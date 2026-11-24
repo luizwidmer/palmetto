@@ -30,7 +30,7 @@ def load(path):
 def check_facts(facts):
     """Refuse anything that looks like it came from the game copy rather than from a measurement."""
     text = json.dumps(facts)
-    forbidden = ("/local package", "game console", "F:\\\\", "\\\\\\\\", ".arc", "shaders.arc")
+    forbidden = ("/local package", "game console", "F:\\\\", "D:\\\\", "\\\\\\\\", ".arc", "shaders.arc")
     for marker in forbidden:
         if marker in text:
             raise SystemExit(f"progress facts contain {marker!r}: keep paths and file names out of the tracker")

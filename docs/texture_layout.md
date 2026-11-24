@@ -50,7 +50,7 @@ commands and zero compute dispatches in both boots. `docs/page_content.md` secti
 ## 2. The A/B: what answering the family changes
 
 Two clean 150 s boots, same tree, same package, harness only (`tooling/boot_report.py`), standard environment
-(`PALMETTO_SHADERS=F:\palmetto-work\shaders\spirv`, `PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`,
+(`PALMETTO_SHADERS=<shaders-dir>`, `PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`,
 `PALMETTO_SEED_GLOBAL=75DF268:D8`), `PALMETTO_XG_TRACE=1` on both. Boot 2 also has capture on
 (`PALMETTO_CAPTURE`) and the one-shot target readback (`PALMETTO_READBACK_AT_DRAW=1`).
 
@@ -154,7 +154,7 @@ The default boot keeps the layout-cache path closed, exactly as measured before 
 # refusal baseline (default) - writes nothing, frame stays black
 python -I tooling\\boot_report.py --exe port\\build\\palmetto.exe --image <title> --game-dir <package>
     --overlay <overlay-dir> --timeout 150 --out <out-dir>
-    --env PALMETTO_SHADERS=F:\\palmetto-work\\shaders\\spirv --env PALMETTO_D3D12=vulkan
+    --env PALMETTO_SHADERS=<shaders-dir> --env PALMETTO_D3D12=vulkan
     --env PALMETTO_SKIP_INT3=1 --env PALMETTO_SEED_GLOBAL=75DF268:D8 --env PALMETTO_XG_TRACE=1
 
 # linear answers (the A/B above)
