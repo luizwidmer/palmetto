@@ -192,7 +192,7 @@ list at GCL7 records the groups a forwarded `Barrier` is given. `check_console_c
 
 `xs_proxy_mock_test` passes (`PASS (9 allocations refused on purpose)`); `crash_unwind_test` (54 checks),
 `graphics_record_test` (101) and `unimplemented_policy_test` (98) still pass; `d3d12_fence_timing_test` remains the
-known pre-existing failure (0xC0000005). Gates: `build_palmetto.cmd` -> `PALMETTO_OK`, `build_tests.cmd` -> `TESTS_BUILT`.
+known pre-existing failure (0xC0000005). Gates: `build_palmetto.cmd` -> `PALMETTO_OK`, `the test build script` -> `TESTS_BUILT`.
 
 ## 8. Next blocker
 

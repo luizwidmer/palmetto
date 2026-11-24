@@ -148,7 +148,7 @@ as `docs/display_path.md` measured - because the proxy's success answer left it 
 | after the fix, 150 s | `PALMETTO_POKE_LOG=193E1BA,193E2DB,CC29D8` | ALIVE, no exception; slot 127 creations 2, out non-null; present plane non-null at calls 1/2/1,000/10,000; 0 null render-target views; 36,306 clears execute |
 
 Artifacts: `F:\palmetto-work\boot-surface-null1` (sections 1-2), `F:\palmetto-work\boot-surface-fixed1` (sections 4-6).
-Gates: `build_palmetto.cmd` -> `PALMETTO_OK`; `build_tests.cmd` -> `TESTS_BUILT`; `xs_proxy_mock_test` -> `PASS`;
+Gates: `build_palmetto.cmd` -> `PALMETTO_OK`; `the test build script` -> `TESTS_BUILT`; `xs_proxy_mock_test` -> `PASS`;
 `d3d12_fence_timing_test` is the pre-existing failure and still fails.
 
 ## 7. What this does not do

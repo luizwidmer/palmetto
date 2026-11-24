@@ -175,7 +175,7 @@ baseline is.
   family) and the mesh fixture the mesh family (464 B) - a deliberate update, because the decoder now proves the
   container where the mock previously sent a zeroed envelope-sized blob; the branch's E_NOTIMPL/E_INVALIDARG contract
   is unchanged. `unimplemented_policy_test` passes; `d3d12_fence_timing_test` remains the known pre-existing failure.
-* Gates: `_setup\build_palmetto.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT`.
+* Gates: `_setup\build_palmetto.cmd` -> `PALMETTO_OK`; `_setup\the test build script` -> `TESTS_BUILT`.
 
 ## 8. The next decode
 

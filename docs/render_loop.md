@@ -273,7 +273,7 @@ answered here.
   call mix are the same). 0 `ExecuteCommandLists`; 625 list creations and 625 successful closes, all during startup.
 * Probe boots: all ALIVE with no exception; the probe switches are off unless set, and the final baseline run above
   was made without any of them.
-* Gates: `build_palmetto.cmd` -> `PALMETTO_OK`, `build_tests.cmd` -> `TESTS_BUILT`;
+* Gates: `build_palmetto.cmd` -> `PALMETTO_OK`, `the test build script` -> `TESTS_BUILT`;
   `crash_unwind_test` (54 checks), `graphics_record_test` (101), `unimplemented_policy_test` (98),
   `xs_proxy_mock_test` pass. `d3d12_fence_timing_test` is the known pre-existing failure (0xC0000005);
   `d3d12_existing_heap_test` returns 1 on this host on its GPU/WARP comparison (it has no failing check line;

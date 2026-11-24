@@ -189,7 +189,7 @@ Gates run for this change:
 
 ```
 _setup\build_palmetto.cmd   -> PALMETTO_OK
-_setup\build_tests.cmd    -> TESTS_BUILT
+_setup\the test build script    -> TESTS_BUILT
 xs_proxy_mock_test        -> PASS (the new slot-55 check included)
 unimplemented_policy_test -> 98 checks, 0 failed
 graphics_record_test      -> 156 checks passed

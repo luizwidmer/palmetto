@@ -265,7 +265,7 @@ format-2 size falsifier, and the builder: the full description from the inputs, 
 silent default), a PS-only record, an FSPX payload passed through, and every refusal in section 3 with its field name.
 159 checks, all passing (docs/input_layout.md section 5).
 
-Gates run for this change: `_setup\build_palmetto.cmd` -> `PALMETTO_OK`, `_setup\build_tests.cmd` -> `TESTS_BUILT`,
+Gates run for this change: `_setup\build_palmetto.cmd` -> `PALMETTO_OK`, `_setup\the test build script` -> `TESTS_BUILT`,
 `unimplemented_policy_test` (98 checks), `xs_proxy_mock_test`, `graphics_record_test` (117 checks) and
 `graphics_pso_test` (159 checks) passing; `d3d12_fence_timing_test` still crashes as it did before this change (a known
 pre-existing failure, not touched here).

@@ -285,7 +285,7 @@ same pixels.
 
 Results: all of the above passes (`xbox_present_test: all cases pass`), and `xs_proxy_mock_test` passes with its slot-32
 expectation updated to the hook's `ERROR_INVALID_STATE` (that file is also compiled GPU-free and has no presentation
-registered). The gates are `build_palmetto.cmd` -> `PALMETTO_OK` and `build_tests.cmd` -> `TESTS_BUILT`; the known
+registered). The gates are `build_palmetto.cmd` -> `PALMETTO_OK` and `the test build script` -> `TESTS_BUILT`; the known
 pre-existing failure `d3d12_fence_timing_test` is untouched.
 
 While making the existing presentation cases runnable again, one pre-existing test-side defect had to be fixed outside
