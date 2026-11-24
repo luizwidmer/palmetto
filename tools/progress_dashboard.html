@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Leonida progress</title>
+<title>Palmetto progress</title>
 <!-- Written by tools/progress_dashboard.py. Self-contained: no network, no packages. -->
 <style>
 /* Neutrals carry a faint violet tint taken from the logo; the accent (focus, links, the active filter) is the
@@ -119,8 +119,8 @@ td .minibar { width: 64px; margin-right: 8px; }
 <body>
 <header class="top">
   <div class="brand">
-    <img class="logo" id="logo" src="/*__PROGRESS_LOGO__*/" alt="Leonida logo" width="46" height="46">
-    <div><h1>Leonida progress</h1><div class="sub">What works, what changed, what blocks next</div></div>
+    <img class="logo" id="logo" src="/*__PROGRESS_LOGO__*/" alt="Palmetto logo" width="46" height="46">
+    <div><h1>Palmetto progress</h1><div class="sub">What works, what changed, what blocks next</div></div>
   </div>
   <dl class="facts" id="facts"></dl>
   <button class="btn" id="theme" type="button" aria-label="Switch colour theme">Theme</button>
@@ -208,14 +208,14 @@ const state = { statuses: new Set(), search: "" };
 // ------------------------------------------------------------------ theme (follows the system until chosen here)
 (function theme() {
   const root = document.documentElement, btn = document.getElementById("theme");
-  const stored = () => { try { return localStorage.getItem("leonida.progress.theme"); } catch (e) { return null; } };
+  const stored = () => { try { return localStorage.getItem("palmetto.progress.theme"); } catch (e) { return null; } };
   const isDark = () => (root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches);
   const label = () => { btn.textContent = isDark() ? "Light theme" : "Dark theme"; };
   const t = stored(); if (t === "light" || t === "dark") root.dataset.theme = t;
   label();
   btn.addEventListener("click", () => {
     root.dataset.theme = isDark() ? "light" : "dark";
-    try { localStorage.setItem("leonida.progress.theme", root.dataset.theme); } catch (e) { /* private window: the choice lasts this visit */ }
+    try { localStorage.setItem("palmetto.progress.theme", root.dataset.theme); } catch (e) { /* private window: the choice lasts this visit */ }
     label(); redrawAll(); trend();
   });
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (!root.dataset.theme) { label(); redrawAll(); trend(); } });
@@ -428,7 +428,7 @@ function exportCsv() {
   const rows = [["id", "panel", "group", "name", "status", "freshness", "detail"]];
   for (const c of SNAP.components.filter(matches)) rows.push([c.id, c.panel, c.group, c.name, c.status, c.freshness || "", c.detail || ""]);
   const csv = rows.map((r) => r.map((v) => (/[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v)).join(",")).join("\r\n");
-  const a = el("a", { href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })), download: "leonida_progress.csv" }); document.body.append(a); a.click(); a.remove();
+  const a = el("a", { href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })), download: "palmetto_progress.csv" }); document.body.append(a); a.click(); a.remove();
 }
 
 for (const p of SNAP.panels) makePanel(p);

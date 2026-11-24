@@ -76,7 +76,7 @@ fn find(bytes: &[u8], start: usize) -> Option<usize> {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn leonida_shader_carve_find_v1(
+pub unsafe extern "C" fn palmetto_shader_carve_find_v1(
     bytes: *const u8,
     len: usize,
     start: usize,
@@ -119,12 +119,12 @@ mod tests {
     fn distinguishes_no_match_from_refusal() {
         let bytes = b"abc";
         let scan =
-            |start| unsafe { leonida_shader_carve_find_v1(bytes.as_ptr(), bytes.len(), start) };
+            |start| unsafe { palmetto_shader_carve_find_v1(bytes.as_ptr(), bytes.len(), start) };
         assert_eq!(scan(0), bytes.len());
         assert_eq!(scan(bytes.len()), bytes.len());
         assert_eq!(scan(bytes.len() + 1), usize::MAX);
         assert_eq!(
-            unsafe { leonida_shader_carve_find_v1(std::ptr::null(), 0, 0) },
+            unsafe { palmetto_shader_carve_find_v1(std::ptr::null(), 0, 0) },
             usize::MAX
         );
     }

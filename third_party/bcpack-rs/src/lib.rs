@@ -1,3 +1,3 @@
-//! Entropy decoder used by Leonida's calibrated texture reader.
+//! Entropy decoder used by Palmetto's calibrated texture reader.
 pub mod rans;
 pub mod tables;

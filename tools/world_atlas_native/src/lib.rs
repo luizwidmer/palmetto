@@ -116,7 +116,7 @@ fn valid_buffer<T>(pointer: *const T, len: usize) -> bool {
 /// Both input pointers must point to readable buffers of the stated lengths.
 /// The output must be initialized, writable, and not alias either input.
 #[no_mangle]
-pub unsafe extern "C" fn leonida_atlas_match_v1(
+pub unsafe extern "C" fn palmetto_atlas_match_v1(
     tiles: *const u64,
     tiles_len: usize,
     cells: *const u64,
@@ -182,7 +182,7 @@ mod tests {
             overlap: 0.5,
         };
         let status = unsafe {
-            leonida_atlas_match_v1([1].as_ptr(), 1, [2, 1].as_ptr(), 2, 2, 0.2, &mut out, 1)
+            palmetto_atlas_match_v1([1].as_ptr(), 1, [2, 1].as_ptr(), 2, 2, 0.2, &mut out, 1)
         };
         assert_eq!(status, -1);
         assert_eq!((out.clear, out.placed, out.overlap), (7, 8, 0.5));
