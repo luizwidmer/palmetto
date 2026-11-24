@@ -131,7 +131,7 @@ leave 78/79 where they are.
 | property | choice |
 |---|---|
 | class | `PalmettoPresentX` (window procedure `DefWindowProcW`: the swapchain is driven by the present calls, no message loop is needed) |
-| title | `the target game Xbox runtime - PresentX` |
+| title | `Palmetto - PresentX` |
 | client area | 1280x720 by default; `PALMETTO_PRESENT_WIDTH` / `PALMETTO_PRESENT_HEIGHT` override it, each clamped to 320..7680 (an unusable value keeps the default and is logged once) |
 | visibility | created hidden; `PALMETTO_PRESENT_WINDOW=auto` (default) shows it from the first **presented** frame, `=shown` shows it at creation, `=hidden` never shows it; any other value is `auto`, logged once |
 | lifecycle | created at the first present through the hook (or the first reported token), then process lifetime; the swapchain is created against it by the registered window presenter factory |
@@ -141,7 +141,7 @@ leave 78/79 where they are.
 visibility choice and the first-frame show are each logged once:
 
 ```
-[rt] present: created the PresentX window "the target game Xbox runtime - PresentX" with a 1280x720 client area, hidden until
+[rt] present: created the PresentX window "Palmetto - PresentX" with a 1280x720 client area, hidden until
     the first presented frame (PALMETTO_PRESENT_WINDOW=auto); the window and its swapchain live for the process
 [rt] present: showing the PresentX window (1280x720 client): the presented frames are in it now
 ```
@@ -221,7 +221,7 @@ run: `palmetto.exe --run <title> --game-dir <package> --overlay F:\palmetto-over
 
 ```
 [rt] present: registered the PresentX backend: PC device ..., window presenter factory, frame-token bridge
-[rt] present: created the PresentX window "the target game Xbox runtime - PresentX" with a 1280x720 client area, hidden until
+[rt] present: created the PresentX window "Palmetto - PresentX" with a 1280x720 client area, hidden until
      the first presented frame (PALMETTO_PRESENT_WINDOW=auto); the window and its swapchain live for the process
 [rt] present: PresentX with a frame token issued by the device proxy, not by the pacer (frame-token bridge):
      presented; no statistics entry and no tear for such a token
@@ -231,9 +231,9 @@ run: `palmetto.exe --run <title> --game-dir <package> --overlay F:\palmetto-over
 * **PresentX succeeds**: 62 `XboxPresentation::PresentX ok` trace lines, 0 failed, and no `[rt] d3d12: present failed`
   (VkResult) line. The queue proxy's console PresentX (slot 32) is what produced them; the frame-token bridge's report
   was accepted once and from then on every frame token is accepted (the bridge log line appears once, by design).
-* **Window**: the service created the 1280x720 `the target game Xbox runtime - PresentX` window at the first present, hidden, and
+* **Window**: the service created the 1280x720 `Palmetto - PresentX` window at the first present, hidden, and
   showed it from the first successfully presented frame (`auto`), so the window is visible for the rest of the run.
-  A second boot polled the process's top-level windows: the window appears as `the target game Xbox runtime - PresentX`,
+  A second boot polled the process's top-level windows: the window appears as `Palmetto - PresentX`,
   `IsWindowVisible` true, 1280x720 client, first seen at t=34 s (its first present is earlier in that second), while the
   title's own `the title's window` window is already up at t=4 s. The window title and class are the documented ones; nothing
   about the title's package is in them.

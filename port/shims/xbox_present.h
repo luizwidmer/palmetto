@@ -244,7 +244,7 @@ inline constexpr UINT xbox_frame_event_origin = palmetto::frame_event_origin;
 // ---- The window of a swapchain-less title (docs/present_wiring.md) -----------------------------------------------
 // PresentX presents without a DXGI swapchain, so the runtime has to make the window itself: the title calls no
 // CreateSwapChain* and no EnumOutputs (docs/display_path.md 4). The registered presentation service creates exactly
-// one plain Win32 window: class "PalmettoPresentX", title "the target game Xbox runtime - PresentX", client area 1280x720 by
+// one plain Win32 window: class "PalmettoPresentX", title "Palmetto - PresentX", client area 1280x720 by
 // default (PALMETTO_PRESENT_WIDTH / PALMETTO_PRESENT_HEIGHT override, 320..7680 each). It is created hidden; the default
 // PALMETTO_PRESENT_WINDOW=auto shows it from the first frame that is actually presented, so a boot whose present
 // surface is still null never opens a black window, PALMETTO_PRESENT_WINDOW=shown shows it at once and =hidden never
