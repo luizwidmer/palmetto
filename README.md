@@ -115,3 +115,5 @@ This project is not affiliated with or endorsed by any console manufacturer or g
 ## License
 
 GPLv3 or later. See [LICENSE](LICENSE). Third-party code keeps its own license.
+
+See [NOTICE.md](NOTICE.md) for the project's content policy and rights-holder contact.
