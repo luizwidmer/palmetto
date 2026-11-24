@@ -1,4 +1,4 @@
-"""CPU-only unit tests for tools/buffer_store_probe.py (SHADER-364)."""
+"""CPU-only unit tests for tooling/buffer_store_probe.py (SHADER-364)."""
 import io
 import json
 import os
@@ -10,7 +10,7 @@ import unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(REPO, "tools")
+TOOLS = os.path.join(REPO, "tooling")
 PROBE = os.path.join(TOOLS, "buffer_store_probe.py")
 
 sys.dont_write_bytecode = True

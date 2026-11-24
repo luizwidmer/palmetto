@@ -1,4 +1,4 @@
-"""Unit tests for tools/cvt_norm_mods_probe.py (reference model, kernel assembly, FakeOracle verdicts, CLI).
+"""Unit tests for tooling/cvt_norm_mods_probe.py (reference model, kernel assembly, FakeOracle verdicts, CLI).
 
 Standard library only; no GPU, no LLVM required (live assembly tests skip when unavailable), and no game files.
 """
@@ -15,7 +15,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-TOOLS = Path(__file__).resolve().parents[1] / "tools"
+TOOLS = Path(__file__).resolve().parents[1] / "tooling"
 sys.dont_write_bytecode = True
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))

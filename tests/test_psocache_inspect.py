@@ -1,4 +1,4 @@
-"""CPU test for tools/psocache_inspect.py on a synthetic cache built by this test, not the game's.
+"""CPU test for tooling/psocache_inspect.py on a synthetic cache built by this test, not the game's.
 
 The synthetic file follows the measured layout: a 0x80 header with the four counts and two sizes, two graphics
 records of 0x70, one compute record of 0x18, two 8-byte meta-index entries, two 8-byte shader-index entries, a
@@ -14,8 +14,8 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "psocache_inspect.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "psocache_inspect.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import psocache_inspect  # noqa: E402
 

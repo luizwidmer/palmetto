@@ -1,4 +1,4 @@
-"""Concurrent-output regression tests for tools/world_build.py (no game data).
+"""Concurrent-output regression tests for tooling/world_build.py (no game data).
 
 A world build stages chunks in the output directory, publishes them one at a time,
 then prunes stale chunks.  Two builds on one output must not interleave: the
@@ -16,7 +16,7 @@ from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 for path in (TOOLS, HERE):
     if path not in sys.path:
         sys.path.insert(0, path)

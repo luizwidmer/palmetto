@@ -1,7 +1,7 @@
 # RDNA2 ISA coverage of the translator
 
-`tools/isa_coverage.py` compares the instructions of AMD's machine-readable RDNA2 ISA specification with what
-`tools/rdna2spirv.py` has a rule for. It reads no game data and needs no GPU; it is a count over the public ISA and
+`tooling/isa_coverage.py` compares the instructions of AMD's machine-readable RDNA2 ISA specification with what
+`tooling/rdna2spirv.py` has a rule for. It reads no game data and needs no GPU; it is a count over the public ISA and
 the translator's source.
 
 ## Getting the specification
@@ -23,10 +23,10 @@ C++ [isa_spec_manager](https://github.com/GPUOpen-Tools/isa_spec_manager) (MIT);
 ## Running it
 
 ```sh
-python -I tools/isa_coverage.py --isa amdgpu_isa_rdna2.xml              # markdown report
-python -I tools/isa_coverage.py --isa amdgpu_isa_rdna2.xml --list       # plus the unknown instructions per encoding
-python -I tools/isa_coverage.py --isa amdgpu_isa_rdna2.xml --json
-python -I tools/isa_coverage.py --isa amdgpu_isa_rdna2.xml --llvm-mc llvm-mc   # classify non-RDNA2 names with llvm-mc
+python -I tooling/isa_coverage.py --isa amdgpu_isa_rdna2.xml              # markdown report
+python -I tooling/isa_coverage.py --isa amdgpu_isa_rdna2.xml --list       # plus the unknown instructions per encoding
+python -I tooling/isa_coverage.py --isa amdgpu_isa_rdna2.xml --json
+python -I tooling/isa_coverage.py --isa amdgpu_isa_rdna2.xml --llvm-mc llvm-mc   # classify non-RDNA2 names with llvm-mc
 ```
 
 `--isa` defaults to `$PALMETTO_RDNA2_ISA_XML`. With that variable set,
@@ -60,7 +60,7 @@ Every new translator rule moves these numbers; rerun the tool for the current on
 unknown. The unknown ones cluster in groups the corpus does not need or that are not written yet: the f64
 transcendentals and `v_div_*`, FLAT and SCRATCH memory, the global atomics, the `image_gather4*` variants outside the
 four `_l`/`_lz` forms, packed image formats (`*_pck`, `*_by2`), the 16-bit `v_pk_*` integer forms, `v_dot*`, and the
-`*_saveexec` / `s_nand`/`s_nor`/`s_xnor` scalar forms. `python -I tools/isa_coverage.py --list` has the full list per
+`*_saveexec` / `s_nand`/`s_nor`/`s_xnor` scalar forms. `python -I tooling/isa_coverage.py --list` has the full list per
 encoding.
 
 Names the translator matches that are not in the RDNA2 XML (10), each checked with
@@ -72,8 +72,8 @@ Names the translator matches that are not in the RDNA2 XML (10), each checked wi
 | `s_delay_alu` | other GPU only (RDNA3) | deliberate, in `NOOPS` |
 | `v_mac_f32`, `v_mac_legacy_f32`, `v_mad_f32`, `v_mad_legacy_f32`, `v_madak_f32`, `v_madmk_f32`, `s_get_waveid_in_workgroup` | valid | real gfx1013 instructions that AMD's XML omits |
 
-`tools/rdna2_decode.py` decodes raw words without LLVM from the opcode and operand tables in
-`tools/rdna2_isa_tables.py`, which are derived from the same `amdgpu_isa_rdna2.xml`. The gfx1013 entries above
+`tooling/rdna2_decode.py` decodes raw words without LLVM from the opcode and operand tables in
+`tooling/rdna2_isa_tables.py`, which are derived from the same `amdgpu_isa_rdna2.xml`. The gfx1013 entries above
 that the XML omits (`v_mac_f32`, `v_mad_f32`, `v_madak_f32`, `v_madmk_f32`, `s_get_waveid_in_workgroup`) are in
 that table, and `v_mad_legacy_f32` is the name the decoder gives VOP3 opcode 0x140 on a gfx101* target. A name
 added there belongs in the table above as well.
@@ -85,13 +85,13 @@ instruction.
 ## Which rules the game reaches that hardware has not checked
 
 Several rows of the translator contract in `docs/design.md` say part of a rule is not measured on hardware, or
-not run on the shader corpus. `tools/op_reach.py` counts, over the disassembled corpus, the shaders and
+not run on the shader corpus. `tooling/op_reach.py` counts, over the disassembled corpus, the shaders and
 instructions that use each instruction. It merges the `_e32`/`_e64`/`_sdwa`/`_dpp` encodings and counts only the
 program up to a listing's last `s_endpgm`. The counts say whether 1.0.2.1 depends on the rule at all. They do
 not settle the hardware question.
 
 ```sh
-python -I tools/op_reach.py <work>/shaders/dxbc/disasm --index <work>/shaders/dxbc/index.json v_cos_f16 v_log_f16 ...
+python -I tooling/op_reach.py <work>/shaders/dxbc/disasm --index <work>/shaders/dxbc/index.json v_cos_f16 v_log_f16 ...
 ```
 
 Measured on the 26,503 1.0.2.1 listings (`shaders.arc`, LLVM gfx1013; 12,101 PS, 9,282 MS, 2,689 CS, 2,236 VS,

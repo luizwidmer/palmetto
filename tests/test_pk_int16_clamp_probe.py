@@ -1,4 +1,4 @@
-"""Unit and oracle-backed tests for tools/pk_int16_clamp_probe.py. Standard library only; no game files."""
+"""Unit and oracle-backed tests for tooling/pk_int16_clamp_probe.py. Standard library only; no game files."""
 from contextlib import redirect_stdout
 import io
 import json
@@ -9,7 +9,7 @@ import unittest
 import unittest.mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 sys.dont_write_bytecode = True
 for p in (TOOLS, os.path.join(TOOLS, "hw_oracle")):
     if p not in sys.path:

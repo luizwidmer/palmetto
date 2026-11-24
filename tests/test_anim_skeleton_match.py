@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/anim_skeleton_match.py (standard library only; no game data)."""
+"""Synthetic tests for tooling/anim_skeleton_match.py (standard library only; no game data)."""
 import json
 import os
 import sys
@@ -8,7 +8,7 @@ import zlib
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import anim_skeleton_match as asm  # noqa: E402
 

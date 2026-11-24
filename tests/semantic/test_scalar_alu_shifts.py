@@ -27,7 +27,7 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 
@@ -168,7 +168,7 @@ class ScalarAluInterpreter:
         return res64, scc
 
     def execute_ir(self, ins):
-        """Execute an IR instruction dictionary matching tools/rdna2spirv.py parser format."""
+        """Execute an IR instruction dictionary matching tooling/rdna2spirv.py parser format."""
         op = ins["op"]
         args = ins["args"]
         return self.step(op, args[0], args[1], args[2])

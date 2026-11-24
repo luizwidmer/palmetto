@@ -40,7 +40,7 @@ Divergence Scenarios:
      - Half-disabled waves (EXEC low-half only or high-half only).
      - Boundary transitions across the 32-lane boundary (lane 31 vs lane 32).
   9. SPIR-V Translation and Interpretation:
-     - Translation through tools/rdna2spirv.py emitting OpSelect with lane %active.
+     - Translation through tooling/rdna2spirv.py emitting OpSelect with lane %active.
      - Execution via tests/semantic/spirv_mini_interp.py.
   10. Negative Controls and Invariant Mutations:
      - Condition inversion, operand swapping, and single-bit flip sensitivity.
@@ -60,7 +60,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 if HERE not in sys.path:

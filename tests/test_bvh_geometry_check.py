@@ -1,4 +1,4 @@
-"""Synthetic checks for tools/bvh_geometry_check.py: the right geometry passes, a shifted, smaller or re-indexed one
+"""Synthetic checks for tooling/bvh_geometry_check.py: the right geometry passes, a shifted, smaller or re-indexed one
 fails the check that should catch it. No game data is read.
 
     python -I tests/test_bvh_geometry_check.py
@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 import bvh_geometry_check as C  # noqa: E402

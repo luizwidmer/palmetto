@@ -11,7 +11,7 @@ Covers:
   * Chained 64-bit scalar subtraction:
       s_sub_u32  d_lo, s0_lo, s1_lo
       s_subb_u32 d_hi, s0_hi, s1_hi
-  * SPIR-V translation lowering equivalence (OpIAddCarry / OpISubBorrow lowering in tools/rdna2spirv.py).
+  * SPIR-V translation lowering equivalence (OpIAddCarry / OpISubBorrow lowering in tooling/rdna2spirv.py).
 
 Run directly:
     python -I tests/semantic/test_scalar_alu_add_sub.py
@@ -25,7 +25,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -167,7 +167,7 @@ def reference_sub_64(a_lo, a_hi, b_lo, b_hi):
 
 
 def spirv_lowering_model_add_sub(op, x, y, scc_in):
-    """Mathematical emulation of the SPIR-V lowering emitted by tools/rdna2spirv.py.
+    """Mathematical emulation of the SPIR-V lowering emitted by tooling/rdna2spirv.py.
 
     Emulates OpIAddCarry / OpISubBorrow with OpCompositeExtract and OpBitwiseOr.
     """

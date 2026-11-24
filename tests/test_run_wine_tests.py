@@ -1,4 +1,4 @@
-"""Tests for scripts/run_wine_tests.py: path mapping, per-test statuses and the job's exit code.
+"""Tests for tooling/scripts/run_wine_tests.py: path mapping, per-test statuses and the job's exit code.
 
     python -I tests/test_run_wine_tests.py
 
@@ -21,7 +21,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "scripts"
+SCRIPTS = ROOT / "tooling" / "tooling/scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
@@ -42,8 +42,8 @@ def ctest_entry(name, command, properties=None):
 class PathMappingTest(unittest.TestCase):
     def test_paths_under_the_windows_checkout_are_mapped(self):
         self.assertEqual(rwt.map_path("D:/win/root", WINDOWS_ROOT, "/repo"), "/repo")
-        self.assertEqual(rwt.map_path("D:\\win\\root\\runtime\\build", WINDOWS_ROOT, "/repo"),
-                         os.path.join("/repo", "runtime", "build"))
+        self.assertEqual(rwt.map_path("D:\\win\\root\\port\\build", WINDOWS_ROOT, "/repo"),
+                         os.path.join("/repo", "port", "build"))
         self.assertEqual(rwt.map_path("d:/WIN/root/a/b.exe", WINDOWS_ROOT, "/repo"), os.path.join("/repo", "a", "b.exe"))
         self.assertEqual(rwt.map_path("D:/win/root/", WINDOWS_ROOT, "/repo"), "/repo")
 

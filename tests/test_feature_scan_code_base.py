@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 
-SCAN = Path(__file__).resolve().parents[1] / "tools" / "feature_scan.py"
+SCAN = Path(__file__).resolve().parents[1] / "tooling" / "feature_scan.py"
 
 
 class CodeBaseFlag(unittest.TestCase):

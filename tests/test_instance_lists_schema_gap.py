@@ -1,4 +1,4 @@
-"""tools/instance_lists.py: a list block whose struct the schema doesn't describe is counted, not a crash.
+"""tooling/instance_lists.py: a list block whose struct the schema doesn't describe is counted, not a crash.
 
     python -I tests/test_instance_lists_schema_gap.py
 
@@ -13,7 +13,7 @@ import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "tooling"))
 
 import instance_lists as il  # noqa: E402
 from test_instance_lists import resource  # noqa: E402

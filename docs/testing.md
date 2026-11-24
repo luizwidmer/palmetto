@@ -1,6 +1,6 @@
 # Running the GPU tests
 
-The GPU tests are small hand-written RDNA2 programs in `runtime/test/shaders`. They are translated to SPIR-V and run
+The GPU tests are small hand-written RDNA2 programs in `port/test/shaders`. They are translated to SPIR-V and run
 on your GPU, and the results are compared with what the RDNA2 hardware gives. They need no game files, and every
 result helps: post it in [#166](https://github.com/the original project/issues/166), one comment per GPU and driver.
 If your GPU is already covered there, testing an open pull request from the review queue in the [coordination
@@ -12,10 +12,10 @@ This page collects the setup steps and the problems testers have run into so far
 
 ## What you need
 
-- **Python 3.11+.** `scripts/run_gpu_tests.py` needs at least 3.10.
+- **Python 3.11+.** `tooling/scripts/run_gpu_tests.py` needs at least 3.10.
 - **`llvm-mc` with the AMDGPU target** (LLVM 21+). The official LLVM Windows release has no AMDGPU target. On
   Windows, use one of:
-  - `scripts\build_llvm_mc.ps1`, which builds a native `llvm-mc.exe` (needs git and the Visual Studio C++ tools);
+  - `tooling/scripts\build_llvm_mc.ps1`, which builds a native `llvm-mc.exe` (needs git and the Visual Studio C++ tools);
   - conda-forge's `llvm-tools` package, whose Windows build includes the AMDGPU target;
   - `llvm-21` in WSL, with `LLVM_MC` set to the whole command:
     `LLVM_MC="wsl -d Ubuntu -e /usr/lib/llvm-21/bin/llvm-mc"`.
@@ -60,38 +60,38 @@ Without `glslangValidator`, other tests are also omitted, including `d3d12_compu
 `d3d12_set0_compute` and `d3d12_mesh`; some registered tests run only part of their checks. These tests can be
 **absent**, not reported as skipped, when their build prerequisites are missing, so a passing `ctest` percentage
 alone does not establish that they ran. Check the CMake configure messages and list the
-configured tests with `ctest --test-dir runtime/build -C RelWithDebInfo -N` before comparing test counts. After
+configured tests with `ctest --test-dir port/build -C RelWithDebInfo -N` before comparing test counts. After
 installing missing tools, rerun CMake in an environment where they are visible and rebuild.
 
 
 Windows, from a "Developer PowerShell for VS 2022" or a plain shell:
 
 ```powershell
-scripts\build_runtime.ps1            # CMake + Ninja into runtime\build
+tooling/scripts\build_runtime.ps1            # CMake + Ninja into port\build
 ```
 
 For the standalone Vulkan tools, put llvm-mingw on `PATH` and point CMake at the directory containing `vulkan/vulkan.h`:
 
 ```powershell
-cmake -S runtime -B runtime/build/vulkan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DPALMETTO_BUILD_WINDOWS_RUNTIME=OFF -DVulkan_INCLUDE_DIR=C:/Vulkan-Headers/include
-cmake --build runtime/build/vulkan --parallel --target vk_harness vk_texture_test vk_sampler_test vk_compute_test vk_store_test vk_bindless_test
+cmake -S runtime -B port/build/vulkan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DPALMETTO_BUILD_WINDOWS_RUNTIME=OFF -DVulkan_INCLUDE_DIR=C:/Vulkan-Headers/include
+cmake --build port/build/vulkan --parallel --target vk_harness vk_texture_test vk_sampler_test vk_compute_test vk_store_test vk_bindless_test
 ```
 
-Pass `--build runtime/build/vulkan` to `scripts/run_gpu_tests.py`.
+Pass `--build port/build/vulkan` to `tooling/scripts/run_gpu_tests.py`.
 
-If you configure with CMake's Visual Studio generator instead, the programs end up in `runtime\build\Release` (or
+If you configure with CMake's Visual Studio generator instead, the programs end up in `port\build\Release` (or
 `RelWithDebInfo`); pass that folder to `--build` below.
 
 Linux and macOS:
 
 ```sh
-cmake -S runtime -B runtime/build/linux
-cmake --build runtime/build/linux --parallel
+cmake -S runtime -B port/build/linux
+cmake --build port/build/linux --parallel
 ```
 
 On macOS, add `-DVulkan_INCLUDE_DIR=/opt/homebrew/include` to the first command.
 
-The test programs and `scripts/run_gpu_tests.py` should come from the same commit. Some checks tolerate an older
+The test programs and `tooling/scripts/run_gpu_tests.py` should come from the same commit. Some checks tolerate an older
 binary (`unpinned_subgroup_skip`), but mixing them can report false failures in the compute tests: 28 `cs_*`
 failures on both an RTX 5070 Ti Laptop and a Radeon 610M with the `426023a` script and `48ad23f` binaries, where
 either matching pair is clean. If you cannot build locally, the `runtime-windows` artifact of the Runtime workflow
@@ -102,28 +102,28 @@ belongs to the commit that built it; check that commit out as well.
 If you cannot build the test programs locally, the Runtime workflow publishes them as the `runtime-windows`
 artifact of its own commit. It holds Windows executables, so use them on Windows or under Wine as in the
 section below; GitHub expires the artifact after 7 days. Not every commit on `main` has one: the workflow runs
-only when a commit touches what it builds or reads (the `paths` list in `.github/workflows/runtime.yml`), so a
+only when a commit touches what it builds or reads (the `paths` list in `.github/workflows/port.yml`), so a
 commit that changes only docs, tests or other tools has no Runtime run. Take the most recent run under
 Actions -> Runtime, and check out the commit it built, or start a run of the commit you want on your own fork with
 "Run workflow" (`workflow_dispatch`). Download and unzip `runtime-windows`, and pass the unzipped folder to `--build`:
 
 ```sh
-python -I scripts/run_gpu_tests.py --build <unzipped runtime-windows>
+python -I tooling/scripts/run_gpu_tests.py --build <unzipped runtime-windows>
 ```
 
 If you also have neither `llvm-mc` nor SPIRV-Tools (`spirv-as` / `spirv-val`) installed, `--disasm-dir` runs the
 pre-disassembled subset in `tests/semantic/fixtures/disasm` and `--assembler python` (the default under `auto` when
-`spirv-as` is absent) assembles SPIR-V with `tools/spirv_asm.py`:
+`spirv-as` is absent) assembles SPIR-V with `tooling/spirv_asm.py`:
 
 ```sh
-python -I scripts/run_gpu_tests.py --build <unzipped runtime-windows> --disasm-dir tests/semantic/fixtures/disasm --assembler python
+python -I tooling/scripts/run_gpu_tests.py --build <unzipped runtime-windows> --disasm-dir tests/semantic/fixtures/disasm --assembler python
 ```
 
 `build.py` and `check.py` take the same folder as their second argument:
 
 ```sh
-python -I runtime/test/shaders/build.py <out dir>
-python -I runtime/test/shaders/check.py <out dir> <unzipped runtime-windows>
+python -I port/test/shaders/build.py <out dir>
+python -I port/test/shaders/check.py <out dir> <unzipped runtime-windows>
 ```
 
 The artifact belongs to the commit that built it, so run the scripts from that commit as well (see the note above).
@@ -149,7 +149,7 @@ Label it as a single-test run so the result is easy to distinguish from a full s
 The whole suite, assembled, translated and run in one go:
 
 ```sh
-python -I scripts/run_gpu_tests.py --build runtime/build/linux     # Windows: the default runtime\build
+python -I tooling/scripts/run_gpu_tests.py --build port/build/linux     # Windows: the default port\build
 ```
 
 `--filter <text>` runs only matching tests, and `--work <dir>` keeps the intermediate files.
@@ -159,13 +159,13 @@ Skips still appear as `SKIP`, and individual skips are allowed if at least one t
 A GPU test program that runs longer than 120 seconds is killed and counted as a failure, so a hung driver does
 not stall the suite. `PALMETTO_GPU_TEST_TIMEOUT` sets the limit in seconds for `check.py`, `run_gpu_tests.py` and
 the `valu_fuzz.py` translator oracle; `0` turns the limit off.
-**Rebuild the test programs after pulling.** The programs carry the V# and push-constant layout the translator expects. An executable from an older commit still loads and runs every shader, so a stale `vk_compute_test` does not fail loudly: when a newer translator starts enforcing a descriptor rule the old program does not set up (the raw V# in `pc[2..3]`, for one), every compute test reports the untouched `0xEEEEEEEE` fill pattern and the run looks like a translator regression. If all the compute tests in a run return that pattern, rebuild first (`cmake --build runtime/build/linux`, or `cmake --build runtime\build` on Windows) and run again before reading anything into the words.
+**Rebuild the test programs after pulling.** The programs carry the V# and push-constant layout the translator expects. An executable from an older commit still loads and runs every shader, so a stale `vk_compute_test` does not fail loudly: when a newer translator starts enforcing a descriptor rule the old program does not set up (the raw V# in `pc[2..3]`, for one), every compute test reports the untouched `0xEEEEEEEE` fill pattern and the run looks like a translator regression. If all the compute tests in a run return that pattern, rebuild first (`cmake --build port/build/linux`, or `cmake --build port\build` on Windows) and run again before reading anything into the words.
 
 The two-step form, which `CONTRIBUTING.md` describes:
 
 ```sh
-python -I runtime/test/shaders/build.py <out dir>
-python -I runtime/test/shaders/check.py <out dir> <folder with the test programs>
+python -I port/test/shaders/build.py <out dir>
+python -I port/test/shaders/check.py <out dir> <folder with the test programs>
 ```
 
 For the standalone `v_mullit_f32` readback, build the full-screen triangle and the
@@ -174,15 +174,15 @@ The driver checks every pixel against an integer product rounded to 24 bits.
 It reports the input words, pixel and channel on the first mismatch.
 
 ```sh
-python -I runtime/test/shaders/build.py <out-dir> vs_ids ps_mullit
-python -I runtime/test/shaders/mullit_readback.py <out-dir> <harness-directory>
+python -I port/test/shaders/build.py <out-dir> vs_ids ps_mullit
+python -I port/test/shaders/mullit_readback.py <out-dir> <harness-directory>
 ```
 
 For D3D12/runtime tests, `PALMETTO_VK_VALIDATION=1` enables `VK_LAYER_KHRONOS_validation`. When running with validation, set `DISABLE_RTSS_LAYER=1` and `DISABLE_VULKAN_OBS_CAPTURE=1` if MSI Afterburner (RivaTuner) or OBS is installed: their overlay layers can add unsupported swapchain usage, and in an elevated (administrator) terminal the loader ignores `VK_LOADER_LAYERS_DISABLE=~implicit~` (see "Known problems").
 
 `vk_compute_test`, `vk_bindless_test` and `vk_image_fuzz` read `PALMETTO_VK_VALIDATION` too (`vk_compute_test`
-through `runtime/test/vk_validation.h`): each validation message goes to stderr and a validation error makes the
-program exit 1, so `PALMETTO_VK_VALIDATION=1 VK_KHRONOS_VALIDATION_GPUAV_ENABLE=1 python scripts/run_gpu_tests.py` fails
+through `port/test/vk_validation.h`): each validation message goes to stderr and a validation error makes the
+program exit 1, so `PALMETTO_VK_VALIDATION=1 VK_KHRONOS_VALIDATION_GPUAV_ENABLE=1 python tooling/scripts/run_gpu_tests.py` fails
 every compute test the layer objects to; the program's output ends with "N validation errors". The other shader test
 programs (`vk_harness`, `vk_store_test`, `vk_texture_test`, `vk_sampler_test`) don't read it.
 To check one, load the layer through the loader and run it by hand, for example
@@ -196,7 +196,7 @@ bound view). It runs on llvmpipe. `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=1` adds s
 ## The Windows runtime on Linux, under Wine or Proton
 
 The Linux build above makes only the Vulkan programs. The loader (`palmetto`), its shims and their tests are Windows
-programs; `runtime/cmake/clang-cl-xwin.cmake` cross-compiles them on Linux with clang-cl and lld-link (LLVM 19+, but not 22.1.7 or 22.1.8 (see Known problems): the
+programs; `port/cmake/clang-cl-xwin.cmake` cross-compiles them on Linux with clang-cl and lld-link (LLVM 19+, but not 22.1.7 or 22.1.8 (see Known problems): the
 MSVC STL that xwin lays out rejects older Clang; versioned names go in with `-DCMAKE_CXX_COMPILER=clang-cl-19` etc.)
 against an MSVC CRT and Windows SDK that [xwin](https://github.com/Jake-Shadle/xwin) downloads from Microsoft
 (running it means accepting Microsoft's licence), and `ctest` runs them through Wine:
@@ -204,10 +204,10 @@ against an MSVC CRT and Windows SDK that [xwin](https://github.com/Jake-Shadle/x
 ```sh
 xwin --accept-license --sdk-version 10.0.26100 splat --use-winsysroot-style --preserve-ms-arch-notation \
      --output ~/.local/share/xwin-sdk
-cmake -S runtime -B runtime/build/windows --toolchain "$PWD/runtime/cmake/clang-cl-xwin.cmake" \
+cmake -S runtime -B port/build/windows --toolchain "$PWD/port/cmake/clang-cl-xwin.cmake" \
       -DXWIN_DIR="$HOME/.local/share/xwin-sdk"
-cmake --build runtime/build/windows --parallel
-WINEPREFIX="$HOME/.local/share/palmetto-wine" ctest --test-dir runtime/build/windows
+cmake --build port/build/windows --parallel
+WINEPREFIX="$HOME/.local/share/palmetto-wine" ctest --test-dir port/build/windows
 ```
 
 Use a recent xwin: 0.10.0 lays out SDK 10.0.26100 with the command above, while 0.6.5 stops with "unable to find
@@ -216,7 +216,7 @@ x86_64 headers for Win11SDK_10.0.26100".
 On a machine without a display (a server, a container, WSL without WSLg), Wine has no graphics driver to create a
 Vulkan instance with, so every Vulkan test fails with `vkCreateInstance failed (VkResult -3)` and, with
 `WINEDEBUG=+vulkan`, "Failed to load Wine graphics driver supporting Vulkan". Run the tests under a virtual X server,
-as CI does: `WINEPREFIX="$HOME/.local/share/palmetto-wine" xvfb-run -a ctest --test-dir runtime/build/windows`
+as CI does: `WINEPREFIX="$HOME/.local/share/palmetto-wine" xvfb-run -a ctest --test-dir port/build/windows`
 (packages `xvfb` and `xauth`, which `xvfb-run` needs). With Mesa installed, the tests then run on llvmpipe.
 
 A virtual X server has no presentable surface, so presentation cannot be judged under it. With a real display (here
@@ -226,8 +226,8 @@ compositor for those three. Six still failed with a real display: `device_proxy`
 `xdxr_build`, `d3d12_xdxr_rt`, `d3d12_present` and `d3d12_compute`.
 
 The build type defaults to `RelWithDebInfo`: xwin leaves out the debug CRT, so `Debug` needs `--include-debug-libs`.
-`make_game.py`'s `runtime` stage makes this same build on Linux when the tools and the SDK are there (`--runtime-build
-runtime/build/windows` takes a folder made by hand like a Windows build). CMake packages are
+`build_port.py`'s `runtime` stage makes this same build on Linux when the tools and the SDK are there (`--runtime-build
+port/build/windows` takes a folder made by hand like a Windows build). CMake packages are
 looked up only inside the SDK folder, so a Windows SDL3 for the GameInput shim is passed as `-DSDL3_DIR=<its
 cmake folder>` (`CMAKE_PREFIX_PATH` is not searched here).
 
@@ -242,12 +242,12 @@ mkdir -p ~/.local/share/palmetto-proton
 STEAM_COMPAT_DATA_PATH="$HOME/.local/share/palmetto-proton" \
 STEAM_COMPAT_CLIENT_INSTALL_PATH="$HOME/.local/share/Steam" \
   "$HOME/.local/share/Steam/steamapps/common/Proton 11.0/proton" run cmd /c exit 0
-cmake -S runtime -B runtime/build/proton --toolchain "$PWD/runtime/cmake/clang-cl-xwin.cmake" \
+cmake -S runtime -B port/build/proton --toolchain "$PWD/port/cmake/clang-cl-xwin.cmake" \
       -DXWIN_DIR="$HOME/.local/share/xwin-sdk" \
       -DCMAKE_CROSSCOMPILING_EMULATOR="$HOME/.local/share/Steam/steamapps/common/Proton 11.0/files/bin/wine"
-cmake --build runtime/build/proton --parallel 2
+cmake --build port/build/proton --parallel 2
 WINEPREFIX="$HOME/.local/share/palmetto-proton/pfx" WINEDLLOVERRIDES="d3d12=n;d3d12core=n;dxgi=n" \
-      WINEDEBUG=-all ctest --test-dir runtime/build/proton
+      WINEDEBUG=-all ctest --test-dir port/build/proton
 ```
 
 `proton run` itself doesn't pass the program's output on, so the tests can't run through it. `WINEPREFIX` must be
@@ -272,7 +272,7 @@ the comparisons with the host D3D12, which is vkd3d-proton here:
 
 The host's D3D12 here is Wine's vkd3d or vkd3d-proton, not Microsoft's runtime, and Proton's `EnumWarpAdapter`
 returns the hardware adapter, so "WARP" is vkd3d-proton on the GPU. Most tests that compare with the host or WARP
-skip that comparison under Wine and Proton (`runtime/test/host_wine.h`), and most of them still check the layer
+skip that comparison under Wine and Proton (`port/test/host_wine.h`), and most of them still check the layer
 against Microsoft's answers recorded in the test (`d3d12_subresource_copy` and `d3d12_private_data` keep theirs in
 `d3d12_subresource_copy_answers.h` and `d3d12_private_data_answers.h`).
 A few still compare with the host (`root_sig`, `device_proxy`, and some of `d3d12_vulkan_device`'s cases), so some
@@ -282,15 +282,15 @@ of those fail for that reason.
 
 The `Runtime` workflow uploads `runtime-windows` for seven days. It contains the Windows executables, DLLs,
 synthetic test shaders, CTest inventory and the path of the Windows checkout. From a clean checkout of the commit
-used by the Windows job, set `run_id` to the Actions run ID and download the artifact to `runtime/build`:
+used by the Windows job, set `run_id` to the Actions run ID and download the artifact to `port/build`:
 
 ```sh
-gh run download "$run_id" --repo the original project --name runtime-windows --dir runtime/build
+gh run download "$run_id" --repo the original project --name runtime-windows --dir port/build
 
 WINE=wine WINEPREFIX="$(mktemp -d)" WINEDLLOVERRIDES="mscoree,mshtml=" WINEDEBUG=-all \
-  bash scripts/run_wine_session.sh python3 -I scripts/run_wine_tests.py \
-  --tests runtime/build/ctest.json \
-  --windows-root "$(cat runtime/build/windows-root.txt)" \
+  bash tooling/scripts/run_wine_session.sh python3 -I tooling/scripts/run_wine_tests.py \
+  --tests port/build/ctest.json \
+  --windows-root "$(cat port/build/windows-root.txt)" \
   --require loader --require pe_loader --require loader_tls --require unimplemented_policy \
   --require run_tiny_game --require run_tiny_game_exit_code
 ```
@@ -311,12 +311,13 @@ To test the wave64 emulation that makes them exact on these GPUs, set `PALMETTO_
 `check.py`, the shaders are checked against the emulated expectations without being emulated, and every wave64 test
 fails.
 
-`scripts/bench_wave64.py` normally compares emulation on AMD and NVIDIA with a native-wave64 AMD reference. On a
+`tooling/scripts/bench_wave64.py` normally compares emulation on AMD and NVIDIA with a native-wave64 AMD reference. On a
 machine without that reference, use `--emulated-only` to time the current Vulkan device instead:
 
 ```sh
-python3 -I scripts/bench_wave64.py --build runtime/build/linux \
-  --llvm-mc "$(brew --prefix llvm)/bin/llvm-mc" --emulated-only
+LLVM_MC="$(brew --prefix llvm)/bin/llvm-mc"
+python3 -I tooling/scripts/bench_wave64.py --build port/build/linux \
+  --llvm-mc "$LLVM_MC" --emulated-only
 ```
 
 This mode builds only the emulated shader, requires every benchmark process to finish the shader's `0 mismatches`
@@ -347,7 +348,7 @@ isn't the requested size still prints `not available`, and those tests skip.
 
 Graphics stages have no emulation: on a 32-wide subgroup a wave64 VS, PS or GS runs as two 32-lane halves, and the
 translator marks each one tier A, B or C by whether that can change its results (`docs/design.md`, "Wave64 graphics:
-partition invariance"). `runtime/test/shaders/w64_graphics.py` checks those tiers on a GPU by running each `ps_w64_*`,
+partition invariance"). `port/test/shaders/w64_graphics.py` checks those tiers on a GPU by running each `ps_w64_*`,
 `vs_w64_*` and `gs_w64_*` fixture at wave64 and at wave32: tier A and B must give the same words both ways, tier C
 must differ. CI has no GPU, and the CPU wave interpreter (`tests/semantic/test_wave64_halves.py`) runs vertex shaders
 only, so this comparison needs real hardware.
@@ -365,15 +366,15 @@ be requested for pixel shaders (they run at the 64-wide default), and the tier C
 Build and run it on Linux with RADV, pinned to one GPU (`PALMETTO_VK_DEVICE`, see "Choosing the GPU"):
 
 ```sh
-cmake -S runtime -B runtime/build/linux -G Ninja && cmake --build runtime/build/linux --target vk_harness
-python3 -I runtime/test/shaders/build.py /tmp/w64g
-PALMETTO_VK_DEVICE=9070 python3 -I runtime/test/shaders/w64_graphics.py /tmp/w64g runtime/build/linux
-PALMETTO_VK_DEVICE=9070 python3 -I runtime/test/shaders/w64_graphics.py /tmp/w64g runtime/build/linux gs_w64_a_ring
+cmake -S runtime -B port/build/linux -G Ninja && cmake --build port/build/linux --target vk_harness
+python3 -I port/test/shaders/build.py /tmp/w64g
+PALMETTO_VK_DEVICE=9070 python3 -I port/test/shaders/w64_graphics.py /tmp/w64g port/build/linux
+PALMETTO_VK_DEVICE=9070 python3 -I port/test/shaders/w64_graphics.py /tmp/w64g port/build/linux gs_w64_a_ring
 ```
 
 Each line prints `ok`, a `SKIP` with its reason, or what differed. To add a fixture:
 
-1. Write `runtime/test/shaders/{ps,vs,gs}_w64_<tier>_<name>.asm` with `; mattr: +wavefrontsize64,-wavefrontsize32`
+1. Write `port/test/shaders/{ps,vs,gs}_w64_<tier>_<name>.asm` with `; mattr: +wavefrontsize64,-wavefrontsize32`
    and a header that says what every result word is. Vertex and geometry fixtures store four words per vertex or
    per triangle to the heap record at `0x1000 + 16 * i`, and every word of a tier A or B fixture is a function of
    `i` alone, never of the lane (copy the store from `vs_w64_a_skip` or `gs_w64_a_ring`).
@@ -395,7 +396,7 @@ To run them anyway, set `PALMETTO_PC_TAIL_UBO=1` **for both `build.py` and `chec
 `run_gpu_tests.py`). The shaders are then translated with `--pc-tail-ubo`: s0..s31 stay in 128 push-constant bytes,
 and the heap base and code base move to a uniform block at set 1 (`docs/design.md`, "Push-constant tail as a uniform
 block"), which `vk_compute_test`, `vk_store_test`, `vk_harness`, `vk_texture_test`, `vk_sampler_test` and
-`vk_bindless_test` bind (`runtime/test/vk_pc_tail.h`). If you set it
+`vk_bindless_test` bind (`port/test/vk_pc_tail.h`). If you set it
 only for `check.py`, the shaders read the tail from push constants the programs no longer declare. `--mesh-compute`
 (`PALMETTO_MESH_COMPUTE=1`) isn't combined with it yet: its vertex shader still reads the output address from push
 constants, so those tests skip.
@@ -413,7 +414,7 @@ To run them anyway, set `PALMETTO_PC_TAIL_UBO=1` **for both `build.py` and `chec
 `run_gpu_tests.py`). The shaders are then translated with `--pc-tail-ubo`: s0..s31 stay in 128 push-constant bytes,
 and the heap base and code base move to a uniform block at set 1 (`docs/design.md`, "Push-constant tail as a uniform
 block"), which `vk_compute_test`, `vk_store_test`, `vk_harness`, `vk_texture_test`, `vk_sampler_test` and
-`vk_bindless_test` bind (`runtime/test/vk_pc_tail.h`). If you set it
+`vk_bindless_test` bind (`port/test/vk_pc_tail.h`). If you set it
 only for `check.py`, the shaders read the tail from push constants the programs no longer declare. `--mesh-compute`
 (`PALMETTO_MESH_COMPUTE=1`) isn't combined with it yet: its vertex shader still reads the output address from push
 constants, so those tests skip.
@@ -432,16 +433,16 @@ capabilities first: they enable `shaderInt64` only for one that declares `Int64`
 ## Without a GPU: Mesa llvmpipe
 
 Mesa's llvmpipe is a software Vulkan driver (`mesa-vulkan-drivers` on Debian and Ubuntu). CI runs the suite on it
-for every pull request that touches the runtime, the scripts or a tool the jobs read (`.github/workflows/runtime.yml`
+for every pull request that touches the runtime, the scripts or a tool the jobs read (`.github/workflows/port.yml`
 lists them), and you can do the same on Linux without a GPU:
 
 ```sh
 sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers vulkan-tools spirv-tools llvm-19
-cmake -S runtime -B runtime/build/linux && cmake --build runtime/build/linux --parallel
-python -I scripts/run_gpu_tests.py --build runtime/build/linux --llvm-mc /usr/lib/llvm-19/bin/llvm-mc
-PALMETTO_W64_EMULATE=1 python -I scripts/run_gpu_tests.py --build runtime/build/linux \
+cmake -S runtime -B port/build/linux && cmake --build port/build/linux --parallel
+python -I tooling/scripts/run_gpu_tests.py --build port/build/linux --llvm-mc /usr/lib/llvm-19/bin/llvm-mc
+PALMETTO_W64_EMULATE=1 python -I tooling/scripts/run_gpu_tests.py --build port/build/linux \
     --llvm-mc /usr/lib/llvm-19/bin/llvm-mc --filter cs_
-PALMETTO_BARY_FALLBACK=1 python -I scripts/run_gpu_tests.py --build runtime/build/linux \
+PALMETTO_BARY_FALLBACK=1 python -I tooling/scripts/run_gpu_tests.py --build port/build/linux \
     --llvm-mc /usr/lib/llvm-19/bin/llvm-mc
 ```
 
@@ -470,13 +471,13 @@ differences.
 
 ## Macs in CI
 
-The `macos` job in `.github/workflows/runtime.yml` builds the runtime on GitHub's `macos-26` arm64 runner and runs
+The `macos` job in `.github/workflows/port.yml` builds the runtime on GitHub's `macos-26` arm64 runner and runs
 `ctest` and `run_gpu_tests.py` on MoltenVK; `macos-python` in `ci.yml` runs the Python suites. The runner is a VM
 whose Metal device is "Apple Paravirtual device" (Metal family Mac2, not Apple7): MoltenVK runs on it with 32-wide
 subgroups, so the wave64 and "32 lanes on request" tests skip there (about 75 of 190 in November 2026), and Mesa's
 KosmicKrisp finds no device. `macos-15` can't build the runtime: Xcode 16's libc++ has no floating-point
 `std::from_chars`. A test known to fail on MoltenVK is listed in the step's `EXPECTED_FAILURES` with the pull
-request or coordination-issue finding that tracks it; it still runs, and `scripts/ci_expected_failures.py` fails the step
+request or coordination-issue finding that tracks it; it still runs, and `tooling/scripts/ci_expected_failures.py` fails the step
 on any other failure. It takes `FAILED_LIST EXIT_STATUS [EXPECTED ...]`, answers `--help`, and reports a list it cannot
 read or a non-numeric status as one line with exit code 2.
 
@@ -496,7 +497,7 @@ exports decoded instead (see Macs, below) and run with or without the bary fallb
 on by itself where the device lacks the extension. Under the bary fallback without it they skip.
 
 Intel Arc with Mesa ANV currently advertises the native barycentric feature but has a driver bug where translated
-pixel shaders can read `BaryCoordKHR.i` as zero (SHADER-925). `make_game.py` detects ANV and automatically translates
+pixel shaders can read `BaryCoordKHR.i` as zero (SHADER-925). `build_port.py` detects ANV and automatically translates
 with `--bary-fallback`; both entry points accept `PALMETTO_BARY_FALLBACK=1` to force it and
 `PALMETTO_BARY_FALLBACK=0` to force native barycentrics. The CLI `--bary-fallback` flag also remains available for
 game builds and other manually built fixtures.
@@ -504,8 +505,8 @@ game builds and other manually built fixtures.
 AMD's Windows driver on gfx90c iGPUs (Renoir, Lucienne, Cezanne, Barcelo: Ryzen 4000/5000 mobile and 5000G, GCN 5)
 also advertises the feature but returns a wrong third `BaryCoordKHR` component, about 0.99 where a small value is
 expected (#5933: Vega 8, PCI 1002:15E7, driver 31.0.21921.13001). `ps_bary`, `ps_persp_bary` and `ps_ij_computed`
-fail natively; through the fallback `ps_bary` and `ps_persp_bary` pass. `tools/vk_subgroup_info.py` reports
-`barycentric_fallback` for these PCI IDs under `VK_DRIVER_ID_AMD_PROPRIETARY`, so `make_game.py` and
+fail natively; through the fallback `ps_bary` and `ps_persp_bary` pass. `tooling/vk_subgroup_info.py` reports
+`barycentric_fallback` for these PCI IDs under `VK_DRIVER_ID_AMD_PROPRIETARY`, so `build_port.py` and
 `run_gpu_tests.py` turn the fallback on by themselves there, with the same `PALMETTO_BARY_FALLBACK` override. RADV and
 other GCN 5 GPUs are not covered: none has been measured.
 
@@ -513,7 +514,7 @@ other GCN 5 GPUs are not covered: none has been measured.
 
 `ps_interp_f16_high` (and `ms_f16_pack`) normally read 16-bit interpolants through `PerVertexKHR` inputs, which
 MoltenVK can't convert to Metal ("PerVertexKHR decoration is not supported in MSL"). `run_gpu_tests.py` asks
-`tools/vk_subgroup_info.py` whether the device can take them and, on MoltenVK, translates with
+`tooling/vk_subgroup_info.py` whether the device can take them and, on MoltenVK, translates with
 `--f16-interp-fallback` by itself: the vertex or mesh shader then also exports the decoded f16 halves
 (`docs/design.md`, "16-bit interpolation without `PerVertexKHR`"). `PALMETTO_F16_INTERP_FALLBACK=1` or `0` forces it
 on or off; `build.py` (for `check.py`) translates with the flag only when that variable is `1`. `ms_f16_pack` also runs
@@ -568,7 +569,7 @@ Laptop (617.42).
 ## Hardware oracle (optional, AMD)
 
 `valu_fuzz.py`, `lds_fuzz.py`, `f32_fuzz.py` and `image_fuzz.py` take `--oracle hw`: the same programs run as native
-compute kernels on an AMD GPU (`tools/hw_oracle/`; setup in [shader_validation.md](shader_validation.md), "Hardware
+compute kernels on an AMD GPU (`tooling/hw_oracle/`; setup in [shader_validation.md](shader_validation.md), "Hardware
 oracle"). It needs AMD clang with the amdgcn target (`PALMETTO_AMD_CLANG`), the AMD driver's HIP runtime and a host C
 compiler on Windows, or the libdrm launcher on Linux. Without them a run prints `hardware oracle unavailable: ...` and
 exits 77, so CI skips it. `image_fuzz.py --oracle hw` loads a linear texture through a T# built for the GPU's family
@@ -584,14 +585,14 @@ With more than one GPU, pick one through the Vulkan loader, for example
 
 Two GPUs of one vendor share one driver, so the loader cannot tell them apart (an RTX 5070 Ti next to an RTX 3060,
 say; without a choice the runtime and every test take the same one: a native driver over Microsoft's Dozen, discrete
-over integrated, the first on a tie, `vulkan_device_rank` in `runtime/src/vulkan_device_filter.h`).
+over integrated, the first on a tie, `vulkan_device_rank` in `port/src/vulkan_device_filter.h`).
 `PALMETTO_VK_DEVICE` names the GPU by part of its name, without case: `PALMETTO_VK_DEVICE=5070` or
 `PALMETTO_VK_DEVICE=radeon`. The D3D12 tests (`vk_test_device.h`) and the layer's standalone device read it,
 and a value that matches no device fails the run instead of testing
 another GPU. For the host side of the comparison tests, `PALMETTO_HOST_ADAPTER` picks the D3D12 adapter the same way.
-Unset, the host side is the adapter behind the layer's Vulkan device (`runtime/test/host_adapter.h`; `d3d12_buffer_tiles`
+Unset, the host side is the adapter behind the layer's Vulkan device (`port/test/host_adapter.h`; `d3d12_buffer_tiles`
 by the layer's `GetAdapterLuid()`), so on a PC with two GPUs the layer is compared with its own GPU's driver.
-The GPU tools of `runtime/test/shaders` (`vk_compute_test`, `vk_harness`, ...) read it the same way through
+The GPU tools of `port/test/shaders` (`vk_compute_test`, `vk_harness`, ...) read it the same way through
 `vk_device_pick.h`, and fail with a message naming the filter when it matches no device.
 
 Two test settings make the layer's standalone device look like a GPU with fewer Vulkan queues, so D3D12 queues share
@@ -608,10 +609,10 @@ game's device ignores it`, so leaving them set cannot slow a game down (`run_tin
 
 | What you see | Cause | What to do |
 |---|---|---|
-| Under Wine 9.0 (Ubuntu 24.04's `wine`), a test or the runtime waits out every `std::condition_variable` timeout: `wait_registration_admission` ("native drainage complete"), `vk_presenter_sync` (`unblocked_during_present`), `frame_pacer`, `vk_fence_dispatcher_sync`, `context_concurrent_detach` | The STL's timed wait (`_Cnd_timedwait_for_unchecked`) is linked statically from `msvcprt.lib` and reads Windows' `_Mtx_t` layout, while `_Mtx_lock`/`_Mtx_unlock` come from Wine's builtin msvcp140, which used another layout until wine-10.1 (757bd7909fda); the wait never released the mutex (#3796) | Fixed in the build: `runtime/src/crt_timed_wait.cpp` routes the wait through msvcp140's own `_Cnd_timedwait` in every `/MD` binary, and `crt_timed_wait_test` checks it. A binary built before that fix still needs Wine 10.1 or newer (or Proton) |
-| `ctest` passes but runs far fewer tests than expected (about 45 instead of 125 on Windows), no `d3d12_*` GPU tests, and `PALMETTO_D3D12=vulkan` does nothing | CMake found no Vulkan headers: `VULKAN_SDK` was not set in the environment that ran CMake (for example a user variable set after the terminal opened), and `CMakeCache.txt` keeps that failed lookup. The configure prints a `CMake Warning` "Vulkan headers not found" | Set `VULKAN_SDK` in that environment (or pass `-DPALMETTO_VULKAN_HEADERS_FETCH=ON`), delete `CMakeCache.txt` and configure again. `-DPALMETTO_REQUIRE_VULKAN=ON` makes this a configure error; CI and `scripts/build_runtime.ps1` (with `VULKAN_SDK` set) pass it |
+| Under Wine 9.0 (Ubuntu 24.04's `wine`), a test or the runtime waits out every `std::condition_variable` timeout: `wait_registration_admission` ("native drainage complete"), `vk_presenter_sync` (`unblocked_during_present`), `frame_pacer`, `vk_fence_dispatcher_sync`, `context_concurrent_detach` | The STL's timed wait (`_Cnd_timedwait_for_unchecked`) is linked statically from `msvcprt.lib` and reads Windows' `_Mtx_t` layout, while `_Mtx_lock`/`_Mtx_unlock` come from Wine's builtin msvcp140, which used another layout until wine-10.1 (757bd7909fda); the wait never released the mutex (#3796) | Fixed in the build: `port/src/crt_timed_wait.cpp` routes the wait through msvcp140's own `_Cnd_timedwait` in every `/MD` binary, and `crt_timed_wait_test` checks it. A binary built before that fix still needs Wine 10.1 or newer (or Proton) |
+| `ctest` passes but runs far fewer tests than expected (about 45 instead of 125 on Windows), no `d3d12_*` GPU tests, and `PALMETTO_D3D12=vulkan` does nothing | CMake found no Vulkan headers: `VULKAN_SDK` was not set in the environment that ran CMake (for example a user variable set after the terminal opened), and `CMakeCache.txt` keeps that failed lookup. The configure prints a `CMake Warning` "Vulkan headers not found" | Set `VULKAN_SDK` in that environment (or pass `-DPALMETTO_VULKAN_HEADERS_FETCH=ON`), delete `CMakeCache.txt` and configure again. `-DPALMETTO_REQUIRE_VULKAN=ON` makes this a configure error; CI and `tooling/scripts/build_runtime.ps1` (with `VULKAN_SDK` set) pass it |
 | Windows refuses to start freshly built test programs ("An Application Control policy has blocked this file"), and the runner stops with a traceback | Smart App Control on Windows 11 | Turn Smart App Control off for the run |
-| `tools/hw_oracle` works once, then stops with "hardware oracle unavailable: Windows Defender blocked the launcher ... (WinError 225)" (older runs: an `OSError: [WinError 225] ... contains a virus or potentially unwanted software` traceback) | Defender's machine-learning check flags the small unsigned `palmetto_hw_oracle_<hash>.exe` that the runner builds in `%TEMP%` (seen as `Trojan:Win32/Bearfoos.A!ml`) and quarantines it; every later run rebuilds and loses it again | Add an exclusion for the build folder (`%TEMP%`) in Windows Security, Virus & threat protection, Manage settings, Exclusions, restore the file from Protection history if you want it back, and rerun. The program is built from `tools/hw_oracle/hw_oracle.c` and is a false positive |
+| `tooling/hw_oracle` works once, then stops with "hardware oracle unavailable: Windows Defender blocked the launcher ... (WinError 225)" (older runs: an `OSError: [WinError 225] ... contains a virus or potentially unwanted software` traceback) | Defender's machine-learning check flags the small unsigned `palmetto_hw_oracle_<hash>.exe` that the runner builds in `%TEMP%` (seen as `Trojan:Win32/Bearfoos.A!ml`) and quarantines it; every later run rebuilds and loses it again | Add an exclusion for the build folder (`%TEMP%`) in Windows Security, Virus & threat protection, Manage settings, Exclusions, restore the file from Protection history if you want it back, and rerun. The program is built from `tooling/hw_oracle/hw_oracle.c` and is a false positive |
 | Validation errors without a VUID, or messages from a layer you didn't ask for | An implicit Vulkan layer from other software (a game-launcher overlay, ReShade, MangoHud, another overlay) | Set `VK_LOADER_LAYERS_DISABLE=~implicit~`. Overlays that hook the swapchain (RivaTuner `VK_LAYER_RTSS`, OBS `VK_LAYER_OBS_HOOK`) can stay loaded: see the next row |
 | Validation errors that only your machine shows (e.g. `xbox_present`'s sRGB swapchain `STORAGE` message), with MSI Afterburner/RivaTuner or OBS installed | An overlay layer that hooks the swapchain: while RivaTuner Statistics Server is running, its `VK_LAYER_RTSS` adds `STORAGE` usage to it (OBS's `VK_LAYER_OBS_HOOK` injects `VK_IMAGE_USAGE_STORAGE_BIT` too). In an elevated (administrator) terminal the loader ignores `VK_LOADER_LAYERS_DISABLE` (`VK_LOADER_DEBUG=all` says so), so `~implicit~` leaves the layer in | Run the tests from a normal terminal, close the overlay application, or set the layer's own switch, which works elevated too: `DISABLE_RTSS_LAYER=1`, `DISABLE_VULKAN_OBS_CAPTURE=1` (OBS). Any other layer's switch is the `disable_environment` entry in its manifest (the JSON listed under `HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers` or `HKCU\...`). `VK_LOADER_DEBUG=layer` prints the layers that were actually inserted |
 | GPU tests crash with an access violation (`0xC0000005`, exit `-1073741819`) right after device creation, with no layer message and validation off (e.g. `d3d12_method_variants` 9 of 10 runs, `xbox_present` 10 of 10, on `main` 561b65a83, RTX 4070 Ti, NVIDIA 616.56) | An implicit layer from an overlay or game tool you did not install for these tests. FPS Monitor's `fpsmonvk64.json` (listed under `HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers`) names itself `VK_LAYER_RENDERDOC_Capture`, so `DISABLE_VULKAN_OBS_CAPTURE=1` does not disable it | `VK_LOADER_DEBUG=layer` prints the layers that were actually inserted. That manifest's `disable_environment` is `DISABLE_LAYER=1`; `DISABLE_LAYER=1` or `VK_LOADER_LAYERS_DISABLE=~implicit~` gave 20 of 20 clean runs (a layer's own switch is its `disable_environment` entry, as the row above says) |
@@ -621,7 +622,7 @@ game's device ignores it`, so leaving them set cannot slow a game down (`run_tin
 | `build.py`: 0 translated, reason `.text` | An old `build.py` with LLVM 19 | Update to current `main` |
 | `vk_harness` doesn't compile: `VK_KHR_maintenance8` names unknown | Vulkan headers older than the SDK the code was written against | Update to current `main` (the code now builds without it), or use current Khronos Vulkan-Headers; conda-forge's package is too old |
 | `ps_bary` and `ps_uniform_branch` fail by about 0.9 | The GPU runs pixel shaders wave64 without fragment barycentrics (GCN3 and RDNA1 on RADV), or an old AMD Windows driver (22.40) | Current `main` skips them on such devices; on Windows, update the driver |
-| `ps_bary`, `ps_persp_bary` and `ps_ij_computed` read the third barycentric as about 0.99 on a gfx90c iGPU (Vega 8, AMD Windows driver 31.0.21921.13001; #5933) | The driver's native `BaryCoordKHR` is wrong there: the same tests pass through `--bary-fallback`, and natively on RADV (Radeon 8060S) | `tools/vk_subgroup_info.py` turns the fallback on by itself for gfx90c under AMD's driver, and `make_game.py`, `run_gpu_tests.py`, `build.py` and `check.py` follow it when `PALMETTO_BARY_FALLBACK` is unset; `=1` forces the fallback and `=0` forces native barycentrics, where they still fail |
+| `ps_bary`, `ps_persp_bary` and `ps_ij_computed` read the third barycentric as about 0.99 on a gfx90c iGPU (Vega 8, AMD Windows driver 31.0.21921.13001; #5933) | The driver's native `BaryCoordKHR` is wrong there: the same tests pass through `--bary-fallback`, and natively on RADV (Radeon 8060S) | `tooling/vk_subgroup_info.py` turns the fallback on by itself for gfx90c under AMD's driver, and `build_port.py`, `run_gpu_tests.py`, `build.py` and `check.py` follow it when `PALMETTO_BARY_FALLBACK` is unset; `=1` forces the fallback and `=0` forces native barycentrics, where they still fail |
 | `cs_w32_salu64` gives eight wrong words on RDNA1 under RADV Mesa 25.2.8 (`0x1E6A2C48 0x1234 0 0x100 47 48 0xFFFF8000 0xFFFFFFFE`, where word 2 should be `0xFFFFFFFF`) | Only the high word of the `s_bfe_i64` result is wrong. The same words appear on four pinned V540s (Navi 12, PCI `1002:7360`) and on a clean upstream/main worktree, and three different valid SPIR-V sign-extension formulations give the same result while the CPU interpreter matches, so this is the driver version rather than the translator (SHADER-276) | Expected with Mesa 25.2.8; the fixture passes on NVIDIA and on AMD's Windows driver. Try a newer Mesa before treating it as a translator bug; do not weaken the fixture's expectation |
 | `d3d12_typeless_rtv` fails its WARP comparison on an AMD desktop iGPU (TEST-591) | [Reported on the Ryzen 5 7600X iGPU with Windows 10 build 19045 and AMD 23.40.02](https://github.com/the original project/issues/166#issuecomment-7083403389). The exact cause is still open. | Retest on a newer Windows and AMD driver combination. Passing results were reported on the [Ryzen 9 7900 iGPU with AMD 25.10.30.02](https://github.com/the original project/issues/3232#issuecomment-7085263408), a [gfx1036 iGPU with AMD 26.5.2](https://github.com/the original project/issues/2891#issuecomment-7084023801), and the [Ryzen 7 9800X3D iGPU with driver 32.0.21045.29003](https://github.com/the original project/pull/3440). |
 | `ps_interp_f16_high` fails on a Mac: `PerVertexKHR decoration is not supported in MSL`, then `vkCreateGraphicsPipelines` -3 | MoltenVK can't convert `PerVertexKHR` inputs to Metal | Current `main` translates it with `--f16-interp-fallback` on MoltenVK (see "Macs: 16-bit interpolation") |
@@ -632,18 +633,18 @@ game's device ignores it`, so leaving them set cannot slow a game down (`run_tin
 | `check.py`'s `cs_fma_fused` fails on a Mac with MoltenVK 1.4.2: word 7 reads `15360` (`0x3c00`), want `29521` (`0x7351`) | The f16 multiply-add (round to odd). The MSL of 1.4.2 and of MoltenVK `main` differ only in SPIRV-Cross's precise-arithmetic helpers (`[[clang::optnone]]` and `fma(l, r, 0)` against `math_mode(safe)` and `fma(l, r, -0.0)`, the SHADER-182 / SHADER-234 change) | Expected with MoltenVK 1.4.2; it passes with MoltenVK `main` |
 | `gs_tri` and `ms_tri` fail on a Mac | MoltenVK has no geometry stage and no `VK_EXT_mesh_shader` | Current `main` reports them as skipped |
 | With `PALMETTO_W64_EMULATE=1` on llvmpipe, the `ms_*` tests fail. Measured with Mesa 26.3.1: on x86_64 at 256-bit vectors (the default there) all six abort with "LLVM ERROR: Cannot emit physreg copy instruction"; on arm64 (128-bit) `ms_tri` draws nothing (the frame stays at the clear color); on x86_64 at 128 bits (`LP_NATIVE_VECTOR_WIDTH=128`) `ms_tri` happened to draw correctly, but with Mesa 26.0.3 `ms_wave_info_s3` and `ms_v5_workgroup` draw nothing there (4 of 6 pass, [measured by @TreXito](https://github.com/the original project/pull/3838#issuecomment-7086696759)) ([measured runs](https://github.com/the original project/issues/3127#issuecomment-7086469679)) | An llvmpipe bug: a mesh shader's runtime `CullPrimitiveEXT` is stored through an invalid `bitcast <N x i1> to <N x float>` (TEST-782, #3127; see "Without a GPU: Mesa llvmpipe") | Run the mesh tests on llvmpipe without `PALMETTO_W64_EMULATE`, or add `PALMETTO_MESH_COMPUTE=1` (the compute fallback): with it all 6 `ms_*` pass emulated on llvmpipe (x86_64, 256-bit) |
-| On a Mac, `valu_fuzz.py --family f16` reads `+0` where the model wants `-0`, from a multiply whose exact product is -0 (`v_mul_f16`, `v_pk_mul_f16`) or from an FMA whose product and addend are both -0 (`v_fma_f16`, `v_fmac_f16`, `v_pk_fma_f16`) | MoltenVK computes a `NoContraction` multiply as `fma(l, r, +0)`, which drops the sign. MoltenVK 1.4.2 and `main` up to at least `5189f8de` are affected (SHADER-182, [design notes](design.md#translator-status-and-runtime-contract)) | Expected with these MoltenVK versions. To run the rest of the fuzzer clean, add `--skip-op` for each of the five ops. To see them match, install Homebrew's `mesa` and use its KosmicKrisp driver: `PALMETTO_VULKAN_LOADER=/opt/homebrew/opt/vulkan-loader/lib/libvulkan.1.dylib VK_DRIVER_FILES=/opt/homebrew/share/vulkan/icd.d/kosmickrisp_mesa_icd.aarch64.json python3 -I tools/valu_fuzz.py --family f16 --build runtime/build/linux`. Or build MoltenVK with SPIRV-Cross `300681bb` or newer in `ExternalRevisions/SPIRV-Cross_repo_revision`, and point `PALMETTO_VULKAN_LOADER` at its `libMoltenVK.dylib` |
+| On a Mac, `valu_fuzz.py --family f16` reads `+0` where the model wants `-0`, from a multiply whose exact product is -0 (`v_mul_f16`, `v_pk_mul_f16`) or from an FMA whose product and addend are both -0 (`v_fma_f16`, `v_fmac_f16`, `v_pk_fma_f16`) | MoltenVK computes a `NoContraction` multiply as `fma(l, r, +0)`, which drops the sign. MoltenVK 1.4.2 and `main` up to at least `5189f8de` are affected (SHADER-182, [design notes](design.md#translator-status-and-runtime-contract)) | Expected with these MoltenVK versions. To run the rest of the fuzzer clean, add `--skip-op` for each of the five ops. To see them match, install Homebrew's `mesa` and use its KosmicKrisp driver: `PALMETTO_VULKAN_LOADER=/opt/homebrew/opt/vulkan-loader/lib/libvulkan.1.dylib VK_DRIVER_FILES=/opt/homebrew/share/vulkan/icd.d/kosmickrisp_mesa_icd.aarch64.json python3 -I tooling/valu_fuzz.py --family f16 --build port/build/linux`. Or build MoltenVK with SPIRV-Cross `300681bb` or newer in `ExternalRevisions/SPIRV-Cross_repo_revision`, and point `PALMETTO_VULKAN_LOADER` at its `libMoltenVK.dylib` |
 | A pixel shader exporting non-canonical f32 NaNs reads back `0x7fc00000` from an RGBA32F color attachment | KosmicKrisp (Mesa 26.3.1), reproduced on Apple M3 Max, M2 Ultra and M1 Pro ([#3125](https://github.com/the original project/issues/3125)): `nir_to_msl` emits `(NAN)` for `float`-typed NaN constants (`MESA_KK_DEBUG=msl`); MoltenVK 1.4.2 preserved both tested payloads on the same hardware | `ps_nan_payload` allows the measured canonical word only for the NaN channels and only when `vk_harness` reports `driver: KosmicKrisp`. Finite channels and other drivers still require exact words. Integer or storage-buffer readback still canonicalizes constants that NIR infers as `float` (see the `cs_bvh` row below). |
 | `cs_bvh` and `cs_bvh32` fail on a Mac with KosmicKrisp: `out[3]` reads `0x7fc00000`, want `0xffffffff` | KosmicKrisp's `nir_to_msl` compiler (Mesa 26.3.1, measured on Apple M2 Ultra, macOS 27.3), not the translator or the buffer format. The triangle branch writes bitcast `float` words and the box branch writes `OpSelect %uint` with `0xffffffff` (`-1`) into the same VGPRs; NIR erases `OpBitcast`, type inference marks the shared register and `bcsel` as `float`, and `nir_to_msl` prints any `float`-typed 32-bit constant in the IEEE-754 NaN range (`0x7f800001..0x7fffffff`, `0xff800001..0xffffffff`) as `(NAN)` (`0x7fc00000`) | Expected with KosmicKrisp in Mesa 26.3.1; MoltenVK 1.4.2 and llvmpipe (Mesa 26.3.1) return `0xffffffff` on the same machine. Do not weaken `vk_compute_test`'s expected BVH words |
-| CMake stops with "needs the Windows SDK 10.0.26100 or newer", or MSVC reports `'Desc_1_2': is not a member of 'D3D12_VERSIONED_ROOT_SIGNATURE_DESC'` | A Windows SDK older than 10.0.26100 (10.0.22621 is the common one), which has no version 1.2 root signatures | `winget install Microsoft.WindowsSDK.10.0.26100`, or add it in the Visual Studio Installer, then delete `runtime/build` and configure again |
+| CMake stops with "needs the Windows SDK 10.0.26100 or newer", or MSVC reports `'Desc_1_2': is not a member of 'D3D12_VERSIONED_ROOT_SIGNATURE_DESC'` | A Windows SDK older than 10.0.26100 (10.0.22621 is the common one), which has no version 1.2 root signatures | `winget install Microsoft.WindowsSDK.10.0.26100`, or add it in the Visual Studio Installer, then delete `port/build` and configure again |
 | `ctest` lists `fsr_dispatch` and `bvh_builder` as failed (`Not Run`) after clang-cl hits an internal compiler error in `fsr_dispatch_test.cpp` and `bvh_builder_test.cpp` | clang-cl 22.1.8 on Fedora (Linux cross-build) and Windows, plus 22.1.7 on Windows | Use clang-cl 23.1.6 (both files compile on Windows) |
 | `d3d12_compute`, `d3d12_draw` or another test that writes a shader library under the temp directory fails now and then (a PSO creation `line N: SUCCEEDED(...)`, or exit 3 with no message) but passes when run alone | Two copies running at once (`ctest -j`, or two suites sharing one Wine prefix or `TMPDIR`) used the same `palmetto_<test>` folder under the temp directory, and one copy deleted the shader modules the other was loading: 6 of 40 runs failed with four copies of `d3d12_compute` at once on a Mac under Wine | Current `main` gives each process its own folder (`<temp>/palmetto_<test>_<pid>`) |
-| A Windows CI artifact run under Wine by hand: `d3d12_compute` and the other tests that read `PALMETTO_TEST_*_SPV` end with exit 3 and no message | The `.spv` paths are compiled in as `D:/a/Palmetto/Palmetto/runtime/build/generated/...`; the prefix has no `D:` drive and the test isn't run from the artifact folder | Run it from the artifact folder (the tests then find `generated/<name>.spv` there) or through `scripts/run_wine_tests.py`, which maps that drive for the run; current `main` names the file it couldn't copy (`cannot copy ...: File not found`) |
+| A Windows CI artifact run under Wine by hand: `d3d12_compute` and the other tests that read `PALMETTO_TEST_*_SPV` end with exit 3 and no message | The `.spv` paths are compiled in as `D:/a/Palmetto/Palmetto/port/build/generated/...`; the prefix has no `D:` drive and the test isn't run from the artifact folder | Run it from the artifact folder (the tests then find `generated/<name>.spv` there) or through `tooling/scripts/run_wine_tests.py`, which maps that drive for the run; current `main` names the file it couldn't copy (`cannot copy ...: File not found`) |
 | Linux cross-build: CMake can't find `clang-cl-19` (or another versioned `clang-cl-<N>`) although `clang-19` and `lld-19` are installed | On Debian and Ubuntu, the versioned `clang-cl-<N>` link is in the `clang-tools-<N>` package, not in `clang-<N>` (`/usr/lib/llvm-<N>/bin/clang-cl` comes from it too); `lld-link-<N>`, `llvm-lib`, `llvm-rc` and `llvm-mt` come from `lld-<N>` and `llvm-<N>` | `sudo apt-get install clang-tools-19 lld-19 llvm-19` (Ubuntu 24.04 has 19 and 20), then pass the versioned names as in [the cross-build](#the-windows-runtime-on-linux-under-wine-or-proton) |
 | Under Ubuntu's Wine 9.0, `wineboot --init` (and every Wine program after it) stops at once with `free(): invalid pointer` or a segmentation fault, before printing anything else; the prefix holds only a `wineserver` file | That Wine opens `/run/user/<uid>` for its server directory, whether `XDG_RUNTIME_DIR` is set or not, and aborts when the folder doesn't exist. The login manager makes it for a desktop session; a container or a shell started without a login session (a root shell in Docker, a CI runner image) has none | Create it before starting Wine: `mkdir -p /run/user/$(id -u) && chmod 700 /run/user/$(id -u)` (setting `XDG_RUNTIME_DIR` alone doesn't help), delete the half-made prefix, and run `wineboot --init` again |
 | `run_gpu_tests.py` fails on a `dict \| None` annotation | Python older than 3.10 | Use Python 3.11+ |
 | `vulkaninfo` lists `Microsoft Direct3D12 (<gpu>)` next to the real GPU and the tests run on it | The Windows "OpenCL™, OpenGL® and Vulkan® Compatibility Pack" installs Mesa's Dozen, a Vulkan-on-D3D12 layer that reports `DISCRETE_GPU` like the native card | Current `main` prefers a native ICD over Microsoft's vendor (`0x1414`) in the runtime and every harness; set `PALMETTO_VK_DEVICE=<part of the real GPU name>` to select explicitly. See #915. |
-| A GPU test that uses `image_load` (or lighting built from real shaders) reads zeros from its image; @Silliana saw every texel except pixel (0,0) come back zero in their own layer (#603, not reproduced here) | In this runtime the shader turns the T# words into an index through the descriptor hash table (`runtime/src/descriptor_table.h`: a miss gives index 0), and index 0 is a 1×1 image of zeros (`runtime/src/vulkan_bindless.h`), so a hand-built or zeroed T# that was never registered reads zeros even at (0,0). The translator does not compare coordinates with the T# size, and `cs_imgload.asm` only uses its T# words as a hash key | Register the descriptor through the runtime (for D3D12, create it with `CreateShaderResourceView`) so its T# hits the table, with the image's real width and height (stored as size − 1, see `runtime/src/gfx10_descriptors.h`) |
+| A GPU test that uses `image_load` (or lighting built from real shaders) reads zeros from its image; @Silliana saw every texel except pixel (0,0) come back zero in their own layer (#603, not reproduced here) | In this runtime the shader turns the T# words into an index through the descriptor hash table (`port/src/descriptor_table.h`: a miss gives index 0), and index 0 is a 1×1 image of zeros (`port/src/vulkan_bindless.h`), so a hand-built or zeroed T# that was never registered reads zeros even at (0,0). The translator does not compare coordinates with the T# size, and `cs_imgload.asm` only uses its T# words as a hash key | Register the descriptor through the runtime (for D3D12, create it with `CreateShaderResourceView`) so its T# hits the table, with the image's real width and height (stored as size − 1, see `port/src/gfx10_descriptors.h`) |
 | `cs_sample_lz_int_d16`, `ps_sample_implicit_sint`, `ps_ssharp`, `ps_tex`, `ps_texture_mip0`, `ps_texture_sample` and `ps_texture_sample_d16` crash (exit -11 or 139) on an Intel GPU on Linux, while NVIDIA and llvmpipe pass them (TEST-399) | A bug in Mesa ANV's shader compiler: compiling these texture-sampling shaders, `nir_opt_gcm` (`nir_opt_gcm.c:430`, `gcm_schedule_early_src`) dereferences a phi source an earlier pass has freed. The SPIR-V passes `spirv-val`. Seen with Mesa 26.1.6 (Arrow Lake) and 26.2.7 (Iris Xe, ADL GT2); Mesa 26.3.1 and `main` (bb98606) pass the whole suite on the same Iris Xe | Use Mesa 26.3.1 or newer. To check a newer Mesa without installing it, build its Intel Vulkan driver and point `VK_DRIVER_FILES` at its `src/intel/vulkan/intel_devenv_icd.x86_64.json` |
 | A test exits with `3221225477` (`0xC0000005`, an access violation) on AMD, only when `VK_INSTANCE_LAYERS=VK_LAYER_LUNARG_api_dump` is set (`d3d12_sparse_queue_family_contract` sets it itself) | The Vulkan SDK's API dump layer (1.4.363.0) crashes the test process now and then: on an RX 9060 XT (RDNA4, Windows driver 32.0.32029.2010) `d3d12_buffer_tiles` and `d3d12_queue_wait` crashed in 1 and 4 of 8 runs in one session and in 3 and 1 of 30 in another; the layer's `detailed` and `pre_dump` settings make no difference. Not seen in 24 runs of those tests without the layer, nor in 8 runs each of the SDK's `vkcube` and `vulkaninfo` with it, so it is not simply the layer on that driver | Run the test again. Do not read a crash under the layer as a failure of the test: run the same program without the layer to check its result, and use `PALMETTO_VK_VALIDATION=1` (the Khronos layer) for validation messages |
 | On an AMD integrated GPU (gfx1036) with AMD's Windows driver (`32.0.21042.62` and `32.0.21045.16010` measured), `crosslane_fuzz.py --wave 64 --w64-native --dpp --no-maskdata --seed 82001 --programs 600` reports one native mismatch: `cs_xl64_8200346406` differs in 96 words (32 lanes of each of its three waves), while `--wave64-emulate` and the hardware oracle match | AMD's Windows driver, not the translator (SHADER-705; the driver's generated code was not inspected). The same native wave64 SPIR-V is exact under RADV (Mesa 26.3.1) on another gfx1036 and on an RX 7900 XTX, and in the CPU interpreter. The wrong instruction is a `v_permlanex16_b32` that reads a register a DPP op with a partial `row_mask` has just written ([shader_validation.md](shader_validation.md), FUZZ-7) | Nothing to change in a build: no shader of the game has that shape (0 of 26,503; the two instructions meet in 6 shaders, all wave32 compute). `--wave64-emulate auto` stays native on this driver because of #857, and the emulated translation of the program matches there |
@@ -657,7 +658,7 @@ Build `vk_store_test` as above and put `spirv-as` and `spirv-val` on PATH. Run t
 probe from the repository root, passing the path to the executable you built:
 
 ```powershell
-python -I runtime/test/shaders/probe_signed_zero.py runtime/build/vulkan/vk_store_test.exe
+python -I port/test/shaders/probe_signed_zero.py port/build/vulkan/vk_store_test.exe
 ```
 
 The probe assembles and validates two hand-written Vulkan 1.2 compute modules. Each requests
@@ -686,7 +687,7 @@ counts of instructions over the program up to each listing's last `s_endpgm`. Th
 shader that contains an instruction does not have to take the exact path a row describes.
 
 ```sh
-python -I tools/op_reach.py <work>/shaders/dxbc/disasm --index <work>/shaders/dxbc/index.json \
+python -I tooling/op_reach.py <work>/shaders/dxbc/disasm --index <work>/shaders/dxbc/index.json \
     --fssm <work>/shaders/dxbc/fssm s_bfe_i64 '*_dpp' v_permlanex16_b32 ds_bpermute_b32 v_mul_f16 ...
 ```
 

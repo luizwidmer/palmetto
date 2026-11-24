@@ -1,4 +1,4 @@
-"""tools/exe_checklist.py: the ASSUMPTION / UNVERIFIED / VERIFY notes, gathered for the executable's first look.
+"""tooling/exe_checklist.py: the ASSUMPTION / UNVERIFIED / VERIFY notes, gathered for the executable's first look.
 
 The repository here is a small tree built in a temporary folder (one shim, one doc), so the counts are exact; the
 last test runs the tool on this repository to make sure every note it finds has a file, a line and some text.
@@ -14,7 +14,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import exe_checklist as ec  # noqa: E402
 
 SHIM = """// demo: a shim with two notes.
@@ -53,9 +53,9 @@ class ExeChecklist(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = self.tmp.name
-        os.makedirs(os.path.join(self.root, "runtime", "shims"))
+        os.makedirs(os.path.join(self.root, "port", "shims"))
         os.makedirs(os.path.join(self.root, "docs"))
-        for rel, text in (("runtime/shims/demo.cpp", SHIM), ("runtime/shims/other.cpp", OTHER), ("docs/demo.md", DOC)):
+        for rel, text in (("port/shims/demo.cpp", SHIM), ("port/shims/other.cpp", OTHER), ("docs/demo.md", DOC)):
             with open(os.path.join(self.root, rel), "w", encoding="utf-8", newline="\n") as f:
                 f.write(text)
 
@@ -64,7 +64,7 @@ class ExeChecklist(unittest.TestCase):
 
     def test_notes_start_at_their_marker_and_skip_trailing_comments(self):
         notes = ec.collect(self.root)
-        demo = [n for n in notes if n["file"] == "runtime/shims/demo.cpp"]
+        demo = [n for n in notes if n["file"] == "port/shims/demo.cpp"]
         self.assertEqual([(n["line"], n["kind"]) for n in demo], [(3, "ASSUMPTION"), (8, "UNVERIFIED")])
         self.assertEqual(demo[0]["text"], "the quota is 1 GiB until the executable shows its own.")
         self.assertEqual(demo[1]["text"], "nothing compares it.")
@@ -72,7 +72,7 @@ class ExeChecklist(unittest.TestCase):
 
     def test_one_class_scan_per_file_with_several_notes(self):
         many = "".join(f"// ASSUMPTION: note {i}\nint value;\n" for i in range(4))
-        with open(os.path.join(self.root, "runtime/shims/many.cpp"), "w", encoding="utf-8", newline="\n") as f:
+        with open(os.path.join(self.root, "port/shims/many.cpp"), "w", encoding="utf-8", newline="\n") as f:
             f.write(SHIM + many)
         seen, real = [], ec.served_classes
 
@@ -82,7 +82,7 @@ class ExeChecklist(unittest.TestCase):
 
         ec.served_classes = counting
         try:
-            notes = [n for n in ec.collect(self.root) if n["file"] == "runtime/shims/many.cpp"]
+            notes = [n for n in ec.collect(self.root) if n["file"] == "port/shims/many.cpp"]
         finally:
             ec.served_classes = real
         self.assertEqual(len(seen), 3)      # one scan per file with notes (demo.cpp, other.cpp, many.cpp)
@@ -136,9 +136,9 @@ class ExeChecklist(unittest.TestCase):
 
     def test_verify_notes_in_code_are_collected(self):
         verify = "// pad demo.\n//\n// The pads (VERIFY: against the game).\n// VERIFY: the timeout is not honoured.\n"
-        with open(os.path.join(self.root, "runtime", "shims", "verify.cpp"), "w", encoding="utf-8", newline="\n") as f:
+        with open(os.path.join(self.root, "port", "shims", "verify.cpp"), "w", encoding="utf-8", newline="\n") as f:
             f.write(verify)
-        notes = [n for n in ec.collect(self.root) if n["file"] == "runtime/shims/verify.cpp"]
+        notes = [n for n in ec.collect(self.root) if n["file"] == "port/shims/verify.cpp"]
         self.assertEqual([(n["line"], n["kind"]) for n in notes], [(3, "VERIFY"), (4, "VERIFY")])
         self.assertEqual(notes[0]["text"], "against the game).")
         self.assertEqual(notes[1]["text"], "the timeout is not honoured.")
@@ -206,7 +206,7 @@ class ExeChecklist(unittest.TestCase):
             self.assertTrue(n["text"].strip(), n)
             self.assertGreater(n["line"], 0)
         # the store shim's remaining unverified sizes (SKU_ID_SIZE, trial-id bound) are on the list
-        self.assertTrue(any(n["file"] == "runtime/shims/xgameruntime_store.cpp" and "SKU_ID_SIZE" in n["text"]
+        self.assertTrue(any(n["file"] == "port/shims/xgameruntime_store.cpp" and "SKU_ID_SIZE" in n["text"]
                             for n in notes))
         self.assertTrue(any(n["file"] == "docs/runtime_imports.md" and n["kind"] == "UNVERIFIED" for n in notes))
         # d3d12_vulkan.md's console assumptions carry the page-wide uppercase marker, so the first look lists them

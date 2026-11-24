@@ -68,8 +68,8 @@ def ci_rules(root):
     # The check loop and the translator list share this one find expression.
     pruned, loop_glob = find(r"-path\s+'([^']+)'\s+-prune\s+-o\s+-type\s+f\s+-name\s+'([^']+)'",
                              "the tests/test_*.py scan")
-    # scripts/run_semantic_tests.py runs the files unittest discover would find, one process each
-    (semantic,) = find(r"(?:python\s+-m\s+unittest\s+discover\s+-s|python\s+-I\s+scripts/run_semantic_tests\.py)\s+(\S+)",
+    # tooling/scripts/run_semantic_tests.py runs the files unittest discover would find, one process each
+    (semantic,) = find(r"(?:python\s+-m\s+unittest\s+discover\s+-s|python\s+-I\s+tooling/scripts/run_semantic_tests\.py)\s+(\S+)",
                        "the semantic suite's folder")
     (viewer,) = find(r"node\s+--test\s+(\S+)", "node --test")
     if re.search(r"unittest\s+discover[^\n]*-p\s", text):
@@ -126,7 +126,7 @@ def tracked_under_tests(root):
         pass
     names = []                                     # no git: walk, as tests/test_docs_links.py does
     for base, dirs, files in os.walk(os.path.join(root, "tests")):
-        dirs[:] = [d for d in dirs if d not in (".git", "third_party", "__pycache__")]
+        dirs[:] = [d for d in dirs if d not in (".git", "vendor", "__pycache__")]
         for name in files:
             names.append(os.path.relpath(os.path.join(base, name), root).replace(os.sep, "/"))
     return names
@@ -160,7 +160,7 @@ def matches_nonrecursive_glob(rel, pattern):
 
 
 def job_of(root: str, rel: str, rules: tuple[str, str, str, str, str]) -> str | None:
-    """Which job runs ``rel``: 'stdlib', 'pytest', 'semantic', 'viewer', or None for no job at all."""
+    """Which job runs ``rel``: 'stdlib', 'pytest', 'semantic', 'app', or None for no job at all."""
     markers, pruned, loop_glob, semantic, viewer = rules
     if rel.startswith(semantic + "/"):
         directory, _, name = rel.rpartition("/")
@@ -171,7 +171,7 @@ def job_of(root: str, rel: str, rules: tuple[str, str, str, str, str]) -> str | 
             directory = directory.rpartition("/")[0]
         return "semantic" if fnmatch.fnmatchcase(name, "test*.py") else None
     if matches_nonrecursive_glob(rel, viewer):
-        return "viewer"
+        return "app"
     if rel.startswith(pruned + "/"):
         return None                                # the Python scans prune this whole tree
     if fnmatch.fnmatchcase(rel.rsplit("/", 1)[-1], loop_glob):

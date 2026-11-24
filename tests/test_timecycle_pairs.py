@@ -1,4 +1,4 @@
-"""Synthetic unit tests for tools/timecycle_pairs.py (no game files)."""
+"""Synthetic unit tests for tooling/timecycle_pairs.py (no game files)."""
 from __future__ import annotations
 
 import contextlib
@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import timecycle_pairs as tp  # noqa: E402
 
 SYNTH_KF = b"""<?xml version="1.0" encoding="UTF-8"?>

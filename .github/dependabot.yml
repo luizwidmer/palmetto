@@ -12,7 +12,7 @@ updates:
       prefix: ci
     open-pull-requests-limit: 1
 
-  # third_party/arc9-explorer: CI builds arc9dump against the new commit before it is merged.
+  # vendor/arc9-explorer: CI builds arc9dump against the new commit before it is merged.
   - package-ecosystem: gitsubmodule
     directory: /
     schedule:

@@ -8,7 +8,7 @@ RDNA2's SALU has no bitfield-insert instruction; shaders insert `insert` into `b
     s_andn2_b32 kept,  base, mask        kept  = base & ~mask
     s_or_b32    dst,   kept, field       SCC   = dst != 0
 
-Each case translates that listing through tools/rdna2spirv.py and executes it in tests/semantic/spirv_mini_interp.py,
+Each case translates that listing through tooling/rdna2spirv.py and executes it in tests/semantic/spirv_mini_interp.py,
 with the operands as push constants (run-time values) and as s_mov_b32 immediates (folded at translation time).
 Standard library only; no GPU, no game files.
 """

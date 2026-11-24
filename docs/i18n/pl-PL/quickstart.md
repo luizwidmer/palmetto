@@ -32,11 +32,11 @@ Projekt jest na wczesnym etapie: **gra jeszcze się nie uruchamia**.
 - [Vulkan SDK](https://vulkan.lunarg.com/) (`spirv-as`, `spirv-val` i `vulkaninfo`).
 - [LLVM 21+](https://github.com/llvm/llvm-project/releases) z **targetem AMDGPU** (`llvm-mc`):
   - Oficjalna wersja LLVM dla Windowsa **nie** zawiera targetu AMDGPU.
-  - Aby zbudować natywny `llvm-mc.exe` z AMDGPU, uruchom `.\scripts\build_llvm_mc.ps1` w PowerShellu w głównym
+  - Aby zbudować natywny `llvm-mc.exe` z AMDGPU, uruchom `.\tooling/scripts\build_llvm_mc.ps1` w PowerShellu w głównym
     folderze repozytorium (WSL nie jest potrzebny). Skrypt wymaga `git` i narzędzi C++ z Visual Studio, ustawia
     zmienną `LLVM_MC` dla Twojego użytkownika i prosi o otwarcie nowego terminala, żeby zmienna była widoczna.
   - Jeśli używasz WSL, zainstaluj `llvm-21` w Ubuntu i ustaw zmienną w tej samej sesji PowerShella, w której
-    uruchamiasz `make_game.py`:
+    uruchamiasz `build_port.py`:
 
     ```powershell
     $env:LLVM_MC = 'wsl -d Ubuntu -e /usr/lib/llvm-21/bin/llvm-mc'
@@ -68,7 +68,7 @@ Portu nie pobiera się gotowego. Buduje się go na Twoim komputerze z Twojej kop
    ```powershell
    git clone --recursive https://github.com/the original project
    ```
-   „Download ZIP” z GitHuba pomija `third_party/arc9-explorer`. Build pobierze go sam, jeśli masz `git`, a w
+   „Download ZIP” z GitHuba pomija `vendor/arc9-explorer`. Build pobierze go sam, jeśli masz `git`, a w
    przeciwnym razie powie, co zrobić.
 3. Kliknij dwukrotnie **`Build.bat`**.
 
@@ -79,19 +79,19 @@ użyć, a jeśli żadnej — poprosi o wklejenie ścieżki do folderu. Przed sta
 i czy jest dość wolnego miejsca, i wymienia wszystkie braki naraz. Wynik zapisuje w `Documents\Palmetto`. Przerwany
 build można uruchomić ponownie — będzie kontynuowany od miejsca, w którym się zatrzymał.
 
-### Z terminala (`make_game.py`)
+### Z terminala (`build_port.py`)
 
 To samo zachowanie i więcej kontroli:
 
 ```powershell
-python -I make_game.py --find                          # lista kopii gry znalezionych na tym komputerze
-python -I make_game.py --pick                          # wybór folderu gry w oknie dialogowym
-python -I make_game.py --check                         # sprawdza Twoją kopię, niczego nie buduje
-python -I make_game.py --check --full-check            # dodatkowo porównuje SHA-256 każdego pliku (wolno)
-python -I make_game.py --game "D:\sciezka\do\paczki" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
-python -I make_game.py --stages shaders,assets         # tylko wybrane etapy
-python -I make_game.py --game "D:\sciezka\do\paczki" --wav  # dodatkowo dekoduje Ogg Opus do PCM WAV (duże pliki)
-python -I make_game.py --wave64-emulate off            # auto (domyślnie), on lub off
+python -I build_port.py --find                          # lista kopii gry znalezionych na tym komputerze
+python -I build_port.py --pick                          # wybór folderu gry w oknie dialogowym
+python -I build_port.py --check                         # sprawdza Twoją kopię, niczego nie buduje
+python -I build_port.py --check --full-check            # dodatkowo porównuje SHA-256 każdego pliku (wolno)
+python -I build_port.py --game "D:\sciezka\do\paczki" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
+python -I build_port.py --stages shaders,assets         # tylko wybrane etapy
+python -I build_port.py --game "D:\sciezka\do\paczki" --wav  # dodatkowo dekoduje Ogg Opus do PCM WAV (duże pliki)
+python -I build_port.py --wave64-emulate off            # auto (domyślnie), on lub off
 ```
 
 Etapy wykonują się w tej kolejności: `check` → `shaders` → `assets` → `runtime` → `pipelines`. Etap `pipelines`
@@ -123,7 +123,7 @@ procesora (można to zmienić przez `--jobs`).
 - **`--wav`**: domyślnie wyłączone, bo 16-bitowy PCM WAV jest kilkakrotnie większy od Ogg Opus. Dekoduje przepakowane
   strumienie Ogg Opus do `work\assets\audio\wav` po etapie banków audio; istniejące pliki WAV są pomijane przy
   wznawianiu builda.
-- **Linux i Wine/Proton**: `make_game.py` działa też na Linuksie, a etap `pipelines` sam buduje tam
+- **Linux i Wine/Proton**: `build_port.py` działa też na Linuksie, a etap `pipelines` sam buduje tam
   `vk_pipeline_check`, jeśli go brakuje. Aby wykonać etap `runtime` poza Windowsem, podaj `--runtime-build <folder>`
   z buildem dla Windowsa (`palmetto.exe` i `palmetto_tls_host.dll`, np. rozpakowany artefakt `runtime-windows` z CI).
   Skrypt skopiuje te pliki do `--out` i utworzy `palmetto.sh`, który uruchamia program przez `wine` (albo przez Wine
@@ -138,15 +138,15 @@ shadery. Zmiana któregokolwiek z nich, a także użycie starszego folderu roboc
 albo tłumaczenie z zachowaniem wyodrębnionych wejść shaderów.
 - **`--wave64-emulate`**: emuluje shadery compute/mesh wave64 na kartach z podgrupami 32-wątkowymi (NVIDIA i Intel). Domyślny tryb `auto` pyta `vulkaninfo` i sam włącza emulację, gdy jest potrzebna.
 - **`--work`**: najlepiej wskazać dysk z co najmniej 400 GB wolnego miejsca. Etap `shaders` trwa najdłużej i domyślnie używa połowy wątków procesora (można to zmienić przez `--jobs`).
-- **Linux i Wine/Proton**: `make_game.py` działa też na Linuksie. Aby wykonać etap `runtime` poza Windowsem, podaj `--runtime-build <folder>` z buildem dla Windowsa (`palmetto.exe` i `palmetto_tls_host.dll`). Skrypt utworzy wtedy `palmetto.sh`, który uruchamia program przez `wine` (albo przez Wine wskazane zmienną `WINE`, np. z Protona).
+- **Linux i Wine/Proton**: `build_port.py` działa też na Linuksie. Aby wykonać etap `runtime` poza Windowsem, podaj `--runtime-build <folder>` z buildem dla Windowsa (`palmetto.exe` i `palmetto_tls_host.dll`). Skrypt utworzy wtedy `palmetto.sh`, który uruchamia program przez `wine` (albo przez Wine wskazane zmienną `WINE`, np. z Protona).
 
 ## Częste problemy
 
 - **Pobrałeś repozytorium przyciskiem „Download ZIP” na GitHubie**: archiwum ZIP nie zawiera submodułu
-  `third_party/arc9-explorer`. Użyj `git clone --recursive`; build pobierze submoduł sam, jeśli masz `git`, a jeśli
+  `vendor/arc9-explorer`. Użyj `git clone --recursive`; build pobierze submoduł sam, jeśli masz `git`, a jeśli
   nie — powie, co zrobić. Możesz też uruchomić `git submodule update --init --recursive` w folderze repozytorium.
 - **`llvm-mc` odrzuca `gfx1013` / AMDGPU**: najpewniej masz oficjalny instalator LLVM dla Windowsa. Użyj
-  `scripts\build_llvm_mc.ps1` albo ustaw `LLVM_MC` na `llvm-mc` z WSL (`llvm-21`).
+  `tooling/scripts\build_llvm_mc.ps1` albo ustaw `LLVM_MC` na `llvm-mc` z WSL (`llvm-21`).
 - **Błąd `D3D12_ROOT_SIGNATURE_DESC2` przy budowaniu runtime**: zaktualizuj Windows SDK do `10.0.26100` lub nowszego
   przez Visual Studio Installer albo `winget install Microsoft.WindowsSDK.10.0.26100`, usuń folder builda i
   skonfiguruj go ponownie.

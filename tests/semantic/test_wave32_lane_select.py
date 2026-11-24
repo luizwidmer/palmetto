@@ -3,10 +3,10 @@ translated SPIR-V.
 
 The lane is S1[4:0] in wave32 and S1[5:0] in wave64. Until #488 the translator masked with 63 in wave32 too, so
 a lane select of 32 or more wrote no lane, and a read shuffled from a lane past the end of a 32-wide subgroup
-(undefined in SPIR-V; NVIDIA happens to wrap it). Found by tools/crosslane_fuzz.py (FUZZ-7).
+(undefined in SPIR-V; NVIDIA happens to wrap it). Found by tooling/crosslane_fuzz.py (FUZZ-7).
 
 tests/test_translate.py checks which masks appear in the SPIR-V text; this runs the result. The input is the GPU
-test runtime/test/shaders/cs_w32_lane_wrap.asm (hand-written, no game data; fixture from regen_fixtures.py),
+test port/test/shaders/cs_w32_lane_wrap.asm (hand-written, no game data; fixture from regen_fixtures.py),
 run by spirv_mini_interp.run_workgroup as one 32-thread workgroup on one 32-wide subgroup. A shuffle from lane
 32 or more raises UndefinedResult there, so a translation that masks with 63 fails loudly instead of passing on
 a driver's wrap.

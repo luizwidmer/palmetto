@@ -10,7 +10,7 @@ an S# in place, which image_sample then reads. Their kind-0 dispatch state says 
 translator refused all 958 of them ("FSPX wave32 dispatch state contradicts wave64 code"), counting s_bfm_b64 as a
 wave64 marker.
 
-Each case writes fspx/<name>.json with the wave size (the sidecar tools/shader_library.py writes), translates a
+Each case writes fspx/<name>.json with the wave size (the sidecar tooling/shader_library.py writes), translates a
 compute listing, runs every invocation with run_workgroup and has each store both words at its own slot.
 """
 import json
@@ -23,7 +23,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

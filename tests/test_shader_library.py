@@ -1,4 +1,4 @@
-"""Unit tests for tools/shader_library.py (the pipeline library in the zlib part of shaders.arc).
+"""Unit tests for tooling/shader_library.py (the pipeline library in the zlib part of shaders.arc).
 
     python -I tests/test_shader_library.py
 
@@ -15,7 +15,7 @@ import unittest
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import shader_library as sl  # noqa: E402
 

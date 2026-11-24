@@ -57,7 +57,7 @@ Mixed Vector Select Patterns & Alternate Mask Configurations Covered:
      - Half-disabled waves (EXEC low-half only or high-half only).
 
   6. SPIR-V Translation & Verification:
-     - Translates assembly via tools/rdna2spirv.py emitting OpSelect.
+     - Translates assembly via tooling/rdna2spirv.py emitting OpSelect.
      - Executes via tests/semantic/spirv_mini_interp.py.
 
   7. Invariants & Negative Controls:
@@ -81,7 +81,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

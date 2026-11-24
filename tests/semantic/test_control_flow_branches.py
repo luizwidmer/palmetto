@@ -9,7 +9,7 @@ Covers:
      two's-complement displacement arithmetic (next_pc + 4 * simm16).
   2. ScalarInterpreter modeling RDNA2 SGPRs, the SCC status flag, scalar comparisons,
      scalar ALU status updates, and graph basic block control flow.
-  3. SPIR-V translator emission verification via tools/rdna2spirv.py branch_condition():
+  3. SPIR-V translator emission verification via tooling/rdna2spirv.py branch_condition():
      validating OpLoad %scc, OpIEqual / OpINotEqual against constant zero, and verifying
      that SCC branching remains lane-uniform without subgroup voting overhead.
   4. End-to-end SPIR-V assembly execution via StructuredBranchInterp modeling:
@@ -40,7 +40,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 
@@ -306,7 +306,7 @@ class ScalarInterpreter:
 # -----------------------------------------------------------------------------
 
 class StructuredBranchInterp:
-    """Interprets structured SPIR-V assembly emitted by tools/rdna2spirv.py for shaders with branches."""
+    """Interprets structured SPIR-V assembly emitted by tooling/rdna2spirv.py for shaders with branches."""
 
     def __init__(self, spvasm: str):
         self.spvasm = spvasm
@@ -895,7 +895,7 @@ class TestScalarInterpreterExecution(unittest.TestCase):
 # -----------------------------------------------------------------------------
 
 class TestTranslatorSpirvEmission(unittest.TestCase):
-    """Verifies that tools/rdna2spirv.py emits expected instructions for s_cbranch_scc0/1."""
+    """Verifies that tooling/rdna2spirv.py emits expected instructions for s_cbranch_scc0/1."""
 
     def test_branch_condition_scc0_emission(self):
         """s_cbranch_scc0 emits OpLoad %scc and OpIEqual against zero without subgroup voting."""

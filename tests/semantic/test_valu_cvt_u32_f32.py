@@ -4,7 +4,7 @@
                       0xFFFFFFFF                if x >= 2^32 (including +inf)
                       trunc(x) as uint32        otherwise (0.0 <= x < 2^32)
 
-Each case translates a hand-written pixel-shader listing with tools/rdna2spirv.py
+Each case translates a hand-written pixel-shader listing with tooling/rdna2spirv.py
 and executes the resulting SPIR-V via tests/semantic/spirv_mini_interp.py.
 Standard library only.
 """
@@ -19,7 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from support import mrt0_words, translate_lines  # noqa: E402  (support puts tools/ on sys.path)
+from support import mrt0_words, translate_lines  # noqa: E402  (support puts tooling/ on sys.path)
 
 MASK32 = 0xFFFFFFFF
 

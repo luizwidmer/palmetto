@@ -7,8 +7,8 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
-TOOL = os.path.join(ROOT, "tools", "rootsig_census.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
+TOOL = os.path.join(ROOT, "tooling", "rootsig_census.py")
 import rootsig_census as R
 
 

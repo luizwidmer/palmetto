@@ -13,7 +13,7 @@ The measurements cover the data area only.
 Use the carver with the short-final-slice fix (advance by the bytes actually read, not by the 1 MiB request):
 
 ```powershell
-python -I tools/arc9_carve.py common.arc <work>\carve\common
+python -I tooling/arc9_carve.py common.arc <work>\carve\common
 ```
 
 Its `index.json` has `off`, `stored`, `size`, `pre` and `head` per stream. The `.bin` files are named by
@@ -21,10 +21,10 @@ offset and are **zlib streams, not files**. ARC9 splits a large file into 64 KiB
 its own zlib stream. A logical XML document is the concatenation of consecutive streams until its root element
 closes; 178 of the 257 header-bearing documents are one stream, and the largest document spans 218.
 
-`tools/gamedata_index.py` groups those blocks into payloads and writes an offset/size/type/root index:
+`tooling/gamedata_index.py` groups those blocks into payloads and writes an offset/size/type/root index:
 
 ```powershell
-python -I tools/gamedata_index.py <work>\carve\common --csv common.csv --json common.json
+python -I tooling/gamedata_index.py <work>\carve\common --csv common.csv --json common.json
 ```
 
 The CSV/JSON contain offsets, sizes, the coarse type and the XML root element. They contain no element values
@@ -80,7 +80,7 @@ texture or audio signature is present in `common.arc`; the two opaque blobs are 
 
 ## MHIU and PAMH heightmaps
 
-`tools/gamedata_maps.py` decodes both payloads. They are **heightmaps**, not
+`tooling/gamedata_maps.py` decodes both payloads. They are **heightmaps**, not
 generic square arrays: each has a 44-byte header, a row table and u8 heights,
 and both scale a value into the header's Z box with
 
@@ -181,7 +181,7 @@ same rules: a 44-byte header, 64 x 64 cells, 64 full-width row records with
   digit of the column, and the 0x08 word takes 28 distinct values.
 
 ```powershell
-python -I tools/gamedata_maps.py <work>\carve\levels --json levels.json
+python -I tooling/gamedata_maps.py <work>\carve\levels --json levels.json
 ```
 
 The tool prints one `PAMH census 64x64: ...` line and writes the per-group
@@ -204,7 +204,7 @@ copied. The MHIU field offsets, the span checks and the Z correlation are
 measured on this package.
 
 ```powershell
-python -I tools/gamedata_maps.py <work>\carve\common --json maps.json
+python -I tooling/gamedata_maps.py <work>\carve\common --json maps.json
 ```
 
 ### Checksum and unknown fields
@@ -231,7 +231,7 @@ python -I tools/gamedata_maps.py <work>\carve\common --json maps.json
 ## `SPS1` shader-preset table
 
 The single `SPS1` payload in `common.arc` (`0x650000`, `43,791` B inflated, 1 stream) is the material shader-preset
-lookup table (`tools/gamedata_sps1.py`), not an `"SPS1Z"` five-byte magic:
+lookup table (`tooling/gamedata_sps1.py`), not an `"SPS1Z"` five-byte magic:
 
 | Offset | Type | Meaning | Measured in 1.0.2.1 `common.arc` |
 |---|---|---|---|
@@ -253,7 +253,7 @@ Measured over all **858** records and cross-checked against `shaders.arc`'s two 
   presets both point to effect hash `0xFC34F08B`, matching [`models.md`](models.md#shader-render-buckets)).
 
 ```powershell
-python -I tools/gamedata_sps1.py <work>\carve\common --shaders shaders.arc --json sps1.json
+python -I tooling/gamedata_sps1.py <work>\carve\common --shaders shaders.arc --json sps1.json
 ```
 
 Only counts, bucket distributions and `--preset-hash` hashes are written; preset and effect names stay local.
@@ -288,8 +288,8 @@ reading also gives a minimum x of exactly -13,312, the `PAMH` heightmap's minimu
 Tile names: the tile textures do exist, but none is named after the tile. Every tile carries only the grid's
 `tileTextureNameSuffix` as its texture name, one tile per texture dictionary, and the dictionary names are not in
 the data. That is why `tileTextureNamePrefix` spellings and the fallback names matched no archive entry or item name
-in the earlier catalog search. `tools/world_grid_atlas.py` (below) finds them in the texture manifests of
-`make_game.py --stages assets`.
+in the earlier catalog search. `tooling/world_grid_atlas.py` (below) finds them in the texture manifests of
+`build_port.py --stages assets`.
 
 ### What the four grids hold
 
@@ -374,8 +374,8 @@ above fall inside it as well. This is a consistency check of that reading, not a
 nothing here shows whether the box is used for the stream test, the camera, or something else.
 
 ```powershell
-python -I tools/arc9_carve.py <game>\common.arc <work>\carve\common
-python -I tools/world_grid_atlas.py <work> --carve <work>\carve\common --json <scratch>\grid_atlas.json
+python -I tooling/arc9_carve.py <game>\common.arc <work>\carve\common
+python -I tooling/world_grid_atlas.py <work> --carve <work>\carve\common --json <scratch>\grid_atlas.json
 python -I tests/test_world_grid_atlas.py
 ```
 
@@ -391,7 +391,7 @@ Without a usable library, or with `PALMETTO_WORLD_ATLAS_NATIVE=0`, the NumPy/Pyt
 not change image decoding, mask extraction, the other grid matchers, or the report format.
 
 ```powershell
-cargo build --release --locked --offline --manifest-path tools/world_atlas_native/Cargo.toml
+cargo build --release --locked --offline --manifest-path tooling/world_atlas_native/Cargo.toml
 python -I tests/test_world_grid_atlas_native.py
 ```
 
@@ -512,7 +512,7 @@ Two consequences for a loader. The stored matrices do not include `Scale`, so th
 built from `Position`, `Rotation` and `Scale` rather than read from `TransformMtx`. Profile indices are
 positions in `ProfileList`, so its order must be kept.
 
-**Package-wide census (ASSET-308, `tools/fog_volumes.py`).** Scanning all `0x7a` resources (assembled via
+**Package-wide census (ASSET-308, `tooling/fog_volumes.py`).** Scanning all `0x7a` resources (assembled via
 `world_census.assemble`, up to 64 MiB and multi-stream, without a 256 KiB per-stream cutoff) in `packs.arc`,
 `levels.arc`, `data.arc`, and `story000.arc`, plus bounded zlib-stream scans across the remaining package
 archives (`common.arc`, `anim.arc`, `navmeshes.arc`, `textures.arc`, `script.arc`, `story000_script.arc`,
@@ -561,7 +561,7 @@ or another archive).
 **`IntExtMode` and `BlendMode` against placement and interiors (ASSET-312).** Measured on the same 14 volumes
 (`common.arc`, `CScatteringTransmittance__FogVolumeListData` at `0x64c000`) and on the interior positions of
 `GameShape__Data__LocationNameLoopkup` (`InteriorNames`, 2,280 `Pos`; see [world.md](world.md)), both read with
-`tools/gamedata_reader.py <carve> --root <root> --out <dir>`. That document gives interior points, not bounds; no
+`tooling/gamedata_reader.py <carve> --root <root> --out <dir>`. That document gives interior points, not bounds; no
 document in `common.arc` stores interior extents (the `CMloArchetypeDef` bounds in `levels.arc` are in interior
 space and need the placing instance). So containment cannot be tested: what is measured is only the distance
 from a volume centre (`Position` + `PositionOffset`) to the nearest interior point, and a point nearby would not
@@ -686,11 +686,11 @@ two maps unmeasured.
 
 ## XML catalog
 
-`tools/gamedata_xml.py` turns a carve into a per-file and per-root catalog. It is stdlib-only and rebuilds
+`tooling/gamedata_xml.py` turns a carve into a per-file and per-root catalog. It is stdlib-only and rebuilds
 multi-stream documents with `gamedata_index.py`, so it reads the same 267 XML payloads the index reports:
 
 ```powershell
-python -I tools/gamedata_xml.py <work>\carve\common --json xml.json --csv xml.csv --check
+python -I tooling/gamedata_xml.py <work>\carve\common --json xml.json --csv xml.csv --check
 ```
 
 The file rows carry offset/bytes/chunks, root, category, element count, maximum depth, attribute names, `$(name)`
@@ -780,7 +780,7 @@ vocabulary mismatches, `TimeMult`, and the `Honor*` values.
 
 ## `OceanSimPresets`
 
-`tools/gamedata_xml.py` lists `OceanSimPresets` among the time/weather/water roots. There is one such document.
+`tooling/gamedata_xml.py` lists `OceanSimPresets` among the time/weather/water roots. There is one such document.
 Its element tree (counts per path; no values or names):
 
 | Path | Count | Content |
@@ -814,7 +814,7 @@ The authored curves and locations provide two controls for a runtime capture.
 The ocean simulation technique has six compute programs. Four declare the same nine constant-buffer members
 in the same order and at the same byte offsets. In all four, the pipeline reflection binds one constant buffer
 at `b5, space1`. The other two declare zero members and zero constant buffers. To reproduce the program
-selection, run `python -I tools/sgd5_effects.py <shaders.arc> --effect OceanWaveSim --technique oceanWaveSim`.
+selection, run `python -I tooling/sgd5_effects.py <shaders.arc> --effect OceanWaveSim --technique oceanWaveSim`.
 Compare the member keys and offsets in each program's counted trailer against the other passes, then check
 the constant-buffer register in its `PSV0` reflection.
 
@@ -890,7 +890,7 @@ hypothesis: it rests on the equal count and the document order, not on the execu
 records as JSON from a carve (the CLI prints summary counts; the JSON is game data and stays local):
 
 ```
-python -I tools/gamedata_reader.py <work>/carve/common --root time_data --out <scratch>
+python -I tooling/gamedata_reader.py <work>/carve/common --root time_data --out <scratch>
 ```
 
 Not measured here (hypothesis): how the two regions are chosen at runtime, what the two plain-modifier numbers
@@ -918,7 +918,7 @@ two numbers by strength, is not settled by these counts.
 Not measured here (hypothesis): the hour of each of the 13 samples (TARGET V's are fixed in code), how the two
 regions are chosen at runtime, what the two plain-modifier numbers mean and how the runtime blends them (see
 above), and how `controlValue` maps onto game state.
-**Plain-modifier number pairs `(a, b)`** (`tools/timecycle_pairs.py`, measured over all **29,727** two-number
+**Plain-modifier number pairs `(a, b)`** (`tooling/timecycle_pairs.py`, measured over all **29,727** two-number
 elements in the 4,291 plain modifiers across all 49 `timecycle_modifier_data` documents):
 
 | Measure | First number (`a`) | Second number (`b`) |
@@ -1139,17 +1139,17 @@ location; a consumer of the field would settle it.
 
 Readable: the 266 XML documents, 3 text/INI-like files, and the two `MHIU` 2048 x 2048
 heightmaps plus the `PAMH` max/min heightmap and the `SPS1` shader-preset table. The XML is ordinary text
-and can be consumed by any parser. `tools/gamedata_maps.py` decodes the `MHIU` row table and
-packed heights and the `PAMH` row table and max/min arrays, and `tools/gamedata_sps1.py` decodes the
+and can be consumed by any parser. `tooling/gamedata_maps.py` decodes the `MHIU` row table and
+packed heights and the `PAMH` row table and max/min arrays, and `tooling/gamedata_sps1.py` decodes the
 `858`-entry `SPS1` preset table and joins it to `shaders.arc`'s `SGD5` effect records.
 
 Not fully readable: the 8.6% unread span, the two opaque binary blobs, and the missing first blocks of the 9
 tail-only documents (their retained tails are readable but incomplete). The encrypted table of contents is
 outside this work by rule; names and exact file boundaries stay unknown until a documented table reader exists.
 
-## Text and binary tables (`tools/gamedata_blobs.py`)
+## Text and binary tables (`tooling/gamedata_blobs.py`)
 
-`tools/gamedata_blobs.py` decodes all five non-XML text and binary payloads in `common.arc` (counts and structural
+`tooling/gamedata_blobs.py` decodes all five non-XML text and binary payloads in `common.arc` (counts and structural
 bounds only; zero names or raw bytes):
 
 | Payload | Inflated B (streams) | Format & measured structure |
@@ -1161,7 +1161,7 @@ bounds only; zero names or raw bytes):
 | `0x23c000` (3-region spatial grid) | 3,274,036 (50) | **Region 1** (`0x000000..0x07FFFF`, `131,072` `u32` cells): `32` empty `0xC0000000` sentinels and `131,040` populated cells whose low 23 bits point (`131,040 / 131,040` aligned) into **Region 3** (`0x166934..0x31F533`, EOF `0x31F534`, `451,328` `u32` words partitioned by the `46,019` distinct cell offsets into spans of `1..24` words); located as the trailing run of 4-byte-aligned offsets matching `min(cell_offs)` (`0x166934`), with every word (`451,328 of 451,328`) falling in **Region 2** (`0x080000..0x166933`, `944,436` B partitioned with zero gaps into `21,662` records: `21,273` of `44` B, `313` of `24` B, `76` of `12` B) |
 
 ```powershell
-python -I tools/gamedata_blobs.py <work>\carve\common --shaders shaders.arc --json blobs.json
+python -I tooling/gamedata_blobs.py <work>\carve\common --shaders shaders.arc --json blobs.json
 ```
 
 ## Dirt and canned colours (`CGraphicsDefinitionsData`)
@@ -1206,7 +1206,7 @@ distribution over the listed channels (independent chances or weights would fit)
 
 **`Channel` numbers the mask texture's channels in component order: 0 = R, 1 = G, 2 = B** (ASSET-304). The
 dirt presets are ped presets, and `textures.arc` holds one texture whose name marks it as the ped dirt masks
-(1024×1024 BC7, 11 mips, next to the ped dirt normal/roughness map). `tools/mask_channels.py` on its export:
+(1024×1024 BC7, 11 mips, next to the ped dirt normal/roughness map). `tooling/mask_channels.py` on its export:
 
 | Channel | Range | Mean | Cover ≥ 64 / 128 | Blobs ≥ 64 / 128 | Largest blob ≥ 64 |
 |---|---|---:|---:|---:|---:|
@@ -1225,7 +1225,7 @@ measured, not confirmed against the shader that samples the mask.
 
 Not measured here (hypothesis): how `VehSpawnIntensities` are chosen at spawn.
 **Spawn intensities are keyed by vehicle class.** Measured on 2026-11-23 from one retail target console
-1.0.2.1 install with `tools/veh_spawn_intensities.py` (numbers and ranges only; the tool never prints
+1.0.2.1 install with `tooling/veh_spawn_intensities.py` (numbers and ranges only; the tool never prints
 entry names). The 31 entries are 30 generic vehicle-class tokens plus one entry whose rain fields differ
 from every other chance-0.5 entry; each carries 7 intensity bands, so the section's own "5 fields" summary
 is top-level children only:
@@ -1406,9 +1406,9 @@ aggregate counts, sizes and schema/category names belong in git, issues or pull 
 synthetic data; CI never reads a game folder. This is the same rule as `AGENTS.md` and `CONTRIBUTING.md`, and
 it applies to this note as well.
 
-## Streaming reader (`tools/gamedata_reader.py`, ASSET-139)
+## Streaming reader (`tooling/gamedata_reader.py`, ASSET-139)
 
-`tools/gamedata_reader.py` reads the carved documents with `iterparse` and turns each into plain Python values,
+`tooling/gamedata_reader.py` reads the carved documents with `iterparse` and turns each into plain Python values,
 without a schema per tag. Each top-level field is converted when its end tag arrives and then dropped, so memory is
 bounded by the largest field. The generic conversion follows the parser's own conventions:
 
@@ -1425,7 +1425,7 @@ bounded by the largest field. The generic conversion follows the parser's own co
 generic.
 
 ```
-python -I tools/gamedata_reader.py <work>/common [--root TAG] [--out DIR]   # counts; --out: one JSON per document (local only)
+python -I tooling/gamedata_reader.py <work>/common [--root TAG] [--out DIR]   # counts; --out: one JSON per document (local only)
 ```
 
 On the 1.0.2.1 carve of `common.arc` the run takes about 5 s, with 0 conversion errors:
@@ -1453,7 +1453,7 @@ both dispatch tables, that streaming equals a whole-tree conversion, and the CLI
 
 The most useful next step is the other half of the **schema bridge**: check whether the 118 XML root tags (and the
 317 `type` classes) match RTTI class names in the executable, then register typed handlers for them in
-`tools/gamedata_reader.py`. That turns the measured XML into the runtime's config layer without hand-writing 5,293
+`tooling/gamedata_reader.py`. That turns the measured XML into the runtime's config layer without hand-writing 5,293
 tags. The streaming reader that dispatches on root and `type` exists now (above). The `MHIU`/`PAMH`
-heightmaps are decoded by `tools/gamedata_maps.py`; every MHIU header field is identified (0x28 is the
+heightmaps are decoded by `tooling/gamedata_maps.py`; every MHIU header field is identified (0x28 is the
 default height), and the row-table layouts and the value-to-Z mapping are measured.

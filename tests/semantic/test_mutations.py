@@ -1,8 +1,8 @@
-"""Mutation tests: sabotage a private copy of tools/ in the ways a real translator regression would, and require
+"""Mutation tests: sabotage a private copy of tooling/ in the ways a real translator regression would, and require
 that tests/semantic/test_ps_semantics.py then FAILS for the shader that exercises the sabotaged rule.
 
 Each mutation is an exact-text replacement that must match exactly once (so a refactor that moves the code makes
-this test fail loudly instead of silently mutating nothing). The repository's own tools/ is never modified.
+this test fail loudly instead of silently mutating nothing). The repository's own tooling/ is never modified.
 Each baseline run on the unmutated copy must pass first.
 """
 import os
@@ -95,7 +95,7 @@ def apply_mutation(path, old, new):
     """Replace old with new in path exactly once, keeping the file's line endings.
 
     A checkout made before .gitattributes pinned `eol=lf` (or a branch applied through a CRLF-translating
-    editor) stores tools/ with CRLF line endings, while every anchor here is written with LF. Matching the
+    editor) stores tooling/ with CRLF line endings, while every anchor here is written with LF. Matching the
     anchors against the raw bytes reports the multiline anchors as missing, so normalize both sides to LF
     and restore the file's original line-ending style on the way out.
     """
@@ -111,8 +111,8 @@ def apply_mutation(path, old, new):
 
 class MutationTests(unittest.TestCase):
     def make_copy(self, tmp):
-        dst = os.path.join(tmp, "tools")
-        shutil.copytree(os.path.join(ROOT, "tools"), dst, ignore=shutil.ignore_patterns("__pycache__", "arc9dump"))
+        dst = os.path.join(tmp, "tooling")
+        shutil.copytree(os.path.join(ROOT, "tooling"), dst, ignore=shutil.ignore_patterns("__pycache__", "arc9dump"))
         return dst
 
     def test_baseline_copy_passes(self):
@@ -131,11 +131,11 @@ class MutationTests(unittest.TestCase):
                 self.assertIn(expect, failed_tests(out), f"{label}: expected {expect} to fail\n{out}")
 
     def test_anchors_match_crlf_translator_copies(self):
-        # Regression: on a CRLF checkout of tools/ the four multiline anchors (v_bfe_i32, v_subrev_co_ci_u32,
+        # Regression: on a CRLF checkout of tooling/ the four multiline anchors (v_bfe_i32, v_subrev_co_ci_u32,
         # v_cmpx_eq_u64, v_mul_legacy_f32) do not occur in the raw bytes and test_each_mutation_is_caught
         # stops before any mutation runs. apply_mutation must find every anchor in a CRLF copy, mutate it
         # once, keep the file on CRLF and leave it valid Python.
-        with open(os.path.join(ROOT, "tools", TRANSLATOR), encoding="utf-8", newline="") as f:
+        with open(os.path.join(ROOT, "tooling", TRANSLATOR), encoding="utf-8", newline="") as f:
             text = f.read().replace("\r\n", "\n")
         crlf_text = text.replace("\n", "\r\n")
         for label, fname, old, new, expect in MUTATIONS:

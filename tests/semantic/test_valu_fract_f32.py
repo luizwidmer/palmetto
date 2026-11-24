@@ -3,7 +3,7 @@ from __future__ import annotations
 """End-to-end semantic value tests for RDNA2 v_fract_f32 and v_fract_f16.
 
 Covers v_fract_f32 (single-precision) and v_fract_f16 (half-precision) executed
-end-to-end through tools/rdna2spirv.py and tests/semantic/spirv_mini_interp.py
+end-to-end through tooling/rdna2spirv.py and tests/semantic/spirv_mini_interp.py
 against independent Fraction-based IEEE-754 `x - floor(x)` reference oracles:
   - Formula: D = S0 - floor(S0), returning values in [0.0, 1.0).
   - Non-negative property: for any finite input x, fract(x) >= 0.0 and fract(x) < 1.0.
@@ -54,7 +54,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

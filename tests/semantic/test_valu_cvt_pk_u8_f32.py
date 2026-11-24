@@ -6,13 +6,13 @@ AMD RDNA2 ISA semantics for `v_cvt_pk_u8_f32 vD, src0, src1, src2`:
   - Inserts that byte into byte lane `src1[1:0]` (`src1 & 3`, i.e. bits [7:0], [15:8], [23:16], or [31:24])
     of `src2`, leaving the other 3 bytes of `src2` untouched in `vD`.
 
-Executed end-to-end through tools/rdna2spirv.py and tests/semantic/spirv_mini_interp.py (single-lane pixel
+Executed end-to-end through tooling/rdna2spirv.py and tests/semantic/spirv_mini_interp.py (single-lane pixel
 shaders via run_fragment and multi-lane compute shaders via run_workgroup), and checked against hand-worked
 constants and an independent pure-Python binary32 Fraction/RTE reference oracle. Standard library only;
 hand-written RDNA2 disassembly listings only.
 
 NaN inputs (docs/design.md, "Float-to-byte pack" row): `FClamp` with a NaN operand is undefined in
-  GLSL.std.450, so tools/rdna2spirv.py finds a NaN from its bits and selects +0 before `FClamp`, then
+  GLSL.std.450, so tooling/rdna2spirv.py finds a NaN from its bits and selects +0 before `FClamp`, then
   `RoundEven` + `OpConvertFToU`. `OracleTests` verifies the RDNA2 ISA `NaN -> 0` rule (also measured on
   hardware, #358), and `NaNHandlingTests` runs qNaN, -qNaN, sNaN and NaN under `abs`/`neg` through
   `spirv_mini_interp.py` and checks byte 0.
@@ -30,7 +30,7 @@ from fractions import Fraction
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

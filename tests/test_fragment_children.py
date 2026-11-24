@@ -1,4 +1,4 @@
-"""Synthetic-data tests for tools/fragment_children.py (ASSET-261, the fragment child-drawable census).
+"""Synthetic-data tests for tooling/fragment_children.py (ASSET-261, the fragment child-drawable census).
 
     python -I tests/test_fragment_children.py
 
@@ -16,8 +16,8 @@ import zlib
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "fragment_children.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "fragment_children.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import fragment_children as fc  # noqa: E402
 

@@ -1,4 +1,4 @@
-"""tools/user_sgpr_census.py on hand-written index.json data (no game files, no GPU)."""
+"""tooling/user_sgpr_census.py on hand-written index.json data (no game files, no GPU)."""
 import contextlib
 import json
 import os
@@ -11,7 +11,7 @@ from unittest import mock
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import report_paths  # noqa: E402
 import user_sgpr_census as usc  # noqa: E402
@@ -68,7 +68,7 @@ def test_const_reads_are_not_pointers():
 
 
 def model_two_dword_tables_from_s0():
-    """Shaders packed as runtime/src/root_signature.h does today: tables are 64-bit VAs from s0."""
+    """Shaders packed as port/src/root_signature.h does today: tables are 64-bit VAs from s0."""
     return {
         "t0": {"stage": "ps", "user_sgpr_reads": reads((0, "ptr64_lo"), (1, "ptr64_hi"), (2, "ptr64_lo"), (3, "ptr64_hi"))},
         "t1": {"stage": "ps", "user_sgpr_reads": reads((0, "ptr64_lo"), (1, "ptr64_hi"), (2, "const32"))},
@@ -159,7 +159,7 @@ def test_cli_rejects_malformed_stage_assignment():
         index = Path(tmp, "index.json")
         report = Path(tmp, "report.json")
         index.write_text(json.dumps(INDEX), encoding="utf-8")
-        tool = os.path.join(ROOT, "tools", "user_sgpr_census.py")
+        tool = os.path.join(ROOT, "tooling", "user_sgpr_census.py")
         for option in ("--base", "--expect"):
             for assignment in ("ps", "ps=bad", "=8", "ps=-1"):
                 result = subprocess.run(
@@ -172,7 +172,7 @@ def test_cli_rejects_malformed_stage_assignment():
                 assert not report.exists()
 
 
-TOOL = os.path.join(ROOT, "tools", "user_sgpr_census.py")
+TOOL = os.path.join(ROOT, "tooling", "user_sgpr_census.py")
 
 
 def run_cli(*args):
@@ -388,7 +388,7 @@ def test_pairs_cli_writes_the_report_and_no_names():
         index = Path(tmp, "index.json")
         report = Path(tmp, "report.json")
         index.write_text(json.dumps(technique_index(omit_invisible=False)), encoding="utf-8")
-        result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "user_sgpr_census.py"),
+        result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "user_sgpr_census.py"),
                                  str(index), "--pairs", "--json", str(report)], capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
         assert "VS/PS pairs: 1 techniques with both stages" in result.stdout

@@ -1,8 +1,8 @@
 # TTPF arrays, cubemaps, and 3D volumes
 
 Measured across all 57 retail target console RDS5 texture pools (1.0.2.1; 357,115 TTPF descriptors,
-1,026,833 chunks) via `python -I tools/ttpf_mips.py scan`. The layouts and decoders described
-below are implemented in `tools/tex_headers.py` and `tools/ttpf_mips.py`. No texture bytes, DDS
+1,026,833 chunks) via `python -I tooling/ttpf_mips.py scan`. The layouts and decoders described
+below are implemented in `tooling/tex_headers.py` and `tooling/ttpf_mips.py`. No texture bytes, DDS
 files, or carved payloads are included; every number below is an aggregate, a descriptor field,
 a byte offset, or a validation metric.
 
@@ -23,12 +23,12 @@ a byte offset, or a validation metric.
 All 697 multi-slice descriptors — the 678 formerly flagged as arrays/volumes plus the 19
 two-slice 2D arrays formerly miscounted as unknown-format 2D records — have exact, validated
 layouts and DX10 DDS export support (`Texture2DArray`, `TextureCube`, and float16 `Texture3D`)
-in `tools/ttpf_mips.py`.
+in `tooling/ttpf_mips.py`.
 
 ## Descriptor word `b` bitfields
 
 The 16-byte ETPF descriptor record is decoded by `parse_etpf_texture_record` in
-`tools/tex_headers.py`. Word `b` packs five fields:
+`tooling/tex_headers.py`. Word `b` packs five fields:
 
 | Field | Expression | Bits | Meaning |
 |---|---|---:|---|
@@ -71,7 +71,7 @@ The observed `(mode >> 1) & 0xF` tile modes partition the 697 multi-slice descri
 
 ### Layout
 
-Implemented in `array_surface_layout` (`tools/tex_headers.py`):
+Implemented in `array_surface_layout` (`tooling/tex_headers.py`):
 
 - Tile mode is `SW_64KB_D` (64 KiB tiles), in **mip-major** order.
 - Total allocation span is exact `depth * single_slice_size` (127 / 127 byte-exact, 0
@@ -95,13 +95,13 @@ Implemented in `array_surface_layout` (`tools/tex_headers.py`):
 | **Total** | **127** | **120** | **4** | **3** |
 
 Under zlib/raw only, 120 arrays export complete chains, 4 are partial (mip 0 touches BCPack on
-some slices while lower mips are zlib/raw), and 3 are all-BCPack. With `tools/bcpack.py`
+some slices while lower mips are zlib/raw), and 3 are all-BCPack. With `tooling/bcpack.py`
 (BC1/BC3/BC4/BC5), the 4 partial arrays complete (**124 complete**) and the 3 all-BCPack arrays
 move to partial (**3 partial, 0 skipped**).
 
 ### Pixel validation
 
-Verified with `tools/ttpf_mips.py check` (BC5 downsample MAE per slice vs. a slice-major
+Verified with `tooling/ttpf_mips.py check` (BC5 downsample MAE per slice vs. a slice-major
 negative control):
 
 | Pool / index | Dimensions | Format / mips | Per-slice max error | Overall max | Slice-major control |
@@ -117,7 +117,7 @@ those 19 entries are standard 2-slice mip-major 2D arrays.
 
 ### Layout
 
-Implemented in `cubemap_surface_layout` (`tools/tex_headers.py`):
+Implemented in `cubemap_surface_layout` (`tooling/tex_headers.py`):
 
 - Each cubemap stores `non_tail + 1` self-contained full-mip cubemap snapshots back-to-back in
   the RDS5 chunk stream. Earlier chunks hold lower-resolution streaming snapshots.
@@ -145,7 +145,7 @@ bytes of earlier snapshots, totaling `2,998,272` bytes exact.
 
 ### Pixel validation
 
-Verified with `tools/ttpf_mips.py check` (BC1_SRGB 6-face downsample MAE vs. a tail-origin
+Verified with `tooling/ttpf_mips.py check` (BC1_SRGB 6-face downsample MAE vs. a tail-origin
 negative control):
 
 | Pool / index | Dimensions | Format / mode / mips | Snapshots / `data_offset` | Per-face max error | Overall max | Tail control |
@@ -161,8 +161,8 @@ tail-origin control (~130–140) by more than 13×.
 
 ### Layout
 
-Implemented in `volume_surface_layout` (`tools/tex_headers.py`) and `detile_volume`
-(`tools/ttpf_mips.py`):
+Implemented in `volume_surface_layout` (`tooling/tex_headers.py`) and `detile_volume`
+(`tooling/ttpf_mips.py`):
 
 - Standard AMD Gfx10 3D `SW_4KB_S` micro-tiling with a single mip level (`mips = 1`).
 - **3 / 3 are 100% zlib/raw (0 BCPack)** and **3 / 3 match their allocation spans byte-exact**.
@@ -178,8 +178,8 @@ adjacent-Z voxel difference:
 | `ttdb_graphics.ttpf` #575 | 32×32×32 | 10 `R16G16B16A16_FLOAT` | 8 | 8×8×8 | 32 | 262,144 | 0.036721 | 0.565428 | 15.4× smoother |
 | `ttdb_graphics.ttpf` #200 | 32×64×32 | 10 `R16G16B16A16_FLOAT` | 8 | 8×8×8 | 32 | 524,288 | 0.016793 | 0.110316 | 6.6× smoother |
 
-The intra-tile bit order (`VOLUME_PATTERNS_4K` in `tools/ttpf_mips.py`) and the tile extents
-(`_VOLUME_4K_TILE` in `tools/tex_headers.py`) are Mesa addrlib's `GFX10_SW_4K_S3_PATINFO` (the RbPlus table is
+The intra-tile bit order (`VOLUME_PATTERNS_4K` in `tooling/ttpf_mips.py`) and the tile extents
+(`_VOLUME_4K_TILE` in `tooling/tex_headers.py`) are Mesa addrlib's `GFX10_SW_4K_S3_PATINFO` (the RbPlus table is
 identical), the same as arc9-explorer's `VolumePatterns`. Until this was corrected, the rows for 2-, 4- and
 16-byte elements matched no GFX10 pattern in addrlib, and the 2-byte tile was taken as 16×8×16 instead of
 8×16×16. Only #901 uses one of those rows. The adjacent-Z check above could not catch it (the wrong order still
@@ -189,7 +189,7 @@ adjacent-Z 0.029 and 0.007 (adjacent-X 0.007 and 0.015). The two 8-byte volumes 
 
 ## 43-bit `(meta, extra)` streaming chunk-page metadata
 
-Decoded by `decode_etpf_chunk_pages` and `etpf_streaming_padding` in `tools/tex_headers.py`, and
+Decoded by `decode_etpf_chunk_pages` and `etpf_streaming_padding` in `tooling/tex_headers.py`, and
 verified across all **357,115 / 357,115** descriptors (`chunk_metadata_ok = 357,115`,
 `chunk_metadata_fail = 0`):
 
@@ -215,7 +215,7 @@ verified across all **357,115 / 357,115** descriptors (`chunk_metadata_ok = 357,
 ## Updated 57-pool corpus totals
 
 With 2D compact layouts plus 2D arrays, cubemaps, and 3D volumes enabled in
-`tools/ttpf_mips.py`:
+`tooling/ttpf_mips.py`:
 
 | Configuration | Complete | Partial | Skipped | Remaining skip breakdown |
 |---|---:|---:|---:|---|
@@ -224,7 +224,7 @@ With 2D compact layouts plus 2D arrays, cubemaps, and 3D volumes enabled in
 | With BCPack BC1/BC3/BC4/BC5 (2D only) | 353,146 | 2,515 | 1,454 | 752 BC6H/BC7 BCPack + 697 multi-slice + 5 DXGI 11 |
 | With BCPack BC1/BC3/BC4/BC5 (+ multi-slice) | **353,840** (**99.08%**, +694) | **2,518** (+3) | **757** (−697) | 752 BC6H/BC7 BCPack + 5 DXGI 11 (**0** layout skips, **0** multi-slice skips) |
 
-`tools/ttpf_mips.py` exports DX10 DDS for 2D arrays (`Texture2DArray`), cubemaps
+`tooling/ttpf_mips.py` exports DX10 DDS for 2D arrays (`Texture2DArray`), cubemaps
 (`TextureCube`), and validated float16 3D volumes (`Texture3D`). Upstream C# `TtpfReader` parity
 has landed in `breadbbbb/arc9-explorer` PRs #5, #6, and #7 (compact layouts, multi-slice shapes,
 and BCPack BC1/BC3/BC4/BC5) and is carried by the `e293917` submodule pin.
@@ -235,10 +235,10 @@ The header lists the mip count, array size, volume depth and cube faces availabl
 to the PNG decoder. A cube array's `array_size` counts whole cubes.
 
 ```powershell
-python -I tools/dds_png.py cubemap.dds --info
-python -I tools/dds_png.py cubemap.dds face.png --layer 1 --face nz --mip 2
-python -I tools/dds_png.py array.dds layer.png --layer 3 --max-size 256
-python -I tools/dds_png.py volume.dds slice.png --mip 1 --z 2
+python -I tooling/dds_png.py cubemap.dds --info
+python -I tooling/dds_png.py cubemap.dds face.png --layer 1 --face nz --mip 2
+python -I tooling/dds_png.py array.dds layer.png --layer 3 --max-size 256
+python -I tooling/dds_png.py volume.dds slice.png --mip 1 --z 2
 ```
 
 Indices start at zero. Faces are `px`, `nx`, `py`, `ny`, `pz` and `nz`
@@ -254,10 +254,10 @@ or slice. Lower mips use tightly packed rows, as written by the project exporter
 ## Reproduce
 
 ```powershell
-python -I tools/ttpf_mips.py scan <game root> --json scan.json
-python -I tools/ttpf_mips.py layout <pool.ttpf> <index>
-python -I tools/ttpf_mips.py check <pool.ttpf> <index> [--allow-provisional]
-python -I tools/ttpf_mips.py export <pool.ttpf> <index> <out.dds> [--allow-provisional]
+python -I tooling/ttpf_mips.py scan <game root> --json scan.json
+python -I tooling/ttpf_mips.py layout <pool.ttpf> <index>
+python -I tooling/ttpf_mips.py check <pool.ttpf> <index> [--allow-provisional]
+python -I tooling/ttpf_mips.py export <pool.ttpf> <index> <out.dds> [--allow-provisional]
 python -I tests/test_tex_headers.py
 python -I tests/test_ttpf_mips.py
 ```

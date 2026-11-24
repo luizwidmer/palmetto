@@ -24,7 +24,7 @@ Modifiers and Semantics:
       - NaNs are clamped/suppressed to +0.0f under hardware clamp saturation.
       - Values within [0.0, 1.0] pass through unmodified.
 
-In SPIR-V Lowering (tools/rdna2spirv.py):
+In SPIR-V Lowering (tooling/rdna2spirv.py):
   v_fma_f32 lowers to:
     %r = OpExtInst %float %glsl Fma %src0 %src1 %src2
   With output modifiers and clamp:
@@ -48,7 +48,7 @@ from fractions import Fraction
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

@@ -2,7 +2,7 @@
 
 `csv.writer` defaults to `lineterminator="\\r\\n"`, so a tool that leaves it at the default writes CRLF on Windows and
 LF everywhere else, and the same archive gives different report bytes depending on the machine that exported it.
-`tools/awc_manifest.py` and `tools/awc_shorts.py` pass `lineterminator="\\n"` and `tools/bink_index.py` documents why
+`tooling/awc_manifest.py` and `tooling/awc_shorts.py` pass `lineterminator="\\n"` and `tooling/bink_index.py` documents why
 its stdout writer needs it; this test keeps every other writer on the same convention. No game files are read.
 """
 import os
@@ -13,14 +13,14 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 
-# Every csv writer call in tools/, with the two lines that may continue it.
+# Every csv writer call in tooling/, with the two lines that may continue it.
 WRITER = re.compile(r"\bcsv\.(?:Dict)?[Ww]riter\(")
 
 
 def writer_calls():
-    """Yield (file, line number, the call's source text) for every csv writer constructed in tools/."""
+    """Yield (file, line number, the call's source text) for every csv writer constructed in tooling/."""
     for name in sorted(os.listdir(TOOLS)):
         if not name.endswith(".py"):
             continue

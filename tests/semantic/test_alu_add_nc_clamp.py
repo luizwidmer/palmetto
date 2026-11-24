@@ -6,7 +6,7 @@ v_add_nc_i32 / v_sub_nc_i32: D = S0 + S1 / S0 - S1, wrapping at 32 bits. With th
 add/sub saturates instead (GFX9+; LLVM selects uaddsat/usubsat to v_add/sub_nc_u32 clamp and saddsat/ssubsat to
 v_add/sub_nc_i32 clamp): the unsigned ops to [0, 0xFFFFFFFF], the signed ones to [0x80000000, 0x7FFFFFFF].
 v_subrev_nc_u32 is S1 - S0 and saturates the same way. Each case translates a synthetic pixel shader with
-tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the result with a plain-Python
+tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the result with a plain-Python
 reference. D leaves through exp as two 16-bit halves ORed into 0x40000000, so no export channel is a NaN or denormal
 pattern that a float round trip could change.
 """
@@ -20,7 +20,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

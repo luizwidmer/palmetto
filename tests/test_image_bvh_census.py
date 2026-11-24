@@ -1,4 +1,4 @@
-"""tools/image_bvh_census.py on hand-written listings: forms, descriptor fields, word-read categories, lane rule.
+"""tooling/image_bvh_census.py on hand-written listings: forms, descriptor fields, word-read categories, lane rule.
 
     python -I tests/test_image_bvh_census.py -v
 
@@ -13,7 +13,7 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tooling"))
 import image_bvh_census as census  # noqa: E402
 
 ENC = " ; encoding: [0x00,0x00,0x00,0x00]"      # only the length matters: every instruction is 4 bytes here

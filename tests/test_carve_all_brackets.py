@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "carve_all.ps1"
+SCRIPT = Path(__file__).resolve().parents[1] / "tooling/scripts" / "carve_all.ps1"
 INDEX = {"summary": {"files": 1, "bink2_files": 0, "span": 10, "compressed_bytes": 5, "unread_bytes": 5,
                      "inflated_bytes": 5}, "files": []}
 

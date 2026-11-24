@@ -2,7 +2,7 @@
 
 ARC9's table of contents is encrypted, so resource names cannot be read from the directory. They
 are still present in the inflated stream data: a drawable is spelled `name.#dr`, a fragment
-`name.#ft`, a drawable dictionary `name.#dd`, and so on. `tools/arc9_names.py` walks the data area
+`name.#ft`, a drawable dictionary `name.#dd`, and so on. `tooling/arc9_names.py` walks the data area
 like `arc9_carve.py`, inflates a bounded prefix of each zlib stream, and indexes those names with
 their archive offsets.
 
@@ -12,7 +12,7 @@ animations, and does not write any game data into the repository. The JSON index
 ## Usage
 
 ```text
-python -I tools/arc9_names.py <archive.arc> <out.json> [--start N] [--limit BYTES]
+python -I tooling/arc9_names.py <archive.arc> <out.json> [--start N] [--limit BYTES]
                               [--max-inflate BYTES] [--types dr,ft,dd] [--quiet]
 ```
 

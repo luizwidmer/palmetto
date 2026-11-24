@@ -49,7 +49,7 @@ commands and zero compute dispatches in both boots. `docs/page_content.md` secti
 
 ## 2. The A/B: what answering the family changes
 
-Two clean 150 s boots, same tree, same package, harness only (`tools/boot_report.py`), standard environment
+Two clean 150 s boots, same tree, same package, harness only (`tooling/boot_report.py`), standard environment
 (`PALMETTO_SHADERS=F:\palmetto-work\shaders\spirv`, `PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`,
 `PALMETTO_SEED_GLOBAL=75DF268:D8`), `PALMETTO_XG_TRACE=1` on both. Boot 2 also has capture on
 (`PALMETTO_CAPTURE`) and the one-shot target readback (`PALMETTO_READBACK_AT_DRAW=1`).
@@ -115,8 +115,8 @@ images:
   measured 150 s window does not need slot 2 to answer (it is only reached when `XGCreateTextureComputer` answers
   `S_OK`, and then only through the layout cache), so the linear answer is complete for the upload measurement.
 
-Implementation: `runtime/shims/xg_xs.cpp`; the call shapes, both modes and the copy bounds are pinned by
-`runtime/test/xg_xs_test.cpp` (17 checks in the default mode, 21 with `PALMETTO_XG_LAYOUT=linear`).
+Implementation: `port/shims/xg_xs.cpp`; the call shapes, both modes and the copy bounds are pinned by
+`port/test/xg_xs_test.cpp` (17 checks in the default mode, 21 with `PALMETTO_XG_LAYOUT=linear`).
 
 ## 4. Why the frame is still black, and what this rules out
 
@@ -127,7 +127,7 @@ not read them for a texture. Device slot 133 (`CreatePlacedResourceX`) for a pla
 [rt] d3d12: a title-placed texture (device slot 133) is an ordinary committed texture, not the title's pages; dimension 3
 ```
 
-(`runtime/shims/d3d12_vulkan_device.cpp`, `create_at_host_address`: a texture gets an ordinary committed image on its
+(`port/shims/d3d12_vulkan_device.cpp`, `create_at_host_address`: a texture gets an ordinary committed image on its
 own `VkDeviceMemory`, and the title's writes at its page address do not reach it - only placed **buffers** get the
 console-VA alias, and that alias rebases the VA for descriptors, it does not import the pages either). So a layout
 answer can only become pixels once the runtime makes a placed texture read the title's pages - the same page-import
@@ -152,7 +152,7 @@ The default boot keeps the layout-cache path closed, exactly as measured before 
 
 ```
 # refusal baseline (default) - writes nothing, frame stays black
-python -I tools\\boot_report.py --exe runtime\\build\\palmetto.exe --image <title> --game-dir <package>
+python -I tooling\\boot_report.py --exe port\\build\\palmetto.exe --image <title> --game-dir <package>
     --overlay <overlay-dir> --timeout 150 --out <out-dir>
     --env PALMETTO_SHADERS=F:\\palmetto-work\\shaders\\spirv --env PALMETTO_D3D12=vulkan
     --env PALMETTO_SKIP_INT3=1 --env PALMETTO_SEED_GLOBAL=75DF268:D8 --env PALMETTO_XG_TRACE=1
@@ -170,7 +170,7 @@ what the table above reads; the capture frames are measured with `ppm_brightness
    in those pages; the backend needs to import them (or copy them into the stand-in image before the texture is
    sampled), for the placed-texture class, the way `alias_console_va` handles buffers. This is the increment that
    would turn the 34,044 bytes the title writes into visible content - and it is in
-   `runtime/shims/d3d12_vulkan_device.cpp`, outside this page's write scope.
+   `port/shims/d3d12_vulkan_device.cpp`, outside this page's write scope.
 2. **Slot 2 (`GetResourceLayout`) and slot 10.** Only then can `XGCreateTextureComputer` answer `S_OK` without the
    layout cache consuming an uninitialised record. The structure shapes are known from the call sites (slot 2: one out
    pointer to a 0x6C8-byte record; slot 10: seven arguments, a count and a 12-byte-entry list) but their fields are not

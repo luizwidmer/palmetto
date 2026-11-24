@@ -1,4 +1,4 @@
-"""tools/d3d12_guid_sites.py on hand-built PE32+ images (no game files, no SDK needed)."""
+"""tooling/d3d12_guid_sites.py on hand-built PE32+ images (no game files, no SDK needed)."""
 import json
 import os
 import struct
@@ -9,7 +9,7 @@ import unittest
 import uuid
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import d3d12_guid_sites as sites  # noqa: E402
 
@@ -178,7 +178,7 @@ class GuidSites(unittest.TestCase):
         out = os.path.join(self.tmp.name, "out.json")
         header = os.path.join(self.tmp.name, "none.h")
         result = subprocess.run(
-            [sys.executable, "-I", os.path.join(ROOT, "tools", "d3d12_guid_sites.py"), path,
+            [sys.executable, "-I", os.path.join(ROOT, "tooling", "d3d12_guid_sites.py"), path,
              "--header", header, "--known", f"ID3D12CommandQueue={QUEUE}", "--json", out],
             capture_output=True, text=True, cwd=ROOT)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -190,7 +190,7 @@ class GuidSites(unittest.TestCase):
 
     def test_cli_cannot_overwrite_an_input_with_its_json_report(self):
         image, _ = pe32plus(b"\x90", QUEUE.bytes_le)
-        script = os.path.join(ROOT, "tools", "d3d12_guid_sites.py")
+        script = os.path.join(ROOT, "tooling", "d3d12_guid_sites.py")
         header_text = b"// Synthetic IID header\n"
         for input_name in ("second.dll", "d3d12.h"):
             with self.subTest(input=input_name):

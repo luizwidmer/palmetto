@@ -1,11 +1,11 @@
-"""Grammar-table integrity and binary-encoding round-trip tests for tools/spirv_asm_tables.py."""
+"""Grammar-table integrity and binary-encoding round-trip tests for tooling/spirv_asm_tables.py."""
 import os
 import struct
 import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 

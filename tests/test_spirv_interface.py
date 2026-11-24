@@ -1,4 +1,4 @@
-"""Unit tests for tools/spirv_interface.py using synthetic SPIR-V binaries.
+"""Unit tests for tooling/spirv_interface.py using synthetic SPIR-V binaries.
 
 Runs with the standard library only (no game data, no GPU):
     python -I tests/test_spirv_interface.py
@@ -9,7 +9,7 @@ import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tooling"))
 import spirv_interface as spv  # noqa: E402
 
 # Extra SPIR-V opcodes and decorations used to exercise filtering and resource handling.

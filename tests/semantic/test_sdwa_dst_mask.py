@@ -26,7 +26,7 @@ Destination unused bit preservation modes (dst_unused):
       All bits outside the written sub-register field (both below offset and above offset + width)
       strictly retain their previous values from the destination VGPR.
 
-SPIR-V translation semantics (tools/rdna2spirv.py):
+SPIR-V translation semantics (tooling/rdna2spirv.py):
   - UNUSED_PRESERVE translates to OpBitFieldInsert %uint %old_vgpr %alu_val %off %width
   - UNUSED_PAD translates to OpBitFieldUExtract %uint %alu_val %c0 %width followed by OpShiftLeftLogical %off
   - UNUSED_SEXT translates to OpBitFieldSExtract %uint %alu_val %c0 %width followed by OpShiftLeftLogical %off
@@ -47,7 +47,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 if HERE not in sys.path:

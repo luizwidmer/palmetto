@@ -2,7 +2,7 @@
 nibbles for u4, signed for i4), modulo 2^32; with `clamp` the result saturates to [0, 2^32-1] (u4) or
 [-2^31, 2^31-1] (i4).
 
-Each case is translated by tools/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
+Each case is translated by tooling/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
 words are written by hand and also recomputed by a plain-Python reference. Standard library only: no GPU, no LLVM,
 no game data.
 """

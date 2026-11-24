@@ -113,7 +113,7 @@ fence.
 
 ## 5. The implementation
 
-`runtime/shims/d3d12_xs_device.cpp` (the fence proxy) keeps a 64-bit cell per fence proxy and answers console fence
+`port/shims/d3d12_xs_device.cpp` (the fence proxy) keeps a 64-bit cell per fence proxy and answers console fence
 slot 12 with its address. The cell is:
 
 * created with the proxy and seeded from the real fence's `GetCompletedValue` (PC slot 8) — the fence is created with
@@ -133,8 +133,8 @@ runtime's own removal path is what reports a removed device. That is the one kno
 the method would hand out, and it is honest in the log (the first slot-12 line prints target, completed value and
 flags).
 
-`runtime/shims/d3d12_xs_device.h` documents the slot, `kConsoleFenceValueAddress = 12`, the watcher hook, and
-`runtime/test/xs_proxy_mock_test.cpp` covers it on the GPU-free mock: slot 12 is answered by the proxy and not
+`port/shims/d3d12_xs_device.h` documents the slot, `kConsoleFenceValueAddress = 12`, the watcher hook, and
+`port/test/xs_proxy_mock_test.cpp` covers it on the GPU-free mock: slot 12 is answered by the proxy and not
 forwarded, the address is fixed for the fence, the cell carries the mock's completed value, a target the value has not
 reached asks the registered watcher once (and not for a reached target), and a `Signal` through a console queue slot 16
 moves the real value into the same cell.
@@ -142,7 +142,7 @@ moves the real value into the same cell.
 ## 6. The measurement
 
 Same environment as the previous fronts (`PALMETTO_SHADERS=<shader corpus work folder>`, `PALMETTO_D3D12=vulkan`,
-`PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`), same harness (`tools/boot_report.py`), one boot at a time:
+`PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`), same harness (`tooling/boot_report.py`), one boot at a time:
 
 | run | max traced call | outcome |
 |---|---:|---|

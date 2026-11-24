@@ -97,7 +97,7 @@ class Arc9dumpExitCodeTest(unittest.TestCase):
             self.assertEqual(wav.read_bytes()[-64:], b"\x11" * 64)
 
     def test_failed_texture_write_exits_nonzero_and_withholds_manifest(self):
-        # A per-item write failure must fail the run like ttpf and xma do: make_game resumes the
+        # A per-item write failure must fail the run like ttpf and xma do: build_port resumes the
         # textures/models stages on the mere existence of manifest.json, so a manifest published after a
         # failed DDS write would mark the stage finished with the file missing forever.
         with tempfile.TemporaryDirectory() as tmp:

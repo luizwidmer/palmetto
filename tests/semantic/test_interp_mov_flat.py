@@ -18,7 +18,7 @@ Background & Specification Rules:
       typically carry integer IDs (instance ID, material ID, primitive ID, bitmasks).
       Smooth interpolation of integer bit patterns corrupts them, whereas flat
       copying delivers exact bitwise identity.
-  * SPIR-V Translation (tools/rdna2spirv.py):
+  * SPIR-V Translation (tooling/rdna2spirv.py):
     - Declares input attributes as vec4 inputs:
       `%in_attrN = OpVariable %_ptr_Input_v4 Input`
     - Input attributes read only through `v_interp_mov_f32` are marked `Flat`:
@@ -45,7 +45,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

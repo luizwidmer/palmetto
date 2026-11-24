@@ -1,4 +1,4 @@
-"""Tests for tools/awc_markers.py, built from synthetic AWC data only (no game files).
+"""Tests for tooling/awc_markers.py, built from synthetic AWC data only (no game files).
 
     python -I tests/test_awc_markers.py
 """
@@ -15,7 +15,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "awc_markers.py")
+TOOL = os.path.join(ROOT, "tooling", "awc_markers.py")
 sys.path.insert(0, os.path.dirname(TOOL))
 import awc_markers  # noqa: E402
 

@@ -14,10 +14,10 @@ itself, supplied separately.
 Build the runtime, then point it at the package:
 
 ```powershell
-powershell -File scripts/build_runtime.ps1
+powershell -File tooling/scripts/build_runtime.ps1
 
 $game = "D:\path\to\your\package"
-runtime\build\palmetto.exe --dry-run "$game\XboxBvhBuilder.dll" --game-dir $game
+port\build\palmetto.exe --dry-run "$game\XboxBvhBuilder.dll" --game-dir $game
 ```
 
 Each run prints one line per mapped module:
@@ -60,11 +60,11 @@ All 16 DLLs in the package map at their preferred base `0x180000000` with no rel
 
 The 12 Microsoft-signed DLLs in this table (the 10 VC++ runtime DLLs, `XCurl.dll` and `libHttpClient.GDK.dll`) report an Authenticode hash mismatch as shipped, because the Xbox packaging fills the load-config `CodeIntegrity` field of all 16 DLLs after signing; this is expected in every copy of the package and is not a sign of tampering ([jasontheminions's finding](https://github.com/the original project/issues/8504#issuecomment-7110985774)).
 
-Since the library-loader shims (`runtime/shims/library_loader.cpp`), a module's `LoadLibrary*`, `GetModuleHandle*`, `GetProcAddress` and `FreeLibrary` imports count as shim, through `kernel32`, `kernelbase` or the `api-ms-win-core-libraryloader-*` set it names. That is why every image above has a few more shim and fewer host imports than before; the Xbox-specific imports below are unchanged. `DisableThreadLibraryCalls` is served the same way: a mapped module gets `TRUE` (the real function refuses a module the Windows loader did not map, which failed the `DllMain` of the four `msvcp140_*` satellite DLLs), and any other handle goes to the real function.
+Since the library-loader shims (`port/shims/library_loader.cpp`), a module's `LoadLibrary*`, `GetModuleHandle*`, `GetProcAddress` and `FreeLibrary` imports count as shim, through `kernel32`, `kernelbase` or the `api-ms-win-core-libraryloader-*` set it names. That is why every image above has a few more shim and fewer host imports than before; the Xbox-specific imports below are unchanged. `DisableThreadLibraryCalls` is served the same way: a mapped module gets `TRUE` (the real function refuses a module the Windows loader did not map, which failed the `DllMain` of the four `msvcp140_*` satellite DLLs), and any other handle goes to the real function.
 
-The process shim (`runtime/shims/process.cpp`) serves `ExitProcess` and `GetCommandLineA/W` the same way: through `kernel32`, `kernelbase`, and `api-ms-win-core-processthreads-l1-1-0` and `api-ms-win-core-processenvironment-l1-1-0`, the sets the API-set umbrella libraries (`OneCore_apiset.lib`, `mincore.lib`) bind them to. `vcomp140.dll` imports `ExitProcess` from the first of these. The UCRT's `_get_narrow_winmain_command_line` and `_get_wide_winmain_command_line` are served too, so a `WinMain` executable gets the game's command line as `lpCmdLine`. `abort()` raises `SIGABRT` when the guest installed a handler (the guest's `signal()` import binds to the host CRT, so its table is the one raised here); with the default or ignore disposition, or a handler that returns, the run still ends with code 3. `run_tiny_game_abort_exit_codes` compares that with a native run of the stand-in image. The table above is `palmetto --dry-run` on each DLL at the commit that added this paragraph.
+The process shim (`port/shims/process.cpp`) serves `ExitProcess` and `GetCommandLineA/W` the same way: through `kernel32`, `kernelbase`, and `api-ms-win-core-processthreads-l1-1-0` and `api-ms-win-core-processenvironment-l1-1-0`, the sets the API-set umbrella libraries (`OneCore_apiset.lib`, `mincore.lib`) bind them to. `vcomp140.dll` imports `ExitProcess` from the first of these. The UCRT's `_get_narrow_winmain_command_line` and `_get_wide_winmain_command_line` are served too, so a `WinMain` executable gets the game's command line as `lpCmdLine`. `abort()` raises `SIGABRT` when the guest installed a handler (the guest's `signal()` import binds to the host CRT, so its table is the one raised here); with the default or ignore disposition, or a handler that returns, the run still ends with code 3. `run_tiny_game_abort_exit_codes` compares that with a native run of the stand-in image. The table above is `palmetto --dry-run` on each DLL at the commit that added this paragraph.
 
-The shims added since account for the rest of the difference from the first version of the table. The UCRT's `_configure_narrow_argv`, `_configure_wide_argv`, `__p___argc`, `__p___wargv` and `abort` are served by `runtime/shims/process.cpp`, which is why almost every DLL gained one or two. The file-system calls listed in *Console paths and the write overlay* below (`CreateFile2`, `CopyFile2`, `CreateDirectoryW`, `FindFirstFileExW`, `SetFileAttributesW` and the rest) account for `msvcp140.dll`, `vcomp140.dll`, `Bink2Console.dll`'s `CreateFile2` and part of the two HTTP clients. `winhttp.dll` is a module the shims own (*WinHTTP offline* below), so every `WinHttp*` import binds to it: 15 in `libHttpClient.GDK.dll` (all 16 but `WinHttpCrackUrl`) and 15 in `XCurl.dll` (all but `WinHttpQueryOption`). That is why the two HTTP clients moved the most: 11 to 26 and 9 to 24 shim imports.
+The shims added since account for the rest of the difference from the first version of the table. The UCRT's `_configure_narrow_argv`, `_configure_wide_argv`, `__p___argc`, `__p___wargv` and `abort` are served by `port/shims/process.cpp`, which is why almost every DLL gained one or two. The file-system calls listed in *Console paths and the write overlay* below (`CreateFile2`, `CopyFile2`, `CreateDirectoryW`, `FindFirstFileExW`, `SetFileAttributesW` and the rest) account for `msvcp140.dll`, `vcomp140.dll`, `Bink2Console.dll`'s `CreateFile2` and part of the two HTTP clients. `winhttp.dll` is a module the shims own (*WinHTTP offline* below), so every `WinHttp*` import binds to it: 15 in `libHttpClient.GDK.dll` (all 16 but `WinHttpCrackUrl`) and 15 in `XCurl.dll` (all but `WinHttpQueryOption`). That is why the two HTTP clients moved the most: 11 to 26 and 9 to 24 shim imports.
 
 The UCRT argv configuration imports honor the executable's startup mode. Each run starts with `argc == 0` and
 null narrow/wide argument tables, while `GetCommandLineA/W` is already available to TLS and process-attach
@@ -106,7 +106,7 @@ returns `TRUE` for every direction and size and allocates nothing; with `--trace
 and size as an `xmem_transfer` event, because the enum values are not public. `xmem_test` covers it.
 
 Seven more `xmem.dll` imports follow argument shapes measured locally at a title's call sites (the comments in
-`runtime/shims/xmem.cpp` give each shape):
+`port/shims/xmem.cpp` give each shape):
 
 - `XMemAllocDefault` and `XMemFreeDefault` take `XMemAlloc`'s and `XMemFree`'s arguments and share their heap.
 - `XMemAllocatePhysicalPages(attributes, UINT64* count, UINT64* pages)` returns a `BOOL` and the count it allocated.
@@ -136,7 +136,7 @@ exits 0 with nothing on stderr:
 ```powershell
 $game = "D:\path\to\your\package"
 $scratch = Join-Path $env:TEMP 'palmetto-overlay'
-runtime\build\palmetto.exe --dry-run "D:\path\to\game.exe" --game-dir $game --overlay $scratch
+port\build\palmetto.exe --dry-run "D:\path\to\game.exe" --game-dir $game --overlay $scratch
 ```
 
 `--overlay` points the write overlay away from `<game-dir>\overlay`, so a dry run writes nothing into the package.
@@ -166,7 +166,7 @@ policy "other" (none is counted as returning an `HRESULT`), and they come from s
 The game executable imports two functions from `xg_xs.dll`, the console's texture layout library:
 `XGSuggestSwizzleMode` (2 call sites, in the helper that fills a texture description) and `XGCreateTextureComputer`
 (4 call sites, which use slots 1, 2, 8 and 10 of the returned object's vtable). The runtime has no model of the console
-resource layout, so `runtime/shims/xg_xs.cpp` computes none: both return `E_NOTIMPL` and write no layout. Two of the
+resource layout, so `port/shims/xg_xs.cpp` computes none: both return `E_NOTIMPL` and write no layout. Two of the
 four `XGCreateTextureComputer` callers ignore the HRESULT and call through the object at once, so the shim still stores
 a static object in the out pointer; its slot 1 (read as `Release`) does nothing, and every other slot up to 31 logs its
 index and caller once and returns `E_NOTIMPL` without writing its arguments. The call shapes and the reasoning are at
@@ -198,7 +198,7 @@ A title's file calls name the console's drives, so `GAME:\data\x.sps` is a file 
 a public runtime project (GPL-2.0-only; facts only, no code) documents for target console GDK titles that
 `GAME:` maps to the game folder and that writes go to a writable overlay instead of the package, which stays read-only.
 `palmetto` therefore shims `CreateFileA/W`, `FindFirstFileA/W`/`FindNextFileA/W`/`FindClose`, `GetFileAttributesA/W`,
-`GetFileAttributesExA/W` and `DeleteFileA/W` (`runtime/shims/file_system.cpp`), under `kernel32.dll`, `kernelbase.dll`
+`GetFileAttributesExA/W` and `DeleteFileA/W` (`port/shims/file_system.cpp`), under `kernel32.dll`, `kernelbase.dll`
 and the `api-ms-win-core-file-*` sets a GDK title links against.
 
 - A `GAME:` path (any case, `\` or `/`) maps under `--game-dir`. A path without the prefix is a host path and is
@@ -261,14 +261,14 @@ and the `api-ms-win-core-file-*` sets a GDK title links against.
   entry; a package file gets an overlay copy under the new spelling, and a package folder is refused like any other
   move of one.
 
-`runtime/test/file_system_test.cpp` (ctest `file_system`) covers this over folders it makes in `%TEMP%`.
+`port/test/file_system_test.cpp` (ctest `file_system`) covers this over folders it makes in `%TEMP%`.
 
 ## When an unimplemented import is called
 
 The table above has no unimplemented imports, but the game executable will. A call to one used to return 0
 silently, which for an `HRESULT` function is `S_OK` with its out parameters never written; the caller then carries on
 with stale pointers and fails somewhere unrelated. `PALMETTO_UNIMPLEMENTED` chooses what the thunk does instead
-(details in `runtime/README.md`):
+(details in `port/README.md`):
 
 - `log` (default): print the name once, return 0. Unchanged.
 - `fail`: return `E_NOTIMPL` for imports known to return `HRESULT`, 0 otherwise.
@@ -299,12 +299,12 @@ thunks `LoadLibraryW` the runtime and `GetProcAddress` those five names at run t
 mostly correspond one to one to the `xgameruntime.lib` functions. The executable is very likely linked the same way.
 
 Bound to the host, those calls would load the PC's Gaming Services runtime, or fail, and never reach the offline
-shims. `runtime/shims/library_loader.cpp` therefore answers `LoadLibrary*` and `GetModuleHandle*` for a module the
+shims. `port/shims/library_loader.cpp` therefore answers `LoadLibrary*` and `GetModuleHandle*` for a module the
 shim registry owns (`rt::shims::owns_dll`: `xgameruntime.dll`, `d3d12_xs.dll`, `xmem.dll`, `xg_xs.dll`, `gameinput.dll`)
 with a pseudo-handle, and `GetProcAddress` on it resolves through the registry. A name the registry doesn't serve is `NULL`
 with `ERROR_PROC_NOT_FOUND` and is logged once. Every other module goes to the host unchanged.
 
-`runtime/shims/xgameruntime.cpp` serves the five entry points. The initializers succeed offline and log the GDK
+`port/shims/xgameruntime.cpp` serves the five entry points. The initializers succeed offline and log the GDK
 version and mode once. `QueryApiImpl` serves `XThreadingImpl`, `XErrorImpl`, `XNetworkingImpl`, `XSystemImpl`,
 `XPersistentLocalStorageImpl`, `XPackageImpl`, `XGameImpl`, `XGameRuntimeFeatureImpl` and `XSystemAnalyticsImpl`
 (below), and `XUserImpl`, `XGameSaveImpl`, `XStoreImpl`, `XGameEventImpl`, `XGameUiImpl`, `XGameStreamingImpl`,
@@ -353,7 +353,7 @@ the docs put it. Take a layout from the IDL only where it matches the docs' slot
 skips one of the docs' unknown slots as missing it, not as proof the slot doesn't exist. The measured slots in the
 table above all follow the docs.
 
-`XThreadingImpl` forwards each slot to `third_party/xtaskqueue`, the same implementation the named exports use;
+`XThreadingImpl` forwards each slot to `vendor/xtaskqueue`, the same implementation the named exports use;
 `XThreadSetTimeSensitive`/`XThreadIsTimeSensitive` keep a per-thread flag and the two private slots log once and
 answer 0. `XErrorImpl` logs each report and hands it to the callback `XErrorSetCallback` set.
 `XNetworkingImpl` answers as a console without a network would: the connectivity hint is initialized with no
@@ -363,9 +363,9 @@ certificate check fails the same way, the two change registrations send the one 
 documents (on the queue's completion port, the process queue when none is given: the hint above, or port 0) and
 none after, and the three `IXNetworkingImpl2` additions are `E_NOTIMPL`.
 
-`XUserImpl` (`runtime/shims/xgameruntime_user.cpp`) is served from xgameruntime-docs' layout alone. No package DLL
+`XUserImpl` (`port/shims/xgameruntime_user.cpp`) is served from xgameruntime-docs' layout alone. No package DLL
 calls an `XUser*` slot (`libHttpClient.GDK.dll` only holds the GUID table). The executable links thunks for
-`IXUserImpl` slots 3-5, 7-14, 19-25 and 33-34 and `IXUserGamertagImpl` slot 3 (`tools/gdk_runtime_calls.py`, from the
+`IXUserImpl` slots 3-5, 7-14, 19-25 and 33-34 and `IXUserGamertagImpl` slot 3 (`tooling/gdk_runtime_calls.py`, from the
 file alone): none of the slots logged on first use below, and of the offline failures only the token-and-signature
 trio (23-25). What the slots must answer is still **not measured**; that is the executable's first boot.
 - **Interfaces:** the class id doubles as `IXUserImpl`'s; `IXUserImpl2`-`6` answer with the same 50-slot vtable;
@@ -389,11 +389,11 @@ trio (23-25). What the slots must answer is still **not measured**; that is the 
 
 `xgameruntime_user_test` calls every served slot with the documented arguments.
 
-`XGameSaveImpl` (`runtime/shims/xgameruntime_gamesave.cpp`) is served from the same layout, also **not measured**:
+`XGameSaveImpl` (`port/shims/xgameruntime_gamesave.cpp`) is served from the same layout, also **not measured**:
 - **Interfaces:** the class id doubles as `IXGameSaveImpl`'s; `IXGameSaveImpl2` (adds the three `XGameSaveFiles`
   slots, 30-32) and `IXGameSaveImpl3` (no methods of its own) answer with the same 33-slot vtable.
 - **Storage:** `PALMETTO_SAVE_DIR\local-user\<container>\<blob>`, defaulting to `%LOCALAPPDATA%\Palmetto\saves`,
-  names %-encoded: the layout `tools/saves.py import` writes ([saves.md](saves.md#importing-into-the-runtime)).
+  names %-encoded: the layout `tooling/saves.py import` writes ([saves.md](saves.md#importing-into-the-runtime)).
   `XGameSaveFilesGetFolderWithUi*` gives `<root>\files\<configId>`.
 - **Updates:** writes and deletes are buffered; `XGameSaveSubmitUpdate` writes each new blob beside its final name,
   then renames it over, so a failed write leaves the container as it was. One write or delete per blob per update;
@@ -409,7 +409,7 @@ trio (23-25). What the slots must answer is still **not measured**; that is the 
 
 `xgameruntime_gamesave_test` drives every slot against a temporary `PALMETTO_SAVE_DIR`.
 
-`XStoreImpl` (`runtime/shims/xgameruntime_store.cpp`), from the same layout; the game-license struct is measured
+`XStoreImpl` (`port/shims/xgameruntime_store.cpp`), from the same layout; the game-license struct is measured
 on the executable, the rest is not:
 - **Interfaces:** the class id doubles as `IXStoreImpl`'s; `IXStoreImpl2`-`6` answer with the same 84-slot vtable.
 - **Offline answers:** the game license is active and not a trial; a package's license is acquirable and valid;
@@ -430,7 +430,7 @@ on the executable, the rest is not:
 `xgameruntime_store_test` drives the license check, add-ons, updates, package licenses and product queries.
 
 `XGameEventImpl`, `XGameUiImpl`, `XGameStreamingImpl`, `XDisplayImpl`, `XUserDeviceImpl`, `XAccessibilityImpl` and
-`XLauncherImpl` (`runtime/shims/xgameruntime_offline.cpp`), from the same layout, also **not measured**:
+`XLauncherImpl` (`port/shims/xgameruntime_offline.cpp`), from the same layout, also **not measured**:
 - **`XGameEventWrite`** succeeds; the events are dropped. The first one's name is logged, and
   `PALMETTO_LOG_GAME_EVENTS=1` logs each with its dimensions and measurements.
 - **Dialogs:** a message dialog's title, text and buttons go to the log (`[rt] game dialog:`), and it completes at
@@ -444,7 +444,7 @@ on the executable, the rest is not:
   0).
 - **Not reached by the executable:** the parameter lists of `XGameUiShowMessageDialogAsync` and
   `XGameStreamingRegisterConnectionStateChanged` are the GDK reference's, and the executable has no caller to check
-  them against. `tools/gdk_runtime_calls.py` finds no thunk for the message dialog and none for any
+  them against. `tooling/gdk_runtime_calls.py` finds no thunk for the message dialog and none for any
   `XGameStreamingImpl` or `XUserDeviceImpl` slot. Of `XGameUiImpl` it links slots 7-8 and 17-19 only: the profile
   card and text entry, which fail before starting.
 
@@ -458,7 +458,7 @@ on the executable, the rest is not:
 - **`XLauncherImpl`** (`IXLauncherImpl`, slots 3-5): `XLaunchUri`, `XDisplayAcquireTimeoutDeferral` (null handle)
   and `XDisplayCloseTimeoutDeferralHandle` fail with `E_FAIL`; nothing is launched.
 - **ASSUMPTION:** the parameter lists of the speech calls and `XHighContrastGetMode` (Off is 0), from the GDK
-  reference; only the argument counts were measured, from `tools/gdk_runtime_calls.py` on the executable.
+  reference; only the argument counts were measured, from `tooling/gdk_runtime_calls.py` on the executable.
 - **HDR:** `XDisplayTryEnableHdrMode` answers Disabled, because the host output is SDR. With `PALMETTO_HDR=1` it
   answers Enabled with the documented default tone-map luminances (0.01, 1000, 1000 nits).
 - **Devices:** every device belongs to the offline user (`XUserFindForDevice` hands out an `XUserHandle` the title
@@ -475,12 +475,12 @@ on the executable, the rest is not:
 `xgameruntime_offline_test` drives the five classes; `xgameruntime_offline_hdr` runs it again with
 `PALMETTO_HDR=1`.
 
-Two more classes are served from `tools/gdk_runtime_calls.py`'s measurement of `libHttpClient.GDK.dll` (it finds the
+Two more classes are served from `tooling/gdk_runtime_calls.py`'s measurement of `libHttpClient.GDK.dll` (it finds the
 thunks in the code without running it and prints, per class, the interface id asked for, the slots called and the
 argument count each passes after `this`). Their thunks are in the DLL but nothing in it calls them; a title linked with
 the same `xgameruntime.lib` gets the same thunks. Every slot is the function at that position of xgameruntime-docs'
 layout with the documented argument count, and each behaves as Microsoft's reference page for that function says
-(`runtime/shims/xgameruntime.cpp` cites both):
+(`port/shims/xgameruntime.cpp` cites both):
 
 | Class | Interface asked for | Slots (args after `this`) | Offline behaviour |
 |---|---|---|---|
@@ -505,17 +505,17 @@ So `XCurl.dll` needs threading, error reporting and networking from the runtime,
 
 ### The retail executable's runtime classes (RT-5)
 
-`python -I tools/gdk_runtime_calls.py game.exe` (from the file alone, nothing executed; `main`
+`python -I tooling/gdk_runtime_calls.py game.exe` (from the file alone, nothing executed; `main`
 `1cc6e3c1`) finds one `QueryApiImpl` helper at RVA `0x55de048` and **161** `xgameruntime.lib` thunks that reach **17**
 runtime classes. 158 of the thunks are referenced from the image; three are present and unreferenced (one each in
 `XPackageImpl`, `XThreadingImpl` and `XAccessibilityImpl`).
 
 The executable does not import `xgameruntime.dll`. Its import table has no such module, so the thunks are linked into
 the image like `libHttpClient.GDK.dll`'s. The name occurs in the image as a UTF-16 string, which
-`tools/pe_inspect.py` lists among the run-time load candidates (a string is where to look, not proof of a
+`tooling/pe_inspect.py` lists among the run-time load candidates (a string is where to look, not proof of a
 `LoadLibrary`). The registry
 therefore needs no module name beyond the `xgameruntime.dll` it already has, which settles the assumption at the top of
-`runtime/shims/xgameruntime.cpp`.
+`port/shims/xgameruntime.cpp`.
 
 | Class | Thunks | Referenced | Served |
 |---|---:|---:|---|
@@ -546,22 +546,22 @@ executable calls, and the argument counts the tool estimates from the registers,
 
 ### Measuring which runtime classes a binary calls
 
-`tools/gdk_runtime_calls.py` lists, from the file alone, the runtime classes, interface ids and vtable slots an image
+`tooling/gdk_runtime_calls.py` lists, from the file alone, the runtime classes, interface ids and vtable slots an image
 calls through `xgameruntime.lib`'s thunks, so the executable's list is known before it first runs.
-`scripts/first_look.ps1` runs it on the executable.
+`tooling/scripts/first_look.ps1` runs it on the executable.
 
 ```powershell
-python -I tools/gdk_runtime_calls.py "$game\XCurl.dll" "$game\libHttpClient.GDK.dll"   # text; --json for JSON
-python -I tools/gdk_runtime_calls.py <exe> --out <dir>    # writes <exe>.gdk_calls.txt and .json, prints a summary
+python -I tooling/gdk_runtime_calls.py "$game\XCurl.dll" "$game\libHttpClient.GDK.dll"   # text; --json for JSON
+python -I tooling/gdk_runtime_calls.py <exe> --out <dir>    # writes <exe>.gdk_calls.txt and .json, prints a summary
 ```
 
 It finds the helper the thunks share (the call a known id's `lea` feeds, after which a vtable slot past IUnknown is
 called), takes every call to it as a thunk, reads the class and interface ids loaded into `rcx` and `rdx` (an id the
 table doesn't know is listed as unknown) and records each slot called up to `Release`, within the thunk's
-`.pdata` function or a byte window without one. The slots are named from `tools/gdk_runtime_classes.json`: the ids,
+`.pdata` function or a byte window without one. The slots are named from `tooling/gdk_runtime_classes.json`: the ids,
 inheritance and method order of xodus-gaming/xgameruntime-docs (GPL-3.0; facts only), made with
-`python -I tools/gen_gdk_runtime_classes.py <docs clone>`. An interface's slot table is its chain's methods, base
-first, from slot 3. For each class the report says whether `runtime/shims/xgameruntime.cpp` has its class id (a
+`python -I tooling/gen_gdk_runtime_classes.py <docs clone>`. An interface's slot table is its chain's methods, base
+first, from slot 3. For each class the report says whether `port/shims/xgameruntime.cpp` has its class id (a
 `constexpr GUID k...Class`), and for each thunk whether anything in the image reaches it: a call, tail jump, address
 load or pointer in data, directly or through an incremental-link `jmp` stub, a call from another thunk counting only
 when that thunk is reached. The argument count it prints is an estimate from the registers and stack slots written
@@ -608,7 +608,7 @@ end to end with a synthetic bundled DLL importing `xmem.dll!XMemAlloc` and `XMem
 `winhttp.dll` (`WinHttpOpen`, `Connect`, `OpenRequest`, `SendRequest`, `ReceiveResponse`, `QueryHeaders`,
 `QueryDataAvailable`, `ReadData`, `WriteData`, `AddRequestHeaders`, `SetOption`, `QueryOption`, `SetTimeouts`,
 `SetStatusCallback`, `CloseHandle`, `CrackUrl`) and nothing from Winsock. Nothing here goes online, so `palmetto` owns
-`winhttp.dll` (`runtime/shims/winhttp_offline.cpp`) and answers all 16 in-process:
+`winhttp.dll` (`port/shims/winhttp_offline.cpp`) and answers all 16 in-process:
 
 - Sessions, connections and requests are local handles: no name is resolved and no socket is opened.
 - `WinHttpSendRequest` fails with `ERROR_WINHTTP_CANNOT_CONNECT`. On a `WINHTTP_FLAG_ASYNC` session it returns `TRUE`
@@ -625,7 +625,7 @@ end to end with a synthetic bundled DLL importing `xmem.dll!XMemAlloc` and `XMem
   function outside these 16 resolves to `NULL` (logged), never to the host.
 
 Each refused server is logged once (`[rt] winhttp: offline, refused <host>:<port>`), which records what a title
-tried to reach. `runtime/test/winhttp_offline_test.cpp` (ctest `winhttp_offline`) covers the synchronous and
+tried to reach. `port/test/winhttp_offline_test.cpp` (ctest `winhttp_offline`) covers the synchronous and
 asynchronous paths with `.invalid` names; it opens no connection.
 
 ## What this proves and what it does not

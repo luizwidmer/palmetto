@@ -1,10 +1,10 @@
-"""Unit tests for tools/gdk_runtime_calls.py and tools/gen_gdk_runtime_classes.py.
+"""Unit tests for tooling/gdk_runtime_calls.py and tooling/gen_gdk_runtime_classes.py.
 
 The image is built here: a .text section of hand-assembled xgameruntime.lib-style thunks (the CFG form that loads the
 slot into rax and calls a dispatch routine, also with the slot copied into rax from another register, `call
 [rax+disp8]`, and `call [r10+disp32]` with a stack argument), a .rdata section with the class and interface ids, and
 .pdata function bounds. The ids and method names come from the
-committed tools/gdk_runtime_classes.json; the docs tree for the generator is a made-up one. No game files.
+committed tooling/gdk_runtime_classes.json; the docs tree for the generator is a made-up one. No game files.
 
     python -I tests/test_gdk_runtime_calls.py
 """
@@ -20,7 +20,7 @@ import unittest
 import uuid
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 

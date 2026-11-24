@@ -1,4 +1,4 @@
-"""tools/ps_helper_probe.py: the analysis on a CPU model of what gfx1036 does (each check, and that it fails when the
+"""tooling/ps_helper_probe.py: the analysis on a CPU model of what gfx1036 does (each check, and that it fails when the
 model breaks that rule), the programs' shape, and (with PALMETTO_PS_ORACLE_BUILD set to a runtime build
 and an AMD GPU selected) the measurement itself. Standard library only."""
 import os
@@ -7,7 +7,7 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import ps_helper_probe as H  # noqa: E402
 
 W, Hh = H.SIZE

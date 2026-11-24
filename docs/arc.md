@@ -46,7 +46,7 @@ Three findings from the same run:
   own.
 - Stream alignment is not universal. Inflated streams sit on 4 KiB boundaries in `data.arc` (295 of 301 checked)
   but not in `levels.arc` (8 of 26), `packs.arc` (0 of 301) or `textures.arc` (0 of 3), so a walker that assumes
-  4 KiB steps misses most streams in three of those four. `tools/arc9_carve.py` does not assume an alignment: it
+  4 KiB steps misses most streams in three of those four. `tooling/arc9_carve.py` does not assume an alignment: it
   continues after the bytes each stream consumed.
 - `anim.arc` is the richest archive for names (64,785 named streams, 367,190 path mentions, almost all `.clip`).
   `movies.arc` produced no zlib streams, and `script.arc` and `story000_script.arc` no names.
@@ -78,7 +78,7 @@ repository has **no licence** (all rights reserved), and every count above was r
 ## Carving
 
 ```powershell
-python -I tools/arc9_carve.py <archive.arc> <out_dir> [--start N] [--limit BYTES] [--index-only]
+python -I tooling/arc9_carve.py <archive.arc> <out_dir> [--start N] [--limit BYTES] [--index-only]
 ```
 
 The walker starts at `--start` or the header's data offset, finds a zlib header (`78 01/5e/9c/da`) or a Bink 2
@@ -121,7 +121,7 @@ test `tests/test_arc9_carve.py` builds a two-stream archive to keep that fixed.
 A gap between streams counts as zero padding when every byte in it is zero, otherwise as unread.
 `arc9_carve.py` checks a gap in 1 MiB pieces. The other scanners that keep these counts (`arc9_names`,
 `bvh_index`, `navmesh_index`, `navmesh_decode`, `rbf0_index`, `anim_index`, `restofworld_index`, `story_index`)
-use `tools/zero_span.py`, which compares the gap with zeros 4 MiB at a time and stops at the first window with a
+use `tooling/zero_span.py`, which compares the gap with zeros 4 MiB at a time and stops at the first window with a
 non-zero byte. They used to slice the gap out of the mapped archive, which copies all of it at once. The largest
 gap in `story000.arc` is 8.9 GiB, so that needed 8.9 GiB of memory. `tests/test_zero_span.py` runs all nine
 scanners on a 48 MiB gap and checks that each one's Python heap peak stays under 24 MiB.
@@ -131,13 +131,13 @@ keys, or write anything outside the output directory.
 
 ## Recovery tools
 
-`tools/arc9dump` is a bulk exporter built on the Core library from
+`tooling/arc9dump` is a bulk exporter built on the Core library from
 [breadbbbb/arc9-explorer](https://github.com/breadbbbb/arc9-explorer) (a `third_party` submodule; the
 related-projects page records the licence boundary). It carves validated resources; it does
 not decrypt the TOC either.
 
 ```powershell
-dotnet build tools/arc9dump/arc9dump.csproj -c Release
+dotnet build tooling/arc9dump/arc9dump.csproj -c Release
 arc9dump ttpf    <pool.ttpf>  <out>
 arc9dump models <archive.arc> <out>
 arc9dump textures <archive.arc> <out>
@@ -150,10 +150,10 @@ writes RIFF XMA2 WAVs that ffmpeg decodes. `models`/`textures` write OBJ/DDS plu
 `ArchiveReader` recovery names are offset-based, and its structured path validates XML/PSIN, models and
 textures; the original ARC paths still require the missing executable/key.
 
-`tools/manifest.py` is independent of ARC: it hashes a directory tree and verifies it later, with `--jobs` on
+`tooling/manifest.py` is independent of ARC: it hashes a directory tree and verifies it later, with `--jobs` on
 both paths. It is used to check exported assets without keeping a second copy.
 
-`tools/arc9_names.py` is the lightweight lookup pass: it walks the same data area, inflates a bounded prefix
+`tooling/arc9_names.py` is the lightweight lookup pass: it walks the same data area, inflates a bounded prefix
 of each zlib stream and indexes the measured `name.#dr`/`#ft`/`#dd` spellings with their archive offsets. It
 does not decode a resource or need the TOC; see [resource_names.md](resource_names.md).
 
@@ -173,13 +173,13 @@ and `core_bvh4.arc`, and its role is not established.
 No archive contradicts the rule, but 8 don't test it. In the 14, the trailer starts with no zlib or Bink 2 header and is
 high-entropy like the TOC after the header: 7.95 to 8.00 bits per byte in the nine of 3 KiB or more, and 6.6 to 7.9
 in the five smaller ones (random 144-byte blocks average about 6.7); what they hold is not
-decoded here. `tools/bink_index.py` counts it as `arc_trailer` instead of unread bytes, only for an `ARC9` header
+decoded here. `tooling/bink_index.py` counts it as `arc_trailer` instead of unread bytes, only for an `ARC9` header
 whose `+12` is a multiple of 16 and fits in the tail after the last stream; in `movies.arc` it is the
 18,928 bytes after 3,884 zeros that [movies.md](movies.md) listed as unread.
 
 ### Viewing a header in ImHex
 
-[tools/imhex/arc9.hexpat](../tools/imhex/arc9.hexpat) is a pattern for the [ImHex](https://imhex.werwolv.net/) hex
+[tooling/imhex/arc9.hexpat](../tooling/imhex/arc9.hexpat) is a pattern for the [ImHex](https://imhex.werwolv.net/) hex
 editor. It names the magic, the data offset at `+4` and the trailer size at `+12`, shows the u32 at `+8` unnamed,
 and shows the range from `+0x10` to the data offset (the rest of the header and the TOC) as one opaque byte array.
 It decodes nothing in that range. `python -I tests/test_imhex_patterns.py` runs it on a synthetic header when ImHex is installed.
@@ -199,7 +199,7 @@ It decodes nothing in that range. `python -I tests/test_imhex_patterns.py` runs 
 
 - [docs/design.md](design.md) - the asset-stage table, coverage numbers and the recovery approach.
 - [docs/page_directory.md](page_directory.md) - the `0DRP` page directory layout, `q38` resource boundaries and
-  `tools/page_index.py`.
+  `tooling/page_index.py`.
 - [docs/story.md](story.md) - measured `story000`/`shared_minigame000` composition, nested ARC9 sub-archives and the `PSIN`/`RSC8` headers.
 - [docs/restofworld.md](restofworld.md) - measured composition of the rest-of-world and script archives.
 - `docs/audio.md` - AWC layout and the audio exporters, once the audio guide is merged.

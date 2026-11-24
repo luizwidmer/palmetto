@@ -1,4 +1,4 @@
-"""v_lshl_add_u32 (RDNA2 VOP3) through tools/rdna2spirv.py; v_lshl_add_u64 is pinned as Unsupported.
+"""v_lshl_add_u32 (RDNA2 VOP3) through tooling/rdna2spirv.py; v_lshl_add_u64 is pinned as Unsupported.
 
 The previous version of this file ran a private Python model of both instructions and never called the translator
 (it only fed the interpreter hand-written SPIR-V), so it passed whatever the translator did.  Every case here is a

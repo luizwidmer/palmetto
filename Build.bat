@@ -29,7 +29,7 @@ if not defined PY (
   pause
   exit /b 1
 )
-%PY% -I "%~dp0make_game.py" %*
+%PY% -I "%~dp0build_port.py" %*
 set "RC=%ERRORLEVEL%"
 echo.
 if "%RC%"=="0" (echo Done.) else (echo The build stopped. Read the message above.)

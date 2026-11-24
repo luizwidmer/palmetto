@@ -5,7 +5,7 @@ The binary16 versions of the f32 ops covered by test_alu_frexp_ldexp.py: v_frexp
 v_ldexp_f16 computes S0 * 2^S1 with S1 a signed 16-bit integer (RDNA2 ISA). Zero gives a signed zero mantissa and
 exponent 0; infinities and NaNs pass through the mantissa and ldexp, and give exponent 0. op_sel picks the high half of
 a source and the last bit sends the result to the high half of the destination; the other half of the destination is
-kept. Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in
+kept. Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in
 tests/semantic/spirv_mini_interp.py and compares the exported word with a plain-Python reference (math.frexp /
 math.ldexp on the double value of the half; struct's binary16 packing rounds to nearest even).
 
@@ -26,7 +26,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

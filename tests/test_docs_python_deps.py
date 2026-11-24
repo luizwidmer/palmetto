@@ -61,7 +61,7 @@ class DocsPythonDeps(unittest.TestCase):
     def test_agents_lists_the_tools_that_need_numpy_or_pillow(self):
         files = tracked_files()
         needing = {os.path.basename(p) for p in files
-                   if p.endswith(".py") and (p.startswith(("tools/", "scripts/")) or p == "make_game.py")
+                   if p.endswith(".py") and (p.startswith(("tooling/", "tooling/scripts/")) or p == "build_port.py")
                    and imports_third_party(read(p))}
         listed = listed_tools(read("AGENTS.md"))
         self.assertTrue(needing and listed)

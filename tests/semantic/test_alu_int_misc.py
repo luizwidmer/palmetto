@@ -8,7 +8,7 @@
   v_mul_lo_u32    D = (S0 * S1) mod 2^32
 
 Each case is a synthetic hand-written pixel-shader listing (operands loaded into VGPRs with v_mov_b32, one
-instruction, exported to mrt0), translated by tools/rdna2spirv.py and executed by spirv_mini_interp.py. The
+instruction, exported to mrt0), translated by tooling/rdna2spirv.py and executed by spirv_mini_interp.py. The
 expected words are hand-computed constants per the RDNA2 ISA; a plain-Python reference (no translator) is checked
 against the same constants so a typo in either is caught. Standard library only.
 """
@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from support import STUB_DXBC, mrt0_words, rdna2spirv  # noqa: E402  (support puts tools/ on sys.path)
+from support import STUB_DXBC, mrt0_words, rdna2spirv  # noqa: E402  (support puts tooling/ on sys.path)
 
 MASK32 = 0xFFFFFFFF
 

@@ -37,13 +37,13 @@ Il progetto è in fase iniziale: **il gioco non si avvia ancora**.
     (non serve WSL):
 
     ```powershell
-    powershell -ExecutionPolicy Bypass -File scripts\build_llvm_mc.ps1
+    powershell -ExecutionPolicy Bypass -File tooling/scripts\build_llvm_mc.ps1
     ```
 
     Lo script richiede `git` e gli strumenti C++ di Visual Studio (vedi sotto), imposta `LLVM_MC` per il tuo
     utente e ti chiede di aprire un nuovo terminale per caricare la variabile.
   - In alternativa, installa `llvm-21` in WSL (Ubuntu) e imposta la variabile con il comando completo, nella
-    stessa sessione PowerShell da cui avvierai `make_game.py`:
+    stessa sessione PowerShell da cui avvierai `build_port.py`:
 
     ```powershell
     $env:LLVM_MC = 'wsl -d Ubuntu -e /usr/lib/llvm-21/bin/llvm-mc'
@@ -68,7 +68,7 @@ Il progetto è in fase iniziale: **il gioco non si avvia ancora**.
    git clone --recursive https://github.com/the original project
    ```
 
-   Il «Download ZIP» di GitHub non include `third_party/arc9-explorer`. La build lo scarica da sola se `git` è
+   Il «Download ZIP» di GitHub non include `vendor/arc9-explorer`. La build lo scarica da sola se `git` è
    installato, altrimenti ti dice cosa fare.
 3. Fai doppio clic su **`Build.bat`**.
 
@@ -80,19 +80,19 @@ verifica che tutto il necessario sia installato e che ci sia abbastanza spazio l
 solo ciò che manca. Il risultato va in `Documents\Palmetto`. Se la build viene interrotta, riprende da dove si era
 fermata.
 
-### Dal terminale (`make_game.py`)
+### Dal terminale (`build_port.py`)
 
 Stesso comportamento, con più controllo:
 
 ```powershell
-python -I make_game.py --find                          # elenca le copie trovate su questo PC
-python -I make_game.py --pick                          # scegli la cartella del gioco in una finestra
-python -I make_game.py --check                         # verifica la tua copia, senza compilare
-python -I make_game.py --check --full-check            # confronta anche lo SHA-256 di ogni file (lento)
-python -I make_game.py --game "D:\percorso\del\pacchetto" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
-python -I make_game.py --stages shaders,assets         # solo alcune fasi
-python -I make_game.py --game "D:\percorso\del\pacchetto" --wav   # decodifica anche Opus in PCM WAV (grande)
-python -I make_game.py --wave64-emulate off            # auto (predefinito), on oppure off
+python -I build_port.py --find                          # elenca le copie trovate su questo PC
+python -I build_port.py --pick                          # scegli la cartella del gioco in una finestra
+python -I build_port.py --check                         # verifica la tua copia, senza compilare
+python -I build_port.py --check --full-check            # confronta anche lo SHA-256 di ogni file (lento)
+python -I build_port.py --game "D:\percorso\del\pacchetto" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
+python -I build_port.py --stages shaders,assets         # solo alcune fasi
+python -I build_port.py --game "D:\percorso\del\pacchetto" --wav   # decodifica anche Opus in PCM WAV (grande)
+python -I build_port.py --wave64-emulate off            # auto (predefinito), on oppure off
 ```
 
 Le fasi vengono eseguite in quest'ordine: `check` → `shaders` → `assets` → `runtime` → `pipelines`.
@@ -113,7 +113,7 @@ avvio non devono essere compilati. La traduzione degli shader è il passaggio pi
   `VK_EXT_mesh_shader`). Sono documentate in [`docs/design.md`](../../design.md).
 - **`--work`**: conviene puntarlo a un disco con almeno 400 GB liberi.
 - **`--wav`**: disattivato di default perché il WAV PCM a 16 bit occupa molto più dell'Ogg Opus.
-- **Linux e Wine/Proton**: `make_game.py` funziona anche su Linux. Per la fase `runtime` fuori da Windows passa
+- **Linux e Wine/Proton**: `build_port.py` funziona anche su Linux. Per la fase `runtime` fuori da Windows passa
   `--runtime-build <cartella>` con una build Windows (`palmetto.exe` e `palmetto_tls_host.dll`, per esempio
   l'artefatto `runtime-windows` della CI scompattato): lo script copia i file in `--out` e scrive `palmetto.sh`,
   che avvia `palmetto.exe` con `wine` (o con il Wine indicato dalla variabile `WINE`; per Proton, il suo
@@ -124,7 +124,7 @@ avvio non devono essere compilati. La traduzione degli shader è il passaggio pi
 
 ## Problemi comuni
 
-- **Hai scaricato con «Download ZIP» di GitHub**: lo ZIP non include il sottomodulo `third_party/arc9-explorer`.
+- **Hai scaricato con «Download ZIP» di GitHub**: lo ZIP non include il sottomodulo `vendor/arc9-explorer`.
   Usa `git clone --recursive` oppure esegui `git submodule update --init --recursive` nella cartella del
   repository.
 - **`llvm-mc` rifiuta `gfx1013` / AMDGPU**: probabilmente hai l'installer ufficiale di LLVM per Windows. Segui

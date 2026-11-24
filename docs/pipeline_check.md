@@ -1,6 +1,6 @@
 # GPU pipeline corpus check
 
-`runtime/test/vk_pipeline_check.cpp` creates a `VkShaderModule` for every entry in the translator's
+`port/test/vk_pipeline_check.cpp` creates a `VkShaderModule` for every entry in the translator's
 `index.json` and, for compute shaders, a real compute pipeline with the runtime's descriptor and push
 constant contract. It is a driver-level check: it proves the modules and pipelines are accepted by
 the Vulkan implementation, not that the shader results are correct. Value-level checks are in
@@ -40,27 +40,27 @@ normal driver check. Mesh pipelines on devices without mesh shader support still
 | `--stats FILE` | Write the driver's per-shader statistics as CSV rows `name,stage,statistic,value`. Needs `VK_KHR_pipeline_executable_properties`; use it without `cache.bin`, because a cached pipeline may come without statistics. |
 | `--cache-feedback` | Group successful pipeline creations by `VkPipelineCreationFeedback`: cache hits, no hit reported, and unavailable. |
 | `--isolate` | POSIX only: check in child processes, `--isolate-batch N` modules at a time (default 256), so a crashing module is recorded as `MODULE CRASH` and the pass continues. Not compatible with `--stats`. |
-| `--inflight-file F` | Keep the modules currently in the driver in F as `name<TAB>phase` lines. It is rewritten by the watchdog and when a large module enters or leaves, and emptied at the end; `make_game.py`'s pipelines stage reads it. |
-| `--skip-file F` | Do not compile modules named one per line in F; each is reported as `MODULE CRASH` and counted as a failed pipeline. `make_game.py` writes F after a crash so the next run checks the rest. |
+| `--inflight-file F` | Keep the modules currently in the driver in F as `name<TAB>phase` lines. It is rewritten by the watchdog and when a large module enters or leaves, and emptied at the end; `build_port.py`'s pipelines stage reads it. |
+| `--skip-file F` | Do not compile modules named one per line in F; each is reported as `MODULE CRASH` and counted as a failed pipeline. `build_port.py` writes F after a crash so the next run checks the rest. |
 
 `--isolate-child` is internal to the parent/child protocol and is not meant to be passed directly. A module with a missing partner stub is skipped; without `--isolate`, a driver crash ends the run.
 
 ## Check user-defined interfaces between stages
 
-`tools/shader_link_check.py` compares the binary SPIR-V declarations of the shaders you plan to put in the
+`tooling/shader_link_check.py` compares the binary SPIR-V declarations of the shaders you plan to put in the
 same pipeline. Use it before driver compilation to locate missing varyings, overlapping components, type
 mismatches and per-primitive mesh declarations. It reads local modules and needs only Python.
 
-The declarations come from `tools/spirv_interface.py`, a standard-library reader of one module's interface
+The declarations come from `tooling/spirv_interface.py`, a standard-library reader of one module's interface
 (the normalized `Location`/`Component` model, one array level and literal specialization defaults) with its
 tests in `tests/test_spirv_interface.py`. It reflects declarations only, not instructions, device features or
 resource bindings, so it does not replace `spirv-val`.
 
 ```powershell
-python -I tools/shader_link_check.py check --vs <vertex.spv> --ps <pixel.spv>
-python -I tools/shader_link_check.py check --vs <vertex.spv> --gs <geometry.spv> --ps <pixel.spv>
-python -I tools/shader_link_check.py check --ms <mesh.spv> --ps <pixel.spv>
-python -I tools/shader_link_check.py inspect <shader.spv>
+python -I tooling/shader_link_check.py check --vs <vertex.spv> --ps <pixel.spv>
+python -I tooling/shader_link_check.py check --vs <vertex.spv> --gs <geometry.spv> --ps <pixel.spv>
+python -I tooling/shader_link_check.py check --ms <mesh.spv> --ps <pixel.spv>
+python -I tooling/shader_link_check.py inspect <shader.spv>
 ```
 
 Direct checks use `main` for every stage unless `--entry` sets another shared default.
@@ -83,7 +83,7 @@ UTF-8 with or without the byte order mark, so a copy saved by Notepad or `Out-Fi
 ```
 
 ```powershell
-python -I tools/shader_link_check.py batch pairs.json --shader-dir <spirv> --quiet --report link-report.json
+python -I tooling/shader_link_check.py batch pairs.json --shader-dir <spirv> --quiet --report link-report.json
 ```
 
 The report records per-pipeline results. It uses the Vulkan Location and Component model, including one
@@ -106,12 +106,12 @@ shader without being able to require 64 for a vertex or geometry shader. Audit t
 index or use the same manifest as the interface check.
 
 ```powershell
-python -I tools/wave64_pipeline_audit.py <spirv>/index.json
-python -I tools/wave64_pipeline_audit.py <spirv>/index.json --manifest pairs.json --strict --report wave64-summary.json
+python -I tooling/wave64_pipeline_audit.py <spirv>/index.json
+python -I tooling/wave64_pipeline_audit.py <spirv>/index.json --manifest pairs.json --strict --report wave64-summary.json
 ```
 
 The audit checks the Vulkan device selected on this PC and respects `PALMETTO_VK_DEVICE`. To assess
-another device, save `python -I tools/vk_subgroup_info.py --stage-caps` as UTF-8 JSON on that system and pass the file
+another device, save `python -I tooling/vk_subgroup_info.py --stage-caps` as UTF-8 JSON on that system and pass the file
 with `--device-info`. The report counts each shader once and each pipeline by its worst stage. It
 contains aggregate counts, capability masks and reason categories. Shader and pipeline names are
 excluded from the report.
@@ -141,10 +141,10 @@ From the Palmetto root, build the checker and translate a synthetic fixture. The
 has a versioned name.
 
 ```sh
-cmake -S runtime -B runtime/build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build runtime/build --target vk_pipeline_check
+cmake -S runtime -B port/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build port/build --target vk_pipeline_check
 fixtures=$(mktemp -d)
-python3 -I runtime/test/shaders/build.py "$fixtures" cs_buf_fmt8
+python3 -I port/test/shaders/build.py "$fixtures" cs_buf_fmt8
 ```
 
 ### AMD RADV
@@ -156,7 +156,7 @@ and `radv_icd` to the absolute path of the matching RADV Vulkan ICD manifest.
 AMDGPU_GPU_ID=gfx1201 \
 LD_PRELOAD="$mesa_build/src/amd/drm-shim/libamdgpu_noop_drm_shim.so" \
 VK_DRIVER_FILES="$radv_icd" MESA_SHADER_CACHE_DISABLE=true \
-  runtime/build/vk_pipeline_check "$fixtures/spirv" --jobs 1 --slow 0
+  port/build/vk_pipeline_check "$fixtures/spirv" --jobs 1 --slow 0
 ```
 
 The checker should select a device whose name includes `RADV GFX1201` and report one compute pipeline
@@ -168,7 +168,7 @@ this runs the same compile check with the distro driver.
 
 ```sh
 RADV_FORCE_FAMILY=GFX1201 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json \
-MESA_SHADER_CACHE_DISABLE=true runtime/build/vk_pipeline_check "$fixtures/spirv" --jobs 1 --slow 0
+MESA_SHADER_CACHE_DISABLE=true port/build/vk_pipeline_check "$fixtures/spirv" --jobs 1 --slow 0
 ```
 
 ### Intel ANV
@@ -180,9 +180,9 @@ Mesa build directory.
 
 ```sh
 INTEL_STUB_GPU_PLATFORM=bmg \
-LD_PRELOAD="$intel_shim_build/src/intel/tools/libintel_noop_drm_shim.so" \
+LD_PRELOAD="$intel_shim_build/src/intel/tooling/libintel_noop_drm_shim.so" \
 VK_DRIVER_FILES="$intel_icd" MESA_SHADER_CACHE_DISABLE=true \
-  runtime/build/vk_pipeline_check "$fixtures/spirv" --jobs 1 --slow 0
+  port/build/vk_pipeline_check "$fixtures/spirv" --jobs 1 --slow 0
 ```
 
 The example selects a Battlemage profile. Use `dg2` for an Alchemist profile or `adl` for Alder Lake.
@@ -254,7 +254,7 @@ acceptance only.
 
 A SPIR-V module larger than 4 MiB is "large". [#884](https://github.com/the original project/issues/884)
 showed why that matters: several compiles that each needed gigabytes of host RAM ran at the same time. Large
-modules now share a memory budget (`runtime/test/large_module_gate.h`): each one reserves 512 bytes of RAM per
+modules now share a memory budget (`port/test/large_module_gate.h`): each one reserves 512 bytes of RAM per
 SPIR-V byte, and they enter the driver while their reservations fit three quarters of the memory available when
 the run starts, up to `--jobs` of them. One large module always gets in when none is compiling, so a module
 bigger than the whole budget still compiles, alone among the large ones. Small modules are never held back. On
@@ -281,7 +281,7 @@ of the arenas (16 modules, 6 threads: 6.2 GB; with `MALLOC_ARENA_MAX=1`: 2.1 GB)
 - `--large-parallel N` caps how many large modules compile at once: `0` (default) by the budget, `1` alone with
   the other threads waiting (the behaviour before), `N` at most N without a budget.
 - `--inflight-file` names every module in flight when a large one enters or leaves the driver, so with several
-  large modules in flight it names all of them; the `pipelines` stage of `make_game.py` checks each alone.
+  large modules in flight it names all of them; the `pipelines` stage of `build_port.py` checks each alone.
 
 ## Skipping huge modules
 
@@ -306,9 +306,9 @@ A driver compiles on the thread that creates the shader module or the pipeline, 
 the shader's control-flow nesting. On Windows a thread that asks for no stack size gets the reserve written in the
 executable's PE header, 1 MB by default. That is the checker's main thread and every `std::thread` worker.
 
-`vk_pipeline_check` is linked with an **8 MB** reserve: `/STACK:8388608` in `runtime/CMakeLists.txt` and on the
-checker's `cl` line in `scripts/build_runtime.ps1`. The CTest `vk_pipeline_check_stack` reads `SizeOfStackReserve`
-back from the built file (`runtime/test/check_stack_reserve.cmake`; the program is not run), and
+`vk_pipeline_check` is linked with an **8 MB** reserve: `/STACK:8388608` in `port/CMakeLists.txt` and on the
+checker's `cl` line in `tooling/scripts/build_runtime.ps1`. The CTest `vk_pipeline_check_stack` reads `SizeOfStackReserve`
+back from the built file (`port/test/check_stack_reserve.cmake`; the program is not run), and
 `tests/test_build_runtime_fallback.py` keeps the two numbers the same.
 
 Measured on an AMD Radeon RX 9070 XT, AMD 26.11.2 (LLPC, Windows driver 32.0.32029.2010), each module alone with
@@ -333,18 +333,18 @@ Not measured: other AMD GPU families, other vendors' Windows drivers, and a corp
 `--wave64-emulate`.
 
 **The runtime.** The D3D12 shim creates a pipeline on the thread that asks for it
-(`runtime/shims/d3d12_vulkan_device.cpp`), so there the compiler runs on a game thread. The entry thread has 8 MB
-from `run_entry` (`runtime/shims/process_shim.h`). A thread the game starts with `dwStackSize` 0, a thread-pool
+(`port/shims/d3d12_vulkan_device.cpp`), so there the compiler runs on a game thread. The entry thread has 8 MB
+from `run_entry` (`port/shims/process_shim.h`). A thread the game starts with `dwStackSize` 0, a thread-pool
 thread and a `std::thread` of the shims get the reserve in `palmetto.exe`'s header, because the game's `CreateThread`
-is Windows' own. `palmetto` is therefore linked with the same 8 MB (`PALMETTO_STACK` in `runtime/CMakeLists.txt`, and
-the loader's `cl` line in `scripts/build_runtime.ps1`). The CTest `palmetto_stack` reads the header, and
+is Windows' own. `palmetto` is therefore linked with the same 8 MB (`PALMETTO_STACK` in `port/CMakeLists.txt`, and
+the loader's `cl` line in `tooling/scripts/build_runtime.ps1`). The CTest `palmetto_stack` reads the header, and
 `run_tiny_game_stack` asks Windows from inside a program the loader runs: the entry thread and a thread created
 with `dwStackSize` 0 both report 8 MB. Not covered: a thread the title creates with an explicit smaller size keeps
 that size. Which threads the game creates pipelines on is not known without its executable.
 
 ## Build-stage batches (BUILD-1030)
 
-`make_game.py` runs the pipelines stage in fresh checker processes over at most **500 index entries** each, on
+`build_port.py` runs the pipelines stage in fresh checker processes over at most **500 index entries** each, on
 Windows and POSIX. The ranges partition the same name-sorted index as `--start` / `--count`, including the final
 short range. Each finished process saves to the same `pipeline_cache.bin`, and the next loads that checkpoint.
 This bounds each invocation to a range that can be split further if concurrent heavy compiles exceed available
@@ -371,7 +371,7 @@ The batch size limits the index range, **not total memory usage**. Concurrent he
 saved cache or compiling one large shader can still exceed a process's available memory; a range that
 cannot complete even alone fails with a diagnostic rather than being counted as checked.
 
-`tests/test_make_game_pipeline_batches.py` runs the real build-stage orchestration against scripted child processes:
+`tests/test_build_port_pipeline_batches.py` runs the real build-stage orchestration against scripted child processes:
 bounded coverage and cache checkpoints, collective memory-crash recovery, a genuinely crashing module, validation
 failures, interruptions, setup failures, inconclusive probes and compatibility with older checkers. It needs no
 game files or GPU.

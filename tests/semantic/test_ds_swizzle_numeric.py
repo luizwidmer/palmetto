@@ -25,7 +25,7 @@ import spirv_mini_interp as si  # noqa: E402
 import support  # noqa: E402
 from support import rdna2spirv  # noqa: E402
 
-SHADERS = os.path.join(support.ROOT, "runtime", "test", "shaders")
+SHADERS = os.path.join(support.ROOT, "port", "test", "shaders")
 
 
 def _validate_spv(spvasm):

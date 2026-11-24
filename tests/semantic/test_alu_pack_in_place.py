@@ -1,4 +1,4 @@
-"""v_pack_b32_u16 is not an RDNA2 instruction, and tools/rdna2spirv.py rejects it.
+"""v_pack_b32_u16 is not an RDNA2 instruction, and tooling/rdna2spirv.py rejects it.
 
 The previous version of this file (799 lines) modelled in-place "v_pack_b32_u16 dst, src0, src1 [op_sel] [clamp]" with
 a private Python function and hand-written SPIR-V, and never called the translator.  RDNA2 packs two halves with

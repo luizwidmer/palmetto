@@ -1,7 +1,7 @@
 """The archive scanners classify the bytes between streams without copying the whole gap.
 
 `gap = m[last:s]` on an mmap copies the gap, so one large gap costs as much memory as its size: story000.arc
-(about 20 GB) could not be indexed on a 16 GB machine. tools/zero_span.py compares the gap with zeros a window
+(about 20 GB) could not be indexed on a 16 GB machine. tooling/zero_span.py compares the gap with zeros a window
 at a time. This checks its counts against the old expression, then runs every scanner that used it on an archive
 with a 48 MiB gap and measures the Python heap peak with tracemalloc.
 """
@@ -15,7 +15,7 @@ import unittest
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 sys.path.insert(0, TOOLS)
 import zero_span  # noqa: E402
 

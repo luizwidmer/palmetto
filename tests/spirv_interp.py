@@ -1,4 +1,4 @@
-"""A tiny interpreter for the SPIR-V assembly that tools/rdna2spirv.py emits, so tests can check computed values
+"""A tiny interpreter for the SPIR-V assembly that tooling/rdna2spirv.py emits, so tests can check computed values
 without a GPU.
 
 It only covers the straight-line, one-lane subset the translator produces for branch-free shaders: scalar/vector

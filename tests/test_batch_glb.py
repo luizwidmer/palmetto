@@ -1,4 +1,4 @@
-"""Unit tests for tools/batch_glb.py batch OBJ -> glTF 2.0 (.glb) converter.
+"""Unit tests for tooling/batch_glb.py batch OBJ -> glTF 2.0 (.glb) converter.
 
 Usage:
     python -I tests/test_batch_glb.py
@@ -16,7 +16,7 @@ import threading
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 

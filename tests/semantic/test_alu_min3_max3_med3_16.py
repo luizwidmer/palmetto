@@ -2,7 +2,7 @@
 v_min3_i16, v_min3_u16, v_max3_i16, v_max3_u16, v_med3_i16, v_med3_u16,
 v_min3_f16, and v_max3_f16.
 
-Each test translates a synthetic pixel shader listing with tools/rdna2spirv.py, executes it in
+Each test translates a synthetic pixel shader listing with tooling/rdna2spirv.py, executes it in
 tests/semantic/spirv_mini_interp.py, and compares the exported mrt0 words against plain-Python references.
 
 Covers:
@@ -31,7 +31,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

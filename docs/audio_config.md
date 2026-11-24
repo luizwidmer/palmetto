@@ -12,8 +12,8 @@ boundary isn't specific to one build; the summary in `<out>/index.json` records 
 (`0x129B000` on the package measured here, the same window as `--limit 0x129B000`):
 
 ```powershell
-python -I tools/arc9_carve.py audio.arc <out> --until-adat
-python -I tools/audio_config.py <out> --join --json
+python -I tooling/arc9_carve.py audio.arc <out> --until-adat
+python -I tooling/audio_config.py <out> --join --json
 ```
 
 `--join` scans the carved streams in name order as one stream. That matters because the config is
@@ -64,7 +64,7 @@ On the measured package:
   manifest reports the per-channel duration directly. The five exceptions are duplicate-title
   or placeholder hash collisions.
 - **All 1,589** records map to an AWC stream id; the ids are the music streams exported by
-  `tools/awc_opus.py`.
+  `tooling/awc_opus.py`.
 - The records are grouped by contiguous id ranges that follow station order. The same config also
   holds station records and station-local content-id lists; they are not part of this record table
   and this tool does not embed the package's ranges.
@@ -78,7 +78,7 @@ the bank itself carries track markers: see [Marker events](#marker-events-awc-ta
 
 The cue times the config lacks are partly in the banks. AWC tag `0xBD` is a headerless array of
 16-byte cue records; [rsc8_audio.md](rsc8_audio.md#the-0xbd-cue-records) has the layout over all 420,168 tags of
-`audio.arc`, counted by `tools/rsc8_audio.py`. This section is about the 945 of them in the streamed-music banks,
+`audio.arc`, counted by `tooling/rsc8_audio.py`. This section is about the 945 of them in the streamed-music banks,
 which that count does not separate, and about what their records mark. The fields are the same four; the names
 used here (with the other page's in brackets) are type (`name`), value, time (`offset`) and flags (`extra`).
 
@@ -160,7 +160,7 @@ descriptor:
 | `0x2AC28E32` | 4 | 4 | 4 | 1 | 0.0 |
 | `0x12067E90` | 1 | 1 | 1 | 1 | 0.0 |
 
-The types are `joaat` name hashes (`tools/audio_config.py`, the helper the record table uses). Hashing plain
+The types are `joaat` name hashes (`tooling/audio_config.py`, the helper the record table uses). Hashing plain
 lowercase words: the seven the finding proposed all hit (7 of 7), and 89 further words tried here gave two
 more type hits, so 9 of the 16 non-zero types resolve and 7 do not; type 0 is the hash of the empty string.
 The value hashes of the six hash-valued types are 7 distinct values, and 6 of them resolve the same way; the
@@ -211,10 +211,10 @@ The three types found in both groups are `0x00000000`, `0x0C801D6C` and `0x7A495
 ### Reproduce
 
 ```powershell
-python -I tools/awc_markers.py <game>\audio.arc --out <temp>\awc_markers.json
+python -I tooling/awc_markers.py <game>\audio.arc --out <temp>\awc_markers.json
 ```
 
-`tools/awc_markers.py` walks the archive for `ADAT` banks with the header parser of `tools/rsc8_audio.py`
+`tooling/awc_markers.py` walks the archive for `ADAT` banks with the header parser of `tooling/rsc8_audio.py`
 (the same 7,162 banks), jumps over each parsed bank and reads only the `0xBD` chunks and the stream lengths:
 under a minute for the 28.5 GB archive on an NVMe drive (10 s once the file is cached). It prints the two
 groups and their 20 most frequent types; the JSON has every type with its events, chunks, value range and,
@@ -232,7 +232,7 @@ be matched in the audio itself; no tool in this repository does that yet. The st
 ## Tool
 
 ```text
-python -I tools/audio_config.py <carve dir or blob> [--json] [--names FILE] [--join]
+python -I tooling/audio_config.py <carve dir or blob> [--json] [--names FILE] [--join]
                                  [--min-ms N] [--max-ms N]
 ```
 
@@ -243,9 +243,9 @@ python -I tools/audio_config.py <carve dir or blob> [--json] [--names FILE] [--j
   `file_offset`; `names` maps hash B to a display string when a NUL-separated local name pool is
   supplied.
 - `joaat` and `normalized_name` are the shared hash helpers. `joaat` is the lowercased **latin-1** byte hash
-  that `tools/hashdict.py` and `tools/awc_names.py` use, so a name hashes alike in every tool; a non-ASCII
+  that `tooling/hashdict.py` and `tooling/awc_names.py` use, so a name hashes alike in every tool; a non-ASCII
   character is one byte (`é` = `0xE9`), not its UTF-8 pair. `tests/test_joaat_agreement.py` holds every copy in
-  `tools/` to that rule.
+  `tooling/` to that rule.
 - Text output prints one `file:file_offset` line per record and a summary; `--json` writes
   `{records, summary}`.
 

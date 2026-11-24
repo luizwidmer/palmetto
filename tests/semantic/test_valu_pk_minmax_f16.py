@@ -1,6 +1,6 @@
 """v_pk_min_f16 and v_pk_max_f16 (RDNA2 VOP3P): D.f16[i] = min / max of S0.f16[i] and S1.f16[i] for both halves; a NaN operand loses to the other one.
 
-Every case is translated by tools/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py. The expected
+Every case is translated by tooling/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py. The expected
 words are written down by hand (from the ISA) next to each case; the plain-Python binary16 reference in
 tests/semantic/f16_ref.py rechecks them lane by lane and drives seeded random operands and modifier combinations.
 Covers per-lane results, op_sel / op_sel_hi half selection, neg_lo / neg_hi, clamp and SGPR sources.

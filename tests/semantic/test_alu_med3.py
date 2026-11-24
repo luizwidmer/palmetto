@@ -1,7 +1,7 @@
 """Semantic interpreter tests for RDNA2 three-operand median instructions:
 v_med3_f32, v_med3_i32, and v_med3_u32.
 
-Each test translates a synthetic pixel shader with tools/rdna2spirv.py, executes it in
+Each test translates a synthetic pixel shader with tooling/rdna2spirv.py, executes it in
 tests/semantic/spirv_mini_interp.py, and validates the exported mrt0 word against a plain-Python reference.
 
 The test matrix covers:
@@ -33,7 +33,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

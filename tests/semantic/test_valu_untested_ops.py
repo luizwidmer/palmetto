@@ -7,7 +7,7 @@ RDNA2 ISA definitions:
   v_lshlrev_b16 / v_lshrrev_b16 / v_ashrrev_i16   D[15:0] = S1.16 shifted by S0[3:0] (the amount wraps at 16, so
                          16 shifts by 0); only the low half of D is checked here;
   v_bcnt_u32_b32         D = popcount(S0) + S1 (32-bit wrap).
-Each case runs a one-lane pixel shader through tools/rdna2spirv.py and tests/semantic/spirv_mini_interp.py and compares
+Each case runs a one-lane pixel shader through tooling/rdna2spirv.py and tests/semantic/spirv_mini_interp.py and compares
 with plain-Python integer references written from the lines above. Compare results leave through v_cndmask_b32_e64.
 """
 import os

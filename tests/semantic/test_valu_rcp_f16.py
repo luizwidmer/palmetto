@@ -1,7 +1,7 @@
 """v_rcp_f16 (RDNA2 VOP1 / VOP3): D.f16 = 1.0 / S0.f16, correctly rounded (0 ulp on every non-NaN input on hardware,
 docs/design.md "f16 transcendentals"), with rcp(+-0) = +-inf and rcp(+-inf) = +-0.
 
-Every case is translated by tools/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
+Every case is translated by tooling/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
 word is written down by hand (from the ISA) next to each case, rechecked against the plain-Python reference in
 tests/semantic/f16_unary_cases.py, and extended with seeded random operands, neg/abs, omod/clamp, op_sel, and SGPR /
 literal / inline-constant sources. A NaN result is compared by class, not payload. Standard library only.

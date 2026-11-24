@@ -1,6 +1,6 @@
 """Semantic regression tests for out-of-bounds typed buffer loads with DST_SEL=1 (SHADER-429).
 
-Measured natively on RDNA2 (gfx1036, wave32 and wave64, 746 kernels via tools/hw_oracle):
+Measured natively on RDNA2 (gfx1036, wave32 and wave64, 746 kernels via tooling/hw_oracle):
   * When a MUBUF buffer_load_format_{x,xy,xyz,xyzw} or buffer_load_format_d16_{x,xy,xyz,xyzw} is out of bounds
     (any OOB_SELECT mode, num_records == 0, partial-element spill, or swizzled OOB), memory is not read and
     data channels (DST_SEL 4..7) decode as 0, while V# DST_SEL still runs: DST_SEL=0 produces 0 and DST_SEL=1
@@ -24,7 +24,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

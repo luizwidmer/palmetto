@@ -5,7 +5,7 @@ ran as a raw compute kernel (registers renamed, nothing else changed), in wave32
 DX10 clamp on, denormals preserved and round to nearest even. They are not derived from the translator.
 
 Three things are checked for every shader:
-  * the words in the .asm header, in check.py and in scripts/run_gpu_tests.py are those hardware words;
+  * the words in the .asm header, in check.py and in tooling/scripts/run_gpu_tests.py are those hardware words;
   * a plain-Python reference written from the rule in docs/design.md ("16-bit results") gives the same words;
   * the translator's SPIR-V, run by tests/spirv_interp.py, gives the same words.
 """
@@ -21,7 +21,7 @@ import spirv_interp as si
 from listing import EMPTY_DXBC, translate_listing
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SHADER_DIR = os.path.join(ROOT, "runtime", "test", "shaders")
+SHADER_DIR = os.path.join(ROOT, "port", "test", "shaders")
 sys.path.insert(0, SHADER_DIR)
 import check  # noqa: E402  (path set above)
 
@@ -183,7 +183,7 @@ def test_header_and_checkers_hold_the_hardware_words(name):
     header = re.search(r"^; Expected mrt0 bits: (.*)$", source(name), re.M).group(1)
     assert tuple(int(x, 0) for x in header.split(",")) == HARDWARE[name]
     assert check.PIXEL_BITS[name] == HARDWARE[name]
-    with open(os.path.join(ROOT, "scripts", "run_gpu_tests.py"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "tooling", "tooling/scripts", "run_gpu_tests.py"), encoding="utf-8") as f:
         m = re.search(rf'"{name}": \(([^)]*)\)', f.read())
     assert m and tuple(int(x, 0) for x in m.group(1).split(",")) == HARDWARE[name]
 

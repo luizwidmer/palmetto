@@ -1,4 +1,4 @@
-"""Tests for tools/awc_manifest.py, built from synthetic AWC data only (no game files).
+"""Tests for tooling/awc_manifest.py, built from synthetic AWC data only (no game files).
 
     python -I tests/test_awc_manifest.py
 """
@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                    "tools", "awc_manifest.py")
+                    "tooling", "awc_manifest.py")
 sys.path.insert(0, os.path.dirname(TOOL))
 import awc_manifest  # noqa: E402
 import awc_names  # noqa: E402

@@ -1,4 +1,4 @@
-"""Tests for tools/bcpack_history_calib.py and external --history support.
+"""Tests for tooling/bcpack_history_calib.py and external --history support.
 
 All rANS BCPack streams, DDS references, and RDS5/ETPF pools are constructed
 synthetically in memory — no game files or game-derived tables are used.
@@ -18,7 +18,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import Mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import bcpack  # noqa: E402
 import bcpack_history_calib as calib  # noqa: E402
@@ -427,7 +427,7 @@ def _encode_bc6h_mode14_tiled(tiled_bytes, *, secret_entry=None, secret_eh=None,
 
 class PrefixDecoderAndCliTest(unittest.TestCase):
     def test_standalone_help_under_isolated_python(self):
-        script = os.path.join(ROOT, "tools", "bcpack_history_calib.py")
+        script = os.path.join(ROOT, "tooling", "bcpack_history_calib.py")
         proc = subprocess.run(
             [sys.executable, "-I", script, "--help"],
             capture_output=True,

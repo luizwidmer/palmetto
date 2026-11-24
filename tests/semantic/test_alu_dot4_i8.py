@@ -6,7 +6,7 @@ for v_dot4c_i32_i8 (VOP2). The 29 FSPX programs of the package's upscaler DLL (d
 times.
 
 The expected words below were measured on RDNA2 hardware (gfx1036, the integrated GPU of a Ryzen 9 7950X3D, through
-tools/hw_oracle): each case ran `v_dot4_i32_i8 v8, v1, v2, v3`, `v_dot4c_i32_i8 v10, v1, v2` with v10 holding the
+tooling/hw_oracle): each case ran `v_dot4_i32_i8 v8, v1, v2, v3`, `v_dot4c_i32_i8 v10, v1, v2` with v10 holding the
 addend, and the same with the two sources swapped. All three gave the word in the table, which the plain-Python
 reference `ref` reproduces. With `clamp` the hardware saturates v_dot4_i32_i8 to a signed 32-bit value
 (0x7fffffff and 0x80000000 in the two overflowing cases); the translator refuses that form.

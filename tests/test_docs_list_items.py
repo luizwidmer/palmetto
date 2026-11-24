@@ -49,7 +49,7 @@ def markdown_files():
     except (OSError, subprocess.CalledProcessError):
         files = [os.path.relpath(os.path.join(r, f), ROOT).replace(os.sep, "/")
                  for r, d, fs in os.walk(ROOT) if ".git" not in r for f in fs if f.endswith(".md")]
-    return [f for f in files if not f.startswith("third_party/")]
+    return [f for f in files if not f.startswith("vendor/")]
 
 
 class RepeatedListItems(unittest.TestCase):

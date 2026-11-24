@@ -42,11 +42,11 @@ From a Palmetto checkout on Windows, with Visual Studio 2022 (C++ desktop worklo
 git fetch https://github.com/the original project.git dcd8ecf10b138566d567020562b7afd853a89024
 git worktree add --detach ..\palmetto-ada FETCH_HEAD
 cd ..\palmetto-ada
-powershell -ExecutionPolicy Bypass -File scripts\build_runtime.ps1
-runtime\build\vk_descriptor_bench.exe --list-devices
-runtime\build\vk_descriptor_bench.exe --self-test
+powershell -ExecutionPolicy Bypass -File tooling/scripts\build_runtime.ps1
+port\build\vk_descriptor_bench.exe --list-devices
+port\build\vk_descriptor_bench.exe --self-test
 foreach ($memory in 'device', 'host', 'rebar') {
-  runtime\build\vk_descriptor_bench.exe --device 0 --memory $memory --sizes 1000,10000,100000 `
+  port\build\vk_descriptor_bench.exe --device 0 --memory $memory --sizes 1000,10000,100000 `
     --groups 4096 --iters 64 --warmup 5 --reps 25 --csv
 }
 ```
@@ -67,4 +67,4 @@ Device 0 was the RTX 4070 SUPER, the only Vulkan device. For the full 12-round s
 | Driver | NVIDIA 621.01 (`nvidia-smi`), Vulkan API 1.4.357 |
 | OS | Windows 11 Home 25H2, build 26200.9974 |
 | Vulkan SDK | 1.4.363.1 (headers for the build) |
-| Compiler | Visual Studio 2022 Build Tools, `RelWithDebInfo` via `scripts\build_runtime.ps1` |
+| Compiler | Visual Studio 2022 Build Tools, `RelWithDebInfo` via `tooling/scripts\build_runtime.ps1` |

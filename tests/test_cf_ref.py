@@ -1,4 +1,4 @@
-"""Unit tests for tools/cf_ref.py (standard library only; no game data, GPU, or llvm-mc).
+"""Unit tests for tooling/cf_ref.py (standard library only; no game data, GPU, or llvm-mc).
 
 Run from the repository root:
     python -I tests/test_cf_ref.py -v
@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import cf_ref  # noqa: E402
 import cpu_ref  # noqa: E402

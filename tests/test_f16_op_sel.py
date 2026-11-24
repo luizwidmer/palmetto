@@ -1,8 +1,8 @@
-"""op_sel on f16 VOP3 ops in tools/rdna2spirv.py.
+"""op_sel on f16 VOP3 ops in tooling/rdna2spirv.py.
 
 These tests feed the translator hand-written ``.s`` listings, so they need neither llvm-mc nor spirv-tools and run
 everywhere. They check the shape of the generated SPIR-V (which half is read, where the result goes), not computed
-values; values are covered on a GPU by runtime/test/vk_harness.
+values; values are covered on a GPU by port/test/vk_harness.
 
 Semantics (Mesa ACO ``can_use_opsel`` / AMD RDNA2 ISA, VOP3 ``op_sel``): bit i < nsrc selects the high half of source i,
 bit nsrc selects the high half of the destination. The half of the destination that is not written is kept.

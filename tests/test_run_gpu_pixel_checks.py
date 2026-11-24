@@ -1,4 +1,4 @@
-"""scripts/run_gpu_tests.py: the pixel checkers fail a short frame or non-finite values, as check.py does (no device needed)."""
+"""tooling/scripts/run_gpu_tests.py: the pixel checkers fail a short frame or non-finite values, as check.py does (no device needed)."""
 from pathlib import Path
 import os
 import struct
@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tooling/scripts"))
 import run_gpu_tests as rgt
 import check
 

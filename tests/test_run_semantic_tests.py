@@ -1,4 +1,4 @@
-"""scripts/run_semantic_tests.py on a throwaway suite: it finds what unittest discover finds, and a failing, crashing
+"""tooling/scripts/run_semantic_tests.py on a throwaway suite: it finds what unittest discover finds, and a failing, crashing
 or unimportable file always makes it exit 1 with that file named, in parallel and with -j 1.
 
     python -I tests/test_run_semantic_tests.py
@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "scripts"))
+sys.path.insert(0, os.path.join(ROOT, "tooling/scripts"))
 
 import run_semantic_tests as r  # noqa: E402
 
@@ -39,7 +39,7 @@ def run(*argv):
 
 
 def cli(*argv):
-    return subprocess.run([sys.executable, "-I", os.path.join(ROOT, "scripts", "run_semantic_tests.py"), *argv],
+    return subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "tooling/scripts", "run_semantic_tests.py"), *argv],
                           capture_output=True, text=True, timeout=15)
 
 

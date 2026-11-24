@@ -43,14 +43,14 @@ body:
         - runtime
         - pipelines
         - Running palmetto
-        - A tool run by hand (tools/, scripts/)
+        - A tool run by hand (tooling/, tooling/scripts/)
     validations:
       required: true
   - type: textarea
     id: command
     attributes:
       label: Command and steps
-      description: How you started it (`Build.bat` or the exact `make_game.py` command) and whether it happens every time.
+      description: How you started it (`Build.bat` or the exact `build_port.py` command) and whether it happens every time.
     validations:
       required: true
   - type: textarea

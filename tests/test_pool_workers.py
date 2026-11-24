@@ -3,7 +3,7 @@
     python -I tests/test_pool_workers.py
 
 Above 61 workers concurrent.futures.ProcessPoolExecutor raises `ValueError: max_workers must be <= 61` on Windows
-and multiprocessing.Pool hangs (tools/pool_workers.py has the measurement). awc_opus.py, awc_shorts.py,
+and multiprocessing.Pool hangs (tooling/pool_workers.py has the measurement). awc_opus.py, awc_shorts.py,
 world_lights_paths.py, world_build.py, anim_clips.py and anim_glb.py (--coverage) handed --jobs to a pool as it was.
 
 Each tool is run through its own code three ways: with the limit patched in and the pool class replaced by one
@@ -23,7 +23,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 sys.path.insert(0, TOOLS)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -175,7 +175,7 @@ class ToolPoolSizeTest(unittest.TestCase):
 
 
 class CommandLineTest(unittest.TestCase):
-    """The audio tools default --jobs to half the CPU count and make_game.py hands its own to awc_opus.py."""
+    """The audio tools default --jobs to half the CPU count and build_port.py hands its own to awc_opus.py."""
 
     def run_tool(self, tool, *args):
         return subprocess.run([sys.executable, "-I", os.path.join(TOOLS, tool), *args], capture_output=True,

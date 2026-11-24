@@ -11,7 +11,7 @@ import unittest
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tooling"))
 import ped_assemble as pa
 
 SLOTS = ("base_color_png", "normal_png", "metallic_roughness_png")
@@ -61,7 +61,7 @@ class PedJsonTextureTests(unittest.TestCase):
 
     def cli(self, *args):
         result = subprocess.run(
-            [sys.executable, "-I", str(ROOT / "tools" / "ped_assemble.py"), *map(str, args)],
+            [sys.executable, "-I", str(ROOT / "tooling" / "ped_assemble.py"), *map(str, args)],
             capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 import zlib
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tooling"))
 import sgd5_effects
 import shader_carve
 

@@ -2,7 +2,7 @@
 
 lt/le/gt/ge/eq/lg are ordered (false when either source is NaN); neq/nlg/nlt/ngt/nle/nge are their unordered negations
 (true when either source is NaN). +0 and -0 compare equal. Each case translates a synthetic pixel shader with
-tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py, reads the compare back with v_cndmask_b32 and
+tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py, reads the compare back with v_cndmask_b32 and
 compares it with Python's own comparison of the operands. f16 sources take the low half of the 32-bit register; the
 high half is noise the compare must ignore.
 """
@@ -17,7 +17,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

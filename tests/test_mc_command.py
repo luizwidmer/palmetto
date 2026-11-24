@@ -16,7 +16,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import mc_command  # noqa: E402
 
@@ -165,14 +165,14 @@ class MissingLlvmMcTest(unittest.TestCase):
         for name in ("vk_compute_test", "vk_store_test", "vk_harness"):   # run_gpu_tests.py only checks they exist
             open(os.path.join(build, name + (".exe" if os.name == "nt" else "")), "wb").close()
         tools = {
-            "run_gpu_tests.py": [os.path.join(ROOT, "scripts", "run_gpu_tests.py"), "--build", build],
-            "valu_fuzz.py": [os.path.join(ROOT, "tools", "valu_fuzz.py"), "--family", "f16", "--programs", "1",
+            "run_gpu_tests.py": [os.path.join(ROOT, "tooling", "tooling/scripts", "run_gpu_tests.py"), "--build", build],
+            "valu_fuzz.py": [os.path.join(ROOT, "tooling", "valu_fuzz.py"), "--family", "f16", "--programs", "1",
                              "--build", build],
-            "lds_fuzz.py": [os.path.join(ROOT, "tools", "lds_fuzz.py"), "--programs", "1", "--build", build],
-            "crosslane_fuzz.py": [os.path.join(ROOT, "tools", "crosslane_fuzz.py"), "--programs", "1", "--exe",
+            "lds_fuzz.py": [os.path.join(ROOT, "tooling", "lds_fuzz.py"), "--programs", "1", "--build", build],
+            "crosslane_fuzz.py": [os.path.join(ROOT, "tooling", "crosslane_fuzz.py"), "--programs", "1", "--exe",
                                   os.path.join(build, "vk_compute_test" + (".exe" if os.name == "nt" else ""))],
-            "image_fuzz.py": [os.path.join(ROOT, "tools", "image_fuzz.py"), "--programs", "1", "--build", build],
-            "build.py": [os.path.join(ROOT, "runtime", "test", "shaders", "build.py"),
+            "image_fuzz.py": [os.path.join(ROOT, "tooling", "image_fuzz.py"), "--programs", "1", "--build", build],
+            "build.py": [os.path.join(ROOT, "port", "test", "shaders", "build.py"),
                          os.path.join(self.tmp.name, "spirv"), "cs_store"],
         }
         env = dict(os.environ, LLVM_MC=self.missing)

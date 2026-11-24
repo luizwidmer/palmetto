@@ -1,4 +1,4 @@
-"""Tests for tools/classify_carve.py, built from synthetic carve indexes (no game data).
+"""Tests for tooling/classify_carve.py, built from synthetic carve indexes (no game data).
 
     python -I tests/test_classify_carve.py
 """
@@ -21,7 +21,7 @@ RESPAGE_HEAD = "42400000deadbeef"
 
 
 def load_module():
-    path = os.path.join(ROOT, "tools", "classify_carve.py")
+    path = os.path.join(ROOT, "tooling", "classify_carve.py")
     spec = importlib.util.spec_from_file_location("classify_carve_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -251,7 +251,7 @@ class MainTests(unittest.TestCase):
                 with open(index, "w", encoding="utf-8") as f:
                     f.write(data)
                 proc = subprocess.run(
-                    [sys.executable, "-I", os.path.join(ROOT, "tools", "classify_carve.py"), self.root],
+                    [sys.executable, "-I", os.path.join(ROOT, "tooling", "classify_carve.py"), self.root],
                     capture_output=True, text=True,
                 )
                 self.assertEqual(proc.returncode, 2)
@@ -261,7 +261,7 @@ class MainTests(unittest.TestCase):
                 self.assertEqual(self.types(), before)
 
     def test_bad_arguments_and_roots_are_one_line(self):
-        tool = os.path.join(ROOT, "tools", "classify_carve.py")
+        tool = os.path.join(ROOT, "tooling", "classify_carve.py")
         a_file = os.path.join(self.root, "index.json")
         with open(a_file, "w", encoding="utf-8") as f:
             f.write("{}")
@@ -281,7 +281,7 @@ class MainTests(unittest.TestCase):
         report = os.path.join(self.root, "types.json")
         os.mkdir(report)
         proc = subprocess.run(
-            [sys.executable, "-I", os.path.join(ROOT, "tools", "classify_carve.py"), self.root],
+            [sys.executable, "-I", os.path.join(ROOT, "tooling", "classify_carve.py"), self.root],
             capture_output=True, text=True,
         )
         self.assertEqual(proc.returncode, 2)
@@ -295,7 +295,7 @@ class MainTests(unittest.TestCase):
         self.assertEqual([n for n in os.listdir(self.root) if n.startswith(".types-")], [])
 
     def test_help_prints_usage_and_writes_nothing(self):
-        tool = os.path.join(ROOT, "tools", "classify_carve.py")
+        tool = os.path.join(ROOT, "tooling", "classify_carve.py")
         for flag in ("-h", "--help"):
             with self.subTest(flag=flag):
                 proc = subprocess.run([sys.executable, "-I", tool, flag], capture_output=True, text=True,
@@ -303,7 +303,7 @@ class MainTests(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0)
                 self.assertIn("usage", proc.stdout)
                 # The printed line is meant to be copied from the repository root, so it names the tool's folder.
-                self.assertIn("python -I tools/classify_carve.py", proc.stdout)
+                self.assertIn("python -I tooling/classify_carve.py", proc.stdout)
                 self.assertEqual(proc.stderr, "")
         self.assertEqual(os.listdir(self.root), [])                            # nothing read or written
 

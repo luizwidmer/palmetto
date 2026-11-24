@@ -2,7 +2,7 @@
 
     python -I tests/test_build_batch_launch.py
 
-`scripts/build_runtime.ps1` and `scripts/build_llvm_mc.ps1` write `_build.cmd` into the build folder and start it
+`tooling/scripts/build_runtime.ps1` and `tooling/scripts/build_llvm_mc.ps1` write `_build.cmd` into the build folder and start it
 with `Start-Process cmd.exe -ArgumentList ...`. With `/c "path"`, cmd.exe drops the quotes when the path holds a
 special character such as `&` or `^` and then runs only the part before it. This test takes each script's launch
 line as written and runs it on a stub batch in such folders: the stub must run, and its exit code must come back.
@@ -28,7 +28,7 @@ FOLDERS = ("plain", "a & b", "a&b", "x^y", "sp (x)", "東京 & co")
 
 def launch_arguments(script):
     """The -ArgumentList expression of the script's one `$p = Start-Process cmd.exe` line."""
-    found = LAUNCH.findall((ROOT / "scripts" / script).read_text(encoding="utf-8-sig"))
+    found = LAUNCH.findall((ROOT / "tooling" / "tooling/scripts" / script).read_text(encoding="utf-8-sig"))
     if len(found) != 1:
         raise AssertionError(f"{script}: expected one `$p = Start-Process cmd.exe -ArgumentList ...` line, found "
                              f"{len(found)}; update tests/test_build_batch_launch.py together with the script")

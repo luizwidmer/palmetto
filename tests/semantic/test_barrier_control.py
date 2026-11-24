@@ -12,7 +12,7 @@ Covers:
       - Memory Scope = 2 (Scope::Workgroup)
       - Memory Semantics = 0x108 (WorkgroupMemory [0x100] | AcquireRelease [0x8])
       - Uniformity: OpControlBarrier must be dynamically uniform across the Execution scope.
-  * Translator verification (tools/rdna2spirv.py):
+  * Translator verification (tooling/rdna2spirv.py):
       - In compute shaders (cs) and mesh shaders (ms), s_barrier emits
         'OpControlBarrier %c2 %c2 %c108'.
       - In pixel (ps), vertex (vs), and geometry (gs) shaders, s_barrier raises
@@ -41,7 +41,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.path.insert(0, TOOLS_DIR)
 sys.path.insert(0, HERE)
@@ -226,7 +226,7 @@ class BarrierSpecificationTests(unittest.TestCase):
 
 
 class TranslatorBarrierEmissionTests(unittest.TestCase):
-    """Verify tools/rdna2spirv.py handling of s_barrier across pipeline stages."""
+    """Verify tooling/rdna2spirv.py handling of s_barrier across pipeline stages."""
 
     def test_compute_stage_emits_opcontrolbarrier(self):
         g = rdna2spirv.Gen(stage="cs")

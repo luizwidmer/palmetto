@@ -6,11 +6,11 @@ in [`xmem_exe_calls.md`](xmem_exe_calls.md). The other 22 are the audio coproces
 `chad.dll`: 19), the texture layout library (`xg_xs.dll`: 2) and DirectStorage (`XCRDAPI.dll`: 1). No public
 documentation of the audio functions exists, so this page records, from the file alone, how the executable calls them:
 how many call sites each has, the constants those sites pass, and how each site uses the result. Nothing was run, and no
-code or data of the executable is quoted. Measured at `main` `1cc6e3c1` with `tools/import_call_sites.py`; the argument
+code or data of the executable is quoted. Measured at `main` `1cc6e3c1` with `tooling/import_call_sites.py`; the argument
 registers before each call were read by hand.
 
 ```powershell
-python -I tools/import_call_sites.py game.exe --dll AcpHal.dll --dll xapu.dll --dll chad.dll `
+python -I tooling/import_call_sites.py game.exe --dll AcpHal.dll --dll xapu.dll --dll chad.dll `
     --dll xg_xs.dll --dll XCRDAPI.dll
 ```
 

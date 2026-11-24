@@ -28,7 +28,7 @@ class DialogueConflictTest(unittest.TestCase):
 
     def cli(self, rows, *extra):
         F.write_csv(self.fixture.dialogue, F.DIALOGUE, rows)
-        return subprocess.run([sys.executable, "-I", str(ROOT / "tools/opus_tags.py"), self.fixture.opus,
+        return subprocess.run([sys.executable, "-I", str(ROOT / "tooling/opus_tags.py"), self.fixture.opus,
                                "--names", self.fixture.names, "--source", "story",
                                "--dialogue", self.fixture.dialogue, *extra],
                               capture_output=True, text=True, timeout=30)

@@ -1,4 +1,4 @@
-"""tools/progress_dashboard.py: parsers, classification, the no-game-data rule and the output-folder rule.
+"""tooling/progress_dashboard.py: parsers, classification, the no-game-data rule and the output-folder rule.
 
     python -I tests/test_progress_dashboard.py
 
@@ -19,11 +19,11 @@ from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import progress_dashboard as pd  # noqa: E402
 
-TOOL = os.path.join(ROOT, "tools", "progress_dashboard.py")
+TOOL = os.path.join(ROOT, "tooling", "progress_dashboard.py")
 SENTINEL = "SENTINEL_SHADER_NAME_must_not_appear"
 
 
@@ -195,11 +195,11 @@ class Freshness(unittest.TestCase):
 
     def test_changed_shader_helper_needs_revalidation(self):
         with tempfile.TemporaryDirectory() as root, mock.patch.object(pd, "ROOT", root):
-            for directory in ("tools", "scripts", "runtime/test/shaders", "tests"):
+            for directory in ("tooling", "tooling/scripts", "port/test/shaders", "tests"):
                 Path(root, directory).mkdir(parents=True)
             test = "tests/test_progress_dashboard.py"
             Path(root, test).touch()
-            helper = Path(root, "runtime/test/shaders/compute_fixture.py")
+            helper = Path(root, "port/test/shaders/compute_fixture.py")
             helper.write_bytes(b"shift = 0\n")
             cached = self.base(pd.file_digest(test), pd.code_digest())
             self.assertEqual(self.collect(cached)["test_progress_dashboard.py"], ("verified", "current"))
@@ -214,7 +214,7 @@ class Freshness(unittest.TestCase):
     def test_ctest_junit_passes_age_like_lasttest_log(self):
         ctest_suite = '<testsuite disabled="0" hostname="" timestamp="2026-11-22T10:00:00">{}</testsuite>'
         sources = {
-            "runtime/build/Testing/Temporary/LastTest.log": (100, "1/1 Test: local\nTest Passed.\n"),
+            "port/build/Testing/Temporary/LastTest.log": (100, "1/1 Test: local\nTest Passed.\n"),
             "before.xml": (100, ctest_suite.format(
                 '<testcase name="older" status="run"/><testcase name="failed" status="fail"/>'
                 '<testcase name="skipped" status="notrun"/>')),
@@ -252,7 +252,7 @@ class Freshness(unittest.TestCase):
     def test_local_ctest_junit_replaces_log_and_keeps_independent_run(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(pd, "ROOT", tmp), \
                 mock.patch.object(pd, "last_commit_time", return_value=0):
-            log = Path(tmp, "runtime/build/Testing/Temporary/LastTest.log")
+            log = Path(tmp, "port/build/Testing/Temporary/LastTest.log")
             log.parent.mkdir(parents=True)
             log.write_text("1/1 Test: probe\nTest Passed.\n", encoding="utf-8")
             local = Path(tmp, "local.xml")
@@ -277,7 +277,7 @@ class Freshness(unittest.TestCase):
 
 class GpuLog(unittest.TestCase):
     LOG = "\n".join([
-        "using runtime/build/RelWithDebInfo",
+        "using port/build/RelWithDebInfo",
         "cs_bounds            ok",
         "ps_texoff            SKIP (VK_KHR_maintenance8 missing)",
         "cs_bpermute32        lane 3: got 0x00000000, want 0x00000007",
@@ -406,7 +406,7 @@ class Corpus(unittest.TestCase):
     def test_counts_only_never_names(self):
         with tempfile.TemporaryDirectory() as tmp:
             work = os.path.join(tmp, "work")
-            sh = os.path.join(work, "shaders")      # make_game.py's layout
+            sh = os.path.join(work, "shaders")      # build_port.py's layout
             os.makedirs(os.path.join(sh, "dxbc"))
             os.makedirs(os.path.join(sh, "spirv"))
             carved = [{"name": f"{SENTINEL}_{i}", "stage": "pixel" if i < 3 else "compute"} for i in range(5)]
@@ -439,26 +439,26 @@ class Scrub(unittest.TestCase):
         self.assertEqual(pd.scrub(f"C:{sep}work{sep}{SENTINEL}_a.fssm, C:{sep}{SENTINEL}_b.fssm"), "<path> <path>")
 
     def test_paths_inside_the_repository_become_relative(self):
-        line = "Error: " + os.path.join(ROOT, "tools", "text_tables.py") + " line 3"
-        self.assertEqual(pd.scrub(line), "Error: tools/text_tables.py line 3")
+        line = "Error: " + os.path.join(ROOT, "tooling", "text_tables.py") + " line 3"
+        self.assertEqual(pd.scrub(line), "Error: tooling/text_tables.py line 3")
 
     def test_checkout_path_with_spaces_becomes_relative(self):
         with tempfile.TemporaryDirectory() as tmp:
             checkout = os.path.join(tmp, "Checkout with spaces [1]")
-            path = os.path.join(checkout, "tools", "text_tables.py")
+            path = os.path.join(checkout, "tooling", "text_tables.py")
             os.makedirs(os.path.dirname(path))
             with open(path, "wb"):
                 pass
             with mock.patch.object(pd, "ROOT", checkout):
-                self.assertEqual(pd.scrub(f"Error: {path} line 3"), "Error: tools/text_tables.py line 3")
-                self.assertEqual(pd.scrub(f'File "{path}", line 3'), 'File "tools/text_tables.py", line 3')
+                self.assertEqual(pd.scrub(f"Error: {path} line 3"), "Error: tooling/text_tables.py line 3")
+                self.assertEqual(pd.scrub(f'File "{path}", line 3'), 'File "tooling/text_tables.py", line 3')
                 self.assertEqual(pd.scrub(f"Checkout: {checkout}"), "Checkout: .")
                 self.assertEqual(pd.scrub(f"Checkout {checkout} is ready"), "Checkout . is ready")
                 sibling = os.path.join(checkout + "x", f"{SENTINEL}.fssm")
                 self.assertEqual(pd.scrub(f"Error: {sibling} line 3"), "Error: <path> line 3")
                 if os.name == "nt":
-                    alternate = os.path.join(checkout.swapcase(), "tools", "text_tables.py").replace("\\", "/")
-                    self.assertEqual(pd.scrub(f"Error: {alternate} line 3"), "Error: tools/text_tables.py line 3")
+                    alternate = os.path.join(checkout.swapcase(), "tooling", "text_tables.py").replace("\\", "/")
+                    self.assertEqual(pd.scrub(f"Error: {alternate} line 3"), "Error: tooling/text_tables.py line 3")
 
     def test_urls_and_relative_paths_stay(self):
         self.assertEqual(pd.scrub("see https://github.com/the original project/issues/1"),

@@ -1,6 +1,6 @@
 """Synthetic parity and fallback checks for the optional atlas matcher.
 
-    cargo build --release --locked --offline --manifest-path tools/world_atlas_native/Cargo.toml
+    cargo build --release --locked --offline --manifest-path tooling/world_atlas_native/Cargo.toml
     python -I tests/test_world_grid_atlas_native.py
 
 Set PALMETTO_WORLD_ATLAS_BENCHMARK=1 to also time a synthetic workload.
@@ -15,7 +15,7 @@ from time import perf_counter
 import unittest
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tooling"))
 
 import world_atlas_accel as accel  # noqa: E402
 import world_grid_atlas as atlas  # noqa: E402

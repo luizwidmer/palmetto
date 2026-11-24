@@ -1,4 +1,4 @@
-"""Tests for tools/glb_inspect.py.
+"""Tests for tooling/glb_inspect.py.
 
 Every GLB here is built by hand from JSON and BIN chunks; no game data, exporter
 or third-party library is involved.
@@ -18,7 +18,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "glb_inspect.py")
+TOOL = os.path.join(ROOT, "tooling", "glb_inspect.py")
 sys.path.insert(0, os.path.dirname(TOOL))
 import glb_inspect  # noqa: E402
 

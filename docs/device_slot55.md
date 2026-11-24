@@ -6,7 +6,7 @@
 The proxy forwarded console #55 by number until this change, so the PC method read the console's base pipeline as a
 resource description and its `riid` as a protected session, refused every call (41,281 `E_INVALIDARG` in one 150 s
 boot), and the title - which does not test that HRESULT - kept a null pipeline state for every pipeline it made this
-way. `runtime/shims/d3d12_xs_device.cpp` now answers the console call itself: it remembers the description of every
+way. `port/shims/d3d12_xs_device.cpp` now answers the console call itself: it remembers the description of every
 graphics pipeline this device creates (slot 57), rebuilds it with the patched fixed-function parts and creates the
 result with the PC device's own `CreateGraphicsPipelineState`, returning the real HRESULT. The first post-fix boot made
 **41,545 slot-55 calls, created 41,545 PC pipeline states (all `S_OK`) and made 0 `CreateReservedResource1` calls**,
@@ -116,7 +116,7 @@ untouched.
 ## 4. Measured before and after
 
 Two boots, retail image, Vulkan backend, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`, one boot at a time,
-harness `tools/boot_report.py`, 150 s (before) and 120 s (after) - the durations are what the two trees were booted
+harness `tooling/boot_report.py`, 150 s (before) and 120 s (after) - the durations are what the two trees were booted
 with; the counts are absolute.
 
 | measurement | before (`boot-rt-readback`, 150 s) | after (`boot-slot55-1`, 120 s) |
@@ -174,7 +174,7 @@ docs/replay_resolution.md; the composition/display passes still need their own a
 
 ## 6. Tests and gates
 
-`runtime/test/xs_proxy_mock_test.cpp` gains `check_slot55_derived_pipeline_state`, which creates a base through the real
+`port/test/xs_proxy_mock_test.cpp` gains `check_slot55_derived_pipeline_state`, which creates a base through the real
 slot-57 record branch and then:
 
 * derives with a rasterizer (part 1) and a sample-mask (part 3) patch - the PC device's `CreateGraphicsPipelineState`
@@ -197,7 +197,7 @@ graphics_pso_test         -> 170 checks passed
 d3d12_fence_timing_test   -> still crashes (known pre-existing failure, untouched)
 ```
 
-Scope: `runtime/shims/d3d12_xs_device.cpp`, `runtime/test/xs_proxy_mock_test.cpp`, this page. No git writes.
+Scope: `port/shims/d3d12_xs_device.cpp`, `port/test/xs_proxy_mock_test.cpp`, this page. No git writes.
 Artifacts: `F:\palmetto-work\boot-slot55-1` (the post-fix boot), `F:\palmetto-work\boot-rt-readback` (the pre-fix boot),
 `F:\palmetto-work\boot-slot55-ab-before` / `ab-after` and `F:\palmetto-work\cap-slot55-before` / `cap-slot55-after`
 (the A/B and its captures).

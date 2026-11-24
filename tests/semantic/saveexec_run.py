@@ -1,4 +1,4 @@
-"""Shared harness for the test_salu_*_saveexec_b64.py files: run one s_<op>_saveexec_b64 through tools/rdna2spirv.py
+"""Shared harness for the test_salu_*_saveexec_b64.py files: run one s_<op>_saveexec_b64 through tooling/rdna2spirv.py
 (support.translate_lines) on every lane of a wave64 in spirv_mini_interp.run_workgroup and return what the program stored.
 
 RDNA2 ISA, SOP1: D = EXEC; EXEC = f(S0, EXEC); SCC = (EXEC != 0). f is in ISA below, one plain-Python lambda per op

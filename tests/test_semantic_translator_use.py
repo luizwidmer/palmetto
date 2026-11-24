@@ -1,4 +1,4 @@
-"""Every tests/semantic/test_*.py actually runs tools/rdna2spirv.py.
+"""Every tests/semantic/test_*.py actually runs tooling/rdna2spirv.py.
 
     python -I tests/test_semantic_translator_use.py
 
@@ -191,7 +191,7 @@ class TranslatorUseTests(unittest.TestCase):
         bad = offenders()
         if bad:
             self.fail(
-                "translator regression tests that never run tools/rdna2spirv.py:\n"
+                "translator regression tests that never run tooling/rdna2spirv.py:\n"
                 + "\n".join(f"  {path}:{line}: {why}" for path, line, why in bad)
                 + "\n\nCall support.translate_fixture/translate_lines/translate_listing (or import "
                   "rdna2spirv) so the test observes the translator, or add a reviewed ALLOWLIST entry "
@@ -214,7 +214,7 @@ class TranslatorUseTests(unittest.TestCase):
                 "test_direct.py": "import rdna2spirv\nrdna2spirv.translate\n",
                 "test_helper.py": "import support\nsupport.translate_lines\n",
                 "test_nested.py": "def f():\n    import support\n    return support.translate_lines\n",
-                "test_process.py": "import subprocess\nCMD = 'tools/rdna2spirv.py'\n",
+                "test_process.py": "import subprocess\nCMD = 'tooling/rdna2spirv.py'\n",
                 "test_silent.py": "import spirv_mini_interp\n",
                 "test_unused.py": "import support\n",   # an unused import reaches nothing
             }

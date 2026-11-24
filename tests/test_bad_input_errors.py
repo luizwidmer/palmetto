@@ -33,7 +33,7 @@ MINIMAL_ISA_XML = """<?xml version="1.0"?>
 
 
 def run(tool, *args):
-    return subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", tool), *args],
+    return subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", tool), *args],
                           capture_output=True, text=True)
 
 

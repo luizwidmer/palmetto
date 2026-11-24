@@ -1,6 +1,6 @@
 # Slot 57 wired: the graphics record converted, the build histogram, and the draw path
 
-**Status: wired and measured.** `runtime/shims/d3d12_xs_device.cpp`'s slot-57 branch decodes the deserialized
+**Status: wired and measured.** `port/shims/d3d12_xs_device.cpp`'s slot-57 branch decodes the deserialized
 graphics pipeline record with `rt::graphics_record::decode`, builds the PC description with `rt::graphics_pso::build`,
 and sends it to the PC device's own `CreateGraphicsPipelineState` exactly as slot 67 sends a compute description
 (docs/graphics_pso.md sections 2-5). The wiring's own boot refused 8,926 of the first 10,000 records at the
@@ -57,7 +57,7 @@ boot does.
 ## 2. The histogram
 
 One boot: retail image, shader corpus, Vulkan backend, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`; one
-boot at a time, 150 s timeout, a boot runs to the timeout. Harness `tools/boot_report.py`, profile
+boot at a time, 150 s timeout, a boot runs to the timeout. Harness `tooling/boot_report.py`, profile
 `_setup/profile_boot.py`. The "before" column is this page's wiring measurement, the same tree before the element-table
 decode (docs/input_layout.md section 6 has the full before/after boot table and the layout-shape histogram).
 
@@ -129,7 +129,7 @@ sections 4-5).
 
 ## 5. Tests and gates
 
-`runtime/test/xs_proxy_mock_test.cpp` compiles the real `src/graphics_record.cpp` and `src/graphics_pso.cpp` into the
+`port/test/xs_proxy_mock_test.cpp` compiles the real `src/graphics_record.cpp` and `src/graphics_pso.cpp` into the
 GPU-free test (its record builder and refusal contract stay unit-tested by `graphics_record_test` and
 `graphics_pso_test`), and covers the new branch: a valid PS+VS record building and forwarding the description (record
 programs in VS/PS, `pRootSignature`, 1 x R8G8B8A8_UNORM, no depth, sample 1, empty input layout, documented default
@@ -153,7 +153,7 @@ graphics_pso_test        -> 159 checks passed
 d3d12_fence_timing_test  -> still crashes (known pre-existing failure, untouched)
 ```
 
-No git writes. Scope: `runtime/shims/d3d12_xs_device.cpp`, `runtime/test/xs_proxy_mock_test.cpp`, this file (the decode
+No git writes. Scope: `port/shims/d3d12_xs_device.cpp`, `port/test/xs_proxy_mock_test.cpp`, this file (the decode
 is a separate change, `d0095ca70`).
 
 ## 6. Follow-ups this measurement leaves open

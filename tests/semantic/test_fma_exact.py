@@ -20,7 +20,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 sys.path.insert(0, TOOLS_DIR)
 sys.path.insert(0, HERE)
 
@@ -121,7 +121,7 @@ class FmaExactTests(unittest.TestCase):
                     self.assertEqual(f"{got:08x}", f"{want:08x}")
 
     def test_cs_fma_fused_words(self):
-        # The cases of runtime/test/shaders/cs_fma_fused.asm that a splitting driver gets wrong (words 0 and 2).
+        # The cases of port/test/shaders/cs_fma_fused.asm that a splitting driver gets wrong (words 0 and 2).
         a, p = 0x3F800800, bits_of(si.f32(f32_of(0x3F800800) ** 2))
         self.assertEqual(fma_words([(a, a, p | 0x80000000), (a, a, 0xBF800000)]), [0x33800000, 0x3A000400])
         # negative control: on the same splitting driver, --fma glsl gives the split words the Intel UHD gave

@@ -1,14 +1,14 @@
-"""global_load / global_store instruction offsets (tools/rdna2spirv.py Gen.global_mem).
+"""global_load / global_store instruction offsets (tooling/rdna2spirv.py Gen.global_mem).
 
 Rule: address = base + offset, where base is the 64-bit SGPR pair plus the zero-extended 32-bit VGPR offset, or the
 64-bit VGPR address with `off`, and offset is the signed 12-bit field as llvm-mc prints it: offset:-4 (field 0xffc,
 encoding 0xfc,0x8f,...), range -2048..2047. llvm-mc rejects offset:0xffc, offset:2048 and offset:-2049 ("expected a
 12-bit signed offset") and disassembles the field 0xffc back as offset:-4, so the signed decimal is the only spelling
-the repo's disassembly (tools/shader_disasm.py) and test build (runtime/test/shaders/build.py) deliver.
+the repo's disassembly (tooling/shader_disasm.py) and test build (port/test/shaders/build.py) deliver.
 Measured on an AMD Radeon RX 6800 (gfx1030) by running global_load_dword as a raw compute kernel, wave32 and wave64
 alike, with the dword at byte n holding 0x10000000+n and the pointer at 0x1000: offset 0 reads 0x10001000, -4
 0x10000ffc, -2048 0x10000800, 2044 0x100017fc, -1024 0x10000c00. The GPU test is
-runtime/test/shaders/cs_global_neg_offset.asm.
+port/test/shaders/cs_global_neg_offset.asm.
 
 The instruction lines are hand-written. Each case runs the code Gen.global_mem emits with GlobalBodyEvaluator and
 asserts the byte address accessed and the value that lands in (or is stored from) the VGPRs.
@@ -19,7 +19,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

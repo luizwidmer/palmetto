@@ -159,11 +159,11 @@ tables is still an open problem.
 
 ## Reading these tables
 
-`tools/mission_tables.py` reads the 32-byte record tables and the 64-byte pool elements they point
+`tooling/mission_tables.py` reads the 32-byte record tables and the 64-byte pool elements they point
 at, from inflated PSIN streams or a directory of carved `.bin` streams:
 
 ```
-python -I tools/mission_tables.py <file-or-dir> [--json] [--limit N]
+python -I tooling/mission_tables.py <file-or-dir> [--json] [--limit N]
 ```
 
 A lone path is the PSIN file: a file without the `PSIN` magic is one `ERROR: <path>: not a PSIN container`

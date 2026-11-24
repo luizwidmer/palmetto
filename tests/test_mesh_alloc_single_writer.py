@@ -2,7 +2,7 @@ import sys
 import os
 import unittest
 
-sys.path.insert(0, 'tools')
+sys.path.insert(0, 'tooling')
 import rdna2spirv
 import spirv_asm
 

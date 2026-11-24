@@ -12,7 +12,7 @@ that into a presented frame. The fields marked "measured" in section 6 come from
 
 ## 1. Why a registration hook
 
-`runtime/shims/d3d12_xs_device.cpp` is compiled into the runtime (`palmetto_d3d12_com`) **and** directly into the GPU-free
+`port/shims/d3d12_xs_device.cpp` is compiled into the runtime (`palmetto_d3d12_com`) **and** directly into the GPU-free
 proxy tests (`xs_proxy_mock_test`, `device_proxy_test`), which link neither Vulkan nor `d3d12_com.cpp`. A console
 PresentX handler in that file therefore cannot call `XboxPresentation` directly - the GPU-free links would fail - and
 that is exactly why the repo's other cross-layer calls go through `palmetto_register_*`
@@ -21,7 +21,7 @@ that is exactly why the repo's other cross-layer calls go through `palmetto_regi
 This page's hook follows the same pattern, with the storage in the presentation header so that it costs the proxy
 translation unit nothing:
 
-* `runtime/shims/xbox_present.h` has two layers. The lower one - the console structs, the window struct and the
+* `port/shims/xbox_present.h` has two layers. The lower one - the console structs, the window struct and the
   registration hook - needs only `windows.h`, `d3d12.h` and `src/frame_pacer.h`. The upper one (class
   `XboxPresentation`) additionally includes `d3d12_com.h` and `vulkan_present.h`. A translation unit that defines
   `PALMETTO_XBOX_PRESENT_HOOK_ONLY` before the include gets **only the lower layer** and no Vulkan dependency:
@@ -39,7 +39,7 @@ translation unit nothing:
 
 ## 2. The registration contract
 
-`runtime/shims/xbox_present.h`:
+`port/shims/xbox_present.h`:
 
 ```cpp
 struct XboxPresentBackend {
@@ -60,7 +60,7 @@ The backend's whole job is one call after its device exists ("the backend regist
 the device it presents through, and the core fills in the present-to-queue call and the token bridge"):
 
 ```cpp
-// runtime/shims/d3d12_vulkan_device.cpp, at the end of create_vulkan_device() (line ~9049), once the device is built:
+// port/shims/d3d12_vulkan_device.cpp, at the end of create_vulkan_device() (line ~9049), once the device is built:
 if (const rt::d3d12::XboxPresentBackend* backend = rt::d3d12::create_xbox_present_backend(device)) {
     palmetto_register_xbox_present(const_cast<rt::d3d12::XboxPresentBackend*>(backend));
 }
@@ -146,13 +146,13 @@ visibility choice and the first-frame show are each logged once:
 [rt] present: showing the PresentX window (1280x720 client): the presented frames are in it now
 ```
 
-`runtime/test/xbox_present_test.cpp` follows the same pattern for its own windows (a `RegisterClassW`/`CreateWindowExW`
+`port/test/xbox_present_test.cpp` follows the same pattern for its own windows (a `RegisterClassW`/`CreateWindowExW`
 pair it owns and destroys) and tests the choice above directly: default title/class/size/visibility, the `shown` and
 `hidden` modes, the size overrides, an unusable size falling back to the default, and the destroy.
 
 ## 5. The exact proxy wiring for later
 
-Three edits, in files this work does not own. Add the include to `runtime/shims/d3d12_xs_device.cpp` (near its other
+Three edits, in files this work does not own. Add the include to `port/shims/d3d12_xs_device.cpp` (near its other
 includes):
 
 ```cpp
@@ -193,7 +193,7 @@ passed for the trace. `a1`/`a2`/`a3` are the measured console arguments: plane c
 
 This is the only token-bridge edit: the proxy keeps issuing tokens, the report makes them presentable.
 
-3. **Backend registration** - at the end of `create_vulkan_device` in `runtime/shims/d3d12_vulkan_device.cpp` (line
+3. **Backend registration** - at the end of `create_vulkan_device` in `port/shims/d3d12_vulkan_device.cpp` (line
    ~9049), include `xbox_present.h` there and add:
 
 ```cpp
@@ -215,7 +215,7 @@ null), and the `[rt] present:` lines name which one happened.
 ## 6. Measured: one 150 s boot with the wiring in
 
 run: `palmetto.exe --run <title> --game-dir <package> --overlay F:\palmetto-overlay --trace <out>/boot.jsonl
---trace-d3d12` through `tools/boot_report.py` (env: `PALMETTO_SHADERS=F:\palmetto-work\shaders\spirv`,
+--trace-d3d12` through `tooling/boot_report.py` (env: `PALMETTO_SHADERS=F:\palmetto-work\shaders\spirv`,
 `PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`), 150 s timeout, retired image
 1.0.2.1. The surface fix (console device slot 127) was in the same binary. The boot log lines, in order:
 
@@ -263,7 +263,7 @@ run: `palmetto.exe --run <title> --game-dir <package> --overlay F:\palmetto-over
 All new coverage is in the presentation tests, which need a window and a Vulkan GPU (they exit 77 as skipped without
 one); no new test needs the game or movie data.
 
-`runtime/test/xbox_present_test.cpp`:
+`port/test/xbox_present_test.cpp`:
 
 * the window choice (title, class, client size, the three visibility modes, size overrides, fallback, destroy);
 * the registration hook with nothing registered (`ERROR_INVALID_STATE`), with an incomplete/short/null/version-mismatched
@@ -276,7 +276,7 @@ one); no new test needs the game or movie data.
   plane resource is `E_INVALIDARG`; after `palmetto_unregister_xbox_present` the call is back to
   `ERROR_INVALID_STATE`.
 
-`runtime/test/d3d12_boot_movie_test.cpp` (package-gated, exits 77 without `PALMETTO_GAME_DIR`/`PALMETTO_MOVIE`): the same
+`port/test/d3d12_boot_movie_test.cpp` (package-gated, exits 77 without `PALMETTO_GAME_DIR`/`PALMETTO_MOVIE`): the same
 registered path over a real decoded boot-movie frame, plus the null-plane refusal through the hook.
 
 The existing presentation cases (blank frame, 1 and 2 planes, composition, tokens, suspend/resume, statistics,

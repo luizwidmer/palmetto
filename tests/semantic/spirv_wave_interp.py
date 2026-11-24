@@ -1,4 +1,4 @@
-"""A strict interpreter that runs one subgroup of the SPIR-V that tools/rdna2spirv.py emits, every invocation at
+"""A strict interpreter that runs one subgroup of the SPIR-V that tooling/rdna2spirv.py emits, every invocation at
 once, so control flow and subgroup operations can be checked by value.
 
 tests/semantic/spirv_mini_interp.py runs one invocation of forward-only code. This one runs `wave` invocations

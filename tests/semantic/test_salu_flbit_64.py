@@ -4,7 +4,7 @@ Leading-bit counts of the 64-bit SGPR pair S0, from bit 63 down:
   s_flbit_i32_b64: the number of 0 bits before the first 1; -1 (0xFFFFFFFF) when S0 is 0.
   s_flbit_i32_i64: the number of bits before the first one that differs from the sign bit (bit 63 itself counts,
                    as for v_ffbh_i32 / s_flbit_i32); -1 when every bit equals the sign (0 and -1).
-SCC is not written. Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in
+SCC is not written. Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in
 tests/semantic/spirv_mini_interp.py and compares the result with a plain-Python reference. D leaves through exp as
 two 16-bit halves ORed into 0x40000000, so no export channel is a NaN or denormal pattern that a float round trip
 could change; SCC comes back through s_cselect_b32.
@@ -19,7 +19,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

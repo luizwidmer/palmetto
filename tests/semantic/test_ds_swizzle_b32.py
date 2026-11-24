@@ -34,7 +34,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:
@@ -735,7 +735,7 @@ class PixelShaderWaveInterpTests(unittest.TestCase):
     """End-to-end 32-lane pixel shader execution via `spirv_wave_interp.run_wave`."""
 
     def test_ps_bitmask_quad_and_broadcast_via_wave_interp(self):
-        # Hand-written PS mirroring runtime/test/shaders/ps_bitmask_perm.asm plus QUAD_PERM & BROADCAST.
+        # Hand-written PS mirroring port/test/shaders/ps_bitmask_perm.asm plus QUAD_PERM & BROADCAST.
         spv, _ = translate_ps("ps_swz_wave32", [
             "v_mbcnt_lo_u32_b32 v0, -1, 0",
             'ds_swizzle_b32 v1, v0 offset:swizzle(BITMASK_PERM,"pippi")',

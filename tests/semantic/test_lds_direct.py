@@ -8,7 +8,7 @@ RDNA2 ISA, "Data Share Instructions": the 2-address forms access two dwords at
   * ds_read2_b32  vdst[0:1], vaddr:       vdst[0] = MEM[ADDR0], vdst[1] = MEM[ADDR1]
 (offset0 and offset1 are 8-bit unit counts; the b64 forms are in test_lds_read2_write2_b64.py.)
 
-Each case is a compute shader translated by tools/rdna2spirv.py (support.translate_lines) and run for 32 lanes in
+Each case is a compute shader translated by tooling/rdna2spirv.py (support.translate_lines) and run for 32 lanes in
 tests/semantic/spirv_mini_interp.py. Lane i uses vaddr = 4 i, so with offsets that are multiples of 32 dwords
 (non-st64) or of 64 dwords (st64) the lanes never share a dword. A plain-Python LDS model, written from the
 formula above, gives the expected words for seeded random offsets; the hand-written cases pin the unit.
@@ -19,7 +19,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import lds_run as L  # noqa: E402  (also puts tools/ on sys.path)
+import lds_run as L  # noqa: E402  (also puts tooling/ on sys.path)
 import rdna2spirv  # noqa: E402
 import support  # noqa: E402
 

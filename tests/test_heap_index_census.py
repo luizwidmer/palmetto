@@ -1,4 +1,4 @@
-"""tools/heap_index_census.py on hand-written listings and containers (no game files, no GPU)."""
+"""tooling/heap_index_census.py on hand-written listings and containers (no game files, no GPU)."""
 import json
 import os
 import struct
@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import heap_index_census as hic  # noqa: E402
 
@@ -22,7 +22,7 @@ def enc(n):
 
 
 def listing(name, lines):
-    """lines: (text, bytes) pairs -> a tab-indented listing as tools/shader_disasm.py writes it."""
+    """lines: (text, bytes) pairs -> a tab-indented listing as tooling/shader_disasm.py writes it."""
     end = 0x100 + sum(n for _, n in lines)
     body = "".join(f"\t{text:<40}{enc(n)}\n" for text, n in lines)
     return f"; {name}.fssm code 0x100..0x{end:x}\n{body}"
@@ -168,13 +168,13 @@ class HeapIndexCensus(unittest.TestCase):
     def test_cli_json_and_missing_folder(self):
         self.work.add("ps_heap", "ps", SFI0_RES | SFI0_SMP, PS_HEAP)
         js = os.path.join(self.work.root, "out", "census.json")
-        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "heap_index_census.py"),
+        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "heap_index_census.py"),
                             self.work.disasm, "--json", js], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("ps sfi0=res+smp: 1 shaders", p.stdout)
         with open(js, encoding="utf-8") as f:
             self.assertEqual(json.load(f)["shaders_read"], 1)
-        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "heap_index_census.py"),
+        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "heap_index_census.py"),
                             os.path.join(self.work.root, "nope")], capture_output=True, text=True)
         self.assertEqual(p.returncode, 2)
         self.assertTrue(p.stderr.startswith("ERROR:"), p.stderr)
@@ -184,7 +184,7 @@ class HeapIndexCensus(unittest.TestCase):
         index = os.path.join(self.work.root, "index.json")
         with open(index, "rb") as f:
             before = f.read()
-        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "heap_index_census.py"),
+        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "heap_index_census.py"),
                             self.work.disasm, "--json", index], capture_output=True, text=True)
         self.assertEqual(p.returncode, 2)
         self.assertIn("--json would overwrite the carve index", p.stderr)
@@ -196,7 +196,7 @@ class HeapIndexCensus(unittest.TestCase):
         listing_path = os.path.join(self.work.disasm, "ps_heap.s")
         with open(listing_path, "rb") as f:
             before = f.read()
-        tool = os.path.join(ROOT, "tools", "heap_index_census.py")
+        tool = os.path.join(ROOT, "tooling", "heap_index_census.py")
         p = subprocess.run([sys.executable, "-I", tool, self.work.disasm, "--json", listing_path],
                            capture_output=True, text=True)
         self.assertEqual(p.returncode, 2)
@@ -214,7 +214,7 @@ class HeapIndexCensus(unittest.TestCase):
         container = os.path.join(self.work.root, "ps_heap.dxbc")
         with open(container, "rb") as f:
             before = f.read()
-        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "heap_index_census.py"),
+        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "heap_index_census.py"),
                             self.work.disasm, "--json", container], capture_output=True, text=True)
         self.assertEqual(p.returncode, 2)
         self.assertIn("--json would overwrite an input the census reads", p.stderr)
@@ -229,7 +229,7 @@ class HeapIndexCensus(unittest.TestCase):
         header = os.path.join(self.work.root, "fssm", "cs_sys.fssm")
         with open(header, "rb") as f:
             before = f.read()
-        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "heap_index_census.py"),
+        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "heap_index_census.py"),
                             self.work.disasm, "--json", header], capture_output=True, text=True)
         self.assertEqual(p.returncode, 2)
         self.assertIn("--json would overwrite an input the census reads", p.stderr)
@@ -243,7 +243,7 @@ class HeapIndexCensus(unittest.TestCase):
         os.link(container, link)
         with open(container, "rb") as f:
             before = f.read()
-        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "heap_index_census.py"),
+        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "heap_index_census.py"),
                             self.work.disasm, "--json", link], capture_output=True, text=True)
         self.assertEqual(p.returncode, 2)
         self.assertIn("--json would overwrite an input the census reads", p.stderr)

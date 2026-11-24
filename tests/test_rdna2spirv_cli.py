@@ -18,8 +18,8 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
-TOOL = os.path.join(ROOT, "tools", "rdna2spirv.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
+TOOL = os.path.join(ROOT, "tooling", "rdna2spirv.py")
 
 import rdna2spirv  # noqa: E402
 
@@ -514,7 +514,7 @@ class ValidatedOutput(unittest.TestCase):
 
     def test_unsupported_clears_retried_shader_but_preserves_unrelated_output(self):
         # s_barrier is compute-only, so this PS is Unsupported before any SPIR-V tool runs. A module an
-        # earlier run published for it must not survive: the index is make_game.py's proof of completion.
+        # earlier run published for it must not survive: the index is build_port.py's proof of completion.
         self.src.write_text("\ts_barrier\n\ts_endpgm\n", encoding="utf-8")
         other = self.out / "cs_other.spv"
         other.write_bytes(b"unrelated module")

@@ -1,6 +1,6 @@
 # Security audit
 
-**Scope:** the runtime's C++ (`runtime/src`, `runtime/shims`), the Python toolchain (`tools/`, `make_game.py`),
+**Scope:** the runtime's C++ (`port/src`, `port/shims`), the Python toolchain (`tooling/`, `build_port.py`),
 and the repo's build/fetch paths. Read-only review with targeted dynamic checks on this host.
 
 **Date:** 2026-11-23. **Tree:** `main` at the commit this file was added with.
@@ -38,7 +38,7 @@ what keeps the loader-related issues at Medium rather than High.
 | S7 | `XBCH` declared size from a shader container is used directly as the inflate ceiling: up to 4 GiB from a few MiB, and `bad_alloc` escapes a COM method that returns `HRESULT` elsewhere | Low | read |
 | S8 | Save blobs are read whole with no ceiling (`istreambuf_iterator`) while the *write* path enforces a 1 GiB quota; a sparse file turns into a huge allocation | Low | read |
 | S9 | `MicrosoftGame.Config` and save `.display` files are read whole with no size limit (the locale path keeps two copies) | Low | read |
-| S10 | `tools/arc9_carve.py` inflates a whole zlib stream with no `max_length` and no running cap, unlike every sibling tool | Low | read |
+| S10 | `tooling/arc9_carve.py` inflates a whole zlib stream with no `max_length` and no running cap, unlike every sibling tool | Low | read |
 | S11 | `index.json` entry names are concatenated into a filesystem path unvalidated (producer sanitizes today; a third-party index would not) | Info | read |
 | S12 | `LoadLibraryEx` flags supplied by the title are forwarded verbatim, including `LOAD_IGNORE_CODE_AUTHZ_LEVEL` (a code-integrity bypass on a policy-managed machine) | Info | read |
 | S13 | `PALMETTO_COMPAT_DIR` selects native DLLs from an environment variable, consulted before every shim, with no integrity check | Info (by design) | read |
@@ -46,7 +46,7 @@ what keeps the loader-related issues at Medium rather than High.
 
 ### S1 — `dwmapi.dll` bare-name load (Medium)
 
-`runtime/shims/dxgi_com.cpp:889-898`
+`port/shims/dxgi_com.cpp:889-898`
 
 ```cpp
 void wait_for_vblank() {
@@ -69,7 +69,7 @@ Fix: `LoadLibraryExW(L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)`.
 
 ### S2 — Run-time `LoadLibrary` fallback uses the default search order (Medium)
 
-`runtime/shims/library_loader.cpp:141-200`. Bare names not served by a shim or by `<game_dir>\<basename>` reach
+`port/shims/library_loader.cpp:141-200`. Bare names not served by a shim or by `<game_dir>\<basename>` reach
 `LoadLibraryA(name)` / `LoadLibraryW(name)` with **no flags**, and no `SetDefaultDllDirectories`,
 `SetDllDirectory` or `AddDllDirectory` call exists anywhere in the tree. The search order therefore includes the
 current directory and PATH for any name absent from System32.
@@ -83,7 +83,7 @@ optionally `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)` once at star
 
 ### S4 — Protection rewrite at a title-chosen address (Low)
 
-`runtime/shims/d3d12_vulkan_device.cpp:1712-1734`. The console heap address is accepted when it is non-zero,
+`port/shims/d3d12_vulkan_device.cpp:1712-1734`. The console heap address is accepted when it is non-zero,
 64 KiB-aligned and at least one page. For a committed page that is neither writable nor guard/no-access (the
 runtime's own `.rdata`, `.text`, IAT), `MapViewOfFile3(MEM_REPLACE_PLACEHOLDER)` fails because the range is not a
 placeholder, and the fallback runs `VirtualAlloc(target, page, MEM_COMMIT, PAGE_READWRITE)`.
@@ -102,7 +102,7 @@ Fix: only touch the range when it is `MEM_FREE`/`MEM_RESERVE`, or already commit
 
 ### S7 — `XBCH` size drives the inflate ceiling (Low)
 
-`runtime/src/shader_library.h:628-631`
+`port/src/shader_library.h:628-631`
 
 ```cpp
 std::memcpy(&unpacked, blob.data() + 16, 4);                       // declared size, from the file
@@ -114,14 +114,14 @@ DEFLATE reaches ~1032:1, so a few MiB of compressed zeros inside one shader entr
 and `std::bad_alloc` escapes `Create*PipelineState` — a COM method that returns `E_OUTOFMEMORY` for allocation
 failure elsewhere (`d3d12_vulkan_device.cpp:4058`, `:4173`).
 
-The same field is capped by the tool that reads it: `tools/fssm_unpack.py:45` `MAX_FSSM_BYTES = 64 << 20`, rejected
+The same field is capped by the tool that reads it: `tooling/fssm_unpack.py:45` `MAX_FSSM_BYTES = 64 << 20`, rejected
 at `:102-103`. The runtime is 64x more permissive than the project's own contract.
 
 Fix: `if (unpacked > (64u << 20)) return {};`
 
 ### S8 — Save blobs read without the quota the write path enforces (Low)
 
-`runtime/shims/xgameruntime_gamesave.cpp:365-370` reads each blob with `istreambuf_iterator` into a vector with no
+`port/shims/xgameruntime_gamesave.cpp:365-370` reads each blob with `istreambuf_iterator` into a vector with no
 size check, while `commit()` enforces `kQuotaBytes = 1 GiB` on write (`:386`). A large or NTFS-sparse blob inside a
 save container that a user was handed becomes a huge allocation instead of a clean `E_GS_*`. Same path truncates
 `info.size` to `uint32_t` at `:347` for blobs ≥ 4 GiB.
@@ -130,7 +130,7 @@ Fix: `fs::file_size` check against the quota before allocating; clamp or refuse 
 
 ### S6 — TLS helper clone (Low, reasoned)
 
-`runtime/src/pe_loader.cpp:290-336` stages `%TEMP%\palmetto_tls_host_<pid>_<slot>.dll.new`, opens a guard on it with
+`port/src/pe_loader.cpp:290-336` stages `%TEMP%\palmetto_tls_host_<pid>_<slot>.dll.new`, opens a guard on it with
 `GENERIC_READ` and `FILE_SHARE_READ | FILE_SHARE_DELETE`, renames it to the final name, then loads it by path. The
 shared `FILE_SHARE_DELETE` permits another process of the same user to open the clone with `DELETE` access, rename it
 away and place its own file at the path before `LoadLibraryExW`. The window is small but the name is predictable.
@@ -142,7 +142,7 @@ loaded module's path (`GetModuleFileName`) after load.
 
 ### S10 — Unbounded inflate in the ARC9 carver (Low)
 
-`tools/arc9_carve.py:218-231` calls `d.decompress(chunk)` with no `max_length` and joins every piece. Every sibling
+`tooling/arc9_carve.py:218-231` calls `d.decompress(chunk)` with no `max_length` and joins every piece. Every sibling
 tool caps inflation (`navmesh_decode.py:68` 256 MiB, `ped_catalogues.py:102` 64 MiB, `restofworld_index.py:43`
 512 MiB, `arc9_names.py:140` passes `DECOMPRESS_MAX`). A crafted archive can exhaust memory in the carve process.
 
@@ -168,7 +168,7 @@ These are the reasons several whole classes of bug are *not* findings, and they 
 - **The path shims confine `GAME:`/`T:` access** to the drive roots (no `..` climb, no `:` component, overlay-internal
   names refused) and classify `MAXIMUM_ALLOWED` as a write; save names are `%`-encoded so separators and a leading
   dot cannot appear.
-- **Archive extraction is sanitized.** `tools/palmetto_mods.py` rejects `..`, absolute, drive-letter, ADS and device
+- **Archive extraction is sanitized.** `tooling/palmetto_mods.py` rejects `..`, absolute, drive-letter, ADS and device
   names, then re-checks containment with `commonpath` and rejects symlink members. Carved outputs are named by
   offset (`%012x`), and `shader_carve.py` strips `<>:"/\|?*` and reserved names.
 - **The local gallery is loopback-only** with a `Host` allowlist that closes DNS rebinding, `realpath`-contained
@@ -190,7 +190,7 @@ These are the reasons several whole classes of bug are *not* findings, and they 
 ## 4. Method and limits
 
 Coverage: every `LoadLibrary*`, `VirtualAlloc*`, `MapViewOfFile*`, `VirtualProtect`, token/privilege, environment
-variable, registry and file-path site in `runtime/src` and `runtime/shims`; every file/stream reader that parses
+variable, registry and file-path site in `port/src` and `port/shims`; every file/stream reader that parses
 package or save bytes; the Python archive→path boundary, subprocess call sites, servers and fetch paths.
 
 Dynamic checks were limited to host-only probes (a `VirtualAlloc` protection check and a `KnownDLLs` read). The game

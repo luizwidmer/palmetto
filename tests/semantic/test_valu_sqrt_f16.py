@@ -2,7 +2,7 @@
 docs/design.md "f16 transcendentals"), with sqrt(+-0) = +-0, sqrt(+inf) = +inf, and a NaN for a negative operand
 (-inf included).
 
-Every case is translated by tools/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
+Every case is translated by tooling/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
 word is written down by hand (from the ISA, values checked independently with float64) next to each case, rechecked
 against the plain-Python reference in tests/semantic/f16_unary_cases.py, and extended with seeded random operands,
 neg/abs, omod/clamp, op_sel, and SGPR / literal / inline-constant sources. A NaN result is compared by class, not

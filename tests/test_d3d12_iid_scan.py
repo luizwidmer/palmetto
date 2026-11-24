@@ -1,4 +1,4 @@
-"""tools/d3d12_iid_scan.py on a hand-written header and hand-built PE images (no game files, no SDK needed)."""
+"""tooling/d3d12_iid_scan.py on a hand-written header and hand-built PE images (no game files, no SDK needed)."""
 import json
 import os
 import struct
@@ -9,7 +9,7 @@ import unittest
 import uuid
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import d3d12_iid_scan as scan  # noqa: E402
 
@@ -218,7 +218,7 @@ class IidScan(unittest.TestCase):
     def test_cli_prints_names_and_writes_json(self):
         dll = self.image("d.dll", pe32plus({"d3d12_xs.dll": [30]}, RESOURCE.bytes_le))
         out = os.path.join(self.tmp.name, "out.json")
-        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "d3d12_iid_scan.py"), dll,
+        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "d3d12_iid_scan.py"), dll,
                             "--header", self.header, "--json", out], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("found:  ID3D12Resource", p.stdout)
@@ -234,7 +234,7 @@ class IidScan(unittest.TestCase):
         report = os.path.join(self.tmp.name, "report.json")
         for bad in (os.path.join(self.tmp.name, "missing.dll"), self.tmp.name):   # missing, and a folder
             with self.subTest(bad=bad):
-                p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "d3d12_iid_scan.py"), good, bad,
+                p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "d3d12_iid_scan.py"), good, bad,
                                     "--header", self.header, "--json", report], capture_output=True, text=True)
                 self.assertEqual(p.returncode, 2, p.stderr)
                 self.assertIn(f"ERROR: cannot read {bad}", p.stderr)
@@ -243,7 +243,7 @@ class IidScan(unittest.TestCase):
 
     def test_cli_missing_header_fails_cleanly(self):
         dll = self.image("e.dll", b"MZ")
-        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "d3d12_iid_scan.py"), dll,
+        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "d3d12_iid_scan.py"), dll,
                             "--header", os.path.join(self.tmp.name, "missing.h")], capture_output=True, text=True)
         self.assertEqual(p.returncode, 2)
         self.assertIn("ERROR", p.stderr)
@@ -251,7 +251,7 @@ class IidScan(unittest.TestCase):
     def test_cli_json_over_a_missing_directory_fails_cleanly(self):
         dll = self.image("i.dll", b"MZ")
         target = os.path.join(self.tmp.name, "missing_dir", "out.json")
-        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "d3d12_iid_scan.py"), dll,
+        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "d3d12_iid_scan.py"), dll,
                             "--header", self.header, "--json", target], capture_output=True, text=True)
         self.assertEqual(p.returncode, 2)
         self.assertIn("ERROR: cannot write", p.stderr)
@@ -262,7 +262,7 @@ class IidScan(unittest.TestCase):
         dll = self.image("f.dll", pe32plus({}, QUEUE.bytes_le))
         with open(dll, "rb") as f:
             before = f.read()
-        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "d3d12_iid_scan.py"), dll,
+        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "d3d12_iid_scan.py"), dll,
                             "--header", self.header, "--json", dll], capture_output=True, text=True)
         self.assertEqual(p.returncode, 2)
         self.assertIn("--json would overwrite", p.stderr)
@@ -273,7 +273,7 @@ class IidScan(unittest.TestCase):
         dll = self.image("g.dll", b"MZ")
         with open(self.header, "rb") as f:
             before = f.read()
-        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "d3d12_iid_scan.py"), dll,
+        p = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "d3d12_iid_scan.py"), dll,
                             "--header", self.header, "--json", self.header], capture_output=True, text=True)
         self.assertEqual(p.returncode, 2)
         self.assertIn("--json would overwrite", p.stderr)

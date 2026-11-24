@@ -7,7 +7,7 @@ Covers s_min_i32, s_max_i32, s_min_u32 and s_max_u32:
 - Mixed SGPR, inline constant and 32-bit literal operands, plus destination aliasing.
 - Negative controls verifying SPIR-V signed/unsigned and strict-inequality mutations fail.
 
-Each case translates a hand-written pixel shader through tools/rdna2spirv.py and executes it in
+Each case translates a hand-written pixel shader through tooling/rdna2spirv.py and executes it in
 tests/semantic/spirv_mini_interp.py. Standard library only; no GPU, no game files.
 """
 import os
@@ -18,7 +18,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.dont_write_bytecode = True
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 if HERE not in sys.path:

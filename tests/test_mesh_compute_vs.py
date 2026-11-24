@@ -1,4 +1,4 @@
-"""Unit tests for tools/mesh_compute_vs.py (standard library; the assembly checks need SPIRV-Tools on PATH)."""
+"""Unit tests for tooling/mesh_compute_vs.py (standard library; the assembly checks need SPIRV-Tools on PATH)."""
 import contextlib
 import io
 import json
@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import mesh_compute_vs as vs  # noqa: E402
 import rdna2spirv  # noqa: E402
 

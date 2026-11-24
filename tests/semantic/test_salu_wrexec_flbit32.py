@@ -3,11 +3,11 @@ s_andn1_wrexec_b64, and s_flbit_i32_b32.
 
 s_andn1_wrexec_b{32,64} (RDNA2 ISA): EXEC = ~S0 & EXEC; D = EXEC; SCC = (EXEC != 0).
 s_andn2_wrexec_b{32,64} (RDNA2 ISA): EXEC = S0 & ~EXEC; D = EXEC; SCC = (EXEC != 0).
-Each wrexec case translates a synthetic pixel shader with tools/rdna2spirv.py, runs all 32 or 64
+Each wrexec case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs all 32 or 64
 lanes in tests/semantic/spirv_wave_interp.py, and checks per-lane EXEC update, D mask, and SCC.
 
 s_flbit_i32_b32 (RDNA2 ISA): D = leading-zero count from MSB (32 - bit_length(S0), or 0xFFFFFFFF if
-S0 == 0); SCC is not written. Each case translates a synthetic pixel shader with tools/rdna2spirv.py,
+S0 == 0); SCC is not written. Each case translates a synthetic pixel shader with tooling/rdna2spirv.py,
 runs it in tests/semantic/spirv_mini_interp.py, and checks D and preserved SCC.
 """
 import os

@@ -1,4 +1,4 @@
-"""CPU-only unit tests for tools/mode_round_probe.py (SHADER-132)."""
+"""CPU-only unit tests for tooling/mode_round_probe.py (SHADER-132)."""
 import io
 import json
 import os
@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(REPO, "tools")
+TOOLS = os.path.join(REPO, "tooling")
 PROBE = os.path.join(TOOLS, "mode_round_probe.py")
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
@@ -165,7 +165,7 @@ class ModeRoundProbeTests(unittest.TestCase):
 
 
 class FakeModeOracle:
-    """Answers the probe's kernels from the tables in tools/mode_round_probe.py, like a GFX10 GPU that matches them,
+    """Answers the probe's kernels from the tables in tooling/mode_round_probe.py, like a GFX10 GPU that matches them,
     except that `bad_op` gets `diffs` nonzero RNE/RTZ XOR words in its first 1024-input chunk."""
     arch = "gfx1030"
 

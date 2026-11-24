@@ -55,7 +55,7 @@ So `channel+0x10` is the **fence proxy** the runtime hands the title for that `C
 from the game's other channel code (`game+0x248B4B0` releases it before `game+0x2472560` re-zeroes the field, and
 `game+0x50BB280` reads the channel's token from `+0x20`). A fence interface is a COM object whose first qword is its
 vtable pointer, and the proxy's is not the PC's: the runtime builds each child proxy's table in its own page
-(`runtime/shims/d3d12_xs_device.cpp`, `get_child_vtable`), so the first qword is the table address inside that page,
+(`port/shims/d3d12_xs_device.cpp`, `get_child_vtable`), so the first qword is the table address inside that page,
 placed at page end minus the slot count.
 
 Measured at the moment the channel stored it (one boot, the write trap on `image+0x75E0EA8`): the new value was
@@ -117,7 +117,7 @@ values 1 and 2 in the two calls. That is the calling shape of `Signal(fence, val
 ## 4. Why console slot 16 is not PC slot 16
 
 The runtime's queue proxy is a child proxy over the PC `ID3D12CommandQueue`, and its table labels the console slots in
-PC order (`runtime/shims/d3d12_xs_device.cpp`: `kQueueSignal = 14`, `kQueueWait = 15`, the queue names table gives
+PC order (`port/shims/d3d12_xs_device.cpp`: `kQueueSignal = 14`, `kQueueWait = 15`, the queue names table gives
 `GetTimestampFrequency` at 16, `GetDesc` at 18). For the generic slot it forwards to `self->real_vtable[Slot]` with the
 same argument positions, so console slot 16 calls PC `GetTimestampFrequency` and PC slot 16's out-pointer write lands on
 whatever the console call had in the first argument — here the fence.
@@ -172,7 +172,7 @@ thing to measure (section 7).
 
 ## 7. What changed (diagnostics)
 
-`runtime/shims/startup_trace.h` gained three env-gated diagnostics, all off in a normal boot:
+`port/shims/startup_trace.h` gained three env-gated diagnostics, all off in a normal boot:
 
 | variable | what it does |
 |---|---|
@@ -189,7 +189,7 @@ numbers in section 9 are the measurement that the diagnostics do not change a no
 
 ## 8. The smallest next change
 
-In `runtime/shims/d3d12_xs_device.cpp`, stop forwarding console queue slot 16 to PC slot 16, because the two are
+In `port/shims/d3d12_xs_device.cpp`, stop forwarding console queue slot 16 to PC slot 16, because the two are
 different methods. For this title's layout (section 4):
 
 * console queue **16** → PC `Signal` (real-vtable slot 14), with the fence proxy argument unwrapped like the existing
@@ -212,7 +212,7 @@ moves off `game+0x4fb0aec`. The likely next stop is the wait dispatcher's slot 1
 ## 9. The measurement
 
 One boot at a time, same environment (`PALMETTO_SHADERS=<shader corpus work folder>`, `PALMETTO_D3D12=vulkan`,
-`PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`), same harness (`tools/boot_report.py`):
+`PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`), same harness (`tooling/boot_report.py`):
 
 | run | instrumentation | max traced call | stop |
 |---|---|---:|---|

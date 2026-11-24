@@ -16,8 +16,8 @@ import unittest
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TOOL = pathlib.Path(os.environ.get("PALMETTO_GAMEDATA_XML", str(ROOT / "tools" / "gamedata_xml.py")))
-for folder in (str(ROOT), str(ROOT / "tools")):
+TOOL = pathlib.Path(os.environ.get("PALMETTO_GAMEDATA_XML", str(ROOT / "tooling" / "gamedata_xml.py")))
+for folder in (str(ROOT), str(ROOT / "tooling")):
     if folder not in sys.path:
         sys.path.insert(0, folder)
 import gamedata_xml

@@ -4,7 +4,7 @@ D.u16 = S0.u16 * S1.u16 + S2.u16 on the low halves (VOP3 only). op_sel bits 0..2
 writes the result to the high half of the destination; the other half of the destination is kept (RDNA2 ISA; Mesa ACO
 can_use_opsel, as for the other opsel-capable 16-bit VOP3 ops, docs/design.md "16-bit results"). With `clamp` the
 full-width result saturates to [0, 65535] (u16) or [-32768, 32767] (i16). Each case translates a synthetic pixel
-shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the exported word with a
+shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the exported word with a
 plain-Python reference. The hardware behaviour of `clamp` on the multiply-add and of the kept half is not measured.
 """
 import itertools
@@ -18,7 +18,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

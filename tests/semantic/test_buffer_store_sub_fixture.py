@@ -2,10 +2,10 @@
 
 Standard library only; no GPU, no LLVM, no game files.
 
-runtime/test/shaders/cs_w32_buffer_store_sub.asm (derivations in its header) seeds six dwords, stores bytes and shorts
+port/test/shaders/cs_w32_buffer_store_sub.asm (derivations in its header) seeds six dwords, stores bytes and shorts
 into them (one short crossing a dword) and reads them back, from lane 0. This runs it as one wave32 group through
 spirv_mini_interp with vk_compute_test's buffer, checks the words against a byte-level model, and that check.py and
-scripts/run_gpu_tests.py expect the same words.
+tooling/scripts/run_gpu_tests.py expect the same words.
 """
 import os
 import re
@@ -17,7 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)  # python -I leaves the script's folder off sys.path
 
-import support  # noqa: E402  (support puts tools/ on sys.path, honouring PALMETTO_TOOLS_DIR)
+import support  # noqa: E402  (support puts tooling/ on sys.path, honouring PALMETTO_TOOLS_DIR)
 import spirv_mini_interp as si  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -68,7 +68,7 @@ class BufferStoreSubFixture(unittest.TestCase):
                 self.assertEqual(mem[4 * k], want)
 
     def test_gpu_runners_expect_the_same_words(self):
-        for rel in (("runtime", "test", "shaders", "check.py"), ("scripts", "run_gpu_tests.py")):
+        for rel in (("port", "test", "shaders", "check.py"), ("tooling", "tooling/scripts", "run_gpu_tests.py")):
             with open(os.path.join(ROOT, *rel), encoding="utf-8") as f:
                 m = re.search(r'"cs_w32_buffer_store_sub"\)?[,:]\s*\[([^\]]*)\]', f.read())
             with self.subTest(file="/".join(rel)):

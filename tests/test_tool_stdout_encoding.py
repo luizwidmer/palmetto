@@ -1,11 +1,11 @@
 """Tools must not die printing a path that the console's code page can't write.
 
-On Windows a redirected stdout (tool.py > log.txt, or a pipe from make_game.py) is encoded with the console's ANSI
+On Windows a redirected stdout (tool.py > log.txt, or a pipe from build_port.py) is encoded with the console's ANSI
 code page, and `python -I` ignores PYTHONUTF8 and PYTHONIOENCODING. A caller path with a character outside that
 code page, such as a Cyrillic, Greek or CJK user name, or a Polish one under a code page without it, reached print()
 as UnicodeEncodeError and ended the run. stderr escapes such characters (backslashreplace); stdout was strict. #1406
-fixed make_game.py. Every CLI tool now starts its __main__ block by setting errors="replace" on stdout, and so do
-the programs under scripts/ and viewer/, which are run the same way.
+fixed build_port.py. Every CLI tool now starts its __main__ block by setting errors="replace" on stdout, and so do
+the programs under tooling/scripts/ and app/, which are run the same way.
 
 The paths below use a private-use character that no ANSI code page maps, so before the fix these tools died on any
 Windows locale. On a UTF-8 console the character prints, and the test passes either way. Standard library only;
@@ -19,11 +19,11 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
-PROGRAM_DIRS = ("tools", "scripts", "viewer")
+TOOLS = os.path.join(ROOT, "tooling")
+PROGRAM_DIRS = ("tooling", "tooling/scripts", "app")
 # Still without the guard because open pull requests change this file; it gets the guard there or after them.
 NOT_YET_GUARDED = {
-    "scripts/run_wine_tests.py",  # open Wine runner pull requests change this file
+    "tooling/scripts/run_wine_tests.py",  # open Wine runner pull requests change this file
 }
 MARK = ""
 # Python 3.15 turns UTF-8 mode on by default, even under -I, and then a redirected stdout cannot fail this way.
@@ -78,7 +78,7 @@ class ScriptsAndViewer(unittest.TestCase):
             disasm = os.path.join(tmp, "disasm-" + MARK)
             os.makedirs(disasm)
             report = os.path.join(tmp, "rep-" + MARK + ".json")
-            audit = os.path.join(ROOT, "scripts", "audit_shader4_regs.py")
+            audit = os.path.join(ROOT, "tooling", "tooling/scripts", "audit_shader4_regs.py")
             r = subprocess.run(PYTHON + [audit, disasm, "--json", report],
                                capture_output=True, cwd=ROOT, timeout=300)
             err = r.stderr.decode("utf-8", "replace")
@@ -91,7 +91,7 @@ class ScriptsAndViewer(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             world = os.path.join(tmp, "world-" + MARK)
             os.makedirs(world)
-            serve = os.path.join(ROOT, "viewer", "serve.py")
+            serve = os.path.join(ROOT, "app", "serve.py")
             proc = subprocess.Popen(PYTHON + [serve, "--world", world, "--port", "0"],
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT)
             try:

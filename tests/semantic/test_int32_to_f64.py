@@ -59,8 +59,8 @@ class Int32ToFloat64(unittest.TestCase):
                     self.assertIn(f"{pointer} = OpAccessChain %_ptr_Function_uint %vgpr %c{first + i}\n", text)
 
     def test_vop3_clamps_the_double_and_ignores_the_scaling(self):
-        # Measured on gfx1036 through tools/hw_oracle (wave32 and wave64 identical on every case,
-        # tools/f64_omod_probe.py): a binary64 destination ignores mul:2/mul:4/div:2 while
+        # Measured on gfx1036 through tooling/hw_oracle (wave32 and wave64 identical on every case,
+        # tooling/f64_omod_probe.py): a binary64 destination ignores mul:2/mul:4/div:2 while
         # denorm_mode_16_64 = 3, the MODE the translator assumes, and clamp still saturates.
         # See docs/design.md, "32-bit integers to binary64".
         for suffix, opcode in (("i32", "OpConvertSToF"), ("u32", "OpConvertUToF")):

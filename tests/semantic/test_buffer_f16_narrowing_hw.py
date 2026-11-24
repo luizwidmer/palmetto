@@ -1,7 +1,7 @@
 """f32 -> f16 narrowing in typed buffer stores to f16 formats and in d16 loads of 32-bit float formats (SHADER-358).
 
 Every expected word was read back from an AMD Radeon RDNA2 iGPU (gfx1036, Ryzen 9 9950X3D, Windows AMD driver
-32.0.21045.16010) through tools/hw_oracle with AMD clang 23 (rocm-sdk-core 10.0.0), wave32 and wave64 alike, with
+32.0.21045.16010) through tooling/hw_oracle with AMD clang 23 (rocm-sdk-core 10.0.0), wave32 and wave64 alike, with
 the same instruction and a V# of the same format (the runtime's selectors: X001, XY01). The hardware rounds toward
 zero and gives +-65504 for a finite value past the f16 range (0x3f803000 stores 0x3c01, not 0x3c02; 65520 stores
 0x7bff, not infinity); infinities stay infinite, f32 denormals give a signed zero, and a NaN keeps its sign and its
@@ -21,7 +21,7 @@ import warnings
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling"))
 sys.path.insert(0, HERE)
 
 import rdna2spirv  # noqa: E402

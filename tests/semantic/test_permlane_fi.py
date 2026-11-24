@@ -1,6 +1,6 @@
 """v_permlane16_b32 / v_permlanex16_b32 with the source lane off in EXEC (SHADER-74), wave32, CPU values.
 
-The input is the GPU test runtime/test/shaders/cs_w32_permlane_fi (hand-written, no game data; fixture from
+The input is the GPU test port/test/shaders/cs_w32_permlane_fi (hand-written, no game data; fixture from
 regen_fixtures.py). EXEC is 0x55555555, so the source lane of every active lane is off, except in the identity
 case. Expected words are the RDNA2 measurement from issue #374 (op_sel:[FI, BOUND_CTRL]):
 FI=1 returns the off lane's value; FI=0 leaves the destination alone (BOUND_CTRL=0) or writes 0 (BOUND_CTRL=1);

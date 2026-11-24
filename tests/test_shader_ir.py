@@ -1,4 +1,4 @@
-"""Tests for tools/shader_ir.py, built from synthetic AMDGPU disassembly (no game data).
+"""Tests for tooling/shader_ir.py, built from synthetic AMDGPU disassembly (no game data).
 
     python -I tests/test_shader_ir.py
 """
@@ -17,7 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_module():
-    path = os.path.join(ROOT, "tools", "shader_ir.py")
+    path = os.path.join(ROOT, "tooling", "shader_ir.py")
     spec = importlib.util.spec_from_file_location("shader_ir_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -334,7 +334,7 @@ class CliInputTest(unittest.TestCase):
     """The tool read sys.argv by hand: no arguments, a bad --limit or a missing folder ended in a traceback."""
 
     def run_tool(self, *args):
-        return subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "shader_ir.py"), *args],
+        return subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "shader_ir.py"), *args],
                               capture_output=True, text=True, timeout=60)
 
     def test_census_reports_input_io_errors_without_a_partial_summary(self):

@@ -1,4 +1,4 @@
-"""Expanded stdlib-only unit tests for tools/spirv_metal_set0.py.
+"""Expanded stdlib-only unit tests for tooling/spirv_metal_set0.py.
 
 Covers bindless capacity parsing from vulkan_bindless.h and custom headers,
 metal_ids() layout math, rewrite() across all 26 bindings, non-set-0 /
@@ -26,7 +26,7 @@ from unittest import mock
 import warnings
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 TOOL_PATH = os.path.join(TOOLS_DIR, "spirv_metal_set0.py")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
@@ -723,7 +723,7 @@ OpDecorate %images Binding 0
 class TestMainAndCli(unittest.TestCase):
     def _call_main(self, argv):
         out, err = io.StringIO(), io.StringIO()
-        # tools/spirv_metal_set0.py:31 uses open(path).read() without a context manager, which emits
+        # tooling/spirv_metal_set0.py:31 uses open(path).read() without a context manager, which emits
         # ResourceWarning under unittest's default filter on redirected stderr; isolate tool stderr here.
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", ResourceWarning)

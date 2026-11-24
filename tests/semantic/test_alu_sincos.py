@@ -5,7 +5,7 @@ RDNA2 hardware range-reduces in turns to [-0.5, 0.5] before scaling by 2*pi. Mul
 by 2*pi before reducing rounds the fractional turn away in binary32 (up to ~1e-4 rad near
 +-255 turns), so the translator reduces in turns first.
 
-Each case translates a synthetic shader with tools/rdna2spirv.py, runs it in
+Each case translates a synthetic shader with tooling/rdna2spirv.py, runs it in
 tests/semantic/spirv_mini_interp.py, and validates the result against an independent
 reference oracle and analytical mathematical identities (including IEEE 754 half-precision
 precision bounds and the Pythagorean identity sin^2(x) + cos^2(x) ~= 1.0).
@@ -26,7 +26,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

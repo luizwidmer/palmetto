@@ -1,6 +1,6 @@
 """Value tests for v_cvt_f16_{u16,i16} output modifiers (clamp, mul:2, mul:4, div:2) and SDWA clamp.
 
-Each case translates a hand-written pixel-shader listing with tools/rdna2spirv.py
+Each case translates a hand-written pixel-shader listing with tooling/rdna2spirv.py
 and executes the resulting SPIR-V via tests/semantic/spirv_mini_interp.py.
 Standard library only.
 """
@@ -12,7 +12,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from support import mrt0_words, translate_lines  # noqa: E402  (support puts tools/ on sys.path)
+from support import mrt0_words, translate_lines  # noqa: E402  (support puts tooling/ on sys.path)
 import rdna2spirv  # noqa: E402
 
 

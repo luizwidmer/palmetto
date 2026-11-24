@@ -1,4 +1,4 @@
-"""tools/d16_image_probe.py: the textures and samplers, the kernels (they assemble for gfx1031), the comparison and its
+"""tooling/d16_image_probe.py: the textures and samplers, the kernels (they assemble for gfx1031), the comparison and its
 exit codes through a fake oracle that plays the GPU, and the exit-77 contract. The last class runs on the hardware
 when the oracle tools are present and the GPU is GFX10, and is skipped otherwise. Standard library only."""
 import io
@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-TOOLS = Path(__file__).resolve().parents[1] / "tools"
+TOOLS = Path(__file__).resolve().parents[1] / "tooling"
 sys.path.insert(0, str(TOOLS))
 import d16_format_probe as fp  # noqa: E402
 import d16_image_probe as ip  # noqa: E402

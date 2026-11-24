@@ -1,4 +1,4 @@
-"""Unit tests for tools/recomp_census.py: the .pdata recompiler census.
+"""Unit tests for tooling/recomp_census.py: the .pdata recompiler census.
 
 The PE fixture is built byte by byte — a minimal PE32+ image whose .pdata lists
 three functions over .text: one clean, one containing an unhandled (x87) insn,
@@ -16,7 +16,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 

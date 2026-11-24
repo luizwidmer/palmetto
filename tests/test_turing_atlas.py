@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "tooling"))
 import turing_atlas
 
 MATRIX_KEYS = ("vulkaninfo", "device", "subgroup", "subgroup_size_control", "mesh",

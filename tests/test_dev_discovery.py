@@ -10,8 +10,8 @@ import tempfile
 import unittest
 
 
-ENTRY = Path(__file__).resolve().parents[1] / "scripts" / "dev.py"
-PRODUCERS = ("tools/boot_trace.py", "scripts/run_guest_scene.py")
+ENTRY = Path(__file__).resolve().parents[1] / "tooling/scripts" / "dev.py"
+PRODUCERS = ("tooling/boot_trace.py", "tooling/scripts/run_guest_scene.py")
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -20,7 +20,7 @@ class DiscoveryTests(unittest.TestCase):
         self.addCleanup(scratch.cleanup)
         self.cwd = Path(scratch.name)
         self.checkout = self.cwd / "checkout d\u00e9mo"
-        self.entry = self.checkout / "scripts" / "dev.py"
+        self.entry = self.checkout / "tooling/scripts" / "dev.py"
         self.entry.parent.mkdir(parents=True)
         shutil.copyfile(ENTRY, self.entry)
 
@@ -70,8 +70,8 @@ class DiscoveryTests(unittest.TestCase):
                 self.assertEqual(result.stderr, b"")
                 inventory = json.loads(result.stdout)
                 self.assertEqual(inventory["schema_version"], 1)
-                tools = {entry["id"]: entry for entry in inventory["tools"]}
-                self.assertEqual(len(tools), len(inventory["tools"]))
+                tools = {entry["id"]: entry for entry in inventory["tooling"]}
+                self.assertEqual(len(tools), len(inventory["tooling"]))
                 found, missing = tools[tool_id], tools[missing_id]
                 self.assertIs(found["present"], True)
                 self.assertEqual(found["path"], present_path)

@@ -1,4 +1,4 @@
-"""Tests for tools/spirv_asm.py (pure-Python SPIR-V binary assembler)."""
+"""Tests for tooling/spirv_asm.py (pure-Python SPIR-V binary assembler)."""
 import os
 import shutil
 import struct
@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 SEMANTIC = os.path.join(ROOT, "tests", "semantic")
 for _p in (TOOLS, SEMANTIC):
     if _p not in sys.path:

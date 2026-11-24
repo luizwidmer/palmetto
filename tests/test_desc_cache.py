@@ -1,4 +1,4 @@
-"""The per-basic-block descriptor lookup cache of tools/rdna2spirv.py (standard library only: no GPU, LLVM or SPIRV-Tools).
+"""The per-basic-block descriptor lookup cache of tooling/rdna2spirv.py (standard library only: no GPU, LLVM or SPIRV-Tools).
 
     python -I tests/test_desc_cache.py
 
@@ -18,7 +18,7 @@ import warnings
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import rdna2spirv  # noqa: E402
 
 CALL = "OpFunctionCall %uint %desc_lookup_fn"

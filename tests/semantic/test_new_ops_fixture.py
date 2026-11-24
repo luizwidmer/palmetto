@@ -2,11 +2,11 @@
 
 Standard library only; no GPU, no LLVM, no game files.
 
-runtime/test/shaders/cs_w32_new_ops.asm has lane 0 of a wave32 group store one word of each of s_quadmask_b32,
+port/test/shaders/cs_w32_new_ops.asm has lane 0 of a wave32 group store one word of each of s_quadmask_b32,
 s_quadmask_b64, s_bitreplicate_b64_b32, v_cvt_pknorm_i16_f32, v_cvt_pknorm_u16_f32, ds_wrxchg2_rtn_b32 (old word and
 the LDS word after it) and a VGPR kept across ds_nop / v_clrexcp (derivations in its header). This runs the fixture
 (tests/semantic/regen_fixtures.py) through spirv_mini_interp, checks the eight words against values computed here
-from the ISA definitions, and checks that check.py and scripts/run_gpu_tests.py expect the same words on the GPU.
+from the ISA definitions, and checks that check.py and tooling/scripts/run_gpu_tests.py expect the same words on the GPU.
 """
 import os
 import re
@@ -69,13 +69,13 @@ class NewOpsFixture(unittest.TestCase):
     def test_lds_ops_run_in_lane_0_only(self):
         # spirv_mini_interp gives each invocation its own LDS, so lanes racing on one address are invisible here;
         # the .asm must cut EXEC to lane 0 before its first ds_ op (#1850).
-        with open(os.path.join(ROOT, "runtime", "test", "shaders", "cs_w32_new_ops.asm"), encoding="utf-8") as f:
+        with open(os.path.join(ROOT, "port", "test", "shaders", "cs_w32_new_ops.asm"), encoding="utf-8") as f:
             lines = [ln.strip() for ln in f if ln.strip() and not ln.startswith(";")]
         self.assertLess(lines.index("v_cmpx_eq_u32_e32 0, v0"),
                         min(i for i, ln in enumerate(lines) if ln.startswith("ds_")))
 
     def test_gpu_runners_expect_the_same_words(self):
-        for rel in (("runtime", "test", "shaders", "check.py"), ("scripts", "run_gpu_tests.py")):
+        for rel in (("port", "test", "shaders", "check.py"), ("tooling", "tooling/scripts", "run_gpu_tests.py")):
             with open(os.path.join(ROOT, *rel), encoding="utf-8") as f:
                 text = f.read()
             m = re.search(r'"cs_w32_new_ops"\)?[,:]\s*\[([^\]]*)\]', text)

@@ -5,7 +5,7 @@ mask and EXEC the mask before the instruction:
 
     D = EXEC; EXEC = S0 | EXEC; SCC = (EXEC != 0)
 
-Each case translates a synthetic compute shader with tools/rdna2spirv.py and runs every lane of the wave in lockstep
+Each case translates a synthetic compute shader with tooling/rdna2spirv.py and runs every lane of the wave in lockstep
 with spirv_mini_interp.run_workgroup, in wave32 (_b32) and native wave64 (_b64); --wave64-emulate is checked to
 translate only, since the interpreter does not run its workgroup barriers. Per lane the shader stores whether the
 lane is on in the new EXEC, its bit of D, and SCC; the expected values come from a plain-Python model of the
@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)  # python -I leaves the script's folder off sys.path
 
-import support  # noqa: E402  (support puts tools/ on sys.path, honouring PALMETTO_TOOLS_DIR)
+import support  # noqa: E402  (support puts tooling/ on sys.path, honouring PALMETTO_TOOLS_DIR)
 import spirv_mini_interp as si  # noqa: E402
 
 rdna2spirv = support.rdna2spirv

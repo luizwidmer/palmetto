@@ -1,4 +1,4 @@
-"""scripts/run_gpu_tests.py: how it judges the output of a compute "dump" test (no device needed)."""
+"""tooling/scripts/run_gpu_tests.py: how it judges the output of a compute "dump" test (no device needed)."""
 import contextlib
 import io
 import json
@@ -11,9 +11,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tooling/scripts"))
 import run_gpu_tests as rgt
-import check   # runtime/test/shaders, on the path once run_gpu_tests is imported
+import check   # port/test/shaders, on the path once run_gpu_tests is imported
 
 WANT = [55, 48]
 DEVICE_32 = "device: X (subgroup 32..32)\n"

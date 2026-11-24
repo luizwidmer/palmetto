@@ -2,7 +2,7 @@
 
     python -I tests/test_run_gpu_readback_size.py
 
-scripts/run_gpu_tests.py unpacked the readbacks of ps_interp_f16_high (also drawn by ms_f16_pack) and ps_ij_computed
+tooling/scripts/run_gpu_tests.py unpacked the readbacks of ps_interp_f16_high (also drawn by ms_f16_pack) and ps_ij_computed
 with a bare struct.iter_unpack("<4I", ...): a file whose size isn't a multiple of 16 raised struct.error, a missing
 one FileNotFoundError, and nothing caught either, so the run ended there and every other test's result was lost.
 The suite is run here with the harness stood in for (as tests/test_run_gpu_mandelbrot.py of #3442 does): no device,
@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tooling/scripts"))
 import run_gpu_tests as rgt  # noqa: E402
 
 

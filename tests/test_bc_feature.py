@@ -1,4 +1,4 @@
-"""Unit tests for tools/bc_feature.py covering BC1-BC7 block compression detection and bit-depth verification.
+"""Unit tests for tooling/bc_feature.py covering BC1-BC7 block compression detection and bit-depth verification.
 
     python -I tests/test_bc_feature.py
 """
@@ -9,7 +9,7 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 
@@ -203,7 +203,7 @@ class BCFormatSpecificationTests(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_NUMPY, "numpy is not available")
 class BCFeatureImplementationTests(unittest.TestCase):
-    """Direct verification of tools/bc_feature.py functions with synthetic blocks."""
+    """Direct verification of tooling/bc_feature.py functions with synthetic blocks."""
 
     def test_565_color_unpacking_and_bit_depth_scaling(self):
         """_565 extracts 5-bit R, 6-bit G, 5-bit B and scales to [0, 255]."""

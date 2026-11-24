@@ -44,19 +44,19 @@ on y trouve le chemin critique, qui construit quoi, et les méthodes D3D12 qui r
   donne les mêmes octets sur toutes les plateformes. `tests/test_text_write_line_endings.py` échoue si un outil
   l'oublie.
 - Un générateur de rapport refuse une sortie qui désigne l'une de ses entrées ou une autre de ses sorties. Pour le
-  vérifier, il appelle `tools/report_paths.same_report_path(a, b)` au lieu de refaire le calcul lui-même : la
+  vérifier, il appelle `tooling/report_paths.same_report_path(a, b)` au lieu de refaire le calcul lui-même : la
   fonction résout les deux chemins, applique les règles de casse du volume et se rabat sur `os.path.samefile`. Un
   nouvel outil réutilise donc cette réponse plutôt que d'en garder sa propre copie. `tests/test_report_paths.py`
   couvre ce cas.
-- `tools/arc9dump` a besoin du sous-module : `git submodule update --init`.
+- `tooling/arc9dump` a besoin du sous-module : `git submodule update --init`.
 - Une nouvelle règle du traducteur de shaders va dans le tableau de contrat de `docs/design.md`, avec la façon dont
   elle a été confirmée : un test GPU, une référence Mesa/LLVM ou un comptage sur le corpus.
 - `python -I tests/test_<name>.py` lance un test unitaire (bibliothèque standard uniquement ; la CI les lance tous).
   Les fichiers de test sans bloc `__main__`, ou qui contiennent un `import pytest` (ils ont besoin des paquets de
   `tests/requirements.txt`), se lancent plutôt avec `python -m pytest tests/test_<name>.py`, comme l'explique
   [AGENTS.md](../../../AGENTS.md). Avec `python -I`, ils échouent à l'import ou ne lancent rien.
-- Tests du runtime : `cmake -S runtime -B runtime/build`, `cmake --build runtime/build --config RelWithDebInfo`,
-  puis `ctest --test-dir runtime/build -C RelWithDebInfo --output-on-failure`. Les tests CPU qui ne demandent aucune
+- Tests du runtime : `cmake -S runtime -B port/build`, `cmake --build port/build --config RelWithDebInfo`,
+  puis `ctest --test-dir port/build -C RelWithDebInfo --output-on-failure`. Les tests CPU qui ne demandent aucune
   donnée du jeu sont configurés sous Windows ; Linux et macOS configurent le sous-ensemble portable (`palmetto` et les
   shims n'existent que pour Windows). Les tests qui ont besoin du paquet commercial le lisent sur place via
   `PALMETTO_GAME_DIR` (et `PALMETTO_MOVIE` pour le test de décodage Bink), et affichent `SKIP` quand la variable n'est
@@ -67,15 +67,15 @@ on y trouve le chemin critique, qui construit quoi, et les méthodes D3D12 qui r
 - `loader_test` écrit de petites images PE dans un dossier `palmetto_loader_test` de `%TEMP%`. Si un antivirus bloque
   les exécutables tout juste écrits, le test s'arrête en donnant cette raison. Excluez le dossier, ou faites pointer
   `PALMETTO_TEST_DIR` vers un dossier que l'antivirus ignore.
-- Vérification des outils : `python -m compileall -q make_game.py tools tests`. L'outil facultatif
+- Vérification des outils : `python -m compileall -q build_port.py tools tests`. L'outil facultatif
   `vk_pipeline_check <spirv dir> [cache.bin] [--jobs N]` crée un module (et, pour les shaders compute, un pipeline)
   pour chaque shader traduit, puis signale les échecs et le chemin du cache enregistré.
-- Les tests GPU sont de petits programmes RDNA2 écrits à la main, dans `runtime/test/shaders`. `build.py` les
+- Les tests GPU sont de petits programmes RDNA2 écrits à la main, dans `port/test/shaders`. `build.py` les
   convertit en SPIR-V avec `llvm-mc` et la cible AMDGPU (LLVM 21+), puis `check.py` les exécute sur votre GPU et
   compare les résultats. Un nouveau test donne ses valeurs attendues dans le commentaire en tête du fichier, et
   reçoit sa vérification dans `check.py`. [docs/testing.md](../../testing.md) décrit l'installation pour chaque
   système, y compris les options natives sous Windows, ainsi que les problèmes connus.
 - Dans la pull request, indiquez ce que vous avez testé et sur quel GPU.
-- Lancez les tests du traducteur avec `python -I scripts/run_semantic_tests.py tests/semantic` (voir
+- Lancez les tests du traducteur avec `python -I tooling/scripts/run_semantic_tests.py tests/semantic` (voir
   `tests/semantic/README.md`). Une nouvelle règle du traducteur doit venir avec une petite fixture `.asm` écrite à la
   main et les mots de sortie attendus.

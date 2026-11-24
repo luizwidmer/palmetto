@@ -1,4 +1,4 @@
-"""Operand, encoding, and modifier validation for the 5 IEEE-754 division VALU ops in tools/rdna2spirv.py.
+"""Operand, encoding, and modifier validation for the 5 IEEE-754 division VALU ops in tooling/rdna2spirv.py.
 
 Covers:
   - v_div_fixup_f16, v_div_fixup_f32, v_div_fixup_f64

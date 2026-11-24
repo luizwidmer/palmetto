@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/navmesh_nodes.py. No game files are read or needed.
+"""Synthetic tests for tooling/navmesh_nodes.py. No game files are read or needed.
 
     python -I tests/test_navmesh_nodes.py
 
@@ -15,7 +15,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import navmesh_decode as nd  # noqa: E402
@@ -23,7 +23,7 @@ import navmesh_nodes as nn  # noqa: E402
 from test_navmesh_decode import build_0drp, build_navmesh, make_arc  # noqa: E402
 from test_world_lights_paths import GRAPH_NODES, node_resource, write_arc  # noqa: E402
 
-TOOL = os.path.join(ROOT, "tools", "navmesh_nodes.py")
+TOOL = os.path.join(ROOT, "tooling", "navmesh_nodes.py")
 ROAD, OTHER = 0x2100, 0x1000            # +0x18 words of the two synthetic polygons (bits 8 + 13, and bit 12)
 MARK = 1 << 17                          # +0x28 word of the first polygon
 

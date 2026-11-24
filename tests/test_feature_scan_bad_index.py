@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOL = Path(os.environ.get("PALMETTO_FEATURE_SCAN", str(ROOT / "tools" / "feature_scan.py")))
+TOOL = Path(os.environ.get("PALMETTO_FEATURE_SCAN", str(ROOT / "tooling" / "feature_scan.py")))
 
 
 def make_work(folder, dxbc_rows, spirv=None, spirv_text=None):

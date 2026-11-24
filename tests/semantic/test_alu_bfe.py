@@ -1,6 +1,6 @@
 """Semantic interpreter tests for RDNA2 bitfield extract instructions (v_bfe_u32, v_bfe_i32).
 
-Verifies translation via tools/rdna2spirv.py and execution via tests/semantic/spirv_mini_interp.py,
+Verifies translation via tooling/rdna2spirv.py and execution via tests/semantic/spirv_mini_interp.py,
 as well as direct SPIR-V OpBitFieldUExtract and OpBitFieldSExtract interpreter edge cases:
   * Signed vs unsigned bitfield extraction
   * Width = 0 edge cases (must return 0 for both signed and unsigned)
@@ -23,7 +23,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

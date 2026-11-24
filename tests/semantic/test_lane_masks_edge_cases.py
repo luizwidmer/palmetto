@@ -1,6 +1,6 @@
 """End-to-end translator tests for lane_masks operand invalidation and SDWA/DPP guards.
 
-Each test translates a synthetic RDNA2 compute shader through tools/rdna2spirv.py and executes all
+Each test translates a synthetic RDNA2 compute shader through tooling/rdna2spirv.py and executes all
 4 lanes via spirv_mini_interp.run_workgroup to confirm that lane_masks.py neither leaves stale
 VGPR/parked-mask state nor forces write_all_lanes on SDWA/DPP ops nor wipes masks on stores.
 """

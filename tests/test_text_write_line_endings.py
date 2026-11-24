@@ -5,7 +5,7 @@ assembly listing is CRLF there and LF on Linux and macOS: the same input gives b
 (checksums and diffs differ). The CSV writers were fixed in #1573; this covers the other text writers. This test reads
 the source with `ast` (standard library, no game data, no GPU) and fails for any `open`, `io.open`, `Path.open`,
 `os.fdopen` or `tempfile.NamedTemporaryFile` (and `TemporaryFile`, `SpooledTemporaryFile`) in a text write mode (`w`,
-`a`, `x`, `r+`), or any `Path.write_text`, under tools/, scripts/, make_game.py and runtime/test/shaders/ that has no
+`a`, `x`, `r+`), or any `Path.write_text`, under tooling/, tooling/scripts/, build_port.py and port/test/shaders/ that has no
 `newline=` argument. `codecs.open` is left alone: it never translates line ends and takes no `newline=`. Pass `newline="\\n"` for LF output (or `newline=""` when the text carries its own line ends,
 like a csv writer).
 """
@@ -16,7 +16,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-SCAN = ("tools", "scripts", "make_game.py", os.path.join("runtime", "test", "shaders"))
+SCAN = ("tooling", "tooling/scripts", "build_port.py", os.path.join("port", "test", "shaders"))
 
 
 def python_files():

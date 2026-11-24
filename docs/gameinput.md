@@ -1,6 +1,6 @@
 # Controller input: the GameInput shim on SDL3
 
-The Xbox build reads controllers through Microsoft's GameInput API. `runtime/shims/gameinput.cpp` answers
+The Xbox build reads controllers through Microsoft's GameInput API. `port/shims/gameinput.cpp` answers
 `GameInputCreate` with its own implementation of that API, backed by [SDL3](https://libsdl.org) gamepads, so
 every controller SDL supports works the way an Xbox pad would: DualSense, DualShock 4, Switch Pro, Xbox pads, and the
 rest of SDL's controller database. On a DualSense the impulse-trigger rumble becomes adaptive-trigger effects, and
@@ -25,7 +25,7 @@ SDL3 is available in one of these ways:
   `-DSDL3_DIR=C:/SDL3/cmake`. No flag is needed.
 - **`-DPALMETTO_SDL3_FETCH=ON`**: downloads the pinned release `SDL3-3.4.20.tar.gz` from SDL's GitHub releases once at
   configure time, checks its SHA-256, and builds it static with only the gamepad parts (no audio, video, GPU or
-  render). That takes about a minute on the first build. `scripts/build_runtime.ps1 -FetchSdl3` passes it.
+  render). That takes about a minute on the first build. `tooling/scripts/build_runtime.ps1 -FetchSdl3` passes it.
 - **A local copy of that tarball**: extract it and pass `-DFETCHCONTENT_SOURCE_DIR_SDL3=<path to SDL3-3.4.20>`; it is
   built the same way, without a download.
 
@@ -34,7 +34,7 @@ it has no `GameInputCreate`, as before, so the loader binds it to the host's `Ga
 thunk. `gameinput_test` and `gameinput_probe` are not built, and CTest lists `gameinput` as not run (disabled) rather
 than failing.
 
-`scripts/build_runtime.ps1` (what `make_game.py` runs) builds the shim only on its CMake path, when Visual Studio's
+`tooling/scripts/build_runtime.ps1` (what `build_port.py` runs) builds the shim only on its CMake path, when Visual Studio's
 C++ CMake tools are installed. Its direct-`cl.exe` fallback compiles a fixed file list without the shim and warns
 about it.
 
@@ -265,7 +265,7 @@ change, and whether `PALMETTO_PROMPTS` forced it. It needs no lock and can be re
 | everything else (Xbox One/Series, Xbox 360, generic, unknown) | Xbox |
 
 SDL takes the type from the pad's vendor and product id. Only deliberate input changes the answer
-(`runtime/src/active_input.h`, tested by `active_input_test` without SDL):
+(`port/src/active_input.h`, tested by `active_input_test` without SDL):
 
 - an edge: a button going down (any of SDL's, the DualSense touchpad included), a trigger rising past 0.3, or a stick
   leaving a radius of 0.35. A held button, trigger or stick, stick drift inside the radius and analog noise never
@@ -421,7 +421,7 @@ the serial or path and the order; for pads already connected at start, that orde
 
 ## ABI
 
-`runtime/shims/gameinput_abi.h` declares the v0 GameInput API as Palmetto's own code: the interfaces in vtable order,
+`port/shims/gameinput_abi.h` declares the v0 GameInput API as Palmetto's own code: the interfaces in vtable order,
 the enums the shim uses and the structs it has to lay out. It was written against Microsoft's public v0 header (the
 GDK version, also published as the `Microsoft.GameInput` NuGet package 0.2303.22621.3038). The header is not in the
 repository. Its struct offsets were checked by compiling both side by side with `offsetof` asserts for every field the

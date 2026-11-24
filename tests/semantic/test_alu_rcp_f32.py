@@ -1,6 +1,6 @@
 """Semantic translation tests for RDNA2 32-bit reciprocal v_rcp_f32.
 
-Translates a synthetic pixel-shader listing through tools/rdna2spirv.translate()
+Translates a synthetic pixel-shader listing through tooling/rdna2spirv.translate()
 -> SPIR-V -> tests/semantic/spirv_mini_interp.py and compares the result against
 a plain-Python reference: 1.0 / x rounded to binary32 for finite non-zero x,
 +infinity for +inf, -0.0 for -inf, and NaN for NaN.
@@ -29,7 +29,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

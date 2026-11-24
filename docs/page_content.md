@@ -12,7 +12,7 @@ Counts, VAs, ids and measured values only; no package bytes, paths or extracted 
 ## 1. Where the title's pages are, and that the CPU can read them
 
 The title's 174 MiB placement (device slot 133) is an xmem range: the title maps physical pages, then places the
-buffer on them. `rt::xmem::commit_physical_range` is registered as the slot's page hook (`runtime/src/main.cpp`,
+buffer on them. `rt::xmem::commit_physical_range` is registered as the slot's page hook (`port/src/main.cpp`,
 `set_placed_at_va_pages_hook`), so the pages are committed **before** the slot-133 handler runs, and the CPU can read
 what the title writes there. Measured in the pull boot: every copied page was `MEM_COMMIT` and readable, and the copied
 bytes were not stand-in zeros - a vertex view of 0xFF0 bytes carried 24 non-zero bytes (three vertices of eight bytes,
@@ -25,14 +25,14 @@ The title VAs in that boot (ASLR per boot; the previous page's layouts have the 
 [rt] replay: title VA range 0x1C380000000 + 0x2600000 (descriptor heap) is arena VA 0xAE10000
 ```
 
-The two ranges are in the same xmem region and overlap by 27 MiB, which is why `runtime/src/console_va_map.h` decides a
+The two ranges are in the same xmem region and overlap by 27 MiB, which is why `port/src/console_va_map.h` decides a
 VA's meaning by the site (buffer vs descriptor heap) as `docs/page_address_space.md` section 2 records.
 
 ## 2. What is copied, and when
 
 The copy is on demand, per draw, while the draw is prepared and before its command buffer is recorded
-(`runtime/src/vulkan_replay.h`, `prepare_draw`; `runtime/src/vulkan_backend.h` and
-`runtime/shims/d3d12_vulkan_device.cpp` for the host copy). Three sources, all the buffers a draw can read:
+(`port/src/vulkan_replay.h`, `prepare_draw`; `port/src/vulkan_backend.h` and
+`port/shims/d3d12_vulkan_device.cpp` for the host copy). Three sources, all the buffers a draw can read:
 
 1. **Vertex and index views.** The view's title VA and byte count are exactly known, so that range is copied to the
    arena range that stands in for it (`arena VA = title range's arena + (va - title)`). The copy is page-wise: a page
@@ -70,7 +70,7 @@ content, not a broken capture.
 ## 4. Where the frame is now blocked: the draw's own target reads back black
 
 A third boot added a one-shot diagnostic: for the first draw, the resolved colour attachment is copied to host memory
-in the same submission and read back after it completes (`arm_attachment_capture` in `runtime/src/vulkan_backend.h`).
+in the same submission and read back after it completes (`arm_attachment_capture` in `port/src/vulkan_backend.h`).
 Measured:
 
 ```
@@ -219,7 +219,7 @@ not the GPU composite.
 
 ## 9. What was added, and what still refuses
 
-Added: the page pull (`console_pull_pages`/`console_pull_table` in `runtime/shims/d3d12_vulkan_device.cpp`, the
+Added: the page pull (`console_pull_pages`/`console_pull_table` in `port/shims/d3d12_vulkan_device.cpp`, the
 `pull_title_pages`/`pull_title_table` replay hooks, `ConsoleVaMap::rebase_span`/`title_span`), the copy-source pull
 (`console_pull_arena`, the `pull_title_arena` replay hook, with request/pull counters), the bounded diagnostics (page
 pull content counts, page table scan, draw attachments with scissor and pixel-stage sampling counts, pipeline-stage

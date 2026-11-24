@@ -1,4 +1,4 @@
-"""tools/pknorm_probe.py: its near-tie inputs tell single from double rounding of v_cvt_pknorm_i16/u16_f32, and the
+"""tooling/pknorm_probe.py: its near-tie inputs tell single from double rounding of v_cvt_pknorm_i16/u16_f32, and the
 translator side gives 0 for every NaN half. Standard library only; no GPU, no LLVM, no game files.
 
 The near-tie words below are worked out by hand, not taken from the tool's own model. x is the f32 the word encodes;
@@ -19,7 +19,7 @@ from fractions import Fraction
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.join(ROOT, "tests", "semantic"))
 
 import pknorm_probe as probe  # noqa: E402

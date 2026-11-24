@@ -31,15 +31,15 @@ def _bare_open_calls(path: pathlib.Path) -> list[tuple[int, str]]:
 class ResourceHygieneTest(unittest.TestCase):
     def test_no_unmanaged_open_calls(self):
         for rel in (
-            "tools/rdna2spirv.py",
-            "tools/amd_swizzle.py",
-            "tools/awc_opus.py",
-            "tools/wave64_graphics_scan.py",
-            "tools/tex_export.py",
-            "tools/tex_mode_probe.py",
-            "tools/shader_disasm.py",
-            "tools/hashdict.py",
-            "tools/d3d12_xs_surface.py",
+            "tooling/rdna2spirv.py",
+            "tooling/amd_swizzle.py",
+            "tooling/awc_opus.py",
+            "tooling/wave64_graphics_scan.py",
+            "tooling/tex_export.py",
+            "tooling/tex_mode_probe.py",
+            "tooling/shader_disasm.py",
+            "tooling/hashdict.py",
+            "tooling/d3d12_xs_surface.py",
         ):
             with self.subTest(file=rel):
                 bare = _bare_open_calls(ROOT / rel)
@@ -52,7 +52,7 @@ class ResourceHygieneTest(unittest.TestCase):
                 "-W",
                 "error::ResourceWarning",
                 "-c",
-                f"import sys; sys.path.insert(0, {str(ROOT / 'tools')!r}); import rdna2spirv",
+                f"import sys; sys.path.insert(0, {str(ROOT / 'tooling')!r}); import rdna2spirv",
             ],
             capture_output=True,
             text=True,

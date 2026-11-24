@@ -1,4 +1,4 @@
-"""Synthetic-data tests for tools/vertex_types.py.
+"""Synthetic-data tests for tooling/vertex_types.py.
 
     python -I tests/test_vertex_types.py
 
@@ -20,8 +20,8 @@ import zlib
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "vertex_types.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "vertex_types.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import vertex_types as vt  # noqa: E402
 

@@ -11,8 +11,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "runtime" / "test" / "shaders"))
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "port" / "test" / "shaders"))
+sys.path.insert(0, str(ROOT / "tooling" / "tooling/scripts"))
 import check
 import run_gpu_tests
 

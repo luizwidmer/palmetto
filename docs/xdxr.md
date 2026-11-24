@@ -3,8 +3,8 @@
 This answers open question 8 of [d3d12_vulkan.md §8.2](d3d12_vulkan.md): the layouts of
 `D3D12XBOX_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_BATCHED_DESC2`, `D3D12XBOX_XDXR_STREAM_DESC` and the offline
 statistics postbuild info. They are recovered from how the package's own `XboxBvhBuilder.dll` (1.0.2.1, the
-884,224-byte file in `game/xbox-1.0.2.1.json`) reads them, not guessed and not taken from NDA headers. The C++
-definitions are in [`runtime/src/xdxr_descs.h`](../runtime/src/xdxr_descs.h), checked by `xdxr_descs_test`.
+884,224-byte file in `profiles/xbox-1.0.2.1.json`) reads them, not guessed and not taken from NDA headers. The C++
+definitions are in [`port/src/xdxr_descs.h`](../port/src/xdxr_descs.h), checked by `xdxr_descs_test`.
 
 **Method.** Static analysis of the DLL with Ghidra 12.2 (through REA 6.10.1): the field accesses, element strides,
 copies and validation branches of the functions below. Addresses are RVAs (image base `0x180000000`). Nothing from

@@ -13,7 +13,7 @@ import tracemalloc
 from types import SimpleNamespace
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tooling"))
 import sandbox_scene  # noqa: E402
 import world_names  # noqa: E402
 

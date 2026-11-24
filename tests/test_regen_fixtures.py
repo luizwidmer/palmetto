@@ -89,7 +89,7 @@ class RegenFixturesTest(unittest.TestCase):
         self.write(os.path.join(self.asm, "cs_a.asm"), "v_mov_b32 v0, 1\ns_endpgm\n")
         code, out, _ = self.run_main("--check")
         self.assertEqual(code, 1)
-        self.assertIn("cs_a: generated fixture whose runtime/test/shaders/cs_a.asm is not marked", out)
+        self.assertIn("cs_a: generated fixture whose port/test/shaders/cs_a.asm is not marked", out)
 
     def test_an_unknown_name_is_a_usage_error(self):
         code, _, err = self.run_main("cs_nope")

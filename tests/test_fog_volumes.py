@@ -1,4 +1,4 @@
-"""Synthetic unit tests for tools/fog_volumes.py (ASSET-308). No game files."""
+"""Synthetic unit tests for tooling/fog_volumes.py (ASSET-308). No game files."""
 import concurrent.futures
 import json
 import os
@@ -11,7 +11,7 @@ import zlib
 from unittest import mock
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
-TOOLS_DIR = os.path.join(os.path.dirname(TESTS_DIR), "tools")
+TOOLS_DIR = os.path.join(os.path.dirname(TESTS_DIR), "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 

@@ -1,4 +1,4 @@
-"""scripts/first_look.ps1 checks for a current and complete runtime before a dry run.
+"""tooling/scripts/first_look.ps1 checks for a current and complete runtime before a dry run.
 
     python -I tests/test_first_look_rebuild.py
 
@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "first_look.ps1"
+SCRIPT = ROOT / "tooling" / "tooling/scripts" / "first_look.ps1"
 PE_INSPECT_STUB = (
     "from pathlib import Path\n"
     "import sys\n"
@@ -41,7 +41,7 @@ EXE_CHECKLIST_STUB = "import sys\n"
 BUILD_STUB = r"""
 Set-Content -LiteralPath (Join-Path $PSScriptRoot 'built.txt') -Value 'built'
 if ($env:PALMETTO_TEST_INCOMPLETE_RUNTIME -ne '1') {
-    $build = Join-Path (Split-Path $PSScriptRoot -Parent) 'runtime\build'
+    $build = Join-Path (Split-Path $PSScriptRoot -Parent) 'port\build'
     foreach ($name in 'palmetto.exe', 'palmetto_tls_host.dll') {
         New-Item -ItemType File -Path (Join-Path $build $name) -Force | Out-Null
     }
@@ -49,8 +49,8 @@ if ($env:PALMETTO_TEST_INCOMPLETE_RUNTIME -ne '1') {
 """
 RUN = r"""
 $ErrorActionPreference = 'Stop'
-Set-Alias -Name (Join-Path $PWD 'runtime\build\palmetto.exe') -Value (Join-Path $PWD 'loader.cmd')
-& .\scripts\first_look.ps1 -Exe (Join-Path $PWD 'fixture.exe')
+Set-Alias -Name (Join-Path $PWD 'port\build\palmetto.exe') -Value (Join-Path $PWD 'loader.cmd')
+& .\tooling/scripts\first_look.ps1 -Exe (Join-Path $PWD 'fixture.exe')
 """
 
 
@@ -59,14 +59,14 @@ class FirstLookRebuildTest(unittest.TestCase):
     def run_case(self, source_newer=False, missing=(), incomplete_build=False, cache=None):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for folder in ("scripts", "tools", "runtime/build", "runtime/src"):
+            for folder in ("tooling/scripts", "tooling", "port/build", "port/src"):
                 (root / folder).mkdir(parents=True)
-            shutil.copyfile(SCRIPT, root / "scripts" / SCRIPT.name)
-            (root / "scripts" / "build_runtime.ps1").write_text(BUILD_STUB, encoding="utf-8")
-            (root / "tools" / "pe_inspect.py").write_text(PE_INSPECT_STUB, encoding="utf-8", newline="\n")
-            (root / "tools" / "gdk_runtime_calls.py").write_text(GDK_RUNTIME_CALLS_STUB, encoding="utf-8", newline="\n")
-            (root / "tools" / "find_hash_lookup.py").write_text(FIND_HASH_LOOKUP_STUB, encoding="utf-8", newline="\n")
-            (root / "tools" / "exe_checklist.py").write_text(EXE_CHECKLIST_STUB, encoding="utf-8", newline="\n")
+            shutil.copyfile(SCRIPT, root / "tooling/scripts" / SCRIPT.name)
+            (root / "tooling/scripts" / "build_runtime.ps1").write_text(BUILD_STUB, encoding="utf-8")
+            (root / "tooling" / "pe_inspect.py").write_text(PE_INSPECT_STUB, encoding="utf-8", newline="\n")
+            (root / "tooling" / "gdk_runtime_calls.py").write_text(GDK_RUNTIME_CALLS_STUB, encoding="utf-8", newline="\n")
+            (root / "tooling" / "find_hash_lookup.py").write_text(FIND_HASH_LOOKUP_STUB, encoding="utf-8", newline="\n")
+            (root / "tooling" / "exe_checklist.py").write_text(EXE_CHECKLIST_STUB, encoding="utf-8", newline="\n")
             (root / "fixture.exe").write_bytes(b"MZ")
             (root / "loader.cmd").write_text("@echo off\necho %*\nexit /b 0\n", encoding="ascii")
             loader = root / "runtime" / "build" / "palmetto.exe"
@@ -89,7 +89,7 @@ class FirstLookRebuildTest(unittest.TestCase):
             run = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                                   "-Command", RUN], cwd=root, env=env, capture_output=True, text=True, timeout=60)
             dry_run = (root / "reports" / "exe" / "fixture" / "dryrun.txt").is_file()
-            return (root / "scripts" / "built.txt").is_file(), dry_run, run.returncode, run.stdout + run.stderr
+            return (root / "tooling/scripts" / "built.txt").is_file(), dry_run, run.returncode, run.stdout + run.stderr
 
     def test_a_loader_older_than_the_sources_is_rebuilt(self):
         built, dry_run, code, out = self.run_case(source_newer=True)

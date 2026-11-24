@@ -12,7 +12,7 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path[:0] = [os.path.join(ROOT, "tools"), os.path.join(ROOT, "tests")]
+sys.path[:0] = [os.path.join(ROOT, "tooling"), os.path.join(ROOT, "tests")]
 
 import bvh_slot_check as S
 from test_bvh_geometry_check import BOUNDS, LEAVES, TRUE, build

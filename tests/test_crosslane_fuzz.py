@@ -1,4 +1,4 @@
-"""tools/crosslane_fuzz.py: the reference model of the cross-lane ops, checked against values worked out by hand
+"""tooling/crosslane_fuzz.py: the reference model of the cross-lane ops, checked against values worked out by hand
 from the RDNA ISA rules in its docstring. No GPU, no llvm-mc, no game files.
 
     python -I tests/test_crosslane_fuzz.py
@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools")
+TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tooling")
 TOOL = os.path.join(TOOLS, "crosslane_fuzz.py")
 sys.path.insert(0, TOOLS)
 import crosslane_fuzz as X  # noqa: E402
@@ -428,7 +428,7 @@ class MissingHarness(unittest.TestCase):
 
 
 class RelativeHarness(unittest.TestCase):
-    """A relative --exe written with "/" (runtime/build/RelWithDebInfo/vk_compute_test.exe) passes os.path.isfile,
+    """A relative --exe written with "/" (port/build/RelWithDebInfo/vk_compute_test.exe) passes os.path.isfile,
     but Windows' CreateProcess doesn't resolve it, so the first GPU run ended in a FileNotFoundError traceback. The
     GPU runs now get an absolute path, also when the configuration subfolder is found for the path given."""
 

@@ -9,7 +9,7 @@ Standard library only. Tests:
   * 64-bit product decomposition and full integer reconstruction from (lo, hi) halves
   * Signed vs unsigned divergence on negative operands (e.g., -1 * -1, INT32_MIN * 2)
   * Extreme boundary values: 0, 1, INT32_MAX, INT32_MIN, -1, -2, large unsigned words
-  * End-to-end SPIR-V translation via tools/rdna2spirv.py and execution via spirv_mini_interp
+  * End-to-end SPIR-V translation via tooling/rdna2spirv.py and execution via spirv_mini_interp
   * Inline constant operands and opcode suffix aliases (_e32, _e64)
   * Negative controls verifying detection of signedness, truncation, or arithmetic mutations
 """
@@ -26,7 +26,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

@@ -1,6 +1,6 @@
 """ds_permute_b32 (SHADER-90), the forward (scatter) cross-lane permute, run across every lane of the translated SPIR-V.
 
-Programs are written here (no game data) and translated by tools/rdna2spirv.py; spirv_mini_interp.run_workgroup runs one
+Programs are written here (no game data) and translated by tooling/rdna2spirv.py; spirv_mini_interp.run_workgroup runs one
 workgroup of 32 or 64 lanes. Each lane stores its result to out[lane]. The expected vectors come from a model
 written from the RDNA2 ISA (DS_PERMUTE_B32, "Forward permute"), not from the translator:
   * every source lane that is on in EXEC writes its data to lane ((addr + offset) >> 2) mod 32 of its own half
@@ -9,7 +9,7 @@ written from the RDNA2 ISA (DS_PERMUTE_B32, "Forward permute"), not from the tra
   * a destination lane that is off in EXEC keeps its VDST;
   * several sources to one lane: the value of one of them (the ISA's "not predictable"; this translator takes the
     highest-numbered). The tests that have such a lane accept any of the writers.
-The GPU test is runtime/test/shaders/cs_w32_permute.asm; its fixture also runs here. The --wave64-emulate output
+The GPU test is port/test/shaders/cs_w32_permute.asm; its fixture also runs here. The --wave64-emulate output
 needs Workgroup memory, which the interpreter rejects, so it is covered by the GPU test only.
 """
 import gc

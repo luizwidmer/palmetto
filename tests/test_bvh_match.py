@@ -1,4 +1,4 @@
-"""Synthetic checks for tools/bvh_match.py: the manifest entry the BLAS was built from is found and verified, a
+"""Synthetic checks for tooling/bvh_match.py: the manifest entry the BLAS was built from is found and verified, a
 wrong geometry, a wrong shader rule and a missing transform are not, and geometries are matched inside one model.
 No game data is read.
 
@@ -16,7 +16,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 import bvh_match as M  # noqa: E402
@@ -50,7 +50,7 @@ def write_obj(path, groups):
 
 
 def item(offset, file, triangles, hashes=None, buckets=None):
-    """One manifest row, as tools/arc9dump writes it: per geometry triangles and shader index, and with `buckets`
+    """One manifest row, as tooling/arc9dump writes it: per geometry triangles and shader index, and with `buckets`
     one render bucket per material (None leaves the field out, as an older export does)."""
     materials = [{"ShaderIndex": i, "Shader": "%08X" % h} for i, h in enumerate(hashes or [])]
     for material, bucket in zip(materials, buckets or []):

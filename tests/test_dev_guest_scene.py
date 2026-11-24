@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+SCRIPTS = Path(__file__).resolve().parents[1] / "tooling/scripts"
 
 
 class GuestSceneTests(unittest.TestCase):
@@ -46,7 +46,7 @@ class GuestSceneTests(unittest.TestCase):
         self.assertEqual(result.stderr, direct.stderr)
 
     def test_forwarding_and_required_output(self):
-        scripts = self.cwd / "checkout with spaces" / "scripts"
+        scripts = self.cwd / "checkout with spaces" / "tooling/scripts"
         scripts.mkdir(parents=True)
         cli = scripts / "dev.py"
         shutil.copyfile(self.cli, cli)

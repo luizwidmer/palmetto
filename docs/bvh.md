@@ -3,7 +3,7 @@
 **Status: measured.** This is a read-only inventory of the `*_bvh4.arc` packs that ship with the target console
 package. No archive, payload, carved file or key is in the repository; the tables below are aggregate counts,
 offsets and the few header bytes needed to describe the format. The packs were indexed with the fixed
-`tools/arc9_carve.py` from PR #90 (`--index-only`), whose decompressor advances by the bytes consumed instead of
+`tooling/arc9_carve.py` from PR #90 (`--index-only`), whose decompressor advances by the bytes consumed instead of
 the 1 MiB read size.
 
 The groups measured were `core_bvh4.arc` (8,297,921,520 bytes), `shared_minigame000_bvh4.arc` (61,987,040 bytes)
@@ -97,7 +97,7 @@ at commit `9639942de5a8e5b01d91977f60ed82cda22d5f41`: `XboxBvh4Header` at L2531 
 **Probe provenance.** The sample column is the 64-byte header at payload offset `0x100` of the complete `bvh4`
 stream at archive offset `0x4050` (16,464) in `shared_minigame000_bvh4.arc`, inflated size 655,360 bytes. The
 pack is read-only and is not in the repository; only these header fields and the four root-record words quoted
-below are reproduced. `tools/bvh_index.py` reports the same stream as `node_count=9943` and
+below are reproduced. `tooling/bvh_index.py` reports the same stream as `node_count=9943` and
 `tail_offset=636416`.
 
 The offsets are relative to the header at `0x100`, not to the start of the payload. In the sample,
@@ -108,7 +108,7 @@ indexer keeps its raw value; it is a signed offset from the start of the structu
 have it negative), and only the entries from the header end to `offsetToElements` are stored.
 
 **Measured over every stream (ASSET-329):** 272,864 complete `bvh4` streams, 271,627 in `core_bvh4.arc` and 1,237 in
-`shared_minigame000_bvh4.arc` (`story000_bvh4.arc` has none), indexed with `tools/bvh_index.py`. Counts only.
+`shared_minigame000_bvh4.arc` (`story000_bvh4.arc` has none), indexed with `tooling/bvh_index.py`. Counts only.
 
 | word | holds on |
 |---|---|
@@ -217,7 +217,7 @@ every record.
 ### 3.2a Descriptor templates and grouping (ASSET-321)
 
 **Status: measured** on all 24,832 "other descriptor" streams of `core_bvh4.arc` and all 85 of
-`shared_minigame000_bvh4.arc`, with `tools/bvh_groups.py` (below). Counts, offsets and widths only.
+`shared_minigame000_bvh4.arc`, with `tooling/bvh_groups.py` (below). Counts, offsets and widths only.
 
 All of them start with a zero `u64` and a `0x5000xxxx` word at `0x08`, as the 208-byte record does. That word
 points at a 32-byte block inside the stream whose `u32` at `+8` (the "page word") is `0x101` or `0x1`; the other
@@ -275,11 +275,11 @@ slot. ASSET-520 tests whether each matrix is the geometry transform of the BLAS 
 measured for N = 1.
 
 **Multi-slot geometry comparison.** Generate a local stream index with
-`python -I tools/arc9_carve.py <core_bvh4.arc> <index-dir> --index-only`. Supply that index and the manifests
+`python -I tooling/arc9_carve.py <core_bvh4.arc> <index-dir> --index-only`. Supply that index and the manifests
 from one or more primary-LOD `arc9dump models` exports, with each manifest beside its OBJs.
 
 ```text
-python -I tools/bvh_slot_check.py <core_bvh4.arc> <index-dir>/index.json <models>/manifest.json [...]
+python -I tooling/bvh_slot_check.py <core_bvh4.arc> <index-dir>/index.json <models>/manifest.json [...]
 ```
 
 For incremental scans, pass `--save-evidence <private-file>` when checking a window. Add another
@@ -365,7 +365,7 @@ transforms. None of the 22,301 table streams can be tied to a BVH buffer with wh
 word they own none.
 
 ```powershell
-python -I tools/bvh_groups.py <core_bvh4.arc> --json <temp>/groups.json   # the template, page word and buffer counts
+python -I tooling/bvh_groups.py <core_bvh4.arc> --json <temp>/groups.json   # the template, page word and buffer counts
 python -I tests/test_bvh_groups.py
 ```
 
@@ -497,7 +497,7 @@ structure, 2 to 21,814 leaves). The other two were identified later (below) and 
   about each axis (index 0, the identity, on every sample).
 
 **The packing holds on every stream (structure only).** The byte-exact match above covers 8 samples.
-`tools/bvh_packing_check.py` reads every stream with the same packing, without geometry (§7). It checks that the
+`tooling/bvh_packing_check.py` reads every stream with the same packing, without geometry (§7). It checks that the
 bytes form exactly one tree:
 
 * the level table is in order and ends before itself;
@@ -557,7 +557,7 @@ meshlet index buffer.
 
 **Which geometries the BVH leaves out (ASSET-349, measured; one rule with known exceptions).** The choice follows the
 render bucket of the geometry's material: the byte at `+57` of the shader record, with the bucket mask at `+60`
-(`third_party/arc9-explorer/Core/RageModelDecoder.cs:680`; `arc9dump models` writes the byte as `RenderBucket`). A
+(`vendor/arc9-explorer/Core/RageModelDecoder.cs:680`; `arc9dump models` writes the byte as `RenderBucket`). A
 geometry is kept when the low 7 bits of that byte are 0 or 3 and left out otherwise; bit 7 does not change the
 choice. What the buckets mean is not measured here (in earlier the engine games 1 and 2 are the alpha and decal buckets;
 that is a hypothesis for this one).
@@ -588,7 +588,7 @@ that is a hypothesis for this one).
   The note below says those 3 left-out geometries have the same bucket as the kept ones; that was not re-measured
   here, and if it holds they belong with the exceptions above.
 
-`tools/bvh_match.py` applies the rule by default whenever every geometry of a model has a bucket in the manifest
+`tooling/bvh_match.py` applies the rule by default whenever every geometry of a model has a bucket in the manifest
 (`--no-bucket-rule` turns it off; `--skip-shaders` still adds hashes on top).
 
 **How a match is verified.** A byte-identical library result checks the packing, not the geometry: the model and
@@ -780,15 +780,15 @@ into three 64 KiB/26 KiB chunks. These list the per-tile BVH packs; they are the
 
 ## 7. Tooling
 
-`tools/bvh_index.py` (standard library only) scans an ARC9 archive or a directory of `.arc`/`.bin` payloads and
+`tooling/bvh_index.py` (standard library only) scans an ARC9 archive or a directory of `.arc`/`.bin` payloads and
 writes JSON and/or CSV with offset, stored size, inflated size, kind, signature, node count, tail offset, the
 `XboxBvh4Header` fields, root pointer/index/type/invalid flag, declared bytes, bounds, descriptor key/transform
 and fill counts. It reads only headers and emits no payload bytes. The row's `version` is the low 16 bits of
 `flags` as an integer; `flags` keeps the full 32-bit word.
 
 ```powershell
-python -I tools/bvh_index.py <archive.arc> --out <temp>/index.json --csv <temp>/index.csv
-python -I tools/bvh_index.py <carve-dir> --out <temp>/index.json
+python -I tooling/bvh_index.py <archive.arc> --out <temp>/index.json --csv <temp>/index.csv
+python -I tooling/bvh_index.py <carve-dir> --out <temp>/index.json
 python -I tests/test_bvh_index.py
 ```
 
@@ -806,11 +806,11 @@ template, XML and XML fragments, the two-stream advance bug and CSV/JSON output.
 Measured with the tool on `shared_minigame000_bvh4.arc`: 2,560 streams, 59,142,787 stored, 970,044,012 inflated,
 1,237 complete `bvh4`, 1,233 `instance208`, 85 descriptors, 5 XML. That matches the carver summary exactly.
 
-`tools/bvh_groups.py` (standard library only) parses the descriptor streams into the two templates of §3.2a and
+`tooling/bvh_groups.py` (standard library only) parses the descriptor streams into the two templates of §3.2a and
 checks every instance descriptor against the BVH stream after it: N BLAS at the offsets its entries give. On the
 shared pack it reports 1,233 + 4 instance descriptors (1,233 + 8 BLAS tied) and 81 table streams with 317 items.
 
-`tools/bvh_rehydrate.py` (standard library only) turns a dehydrated BLAS back into the runtime layout on the CPU,
+`tooling/bvh_rehydrate.py` (standard library only) turns a dehydrated BLAS back into the runtime layout on the CPU,
 from float3 vertices, `uint16`/`uint32` or no indices and an optional 3x4 geometry transform, following the packing
 in §4a. On the 8 samples whose geometry was identified first, its output is byte-identical to what
 `XboxBvhBuilder.dll`'s `RehydrateRaytracingAccelerationStructureX` writes (384 to 2,512,512 bytes per structure). It
@@ -818,29 +818,29 @@ is the reference for checking the builder's `Box16Rehydration`, `Box32Rehydratio
 a GPU ([embedded_shaders.md](embedded_shaders.md)). Its tests are synthetic.
 
 The output keeps the console's size convention: `64 * (totalSizeIn64BNodes + 1)` bytes from the header, which is the
-`0x140 + 64 * n` end of §3.1 with the header at `0x100`. `tools/xdxr_bvh.py validate` and the GPU builder use
+`0x140 + 64 * n` end of §3.1 with the header at `0x100`. `tooling/xdxr_bvh.py validate` and the GPU builder use
 `64 * totalSizeIn64BNodes` for the whole structure instead, so `validate` reports a rehydrated console structure as
 not covering its buffer.
 
 ```powershell
-python -I tools/bvh_rehydrate.py <dehydrated.bin> --geom <vertices.f32>[,<indices.u32>] --out <rehydrated.bin>
-python -I tools/bvh_rehydrate.py <bvh4 stream> --header-offset 256 --geom ... --transform m00,...,m23 --out ...
+python -I tooling/bvh_rehydrate.py <dehydrated.bin> --geom <vertices.f32>[,<indices.u32>] --out <rehydrated.bin>
+python -I tooling/bvh_rehydrate.py <bvh4 stream> --header-offset 256 --geom ... --transform m00,...,m23 --out ...
 python -I tests/test_bvh_rehydrate.py
 ```
 
-`tools/bvh_geometry_check.py` says whether the geometry given to a rehydration is the geometry the BLAS was built
+`tooling/bvh_geometry_check.py` says whether the geometry given to a rehydration is the geometry the BLAS was built
 from, using what the dehydrated stream stores (§4a): leaves inside and equal to `sceneBounds`, stored box overrides
 consistent with the rehydrated slots, and paired leaves sharing an edge in the index buffer, which needs no positions.
 On the 10 samples the right geometry passes every check and a wrong decode fails (175 of 181 leaves outside, or 11 of
 23 overrides inconsistent).
 
 ```powershell
-python -I tools/bvh_geometry_check.py <dehydrated.bin> --geom <vertices.f32>[,<indices.u32>] [--json report.json]
+python -I tooling/bvh_geometry_check.py <dehydrated.bin> --geom <vertices.f32>[,<indices.u32>] [--json report.json]
 python -I tests/test_bvh_geometry_check.py
 ```
 
-`tools/bvh_packing_check.py` checks the §4a packing on every stream of a pack, without geometry. The checks are
-listed in §4a and in the tool's docstring. It scans an `.arc` the way `tools/bvh_index.py` does, in parallel windows
+`tooling/bvh_packing_check.py` checks the §4a packing on every stream of a pack, without geometry. The checks are
+listed in §4a and in the tool's docstring. It scans an `.arc` the way `tooling/bvh_index.py` does, in parallel windows
 (a stream belongs to the window it starts in). A `bvh4-chunk` is joined with the streams after it up to its
 declared end. The joined streams are counted as `continuation`, once each, even when one starts in the next window.
 The tool also takes carved stream files (`--header-offset 256` for a whole payload).
@@ -859,16 +859,16 @@ Measured on Windows with 14 workers:
 The exit status is 1 when a stream fails.
 
 ```powershell
-python -I tools/bvh_packing_check.py <core_bvh4.arc> --json <temp>/packing.json
-python -I tools/bvh_packing_check.py <stream.bin> --header-offset 256
+python -I tooling/bvh_packing_check.py <core_bvh4.arc> --json <temp>/packing.json
+python -I tooling/bvh_packing_check.py <stream.bin> --header-offset 256
 python -I tests/test_bvh_packing_check.py
 ```
 
-`tools/bvh_match.py` finds the drawable geometry a dehydrated BLAS was built from, on top of `arc9dump`'s model
+`tooling/bvh_match.py` finds the drawable geometry a dehydrated BLAS was built from, on top of `arc9dump`'s model
 export rather than a second decoder. It reads the leaf signature (triangles per geometry index, a leaf that holds two
 primitives counting as two), keeps every (drawable, model) of a `arc9dump models` manifest whose per-geometry triangle
 counts contain that signature as an ordered subsequence, and checks the survivors with
-`tools/bvh_geometry_check.py` from the model's exported OBJ and the 3x4 at `+0x50` of the instance descriptor. The
+`tooling/bvh_geometry_check.py` from the model's exported OBJ and the 3x4 at `+0x50` of the instance descriptor. The
 geometries the BVH leaves out are filtered by render bucket (§4a, ASSET-349: kept when the low 7 bits are 0 or 3);
 `--no-bucket-rule` turns that off and `--skip-shaders` adds shader name hashes on top (game data, local use only). A
 model with a geometry whose bucket the manifest cannot resolve keeps every geometry and the checks decide. Measured on the ten BLAS of the sample pack, against the first 1 GiB window of
@@ -884,22 +884,22 @@ valid archive - a slice of `levels.arc` cut at an offset has no `9FPR` header - 
 from its own compression blocks; a sub-range is never written to the index cache, which describes a whole file.
 
 ```powershell
-dotnet build tools/arc9dump/arc9dump.csproj -c Release
-dotnet tools/arc9dump/bin/Release/net8.0/arc9dump.dll models <levels.arc> <out> --start 3221225472 --length 1073741824
-python -I tools/bvh_match.py <dehydrated.bin> <out>/levels/models/manifest.json --descriptor <instance208.bin> [--no-bucket-rule] [--skip-shaders H,H,...]
+dotnet build tooling/arc9dump/arc9dump.csproj -c Release
+dotnet tooling/arc9dump/bin/Release/net8.0/arc9dump.dll models <levels.arc> <out> --start 3221225472 --length 1073741824
+python -I tooling/bvh_match.py <dehydrated.bin> <out>/levels/models/manifest.json --descriptor <instance208.bin> [--no-bucket-rule] [--skip-shaders H,H,...]
 python -I tests/test_bvh_match.py
 ```
 
 The sample set §4a was measured on can be rebuilt from any copy of the package, and nothing of it enters this
 repository:
 
-1. `tools/bvh_index.py` on `core_bvh4.arc` lists each `bvh4` stream and its descriptor row; the 3x4 at `+0x50` is
+1. `tooling/bvh_index.py` on `core_bvh4.arc` lists each `bvh4` stream and its descriptor row; the 3x4 at `+0x50` is
    the transform the matching needs, and a carved stream is passed to the next tools with `--header-offset 256`
    (or `0` when the structure was carved from its own header);
 2. export a window of `levels.arc` that holds that region's drawables (`arc9dump models`, `--start`/`--length`);
-3. `tools/bvh_match.py` identifies the drawable's geometries against it, and `--write <dir>` stores exactly those
+3. `tooling/bvh_match.py` identifies the drawable's geometries against it, and `--write <dir>` stores exactly those
    geometries as the float3 and uint32 buffers the next step takes, with the transform recorded in `export.json`;
-4. `tools/bvh_rehydrate.py` on the same stream with those buffers and `--transform` gives the runtime layout,
+4. `tooling/bvh_rehydrate.py` on the same stream with those buffers and `--transform` gives the runtime layout,
    byte-identical to what `XboxBvhBuilder.dll` writes on these samples (§4a).
 
 With the excluded shader hashes the run answers with one consistent candidate per sample; without them every
@@ -907,9 +907,9 @@ candidate is checked and the checks decide. Measured on the window above: 1,228 
 candidates from the signature per sample, and a rehydrated structure of `64 * (totalSizeIn64BNodes + 1)` bytes from
 the header. Its root parent-table entry is `0xFFFFFFFF` in all eight samples identified first (the entry at
 `offsetToParents` read signed, plus `4 * ((root - offsetToElements) / 64)`), which is what the GPU builder writes
-for a root and what `tools/xdxr_bvh.py validate` requires since #2625.
+for a root and what `tooling/xdxr_bvh.py validate` requires since #2625.
 
-`tools/image_bvh_census.py` (standard library only) counts how the game's shaders call `image_bvh*_intersect_ray`:
+`tooling/image_bvh_census.py` (standard library only) counts how the game's shaders call `image_bvh*_intersect_ray`:
 sites per form, the descriptor fields at each site, and how the four result words are read, as ratio (divided by word
 1), high_half (`sext(w1[31:16])` into `v_mul_i32_i24`), raw integer, raw float, raw other or select. It walks forward
 from each call with an EXEC lane rule (its docstring has the rule and the categories), and it prints counts,
@@ -927,14 +927,14 @@ unclassified. Of the 548 sites with such a raw-float read, 506 have every one af
 goes through memory.
 
 ```powershell
-python -I tools/image_bvh_census.py <work>/shaders/dxbc/disasm --out <temp>/image_bvh_census.json
+python -I tooling/image_bvh_census.py <work>/shaders/dxbc/disasm --out <temp>/image_bvh_census.json
 python -I tests/test_image_bvh_census.py
 ```
 
-## 7a. Building runtime BVHs: `tools/xdxr_bvh.py`
+## 7a. Building runtime BVHs: `tooling/xdxr_bvh.py`
 
 The Vulkan layer has to write acceleration structures in this runtime layout, because the game's traversal shaders
-read the nodes themselves (`docs/d3d12_vulkan.md` §4.8). `tools/xdxr_bvh.py` (standard library only) is the CPU
+read the nodes themselves (`docs/d3d12_vulkan.md` §4.8). `tooling/xdxr_bvh.py` (standard library only) is the CPU
 reference for that builder. It encodes a BLAS from triangles or a TLAS from instances, runs one traversal step
 with the semantics of the hardware instruction, walks a whole BVH to the closest hit, and checks a buffer's
 structure. Its fixtures are synthetic.
@@ -960,13 +960,13 @@ its entry distance is at most the ray extent, and the children are sorted with t
 (1,2). A triangle returns `(t_num, t_denom, i_num, j_num)`, or `(inf, 1, 0, 0)` on a miss. A box miss stays a miss
 for an unbounded ray: the public code's `<=` against an infinite extent would keep it.
 
-**Translator.** `image_bvh_intersect_ray` in `tools/rdna2spirv.py` used to follow RADV's software path on triangle
+**Translator.** `image_bvh_intersect_ray` in `tooling/rdna2spirv.py` used to follow RADV's software path on triangle
 nodes: slots (0, 1, 2) for every type and (V, W) as the barycentrics, because RADV builds only one triangle per
 node. It now reads the slots of the node type and applies the remap byte. AMD GPURT
 (`CalcTriangleCompressionVertexIndices`, `SwizzleBarycentrics`) and the XDXR path agree on both. TRI1 nodes
 therefore traverse to the right triangle (docs/design.md, Ray tracing row; `tests/semantic/test_image_bvh_tri.py`).
 Its four triangle words are the ones native RDNA2 returns (docs/design.md, Ray tracing row; measured on an RX 6800
-with the kernels `tools/bvh_tri_probe.py` builds, `tests/semantic/test_image_bvh_tri_hw.py`): k·(T, det, b_i, b_j)
+with the kernels `tooling/bvh_tri_probe.py` builds, `tests/semantic/test_image_bvh_tri_hw.py`): k·(T, det, b_i, b_j)
 with k = |d[kz]|³ on a hit, and on a miss copysign(inf, k·det) in word 0 with the other three kept, where the step
 above returns (inf, 1, 0, 0). A ray exactly on an edge or a vertex follows RDNA2's tie rule (docs/design.md, Ray
 tracing row): the zero edge from P to Q passes when ty = 0 ? sign(det)·tx > 0 : sign(d[kz])·sign(det)·ty > 0, with
@@ -974,7 +974,7 @@ tracing row): the zero edge from P to Q passes when ty = 0 ? sign(det)·tx > 0 :
 the z-dominant rows before they ran; the step above and RADV break those ties differently. Measured on gfx1030 only,
 with dyadic inputs.
 
-**GPU builder.** `runtime/src/xdxr_build.comp` with `xdxr_build.h` writes the same layout on the GPU, straight into
+**GPU builder.** `port/src/xdxr_build.comp` with `xdxr_build.h` writes the same layout on the GPU, straight into
 the destination buffer:
 
 1. one thread per triangle (TRI0 leaves, remap `0x09`) or per instance (128-byte records, the world-to-object
@@ -1049,7 +1049,7 @@ accumulators, so the rounding does not add up from level to level. The rounding 
 rounds in an implementation-defined way (AMD's driver rounds toward zero). Beyond the half range a bound becomes
 +-inf on its outward side and +-65504 on its inward side, so an empty slot (min +inf, max -inf) is still empty. A
 bound smaller than the smallest normal half (2^-14) in magnitude becomes 0 or +-2^-14, whichever is on its outward
-side, never a half denormal: a decoder that flushes those to zero would make the box smaller. `tools/xdxr_bvh.py`
+side, never a half denormal: a decoder that flushes those to zero would make the box smaller. `tooling/xdxr_bvh.py`
 `half_round` does the same, and `check-build` compares every BOX16 word bit for bit with `encode_box16` of the exact
 box of the triangles under that child. Top-level builds keep BOX32 whatever the flags, because they are in world
 space, where a half's step reaches 2 m at 2,048 m and 4 m at 4,096 m. An update must pass the same flags as its
@@ -1081,7 +1081,7 @@ triangle's leaf. On a sorted grid of 7,200 triangles, 2,208 of the 3,600 possibl
 consecutive elements: a radix-tree node often has an inner node among its children, and only triangle children
 pair). A refit rewrites every leaf as one triangle, so a structure that may be updated is
 not paired. **ASSUMPTION:** that pairing only siblings is close enough. The console builder's pairing rule is not
-traced; `tools/xdxr_bvh.py` `build_blas(pair=True)` pairs greedily over the whole mesh instead, and both traverse
+traced; `tooling/xdxr_bvh.py` `build_blas(pair=True)` pairs greedily over the whole mesh instead, and both traverse
 the same way. `check-build` compares barycentrics as well as hits, and checks that a paired case has TRI1 nodes and
 that cases that must not pair (other geometry, same direction) have none.
 
@@ -1125,8 +1125,8 @@ Not done yet: serialization; a compaction that reclaims the leaves that pairing 
 collapse of the radix tree, or treelet restructuring, would trim a few more steps.
 
 ```powershell
-python -I tools/xdxr_bvh.py selftest --seed 1 --rays 400   # build BLASes, compare closest hits with brute force
-python -I tools/xdxr_bvh.py validate <dumped BVH buffer>    # structural check of a runtime buffer
+python -I tooling/xdxr_bvh.py selftest --seed 1 --rays 400   # build BLASes, compare closest hits with brute force
+python -I tooling/xdxr_bvh.py validate <dumped BVH buffer>    # structural check of a runtime buffer
 python -I tests/test_xdxr_bvh.py
 ```
 
@@ -1148,7 +1148,7 @@ Measured on the 1.0.2.1 package with the tools above; counts and offsets only.
   CS (`deferred_tiled` family, 32-bit form) on the RTX 2060 returns the CPU walker's children in the same order at
   both. Its second traversal site still needs the executable.
 * The base and the address formula were also measured on the **native instruction**, with no emulation in the path:
-  `tools/hw_oracle` ran `image_bvh_intersect_ray` and `image_bvh64_intersect_ray` on gfx1036 (Ryzen 9 9950X3D iGPU,
+  `tooling/hw_oracle` ran `image_bvh_intersect_ray` and `image_bvh64_intersect_ray` on gfx1036 (Ryzen 9 9950X3D iGPU,
   driver 32.0.21030.2001) over hand-built box32 nodes, a decoy node at the buffer start and the real one at +0x1000.
   dword0 `(P >> 8) + 0x10` with node `0|5`, and dword0 `(P >> 8) + 0x08` with node `0x800>>3|5`, both traverse the
   node at `P + 0x1000`: address = base × 256 + (node & ~7) × 8, and the base and the node offset add. The control

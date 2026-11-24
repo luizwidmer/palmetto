@@ -1,4 +1,4 @@
-"""Unit tests for tools/pe_inspect.py: standard-library PE parsing, directory walks and the report it writes.
+"""Unit tests for tooling/pe_inspect.py: standard-library PE parsing, directory walks and the report it writes.
 
 The fixtures are built here, byte by byte, so the test needs no game files and no third-party packages. The 32-bit
 image exists because a delay-import descriptor without dlattrRva stores virtual addresses in 32-bit fields: that form
@@ -19,7 +19,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 

@@ -1,4 +1,4 @@
-"""scripts/check_no_game_data.py catches game-data magics under any file name.
+"""tooling/scripts/check_no_game_data.py catches game-data magics under any file name.
 
     python -I tests/test_check_no_game_data.py
 
@@ -25,7 +25,7 @@ import zipfile
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPT = os.path.join(ROOT, "scripts", "check_no_game_data.py")
+SCRIPT = os.path.join(ROOT, "tooling", "tooling/scripts", "check_no_game_data.py")
 
 
 def pe_header(e_lfanew=0x80):

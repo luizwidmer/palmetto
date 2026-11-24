@@ -10,7 +10,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from test_navmesh_decode import build_navmesh, make_arc, nd
 
-TOOL = HERE.parent / "tools" / "navmesh_tile_obj.py"
+TOOL = HERE.parent / "tooling" / "navmesh_tile_obj.py"
 
 
 def read_obj(path):

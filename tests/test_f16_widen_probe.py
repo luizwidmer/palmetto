@@ -1,4 +1,4 @@
-"""CPU-only unit tests for tools/f16_widen_probe.py: the models, the sweep through a fake oracle, and the CLI contracts."""
+"""CPU-only unit tests for tooling/f16_widen_probe.py: the models, the sweep through a fake oracle, and the CLI contracts."""
 
 import io
 import json
@@ -12,7 +12,7 @@ import unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(REPO, "tools")
+TOOLS = os.path.join(REPO, "tooling")
 PROBE = os.path.join(TOOLS, "f16_widen_probe.py")
 
 sys.dont_write_bytecode = True

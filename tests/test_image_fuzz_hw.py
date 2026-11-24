@@ -1,4 +1,4 @@
-"""tools/image_fuzz.py --oracle hw without a GPU: the T# words per GPU family (exact dwords), the texture layout, the
+"""tooling/image_fuzz.py --oracle hw without a GPU: the T# words per GPU family (exact dwords), the texture layout, the
 native kernel text, the model's dwords, the negative control and the exit-77 contract. The last test runs on the
 hardware when the oracle tools are present and is skipped otherwise.
 """
@@ -12,7 +12,7 @@ import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import image_fuzz as imf  # noqa: E402
 from hw_oracle import asm, runner, tsharp  # noqa: E402
 

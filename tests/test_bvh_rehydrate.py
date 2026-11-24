@@ -1,4 +1,4 @@
-"""Synthetic dehydrated BLASes for tools/bvh_rehydrate.py: leaves, box groups and overrides, BOX16 rounding, the leaf
+"""Synthetic dehydrated BLASes for tooling/bvh_rehydrate.py: leaves, box groups and overrides, BOX16 rounding, the leaf
 frame, the geometry transform, chunking, errors and the command line. No game data is read.
 
     python -I tests/test_bvh_rehydrate.py
@@ -13,7 +13,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import bvh_rehydrate as R  # noqa: E402
 

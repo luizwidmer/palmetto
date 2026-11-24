@@ -1,4 +1,4 @@
-"""Unit tests for tools/bcpack_tool.py BCPack inspection, decode and profiling tool.
+"""Unit tests for tooling/bcpack_tool.py BCPack inspection, decode and profiling tool.
 
 Usage:
     python -I tests/test_bcpack_tool.py
@@ -13,7 +13,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 TESTS = os.path.join(ROOT, "tests")
 for p in (TOOLS, TESTS):
     if p not in sys.path:

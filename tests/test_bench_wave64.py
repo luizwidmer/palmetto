@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path[:0] = [os.path.join(ROOT, "scripts"), os.path.join(ROOT, "tools")]
+sys.path[:0] = [os.path.join(ROOT, "tooling/scripts"), os.path.join(ROOT, "tooling")]
 import bench_wave64  # noqa: E402
 import rdna2spirv  # noqa: E402
 
@@ -183,7 +183,7 @@ class DriverSelectors(unittest.TestCase):
             launch.return_value.stdout = output
             launch.return_value.stderr = ""
             launch.return_value.returncode = 0
-            timing, output_hash, device = bench_wave64.run("tools", "test.spv", 4, 2, None, True)
+            timing, output_hash, device = bench_wave64.run("tooling", "test.spv", 4, 2, None, True)
         self.assertEqual((timing, output_hash, device), ((1.0, 0.9), "abc", "stub GPU"))
         self.assertEqual(launch.call_args.kwargs["env"]["VK_LOADER_DRIVERS_SELECT"], "custom.json")
 

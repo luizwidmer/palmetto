@@ -4,7 +4,7 @@ The package's FSR upscaler, `amd_fidelityfx_upscaler_xbox.dll`, carries 29 compu
 `SFI0`, `ISG1`, `OSG1`, `PSV0`, `RTS0`, `HASH` and `ACCC` parts and no `DXIL` ([d3d12_command_objects.md](d3d12_command_objects.md)
 §3.5a). The `ACCC` part is an `FSPX` payload: a small directory around a precompiled RDNA2 program. It is not the
 `XBCH`/`FSSM` format of the game's own shaders ([design.md](design.md)), but it holds the same kind of program, and
-`tools/fspx_unpack.py` lays it out so `tools/rdna2spirv.py` translates it like a game compute shader.
+`tooling/fspx_unpack.py` lays it out so `tooling/rdna2spirv.py` translates it like a game compute shader.
 
 Everything below was measured on the 1.0.2.1 package's DLL (SHA-256 `faff02f2…a75fa`). "Read from the DLL" means
 Ghidra 12.2 output (through REA) for the named function; "measured" means checked on all 29 programs unless a count is
@@ -36,7 +36,7 @@ The DLL's reader (RVA 0x1a20, read from the DLL) clamps the total to the buffer,
 - 5 when kind 0 or kind 6 is missing or empty, else 0.
 
 It skips an entry whose range starts inside the directory or ends past the total, and keeps the last entry of each
-kind 0, 1, 6 and 7; other kinds are ignored. `tools/fspx_unpack.py`'s `parse_fspx` follows the same rules and codes.
+kind 0, 1, 6 and 7; other kinds are ignored. `tooling/fspx_unpack.py`'s `parse_fspx` follows the same rules and codes.
 
 The pipeline function (RVA 0x4aa0, read from the DLL) accepts either a bare `FSPX` payload or a `DXBC` container whose
 `ACCC` part is one. It copies kind 6 into an `XMemAlloc` block (size rounded up to 256 bytes, attributes
@@ -131,11 +131,11 @@ program whose kind 0 is too short for word 4 keeps the code heuristic.
   - They carry the container's shader hash. Measured: the low halves of words 0 and 3 and the literals in words 2 and
     5 equal the 16 bytes after kind 7's `0x43` word, which are the digest in the container's `HASH` part, in all 29.
   - `llvm-mc` rejects them. Measured on RDNA2 hardware (`gfx1031`, AMD Radeon RX 6700 XT, driver 26.11.2, through
-    `tools/fspx_prologue_probe.py` / `tools/hw_oracle`): in wave32 and wave64 across 5 synthetic 36-byte prologues
+    `tooling/fspx_prologue_probe.py` / `tooling/hw_oracle`): in wave32 and wave64 across 5 synthetic 36-byte prologues
     (50 positive checks and 8 negative controls), executing the raw words leaves VGPRs (`v0`, `v1`, `v8`..`v15`),
     SGPRs (`s[0:1]`, `s4`..`s15`), `M0`, `VCC`, `EXEC` (including inactive lanes across 64 threads) and `SCC` (both 0
     and 1) unchanged, and execution resumes cleanly at `+36` bytes. So they are hardware no-ops on RDNA2.
-  - `tools/fspx_unpack.py` disassembles from the end of the prologue.
+  - `tooling/fspx_unpack.py` disassembles from the end of the prologue.
 - **Target.** The programs use `v_dot4_i32_i8` (1,458 times) and `v_dot4c_i32_i8` (25,813 times), which fits the
   provider's name (`FSR4_Int8`). `llvm-mc` (LLVM 23.1.5) decodes them for `gfx1011`, `gfx1012`, `gfx1030`, `gfx1031`,
   `gfx1033`, `gfx1034` and `gfx1036`, but not for `gfx1010`, `gfx1013` (the target `shader_disasm.py` uses for the
@@ -145,7 +145,7 @@ program whose kind 0 is too short for word 4 keeps the code heuristic.
 - **What llvm-mc still rejects.** With `gfx1030`, 21 of the 29 decode with no invalid word. The other 89 words, in 8
   programs, are all VOP3P opcode 0x16 with `op_sel` 2 and `op_sel_hi` 5. That is the opcode of the 1,458
   `v_dot4_i32_i8` that `llvm-mc` does decode, all of which have `op_sel` 0.
-  - Measured on RDNA2 hardware (gfx1036, through `tools/hw_oracle`, the instruction given as two raw words): with
+  - Measured on RDNA2 hardware (gfx1036, through `tooling/hw_oracle`, the instruction given as two raw words): with
     `op_sel` 2 and `op_sel_hi` 5 the result is the dot product with the two 16-bit halves of the second source
     exchanged, in all 5 operand sets (4 of them give another word under the plain rule). So `op_sel` selects halves
     here as it does for the packed 16-bit ops. The words are in `tests/semantic/test_alu_dot4_i8.py`.
@@ -165,10 +165,10 @@ program whose kind 0 is too short for word 4 keeps the code heuristic.
 
 ## Build and run-time lookup
 
-**Build.** `make_game.py`'s `shaders` stage, after the game's own shaders, runs `tools/fspx_unpack.py --disasm` on
-the package's `amd_fidelityfx_upscaler_xbox.dll` into `<work>/shaders/fspx/` and `tools/rdna2spirv.py` on that
+**Build.** `build_port.py`'s `shaders` stage, after the game's own shaders, runs `tooling/fspx_unpack.py --disasm` on
+the package's `amd_fidelityfx_upscaler_xbox.dll` into `<work>/shaders/fspx/` and `tooling/rdna2spirv.py` on that
 disassembly into `<work>/shaders/spirv/fspx/`, with the same `--wave64-emulate` and fallback flags. Each index entry
-of a program without an FSSM blob gets two keys (`tools/shader_meta.py`):
+of a program without an FSSM blob gets two keys (`tooling/shader_meta.py`):
 
 - `fspx_code_sha256`, the SHA-256 of `fspx/<name>.code`: the whole kind-6 entry, prologue and padding included;
 - `fspx_state_sha256`, the SHA-256 of `fspx/<name>.state`: the kind-0 entry (dispatch state) as it is.
@@ -183,7 +183,7 @@ The step is redone as a whole when the DLL, the unpacking or translating tools, 
 flags change (`fspx_build.json`, written last); it never makes the game's shaders translate again. A package without
 the DLL skips it.
 
-**Run time.** `ShaderLibrary::load(dir)` (`runtime/src/shader_library.h`) reads `<dir>/index.json` and then, when it
+**Run time.** `ShaderLibrary::load(dir)` (`port/src/shader_library.h`) reads `<dir>/index.json` and then, when it
 is there, `<dir>/fspx/index.json`, whose entries are named `fspx/<name>`. A missing or unreadable `fspx/index.json`
 leaves the main index loaded. Entries are found by `fssm_sha256` or by `fspx_code_sha256`, in two separate tables.
 `compute_program()` decides what a compute PSO's bytecode is looked up by:
@@ -223,14 +223,14 @@ and `RSRC2`).
 
 ## Translation status
 
-With `tools/fspx_unpack.py --disasm` and `tools/rdna2spirv.py` on the 29 programs (`main` at `aa2988cc` with the
+With `tooling/fspx_unpack.py --disasm` and `tooling/rdna2spirv.py` on the 29 programs (`main` at `aa2988cc` with the
 `v_fma_mix*` literal repair in [design.md](design.md), "Printed encodings"):
-**Wave size.** On `main` at `aa2988cc`, `make_game.py`'s FSPX step translates 26 of the 29, and each now gets the
+**Wave size.** On `main` at `aa2988cc`, `build_port.py`'s FSPX step translates 26 of the 29, and each now gets the
 wave size of its dispatch state. Before, the code heuristic gave 4 of the 26 the other size: one wave64 program
 was translated as wave32, and three wave32 programs as wave64, because they write `vcc` with `s_mov_b64`. The
 translated and `spirv-val`-valid count is the same (26) either way. The breakdown below was measured when 17 translated.
 
-With `tools/fspx_unpack.py --disasm` and `tools/rdna2spirv.py` on the 29 programs:
+With `tooling/fspx_unpack.py --disasm` and `tooling/rdna2spirv.py` on the 29 programs:
 
 - **27 translate and pass `spirv-val`**, 11 of the 13 programs that use dot4 among them (design.md, "Signed-byte
   dot products"). Without the repair, 26: the `v_fma_mix_f32` it is for is refused.

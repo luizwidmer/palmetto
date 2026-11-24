@@ -7,8 +7,8 @@ hold counts, offsets, chunk names and module identifiers.
 
 ## 1. Why they matter
 
-`tools/shader_carve.py` carves `shaders.arc` only. Two DLLs in the same package carry compute programs of their
-own, and `make_game.py`'s `shaders` stage translates both sets after the game's shaders (section 7 for the
+`tooling/shader_carve.py` carves `shaders.arc` only. Two DLLs in the same package carry compute programs of their
+own, and `build_port.py`'s `shaders` stage translates both sets after the game's shaders (section 7 for the
 builder, [fspx.md](fspx.md) for FidelityFX):
 
 * `XboxBvhBuilder.dll`, Microsoft's XDXR acceleration-structure builder. Its constructor creates compute PSOs
@@ -16,12 +16,12 @@ builder, [fspx.md](fspx.md) for FidelityFX):
 * `amd_fidelityfx_upscaler_xbox.dll`, the FidelityFX 4.1.1 upscaler. Its programs are the `ACCC`/`FSPX` format
   covered in [fspx.md](fspx.md); this note only counts them.
 
-`tools/pe_shader_containers.py` scans a binary for DXBC containers, validates the chunk table, reads the `ILDN`
+`tooling/pe_shader_containers.py` scans a binary for DXBC containers, validates the chunk table, reads the `ILDN`
 module name and reports what each container carries. `--extract` writes the containers and an `index.json` the
 translator reads; extracted shaders are game data and must stay in the user's work folder.
 
 ```sh
-python -I tools/pe_shader_containers.py <dll> --json <work>/containers.json --extract <work>/embedded/dxbc
+python -I tooling/pe_shader_containers.py <dll> --json <work>/containers.json --extract <work>/embedded/dxbc
 ```
 
 ## 2. Inventory
@@ -42,16 +42,16 @@ validator rejects it (the scan reports both counts).
 ### Retail executable (`game.exe`, RT-5)
 
 Scanning the retail executable (120,181,760 bytes, SHA-256 `e95020b2fa4a721db3df59fdecf75621730ac559d8835252f6c3b658d5a08993`)
-with `tools/pe_shader_containers.py` finds **10** valid DXBC containers (9,520 bytes total, file offsets
+with `tooling/pe_shader_containers.py` finds **10** valid DXBC containers (9,520 bytes total, file offsets
 `0x688cd3c`..`0x688fdf6`, sizes 924–992 bytes) and 1 rejected `DXBC` hit:
 
 * **Stages (`PSV0`):** **1** vertex shader (`0x688cd3c`, 992 bytes) and **9** pixel shaders (924–980 bytes). Unlike the
   DLL containers above, none carries `ILDN`, `STAT`, `RTS0`, or LLVM bitcode (`has_bitcode = false`). All 10 carry
   console-only `XBCH` (`XDAT` tag `0x0d`, 307–368 bytes) and `NOBC` (tag `0x07`, 28 bytes), plus a 12-byte `PRIV` chunk.
-* **Translation and GPU check:** `tools/pe_shader_containers.py --extract` previously hardcoded `"stage": "cs"` in
+* **Translation and GPU check:** `tooling/pe_shader_containers.py --extract` previously hardcoded `"stage": "cs"` in
   `index.json`, causing `rdna2spirv.py` to reject all 10 with `CS group size`. With `stage` read from `PSV0`, all 10
-  unpack via `tools/fssm_unpack.py` (10/10 `FSSM`, 1,245–4,176 bytes), disassemble cleanly via `tools/shader_disasm.py --backend python`
-  (10/10 clean), translate via `tools/rdna2spirv.py` (10/10 translated, all wave64 tier A), and pass `vk_pipeline_check`
+  unpack via `tooling/fssm_unpack.py` (10/10 `FSSM`, 1,245–4,176 bytes), disassemble cleanly via `tooling/shader_disasm.py --backend python`
+  (10/10 clean), translate via `tooling/rdna2spirv.py` (10/10 translated, all wave64 tier A), and pass `vk_pipeline_check`
   on an NVIDIA GeForce RTX 5060 Laptop GPU (driver `617.14`, Windows 11): **10/10 modules and 10/10 pipelines OK** (1 VS, 9 PS, 0 failed, 0 skipped).
 
 **Every one of the 52 containers carries two representations of its program:**
@@ -138,9 +138,9 @@ that expands to `FSSM` ([fssm_crosscheck.md](fssm_crosscheck.md)). On all 52 con
 
 | step | result |
 |---|---|
-| `tools/fssm_unpack.py` | **52/52** decompress to a valid `FSSM` blob (716 B to 101,320 B, median 2,200 B) |
-| `tools/shader_disasm.py --mcpu gfx1013` | **52/52** disassemble; 42 with no invalid word, 10 with invalid words in the code |
-| `tools/rdna2spirv.py` | **51** translate and pass `spirv-val` (`main` `49475796`) |
+| `tooling/fssm_unpack.py` | **52/52** decompress to a valid `FSSM` blob (716 B to 101,320 B, median 2,200 B) |
+| `tooling/shader_disasm.py --mcpu gfx1013` | **52/52** disassemble; 42 with no invalid word, 10 with invalid words in the code |
+| `tooling/rdna2spirv.py` | **51** translate and pass `spirv-val` (`main` `49475796`) |
 
 When this page was first written, 42 translated and 10 stopped at four rules. Three of those rules have landed since
 (`427c1376`, from #1968), and one program still waits on a fifth rule:
@@ -173,12 +173,12 @@ The single remaining untranslated program stops at one rule:
 Reproduction, after `--extract` above:
 
 ```sh
-python -I tools/fssm_unpack.py <work>/embedded/dxbc
-python -I tools/shader_disasm.py <work>/embedded/dxbc/fssm --out <work>/embedded/dxbc/disasm --mcpu gfx1013
-python -I tools/rdna2spirv.py <work>/embedded/dxbc/disasm --out <work>/embedded/spirv
+python -I tooling/fssm_unpack.py <work>/embedded/dxbc
+python -I tooling/shader_disasm.py <work>/embedded/dxbc/fssm --out <work>/embedded/dxbc/disasm --mcpu gfx1013
+python -I tooling/rdna2spirv.py <work>/embedded/dxbc/disasm --out <work>/embedded/spirv
 ```
 
-`make_game.py` runs the same four tools as a build step (section 7).
+`build_port.py` runs the same four tools as a build step (section 7).
 
 ## 5. What this changes
 
@@ -197,7 +197,7 @@ python -I tools/rdna2spirv.py <work>/embedded/dxbc/disasm --out <work>/embedded/
   output. Which of them the game actually creates is a call-site question (RT-5). The module-to-pipeline order
   above comes from `ILDN`, not from a runtime trace. The `STAT` metadata-only shape is consistent with reflection,
   but whether the builder consumes it has not been measured.
-* **They run on a GPU (TEST-594).** `tools/bvh_gpu_smoke.py` translates them from the package and runs each through
+* **They run on a GPU (TEST-594).** `tooling/bvh_gpu_smoke.py` translates them from the package and runs each through
   `vk_compute_test`. Each program reads its root arguments from a table at `s[0:1]`, the heap base there, which the
   tool seeds with `VKC_HEAP_INIT`: every table word points past the table into zeros. **All 49 that aren't
   rehydration programs pass**: exit 0, no Khronos validation error, and the same heap bytes on a second run (AMD
@@ -221,21 +221,21 @@ python -I tools/rdna2spirv.py <work>/embedded/dxbc/disasm --out <work>/embedded/
     table that other waves are reading, so its output differs between runs. That is the test input, not the
     translator; the tool's default avoids it.
 * **What is still open.** The other programs' outputs (the sorts, prefix sums, builders, refit and loaders) are not
-  checked against a reference yet; the rehydration trio has one in TEST-376 (`tools/bvh_rehydrate.py`); `LeafRehydration` does not finish within 60 s with either table described
+  checked against a reference yet; the rehydration trio has one in TEST-376 (`tooling/bvh_rehydrate.py`); `LeafRehydration` does not finish within 60 s with either table described
   above. Which of them the game actually creates is a call-site question (RT-5). The module-to-pipeline order
   above comes from `ILDN`, not from a runtime trace. The `STAT` bitcode and the `0x07 NOBC` record are not
   explained.
 
 ## 6. Tool and tests
 
-`tools/bvh_gpu_smoke.py --game-dir <package> [--max-shared-memory N] [--checked] [--json report.json]` reproduces the
+`tooling/bvh_gpu_smoke.py --game-dir <package> [--max-shared-memory N] [--checked] [--json report.json]` reproduces the
 GPU run above: the extraction and translation of §4, then two dispatches per program, and with `--checked` the six
 byte-exact cases. Its report holds module names, statuses
 and counts only. `tests/test_bvh_gpu_smoke.py` checks the heap image, the word count and the judging of runs with a
 fake `vk_compute_test`, and the checked cases' inputs and judging (a fake that does what each case describes passes,
 one wrong byte fails), without a GPU or game files.
 
-`tools/pe_shader_containers.py` is standard library only and reads the file, never runs it. It accepts a
+`tooling/pe_shader_containers.py` is standard library only and reads the file, never runs it. It accepts a
 container only when the chunk table is sorted, 4-byte aligned, entirely inside the declared total and its last
 chunk ends exactly at that total; that is what rejects the FSR DLL's `DXBC` immediate. The synthetic tests in
 `tests/test_pe_shader_containers.py` build containers by hand (no game data) and cover the accepted layout, a
@@ -243,15 +243,15 @@ bare magic, a truncated chunk, an `ACCC`/`FSPX` container, the `ILDN` name and t
 
 ## 7. Build step and run-time lookup
 
-**Build (D3D-557).** `make_game.py`'s `shaders` stage, after the game's own shaders and the FidelityFX step, runs
+**Build (D3D-557).** `build_port.py`'s `shaders` stage, after the game's own shaders and the FidelityFX step, runs
 `bvh_shaders()` on the package's `XboxBvhBuilder.dll`. It is the recipe of section 4, with the extraction index
 passed along so that each tool reads only what the one before it wrote:
 
 ```sh
-python -I tools/pe_shader_containers.py <game>/XboxBvhBuilder.dll --extract <work>/shaders/bvh
-python -I tools/fssm_unpack.py <work>/shaders/bvh --carve-index <work>/shaders/bvh/index.json
-python -I tools/shader_disasm.py <work>/shaders/bvh/fssm --unpack-index <work>/shaders/bvh/fssm_index.json --out <work>/shaders/bvh/disasm --mcpu gfx1013
-python -I tools/rdna2spirv.py <work>/shaders/bvh/disasm --out <work>/shaders/spirv/bvh --no-asm --max-shared-memory 32768
+python -I tooling/pe_shader_containers.py <game>/XboxBvhBuilder.dll --extract <work>/shaders/bvh
+python -I tooling/fssm_unpack.py <work>/shaders/bvh --carve-index <work>/shaders/bvh/index.json
+python -I tooling/shader_disasm.py <work>/shaders/bvh/fssm --unpack-index <work>/shaders/bvh/fssm_index.json --out <work>/shaders/bvh/disasm --mcpu gfx1013
+python -I tooling/rdna2spirv.py <work>/shaders/bvh/disasm --out <work>/shaders/spirv/bvh --no-asm --max-shared-memory 32768
 ```
 
 The last line also gets `--wave64-emulate` and the fallback flags of the build, like the game's shaders.
@@ -290,7 +290,7 @@ The last line also gets `--wave64-emulate` and the fallback flags of the build, 
   emulated modules made at the default cap, `RadixAlloc` is refused (`declares 37084 bytes of workgroup memory`,
   `0x80004001`) after 28 creations.
 
-**Run time.** `ShaderLibrary::load(dir)` (`runtime/src/shader_library.h`) reads `<dir>/index.json`, then
+**Run time.** `ShaderLibrary::load(dir)` (`port/src/shader_library.h`) reads `<dir>/index.json`, then
 `<dir>/fspx/index.json` and `<dir>/bvh/index.json` when they are there. The builder's entries are named
 `bvh/<name>`, the path of their module below `<dir>`, and go into the table of the game's shaders, so
 `create_compute` finds them through the lookup it already had (`compute_program()` gives an `FSSM` program, looked up
@@ -369,7 +369,7 @@ compile:
   few more blocks multiply the time. That looks like growth with the paths through the program rather than with
   its size, which these numbers suggest and do not show.
 * **Nothing done to the module from outside changed that.** `spirv-opt -O` (1,350,016 B) and the local SSA
-  rewrite with dead-code elimination (`--ssa-rewrite` after the two local eliminations and before
+  rewrite with dead-code elimination (the SSA rewrite pass after the two local eliminations and before
   `--eliminate-dead-code-aggressive`, 1,120,512 B) validate and did not finish in 120 s;
   `--eliminate-dead-branches --merge-blocks --cfg-cleanup` returns the module unchanged. Marking every load and
   store of the dispatch variables `%pc` and `%done` `Volatile`, which keeps the module equivalent, did not finish in

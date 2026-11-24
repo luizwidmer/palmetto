@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 // Exercise the viewer's actual loading and streaming code without WebGL, a network or game data.
-const html = readFileSync(join(__dirname, '..', 'viewer', 'index.html'), 'utf8');
+const html = readFileSync(join(__dirname, '..', 'app', 'index.html'), 'utf8');
 const viewerModule = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1].replace(/^import .*;$/gm, '');
 const worldBegin = html.indexOf('// ---------- world description ----------');
 const worldEnd = html.indexOf('// Deterministic test terrain:', worldBegin);

@@ -1,4 +1,4 @@
-"""Tests for tools/world_index.py, built from synthetic 0x7a headers (no game data).
+"""Tests for tooling/world_index.py, built from synthetic 0x7a headers (no game data).
 
     python -I tests/test_world_index.py
 """
@@ -17,12 +17,12 @@ import zlib
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import report_paths
 
 
 def load_tool():
-    path = os.path.join(ROOT, "tools", "world_index.py")
+    path = os.path.join(ROOT, "tooling", "world_index.py")
     spec = importlib.util.spec_from_file_location("world_index_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -913,7 +913,7 @@ class WorldIndexTest(unittest.TestCase):
                 self.assertEqual((agg.counts, agg.incomplete), ({}, 1))
 
     def test_archetypes_out_is_a_world_names_input(self):
-        spec = importlib.util.spec_from_file_location("world_names_for_index", os.path.join(ROOT, "tools", "world_names.py"))
+        spec = importlib.util.spec_from_file_location("world_names_for_index", os.path.join(ROOT, "tooling", "world_names.py"))
         WN = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(WN)
         agg = WI.ArchetypeCounts()

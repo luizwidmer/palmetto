@@ -1,4 +1,4 @@
-"""scripts/build_runtime.ps1's cl.exe fallback builds every GPU test harness the Python tools need (no build run).
+"""tooling/scripts/build_runtime.ps1's cl.exe fallback builds every GPU test harness the Python tools need (no build run).
 
 The fallback is what runs when Visual Studio has no "C++ CMake tools" component. Without these programs,
 check.py / run_gpu_tests.py stop with "missing vk_compute_test", and so do the fuzzers.
@@ -14,12 +14,12 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT / "scripts"), str(ROOT / "runtime" / "test" / "shaders"), str(ROOT / "tools")]
+sys.path[:0] = [str(ROOT / "tooling" / "tooling/scripts"), str(ROOT / "port" / "test" / "shaders"), str(ROOT / "tooling")]
 import check  # noqa: E402
 import image_fuzz  # noqa: E402
 import run_gpu_tests  # noqa: E402
 
-SCRIPT = ROOT / "scripts" / "build_runtime.ps1"
+SCRIPT = ROOT / "tooling" / "tooling/scripts" / "build_runtime.ps1"
 
 
 def fallback_body(text: str) -> str:
@@ -41,29 +41,29 @@ class FallbackBuildsTheHarnesses(unittest.TestCase):
         """A harness run_gpu_tests.py or check.py starts by name, but the fallback did not build, fails its test
         with "could not start" (ps_ssharp: vk_sampler_test.exe, WinError 2)."""
         named = set()
-        for path in (ROOT / "scripts" / "run_gpu_tests.py", ROOT / "runtime" / "test" / "shaders" / "check.py"):
+        for path in (ROOT / "tooling" / "tooling/scripts" / "run_gpu_tests.py", ROOT / "port" / "test" / "shaders" / "check.py"):
             named |= set(re.findall(r'"(vk_[a-z0-9_]+)"', path.read_text(encoding="utf-8")))
-        harnesses = {n for n in named if (ROOT / "runtime" / "test" / f"{n}.cpp").is_file()}
+        harnesses = {n for n in named if (ROOT / "port" / "test" / f"{n}.cpp").is_file()}
         self.assertIn("vk_sampler_test", harnesses)
         self.assertEqual(harnesses - self.programs, set(), "missing from build_runtime.ps1's cl.exe fallback")
 
     def test_the_fallback_builds_every_harness_a_tool_starts(self):
-        """EGEN-FALLBACK-SANDBOX-SWEEP: tools/sandbox.py starts runtime/build/vk_sandbox(.exe) and ends at
-        "unsupported: vk_sandbox is not built" without it; tools/ps_sweep.py --exe and
-        tools/ab_control_flow.py --all-attachments start runtime/build/vk_ps_sweep.exe. CMake builds both, the cl.exe
+        """EGEN-FALLBACK-SANDBOX-SWEEP: tooling/sandbox.py starts port/build/vk_sandbox(.exe) and ends at
+        "unsupported: vk_sandbox is not built" without it; tooling/ps_sweep.py --exe and
+        tooling/ab_control_flow.py --all-attachments start port/build/vk_ps_sweep.exe. CMake builds both, the cl.exe
         fallback built neither, so neither pixel check of translated shaders could run from a fallback build."""
         named = set()
-        for folder in ("tools", "scripts", "runtime/test/shaders"):
+        for folder in ("tooling", "tooling/scripts", "port/test/shaders"):
             for path in (ROOT / folder).rglob("*.py"):
                 named |= set(re.findall(r'"(vk_[a-z0-9_]+)"', path.read_text(encoding="utf-8")))
-        harnesses = {n for n in named if (ROOT / "runtime" / "test" / f"{n}.cpp").is_file()}
+        harnesses = {n for n in named if (ROOT / "port" / "test" / f"{n}.cpp").is_file()}
         self.assertTrue({"vk_sandbox", "vk_ps_sweep"} <= harnesses)
         self.assertEqual(harnesses - self.programs, set(), "missing from build_runtime.ps1's cl.exe fallback")
 
     def test_the_launcher_compiles_every_source_cmake_gives_palmetto(self):
         """BUILD-680: main.cpp calls rt::fs::configure, but the fallback left out shims/file_system.cpp (LNK2019).
         Every source of CMake's add_executable(palmetto ...) must be in the fallback's launcher list ($files)."""
-        cmake = (ROOT / "runtime" / "CMakeLists.txt").read_text(encoding="utf-8")
+        cmake = (ROOT / "port" / "CMakeLists.txt").read_text(encoding="utf-8")
         block = re.search(r"add_executable\(palmetto\s+(.*?)\)", cmake, re.S).group(1)
         wanted = {item.replace("/", "\\") for item in block.split() if item.endswith(".cpp")}
         files = re.search(r"\$files = (.*?) \| ForEach-Object", self.body).group(1)
@@ -76,13 +76,13 @@ class FallbackBuildsTheHarnesses(unittest.TestCase):
         self.assertTrue(sources)
         for name in sources:
             with self.subTest(source=name):
-                self.assertTrue((ROOT / "runtime" / "test" / name).is_file())
+                self.assertTrue((ROOT / "port" / "test" / name).is_file())
 
     def test_the_pipeline_checker_gets_the_stack_reserve_cmake_gives_it(self):
         """BUILD-1457: a driver compiles on vk_pipeline_check's threads, and AMD's Windows compiler overflows the
         1 MB PE default. CMake links the checker with /STACK:<PALMETTO_PIPELINE_CHECK_STACK>; the fallback has to pass
         the same number on the checker's own cl line (a /link option applies to that one program)."""
-        cmake = (ROOT / "runtime" / "CMakeLists.txt").read_text(encoding="utf-8")
+        cmake = (ROOT / "port" / "CMakeLists.txt").read_text(encoding="utf-8")
         reserve = re.search(r"set\(PALMETTO_PIPELINE_CHECK_STACK (\d+)\)", cmake).group(1)
         self.assertGreaterEqual(int(reserve), 8 * 1024 * 1024)
         self.assertIn("target_link_options(vk_pipeline_check PRIVATE /STACK:${PALMETTO_PIPELINE_CHECK_STACK})", cmake)
@@ -95,19 +95,19 @@ class FallbackBuildsTheHarnesses(unittest.TestCase):
         header, and the driver compiles a pipeline's shaders on the thread that creates it. CMake links palmetto with
         /STACK:<PALMETTO_STACK>; the fallback has to pass the same number, and it is the number run_entry gives the
         entry thread, so every game thread that asks for no size has the same room."""
-        cmake = (ROOT / "runtime" / "CMakeLists.txt").read_text(encoding="utf-8")
+        cmake = (ROOT / "port" / "CMakeLists.txt").read_text(encoding="utf-8")
         reserve = re.search(r"set\(PALMETTO_STACK (\d+)\)", cmake).group(1)
         self.assertGreaterEqual(int(reserve), 8 * 1024 * 1024)
         self.assertRegex(cmake, r"target_link_options\(palmetto PRIVATE [^)]*/STACK:\$\{PALMETTO_STACK\}\)")
         lines = [line for line in self.body.splitlines() if "/Fe:palmetto.exe" in line]
         self.assertEqual(len(lines), 1)
         self.assertRegex(lines[0], rf"/Fe:palmetto\.exe /link (\S+ )*/STACK:{reserve}( |$)")
-        shim = (ROOT / "runtime" / "shims" / "process_shim.h").read_text(encoding="utf-8")
+        shim = (ROOT / "port" / "shims" / "process_shim.h").read_text(encoding="utf-8")
         megabytes = re.search(r"run_entry\(void\* entry, std::size_t stack_bytes = (\d+)u << 20\);", shim).group(1)
         self.assertEqual(int(megabytes) << 20, int(reserve))
 
     def test_the_loader_gets_the_host_base_cmake_gives_it(self):
-        cmake = (ROOT / "runtime" / "CMakeLists.txt").read_text(encoding="utf-8")
+        cmake = (ROOT / "port" / "CMakeLists.txt").read_text(encoding="utf-8")
         base = re.search(r"set\(PALMETTO_HOST_BASE (/BASE:0x[0-9A-Fa-f]+)\)", cmake).group(1)
         self.assertRegex(cmake, r"target_link_options\(palmetto PRIVATE [^)]*\$\{PALMETTO_HOST_BASE\}")
         lines = [line for line in self.body.splitlines() if "/Fe:palmetto.exe" in line]
@@ -130,7 +130,7 @@ class FallbackBuildsTheHarnesses(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "win32", "requires Windows PowerShell")
     def test_path_fallback_prefers_vs_and_skips_msys_cmake(self):
         text = SCRIPT.read_text(encoding="utf-8")
-        # Extract the helper functions and the two Find-BuildTool assignments directly from scripts/build_runtime.ps1.
+        # Extract the helper functions and the two Find-BuildTool assignments directly from tooling/scripts/build_runtime.ps1.
         helpers_start = text.index("function Invoke-ToolProbe")
         helpers_end = text.index("$root = Split-Path")
         lookup_start = text.index("$cmakeDir = Join-Path")

@@ -5,7 +5,7 @@ D[15:0] = norm16(S0), D[31:16] = norm16(S1): the f32 is clamped to [-1, 1] (i16)
 nir_opcodes.py as fround_even(fclamp(x) * 32767.0 / 65535.0). NaN gives 0 (as v_cvt_i32_f32), and the exact product
 is rounded once, not the f32 product: both measured on an RDNA2 iGPU (gfx1036, SHADER-339; the rounding is
 SHADER-363). NEAR_TIES are inputs whose f32 product lands exactly on k + 0.5 while the exact one does not; rounding the
-f32 product would be one off there. The whole dword is written. Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in
+f32 product would be one off there. The whole dword is written. Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in
 tests/semantic/spirv_mini_interp.py and compares the result with a plain-Python reference. D leaves through exp as two
 16-bit halves ORed into 0x40000000, so no export channel is a NaN or denormal pattern that a float round trip could
 change.
@@ -21,7 +21,7 @@ from fractions import Fraction
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)
@@ -57,7 +57,7 @@ OPS = {"v_cvt_pknorm_i16_f32": True, "v_cvt_pknorm_u16_f32": False}
 VALUES = [bits(v) for v in (0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 2.0, -2.0, 1e-30, 0.25, 0.75, 0.999, -0.999,
                              1 / 32767, 0.5 / 32767, 1.5 / 32767, 2.5 / 32767, 0.5 / 65535, 1.5 / 65535, 2.5 / 65535,
                              float("inf"), float("-inf"))] + [0x7FC00000, 0xFFC00000, 0x00000001, 0x80000001]
-# (op, S0, S1, the dword an RDNA2 iGPU (gfx1036) gave, tools/pknorm_probe.py --oracle hw). S0 or S1 is a near tie:
+# (op, S0, S1, the dword an RDNA2 iGPU (gfx1036) gave, tooling/pknorm_probe.py --oracle hw). S0 or S1 is a near tie:
 # below k + 0.5 exactly (1.5 - 1.4e-9 gives 1, 3.5 - ... gives 3) or above it (256.5 + 1.5e-5 gives 257).
 MEASURED = [
     ("v_cvt_pknorm_i16_f32", 0x38400180, 0x00000000, 0x00000001),

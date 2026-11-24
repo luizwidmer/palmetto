@@ -1,10 +1,10 @@
-"""The verdict logic of runtime/test/check_tiny_frame.py on synthetic output: no loader, GPU or game files."""
+"""The verdict logic of port/test/check_tiny_frame.py on synthetic output: no loader, GPU or game files."""
 import importlib.util
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SPEC = importlib.util.spec_from_file_location("check_tiny_frame", ROOT / "runtime" / "test" / "check_tiny_frame.py")
+SPEC = importlib.util.spec_from_file_location("check_tiny_frame", ROOT / "port" / "test" / "check_tiny_frame.py")
 check = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(check)
 

@@ -6,7 +6,7 @@ RDNA2 ISA, "Data Share Instructions": ds_add_u32 is the atomic M = M + D (mod 2^
 (vaddr + offset) / 4, ds_sub_u32 is M = M - D; the _rtn_ form also returns the old M in vdst, the plain form leaves
 vdst alone. The offset is added to the address in bytes.
 
-Each case is a compute shader translated by tools/rdna2spirv.py (support.translate_lines) and run in
+Each case is a compute shader translated by tooling/rdna2spirv.py (support.translate_lines) and run in
 tests/semantic/spirv_mini_interp.py (one lane: that interpreter does not share LDS between lanes, see lds_run.py).
 It writes a few LDS dwords, runs a sequence of these atomics on them and stores each returned value and the final
 dwords. The one-operation tables are written out by hand from the formulas above; seeded random sequences are checked
@@ -19,7 +19,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import lds_run as L  # noqa: E402  (also puts tools/ on sys.path)
+import lds_run as L  # noqa: E402  (also puts tooling/ on sys.path)
 
 M32 = L.M32
 FN = {"add": lambda m, d: (m + d) & M32, "sub": lambda m, d: (m - d) & M32}

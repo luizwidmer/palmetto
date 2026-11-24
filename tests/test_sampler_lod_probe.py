@@ -1,4 +1,4 @@
-"""tools/sampler_lod_probe.py without a GPU: the descriptor fields sit where the runtime reads them, the measured model
+"""tooling/sampler_lod_probe.py without a GPU: the descriptor fields sit where the runtime reads them, the measured model
 gives the gfx1036 levels, and the kernel builds.
 
     python -I tests/test_sampler_lod_probe.py
@@ -8,13 +8,13 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
-sys.path.insert(0, os.path.join(ROOT, "tools", "hw_oracle"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
+sys.path.insert(0, os.path.join(ROOT, "tooling", "hw_oracle"))
 
 import sampler_lod_probe as p  # noqa: E402
 
 # What gfx1036 (Radeon iGPU, AMD 26.10.1) read for every row, wave32 and wave64 alike:
-# tools/sampler_lod_probe.py --oracle hw. All 43 are pinned, so a change to rdna2_level shows without a GPU.
+# tooling/sampler_lod_probe.py --oracle hw. All 43 are pinned, so a change to rdna2_level shows without a GPU.
 MEASURED = {
     "calib_lod0": 0, "calib_lod1": 1, "calib_lod2": 2, "calib_lod3": 3, "calib_lod4": 4, "calib_lod5": 5,
     "calib_lod6": 6, "lz": 0, "s_min2_l0": 2, "s_min2_lz": 2, "s_max1_l4": 1, "s_max0_l3": 0, "s_bias+2_l1": 3,
@@ -33,7 +33,7 @@ def field(word, lo, width):
 
 class FieldsTest(unittest.TestCase):
     def test_sampler_words_match_check_py(self):
-        sys.path.insert(0, os.path.join(ROOT, "runtime", "test", "shaders"))
+        sys.path.insert(0, os.path.join(ROOT, "port", "test", "shaders"))
         import check
         for s in ((1, 0.0, 15.0, 0.0), (1, 2.0, 15.0, 0.0), (1, 0.0, 1.5, -1.0), (0, 1.0, 15.0, 0.5)):
             with self.subTest(s=s):

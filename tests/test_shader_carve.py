@@ -2,7 +2,7 @@
 
     python -I tests/test_shader_carve.py
 
-Validates tools/shader_carve.py without touching game files or proprietary assets:
+Validates tooling/shader_carve.py without touching game files or proprietary assets:
 - DXBC container chunk table parsing, byte offset calculation, and chunk boundary validation
 - Shader model version packing and stage mapping (including unknown stage fallback)
 - ARC9 entry regex marker detection, name length/character constraints, and stored-size backreference
@@ -24,8 +24,8 @@ from unittest import mock
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "shader_carve.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "shader_carve.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import shader_carve  # noqa: E402
 
 

@@ -1,7 +1,7 @@
 """SHADER-10: the hand-written ps_w64_* and vs_w64_* fixtures get the tier their header names, and the census counts
 tiers.
 
-The fixtures (runtime/test/shaders/{ps,vs}_w64_{a,b,c}_*.asm) are the GPU tests of w64_graphics.py: each pixel fixture
+The fixtures (port/test/shaders/{ps,vs}_w64_{a,b,c}_*.asm) are the GPU tests of w64_graphics.py: each pixel fixture
 was drawn on an AMD Radeon 880M with the fragment subgroup size required to 64 and to 32, each vertex fixture (TEST-251)
 on an RX 9070 XT and a Ryzen 9800X3D iGPU (RADV) with the VS stage at wave64 and at wave32 (RADV_PERFTEST=gewave32).
 Tier A and B fixtures gave identical words (and the words their header derives), tier C fixtures differed, so this
@@ -21,8 +21,8 @@ import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-SHADERS = os.path.join(ROOT, "runtime", "test", "shaders")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+SHADERS = os.path.join(ROOT, "port", "test", "shaders")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, SHADERS)
 
 import wave64_halves  # noqa: E402
@@ -191,9 +191,9 @@ def test_live_lane_need_skips_on_a_narrow_stage_and_runs_on_a_wide_one(tmp_path,
     monkeypatch.setattr(w64_graphics, "draw", lambda tools, spirv, n, size, tmp: (words, None, False if size else None))
     monkeypatch.setitem(w64_graphics.NEEDS_LIVE_LANES, name, 32)
     monkeypatch.setattr(w64_graphics, "live_width", lambda tools, spirv, tmp: 16)
-    skip = w64_graphics.check("tools", str(tmp_path), name)
+    skip = w64_graphics.check("tooling", str(tmp_path), name)
     assert isinstance(skip, w64_graphics.Skip) and "16 live lanes" in skip and "needs 32" in skip
     monkeypatch.setattr(w64_graphics, "live_width", lambda tools, spirv, tmp: 32)
-    assert w64_graphics.check("tools", str(tmp_path), name) == ""
+    assert w64_graphics.check("tooling", str(tmp_path), name) == ""
     monkeypatch.setattr(w64_graphics, "live_width", lambda tools, spirv, tmp: None)   # probe could not run: judged
-    assert w64_graphics.check("tools", str(tmp_path), name) == ""
+    assert w64_graphics.check("tooling", str(tmp_path), name) == ""

@@ -1,6 +1,6 @@
 """Package-gated first-light test: draw the real model a first_light.py run assembled.
 
-tools/first_light.py writes a directory with vs.spv, ps.spv, mesh.bin and manifest.json from the user's own
+tooling/first_light.py writes a directory with vs.spv, ps.spv, mesh.bin and manifest.json from the user's own
 package. This test runs vk_harness on that directory and checks the pixels against the manifest: a coverage
 window, a corner the mesh does not cover (the harness clear value) and the UV the model's last triangle writes at
 the centre pixel. The oracle is also exercised on synthetic images, without a GPU or a package, so the
@@ -29,7 +29,7 @@ from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import first_light as fl
 from spirv_stubs import build_ps_stub, build_vs_stub
 
@@ -42,9 +42,9 @@ def harness() -> str | None:
     exe = ".exe" if os.name == "nt" else ""
     for path in (
         os.environ.get("PALMETTO_VK_HARNESS"),
-        os.path.join(ROOT, "runtime", "build", "linux", f"vk_harness{exe}"),
-        os.path.join(ROOT, "runtime", "build", "windows", f"vk_harness{exe}"),
-        os.path.join(ROOT, "runtime", "build", f"vk_harness{exe}"),
+        os.path.join(ROOT, "port", "build", "linux", f"vk_harness{exe}"),
+        os.path.join(ROOT, "port", "build", "windows", f"vk_harness{exe}"),
+        os.path.join(ROOT, "port", "build", f"vk_harness{exe}"),
     ):
         if path and os.path.isfile(path):
             return path
@@ -106,13 +106,13 @@ class FirstLightTests(unittest.TestCase):
         self.out = os.environ.get("PALMETTO_FIRST_LIGHT_DIR")
         if not self.out:
             self.skipTest(
-                "PALMETTO_FIRST_LIGHT_DIR is not set (run tools/first_light.py first)"
+                "PALMETTO_FIRST_LIGHT_DIR is not set (run tooling/first_light.py first)"
             )
         self.out = os.path.abspath(os.path.expanduser(self.out))
         self.harness = harness()
         if not self.harness:
             self.skipTest(
-                "vk_harness is not built (runtime/build/linux or runtime/build/windows, target "
+                "vk_harness is not built (port/build/linux or port/build/windows, target "
                 "vk_harness); set PALMETTO_VK_HARNESS"
             )
         with open(os.path.join(self.out, "manifest.json"), encoding="utf-8") as f:
@@ -155,7 +155,7 @@ class FirstLightTests(unittest.TestCase):
             [
                 sys.executable,
                 "-I",
-                os.path.join(ROOT, "tools", "first_light.py"),
+                os.path.join(ROOT, "tooling", "first_light.py"),
                 "--check",
                 "--out",
                 self.out,
@@ -586,7 +586,7 @@ class ProbeCoordinateTests(unittest.TestCase):
 
 
 class ReadObjTests(unittest.TestCase):
-    """Wavefront OBJ parsing in tools/first_light.py without a GPU or game package."""
+    """Wavefront OBJ parsing in tooling/first_light.py without a GPU or game package."""
 
     def _write_obj(self, text: str) -> str:
         tmp = tempfile.TemporaryDirectory()

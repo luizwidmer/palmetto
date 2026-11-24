@@ -1,4 +1,4 @@
-"""tools/shader_meta.py leaves malformed or out-of-range operands alone instead of raising (standard library only).
+"""tooling/shader_meta.py leaves malformed or out-of-range operands alone instead of raising (standard library only).
 
     python -I tests/test_shader_meta_operands.py
 """
@@ -7,7 +7,7 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import shader_meta  # noqa: E402
 

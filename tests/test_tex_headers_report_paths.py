@@ -17,8 +17,8 @@ import unittest
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TOOL = pathlib.Path(os.environ.get("PALMETTO_TEX_HEADERS", str(ROOT / "tools" / "tex_headers.py")))
-for folder in (str(ROOT), str(ROOT / "tools")):
+TOOL = pathlib.Path(os.environ.get("PALMETTO_TEX_HEADERS", str(ROOT / "tooling" / "tex_headers.py")))
+for folder in (str(ROOT), str(ROOT / "tooling")):
     if folder not in sys.path:
         sys.path.insert(0, folder)
 import tex_headers

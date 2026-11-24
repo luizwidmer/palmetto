@@ -3,7 +3,7 @@
 RDNA2 ISA, SOP1:
   s_xor_saveexec_b64: D = EXEC; EXEC = S0 ^ EXEC; SCC = (EXEC != 0).
 
-Each case translates a hand-written compute program with tools/rdna2spirv.py and runs 64 lanes in
+Each case translates a hand-written compute program with tooling/rdna2spirv.py and runs 64 lanes in
 tests/semantic/spirv_mini_interp.py (harness: saveexec_run.py), with S0 from VCC, an SGPR pair written by v_cmp, an
 SGPR pair loaded with literals, and EXEC itself, against the ISA formula in plain Python. Until this file, the test of
 this name ran a self-built interpreter and never called the translator.
@@ -13,7 +13,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import saveexec_run  # noqa: E402  (support puts tools/ on sys.path)
+import saveexec_run  # noqa: E402  (support puts tooling/ on sys.path)
 
 
 class Saveexec(unittest.TestCase):

@@ -1,9 +1,9 @@
-"""Tests for the ImHex patterns in tools/imhex.
+"""Tests for the ImHex patterns in tooling/imhex.
 
     python -I tests/test_imhex_patterns.py
 
 Every byte here is built by the test: no game file, name or path is used. The RBF0 inputs are first checked with
-tools/rbf0_index.py and the PSIN inputs with tools/psin_index.py and tools/psin_data.py, the repository's own
+tooling/rbf0_index.py and the PSIN inputs with tooling/psin_index.py and tooling/psin_data.py, the repository's own
 parsers (the PSIN schema reuses the invented names of tests/test_psin_index.py). When ImHex is installed, each pattern
 then runs on the same bytes
 through ImHex's pattern-language CLI (`imhex --pl format ... -f json`) and the decoded fields are compared with the
@@ -20,8 +20,8 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PATTERNS = os.path.join(ROOT, "tools", "imhex")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+PATTERNS = os.path.join(ROOT, "tooling", "imhex")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import psin_data  # noqa: E402

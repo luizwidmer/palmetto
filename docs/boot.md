@@ -10,7 +10,7 @@ network off. Nothing here quotes game data; a real trace stays on the player's m
 
 ## 1. What the first boot produces
 
-`palmetto` has three passes over the executable (`runtime/README.md`, "Dry run" and "Current limits"):
+`palmetto` has three passes over the executable (`port/README.md`, "Dry run" and "Current limits"):
 
 | Pass | What it does | What a clean result shows |
 |---|---|---|
@@ -21,12 +21,12 @@ network off. Nothing here quotes game data; a real trace stays on the player's m
 Two traces are written independently:
 
 * **startup trace** (`--trace FILE`): one JSON object per line, flushed per event, so it survives a crash. Kinds
-  and fields are in [`runtime/README.md`](../runtime/README.md) ("Startup trace").
+  and fields are in [`port/README.md`](../port/README.md) ("Startup trace").
 * **D3D12 trace** (`--trace-d3d12`): one `[d3d12-trace] #<seq> <method> <outcome>` line per call, on stderr. The
   ordinary `[rt]` diagnostics stay separate. A present is one `XboxPresentation::PresentX` line (`ok` or `failed`),
   so the presents of a run are a count of those lines.
 
-`tools/boot_trace.py` reads both and prints the triage units: modules, unimplemented calls and callers,
+`tooling/boot_trace.py` reads both and prints the triage units: modules, unimplemented calls and callers,
 DllMain/TLS results, exceptions with their stack frames, the exit, and the D3D12 calls by outcome and first call
 per method. The `[rt]` lines in the same stderr log carry the device parameters, feature ids and warnings; the
 summary leaves them as a count, so grep `^\[rt\]` for those.
@@ -41,10 +41,10 @@ $exe = "C:\path\to\game.exe"
 $pkg = "C:\path\to\the\package"
 $trace = Join-Path $env:TEMP boot.jsonl
 $log = Join-Path $env:TEMP d3d12.log
-.\runtime\build\palmetto.exe --run $exe --game-dir $pkg --trace $trace --trace-d3d12 2>&1 |
+.\port\build\palmetto.exe --run $exe --game-dir $pkg --trace $trace --trace-d3d12 2>&1 |
     ForEach-Object { $_.ToString() } |
     Out-File -LiteralPath $log -Width 4096 -Encoding utf8
-python -I tools\boot_trace.py $trace --d3d12 $log
+python -I tooling\boot_trace.py $trace --d3d12 $log
 ```
 
 The capture pipeline writes each message as text to avoid PowerShell 5.1 wrapping the first stderr record at a
@@ -55,10 +55,10 @@ Linux under Wine (a cross build made with xwin, or the `runtime-windows` artifac
 
 ```sh
 export PALMETTO_D3D12=vulkan
-wine runtime/build/windows/palmetto.exe --run /path/to/game.exe \
+wine port/build/windows/palmetto.exe --run /path/to/game.exe \
      --game-dir "Z:\\path\\to\\the\\package" \
      --trace "Z:\\tmp\\boot.jsonl" --trace-d3d12 2> /tmp/d3d12.log
-python3 -I tools/boot_trace.py /tmp/boot.jsonl --d3d12 /tmp/d3d12.log
+python3 -I tooling/boot_trace.py /tmp/boot.jsonl --d3d12 /tmp/d3d12.log
 ```
 
 `--trace FILE` **refuses an existing file** (exit 2): it is created before the loader reads anything, so use a
@@ -94,7 +94,7 @@ Read the startup trace first; the first event that is not the expected one is th
 1. **`map`** — is the executable at its preferred base (`relocated: false`), and are the expected package DLLs
    mapped? A missing module is an import-table or search-path problem.
 2. **`unimplemented_call`** — the first `dll!name` and its `caller` (module+RVA). Add a shim, a host binding or a
-   deliberate failure in `runtime/shims/registry.cpp`; rerun with `PALMETTO_UNIMPLEMENTED=stop` to halt at the first
+   deliberate failure in `port/shims/registry.cpp`; rerun with `PALMETTO_UNIMPLEMENTED=stop` to halt at the first
    remaining blocker.
 3. **`tls_callback` / `dllmain`** — a failed DllMain, or a TLS callback that faults, usually points at the CRT or
    TLS index. The summary shows the address and phase of the last observed TLS callback
@@ -139,7 +139,7 @@ the de-duplicated 1–22. It maps each question to the event to look for; it doe
 | 7 | Standard AS build vs `XboxBvhBuilder` | first `BuildRaytracingAccelerationStructure`/`Copy...` vs slot-62 PSOs; see [embedded_shaders.md](embedded_shaders.md) |
 | 8 | XDXR desc layouts | measured in [xdxr.md](xdxr.md); the live signal is a non-empty stream desc at slot 62 |
 | 9 | Tiled textures / DCC | slot 76, `CopyTextureRegion`, resource descs; a `0x101` layout or tiled address |
-| 10 | Binning, DCC, VRS, wave MMA, stream output | shader-side answered by `tools/feature_scan.py`; the trace adds PSO/stream subobjects |
+| 10 | Binning, DCC, VRS, wave MMA, stream output | shader-side answered by `tooling/feature_scan.py`; the trace adds PSO/stream subobjects |
 | 11 | `CheckFeatureSupport` answers | the call's `ok`/`failed` and the `[rt]` feature-id line; the answer itself is not logged yet |
 | 12 | Async compute / copy queues | queue creation and cross-queue fences |
 | 13 | 144-byte push constants | device creation `[rt]` line; `push_constants_need_fallback` when the device reports fewer |

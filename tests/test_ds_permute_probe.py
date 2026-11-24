@@ -1,4 +1,4 @@
-"""CPU-only unit tests for tools/ds_permute_probe.py (SHADER-133)."""
+"""CPU-only unit tests for tooling/ds_permute_probe.py (SHADER-133)."""
 import io
 import json
 import os
@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(REPO, "tools")
+TOOLS = os.path.join(REPO, "tooling")
 PROBE = os.path.join(TOOLS, "ds_permute_probe.py")
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)

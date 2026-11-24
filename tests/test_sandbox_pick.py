@@ -1,11 +1,11 @@
-"""tools/sandbox.py: the shader pair is chosen by signature and descriptor layout, never by name."""
+"""tooling/sandbox.py: the shader pair is chosen by signature and descriptor layout, never by name."""
 import json
 import os
 import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tooling"))
 import sandbox  # noqa: E402
 
 VS_TEXT = """\ts_load_dwordx4 s[0:3], s[8:9], null

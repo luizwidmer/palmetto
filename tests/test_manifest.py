@@ -1,4 +1,4 @@
-"""Tests for tools/manifest.py covering directory hashing, manifest creation, verification, and corruption detection.
+"""Tests for tooling/manifest.py covering directory hashing, manifest creation, verification, and corruption detection.
 
     python -I tests/test_manifest.py
 """
@@ -15,8 +15,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "manifest.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "manifest.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import manifest  # noqa: E402
 import report_paths  # noqa: E402
 

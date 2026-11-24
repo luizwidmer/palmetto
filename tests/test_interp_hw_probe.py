@@ -1,6 +1,6 @@
-"""Synthetic checks for tools/interp_hw_probe.py (SHADER-430): the CPU side of the v_interp probe.
+"""Synthetic checks for tooling/interp_hw_probe.py (SHADER-430): the CPU side of the v_interp probe.
 
-The probe itself needs an AMD GPU (tools/hw_oracle). This file tests the exact-model side that the
+The probe itself needs an AMD GPU (tooling/hw_oracle). This file tests the exact-model side that the
 GPU run is compared against: the Fraction-to-f32/f16 rounding helpers (nearest even, subnormals
 kept, infinity on overflow), the bit round trips, the zero comparator, the f32 denormal flush rule,
 the LDS attribute-word packing of the two kernel builders, and the CLI's exit-code contract when
@@ -22,8 +22,8 @@ from random import Random
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "interp_hw_probe.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "interp_hw_probe.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import interp_hw_probe as ihp  # noqa: E402
 

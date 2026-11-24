@@ -25,7 +25,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 for path in (TOOLS_DIR, HERE):
     if path not in sys.path:
         sys.path.insert(0, path)
@@ -65,7 +65,7 @@ class CndmaskSignBitModifiers(unittest.TestCase):
         srcs = (f"v2, {operand}" if modified_is_src1 else f"{operand}, v2")
         lines = [f"v_mov_b32 v1, 0x{word:08x}", f"v_mov_b32 v2, 0x{OTHER:08x}", f"s_mov_b32 s4, {cond}",
                  f"v_cndmask_b32_e64 v0, {srcs}, s4", "v_mov_b32 v3, 0"]
-        asm = ("; ps_cndmask_mods\n" + "".join(f"\t{line}\n" for line in lines)
+        asm = ("; ps_cndmask_extensions\n" + "".join(f"\t{line}\n" for line in lines)
                + "\texp mrt0 v0, v1, v2, v3 done vm\n\ts_endpgm\n")
         with open(self.src, "w", encoding="utf-8", newline="\n") as f:
             f.write(asm)

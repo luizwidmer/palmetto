@@ -6,7 +6,7 @@
 Linux), so the same report is byte-different per platform, and a character the code page lacks raises
 UnicodeEncodeError. CONTRIBUTING.md asks for `encoding="utf-8"` on text files. The test reads the source with `ast`
 (standard library, no game data, no GPU) and fails for any `open` / `os.fdopen` in a text mode, or any
-`read_text` / `write_text`, under tools/, scripts/, make_game.py and runtime/test/shaders/ without an `encoding=`
+`read_text` / `write_text`, under tooling/, tooling/scripts/, build_port.py and port/test/shaders/ without an `encoding=`
 argument. Binary modes are exempt.
 """
 import ast

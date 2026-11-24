@@ -22,7 +22,7 @@ Palmetto 是一个把 target console 版 the target game **静态重编译**到 
 
 目前在任何平台上都还不能游玩。各平台现在能运行的部分：
 
-- **Windows**：全部（`make_game.py`、各工具，以及带 D3D12 → Vulkan 层及其测试的 runtime `palmetto`）。
+- **Windows**：全部（`build_port.py`、各工具，以及带 D3D12 → Vulkan 层及其测试的 runtime `palmetto`）。
 - **Linux**：翻译器、资源工具和 Vulkan GPU 测试工具可原生构建并运行（在 RADV 和 NVIDIA 上测试过）。runtime 是
   Windows 代码：用 clang-cl 和 xwin 交叉编译，测试在 Wine 或 Proton 下运行。游戏将来也打算这样运行（#217）。
 - **macOS（Apple Silicon）**：Python 工具和 Vulkan 测试工具可在 MoltenVK（Homebrew）或 KosmicKrisp 上原生运行。
@@ -41,7 +41,7 @@ Palmetto 是一个把 target console 版 the target game **静态重编译**到 
 - [Vulkan SDK](https://vulkan.lunarg.com/)（`spirv-as`、`spirv-val`、`vulkaninfo`）。
 - [LLVM 21+](https://github.com/llvm/llvm-project/releases)，需要 **AMDGPU target**（`llvm-mc`）：
   - Windows 官方 LLVM 发行版**不含** AMDGPU target。
-  - Windows 上运行 `scripts\build_llvm_mc.ps1` 构建原生 `llvm-mc.exe`（需要 `git` 和 Visual Studio 的 C++ 工具）
+  - Windows 上运行 `tooling/scripts\build_llvm_mc.ps1` 构建原生 `llvm-mc.exe`（需要 `git` 和 Visual Studio 的 C++ 工具）
     并设置 `LLVM_MC`；**或**在 WSL 里安装 `llvm-21` 并设置
     `LLVM_MC="wsl -d Ubuntu -e /usr/lib/llvm-21/bin/llvm-mc"`（见 [`docs/design.md`](../../design.md#disassembling-shaders)）。
     构建脚本大约需要 20-40 分钟。
@@ -64,7 +64,7 @@ Palmetto 是一个把 target console 版 the target game **静态重编译**到 
    git clone --recursive https://github.com/the original project
    ```
 
-   用 GitHub 的 “Download ZIP” 下载会缺少 `third_party/arc9-explorer`：装了 `git` 时构建会自动获取，否则会告诉你该怎么做。
+   用 GitHub 的 “Download ZIP” 下载会缺少 `vendor/arc9-explorer`：装了 `git` 时构建会自动获取，否则会告诉你该怎么做。
 
 3. 双击 **`Build.bat`**。
 
@@ -78,28 +78,28 @@ Palmetto 是一个把 target console 版 the target game **静态重编译**到 
 上面的空间要求针对完整构建。只想*运行*移植版时，`--stages check,shaders,runtime` 约需 30 GB；占了其余绝大部分
 空间的 `assets` 阶段只供资源工具使用，`--wav` 还会再增加数倍于 Ogg Opus 的大小。`--work` 和 `--out` 都可以放在
 其他盘。runtime 原地映射游戏包，所以包所在盘为只读时需要 `palmetto --overlay <可写目录>`（这是 `palmetto` 的选项，
-不是 `make_game.py` 的）。不要删除 `work/shaders/dxbc/disasm` 里的 `.s` 文件：连同
+不是 `build_port.py` 的）。不要删除 `work/shaders/dxbc/disasm` 里的 `.s` 文件：连同
 `work/shaders/spirv/index.json` 一起删掉后，`shaders` 阶段可能看起来已完成，却没有任何着色器。
 
-### 命令行（`make_game.py`）
+### 命令行（`build_port.py`）
 
 ```powershell
-python -I make_game.py --find                             # 列出本机找到的拷贝
-python -I make_game.py --pick                             # 在文件夹对话框里选择游戏目录
-python -I make_game.py --check                            # 校验游戏文件，不构建
-python -I make_game.py --check --full-check               # 另外比对每个文件的 SHA-256（较慢）
-python -I make_game.py --game "D:\path\to\package" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
-python -I make_game.py --stages shaders,assets            # 只跑指定阶段
-python -I make_game.py --game "D:\path\to\package" --wav  # 额外把 Ogg Opus 解码为 PCM WAV（很大）
-python -I make_game.py --wave64-emulate auto              # auto（默认）、on 或 off
+python -I build_port.py --find                             # 列出本机找到的拷贝
+python -I build_port.py --pick                             # 在文件夹对话框里选择游戏目录
+python -I build_port.py --check                            # 校验游戏文件，不构建
+python -I build_port.py --check --full-check               # 另外比对每个文件的 SHA-256（较慢）
+python -I build_port.py --game "D:\path\to\package" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
+python -I build_port.py --stages shaders,assets            # 只跑指定阶段
+python -I build_port.py --game "D:\path\to\package" --wav  # 额外把 Ogg Opus 解码为 PCM WAV（很大）
+python -I build_port.py --wave64-emulate auto              # auto（默认）、on 或 off
 ```
 
 阶段顺序：`check` → `shaders` → `assets` → `runtime` → `pipelines`。`pipelines` 阶段在你的 GPU 驱动上创建每个
 翻译后的着色器并检查能否编译，报告必须跳过的着色器，并把管线缓存保存到 `--out` 里的 `pipeline_cache.bin`；
 runtime 目前还不加载这个缓存，所以它不会加快首次启动。
 
-构建会记录产出结果所用的 `llvm-mc` 命令和版本、翻译器源码，以及资源解码器（`third_party/arc9-explorer` 的
-commit 和 `tools/arc9dump` 的源码）。其中任何一项改变时，只重做受影响的步骤（反汇编、翻译，或该归档的模型和
+构建会记录产出结果所用的 `llvm-mc` 命令和版本、翻译器源码，以及资源解码器（`vendor/arc9-explorer` 的
+commit 和 `tooling/arc9dump` 的源码）。其中任何一项改变时，只重做受影响的步骤（反汇编、翻译，或该归档的模型和
 纹理导出）。没有这些记录的旧工作目录在升级后会把这些步骤重做一次。
 
 - **`--wave64-emulate`**：决定是否把 wave64 compute/mesh 着色器翻译成在任意子组宽度下都精确的版本
@@ -119,25 +119,25 @@ commit 和 `tools/arc9dump` 的源码）。其中任何一项改变时，只重�
   `--mesh-compute`（把 mesh 着色器当作 compute，用于没有 `VK_EXT_mesh_shader` 的设备）。每个标志的说明见
   [`docs/design.md`](../../design.md)。
 - **`--work`**：建议指向至少有 400 GB 空闲的磁盘；`shaders` 阶段最慢，默认使用一半 CPU 线程（`--jobs` 可调）。
-- **Linux 与 Wine/Proton**：`make_game.py` 也能在 Linux 上运行。`runtime` 阶段会在 Linux 上用 clang-cl 和
+- **Linux 与 Wine/Proton**：`build_port.py` 也能在 Linux 上运行。`runtime` 阶段会在 Linux 上用 clang-cl 和
   lld-link（LLVM 19+，但 22.1.7 和 22.1.8 有已知问题，见 [docs/testing.md](../../testing.md#known-problems)；
   命令名用不带版本后缀的，或五个 LLVM 工具都用同一版本后缀，例如 `clang-cl-21`）把 loader 交叉编译到
-  `runtime/build/windows`，依赖 `XWIN_DIR` 或
+  `port/build/windows`，依赖 `XWIN_DIR` 或
   `~/.local/share/xwin-sdk` 里的 MSVC CRT 和 Windows SDK
   （[docs/testing.md](../../testing.md#the-windows-runtime-on-linux-under-wine-or-proton) 有一次性 `xwin` 命令）；
   缺少这些时该阶段不参与默认 stages，显式请求会先列出缺什么。
   也可以使用别处构建好的 Windows 版本，例如 Runtime workflow 的 `runtime-windows` artifact：
-  `python3 -I make_game.py --runtime-build ~/Downloads/runtime-windows`。
+  `python3 -I build_port.py --runtime-build ~/Downloads/runtime-windows`。
   两种方式都会把 `palmetto.exe` 和 `palmetto_tls_host.dll` 复制到 `--out`，并在旁边生成 `palmetto.sh`，
   用 `wine`（或 `WINE` 指定的 Proton）启动。`pipelines` 阶段使用 `vk_pipeline_check`（需要 CMake 3.24+、C++20
-  编译器和 Vulkan 开发头文件，构建到 `runtime/build/linux`；缺少时脚本会在其他工作之前自行构建）。
+  编译器和 Vulkan 开发头文件，构建到 `port/build/linux`；缺少时脚本会在其他工作之前自行构建）。
 
 ## 常见问题
 
-- **用 GitHub 的 “Download ZIP” 下载**：ZIP 不含 `third_party/arc9-explorer` 子模块。请用
+- **用 GitHub 的 “Download ZIP” 下载**：ZIP 不含 `vendor/arc9-explorer` 子模块。请用
   `git clone --recursive`，或在仓库目录里执行 `git submodule update --init --recursive`。
 - **`llvm-mc` 拒绝 `gfx1013` / AMDGPU**：多半是用了 Windows 官方 LLVM 安装包。改用
-  `scripts\build_llvm_mc.ps1`，或把 `LLVM_MC` 指向 WSL 里的 `llvm-mc`（`llvm-21`）。
+  `tooling/scripts\build_llvm_mc.ps1`，或把 `LLVM_MC` 指向 WSL 里的 `llvm-mc`（`llvm-21`）。
 - **构建 runtime 时报 `D3D12_ROOT_SIGNATURE_DESC2` 错误**：把 Windows SDK 升级到 `10.0.26100` 或更新
   （可在 Visual Studio Installer 或 `winget install Microsoft.WindowsSDK.10.0.26100` 中安装），
   删除构建目录后重新配置。

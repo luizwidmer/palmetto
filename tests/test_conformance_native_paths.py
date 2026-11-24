@@ -2,7 +2,7 @@
 
 main() receives a command line converted to the ANSI code page, and std::filesystem::path::string() throws for a
 character that page does not have. The source checks run everywhere. The run checks need Windows, a built
-conform_native.exe (tools/conformance/native/README.md) and a D3D12 adapter, and are skipped without them. No game
+conform_native.exe (tooling/conformance/native/README.md) and a D3D12 adapter, and are skipped without them. No game
 files.
 """
 import os
@@ -14,7 +14,7 @@ import sys
 import tempfile
 import unittest
 
-NATIVE = Path(__file__).resolve().parents[1] / "tools" / "conformance" / "native"
+NATIVE = Path(__file__).resolve().parents[1] / "tooling" / "conformance" / "native"
 EXES = [NATIVE / "build" / "Release" / "conform_native.exe", NATIVE / "build" / "conform_native.exe"]
 # No ANSI code page has all of these scripts, so the name is outside the active one on every Windows but UTF-8 ones.
 NAME = "日本हिไท"

@@ -1,8 +1,8 @@
 """SHADER-526: every module declares DenormPreserve 16, so a driver keeps an f16 denormal instead of flushing it.
 
 RDNA2 keeps f16 denormals. `v_mul_f16_sdwa v3, 2.0, v1 src0_sel:BYTE_1` reads the denormal 0x0040 (2^-18) and
-multiplies it by 1024.0 to 0x1c00 (runtime/test/shaders/ps_sdwa_f16_const.asm, measured on gfx1036 with
-tools/hw_oracle). The translator models f16 arithmetic in f32 with integer narrowing, so in the module that value is
+multiplies it by 1024.0 to 0x1c00 (port/test/shaders/ps_sdwa_f16_const.asm, measured on gfx1036 with
+tooling/hw_oracle). The translator models f16 arithmetic in f32 with integer narrowing, so in the module that value is
 an ordinary f32 and no f32 denormal is involved: the 16-bit mode is what governs the f16-to-f32 conversion the
 driver emits for it. Without the mode NVIDIA flushed that conversion and the same test read lane y as 0x0000 on an
 RTX 3090 (driver 610.88) and an RTX 4070 SUPER (610.88), 4096/4096 pixels; with it, 4096/4096 pixels exact.
@@ -21,7 +21,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 sys.path.insert(0, TOOLS_DIR)
 sys.path.insert(0, HERE)
 

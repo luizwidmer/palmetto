@@ -41,7 +41,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:
@@ -444,7 +444,7 @@ def tearDownModule() -> None:
 
 
 def run_assembly(lines: Sequence[str]) -> Tuple[int, int, int, int]:
-    """Translates a synthetic pixel shader with tools/rdna2spirv.py and runs it
+    """Translates a synthetic pixel shader with tooling/rdna2spirv.py and runs it
     in tests/semantic/spirv_mini_interp.py, returning exported mrt0 (v0, v1, v2, v3).
     """
     if _TMP_DIR is None:
@@ -747,7 +747,7 @@ class TestRoundValuInterpreter(unittest.TestCase):
 
 class TestSpirvMiniInterpExecution(unittest.TestCase):
     """End-to-end integration tests compiling synthetic RDNA2 assembly with
-    tools/rdna2spirv.py and executing the generated SPIR-V in
+    tooling/rdna2spirv.py and executing the generated SPIR-V in
     tests/semantic/spirv_mini_interp.py.
     """
 

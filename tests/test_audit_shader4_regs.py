@@ -1,4 +1,4 @@
-"""Unit tests for scripts/audit_shader4_regs.py (standard library only, synthetic .s/.fssm/.dxbc)."""
+"""Unit tests for tooling/scripts/audit_shader4_regs.py (standard library only, synthetic .s/.fssm/.dxbc)."""
 import contextlib
 import io
 import json
@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "scripts"))
+sys.path.insert(0, os.path.join(ROOT, "tooling/scripts"))
 import audit_shader4_regs as audit_mod  # noqa: E402
 
 

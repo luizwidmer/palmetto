@@ -1,4 +1,4 @@
-"""Synthetic unit tests for tools/bary_fallback_gs.py.
+"""Synthetic unit tests for tooling/bary_fallback_gs.py.
 
 Standard library only; no GPU or game data. Index files are constructed in temporary
 directories. The rebuild regression uses SPIRV-Tools when available.
@@ -19,7 +19,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 TOOL_PATH = os.path.join(TOOLS_DIR, "bary_fallback_gs.py")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)

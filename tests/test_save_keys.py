@@ -1,4 +1,4 @@
-"""Tests for tools/save_keys.py: the hash families, key collection from JSAV/ASAV/JSON, and dictionary resolution
+"""Tests for tooling/save_keys.py: the hash families, key collection from JSAV/ASAV/JSON, and dictionary resolution
 (plain, zlib-wrapped and composed names). All names and containers are synthetic; no game data is used.
 
     python -I tests/test_save_keys.py
@@ -17,7 +17,7 @@ import zlib
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import save_keys as sk  # noqa: E402
 import saves  # noqa: E402
 
@@ -174,7 +174,7 @@ class Resolve(unittest.TestCase):
         self.assertNotIn("%08x" % sk.joaat(b"MysteryField"), got)
 
     def resolve_cli(self, *args):
-        tool = os.path.join(ROOT, "tools", "save_keys.py")
+        tool = os.path.join(ROOT, "tooling", "save_keys.py")
         return subprocess.run([sys.executable, "-I", tool, "resolve", *args], cwd=ROOT, capture_output=True, text=True)
 
     def test_out_naming_an_input_is_refused(self):
@@ -275,7 +275,7 @@ class MalformedJsavTest(unittest.TestCase):
 
     def test_cli_reports_a_warning_and_exits_zero(self):
         _keys, _err, path = self.collect(self.jsav(4))
-        tool = os.path.join(ROOT, "tools", "save_keys.py")
+        tool = os.path.join(ROOT, "tooling", "save_keys.py")
         r = subprocess.run([sys.executable, "-I", tool, "collect", path],
                            cwd=ROOT, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -301,7 +301,7 @@ class MissingFilesTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def cli(self, *args):
-        tool = os.path.join(ROOT, "tools", "save_keys.py")
+        tool = os.path.join(ROOT, "tooling", "save_keys.py")
         return subprocess.run([sys.executable, "-I", tool, *args], cwd=ROOT, capture_output=True, text=True)
 
     def assert_one_error_line(self, r, path):
@@ -448,7 +448,7 @@ class ComposeDeterminism(unittest.TestCase):
             with open(dic, "wb") as f:
                 for w in self.WORDS:
                     f.write(b"\0" + w.encode() + b"\0")
-            tool = os.path.join(ROOT, "tools", "save_keys.py")
+            tool = os.path.join(ROOT, "tooling", "save_keys.py")
             runs = [subprocess.run([sys.executable, "-I", tool, "resolve", save, "--dict", dic,
                                     "--compose", "6"], cwd=ROOT, capture_output=True, text=True)
                     for _ in range(5)]

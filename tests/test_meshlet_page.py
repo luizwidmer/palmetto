@@ -1,4 +1,4 @@
-"""Synthetic-data tests for tools/meshlet_page.py.
+"""Synthetic-data tests for tooling/meshlet_page.py.
 
     python -I tests/test_meshlet_page.py
 
@@ -15,8 +15,8 @@ import unittest
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "meshlet_page.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "meshlet_page.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import meshlet_page as mp  # noqa: E402
 

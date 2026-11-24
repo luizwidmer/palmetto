@@ -22,7 +22,7 @@ the AnyPS5 project, in all four IEEE/DX10_CLAMP mode combinations and in wave32 
   * v_fract_f32: a result that rounds to 1.0 is 0x3f7fffff instead (f16: 0x3bff); fract(-0) = +0,
     fract(+-inf) = NaN.
 Inputs come from memory through s_buffer_load (V# in s[0:3] -> 0x1000), as in the GPU fixtures
-runtime/test/shaders/ps_fnan_med3.asm and ps_fnan_fract.asm, which are run here too.
+port/test/shaders/ps_fnan_med3.asm and ps_fnan_fract.asm, which are run here too.
 """
 import gc
 import math
@@ -36,7 +36,7 @@ import warnings
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-import support  # noqa: E402  (puts PALMETTO_TOOLS_DIR or tools/ on the path)
+import support  # noqa: E402  (puts PALMETTO_TOOLS_DIR or tooling/ on the path)
 import spirv_mini_interp as si  # noqa: E402
 
 rdna2spirv = support.rdna2spirv

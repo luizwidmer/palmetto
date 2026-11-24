@@ -18,8 +18,8 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "spirv_metal_set0.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "spirv_metal_set0.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import spirv_metal_set0 as m  # noqa: E402
 

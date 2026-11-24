@@ -1,4 +1,4 @@
-"""Input checks for tools/tile_probe.py, on a synthetic blob (no game data).
+"""Input checks for tooling/tile_probe.py, on a synthetic blob (no game data).
 
     python -I tests/test_tile_probe.py
 
@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "tile_probe.py")
+TOOL = os.path.join(ROOT, "tooling", "tile_probe.py")
 HAVE_NUMPY = importlib.util.find_spec("numpy") is not None
 # the tool is documented as `python -I`, which does not see a --user install of Pillow
 HAVE_PIL_ISOLATED = subprocess.run([sys.executable, "-I", "-c", "import PIL"],
@@ -96,7 +96,7 @@ class TileProbeInputTest(unittest.TestCase):
         self.assertNotIn("Traceback", p.stderr)
 
     def test_out_creates_a_missing_folder(self):
-        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        sys.path.insert(0, os.path.join(ROOT, "tooling"))
         import tile_probe
         preview = os.path.join(self.tmp.name, "previews", "deep", "best.png")
         tile_probe.check_preview_path(preview, self.blob)
@@ -117,7 +117,7 @@ class TileProbeInputTest(unittest.TestCase):
 
     def test_block_feature_rejects_unsupported_bpe(self):
         import numpy as np
-        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        sys.path.insert(0, os.path.join(ROOT, "tooling"))
         import tile_probe
 
         for bad_bpe in (1, 2, 4, 12):
@@ -129,7 +129,7 @@ class TileProbeInputTest(unittest.TestCase):
         import types
         from unittest import mock
 
-        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        sys.path.insert(0, os.path.join(ROOT, "tooling"))
         import tile_probe
 
         captured = []

@@ -6,7 +6,7 @@ In the AMD RDNA2 ISA:
   * s_add_u32 (scalar add with unsigned carry-out, functionally s_add_co_u32):
       D.u = (S0.u + S1.u) mod 2^32
       SCC = (S0.u + S1.u >= 2^32)
-  * Lowers in SPIR-V (tools/rdna2spirv.py) to OpIAddCarry %umul %s0 %s1:
+  * Lowers in SPIR-V (tooling/rdna2spirv.py) to OpIAddCarry %umul %s0 %s1:
       Member 0: 32-bit wrapped sum (stored in destination SGPR D)
       Member 1: 32-bit unsigned carry-out (stored in SCC condition flag register)
 
@@ -24,7 +24,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

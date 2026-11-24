@@ -36,7 +36,7 @@ s_endpgm
     for shader in (vs, ps):
         shader.validate(shader.translate())
 
-    fixture = Path(__file__).resolve().parents[1] / "runtime/test/shaders/gs_tri.asm"
+    fixture = Path(__file__).resolve().parents[1] / "port/test/shaders/gs_tri.asm"
     triangle = fixture.read_text(encoding="utf-8")
     # Three single-vertex strips produce zero triangles. One three-vertex strip produces one.
     singles = triangle.replace("GS_OP_EMIT,", "GS_OP_EMIT_CUT,")

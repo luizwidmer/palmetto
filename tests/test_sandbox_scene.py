@@ -1,4 +1,4 @@
-"""tools/sandbox_scene.py: entity world rows, nearest-first selection and the packed vertex layout."""
+"""tooling/sandbox_scene.py: entity world rows, nearest-first selection and the packed vertex layout."""
 import io
 import json
 import os
@@ -9,7 +9,7 @@ import tracemalloc
 import unittest
 from contextlib import redirect_stderr
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tooling'))
 import sandbox_scene
 
 class TestSandboxScene(unittest.TestCase):

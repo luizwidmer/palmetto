@@ -1,9 +1,9 @@
-"""Lane-level tests for every RDNA2 s_<op>_saveexec_b32/b64 and s_andn1/andn2_wrexec, against tools/cf_ref.py.
+"""Lane-level tests for every RDNA2 s_<op>_saveexec_b32/b64 and s_andn1/andn2_wrexec, against tooling/cf_ref.py.
 
 D = EXEC; EXEC = f(S0, EXEC); SCC = (EXEC != 0) for saveexec, and EXEC = f(S0, EXEC); D = EXEC for wrexec. Each case
 runs a translated pixel shader in tests/semantic/spirv_wave_interp.py as one wave whose EXEC starts partial (v_cmpx),
 with S0 a different lane range, and checks every lane's saved bit, new EXEC bit and the wave's SCC against the ISA
-model in tools/cf_ref.py (_SAVEEXEC, the table the FUZZ-8 differential fuzzer uses). Lanes that EXEC had off and that
+model in tooling/cf_ref.py (_SAVEEXEC, the table the FUZZ-8 differential fuzzer uses). Lanes that EXEC had off and that
 f turns on (nand, nor, orn1, orn2, xnor, ...) become active, as on hardware. Standard library only; no game files.
 """
 import os
@@ -15,7 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.dont_write_bytecode = True
 sys.path.insert(0, HERE)
 
-from test_salu64_bitwise_data import run_ps_wave  # noqa: E402  (also puts tools/ on sys.path)
+from test_salu64_bitwise_data import run_ps_wave  # noqa: E402  (also puts tooling/ on sys.path)
 import cf_ref  # noqa: E402
 
 KINDS = ["and", "or", "xor", "andn1", "andn2", "orn1", "orn2", "nand", "nor", "xnor"]

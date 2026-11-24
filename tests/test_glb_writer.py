@@ -1,4 +1,4 @@
-"""Unit tests for tools/glb_writer.py covering glTF 2.0 binary (.glb) container
+"""Unit tests for tooling/glb_writer.py covering glTF 2.0 binary (.glb) container
 header generation, chunk padding, buffer views, accessors, materials, textures,
 OBJ parsing, and container validation.
 
@@ -22,7 +22,7 @@ import zlib
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 
@@ -1103,7 +1103,7 @@ class TestConcaveObjFaces(unittest.TestCase):
 
 
 class TestGlbWriterMainCli(unittest.TestCase):
-    """Tests the command-line entrypoint of tools/glb_writer.py."""
+    """Tests the command-line entrypoint of tooling/glb_writer.py."""
 
     def test_main_cli_execution(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

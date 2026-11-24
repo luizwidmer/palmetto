@@ -1,6 +1,6 @@
 """Translator-driven semantic tests for pixel-shader interpolation (v_interp_p1_f32, v_interp_p2_f32, v_interp_mov_f32).
 
-Translates hand-written RDNA2 pixel shaders through tools/rdna2spirv.py, validates the generated SPIR-V with
+Translates hand-written RDNA2 pixel shaders through tooling/rdna2spirv.py, validates the generated SPIR-V with
 spirv-as/spirv-val when on PATH, and executes them in spirv_mini_interp via support.varyings / support.mrt0_words:
   - v_interp_p1_f32 + v_interp_p2_f32 across all 4 attribute channels (x/y/z/w) at vertex and interior barycentrics;
   - multiple attributes (attr0, attr1, attr2) mapped to sequential Vulkan input locations;

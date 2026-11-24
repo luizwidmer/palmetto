@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/anim_rigs.py.
+"""Synthetic tests for tooling/anim_rigs.py.
 
     python -I tests/test_anim_rigs.py
 
@@ -15,8 +15,8 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "anim_rigs.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "anim_rigs.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import anim_rigs  # noqa: E402

@@ -18,7 +18,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling"))
 sys.path.insert(0, HERE)
 
 import shader_ir  # noqa: E402
@@ -90,7 +90,7 @@ DOT_OPS = (
     "v_dot8_u32_u4",
 )
 
-# Hardware-measured on RDNA2 gfx1036 (Ryzen 9 7950X3D iGPU, tools/hw_oracle, @aslan2142):
+# Hardware-measured on RDNA2 gfx1036 (Ryzen 9 7950X3D iGPU, tooling/hw_oracle, @aslan2142):
 # 60 operand sets as (S0, S1, S2, D, D_clamp).
 MEASURED_DOT_GFX1036 = {
     "v_dot4_u32_u8": [

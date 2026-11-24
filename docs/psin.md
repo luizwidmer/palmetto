@@ -265,7 +265,7 @@ established. Per the project rules, no decryption is attempted.
 
 The 57 complete `PSIN` streams without `LSCH` (54 in `data.arc`, 2 in `packs.arc`, 1 in `anim.arc`) replace
 `LSCH`/`LENM`/`LSNS`/`LRSC` with a big-endian PSO schema chain: `PMAP`, `PSCH`, `PSIG`, optional `STFN`/`STDN`, `STNS`
-and `CHKS`. Measured with `tools/psin_psch.py` over all **54** containers in `data.arc` (`54/54` valid):
+and `CHKS`. Measured with `tooling/psin_psch.py` over all **54** containers in `data.arc` (`54/54` valid):
 
 - **Header and instance region:** bytes `+0x08..+0x0F` hold `pppppppp` (`0x70` x 8) and instance data blocks sit at
   `+0x10..first_section` (in contrast to `LSCH` containers, which place the block table at `+8`).
@@ -290,7 +290,7 @@ and `CHKS`. Measured with `tools/psin_psch.py` over all **54** containers in `da
   byte-for-byte.
 
 ```text
-python -I tools/psin_psch.py <file_or_carve_dir_or_arc> [--carve-dir DIR] [--json FILE]
+python -I tooling/psin_psch.py <file_or_carve_dir_or_arc> [--carve-dir DIR] [--json FILE]
 ```
 
 `tests/test_psin_psch.py` builds synthetic `PMAP`/`PSCH`/`PSIG`/`STDN`/`STNS` containers and tests block validation,
@@ -299,7 +299,7 @@ member descriptor checks, carve-directory filtering and `--json` collision refus
 ## Instance data
 
 The region between the 8-byte header and `LSCH` is a block table followed by its data blocks. The schema in
-`LSCH`/`LENM` describes the blocks, and `LRSC` names the root. `tools/psin_data.py` reads it.
+`LSCH`/`LENM` describes the blocks, and `LRSC` names the root. `tooling/psin_data.py` reads it.
 
 ### Block table and blocks
 
@@ -395,8 +395,8 @@ hashes are covered under *Hashes*, and the resource names behind hash values und
 ### Tool
 
 ```text
-python -I tools/psin_data.py <PSIN file or carve directory> [--json] [--limit N]
-python -I tools/psin_data.py <PSIN file> --dump
+python -I tooling/psin_data.py <PSIN file or carve directory> [--json] [--limit N]
+python -I tooling/psin_data.py <PSIN file> --dump
 ```
 
 The default output is the counts above, for one file or every `.bin` in a carve directory. A single file that does
@@ -417,7 +417,7 @@ placement maps:
 | `0x4a`, `0x4d`, `0x4b` (u32) | joaat of the lower-cased name |
 | `0x4f` (u64) | low 64 bits of MurmurHash3 x64 128, seed 0, over the name's bytes |
 
-`tools/psin_names.py` walks every container with `psin_data.py`, collects each hash value with the struct and member
+`tooling/psin_names.py` walks every container with `psin_data.py`, collects each hash value with the struct and member
 that hold it, and looks it up in a dictionary of names you already have: `arc9_names.py` JSON (the `.#dr`/`.#ft`/`.#dd`
 suffix dropped) or plain name lists. Each run also hashes every name with `#zq` appended, through the same rules. Those
 names cannot be right, so their matches show how many real matches chance alone would give.
@@ -453,7 +453,7 @@ the same archives with default options; 317,257 of them come from `levels.arc`.
   scenarios), or resources whose own name string `arc9_names.py` does not find.
 
 ```text
-python -I tools/psin_names.py <PSIN file or carve directory> --names <arc9_names.json> [--names ...]
+python -I tooling/psin_names.py <PSIN file or carve directory> --names <arc9_names.json> [--names ...]
                               [--json] [--fields N] [--refs OUT.tsv] [--limit N]
 ```
 
@@ -490,7 +490,7 @@ local-space navmeshes remains open.
 ## Tool
 
 ```text
-python -I tools/psin_index.py <PSIN file or carve directory> [--json] [--schema] [--limit N]
+python -I tooling/psin_index.py <PSIN file or carve directory> [--json] [--schema] [--limit N]
 ```
 
 `--limit N` stops after N PSIN containers and must be at least 1 (0 or a negative value is refused with exit
@@ -521,7 +521,7 @@ only.
 
 ### Viewing a container in ImHex
 
-[tools/imhex/psin.hexpat](../tools/imhex/psin.hexpat) is a pattern for the [ImHex](https://imhex.werwolv.net/) hex
+[tooling/imhex/psin.hexpat](../tooling/imhex/psin.hexpat) is a pattern for the [ImHex](https://imhex.werwolv.net/) hex
 editor that lays out one container as this page describes it:
 - the header, the instance-data block table with its `pppppppp` end, and the blocks, as raw bytes;
 - the section chain;
@@ -540,7 +540,7 @@ Besides its 1,012 `PSIN` containers (1,015 streams, 3,477,872 inflated bytes), `
 binary container carved at offset `0x53000` (`42` contiguous deflate streams: 41 x 65,536 + 15,408 = **2,702,384**
 inflated bytes / `0x293C30`, 461,333 stored bytes, 43.7% of `script.arc`'s inflated output). It is not `PSIN`, `RBF0`
 or `0DRP`, and carries no strings: it is a dense 483-tree forest serialized in preorder with `0x71717171` (`'qqqq'`)
-relocatable pointers, measured with `tools/script_qtable.py` on package 1.0.2.1.
+relocatable pointers, measured with `tooling/script_qtable.py` on package 1.0.2.1.
 
 ### Layout and header (`0x000000..0x293C2F`)
 
@@ -578,7 +578,7 @@ pointer whose low 32 bits equal `offsets[target] + 8` (the start of record `targ
 | Typed struct records | 20,389 | `+0x08 = struct_type_hash` (66 distinct hashes), `+0x0C = 0` on all 20,389 | Sizes `32` B (17,106: 12,332 wrapper nodes pointing at `+0x10` to `i + 1` with `+0x18 = 0`, 3,540 single-pointer at `+0x18`, 3 two-pointer, 1,231 leaves), `48` B (1,642: 1,641 two-pointer, 1 leaf) and `64` B (1,641 leaves). |
 
 ```text
-python -I tools/script_qtable.py <carve_dir_or_arc_or_bin> [--root-hash HEX] [--type-hash HEX] [--json FILE]
+python -I tooling/script_qtable.py <carve_dir_or_arc_or_bin> [--root-hash HEX] [--type-hash HEX] [--json FILE]
 ```
 
 Accepts an `arc9_carve.py` carve directory (`script`), a `script.arc` archive or a joined `.bin` payload.
@@ -594,6 +594,6 @@ exit 2 as well.
 - The 64 KiB split is not joined automatically. A caller that has the archive order can join adjacent
   blocks first; the tool then parses the complete container.
 - `LSNS` record contents and the `CHKS` payload are opaque to this tool; only the `LSNS` block layout is read. `LSCH` and `LENM` are decoded as above, and the instance
-  data by `tools/psin_data.py`. Struct, member and enum names stay 32-bit hashes, and most of them have no known
+  data by `tooling/psin_data.py`. Struct, member and enum names stay 32-bit hashes, and most of them have no known
   name.
 - No game data, names, hashes or payloads are committed. The carve directories are local.

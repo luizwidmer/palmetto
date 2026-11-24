@@ -1,4 +1,4 @@
-"""Unit tests for tools/pe_shader_containers.py, on synthetic containers (no game data, no PE needed).
+"""Unit tests for tooling/pe_shader_containers.py, on synthetic containers (no game data, no PE needed).
 
 The containers are built by hand here: a u32 offset table at +32, and each chunk beginning with its fourcc
 and a u32 size. The scan's job is to accept exactly that shape and to reject the `DXBC` immediates and error
@@ -17,7 +17,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import pe_shader_containers as psc
 

@@ -7,17 +7,17 @@ tends to get wrong.
 ## What this is
 
 A port template for the target console build of the target game, built on the player's PC from their own copy:
-`make_game.py` carves and translates the shaders (RDNA2 → SPIR-V), exports the assets and builds `runtime/`, a PE
+`build_port.py` carves and translates the shaders (RDNA2 → SPIR-V), exports the assets and builds `port/`, a PE
 loader that maps the game's executable and resolves its imports to shims. Nothing of the game is in the repository.
 
 ## Where things are
 
 - The notes under `docs/` record measured formats, indexed by [docs/README.md](docs/README.md); `docs/design.md` is the one quoted most.
-- `scripts/` holds the GPU/Wine test runners (`run_gpu_tests.py`, `run_wine_tests.py`), the translator suite runner
+- `tooling/scripts/` holds the GPU/Wine test runners (`run_gpu_tests.py`, `run_wine_tests.py`), the translator suite runner
   `run_semantic_tests.py`, `check_no_game_data.py` (see the first hard rule below) and PowerShell build helpers.
-- `viewer/` is the map viewer: `index.html` plus `serve.py`, a local-only server for the exported world.
-- `third_party/` holds the `arc9-explorer` submodule (`tools/arc9dump` needs `git submodule update --init`), the vendored `xtaskqueue` the `xgameruntime` shim links and the vendored `bcpack-rs` rANS decoder of the BCPack calibration tools.
-- `game/xbox-1.0.2.1.json` is the per-file size and SHA-256 manifest of the Xbox package — hashes only, no game content.
+- `app/` is the map viewer: `index.html` plus `serve.py`, a local-only server for the exported world.
+- `vendor/` holds the `arc9-explorer` submodule (`tooling/arc9dump` needs `git submodule update --init`), the vendored `xtaskqueue` the `xgameruntime` shim links and the vendored `bcpack-rs` rANS decoder of the BCPack calibration tools.
+- `profiles/xbox-1.0.2.1.json` is the per-file size and SHA-256 manifest of the Xbox package — hashes only, no game content.
 - `tests/semantic/` is the translator regression suite; a new translator rule comes with a small hand-written `.asm` fixture there.
 
 ## Hard rules
@@ -25,7 +25,7 @@ loader that maps the game's executable and resolves its imports to shims. Nothin
 - **No game data, ever**: no archives, executables, carved files, shaders in any form (DXBC, FSSM, disassembly,
   SPIR-V), textures, audio, or logs and reports that quote them, in commits, issues, pull requests or test
   fixtures. A test that needs a shader builds its input by hand or reads it from the user's work folder.
-  `python -I scripts/check_no_game_data.py <path> ...` reads the first bytes of the files you name, so it catches a
+  `python -I tooling/scripts/check_no_game_data.py <path> ...` reads the first bytes of the files you name, so it catches a
   renamed file the extension check in CI misses.
 - **No keys, decryption or protection workarounds.** If a format turns out to be encrypted, write that down in
   `docs/design.md` and stop there.
@@ -53,7 +53,7 @@ loader that maps the game's executable and resolves its imports to shims. Nothin
 - Found work you won't do yourself (a bug, a missing method, a stale doc, a follow-up of your own pull request)?
   Post it in the coordination issue as `finding: <one line>`, followed by where it is (file and line), why it matters,
   and whether it needs game files or particular hardware. The coordinator checks it and lists it for others.
-- For the D3D12 → Vulkan layer (`runtime/shims/d3d12_*`, `runtime/src/vulkan_*`), also read
+- For the D3D12 → Vulkan layer (`port/shims/d3d12_*`, `port/src/vulkan_*`), also read
   [#313](https://github.com/the original project/issues/313): most of that work builds on a few open pull requests,
   and it lists which D3D12 methods are still open.
 
@@ -70,15 +70,15 @@ tests in 224 s on 16 cores) and the two builds longer - so run one translator te
 whole suite once before the pull request:
 
 ```powershell
-python -m compileall -q make_game.py tools tests
-python -I make_game.py --help
-python -I scripts/run_semantic_tests.py tests/semantic   # translator suite, one file per core; no LLVM, SPIR-V tools or GPU needed
+python -m compileall -q build_port.py tools tests
+python -I build_port.py --help
+python -I tooling/scripts/run_semantic_tests.py tests/semantic   # translator suite, one file per core; no LLVM, SPIR-V tools or GPU needed
 python -m unittest discover -s tests/semantic -p test_<name>.py   # one translator test file
 python -I tests/test_<name>.py                     # standalone standard-library unit test
 node --test tests/test_viewer_streaming.cjs        # viewer streaming; needs Node 22+
-dotnet build tools/arc9dump/arc9dump.csproj -c Release
-cmake -S runtime -B runtime/build; cmake --build runtime/build --config RelWithDebInfo
-ctest --test-dir runtime/build -C RelWithDebInfo --output-on-failure
+dotnet build tooling/arc9dump/arc9dump.csproj -c Release
+cmake -S runtime -B port/build; cmake --build port/build --config RelWithDebInfo
+ctest --test-dir port/build -C RelWithDebInfo --output-on-failure
 ```
 
 `palmetto` and the shims are Windows-only, so Linux and macOS configure the portable subset of the runtime tests. The
@@ -99,8 +99,8 @@ With a work folder already built, a translator change is checked on a slice befo
 compared with the run before it:
 
 ```powershell
-python -I tools/rdna2spirv.py <work>/shaders/dxbc/disasm --out <scratch> --limit 200
-python -I tools/rdna2spirv.py <work>/shaders/dxbc/disasm --out <scratch> --shard 0/8   # one of 8 parallel slices
+python -I tooling/rdna2spirv.py <work>/shaders/dxbc/disasm --out <scratch> --limit 200
+python -I tooling/rdna2spirv.py <work>/shaders/dxbc/disasm --out <scratch> --shard 0/8   # one of 8 parallel slices
 ```
 
 Shard runs write `index.part*.json`; merge them into `index.json` with `--merge`. Report translated and
@@ -114,5 +114,5 @@ Shard runs write `index.part*.json`; merge them into `index.json` with `--merge`
   `tex_headers.py` and `skinned_glb.py` (which fall back to the standard library when numpy is absent).
 - A text file a tool writes names its line ending - `open(path, "w", encoding="utf-8", newline="\n")` - so the same
   input gives the same bytes on every platform; `tests/test_text_write_line_endings.py` catches a writer that forgets.
-- Keep `make_game.py` working on Windows first: paths through `os.path`, no bash in the build.
+- Keep `build_port.py` working on Windows first: paths through `os.path`, no bash in the build.
 - In the pull request, say that it was AI-assisted, what you tested and on which GPU and driver.

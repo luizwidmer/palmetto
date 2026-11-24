@@ -1,4 +1,4 @@
-; ps_far_branch  llvm-mc -triple=amdgcn--amdpal -mcpu=gfx1013 -show-encoding output for runtime/test/shaders/ps_far_branch.asm (the far branches need the instruction encodings; test_far_branch.py checks this listing against the .asm)
+; ps_far_branch  llvm-mc -triple=amdgcn--amdpal -mcpu=gfx1013 -show-encoding output for port/test/shaders/ps_far_branch.asm (the far branches need the instruction encodings; test_far_branch.py checks this listing against the .asm)
 	s_mov_b32 s10, 1                        ; encoding: [0x81,0x03,0x8a,0xbe]
 	s_getpc_b64 s[4:5]                      ; encoding: [0x00,0x1f,0x84,0xbe]
 	s_add_u32 s4, s4, 0xb8                  ; encoding: [0x04,0xff,0x04,0x80,0xb8,0x00,0x00,0x00]

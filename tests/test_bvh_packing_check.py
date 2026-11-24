@@ -1,4 +1,4 @@
-"""Synthetic dehydrated BLASes for tools/bvh_packing_check.py: a clean two-level tree passes, and each broken
+"""Synthetic dehydrated BLASes for tooling/bvh_packing_check.py: a clean two-level tree passes, and each broken
 invariant is reported under its own reason. Also scans a small fake archive with a split stream. No game data.
 
     python -I tests/test_bvh_packing_check.py
@@ -14,7 +14,7 @@ import unittest
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import bvh_packing_check as C  # noqa: E402
 import bvh_rehydrate as R  # noqa: E402

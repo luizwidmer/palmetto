@@ -1,11 +1,11 @@
-"""scripts/check_apt_key.py accepts only the pinned key, and the workflows check every apt key they fetch.
+"""tooling/scripts/check_apt_key.py accepts only the pinned key, and the workflows check every apt key they fetch.
 
     python -I tests/test_check_apt_key.py
 
 GnuPG is stood in for by a small Python program that prints the `--with-colons` listing written in each test's "key
 file", so the tests run anywhere without a real key or gpg: the one key, another key, two primary keys, a primary key
 with subkeys, a file gpg can't read. The workflows are read as text: every `.key`/`.gpg`/`.asc` URL they fetch must go
-to a temporary file that `scripts/check_apt_key.py` checks before anything installs it. Standard library only.
+to a temporary file that `tooling/scripts/check_apt_key.py` checks before anything installs it. Standard library only.
 """
 import os
 import re
@@ -16,10 +16,10 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "scripts"))
+sys.path.insert(0, os.path.join(ROOT, "tooling/scripts"))
 import check_apt_key  # noqa: E402
 
-SCRIPT = os.path.join(ROOT, "scripts", "check_apt_key.py")
+SCRIPT = os.path.join(ROOT, "tooling", "tooling/scripts", "check_apt_key.py")
 WINEHQ = "D43F640145369C51D786DDEA76F1A20FF987672F"
 LLVM = "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421"
 
@@ -139,8 +139,8 @@ class Workflows(unittest.TestCase):
                     self.assertNotIn("|", line.split("#")[0], f"{where} pipes a key straight into a command")
                     self.assertNotRegex(line, r"/etc/apt|/usr/share/keyrings", f"{where} downloads into apt's keyrings")
                     following = "\n".join(lines[n + 1:n + 4])
-                    self.assertRegex(following, r"scripts/check_apt_key\.py \"?\$\w+\"? [0-9A-F]{40}\b",
-                                     f"{where}: the key isn't checked by scripts/check_apt_key.py right after")
+                    self.assertRegex(following, r"tooling/scripts/check_apt_key\.py \"?\$\w+\"? [0-9A-F]{40}\b",
+                                     f"{where}: the key isn't checked by tooling/scripts/check_apt_key.py right after")
         self.assertGreaterEqual(fetched, 2, "expected the WineHQ and apt.llvm.org key downloads")
 
 

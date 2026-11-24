@@ -4,7 +4,7 @@ Measured natively on RDNA2 (gfx1035 & gfx1036, wave32 & wave64): v_cvt_flr_i32_f
 v_cvt_rpi_i32_f32 is sat_i32(floor(S0 + 0.5)) computed **exactly** (without binary32 rounding of S0 + 0.5, so
 0x3EFFFFFF = 0.49999997 gives 0, 0x4B000001 gives 0x00800001, and 0x4B7FFFFF gives 0x00FFFFFF). Values at or past
 +-2^31, +-inf, and NaNs all saturate by the sign bit of the operand (+ -> 0x7FFFFFFF, - -> 0x80000000), unlike
-v_cvt_i32_f32 which returns 0 for NaN. Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs
+v_cvt_i32_f32 which returns 0 for NaN. Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs
 it in tests/semantic/spirv_mini_interp.py and compares the result with an exact plain-Python reference. Denormal
 inputs are left out (the float mode that would flush them is not modelled). The result leaves through exp as two
 16-bit halves ORed into 0x40000000, so no export channel is a NaN or denormal pattern that a float round trip could
@@ -22,7 +22,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

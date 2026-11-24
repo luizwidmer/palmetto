@@ -1,4 +1,4 @@
-"""Unit tests for read-before-write operand classification in scripts/vs_input_survey.py.
+"""Unit tests for read-before-write operand classification in tooling/scripts/vs_input_survey.py.
 
     python -I tests/test_vs_input_survey_rbw.py
 
@@ -11,8 +11,8 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
-sys.path.insert(0, os.path.join(ROOT, "scripts"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
+sys.path.insert(0, os.path.join(ROOT, "tooling/scripts"))
 
 import shader_ir  # noqa: E402
 import vs_input_survey as V  # noqa: E402

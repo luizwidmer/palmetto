@@ -3,12 +3,12 @@
     python -I tests/test_docs_cli_flags.py
 
 `tests/test_docs_repo_paths.py` checks the paths the docs name; this checks the options. A renamed or removed
-argparse option leaves `python -I tools/x.py --old` in a README or guide that no longer runs. Three checks:
+argparse option leaves `python -I tooling/x.py --old` in a README or guide that no longer runs. Three checks:
 
 1. a `--flag` anywhere in a Markdown page appears as a string in some tracked non-Markdown source file;
-2. in a fenced command that starts `python [-I] tools/x.py` (or `scripts/`, or `make_game.py`), every flag appears in
+2. in a fenced command that starts `python [-I] tooling/x.py` (or `tooling/scripts/`, or `build_port.py`), every flag appears in
    that script (a script that builds flags as `"--" + name` is skipped; `--help` is argparse's own);
-3. in a fenced command running a PowerShell script (`scripts/` or `tools/`), every flag appears in that script's
+3. in a fenced command running a PowerShell script (`tooling/scripts/` or `tooling/`), every flag appears in that script's
    `param()` block.
 
 Reads tracked files only; no game files.
@@ -23,12 +23,19 @@ FLAG = re.compile(r"(?<![\w-])(--[a-z][\w-]*)")
 SOURCE_SUFFIXES = (".py", ".ps1", ".cpp", ".cc", ".c", ".h", ".hpp", ".cmake", ".txt", ".cs", ".cjs", ".js", ".html",
                    ".bat", ".sh", ".yml", ".yaml", ".csproj")
 # Flags of other programs the docs quote: gh (AGENTS.md), pip (docs/shader_validation.md), argparse itself.
-FOREIGN = {"--search", "--state", "--index-url", "--help"}
+FOREIGN = {"--search", "--state", "--index-url", "--help",
+    "--eliminate-dead-code-aggressive",
+    "--eliminate-dead-branches",
+    "--merge-blocks",
+    "--cfg-cleanup",
+    "--merge-return",
+    "--scalar-replacement",
+    "--ssa-rewrite"}
 # Pages that quote another project's tree (a public prior-art project, a public prior-art project).
 OTHER_PROJECTS = {"docs/fssm_crosscheck.md", "docs/d3d12_xs_surface.md"}
-COMMAND = re.compile(r"\bpython3?(?: -I)? ((?:tools|scripts)/[\w/]+\.py|make_game\.py)\b")
+COMMAND = re.compile(r"\bpython3?(?: -I)? ((?:tooling|tooling/scripts)/[\w/]+\.py|build_port.py)\b")
 PS1_COMMAND = re.compile(
-    r"(?:powershell(?:\.exe)?\s+.*?-File\s+|(?:\./|\.\\|&|\.)\s*|\b)((?:tools|scripts)[\\/][\w./\\-]+\.ps1)\b",
+    r"(?:powershell(?:\.exe)?\s+.*?-File\s+|(?:\./|\.\\|&|\.)\s*|\b)((?:tooling|tooling/scripts)[\\/][\w./\\-]+\.ps1)\b",
     re.IGNORECASE
 )
 PS1_FLAG = re.compile(r"(?<![\w-])(-[a-zA-Z][\w-]*)")
@@ -158,8 +165,8 @@ def fenced_commands(text):
 
 # These dev.py subcommands pass their arguments through to the producer.
 DEV_PRODUCERS = {
-    "boot-trace": "tools/boot_trace.py",
-    "guest-scene": "scripts/run_guest_scene.py",
+    "boot-trace": "tooling/boot_trace.py",
+    "guest-scene": "tooling/scripts/run_guest_scene.py",
 }
 
 
@@ -174,7 +181,7 @@ def tool_flag_mismatches(pages, sources):
                 continue
             tool = m.group(1)
             args = cmd[m.end():].split(maxsplit=1)
-            if tool == "scripts/dev.py" and args:
+            if tool == "tooling/scripts/dev.py" and args:
                 tool = DEV_PRODUCERS.get(args[0], tool)
             source = sources.get(tool, "")
             if '"--" +' in source or "'--' +" in source:
@@ -211,33 +218,33 @@ def ps1_flag_mismatches(pages, sources):
 class DocsCliFlags(unittest.TestCase):
     def test_dev_inherits_only_the_selected_producer_flags(self):
         pages = {"docs/dev.md": ("```\n"
-                                 "python -I scripts/dev.py boot-trace --d3d12 --negative-controls\n"
-                                 "python -I scripts/dev.py guest-scene --negative-controls --d3d12\n"
-                                 "python -I scripts/dev.py discover --json --d3d12\n"
+                                 "python -I tooling/scripts/dev.py boot-trace --d3d12 --negative-controls\n"
+                                 "python -I tooling/scripts/dev.py guest-scene --negative-controls --d3d12\n"
+                                 "python -I tooling/scripts/dev.py discover --json --d3d12\n"
                                  "```\n")}
         sources = {
-            "scripts/dev.py": "--json",
-            "tools/boot_trace.py": "--d3d12",
-            "scripts/run_guest_scene.py": "--negative-controls",
+            "tooling/scripts/dev.py": "--json",
+            "tooling/boot_trace.py": "--d3d12",
+            "tooling/scripts/run_guest_scene.py": "--negative-controls",
         }
         self.assertEqual(tool_flag_mismatches(pages, sources), [
-            ("docs/dev.md:2", "tools/boot_trace.py", "--negative-controls"),
-            ("docs/dev.md:3", "scripts/run_guest_scene.py", "--d3d12"),
-            ("docs/dev.md:4", "scripts/dev.py", "--d3d12"),
+            ("docs/dev.md:2", "tooling/boot_trace.py", "--negative-controls"),
+            ("docs/dev.md:3", "tooling/scripts/run_guest_scene.py", "--d3d12"),
+            ("docs/dev.md:4", "tooling/scripts/dev.py", "--d3d12"),
         ])
 
     def test_checkers_report_only_the_missing_flag(self):
         pages = {"docs/a.md": "Use `--real` or `--gone`, and `gh --search`.\n"
-                              "```\npython -I tools/x.py --real --old \\\n    --more\npython -I tools/y.py --old\n```\n"}
+                              "```\npython -I tooling/x.py --real --old \\\n    --more\npython -I tooling/y.py --old\n```\n"}
         self.assertEqual(unknown_flags(pages, '"--real" "--more" "--old"'), [("docs/a.md:1", "--gone")])
-        sources = {"tools/x.py": 'add("--real") add("--more")', "tools/y.py": 'add("--old")'}
-        self.assertEqual(tool_flag_mismatches(pages, sources), [("docs/a.md:3", "tools/x.py", "--old")])
-        sources["tools/x.py"] += ' "--" + name'
+        sources = {"tooling/x.py": 'add("--real") add("--more")', "tooling/y.py": 'add("--old")'}
+        self.assertEqual(tool_flag_mismatches(pages, sources), [("docs/a.md:3", "tooling/x.py", "--old")])
+        sources["tooling/x.py"] += ' "--" + name'
         self.assertEqual(tool_flag_mismatches(pages, sources), [])
 
-        ps1_pages = {"docs/b.md": "```\n.\\scripts\\test.ps1 -ValidParam -BadParam\n```\n"}
-        ps1_sources = {"scripts/test.ps1": "param([string]$ValidParam)"}
-        self.assertEqual(ps1_flag_mismatches(ps1_pages, ps1_sources), [("docs/b.md:2", "scripts/test.ps1", "-BadParam")])
+        ps1_pages = {"docs/b.md": "```\n.\\tooling\\scripts\\test.ps1 -ValidParam -BadParam\n```\n"}
+        ps1_sources = {"tooling/scripts/test.ps1": "param([string]$ValidParam)"}
+        self.assertEqual(ps1_flag_mismatches(ps1_pages, ps1_sources), [("docs/b.md:2", "tooling/scripts/test.ps1", "-BadParam")])
 
     def test_docs_name_existing_flags(self):
         files = tracked_files()
@@ -250,13 +257,13 @@ class DocsCliFlags(unittest.TestCase):
 
     def test_fenced_commands_use_the_flags_of_their_tool(self):
         files = tracked_files()
-        sources = {p: read(p) for p in files if p.endswith(".py") and (p.startswith(("tools/", "scripts/")) or p == "make_game.py")}
+        sources = {p: read(p) for p in files if p.endswith(".py") and (p.startswith(("tooling/", "tooling/scripts/")) or p == "build_port.py")}
         pages = {p: read(p) for p in files if p.endswith(".md") and p not in OTHER_PROJECTS}
         bad = tool_flag_mismatches(pages, sources)
         self.assertEqual(bad, [], "fenced commands using a flag their script lacks: " +
                          "; ".join(f"{where} {tool} {flag}" for where, tool, flag in bad))
 
-        ps1_sources = {p: read(p) for p in files if p.endswith(".ps1") and p.startswith(("tools/", "scripts/"))}
+        ps1_sources = {p: read(p) for p in files if p.endswith(".ps1") and p.startswith(("tooling/", "tooling/scripts/"))}
         ps1_bad = ps1_flag_mismatches(pages, ps1_sources)
         self.assertEqual(ps1_bad, [], "fenced commands using a flag their PowerShell script lacks: " +
                          "; ".join(f"{where} {tool} {flag}" for where, tool, flag in ps1_bad))

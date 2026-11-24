@@ -1,4 +1,4 @@
-"""Tests for tools/cf_diff.py and tools/cf_ref.py, the FUZZ-8 control-flow fuzzer (no game data, no GPU, no
+"""Tests for tooling/cf_diff.py and tooling/cf_ref.py, the FUZZ-8 control-flow fuzzer (no game data, no GPU, no
 llvm-mc).
 
     python -m pytest tests/test_cf_diff.py -v
@@ -12,8 +12,8 @@ import tempfile
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "cf_diff.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "cf_diff.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import cf_diff  # noqa: E402
 import cf_ref  # noqa: E402

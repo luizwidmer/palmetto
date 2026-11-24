@@ -8,7 +8,7 @@ invoked. Counts, RVAs, handle values and object types only; no game data, paths 
 
 ## 1. How the wait was measured
 
-`PALMETTO_WAIT_SAMPLE=<seconds,...>` (`runtime/src/main.cpp`, in the runtime itself so the title's own threads are
+`PALMETTO_WAIT_SAMPLE=<seconds,...>` (`port/src/main.cpp`, in the runtime itself so the title's own threads are
 sampled; `1` means 5,10,20,40,60). At each sample time a sampler thread:
 
 * snapshots every other thread of the process (Toolhelp32), `SuspendThread`/`GetThreadContext`, and records RIP, RSP,
@@ -22,7 +22,7 @@ sampled; `1` means 5,10,20,40,60). At each sample time a sampler thread:
 * scans the first two stack pages for return addresses inside the mapped image or a loaded module (shallow walk; every
   page is `VirtualQuery`d first, so a bad stack end is a skipped page, not a fault) and prints them as module+RVA.
 
-`PALMETTO_DSTORAGE_TRACE=1` (`runtime/shims/dstorage.cpp`) logs the first few of each queue call with the **title-side
+`PALMETTO_DSTORAGE_TRACE=1` (`port/shims/dstorage.cpp`) logs the first few of each queue call with the **title-side
 caller's module+RVA**, every entry the worker runs with its HRESULT, and periodic progress counters (requests, MiB,
 MiB/s). Both are off by default and change no behaviour.
 
@@ -103,8 +103,8 @@ order:
 
 ## 6. Instrumentation added (all env-gated, no behaviour change)
 
-`runtime/src/main.cpp`: `PALMETTO_WAIT_SAMPLE` sampler as described in section 1 (thread snapshot, RIP naming, object
-types, shallow stack, per-sample site histogram and wait detail). `runtime/shims/dstorage.cpp`: `PALMETTO_DSTORAGE_TRACE`
+`port/src/main.cpp`: `PALMETTO_WAIT_SAMPLE` sampler as described in section 1 (thread snapshot, RIP naming, object
+types, shallow stack, per-sample site histogram and wait detail). `port/shims/dstorage.cpp`: `PALMETTO_DSTORAGE_TRACE`
 per-call trace with caller RVAs, per-entry completion HRESULTs, and periodic request/MiB/MiB/s progress counters; no
 queue semantics changed.
 

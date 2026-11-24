@@ -12,7 +12,7 @@ block_1based = ptr & 0xfffff
 byte_offset  = ptr >> 20
 ```
 
-Parser and CLI: `tools/ped_catalogues.py` (stdlib only, `python -I`). Synthetic test suite: `tests/test_ped_catalogues.py`.
+Parser and CLI: `tooling/ped_catalogues.py` (stdlib only, `python -I`). Synthetic test suite: `tests/test_ped_catalogues.py`.
 
 ---
 
@@ -20,7 +20,7 @@ Parser and CLI: `tools/ped_catalogues.py` (stdlib only, `python -I`). Synthetic 
 
 ### Resource-packed `0DRP` v122 (`0x7a`)
 
-Uses the standard `0x60`-byte standalone `0DRP`/`0x7a` header validated by `tools/odrp_7a.py` (see [page_directory.md](page_directory.md)):
+Uses the standard `0x60`-byte standalone `0DRP`/`0x7a` header validated by `tooling/odrp_7a.py` (see [page_directory.md](page_directory.md)):
 
 | Offset | Type | Field | Notes |
 |---:|---|---|---|
@@ -42,7 +42,7 @@ Each 16-byte block directory row at `+0x38` is `(u32 type_hash, u32 byte_size, u
 
 ### Standalone `PSIN`
 
-Uses the standard `PSIN` header, `0xaa`-filled 16-byte block table, `0x70` table terminator, `LSCH`/`LENM` schema sections, and `LRSC` `0DRP` v122 summary record (`u32@+0x10` = 1-based root block index), decoded via `tools/psin_data.py` (see [psin.md](psin.md)).
+Uses the standard `PSIN` header, `0xaa`-filled 16-byte block table, `0x70` table terminator, `LSCH`/`LENM` schema sections, and `LRSC` `0DRP` v122 summary record (`u32@+0x10` = 1-based root block index), decoded via `tooling/psin_data.py` (see [psin.md](psin.md)).
 
 ---
 
@@ -128,7 +128,7 @@ When `key == 0x46e1a048`, `target_ptr` resolves into a block of type `0x3d780b74
 
 Within a single catalogue, `0xf795e8ba` presets form a forest keyed by `preset_id` via `parent_id`. Child presets commonly carry texture overrides (e.g. face albedo and normal) while placing the drawable tag (`0x4bfd27dd` or `0x1c114e61`, `joaat32` of the lowercased drawable name) on a parent or grandparent preset with zero texture hashes.
 
-`tools/ped_catalogues.py` resolves each state in deterministic precedence order:
+`tooling/ped_catalogues.py` resolves each state in deterministic precedence order:
 
 1. **Direct preset drawable tag** (`0x4bfd27dd` / `0x1c114e61` on the preset's `+0x28` tag map, `joaat32`).
 2. **Direct state drawable tag** (`0x4bfd27dd` / `0x1c114e61` on the state's `+0xa0` tag map, `joaat32`).
@@ -140,7 +140,7 @@ Within a single catalogue, `0xf795e8ba` presets form a forest keyed by `preset_i
 
 ## Verified corpus counts (Xbox package `1.0.2.1`, `packs.arc`)
 
-Measured read-only with `tools/ped_catalogues.py` (0 parse errors, 0 warnings):
+Measured read-only with `tooling/ped_catalogues.py` (0 parse errors, 0 warnings):
 
 | Metric | Resource-packed `0DRP` (`packs.arc`) | Standalone `PSIN` (`00011ccb2000.pso`) | Combined |
 |---|---:|---:|---:|
@@ -166,7 +166,7 @@ Measured read-only with `tools/ped_catalogues.py` (0 parse errors, 0 warnings):
 ## CLI usage
 
 ```powershell
-python -I tools/ped_catalogues.py census  <file|dir|archive.arc> --json
-python -I tools/ped_catalogues.py inspect <catalogue.pso|catalogue.0drp> --limit 10
-python -I tools/ped_catalogues.py resolve <file|dir|archive.arc> --name <drawable_name> --cull-only --json
+python -I tooling/ped_catalogues.py census  <file|dir|archive.arc> --json
+python -I tooling/ped_catalogues.py inspect <catalogue.pso|catalogue.0drp> --limit 10
+python -I tooling/ped_catalogues.py resolve <file|dir|archive.arc> --name <drawable_name> --cull-only --json
 ```

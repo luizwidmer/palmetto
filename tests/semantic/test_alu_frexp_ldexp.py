@@ -3,7 +3,7 @@
 v_frexp_mant_f32 returns the mantissa of S0 in [0.5, 1) with its sign, v_frexp_exp_i32_f32 the matching exponent
 (S0 = mant * 2^exp), and v_ldexp_f32 computes S0 * 2^S1 with S1 a signed integer (RDNA2 ISA). Zero gives a signed zero
 mantissa and exponent 0; infinities and NaNs pass through the mantissa and ldexp, and give exponent 0. Each case
-translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and
+translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and
 compares the exported word with a plain-Python reference (math.frexp / math.ldexp on the double value of the input).
 
 Not covered because the translator does not model them (docs/design.md): f32 denormal inputs and denormal results.
@@ -21,7 +21,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

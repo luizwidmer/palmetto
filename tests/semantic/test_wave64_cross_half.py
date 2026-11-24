@@ -1,11 +1,11 @@
 """Wave64 cross-half lane operations, executed across all 64 lanes of the translated SPIR-V.
 
-The inputs are the GPU tests runtime/test/shaders/cs_w64x_readlane, cs_w64x_writelane and cs_w64x_bpermute
+The inputs are the GPU tests port/test/shaders/cs_w64x_readlane, cs_w64x_writelane and cs_w64x_bpermute
 (hand-written, no game data; fixtures from regen_fixtures.py). Each is translated without --wave64-emulate and run
 by spirv_mini_interp.run_workgroup as one 64-thread workgroup, in two layouts:
 
 * one 64-wide subgroup (AMD with requiredSubgroupSize = 64). The eight output words must equal the values the
-  GPU check expects (runtime/test/shaders/check.py W64X_DUMPS, scripts/run_gpu_tests.py), derived in each .asm
+  GPU check expects (port/test/shaders/check.py W64X_DUMPS, tooling/scripts/run_gpu_tests.py), derived in each .asm
   header from the RDNA2 ISA: v_readlane/v_writelane select lane S1 % 64 and ignore EXEC; ds_bpermute_b32 works
   on each 32-lane half as an independent wave32 (ISA 10.4.4) and reads 0 from a lane that is off in EXEC.
 * two 32-wide subgroups, invocations 0-31 and 32-63 (NVIDIA, e.g. an RTX 4070 Super, without emulation). This is

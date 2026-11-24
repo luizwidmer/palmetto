@@ -1,4 +1,4 @@
-"""tools/fma_mix_probe.py: the inputs tell single from double f16 rounding of v_fma_mixlo/hi_f16, and each side is
+"""tooling/fma_mix_probe.py: the inputs tell single from double f16 rounding of v_fma_mixlo/hi_f16, and each side is
 judged right. Standard library only; no GPU, no LLVM, no game files.
 
 The words below are worked out by hand, not taken from the tool's own model (f16: ulp 2^-10 on [1, 2), ties at the odd
@@ -22,7 +22,7 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.join(ROOT, "tests", "semantic"))
 
 import fma_mix_probe as probe  # noqa: E402

@@ -37,7 +37,7 @@ RDNA2 GPU プログラムは Vulkan 向けの SPIR-V に翻訳され、モデル
     ビルドし（WSL 不要。`git` と下記の Visual Studio の C++ ツールが必要）、`LLVM_MC` を設定します:
 
     ```powershell
-    powershell -ExecutionPolicy Bypass -File scripts\build_llvm_mc.ps1
+    powershell -ExecutionPolicy Bypass -File tooling/scripts\build_llvm_mc.ps1
     ```
   - または WSL に `llvm-21` を入れて、`LLVM_MC` にコマンド全体を設定します:
     `LLVM_MC="wsl -d Ubuntu -e /usr/lib/llvm-21/bin/llvm-mc"`
@@ -60,7 +60,7 @@ RDNA2 GPU プログラムは Vulkan 向けの SPIR-V に翻訳され、モデル
    git clone --recursive https://github.com/the original project
    ```
 
-   GitHub の "Download ZIP" では `third_party/arc9-explorer` が含まれません。`git` があればビルドが自動で
+   GitHub の "Download ZIP" では `vendor/arc9-explorer` が含まれません。`git` があればビルドが自動で
    取得し、なければ必要な操作を表示します。
 3. **`Build.bat`** をダブルクリックします。
 
@@ -70,17 +70,17 @@ Windows が保存する場所を含む）、Games、ホームフォルダー、�
 見つからない場合はフォルダーの貼り付けを求めます。開始前に上記の前提条件と空き容量を確認し、足りないものを
 まとめて表示します。出力先は `Documents\Palmetto` です。中断したビルドは続きから再開します。
 
-### コマンドライン（`make_game.py`）
+### コマンドライン（`build_port.py`）
 
 ```powershell
-python -I make_game.py --find                          # この PC で見つかったコピーを一覧
-python -I make_game.py --pick                          # フォルダーダイアログでゲームフォルダーを選ぶ
-python -I make_game.py --check                         # コピーを確認するだけでビルドしない
-python -I make_game.py --check --full-check            # すべてのファイルの SHA-256 も比較（低速）
-python -I make_game.py --game "D:\path\to\your\package" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
-python -I make_game.py --stages shaders,assets         # 一部のステージだけ
-python -I make_game.py --game "D:\path\to\your\package" --wav   # Opus を PCM WAV にもデコード（大容量）
-python -I make_game.py --wave64-emulate off            # auto（既定）、on、off のいずれか
+python -I build_port.py --find                          # この PC で見つかったコピーを一覧
+python -I build_port.py --pick                          # フォルダーダイアログでゲームフォルダーを選ぶ
+python -I build_port.py --check                         # コピーを確認するだけでビルドしない
+python -I build_port.py --check --full-check            # すべてのファイルの SHA-256 も比較（低速）
+python -I build_port.py --game "D:\path\to\your\package" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
+python -I build_port.py --stages shaders,assets         # 一部のステージだけ
+python -I build_port.py --game "D:\path\to\your\package" --wav   # Opus を PCM WAV にもデコード（大容量）
+python -I build_port.py --wave64-emulate off            # auto（既定）、on、off のいずれか
 ```
 
 ステージは `check` → `shaders` → `assets` → `runtime` → `pipelines` の順に実行されます。`pipelines` は
@@ -97,16 +97,16 @@ python -I make_game.py --wave64-emulate off            # auto（既定）、on�
   隣に保存され、変更すると翻訳し直しになります。
 - **`--work`**: 中間ファイル用のフォルダーです。最低でも 400 GB 空いているドライブを指定してください。
 - **`--wav`**: 既定では無効です。16-bit PCM WAV は Ogg Opus より数倍大きいためです。
-- **Linux と Wine/Proton**: `make_game.py` は Linux でも動作します。ローダーは Windows プログラムなので
+- **Linux と Wine/Proton**: `build_port.py` は Linux でも動作します。ローダーは Windows プログラムなので
   Wine または Proton で動きます。`runtime` ステージは Linux 上で clang-cl と lld-link（LLVM 19 以降）を使い、
   [xwin](https://github.com/Jake-Shadle/xwin) が `XWIN_DIR` または `~/.local/share/xwin-sdk` に用意した
-  MSVC CRT と Windows SDK に対して `runtime/build/windows` へクロスビルドします
+  MSVC CRT と Windows SDK に対して `port/build/windows` へクロスビルドします
   （[docs/testing.md](../../testing.md#the-windows-runtime-on-linux-under-wine-or-proton) に一度だけ実行する
   `xwin` コマンドがあります）。これらがない場合、このステージは既定のステージから外れ、明示的に指定すると
   何が足りないかを作業開始前に表示します。別の場所で作った Windows 版も使えます:
 
   ```sh
-  python3 -I make_game.py --runtime-build ~/Downloads/runtime-windows
+  python3 -I build_port.py --runtime-build ~/Downloads/runtime-windows
   ```
 
   どちらの場合も `palmetto.exe` と `palmetto_tls_host.dll` を `--out` にコピーし、隣に `palmetto.sh` を書き出します。
@@ -115,16 +115,16 @@ python -I make_game.py --wave64-emulate off            # auto（既定）、on�
 
 ## よくある問題
 
-- **GitHub の "Download ZIP" を使った**: ZIP には `third_party/arc9-explorer` サブモジュールが含まれません。
+- **GitHub の "Download ZIP" を使った**: ZIP には `vendor/arc9-explorer` サブモジュールが含まれません。
   `git clone --recursive` を使うか、リポジトリのフォルダーで `git submodule update --init --recursive` を
   実行してください。
 - **`llvm-mc` が `gfx1013` や AMDGPU を拒否する**: Windows 版の公式 LLVM を使っている可能性が高いです。
-  リポジトリのルートで `powershell -ExecutionPolicy Bypass -File scripts\build_llvm_mc.ps1` を実行するか、
+  リポジトリのルートで `powershell -ExecutionPolicy Bypass -File tooling/scripts\build_llvm_mc.ps1` を実行するか、
   `LLVM_MC` を WSL の `llvm-mc`（`llvm-21`）に向けてください。
 - **CMake が "needs the Windows SDK 10.0.26100 or newer" で止まる**、または MSVC が `Desc_1_2` は
   `D3D12_VERSIONED_ROOT_SIGNATURE_DESC` のメンバーではないと報告する: Windows SDK を `10.0.26100` 以降に
   更新し（Visual Studio Installer、または `winget install Microsoft.WindowsSDK.10.0.26100`）、
-  `runtime/build` を削除してから構成し直してください。
+  `port/build` を削除してから構成し直してください。
 - **`C:` ドライブの空きが足りない**: `--work "D:\palmetto-work"` を指定して中間ファイルを別のドライブに置きます。
 - **Windows がビルド直後のテストプログラムの実行を拒否する**（"An Application Control policy has blocked this
   file"）: Windows 11 のスマート アプリ コントロールです。

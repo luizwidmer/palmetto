@@ -3,7 +3,7 @@
   v_cvt_f32_i32   D = exact (as binary32) signed int32 -> nearest f32, round to nearest even
   v_cvt_f32_u32   D = exact (as binary32) unsigned int32 -> nearest f32, round to nearest even
 
-Every case translates a hand-written pixel-shader listing with tools/rdna2spirv.py and executes the resulting SPIR-V
+Every case translates a hand-written pixel-shader listing with tooling/rdna2spirv.py and executes the resulting SPIR-V
 via tests/semantic/spirv_mini_interp.py. Expected words are written by hand from the ISA formula and also recomputed
 by a plain-Python reference, with seeded random operands.
 

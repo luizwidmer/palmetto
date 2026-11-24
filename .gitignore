@@ -46,5 +46,5 @@ env.ps1
 
 
 # Local third-party checkouts are not tracked
-third_party/*-explorer/
+vendor/*-explorer/
 .xwin-cache/

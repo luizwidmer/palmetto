@@ -1,10 +1,10 @@
-"""Tests for tools/valu_int_diff.py: integer & packed-16bit VALU differential fuzzer (no game data, stdlib only)."""
+"""Tests for tooling/valu_int_diff.py: integer & packed-16bit VALU differential fuzzer (no game data, stdlib only)."""
 import os
 import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 

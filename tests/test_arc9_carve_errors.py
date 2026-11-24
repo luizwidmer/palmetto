@@ -1,4 +1,4 @@
-"""Regression tests for clean OSError handling when writing carved streams in tools/arc9_carve.py.
+"""Regression tests for clean OSError handling when writing carved streams in tooling/arc9_carve.py.
 
     python -I tests/test_arc9_carve_errors.py
 """
@@ -11,7 +11,7 @@ import unittest
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "arc9_carve.py")
+TOOL = os.path.join(ROOT, "tooling", "arc9_carve.py")
 
 
 class Arc9CarveWriteErrorTests(unittest.TestCase):

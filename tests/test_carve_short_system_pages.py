@@ -10,7 +10,7 @@ import unittest
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT / "tests"), str(ROOT / "tools")]
+sys.path[:0] = [str(ROOT / "tests"), str(ROOT / "tooling")]
 import test_restofworld_model_join as fixture  # noqa: E402
 import restofworld_model_join as joiner  # noqa: E402
 
@@ -52,7 +52,7 @@ class ShortSystemPagesTest(unittest.TestCase):
         source = self.root / f"source-{self.number}.arc"
         folder = self.root / f"carved-{self.number}"
         source.write_bytes(data)
-        run = subprocess.run([sys.executable, "-I", str(ROOT / "tools/arc9_carve.py"),
+        run = subprocess.run([sys.executable, "-I", str(ROOT / "tooling/arc9_carve.py"),
                               str(source), str(folder), *map(str, options)], capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(source.read_bytes(), data)
@@ -64,7 +64,7 @@ class ShortSystemPagesTest(unittest.TestCase):
 
     def joined_cli(self, source):
         output = self.root / f"report-{self.number}-{source.name}.json"
-        run = subprocess.run([sys.executable, "-I", str(ROOT / "tools/restofworld_model_join.py"),
+        run = subprocess.run([sys.executable, "-I", str(ROOT / "tooling/restofworld_model_join.py"),
                               str(source), str(output), "--quiet"], capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stderr)
         return json.loads(output.read_text(encoding="utf-8"))
@@ -101,7 +101,7 @@ class ShortSystemPagesTest(unittest.TestCase):
         self.assertNotIn(offsets[-2], [row["off"] for row in index["files"]])
         for path in (source, folder):
             output = self.root / "interrupted.json"
-            run = subprocess.run([sys.executable, "-I", str(ROOT / "tools/restofworld_model_join.py"),
+            run = subprocess.run([sys.executable, "-I", str(ROOT / "tooling/restofworld_model_join.py"),
                                   str(path), str(output), "--quiet"], capture_output=True)
             self.assertEqual(run.returncode, 1, run.stderr)
             report = json.loads(output.read_bytes())
@@ -194,7 +194,7 @@ class ShortSystemPagesTest(unittest.TestCase):
                 (folder / f"{tail_offset:012x}.bin").write_bytes(pages[2])
                 for path in (source, folder):
                     output = self.root / "interrupted.json"
-                    run = subprocess.run([sys.executable, "-I", str(ROOT / "tools/restofworld_model_join.py"),
+                    run = subprocess.run([sys.executable, "-I", str(ROOT / "tooling/restofworld_model_join.py"),
                                           str(path), str(output), "--quiet"], capture_output=True, text=True)
                     self.assertEqual(run.returncode, 1, run.stderr)
                     summary = json.loads(output.read_text(encoding="utf-8"))["summary"]

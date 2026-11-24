@@ -1,11 +1,11 @@
 """Semantic audit & regression tests for loop ballot masks and s_barrier in loops.
 
 Pure Python stdlib only (no llvm-mc, spirv-val, GPU, or game data). Translates synthetic hand-written
-RDNA2 listings via tools/rdna2spirv.py and executes the emitted SPIR-V across every lane and wave:
+RDNA2 listings via tooling/rdna2spirv.py and executes the emitted SPIR-V across every lane and wave:
 
   1. Divergent loops with v_cmp / s_and_saveexec / s_or_b64 / s_and_b64 / s_andn2_b64 /
      s_bcnt1_i32_b32/b64 / v_mbcnt / v_cndmask_b32 / v_readfirstlane_b32 in wave32, native wave64,
-     and --wave64-emulate (checked against tools/cf_ref.py and direct RDNA2 ISA oracles).
+     and --wave64-emulate (checked against tooling/cf_ref.py and direct RDNA2 ISA oracles).
   2. Lane-mask / ballot bug regressions:
        - wave32 32-bit SOP2 bitwise ops on EXEC with non-0/-1 immediates
        - lane_masks.py preserving mask tracking on 64-bit mask + non-0/-1 immediate and s_mov_b64 vcc, imm
@@ -27,7 +27,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 for _p in (HERE, TOOLS_DIR):
@@ -902,7 +902,7 @@ class DivergentLoopBallotTests(unittest.TestCase):
         ]
 
     def _cf_ref_divergent_loop(self, wave):
-        """Divergent loop using only ops modelled by tools/cf_ref.py (v_cmp, s_and_saveexec, s_or, s_and, v_cndmask)."""
+        """Divergent loop using only ops modelled by tooling/cf_ref.py (v_cmp, s_and_saveexec, s_or, s_and, v_cndmask)."""
         if wave == 32:
             return [
                 "v_mbcnt_lo_u32_b32 v0, -1, 0",

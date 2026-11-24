@@ -1,4 +1,4 @@
-"""Synthetic-header tests for tools/anim_index.py.
+"""Synthetic-header tests for tooling/anim_index.py.
 
     python -I tests/test_anim_index.py
 
@@ -18,8 +18,8 @@ from unittest import mock
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "anim_index.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "anim_index.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import anim_index  # noqa: E402
 

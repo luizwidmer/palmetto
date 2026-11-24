@@ -16,7 +16,7 @@ Semantics and Condition Code (SCC):
   - Pre-existing SCC state is ignored and unconditionally overwritten.
 
 Each test case verifies mathematical semantics against pure-Python reference models
-and executes synthetic shaders with tools/rdna2spirv.py in tests/semantic/spirv_mini_interp.py.
+and executes synthetic shaders with tooling/rdna2spirv.py in tests/semantic/spirv_mini_interp.py.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if ROOT not in sys.path:

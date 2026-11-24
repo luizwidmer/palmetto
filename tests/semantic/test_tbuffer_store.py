@@ -13,10 +13,10 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(ROOT, "runtime", "test", "shaders"))
-sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "port", "test", "shaders"))
+sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling"))
 
-import check       # noqa: E402  (runtime/test/shaders/check.py; importing it runs nothing)
+import check       # noqa: E402  (port/test/shaders/check.py; importing it runs nothing)
 import rdna2spirv  # noqa: E402
 import support     # noqa: E402
 

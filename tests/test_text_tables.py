@@ -1,4 +1,4 @@
-"""Tests for tools/text_tables.py, built from synthetic resources and conversation data (no game data).
+"""Tests for tooling/text_tables.py, built from synthetic resources and conversation data (no game data).
 
     python -I tests/test_text_tables.py
 """
@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_module():
-    path = os.path.join(ROOT, "tools", "text_tables.py")
+    path = os.path.join(ROOT, "tooling", "text_tables.py")
     spec = importlib.util.spec_from_file_location("text_tables_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

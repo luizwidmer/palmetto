@@ -83,7 +83,7 @@ it is the measured call shape first, and the public source names it.
 
 ## 3. The fix
 
-`runtime/shims/d3d12_xs_device.cpp`:
+`port/shims/d3d12_xs_device.cpp`:
 
 * new `proxy_create_committed_resource_layout()` handles console slot 127 (the ten arguments above), and the dispatch
   table routes `Slot == 127` to it before the beyond-vtable refusal. It is no longer reachable from
@@ -100,7 +100,7 @@ it is the measured call shape first, and the public source names it.
   instead of a success over a null out pointer. The title's own failure path then returns no surface at all, which is
   the honest outcome and visible in the log.
 * `slot_name(127)`, the `kMaxSlots`/`refuse_beyond_device` comments and `device_slot_overridden(127)` are updated.
-* `runtime/test/xs_proxy_mock_test.cpp` gains a slot-127 contract test: the console call reaches the host's
+* `port/test/xs_proxy_mock_test.cpp` gains a slot-127 contract test: the console call reaches the host's
   `CreateCommittedResource` with the translated description (2D, layout UNKNOWN, flags `0x5`, alignment 0), the state
   the barrier layout names (unordered access) and the console heap flags; the host's out pointer reaches the title's
   pointer. The mock's slot 27 (`CreateCommittedResource`) records what it was handed and writes a resource out, as
@@ -155,7 +155,7 @@ Gates: `build_palmetto.cmd` -> `PALMETTO_OK`; `build_tests.cmd` -> `TESTS_BUILT`
 
 * **Nothing is visible yet.** The queue's `PresentX` (slot 32) is still answered `unsupported`, and no window presenter
   is registered in this build, so the frame that now has display resources has nowhere to present them. The
-  presentation core (`runtime/shims/xbox_present.*`, the window presenter in `runtime/shims/d3d12_com.h`) is the
+  presentation core (`port/shims/xbox_present.*`, the window presenter in `port/shims/d3d12_com.h`) is the
   next piece: its `PresentX` refuses a plane whose first resource is null, and that refusal no longer applies - the
   plane now names a real resource.
 * The submit failures (`ExecuteCommandLists` unresolved resource) are the replay layer's frontier, not this one.

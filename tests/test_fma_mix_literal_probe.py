@@ -1,4 +1,4 @@
-"""tools/fma_mix_literal_probe.py: the cases tell the two readings of a split v_fma_mix literal apart, the encodings
+"""tooling/fma_mix_literal_probe.py: the cases tell the two readings of a split v_fma_mix literal apart, the encodings
 are the ones described, the translator side follows the halves reading, and a missing GPU is exit 77. Standard
 library only; no GPU, no LLVM, no game files.
 
@@ -22,7 +22,7 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.join(ROOT, "tests", "semantic"))
 
 import fma_mix_literal_probe as probe  # noqa: E402

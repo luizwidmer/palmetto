@@ -2,7 +2,7 @@
 _co_ci forms (e32 through VCC, e64 through SGPRs), s_add_u32/s_addc_u32 and s_sub_u32/s_subb_u32 (through SCC), and
 the 64-bit add and subtract a compiler builds from them.
 
-Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py
+Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py
 and compares the result and the carry-out (read back with v_cndmask_b32 or s_cselect_b32) with plain Python. The
 carry-out of a subtract is its borrow: 1 when the subtrahend (plus the carry-in) is larger than the minuend.
 """
@@ -16,7 +16,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

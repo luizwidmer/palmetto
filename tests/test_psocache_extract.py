@@ -1,4 +1,4 @@
-"""CPU test for tools/psocache_extract.py on synthetic ARC9 archives built by this test.
+"""CPU test for tooling/psocache_extract.py on synthetic ARC9 archives built by this test.
 
 The cache inside is a tiny file that satisfies the layout `psocache_inspect` checks: a 0x80 header, one 0x70
 record, one 0x18 record, two 8-byte index entries, a 32-byte meta entry and a 0x100-byte code entry. The cache
@@ -14,7 +14,7 @@ import unittest
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "psocache_extract.py")
+TOOL = os.path.join(ROOT, "tooling", "psocache_extract.py")
 
 HEADER = 0x80
 GRAPHICS = 1

@@ -4,7 +4,7 @@ Both multiply the low 24 bits of each source into a 48-bit product and return it
 most 16 significant bits): v_mul_hi_u32_u24 zero-extends the operands, v_mul_hi_i32_i24 sign-extends them from
 bit 23 and the result is the signed high word. Bits 24-31 of the sources are ignored. The low words are
 v_mul_u32_u24 / v_mul_i32_i24, so the pair must give back the whole product. Each case translates a synthetic
-pixel shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the exported
+pixel shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the exported
 words with a plain-Python reference.
 """
 import os
@@ -17,7 +17,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

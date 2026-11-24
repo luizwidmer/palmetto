@@ -1,4 +1,4 @@
-"""Tests for tools/world_census.py, built from synthetic 0x7a resources (no game data).
+"""Tests for tooling/world_census.py, built from synthetic 0x7a resources (no game data).
 
     python -I tests/test_world_census.py
 """
@@ -29,7 +29,7 @@ def load(name, path):
     return module
 
 
-WC = load("world_census_under_test", os.path.join(ROOT, "tools", "world_census.py"))
+WC = load("world_census_under_test", os.path.join(ROOT, "tooling", "world_census.py"))
 TWI = load("world_index_test_builder", os.path.join(ROOT, "tests", "test_world_index.py"))
 
 
@@ -220,7 +220,7 @@ class CensusArgumentTest(unittest.TestCase):
             arc = os.path.join(tmp, "sample.arc")
             make_archive(arc)
             out = os.path.join(tmp, "out")
-            tool = os.path.join(ROOT, "tools", "world_census.py")
+            tool = os.path.join(ROOT, "tooling", "world_census.py")
             for flag, value in (("--shard-size", "0"), ("--shard-size", "-1"), ("--jobs", "0")):
                 with self.subTest(flag=flag, value=value):
                     # A subprocess with a timeout, so the old endless loop fails the test instead of hanging it.
@@ -252,7 +252,7 @@ class CensusArgumentTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             arc = os.path.join(tmp, "sample.arc")
             make_archive(arc)
-            tool = os.path.join(ROOT, "tools", "world_census.py")
+            tool = os.path.join(ROOT, "tooling", "world_census.py")
             p = subprocess.run([sys.executable, "-I", tool, arc, "--out", os.path.join(tmp, "out"), "--jobs", "100"],
                                capture_output=True, text=True, timeout=30)
             self.assertEqual(p.returncode, 2, p.stderr)

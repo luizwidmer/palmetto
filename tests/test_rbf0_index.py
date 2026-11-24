@@ -1,4 +1,4 @@
-"""Synthetic-header tests for tools/rbf0_index.py.
+"""Synthetic-header tests for tooling/rbf0_index.py.
 
     python -I tests/test_rbf0_index.py
 
@@ -17,8 +17,8 @@ from unittest import mock
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "rbf0_index.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "rbf0_index.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import rbf0_index  # noqa: E402
 

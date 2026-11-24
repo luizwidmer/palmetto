@@ -1,4 +1,4 @@
-"""Tests for tools/awc_shorts.py, built from synthetic AWC data (no game files).
+"""Tests for tooling/awc_shorts.py, built from synthetic AWC data (no game files).
 
     python -I tests/test_awc_shorts.py
 """
@@ -17,7 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_tool():
-    path = os.path.join(ROOT, "tools", "awc_shorts.py")
+    path = os.path.join(ROOT, "tooling", "awc_shorts.py")
     spec = importlib.util.spec_from_file_location("awc_shorts_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -200,7 +200,7 @@ class ShortsTest(unittest.TestCase):
         index = os.path.join(self.out, "shorts.csv")
         with open(index, "wb") as f:
             f.write(b"previous catalog\n")
-        tool = os.path.join(ROOT, "tools", "awc_shorts.py")
+        tool = os.path.join(ROOT, "tooling", "awc_shorts.py")
         for jobs in ("1", "2"):
             with self.subTest(jobs=jobs):
                 result = subprocess.run([sys.executable, "-I", tool, path, self.out, "--jobs", jobs],
@@ -282,8 +282,8 @@ class ShortsTest(unittest.TestCase):
 
     def test_truncated_bank_skipped_pool(self):
         # A spawned worker must import the tool by name, so use the real module, not the spec-loaded copy.
-        sys.path.insert(0, os.path.join(ROOT, "tools"))
-        self.addCleanup(sys.path.remove, os.path.join(ROOT, "tools"))
+        sys.path.insert(0, os.path.join(ROOT, "tooling"))
+        self.addCleanup(sys.path.remove, os.path.join(ROOT, "tooling"))
         import awc_shorts
         self.check_truncated_bank_skipped(awc_shorts, 2)
 

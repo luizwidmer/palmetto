@@ -19,11 +19,11 @@ class FirstLookPathTests(unittest.TestCase):
         source = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp, "checkout [1]")
-            for folder in ("scripts", "tools", "runtime/build/Release"):
+            for folder in ("tooling/scripts", "tooling", "port/build/Release"):
                 (repo / folder).mkdir(parents=True)
-            for relative in ("scripts/first_look.ps1", "tools/pe_inspect.py", "tools/gdk_runtime_calls.py",
-                             "tools/gdk_runtime_classes.json", "tools/find_hash_lookup.py", "tools/exe_checklist.py",
-                             "tools/report_paths.py"):
+            for relative in ("tooling/scripts/first_look.ps1", "tooling/pe_inspect.py", "tooling/gdk_runtime_calls.py",
+                             "tooling/gdk_runtime_classes.json", "tooling/find_hash_lookup.py", "tooling/exe_checklist.py",
+                             "tooling/report_paths.py"):
                 shutil.copyfile(source / relative, repo / relative)
             game = Path(tmp, "package [1]")
             game.mkdir()
@@ -36,7 +36,7 @@ class FirstLookPathTests(unittest.TestCase):
                 **os.environ,
                 "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
                 "PSModulePath": str(Path(os.environ["SystemRoot"], "System32/WindowsPowerShell/v1.0/Modules")),
-                "FIRST_LOOK_SCRIPT": str(repo / "scripts/first_look.ps1"),
+                "FIRST_LOOK_SCRIPT": str(repo / "tooling/scripts/first_look.ps1"),
                 "FIRST_LOOK_PACKAGE": str(game),
             }
             ps = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
@@ -45,7 +45,7 @@ class FirstLookPathTests(unittest.TestCase):
 Add-Type -OutputAssembly palmetto.exe -OutputType ConsoleApplication -TypeDefinition '
 public class Loader { public static void Main(string[] args) { System.Console.WriteLine(string.Join("\\n", args)); } }'
 """], cwd=tmp, env=env, check=True, timeout=30)
-            loader = repo / "runtime/build/Release/palmetto.exe"
+            loader = repo / "port/build/Release/palmetto.exe"
             shutil.move(Path(tmp, "palmetto.exe"), loader)
             loader.with_name("palmetto_tls_host.dll").touch()
             command = [*ps, "Set-Location -LiteralPath $env:FIRST_LOOK_PACKAGE; "
@@ -62,22 +62,22 @@ public class Loader { public static void Main(string[] args) { System.Console.Wr
             self.assertIn("the called ones come first", (out / "checklist.md").read_text("utf-8"))
 
             # A source update in the bracketed checkout must still trigger the rebuild.
-            source_dir = repo / "runtime/src"
+            source_dir = repo / "port/src"
             source_dir.mkdir()
             (source_dir / "main.cpp").touch()
             older = (source_dir / "main.cpp").stat().st_mtime - 3600
             os.utime(loader, (older, older))
-            (repo / "scripts/build_runtime.ps1").write_text(
-                'Copy-Item -LiteralPath "$PSScriptRoot/../runtime/build/Release/palmetto.exe" '
-                '-Destination "$PSScriptRoot/../runtime/build/palmetto.exe"\n'
-                'Copy-Item -LiteralPath "$PSScriptRoot/../runtime/build/Release/palmetto_tls_host.dll" '
-                '-Destination "$PSScriptRoot/../runtime/build/palmetto_tls_host.dll"\n'
+            (repo / "tooling/scripts/build_runtime.ps1").write_text(
+                'Copy-Item -LiteralPath "$PSScriptRoot/../port/build/Release/palmetto.exe" '
+                '-Destination "$PSScriptRoot/../port/build/palmetto.exe"\n'
+                'Copy-Item -LiteralPath "$PSScriptRoot/../port/build/Release/palmetto_tls_host.dll" '
+                '-Destination "$PSScriptRoot/../port/build/palmetto_tls_host.dll"\n'
                 'Set-Content -LiteralPath (Join-Path $PSScriptRoot "built.txt") -Value built\n',
                 encoding="utf-8", newline="\n",
             )
             rebuilt = subprocess.run(command, cwd=tmp, env=env, capture_output=True, timeout=30)
             self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout + rebuilt.stderr)
-            self.assertTrue((repo / "scripts/built.txt").is_file())
+            self.assertTrue((repo / "tooling/scripts/built.txt").is_file())
 
             image.unlink()  # fixture1.exe still exists and would match the wildcard.
             missing = subprocess.run(command, cwd=tmp, env=env, capture_output=True, timeout=30)

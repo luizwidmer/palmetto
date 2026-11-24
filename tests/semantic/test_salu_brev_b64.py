@@ -2,7 +2,7 @@
 
 D = the 64 bits of S0 in reverse order (bit i goes to bit 63 - i), so D.lo = reverse(S0.hi) and D.hi =
 reverse(S0.lo). SCC is not written. The SGPR pair is 64-bit data here, as for s_lshl_b64. Each case translates a
-synthetic pixel shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the
+synthetic pixel shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the
 pair with a plain-Python reference. The pair leaves through exp as four 16-bit halves ORed into 0x40000000, so no
 export channel is a NaN or denormal pattern that a float round trip could change; SCC comes back through
 s_cselect_b32.
@@ -17,7 +17,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

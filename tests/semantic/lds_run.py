@@ -1,4 +1,4 @@
-"""Shared helper for the LDS tests: translate a hand-written compute listing with tools/rdna2spirv.py and run it
+"""Shared helper for the LDS tests: translate a hand-written compute listing with tooling/rdna2spirv.py and run it
 lane by lane in spirv_mini_interp (standard library only; no GPU, no game files).
 
 The listing sees v0 = the lane's thread id x and s[0:3] = a 4 KiB output buffer. `store(reg, slot)` writes a VGPR

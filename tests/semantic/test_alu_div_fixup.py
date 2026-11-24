@@ -19,7 +19,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)
@@ -230,8 +230,8 @@ class DivFixupF64Tests(unittest.TestCase):
         validate_spirv(spv_mod)
 
     def test_scaling_modifiers_are_ignored_under_the_games_mode(self):
-        # Measured by @fiestorra on a gfx1036 iGPU (driver 31.0.24002.92) through tools/hw_oracle,
-        # tools/f64_omod_probe.py: on both ops the f16 and the binary64 result ignore mul:/div: while
+        # Measured by @fiestorra on a gfx1036 iGPU (driver 31.0.24002.92) through tooling/hw_oracle,
+        # tooling/f64_omod_probe.py: on both ops the f16 and the binary64 result ignore mul:/div: while
         # denorm_mode_16_64 = 3, the MODE these rows assume, and scale only with IEEE=0 and
         # denorm_mode_16_64 = 0, while clamp applies in every MODE. See docs/design.md,
         # "v_div_fixup_f16, v_div_fixup_f64".

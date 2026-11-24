@@ -31,8 +31,8 @@ measured natively on AMD GPUs (SHADER-116). The translator reads this field and 
 
 **RDNA1 measurement (SHADER-341):** the console target is gfx1013 (GFX10.1); gfx1036 is GFX10.3, and the
 RDNA2 measurement above shows Mesa's GFX10 column is wrong for GFX10.3. A second native measurement through
-`tools/hw_oracle` (Linux libdrm launcher, AMD clang 18) on an **AMD Radeon Pro V540, Navi 12 / gfx1011, RDNA1**
-(`1002:7360`, bare metal, RADV Mesa 25.2.8, Ubuntu 24.04) found the same: `tools/buffer_bounds_probe.py` ran 12
+`tooling/hw_oracle` (Linux libdrm launcher, AMD clang 18) on an **AMD Radeon Pro V540, Navi 12 / gfx1011, RDNA1**
+(`1002:7360`, bare metal, RADV Mesa 25.2.8, Ubuntu 24.04) found the same: `tooling/buffer_bounds_probe.py` ran 12
 one-lane cases for a 4-byte `buffer_load_dword` at wave32 and wave64 (24 groups, 0 wave32/64 differences, 0
 launcher errors). Every case followed the RDNA2 / Mesa GFX11 column and **8 of 24 disagreed with Mesa's GFX10
 column**. The witnesses include mode 0 stride 16 at offset 13 (out of range on hardware, in range by the GFX10

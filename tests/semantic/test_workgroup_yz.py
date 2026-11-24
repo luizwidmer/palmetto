@@ -1,8 +1,8 @@
 """Semantic test for compute workgroup IDs Y/Z.
 
 The contract row "Compute workgroup IDs Y/Z" in docs/design.md is checked only by the GPU
-fixture ``runtime/test/shaders/cs_workgroup_yz.asm`` (plus an explicit EXEC set, which hardware
-provides). This test runs the same hand-written listing through tools/rdna2spirv.py and
+fixture ``port/test/shaders/cs_workgroup_yz.asm`` (plus an explicit EXEC set, which hardware
+provides). This test runs the same hand-written listing through tooling/rdna2spirv.py and
 tests/semantic/spirv_mini_interp.py on a 2 x 3 x 4
 dispatch: with COMPUTE_PGM_RSRC2 = 0x308 (4 user SGPRs, TGID_Y and TGID_Z enabled, TGID_X
 disabled) the translator must put WorkgroupId.y in s4 and WorkgroupId.z in s5. The listing
@@ -20,7 +20,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)
@@ -33,7 +33,7 @@ STUB_DXBC = b"DXBC" + bytes(24) + struct.pack("<I", 0) + bytes(4)
 RSRC2_YZ = 0x308  # user SGPRs = 4; TGID_Y_EN (bit 8) and TGID_Z_EN (bit 9), not TGID_X_EN
 FSSM_NAME = "cs_workgroup_yz"
 
-# runtime/test/shaders/cs_workgroup_yz.asm, written out by hand so llvm-mc is not needed.
+# port/test/shaders/cs_workgroup_yz.asm, written out by hand so llvm-mc is not needed.
 LISTING = [
     "s_mov_b64 exec, -1",  # hardware starts a wave with all lanes active
     "s_min_u32 s6, s4, 3",

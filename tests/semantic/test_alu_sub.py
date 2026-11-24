@@ -8,7 +8,7 @@ Instructions covered:
 
 Models VALU two's complement integer subtraction, reverse subtraction, SIMD lane
 masking via EXEC, inline constant operands, SGPR source scalar broadcast, borrow
-propagation for multi-word math, and lowering to SPIR-V OpISub via tools/rdna2spirv.py
+propagation for multi-word math, and lowering to SPIR-V OpISub via tooling/rdna2spirv.py
 executed in tests/semantic/spirv_mini_interp.py.
 
 Standard library only: zero game data, no GPU hardware required.
@@ -26,7 +26,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

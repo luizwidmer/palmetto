@@ -21,14 +21,14 @@ class FirstLookShimReportTest(unittest.TestCase):
             # Every tool first_look.ps1 runs: a missing one fails its step, and the test's stand-in loader (an alias)
             # leaves that exit code in $LASTEXITCODE for the script's exit. (gdk_runtime_calls since round 43,
             # find_hash_lookup for mods, exe_checklist for the notes to confirm.) gdk_runtime_calls, find_hash_lookup
-            # and exe_checklist import tools/report_paths.py for the shared output-overwrite guard, so the copy needs
+            # and exe_checklist import tooling/report_paths.py for the shared output-overwrite guard, so the copy needs
             # it too or each tool stops at import with ModuleNotFoundError.
-            for name in ("scripts/first_look.ps1", "tools/pe_inspect.py", "tools/gdk_runtime_calls.py",
-                         "tools/gdk_runtime_classes.json", "tools/find_hash_lookup.py", "tools/exe_checklist.py",
-                         "tools/report_paths.py"):
+            for name in ("tooling/scripts/first_look.ps1", "tooling/pe_inspect.py", "tooling/gdk_runtime_calls.py",
+                         "tooling/gdk_runtime_classes.json", "tooling/find_hash_lookup.py", "tooling/exe_checklist.py",
+                         "tooling/report_paths.py"):
                 (root / name).parent.mkdir(exist_ok=True)
                 shutil.copyfile(source / name, root / name)
-            loader = root / "runtime/build/palmetto.exe"
+            loader = root / "port/build/palmetto.exe"
             loader.parent.mkdir(parents=True)
             loader.touch()
             loader.with_name("palmetto_tls_host.dll").touch()
@@ -37,8 +37,8 @@ class FirstLookShimReportTest(unittest.TestCase):
             # in place of a native loader so the test needs no runtime build.
             script = r"""
 $ErrorActionPreference = 'Stop'
-Set-Alias -Name (Join-Path $PWD 'runtime\build\palmetto.exe') -Value Write-Output
-& .\scripts\first_look.ps1 -Exe (Join-Path $PWD 'fixture.exe')
+Set-Alias -Name (Join-Path $PWD 'port\build\palmetto.exe') -Value Write-Output
+& .\tooling/scripts\first_look.ps1 -Exe (Join-Path $PWD 'fixture.exe')
 """
             env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
             env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env["PATH"]

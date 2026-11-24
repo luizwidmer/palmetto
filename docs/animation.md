@@ -5,7 +5,7 @@ local copy; no archive, payload, name list or byte dump is committed. The tables
 excerpts only.
 
 The table of contents of an ARC9 is encrypted. This work does not read or decrypt it. It indexes the data area
-the same way `tools/arc9_carve.py` does: every zlib stream that inflates cleanly to its end is one **stream** in
+the same way `tooling/arc9_carve.py` does: every zlib stream that inflates cleanly to its end is one **stream** in
 the tables below. A logical the engine resource can span several streams, so "stream" is not "file".
 
 ## Measured archive composition
@@ -17,7 +17,7 @@ data start          0x4660 (18,016)
 data span           4,407,608,368 bytes
 ```
 
-The requested command (`python -I tools/arc9_carve.py <package>/anim.arc <work>/anim-index --index-only`) prints:
+The requested command (`python -I tooling/arc9_carve.py <package>/anim.arc <work>/anim-index --index-only`) prints:
 
 | Measure | arc9_carve |
 |---|---:|
@@ -32,7 +32,7 @@ The requested command (`python -I tools/arc9_carve.py <package>/anim.arc <work>/
 
 `arc9_carve.py` overreads its last stream: it advances a 1 MiB read cursor by 1 MiB even when the final mmap
 slice is shorter. That makes the last `PSIN` stream look 974,742 bytes stored instead of 1,766 and skips 21
-streams at the tail. `tools/anim_index.py` advances by the actual slice length. Its corrected walk finds:
+streams at the tail. `tooling/anim_index.py` advances by the actual slice length. Its corrected walk finds:
 
 | Measure | corrected walk |
 |---|---:|
@@ -110,7 +110,7 @@ preamble at `+0x20`** containing a table of `N_desc` 5-byte `{u32 hash; u8 kind}
 count (`total_bytes == 46 + 5 * N_desc + body_size` across all 324 resources, with zero tail padding). The full
 preamble, state-machine hierarchy (`Type 1` = `StateMachine`, `Type 3` = `InlinedStateMachine`, `Type 22` =
 `MotionTree`), transitions and parameter blocks are decoded in [`MoVE` state-machine containers](#move-state-machine-containers)
-below (`tools/anim_move.py`, ASSET-86).
+below (`tooling/anim_move.py`, ASSET-86).
 
 ### Name tables (`pack:/...`)
 
@@ -151,7 +151,7 @@ to the bones, but a skeleton carries its own names (`joaat32` at bone record `+0
 [Bone tables and motion matchers](#bone-tables-and-motion-matchers).
 Measured across all `SKEL_*` streams in
 `anim.arc` (`177` streams, `118` distinct `SKEL_*` tokens) against the decoded skeleton name tables in
-`packs.arc` (`2,866` `SKEL_`-bearing streams, `691` distinct `SKEL_*` tokens) using `tools/anim_skeleton_match.py`:
+`packs.arc` (`2,866` `SKEL_`-bearing streams, `691` distinct `SKEL_*` tokens) using `tooling/anim_skeleton_match.py`:
 `117` of `118` (`99.2%`) match by exact case and all `118` of `118` (`100%`) match case-insensitively (and by
 lowercased `joaat32`, since `SKEL_HEAD` corresponds to `SKEL_Head`); `166` of `177` streams match all of their
 tokens by exact case. The animation pages still carry no model name next to the bones.
@@ -308,7 +308,7 @@ The first rig-set block starts at 0x0045. The tag/length layout is visible direc
   `deformation[2]` (1,702), `identity` (1,109), `pose` (938), `pose.ragdoll.post` (160), `facial` (152), and
   ten smaller values.
 
-The grammar-driven tree decoder (`tools/rbf0_tree.py`; `docs/rbf0.md` section 9) parses the same 1,348,436-byte
+The grammar-driven tree decoder (`tooling/rbf0_tree.py`; `docs/rbf0.md` section 9) parses the same 1,348,436-byte
 blob to its last byte and confirms the counts above: 9 descriptors, 28,962 elements, 20,031 text records, 1,126
 string values, 6,677 integer values and maximum element depth 6. The 1,126 string values are the `key` attributes
 on the rig-set `Item` elements. Each of the 6,677 entry `Item` elements contains `Dictionary`, `Rig` and `Group`
@@ -355,7 +355,7 @@ All 8 of its +0x10 hashes match joaat32 of full names in its own 0x0750 list. Th
 14-entry pointer table at 0x0000 (targets in the `0x5005xxxx` range), records at 0x02d0, and two motionmatcher
 paths at 0x0210 and 0x0290; 19 of its 30 names hash-confirm. The 4,272-byte stream has 28 names and 14 hashes.
 
-**Which skeleton (ASSET-231).** `tools/anim_skel_match.py` reads every skeleton `anim_glb.read_skeleton` reads in
+**Which skeleton (ASSET-231).** `tooling/anim_skel_match.py` reads every skeleton `anim_glb.read_skeleton` reads in
 `packs.arc` (14,212, 199 distinct joint-hash lists) and looks each name up by `joaat32` of its lowercased spelling:
 
 | Stream | Names | Joints of some skeleton | Same spelling as the joint | Skeletons holding all of them |
@@ -391,12 +391,12 @@ high-entropy stream; it is not at a header boundary and is treated as coincidenc
 
 ## Keyframe decoding
 
-`tools/anim_clips.py` decodes the clip dictionaries down to per-frame track values. It starts from the same stream
+`tooling/anim_clips.py` decodes the clip dictionaries down to per-frame track values. It starts from the same stream
 walk as `anim_index.py`, so the stream numbers below are the corrected walk's 130,470. Run on the 1.0.2.1 copy:
 
 ```powershell
-python -I tools/anim_clips.py <package>\anim.arc <work>\anim-clips.json --jobs 8
-python -I tools/anim_clips.py <package>\anim.arc --decode <dictionary offset> [--frames N]   # values to stdout
+python -I tooling/anim_clips.py <package>\anim.arc <work>\anim-clips.json --jobs 8
+python -I tooling/anim_clips.py <package>\anim.arc --decode <dictionary offset> [--frames N]   # values to stdout
 ```
 
 The JSON holds counts and one row per dictionary (offset, hash and counts, plus the name read from your copy).
@@ -440,7 +440,7 @@ has been read from listed streams: a root whose page map is in such an unlisted 
 map not in the next stream"). No anim.arc root has that layout. In `story000.arc` 5 roots do, with the page map in
 a 32- or 48-byte zlib tail, and none of the 5 is a clip dictionary once that tail is joined. Of the joined resources, 61,505 are clip
 dictionaries. 4 have `RIG` plus a version at +0x70 instead of a pack array (rig dictionaries, [decoded
-below](#rig-dictionaries) by `tools/anim_rigs.py`), and
+below](#rig-dictionaries) by `tooling/anim_rigs.py`), and
 1 has some other value there. Together the dictionaries use 87,234 listed streams plus the 36 unlisted pages
 (3,802,124,713 stored / 7,077,351,104 inflated bytes in the listed streams). By `anim_index.py` class those
 streams are: zero-prefix 66,115, raw 20,845, name-table 273, skeleton-names 1.
@@ -524,11 +524,11 @@ u32; u32 count}` with `Entry {u64 key; T *value; Entry *next}`. Hashes are `joaa
 
 A clip plays its animations at the same time, each over its own `[start, end]` window at its rate: animation time
 `t` is clip time `(t − start) / rate`, and `(end − start) / rate` equals the clip's `+0x78` duration: over all
-61,505 dictionaries of `anim.arc` (`tools/anim_clips.py`, `clip_windows`), 784,562 of the 785,174 animation entries of
+61,505 dictionaries of `anim.arc` (`tooling/anim_clips.py`, `clip_windows`), 784,562 of the 785,174 animation entries of
 ordinary clips match to float32 precision (relative 1e-5) and the other 612 within 2.2e-4 relative, 581 of them in
 one-frame (0.033 s) clips where the rounding shows most; none has rate 0 (the first check, 300 sampled
 dictionaries, had 4,471 of 4,471). In the samples, the animations of one clip covered different bones and could
-have different frame rates. `tools/anim_glb.py` plays clips on a fragment skeleton and writes them as glTF
+have different frame rates. `tooling/anim_glb.py` plays clips on a fragment skeleton and writes them as glTF
 animations; see [character_skeleton.md](character_skeleton.md#animated-gltf-export).
 
 **Track types** are `joaat32` of their names. This is the meaning of the recurring `0x98e1750c` noted above:
@@ -841,16 +841,16 @@ dictionary in `story000.arc`. None of its 9,188 distinct dictionary hashes is a 
 one of the 1,902 hashes anim.arc refers to without having them.
 
 ```
-python -I tools/anim_clips.py <package>\pack\story000\story000.arc <work>\story000-clips.json --jobs 20
+python -I tooling/anim_clips.py <package>\pack\story000\story000.arc <work>\story000-clips.json --jobs 20
 ```
 
 ## Rig dictionaries
 
-`tools/anim_rigs.py` reads the four `RIG` roots above (ASSET-20). Run on the 1.0.2.1 copy:
+`tooling/anim_rigs.py` reads the four `RIG` roots above (ASSET-20). Run on the 1.0.2.1 copy:
 
 ```powershell
-python -I tools/anim_index.py <package>\anim.arc <work>\anim-index.json --rigs <work>\rigs.json
-python -I tools/anim_rigs.py <package>\anim.arc <work>\anim-rigs.json --rigs <work>\rigs.json
+python -I tooling/anim_index.py <package>\anim.arc <work>\anim-index.json --rigs <work>\rigs.json
+python -I tooling/anim_rigs.py <package>\anim.arc <work>\anim-rigs.json --rigs <work>\rigs.json
 ```
 
 The output holds counts and one row per rig dictionary (offset, name, hash, entry count), no table items.
@@ -970,10 +970,10 @@ model or skeleton each non-humanoid clip dictionary drives.
 
 ## `MoVE` state-machine containers
 
-`tools/anim_move.py` decodes all 324 `MoVE` (version 19) resources in `anim.arc` (ASSET-86):
+`tooling/anim_move.py` decodes all 324 `MoVE` (version 19) resources in `anim.arc` (ASSET-86):
 
 ```powershell
-python -I tools/anim_move.py <package>\anim.arc <work>\anim-move.json
+python -I tooling/anim_move.py <package>\anim.arc <work>\anim-move.json
 ```
 
 All 324 resources (325 zlib streams, 331,771 stored / 1,494,188 inflated bytes once the 64 KiB stream at
@@ -1051,10 +1051,10 @@ state-machine and motion-tree hierarchy (**1,616** containers across the 324 res
 
 ## `MoVE` state-machine containers
 
-`tools/anim_move.py` decodes all 324 `MoVE` (version 19) resources in `anim.arc` (ASSET-86):
+`tooling/anim_move.py` decodes all 324 `MoVE` (version 19) resources in `anim.arc` (ASSET-86):
 
 ```powershell
-python -I tools/anim_move.py <package>\anim.arc <work>\anim-move.json
+python -I tooling/anim_move.py <package>\anim.arc <work>\anim-move.json
 ```
 
 All 324 resources (325 zlib streams, 331,771 stored / 1,494,188 inflated bytes once the 64 KiB stream at
@@ -1183,14 +1183,14 @@ The bytes support **new the engine resource pages**, not the TARGET V `YCD`/`RSC
 - `MoVE` (version 19) and the 2/3 clip streams as the animation payloads; neither is zlib inside the page.
 - No `YCD`, `YDD`, `YLD`, `YFD`, `RSC7` or `RSC8` at any stream start.
 
-`MoVE` (version 19) is a flat relative-offset state-machine and motion-tree graph (`tools/anim_move.py`).
+`MoVE` (version 19) is a flat relative-offset state-machine and motion-tree graph (`tooling/anim_move.py`).
 
 ### What the bytes do not prove
 
 - `0DRP` is a page marker with a version, page count and pointers. Its role is inferred from the page layout, not
   decoded, and the marker is not proven to be animation-specific.
 - `MoVE` v19's container layout, preamble tables, recursive state containers (`Type 1`, `Type 3`, `Type 22`),
-  transitions and parameter blocks are decoded (`tools/anim_move.py`), while the unhashed source names of most
+  transitions and parameter blocks are decoded (`tooling/anim_move.py`), while the unhashed source names of most
   network/request/flag hashes and the evaluation semantics of the rarest leaf operator node types remain unmapped.
 - The two- and three-entry auxiliary tables bound their tagged payloads. Their contents have yet to be linked
   to a clip. The clip dictionaries' keyframes are decoded in [Keyframe decoding](#keyframe-decoding).
@@ -1212,7 +1212,7 @@ The bytes support **new the engine resource pages**, not the TARGET V `YCD`/`RSC
 3. **Group streams into resources.** The TOC is encrypted, so use the `0DRP` page header: count at +0x20,
    pointers at +0x08 and +0x28..+0x40, four u16 values at +0x48. The sampled layout places page headers among
    zero-prefixed pages; a logical resource can span several streams. Do not assume one stream is one file. The
-   page map at the `+0x08` pointer gives the system page count, and that is how `tools/anim_clips.py` joins the
+   page map at the `+0x08` pointer gives the system page count, and that is how `tooling/anim_clips.py` joins the
    clip dictionaries.
 4. **Parse the name/hash tables.** Names are NUL-terminated and 16-byte aligned; the name hash is joaat32 of
    the stem (path without `pack:/` and without the final extension). The record stride varies (16 or 32 bytes in
@@ -1220,7 +1220,7 @@ The bytes support **new the engine resource pages**, not the TARGET V `YCD`/`RSC
    track type.
 5. **Trace the auxiliary payloads to their consumers.** Use the parent's `+0x40` table to bound each payload
    before checking its fields against the root object's schema. The table framing alone establishes no
-   association with the two named page-0 clips. (`MoVE` v19 is now decoded separately by `tools/anim_move.py`.)
+   association with the two named page-0 clips. (`MoVE` v19 is now decoded separately by `tooling/anim_move.py`.)
 6. **Keep the compression boundary explicit.** Outer ARC9 zlib is understood. Do not add a zlib pass inside a
    page without evidence; the sampled pages had no valid nested stream.
 7. **Re-run the model cross-check with the full export.** The current 1,350-model data.arc manifest has bone
@@ -1231,21 +1231,21 @@ The bytes support **new the engine resource pages**, not the TARGET V `YCD`/`RSC
 
 ```powershell
 # Full stream index and coverage (writes index.json only)
-python -I tools/arc9_carve.py <package>\anim.arc <work>\anim-index --index-only
+python -I tooling/arc9_carve.py <package>\anim.arc <work>\anim-index --index-only
 
 # Signature index (CSV or JSON; --limit/--start for a bounded scan)
-python -I tools/anim_index.py <package>\anim.arc <work>\anim-index.csv
-python -I tools/anim_index.py <work>\anim-carve <work>\anim-index.json
+python -I tooling/anim_index.py <package>\anim.arc <work>\anim-index.csv
+python -I tooling/anim_index.py <work>\anim-carve <work>\anim-index.json
 
 # Keyframe decoding: counts and one row per clip dictionary; --decode prints one dictionary's values
-python -I tools/anim_clips.py <package>\anim.arc <work>\anim-clips.json --jobs 8
+python -I tooling/anim_clips.py <package>\anim.arc <work>\anim-clips.json --jobs 8
 
 # Rig dictionaries and MoVE v19 state-machine containers
-python -I tools/anim_rigs.py <package>\anim.arc <work>\anim-rigs.json --rigs <work>\rigs.json
-python -I tools/anim_move.py <package>\anim.arc <work>\anim-move.json
+python -I tooling/anim_rigs.py <package>\anim.arc <work>\anim-rigs.json --rigs <work>\rigs.json
+python -I tooling/anim_move.py <package>\anim.arc <work>\anim-move.json
 ```
 
-`tools/anim_index.py` reports `MoVE`, `0DRP`, `pack:/`, `SKEL_`, `RBF0`, `PSIN`, type-hash and 2/3 clip headers,
+`tooling/anim_index.py` reports `MoVE`, `0DRP`, `pack:/`, `SKEL_`, `RBF0`, `PSIN`, type-hash and 2/3 clip headers,
 plus `raw:<hex>` for anything it does not recognise. It writes no payloads. `--start` must be 0 or more and
 `--limit` at least 1 (decimal or `0x` hex); an out-of-range value stops with a one-line error and exit code 2
 before an index is written.

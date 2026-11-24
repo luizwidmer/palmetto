@@ -2,11 +2,11 @@
 
 Standard library only; no GPU, no LLVM, no game files.
 
-runtime/test/shaders/cs_w32_salu64.asm has lane 0 of a wave32 group store one word of each of s_brev_b64,
+port/test/shaders/cs_w32_salu64.asm has lane 0 of a wave32 group store one word of each of s_brev_b64,
 s_bfe_u64, s_bfe_i64, s_bitset1_b64, s_flbit_i32_b64, s_flbit_i32_i64, s_cmov_b32 of s_sext_i32_i16 and
 v_mad_u64_u32 (derivations in its header). These ops were checked on the CPU only. This runs the fixture
 (tests/semantic/regen_fixtures.py) through spirv_mini_interp, checks the eight words against values computed here
-from the ISA definitions, and checks that check.py and scripts/run_gpu_tests.py expect the same words on the GPU.
+from the ISA definitions, and checks that check.py and tooling/scripts/run_gpu_tests.py expect the same words on the GPU.
 """
 import os
 import re
@@ -84,7 +84,7 @@ class Salu64Fixture(unittest.TestCase):
                 self.assertEqual(mem[4 * k], want)
 
     def test_gpu_runners_expect_the_same_words(self):
-        for rel in (("runtime", "test", "shaders", "check.py"), ("scripts", "run_gpu_tests.py")):
+        for rel in (("port", "test", "shaders", "check.py"), ("tooling", "tooling/scripts", "run_gpu_tests.py")):
             with open(os.path.join(ROOT, *rel), encoding="utf-8") as f:
                 text = f.read()
             m = re.search(r'"cs_w32_salu64"\)?[,:]\s*\[([^\]]*)\]', text)

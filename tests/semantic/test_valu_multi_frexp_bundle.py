@@ -12,7 +12,7 @@ RDNA2 Floating-Point Decomposition Architecture:
   - Supports f16 (IEEE 754 half-precision binary16), f32 (binary32), and f64 (binary64).
   - Unbiased exponent and normalized significand extraction.
   - Zero, infinity, NaN, and denormal/subnormal edge-case handling adhering to GFX1030+ hardware semantics.
-  - End-to-end SPIR-V assembly translation through tools/rdna2spirv.py.
+  - End-to-end SPIR-V assembly translation through tooling/rdna2spirv.py.
 
 Standard library only: Python 3.9+ compatible, zero game data, zero external dependencies.
 """

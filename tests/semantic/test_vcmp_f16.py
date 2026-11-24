@@ -2,7 +2,7 @@
 
 RDNA2 ISA (VOPC, _F16): the compare reads S0.f16 and S1.f16, bits 15:0 of the operands only, and the ordered forms
 are false when either operand is NaN, so the N* forms are true for an unordered pair; +0 == -0. The shaders are
-runtime/test/shaders/ps_vcmp_f16.asm and ps_vcmp_f16_e64.asm (also run on the GPU by check.py and run_gpu_tests.py);
+port/test/shaders/ps_vcmp_f16.asm and ps_vcmp_f16_e64.asm (also run on the GPU by check.py and run_gpu_tests.py);
 their headers derive the eight words by hand. The reference here is plain Python on the same f16 bit patterns.
 """
 import math

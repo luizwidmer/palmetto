@@ -42,7 +42,7 @@ def ref_i16(
     clamp: bool = False,
     sel: tuple[int, int, int] = (0, 0, 0),
 ) -> int:
-    """Plain-Python reference matching tools/rdna2spirv.py for v_add_i16 / v_sub_i16."""
+    """Plain-Python reference matching tooling/rdna2spirv.py for v_add_i16 / v_sub_i16."""
     e64 = op.endswith("_e64")
     x = s16(s0, sel[0])
     y = s16(s1, sel[1])

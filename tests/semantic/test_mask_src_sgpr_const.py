@@ -15,7 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.dont_write_bytecode = True
 sys.path.insert(0, HERE)
 
-from test_salu64_bitwise_data import run_ps_wave  # noqa: E402  (also puts tools/ on sys.path)
+from test_salu64_bitwise_data import run_ps_wave  # noqa: E402  (also puts tooling/ on sys.path)
 
 EPILOGUE = ["v_mov_b32 v0, 0", "v_mov_b32 v2, 0", "v_mov_b32 v3, 0"]
 

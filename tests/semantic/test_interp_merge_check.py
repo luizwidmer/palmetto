@@ -15,7 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.dont_write_bytecode = True
 sys.path.insert(0, HERE)
 
-from test_salu64_bitwise_data import translate_ps  # noqa: E402  (also puts tools/ on sys.path)
+from test_salu64_bitwise_data import translate_ps  # noqa: E402  (also puts tooling/ on sys.path)
 import spirv_mini_interp as si  # noqa: E402
 import spirv_wave_interp as wi  # noqa: E402
 

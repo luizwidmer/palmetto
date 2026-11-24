@@ -1,4 +1,4 @@
-"""tools/ptr_truncation_census.py on hand-written listings (standard library only, no game data, no GPU).
+"""tooling/ptr_truncation_census.py on hand-written listings (standard library only, no game data, no GPU).
 
     python -I tests/test_ptr_truncation_census.py
 """
@@ -13,7 +13,7 @@ import unittest
 import warnings
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import ptr_truncation_census as P  # noqa: E402
 import shader_meta  # noqa: E402
@@ -216,7 +216,7 @@ class SummaryTests(unittest.TestCase):
                 sys.stderr = io.StringIO()
                 try:
                     with self.assertRaises(SystemExit) as cm:
-                        P.main([os.path.join(ROOT, "tools"), "--limit", value])
+                        P.main([os.path.join(ROOT, "tooling"), "--limit", value])
                 finally:
                     message = sys.stderr.getvalue()
                     sys.stderr = stderr

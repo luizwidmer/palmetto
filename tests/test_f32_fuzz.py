@@ -1,4 +1,4 @@
-"""Tests for tools/f32_fuzz.py, the FUZZ-3 float VALU differential fuzzer (no game data, no GPU, no llvm-mc).
+"""Tests for tooling/f32_fuzz.py, the FUZZ-3 float VALU differential fuzzer (no game data, no GPU, no llvm-mc).
 
     python -I tests/test_f32_fuzz.py
 """
@@ -9,7 +9,7 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.dont_write_bytecode = True
 
 import f32_fuzz as ff  # noqa: E402
@@ -108,7 +108,7 @@ class HarnessTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
-    TOOL = os.path.join(ROOT, "tools", "f32_fuzz.py")
+    TOOL = os.path.join(ROOT, "tooling", "f32_fuzz.py")
 
     def test_no_arguments_prints_usage(self):
         r = subprocess.run([sys.executable, "-I", self.TOOL], capture_output=True, text=True, timeout=5)
@@ -120,7 +120,7 @@ class CliTests(unittest.TestCase):
 class HardwareOracle(unittest.TestCase):
     """--oracle hw: kernel text, verdicts, GFX11 skips and the exit-77 contract (no GPU needed), plus a run on the
     GPU when the oracle tools are present."""
-    TOOL = os.path.join(ROOT, "tools", "f32_fuzz.py")
+    TOOL = os.path.join(ROOT, "tooling", "f32_fuzz.py")
 
     def case(self, op, vals, srcs, mods=(), e64=False):
         return ff.Case(op, list(vals) + [0] * (9 - len(vals)), srcs, e64, list(mods))
@@ -212,7 +212,7 @@ class HardwareOracle(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
 
     def test_exit_77_without_the_oracle_tools(self):
-        env = dict(os.environ, PALMETTO_AMD_CLANG=os.path.join(ROOT, "tools", "no-such-clang.exe"))
+        env = dict(os.environ, PALMETTO_AMD_CLANG=os.path.join(ROOT, "tooling", "no-such-clang.exe"))
         r = subprocess.run([sys.executable, "-I", self.TOOL, "--oracle", "hw", "--programs", "2"],
                            capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 77, r.stdout + r.stderr)

@@ -4,7 +4,7 @@ One cache blob was found in the package data, stored as a single resource in the
 archive. It is a chain of 4,205 adjacent zlib streams: 4,204 full 64 KiB streams and a 27,436-byte last one, with
 31,437 bytes of zero padding between the streams. Concatenating the inflated bytes in archive order gives
 **275,540,780 bytes** (0x106C6B2C); the first stream starts at archive offset 0x10579000 and the chain is the last
-resource in the archive. This page describes that file; `tools/psocache_inspect.py` checks a carved copy of it.
+resource in the archive. This page describes that file; `tooling/psocache_inspect.py` checks a carved copy of it.
 
 The blob is little-endian. In the tables, *measured* means the field's value and the region arithmetic were checked
 on this file. *Unproven* means the field is only located and described, not decoded.
@@ -158,7 +158,7 @@ PSO and the other 3,502 are not named by the graphics or compute records measure
 
 ## Graphics user signature
 
-`tools/psocache_usersig.py` resolves a graphics PSO to its user data and prints, per chunk, the kind, register
+`tooling/psocache_usersig.py` resolves a graphics PSO to its user data and prints, per chunk, the kind, register
 space, base register, count, element size and the slot bytes. A PSO uses 3 to 5 distinct chunk records after
 duplicates are removed (four on 23,625 of 25,471 PSOs); the eight layouts are shared across the corpus.
 
@@ -205,7 +205,7 @@ is not measured.
 
 ## Checking and carving a copy
 
-`tools/psocache_extract.py` finds the cache in an ARC9 archive without the TOC: it walks the archive's stream
+`tooling/psocache_extract.py` finds the cache in an ARC9 archive without the TOC: it walks the archive's stream
 table in order, inflates each stream to learn its extent, keeps only the first 4 bytes, and stops at the first
 stream whose output starts with the magic. It then appends the following contiguous streams (up to 1 MiB of zero
 padding) until the header's declared total is reached, writes the file under the temporary directory and runs
@@ -214,13 +214,13 @@ source folder is scanned in sorted order and the report names the archive index 
 path.
 
 ```
-python -I tools/psocache_extract.py <archive.arc|folder> <cache-in-tmp>
+python -I tooling/psocache_extract.py <archive.arc|folder> <cache-in-tmp>
 ```
 
-`tools/psocache_inspect.py` reads the cache file only:
+`tooling/psocache_inspect.py` reads the cache file only:
 
 ```
-python -I tools/psocache_inspect.py <cache> --meta
+python -I tooling/psocache_inspect.py <cache> --meta
 ```
 
 It checks the magic, reads the four counts and two sizes above, bounds all six regions against the file, checks that
@@ -231,12 +231,12 @@ prints offsets, sizes and counts, names every field that does not fit instead of
 regions add up to the file size, 1 on a disagreement and 2 when the file is not a cache. `--json` prints the same
 report as JSON. It does not decode a chunk payload, disassemble the code or verify a hash.
 
-`tools/psocache_usersig.py` turns one or more graphics PSOs into the per-record user signature and the 32-dword
+`tooling/psocache_usersig.py` turns one or more graphics PSOs into the per-record user signature and the 32-dword
 fit described above:
 
 ```
-python -I tools/psocache_usersig.py <cache> [--entry N] [--limit N] [--json]
+python -I tooling/psocache_usersig.py <cache> [--entry N] [--limit N] [--json]
 ```
 
-It reuses the parser from `tools/psocache_inspect.py`, prints the aggregate over the first `--limit` graphics PSOs
+It reuses the parser from `tooling/psocache_inspect.py`, prints the aggregate over the first `--limit` graphics PSOs
 (all by default) or one PSO with `--entry N`, and never prints a hash.

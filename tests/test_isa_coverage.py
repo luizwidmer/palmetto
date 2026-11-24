@@ -1,4 +1,4 @@
-"""Unit tests for tools/isa_coverage.py (RDNA2 ISA coverage of the translator).
+"""Unit tests for tooling/isa_coverage.py (RDNA2 ISA coverage of the translator).
 
 The fixtures are our own text: a few made-up instruction entries in the schema of AMD's machine-readable ISA XML and
 a few lines of translator-shaped source. No game data and no AMD file is needed. One test reads the real
@@ -20,7 +20,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 

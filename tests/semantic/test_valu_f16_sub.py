@@ -15,7 +15,7 @@ Covers:
   - Hardware ISA equivalence: packed subtraction implemented via v_pk_add_f16 with operand negation
     (neg_lo:[0,1] neg_hi:[0,1]), and translator rejection of untranslated pseudo-op v_pk_sub_f16.
 
-All operations are executed end-to-end through tools/rdna2spirv.py and
+All operations are executed end-to-end through tooling/rdna2spirv.py and
 tests/semantic/spirv_mini_interp.py and verified against a deterministic reference oracle.
 
 Standard library only: zero game data, no GPU hardware required.
@@ -35,7 +35,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

@@ -1,4 +1,4 @@
-"""Synthetic regression tests for tools/ab_control_flow.py.
+"""Synthetic regression tests for tooling/ab_control_flow.py.
 
 Validates candidate selection, outcome classification, vertex shader synthesis,
 backward branch detection, disassembly opcode filtering, reachability analysis,
@@ -30,7 +30,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 if TOOLS_DIR not in sys.path:
@@ -998,7 +998,7 @@ class PipelineExecutionTest(unittest.TestCase):
         os.makedirs(self.repo)
         os.makedirs(os.path.join(self.shaders, "dxbc", "disasm"))
         os.makedirs(os.path.join(self.shaders, "spirv"))
-        os.makedirs(os.path.join(self.repo, "runtime", "build"))
+        os.makedirs(os.path.join(self.repo, "port", "build"))
 
     def tearDown(self):
         self.tmp.cleanup()

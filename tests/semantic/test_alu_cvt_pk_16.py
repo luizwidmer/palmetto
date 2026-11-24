@@ -2,7 +2,7 @@
 
 RDNA ISA pseudocode: D[15:0] = sat16(S0), D[31:16] = sat16(S1), where v_cvt_pk_u16_u32 saturates the unsigned 32-bit
 value to [0, 0xFFFF] (u32_to_u16) and v_cvt_pk_i16_i32 the signed value to [-32768, 32767] (i32_to_i16). The whole
-dword is written. Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in
+dword is written. Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in
 tests/semantic/spirv_mini_interp.py and compares the result with a plain-Python reference. D leaves through exp as two
 16-bit halves ORed into 0x40000000, so no export channel is a NaN or denormal pattern that a float round trip could
 change.
@@ -17,7 +17,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

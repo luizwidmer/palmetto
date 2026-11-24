@@ -11,7 +11,7 @@ what the translator uses. No case here puts a source offset above 255, so the te
 
 Each case is a synthetic hand-written pixel-shader listing: v_mov_b32 loads a distinct sentinel into v1..v30
 (and v0 where a case needs it), s_mov_b32 sets M0, one v_movrelsd_2_b32 runs, and four registers go out through
-exp mrt0. The listing is translated by tools/rdna2spirv.py and executed by spirv_mini_interp.py. The exported
+exp mrt0. The listing is translated by tooling/rdna2spirv.py and executed by spirv_mini_interp.py. The exported
 registers include the written one, the one read and a neighbour, so the tests show which register was read and
 that the write landed only in VGPR[D.addr + M0[25:16]].
 
@@ -32,7 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from support import STUB_DXBC, mrt0_words, rdna2spirv  # noqa: E402  (support puts tools/ on sys.path)
+from support import STUB_DXBC, mrt0_words, rdna2spirv  # noqa: E402  (support puts tooling/ on sys.path)
 
 MASK32 = 0xFFFFFFFF
 NUM_VGPRS = 256         # size of the translator's %vgpr array

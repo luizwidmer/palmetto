@@ -1,9 +1,9 @@
-"""Cube samples in tools/rdna2spirv.py.
+"""Cube samples in tooling/rdna2spirv.py.
 
 The hardware takes a cube sample's s and t in [1, 2] (sc / |cubema| + 1.5) and its third coordinate as 8 * slice + face
 (Mesa ac_nir_lower_tex_coords.c, AMD LLPC ImageBuilder.cpp). The translator samples a 6-layer 2D-array view instead,
 so it passes s - 1, t - 1 and layer 6 * slice + face. These tests evaluate the coordinate the SPIR-V hands to the
-sample; runtime/test/shaders/ps_cube_sample.asm checks the result on a GPU.
+sample; port/test/shaders/ps_cube_sample.asm checks the result on a GPU.
 """
 import math
 import re

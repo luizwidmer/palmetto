@@ -1,7 +1,7 @@
 """v_cmp_{eq,ne,lt,le,gt,ge,f,t}_{u32,i32}, e32 (VCC) and e64 (SGPR pair), on values where signed and unsigned disagree.
 
 RDNA2 ISA (VOPC): _U32 compares S0.u32 with S1.u32, _I32 compares S0.i32 with S1.i32; EQ, NE, LT, LE, GT, GE are the
-usual relations, F = 0 and T = 1 whatever the sources hold. The shader is runtime/test/shaders/ps_vcmp_int32.asm (also
+usual relations, F = 0 and T = 1 whatever the sources hold. The shader is port/test/shaders/ps_vcmp_int32.asm (also
 run on the GPU by check.py and run_gpu_tests.py); its header derives the four words by hand. The reference here is
 plain Python on the same operand pairs.
 """

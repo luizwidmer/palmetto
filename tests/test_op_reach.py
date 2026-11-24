@@ -14,8 +14,8 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "op_reach.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "op_reach.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import op_reach  # noqa: E402
 
 LISTINGS = {

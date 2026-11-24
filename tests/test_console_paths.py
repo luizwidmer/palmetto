@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-CHECK = Path(__file__).resolve().parents[1] / "runtime/test/check_console_paths.cmake"
+CHECK = Path(__file__).resolve().parents[1] / "port/test/check_console_paths.cmake"
 CMAKE = shutil.which("cmake")
 
 

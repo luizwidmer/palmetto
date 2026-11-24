@@ -1,4 +1,4 @@
-"""tools/hw_oracle: kernel text, literal and opcode filters, error mapping, the exit-77 contract, and the parts of
+"""tooling/hw_oracle: kernel text, literal and opcode filters, error mapping, the exit-77 contract, and the parts of
 the Linux backend that need no GPU (reading the assembled object, the launcher's tokens, the display check). The
 last tests run on the hardware when the oracle tools are present and are skipped otherwise.
 Standard library only."""
@@ -12,7 +12,7 @@ import unittest
 import unittest.mock
 from unittest import mock
 
-TOOLS = Path(__file__).resolve().parents[1] / "tools"
+TOOLS = Path(__file__).resolve().parents[1] / "tooling"
 sys.path.insert(0, str(TOOLS))
 from hw_oracle import asm, drm, runner  # noqa: E402
 

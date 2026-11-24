@@ -108,7 +108,7 @@ Hypotheses tested against the measured blob bytes and the documented enums:
 
   The semantics agree as well: `POSITION` is 3- or 4-component float, `TEXCOORD` is float2, `COLOR` is a packed
   8-bit-per-channel colour (UNORM or UINT).
-* **Console GFX10 format code (refuted).** `runtime/src/gfx10_descriptors.h` maps the same numbers to
+* **Console GFX10 format code (refuted).** `port/src/gfx10_descriptors.h` maps the same numbers to
   `GFX10_FORMAT_8_SNORM` (word 2, 1 byte), `GFX10_FORMAT_8_SINT` (6, 1 byte), `GFX10_FORMAT_8_8_USCALED` (16, 2 bytes)
   and `GFX10_FORMAT_16_16_SINT` (28, 4 bytes), and has no row for 30 at all. Those sizes cannot produce the measured
   advances of 12, 8 and 4 bytes, so the console-code hypothesis is refuted by the data.
@@ -148,15 +148,15 @@ boot says exactly which words (and which element positions) remain unmapped.
 
 ## 5. Tests and gates
 
-* `runtime/test/graphics_record_test.cpp` (117 checks): the decoded table on all six measured shapes (count, name
+* `port/test/graphics_record_test.cpp` (117 checks): the decoded table on all six measured shapes (count, name
   lengths, name offsets, the six words, padding), the 4-byte fill rule, and the malformed cases - size outside
   80..340 or not a word multiple, count too high/low, unterminated or unprintable name, zero/absurd name length,
   non-zero padding, slack after the padding, a zero count with trailing bytes, and the refuted contiguous-names form.
-* `runtime/test/graphics_pso_test.cpp` (159 checks): the measured format table against the documented DXGI enum values,
+* `port/test/graphics_pso_test.cpp` (159 checks): the measured format table against the documented DXGI enum values,
   the mapped descriptions for the 120/152/156/188/224-byte shapes (formats, semantic indexes, packed offsets, slot,
   per-vertex class, step rate, `SemanticName` pointing into the record blob), the format-2 size falsifier (a following
   element at 16 bytes builds, one at 12 refuses at `aligned_byte_offset`), and every refusal above.
-* `runtime/test/xs_proxy_mock_test.cpp`: the slot-57 element case now builds the measured element form with an
+* `port/test/xs_proxy_mock_test.cpp`: the slot-57 element case now builds the measured element form with an
   unmeasured format word 7 and expects the same `E_NOTIMPL` refusal, so the branch's contract is unchanged.
 * Gates: `_setup\build_palmetto.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT`;
   `graphics_record_test`, `graphics_pso_test`, `xs_proxy_mock_test` and `unimplemented_policy_test` pass.
@@ -164,7 +164,7 @@ boot says exactly which words (and which element positions) remain unmapped.
 ## 6. Boot measurement, before and after
 
 One boot, retail image, shader corpus, Vulkan backend, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`, 150 s
-timeout, a boot runs to the timeout; harness `tools/boot_report.py`, profile `_setup/profile_boot.py`. The "before"
+timeout, a boot runs to the timeout; harness `tooling/boot_report.py`, profile `_setup/profile_boot.py`. The "before"
 column is the slot-57 wiring measurement (`docs/slot57_wiring.md` section 2, the same tree before this decode).
 
 | | before | after |

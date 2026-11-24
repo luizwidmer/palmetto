@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/opus_tags.py (no game data: invented banks, names and subtitles)."""
+"""Synthetic tests for tooling/opus_tags.py (no game data: invented banks, names and subtitles)."""
 import codecs
 import contextlib
 import io
@@ -13,8 +13,8 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "opus_tags.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "opus_tags.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import awc_opus  # noqa: E402
 import opus_tags as T  # noqa: E402

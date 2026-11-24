@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import unittest
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "build_runtime.ps1"
+SCRIPT = Path(__file__).resolve().parents[1] / "tooling/scripts" / "build_runtime.ps1"
 CSC = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
 RECORDER = r'''
 using System;
@@ -51,7 +51,7 @@ class CMakeBatchTest(unittest.TestCase):
         branch = text[start:end] + "}\n"
         writer = text[text.index('$bat = Join-Path $out "_build.cmd"'):]
         root = folder / "checkout"
-        src, out = root / "runtime", root / "runtime/build"
+        src, out = root / "runtime", root / "port/build"
         out.mkdir(parents=True)
         tools = folder / "tools ^ & 東京"
         tools.mkdir()

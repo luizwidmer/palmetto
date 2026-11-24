@@ -1,4 +1,4 @@
-"""tools/texoff_probe.py without a GPU: the rows tell a signed field from an unsigned one, and the kernels build.
+"""tooling/texoff_probe.py without a GPU: the rows tell a signed field from an unsigned one, and the kernels build.
 
     python -I tests/test_texoff_probe.py
 """
@@ -7,8 +7,8 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
-sys.path.insert(0, os.path.join(ROOT, "tools", "hw_oracle"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
+sys.path.insert(0, os.path.join(ROOT, "tooling", "hw_oracle"))
 
 import texoff_probe as p  # noqa: E402
 

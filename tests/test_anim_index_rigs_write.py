@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "anim_index.py")
+TOOL = os.path.join(ROOT, "tooling", "anim_index.py")
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 from test_anim_index import rbf0_blob  # noqa: E402
 

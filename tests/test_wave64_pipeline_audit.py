@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tooling"))
 sys.path.insert(0, str(ROOT / "tests" / "semantic"))
 
 import rdna2spirv  # noqa: E402
@@ -133,7 +133,7 @@ class CommandLineTest(unittest.TestCase):
         path.write_text(json.dumps(value), encoding="utf-8", newline="\n")
 
     def run_audit(self, *args):
-        return subprocess.run([sys.executable, "-I", str(ROOT / "tools" / "wave64_pipeline_audit.py"),
+        return subprocess.run([sys.executable, "-I", str(ROOT / "tooling" / "wave64_pipeline_audit.py"),
                                self.index, "--device-info", self.caps, *args],
                               capture_output=True, text=True, timeout=20)
 

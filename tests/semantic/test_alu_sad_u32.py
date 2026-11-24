@@ -30,7 +30,7 @@ ISA Specifications (AMD RDNA2 / GFX10 Instruction Set Architecture):
     opcodes raise Unsupported rather than silently miscompiling.
 
 Standard library only: no GPU, no LLVM, no external tools, zero game data.
-Verified against tools/rdna2spirv.py and tests/semantic/spirv_mini_interp.py.
+Verified against tooling/rdna2spirv.py and tests/semantic/spirv_mini_interp.py.
 """
 import gc
 import os
@@ -43,7 +43,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

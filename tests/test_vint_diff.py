@@ -1,4 +1,4 @@
-"""tools/vint_diff.py: the integer VALU reference against hand-worked values, a short seeded fuzz run, and canaries.
+"""tooling/vint_diff.py: the integer VALU reference against hand-worked values, a short seeded fuzz run, and canaries.
 Standard library only; no GPU."""
 import contextlib
 import io
@@ -9,7 +9,7 @@ import subprocess
 import sys
 import unittest
 
-TOOL = Path(__file__).resolve().parents[1] / "tools" / "vint_diff.py"
+TOOL = Path(__file__).resolve().parents[1] / "tooling" / "vint_diff.py"
 sys.path.insert(0, str(TOOL.parent))
 import vint_diff as d  # noqa: E402
 

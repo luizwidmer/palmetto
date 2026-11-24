@@ -1,4 +1,4 @@
-"""tools/ped_assemble.py on a malformed GLB: one `ERROR:` line and exit 2, not a traceback.
+"""tooling/ped_assemble.py on a malformed GLB: one `ERROR:` line and exit 2, not a traceback.
 
     python -I tests/test_ped_assemble_malformed_glb.py
 
@@ -16,7 +16,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 

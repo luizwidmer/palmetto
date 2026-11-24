@@ -18,7 +18,7 @@ import zlib
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "gamedata_index.py")
+TOOL = os.path.join(ROOT, "tooling", "gamedata_index.py")
 
 
 def load_tool():

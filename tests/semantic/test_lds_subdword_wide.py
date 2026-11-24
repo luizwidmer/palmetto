@@ -14,7 +14,7 @@ RDNA2 ISA, "Data Share Instructions"; ADDR = vaddr + offset (bytes):
   * ds_{read,write}_b64/b96/b128: N consecutive dwords from ADDR, lowest register first
   * ds_read2st64_b32: MEM[ADDR + offset0 * 256] and MEM[ADDR + offset1 * 256]
 
-The inputs are the GPU tests runtime/test/shaders/cs_w32_lds_subdword.asm and cs_w32_lds_wide.asm (fixtures from
+The inputs are the GPU tests port/test/shaders/cs_w32_lds_subdword.asm and cs_w32_lds_wide.asm (fixtures from
 regen_fixtures.py), translated for wave32 and run as one 32-lane subgroup in lockstep. The expected words are
 computed below from a byte-level model of LDS written from the rules above; they are the words in the .asm
 headers, check.py and run_gpu_tests.py.

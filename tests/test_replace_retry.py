@@ -1,4 +1,4 @@
-"""tools/replace_retry.py: os.replace that retries the transient Windows PermissionErrors, and its call sites.
+"""tooling/replace_retry.py: os.replace that retries the transient Windows PermissionErrors, and its call sites.
 
     python -I tests/test_replace_retry.py -v
 
@@ -15,7 +15,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 import replace_retry  # noqa: E402

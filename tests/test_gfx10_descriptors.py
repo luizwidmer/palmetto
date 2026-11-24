@@ -1,4 +1,4 @@
-"""The format table of runtime/src/gfx10_descriptors.h against tools/gfx10_formats.json.
+"""The format table of port/src/gfx10_descriptors.h against tooling/gfx10_formats.json.
 
 The C++ header keeps its own copy of the GFX10_FORMAT codes it maps to Vulkan (the runtime does not read JSON for
 this). This test reads the table out of the header and checks every row: the code has the name its comment says,
@@ -14,8 +14,8 @@ import re
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HEADER = os.path.join(ROOT, "runtime", "src", "gfx10_descriptors.h")
-FORMATS = os.path.join(ROOT, "tools", "gfx10_formats.json")
+HEADER = os.path.join(ROOT, "port", "src", "gfx10_descriptors.h")
+FORMATS = os.path.join(ROOT, "tooling", "gfx10_formats.json")
 
 ROW = re.compile(r"^\s*\{(\d+), VK_FORMAT_(\w+), channels_(\w+)\},\s*// GFX10_FORMAT_(\w+)\s*$")
 ANY_ROW = re.compile(r"^\s*\{\d+, VK_FORMAT_")

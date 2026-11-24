@@ -20,7 +20,7 @@ payload, carved stream or name list is in this document or the repository.
 
 ## Method and coverage
 
-The walk is the fixed `tools/arc9_carve.py` zlib walk from PR #90: find a zlib header, inflate to `eof`, advance by
+The walk is the fixed `tooling/arc9_carve.py` zlib walk from PR #90: find a zlib header, inflate to `eof`, advance by
 the bytes actually consumed, and never read the encrypted TOC. A page is counted when the inflated stream has
 `30 44 52 50` at +0x10.
 
@@ -47,7 +47,7 @@ format; their streams are BVH payloads and descriptors (see `docs/bvh.md`, PR #1
 
 ## Whole-archive pass
 
-The `navmeshes.arc` and `anim.arc` rows above stop at 64 MiB and 256 MiB. `tools/page_index.py <archive> pages.json`
+The `navmeshes.arc` and `anim.arc` rows above stop at 64 MiB and 256 MiB. `tooling/page_index.py <archive> pages.json`
 without `--limit`, on the same 1.0.2.1 package, reads both archives to the end (counts only; every row is taken from
 the report's `summary` or counted over its `pages`):
 
@@ -429,7 +429,7 @@ the `q38` records tile the resource with zero overlaps and 138,583 gaps in the 1
 pages either.
 
 The boundary is therefore taken from the tables, not from `+0x20`: a resource is the directory stream plus the
-following streams needed to reach the `q38` table and its last record. `tools/page_index.py` reports that group per
+following streams needed to reach the `q38` table and its last record. `tooling/page_index.py` reports that group per
 page as `resource` (`streams`, `bytes`, `page_units`, `declared_pages`, `declared_matches_units`), and the summary
 counts how often the declared count agrees, so the disagreement is recorded rather than used.
 
@@ -468,13 +468,13 @@ path or resource type is present in a `0DRP` page.
 
 ## Tool
 
-`tools/page_index.py` is stdlib-only and reads the same data area as the carver. It never writes payloads and
+`tooling/page_index.py` is stdlib-only and reads the same data area as the carver. It never writes payloads and
 never touches the TOC.
 
 ```powershell
-python -I tools/page_index.py <archive.arc> pages.json --limit 268435456
-python -I tools/page_index.py <archive.arc> pages.csv
-python -I tools/page_index.py <carve-dir> pages.json
+python -I tooling/page_index.py <archive.arc> pages.json --limit 268435456
+python -I tooling/page_index.py <archive.arc> pages.csv
+python -I tooling/page_index.py <carve-dir> pages.json
 python -I tests/test_page_index.py
 ```
 

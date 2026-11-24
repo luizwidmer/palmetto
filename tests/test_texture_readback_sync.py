@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 
-CHECK = Path(__file__).resolve().parents[1] / "runtime/test/check_texture_readback_sync.cmake"
+CHECK = Path(__file__).resolve().parents[1] / "port/test/check_texture_readback_sync.cmake"
 CMAKE = shutil.which("cmake")
 FRAME_BYTES = 64 * 64 * 16
 HARNESS = """\

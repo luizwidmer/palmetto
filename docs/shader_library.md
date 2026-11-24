@@ -2,7 +2,7 @@
 
 **Status: measured** on the 1.0.2.1 package. `shaders.arc` holds one more file behind its 26,503 shader entries:
 a library of precompiled pipelines, with 25,471 graphics and 2,693 compute pipeline records and the 21,522 native
-RDNA2 programs they run. `tools/shader_carve.py` reads only the raw-deflate shader entries, so until now nothing
+RDNA2 programs they run. `tooling/shader_carve.py` reads only the raw-deflate shader entries, so until now nothing
 read this file. No program, blob or record is reproduced here; the tables hold counts, sizes and offsets.
 
 ## 1. Where it is
@@ -13,7 +13,7 @@ kind, sizes, raw deflate). The rest, from file offset `0x10579000`, is 4,205 zli
 stream coverage [world_census.md](world_census.md) measured for `shaders.arc`. The gaps between the streams are 0
 to 12 bytes.
 
-`tools/shader_library.py` finds the first stream that inflates to the header below and appends streams until it
+`tooling/shader_library.py` finds the first stream that inflates to the header below and appends streams until it
 has the size the header gives. It fails if the sizes don't match exactly.
 
 **No shaders elsewhere.** The other 74 ARC9 and TTPF archives of the package (214 GB: the root archives except
@@ -112,8 +112,8 @@ or the library code has another strict wave64 marker. Synthetic cases are in
 ## 4. Tool
 
 ```sh
-python -I tools/shader_library.py <package>/shaders.arc --out <work>/library --disasm --carve <work>/shaders/dxbc
-python -I tools/rdna2spirv.py <work>/library/disasm --out <work>/library/spirv
+python -I tooling/shader_library.py <package>/shaders.arc --out <work>/library --disasm --carve <work>/shaders/dxbc
+python -I tooling/rdna2spirv.py <work>/library/disasm --out <work>/library/spirv
 ```
 
 * It writes `fspx/<name>.code` and `fspx/<name>.json`, the layout `fspx_unpack.py` writes and `rdna2spirv.py`

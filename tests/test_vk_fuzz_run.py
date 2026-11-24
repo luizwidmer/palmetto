@@ -1,4 +1,4 @@
-"""tools/vk_fuzz_run.py (the compute-program wrapper behind the --oracle hw,vk modes of the differential fuzzers) and the
+"""tooling/vk_fuzz_run.py (the compute-program wrapper behind the --oracle hw,vk modes of the differential fuzzers) and the
 --oracle vk guard of each fuzzer that has the mode. Standard library only; no GPU, no llvm-mc.
 
     python -I tests/test_vk_fuzz_run.py
@@ -15,7 +15,7 @@ import unittest
 import unittest.mock as mock
 from pathlib import Path
 
-TOOLS = Path(__file__).resolve().parents[1] / "tools"
+TOOLS = Path(__file__).resolve().parents[1] / "tooling"
 sys.path.insert(0, str(TOOLS))
 sys.dont_write_bytecode = True
 

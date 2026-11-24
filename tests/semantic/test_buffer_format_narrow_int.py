@@ -1,7 +1,7 @@
-"""Narrow integer typed-buffer formats (8/16-bit UINT and SINT) in tools/rdna2spirv.py, against words measured natively.
+"""Narrow integer typed-buffer formats (8/16-bit UINT and SINT) in tooling/rdna2spirv.py, against words measured natively.
 
 Every expected word below was read back from an AMD Radeon RDNA2 iGPU (gfx1036, Ryzen 9 9950X3D, Windows AMD
-driver, through tools/hw_oracle with AMD clang 23 from rocm-sdk-core 10.0.0), in wave32 and wave64 alike, with the
+driver, through tooling/hw_oracle with AMD clang 23 from rocm-sdk-core 10.0.0), in wave32 and wave64 alike, with the
 same V# and instruction the translated shader gets here:
 
 - loads: `buffer_load_format_xyzw` and `_d16_xyzw` from four source dwords (SOURCE) with DST_SEL XYZW and X011. UINT
@@ -27,7 +27,7 @@ import warnings
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling"))
 sys.path.insert(0, HERE)
 
 import rdna2spirv  # noqa: E402

@@ -7,8 +7,8 @@ Nothing below reproduces game data; every number is a count.
 
 ## 1. What runs
 
-`tools/sandbox.py` packs the props around a point (`tools/sandbox_scene.py`), picks one translated VS/PS pair from
-the work folder and runs `vk_sandbox` (`runtime/test/vk_sandbox.cpp`), which draws every prop with that pair: vertex buffers at
+`tooling/sandbox.py` packs the props around a point (`tooling/sandbox_scene.py`), picks one translated VS/PS pair from
+the work folder and runs `vk_sandbox` (`port/test/vk_sandbox.cpp`), which draws every prop with that pair: vertex buffers at
 locations 0–2 (position, normal, UV), a D32 depth buffer, one indexed draw per mesh and one descriptor table per
 draw. `--window` opens a window to fly, walk or drive through the scene; `--check` renders one frame headless and
 prints only counts.
@@ -51,12 +51,12 @@ T# words and the PS's S# literal in the descriptor hash table, builds the sample
 ## 4. Reproduce it
 
 ```sh
-python -I tools/world_index.py ... --entities-out <work>/entities.jsonl     # placements (docs/world.md)
+python -I tooling/world_index.py ... --entities-out <work>/entities.jsonl     # placements (docs/world.md)
 arc9dump models "<package>/levels.arc" <work>/assets
 arc9dump ttpf "<package>/data/ttdb/maps/ttdb_maps_<n>_7.ttpf" <work>/ttpf_maps          # n = 0..7
 arc9dump ttpf "<package>/data/ttdb/terrain/ttdb_terrain_<n>_7.ttpf" <work>/ttpf_terrain  # n = 0..7
-cmake --build runtime/build --target vk_sandbox
-python -I tools/sandbox.py --work <work> --entities <work>/entities.jsonl --models <work>/assets \
+cmake --build port/build --target vk_sandbox
+python -I tooling/sandbox.py --work <work> --entities <work>/entities.jsonl --models <work>/assets \
     --textures <work>/ttpf_maps --textures <work>/ttpf_terrain [--center X Y] --window
 ```
 

@@ -1,6 +1,6 @@
 """v_alignbyte_b32 (RDNA2 VOP3): D = low 32 bits of ({S0, S1} >> (8 * (S2 & 3))), S0 the high dword.
 
-Each case is translated by tools/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
+Each case is translated by tooling/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
 words are written by hand and also recomputed by a plain-Python reference. Standard library only: no GPU, no LLVM,
 no game data.
 """

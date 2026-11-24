@@ -1,7 +1,7 @@
 # Title-placed texture page import, and naming the consumer of the streamed blocks
 
 **Status: measured increment, negative on content but with the next address named.** The surface is now
-`runtime/shims/d3d12_vulkan_device.cpp` (the placed-texture stand-in) and the device entry points a consumer of the
+`port/shims/d3d12_vulkan_device.cpp` (the placed-texture stand-in) and the device entry points a consumer of the
 title's memory would use. Two pieces were built and measured: a bounded page import for title-placed textures
 (`PALMETTO_TEXTURE_IMPORT=1`, off by default), and off-by-default caller-RVA logging on the device creation/view/Map
 paths (`PALMETTO_DEVICE_TRACE=1`). The A/B is still black, and the measurement says why: **the bytes the title's

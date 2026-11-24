@@ -12,7 +12,7 @@ Arguments:
 Scope note:
   This file tests a self-contained textbook IEEE-754 / ISA-PDF model (IEEE=1, denorm32=3,
   s1-before-s2 NaN priority, positive canonical +qNaN 0x7FC00000 / 0x7E00); it does NOT invoke
-  tools/rdna2spirv.py and does NOT match real RDNA2 silicon in the game's inferred MODE.
+  tooling/rdna2spirv.py and does NOT match real RDNA2 silicon in the game's inferred MODE.
   For the hardware-measured RDNA2 (gfx1036, IEEE=0, denorm32=0, DX10_CLAMP=1) translator contract,
   see the ``v_div_fixup_f32`` row in docs/design.md and tests/semantic/test_alu_div_fixup_f32.py.
   Key divergences measured natively on gfx1036 (wave32 and wave64):

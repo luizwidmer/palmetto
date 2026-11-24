@@ -3,12 +3,12 @@
 From the Palmetto checkout root, use Python 3 to list the development tools:
 
 ```powershell
-python -I scripts/dev.py --help
-python -I scripts/dev.py discover
-python -I scripts/dev.py discover --json
+python -I tooling/scripts/dev.py --help
+python -I tooling/scripts/dev.py discover
+python -I tooling/scripts/dev.py discover --json
 ```
 
-From another directory, pass the path to `scripts/dev.py`, quoting it if needed.
+From another directory, pass the path to `tooling/scripts/dev.py`, quoting it if needed.
 The inventory always describes the checkout containing that script.
 
 `boot-trace` points to the analyzer for startup JSONL and D3D12 stderr logs.
@@ -41,15 +41,15 @@ producer script is missing. Invalid CLI arguments exit with code `2`.
 Use the existing analyzer through the development CLI:
 
 ```powershell
-python -I scripts/dev.py boot-trace --help
-python -I scripts/dev.py boot-trace "logs/startup trace.jsonl"
-python -I scripts/dev.py boot-trace "logs/startup trace.jsonl" --d3d12 "logs/d3d12 stderr.log" --json
+python -I tooling/scripts/dev.py boot-trace --help
+python -I tooling/scripts/dev.py boot-trace "logs/startup trace.jsonl"
+python -I tooling/scripts/dev.py boot-trace "logs/startup trace.jsonl" --d3d12 "logs/d3d12 stderr.log" --json
 ```
 
 Pass a startup JSONL from `palmetto --trace`, a D3D12 stderr log from
 `palmetto --trace-d3d12`, or both. Relative input paths are interpreted from
 the directory where you run the CLI. From outside the checkout, give the
-path to `scripts/dev.py` and keep the trace paths relative to your directory.
+path to `tooling/scripts/dev.py` and keep the trace paths relative to your directory.
 
 The analyzer supplies the help, output, diagnostics and exit status. If one
 input fails but the other can be read, `--json` can still emit a partial
@@ -57,24 +57,24 @@ summary on stdout with a diagnostic on stderr and exit code `2`. If neither
 input can be analyzed, there is no JSON summary. The summary describes the
 recorded events, and the exit status reports the analysis result.
 
-You can also run `python -I tools/boot_trace.py` with the same arguments.
+You can also run `python -I tooling/boot_trace.py` with the same arguments.
 
 ## Run a synthetic guest scene
 
 Use the existing headless runner with a loader and guest built on Windows
 with Vulkan, static SDL3 and `PALMETTO_GUEST_SCENE=ON`. Supply the synthetic
 M1.5 shader fixture root containing `spirv/`. See the
-[runtime instructions](../runtime/README.md#a-600-frame-headless-guest-scene)
+[runtime instructions](../port/README.md#a-600-frame-headless-guest-scene)
 for the build, fixture and Wine setup.
 
 ```powershell
-python -I scripts/dev.py guest-scene --help
-python -I scripts/dev.py guest-scene --loader "build/palmetto.exe" --guest "build/tiny_guest_draw.exe" --shaders "m15 shaders" --out "scene run" --negative-controls
+python -I tooling/scripts/dev.py guest-scene --help
+python -I tooling/scripts/dev.py guest-scene --loader "build/palmetto.exe" --guest "build/tiny_guest_draw.exe" --shaders "m15 shaders" --out "scene run" --negative-controls
 ```
 
 Pass `--out PATH` or `--out=PATH` with a new or empty directory. Relative
 paths are interpreted from the directory where you run the CLI, including
-when you invoke `scripts/dev.py` by its full path from another directory.
+when you invoke `tooling/scripts/dev.py` by its full path from another directory.
 
 The CLI forwards the runner's exit code and diagnostics. Exit code `0`
 means the scene checks passed. Exit code `1` can indicate a scene check
@@ -90,4 +90,4 @@ The output directory also holds any logs, frame records and PPM images
 the runner produced. If the runner rejects an occupied directory, any
 report already there belongs to an earlier run.
 
-You can also invoke `python -I scripts/run_guest_scene.py` directly.
+You can also invoke `python -I tooling/scripts/run_guest_scene.py` directly.

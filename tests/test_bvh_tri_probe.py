@@ -1,4 +1,4 @@
-"""CPU-only unit tests for tools/bvh_tri_probe.py: case generation, the rule, the kernel text and the GPU path with a
+"""CPU-only unit tests for tooling/bvh_tri_probe.py: case generation, the rule, the kernel text and the GPU path with a
 stand-in oracle. No GPU, no assembler.
 
     python -I tests/test_bvh_tri_probe.py
@@ -14,7 +14,7 @@ import unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(REPO, "tools")
+TOOLS = os.path.join(REPO, "tooling")
 PROBE = os.path.join(TOOLS, "bvh_tri_probe.py")
 
 sys.dont_write_bytecode = True

@@ -43,7 +43,7 @@ class CliBadJsonTests(unittest.TestCase):
 
     def run_cli(self, *args):
         return subprocess.run(
-            [sys.executable, "-I", os.path.join(ROOT, "tools", "first_light.py"), *args],
+            [sys.executable, "-I", os.path.join(ROOT, "tooling", "first_light.py"), *args],
             capture_output=True,
             text=True,
         )

@@ -1,4 +1,4 @@
-"""Unit and semantic execution tests for OutputVertices bounds in tools/spirv_gs_to_compute.py (SHADER-617).
+"""Unit and semantic execution tests for OutputVertices bounds in tooling/spirv_gs_to_compute.py (SHADER-617).
 
 Verifies that:
 - OpEmitVertex guards record/meta SSBO stores and %gsc_n increments on n < OutputVertices, so a geometry
@@ -21,7 +21,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import spirv_gs_to_compute as gsc  # noqa: E402
 
 MASK32 = 0xFFFFFFFF

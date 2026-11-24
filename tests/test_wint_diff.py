@@ -1,4 +1,4 @@
-"""tools/wint_diff.py: the whole-wave reference against hand-worked values, a short seeded fuzz run, and canaries.
+"""tooling/wint_diff.py: the whole-wave reference against hand-worked values, a short seeded fuzz run, and canaries.
 Standard library only; no GPU."""
 import contextlib
 import io
@@ -10,7 +10,7 @@ import sys
 import unittest
 import unittest.mock
 
-TOOL = Path(__file__).resolve().parents[1] / "tools" / "wint_diff.py"
+TOOL = Path(__file__).resolve().parents[1] / "tooling" / "wint_diff.py"
 sys.path.insert(0, str(TOOL.parent))
 import wint_diff as d  # noqa: E402
 

@@ -7,12 +7,12 @@ created; no source, no branch, no commit.
 
 | file | HEAD blob | lines |
 |---|---|---|
-| `runtime/shims/d3d12_xs_device.cpp` | `7964f6b78` | 2317 |
-| `runtime/shims/d3d12_vulkan_device.cpp` | `052a07723` | 10091 |
+| `port/shims/d3d12_xs_device.cpp` | `7964f6b78` | 2317 |
+| `port/shims/d3d12_vulkan_device.cpp` | `052a07723` | 10091 |
 
 All line numbers below are that snapshot. The branch has moved once during the audit (`d35b78470` adds
-`tools/boot_report.py`; the two shims are untouched). Runtime evidence used: the repo sources and the local
-boot-harness run of the current build (`tools/boot_report.py`, 1,197 D3D12 calls), whose stderr contains the
+`tooling/boot_report.py`; the two shims are untouched). Runtime evidence used: the repo sources and the local
+boot-harness run of the current build (`tooling/boot_report.py`, 1,197 D3D12 calls), whose stderr contains the
 device-slot first-call lines. No game bytes, package addresses or shader data are quoted.
 
 **Index of findings**
@@ -149,7 +149,7 @@ return buffer), `is_device_proxy(a1)` is false, the branch ends, and control rea
 `proxy_slot` at `:2005` with no `return` — falling off the end of a `std::uint64_t` function is undefined
 behaviour and the caller's return buffer is never written. Same for the impossible `!device->real` case.
 
-This is not theoretical: `runtime/test/d3d12_fence_timing_test.cpp` wraps a Vulkan device in the proxy
+This is not theoretical: `port/test/d3d12_fence_timing_test.cpp` wraps a Vulkan device in the proxy
 (`:336-340`) and then calls the interface methods, including
 `check_custom_heap_properties(device.p)` at `:375`, which calls
 `device->GetCustomHeapProperties(...)` at `:280`, `:306` and `:320`. Those are PC-order calls and hit the
@@ -207,7 +207,7 @@ once, so the stop names itself instead of faulting.
 ### `GetAdapterLuid` (slot 43) is safe
 
 `LUID` is 8 bytes; on x64 it is returned in RAX, not through a hidden buffer, so the console and PC register
-layouts coincide and the generic forward at `:2002-2003` is correct. `runtime/test/device_proxy_test.cpp:196-201`
+layouts coincide and the generic forward at `:2002-2003` is correct. `port/test/device_proxy_test.cpp:196-201`
 already calls it through the proxy and compares it with the real device's LUID, and the measured 1,197-call run
 never calls slot 43 (the title reaches the adapter through `XboxIDXGIDevice::GetAdapter`, which goes through
 `host_adapter`/the provider on the real device, `:396-420`). The comment at `device_proxy_test.cpp:196` that
@@ -367,7 +367,7 @@ would be worse.
    physical pages on first touch. A fallback that calls only the handler leaves the range reserved,
    `Resource::create_host_buffer`'s committed-range scan (`d3d12_vulkan_device.cpp:2046-2057`) then returns
    `E_NOTIMPL`, and the title silently gets the ordinary-buffer fallback. The two call sites should share one
-   helper (`set_placed_at_va_pages_hook` is registered in `runtime/src/main.cpp:169`; there is no getter for it
+   helper (`set_placed_at_va_pages_hook` is registered in `port/src/main.cpp:169`; there is no getter for it
    today, so adding one is the minimal plumbing).
 5. **Validate cheap arguments before the pointer is used.** `create_placed` currently dereferences the title
    value in `Heap::from` at `:7307` *before* the combined `if (!heap || !desc)` check at `:7308`; a `!desc` (or a
@@ -396,7 +396,7 @@ would be worse.
   forward.
 * Slot 43 `GetAdapterLuid`: 8-byte RAX return, already tested through the proxy.
 * The heap handle conversion (`:562-582`): PC `(this, hidden ptr)` call plus RAX tolerance is correct for both
-  the host PC heap and the Vulkan-layer heap, and `runtime/test/device_proxy_test.cpp:263-280` pins it.
+  the host PC heap and the Vulkan-layer heap, and `port/test/device_proxy_test.cpp:263-280` pins it.
 * The list proxy forwarder (`:1145`): no mapped PC command-list slot returns a struct by value, so the raw
   forward is order-safe; the only adjustments it makes are pointer-array unwrapping (`:1135-1144`).
 * The queue/fence/allocator forwarder (`:1283-1284`) for every slot except the two `GetDesc` cases in C3.

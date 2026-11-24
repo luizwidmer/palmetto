@@ -1,11 +1,11 @@
 # Short streamed-music idents
 
-`tools/awc_shorts.py` exports short streamed-music channels from AWC banks: station idents, stings,
+`tooling/awc_shorts.py` exports short streamed-music channels from AWC banks: station idents, stings,
 DJ links and similar clips. It selects each `0x48` channel by its decoded duration and repacks the
 stored Opus packets into Ogg Opus without re-encoding.
 
 ```powershell
-python -I tools\awc_shorts.py <bank.awc | directory> <out> `
+python -I tooling\awc_shorts.py <bank.awc | directory> <out> `
     --min-seconds 5 --max-seconds 60 --jobs 8
 ```
 

@@ -1,4 +1,4 @@
-"""Validation and semantic tests for 8 32-bit integer 2-source VALU ops in tools/rdna2spirv.py.
+"""Validation and semantic tests for 8 32-bit integer 2-source VALU ops in tooling/rdna2spirv.py.
 
 Covers:
   VOP3-only: v_mul_lo_u32, v_mul_hi_u32, v_mul_hi_i32, v_bcnt_u32_b32
@@ -23,7 +23,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

@@ -1,4 +1,4 @@
-"""Synthetic tests for runtime/test/check_sparse_queue_family.py (TEST-1089).
+"""Synthetic tests for port/test/check_sparse_queue_family.py (TEST-1089).
 
 The contract checker runs the GPU test twice, once under VK_LAYER_LUNARG_api_dump and once under
 VK_LAYER_KHRONOS_validation, because api_dump's vkDestroyDevice can crash on the AMD Windows driver. These
@@ -22,7 +22,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("check_sparse_queue_family",
-                                              ROOT / "runtime" / "test" / "check_sparse_queue_family.py")
+                                              ROOT / "port" / "test" / "check_sparse_queue_family.py")
 checker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(checker)
 
@@ -201,7 +201,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual(self.run_main(fake_run), 0)
 
     def test_both_runs_fit_the_ctest_timeout(self) -> None:
-        cmake = (ROOT / "runtime" / "CMakeLists.txt").read_text(encoding="utf-8")
+        cmake = (ROOT / "port" / "CMakeLists.txt").read_text(encoding="utf-8")
         limit = re.search(r"d3d12_sparse_queue_family_contract PROPERTIES[^)]*TIMEOUT (\d+)", cmake)
         self.assertIsNotNone(limit)
         self.assertLess(2 * checker.RUN_TIMEOUT, int(limit.group(1)))

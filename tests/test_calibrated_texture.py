@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT / "tests"), str(ROOT / "tools")]
+sys.path[:0] = [str(ROOT / "tests"), str(ROOT / "tooling")]
 import test_ttpf_mips as fixtures
 import bcpack_tables
 
@@ -56,7 +56,7 @@ class CalibratedExport(unittest.TestCase):
         try:
             calibrated_texture.native()
         except OSError as exc:
-            self.skipTest(f"build tools/bcpack_calibration first: {exc}")
+            self.skipTest(f"build tooling/bcpack_calibration first: {exc}")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             pool = root / "pool.ttpf"
@@ -64,7 +64,7 @@ class CalibratedExport(unittest.TestCase):
             profile = root / "profile.json"
             _, linear, _ = fixtures.build_bc1_bcpack_pool(pool)
             profile.write_text(json.dumps(synthetic_profile()), encoding="utf-8")
-            command = [sys.executable, "-IB", str(ROOT / "tools/ttpf_mips.py"),
+            command = [sys.executable, "-IB", str(ROOT / "tooling/ttpf_mips.py"),
                        "export", str(pool), "0", str(output), "--calibration", str(profile)]
             run = subprocess.run(command, capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stderr)

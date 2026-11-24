@@ -1,7 +1,7 @@
 # Census of `levels.arc`
 
 `levels.arc` is 76,155,065,056 bytes. Its table of contents is encrypted, so the archive cannot be
-enumerated by name. `tools/world_census.py` measures the data area directly: it inflates every zlib
+enumerated by name. `tooling/world_census.py` measures the data area directly: it inflates every zlib
 stream, validates each `0DRP` / version `0x7a` resource, joins continuation streams, and counts the
 map resources and placement entities they contain.
 
@@ -94,7 +94,7 @@ other non-map `0x7a` resource.
 | **Total** | **25,842,668,880** | **25,842,458,096** | **0** | **0** | **0** | **52,872** | **32/32** | **62.2%** | **100%** |
 
 Outside `levels.arc`, **no `0x7a` resource has a `CMapData` root: 0 placement maps / 0
-entities**. The 52,872 metadata rows describe other `0x7a` resources. `tools/world_index.py`
+entities**. The 52,872 metadata rows describe other `0x7a` resources. `tooling/world_index.py`
 independently parsed the ten archives and also returned 0 maps / 0 entities. `audio.arc` (radio) was
 not scanned.
 
@@ -191,8 +191,8 @@ older-format and mismatched shards. `--merge-only` reports their ranges as missi
 Use `--resume` to refresh format 4 shards in place, since their stream totals can include warm-up streams twice.
 
 ```powershell
-python -I tools\world_census.py <levels.arc> --out work\world\census --shard-size 2147483648 --jobs 12
-python -I tools\world_census.py <levels.arc> --out work\world\census --merge-only
+python -I tooling\world_census.py <levels.arc> --out work\world\census --shard-size 2147483648 --jobs 12
+python -I tooling\world_census.py <levels.arc> --out work\world\census --merge-only
 python -I tests\test_world_census.py
 ```
 

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "meta_to_xml.ps1"
+SCRIPT = Path(__file__).resolve().parents[1] / "tooling/scripts" / "meta_to_xml.ps1"
 POWERSHELL_EXE = Path(os.environ.get("SystemRoot", r"C:\Windows")).joinpath(
     "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
 )

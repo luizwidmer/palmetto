@@ -27,7 +27,7 @@ Das Projekt steht noch am Anfang: **Das Spiel startet noch nicht.**
 
 Auf keiner Plattform ist bisher etwas spielbar. Was heute wo läuft:
 
-- **Windows**: alles (`make_game.py`, die Tools und die Runtime `palmetto` mit der D3D12 → Vulkan-Schicht und ihren
+- **Windows**: alles (`build_port.py`, die Tools und die Runtime `palmetto` mit der D3D12 → Vulkan-Schicht und ihren
   Tests).
 - **Linux**: Der Übersetzer, die Asset-Tools und die Vulkan-GPU-Testtools bauen und laufen nativ (getestet mit RADV
   und NVIDIA). Die Runtime ist Windows-Code: Sie wird mit clang-cl und xwin cross-kompiliert, ihre Tests laufen unter
@@ -53,7 +53,7 @@ gesammelt.
 - [Vulkan SDK](https://vulkan.lunarg.com/) (`spirv-as`, `spirv-val` und `vulkaninfo`).
 - [LLVM 21+](https://github.com/llvm/llvm-project/releases) mit dem **AMDGPU-Target** (`llvm-mc`):
   - Der offizielle LLVM-Build für Windows enthält das AMDGPU-Target **nicht**.
-  - Ein natives `llvm-mc.exe` mit AMDGPU baut `.\scripts\build_llvm_mc.ps1`, ausgeführt in PowerShell im
+  - Ein natives `llvm-mc.exe` mit AMDGPU baut `.\tooling/scripts\build_llvm_mc.ps1`, ausgeführt in PowerShell im
     Hauptordner des Repositorys. Das Skript braucht `git` und die C++-Tools von Visual Studio, setzt die Variable
     `LLVM_MC` für deinen Benutzer und bittet dich, danach ein neues Terminal zu öffnen, damit sie sichtbar wird. Das
     dauert etwa 20-40 Minuten.
@@ -62,7 +62,7 @@ gesammelt.
     setzen (`where.exe llvm-mc` zeigt ihn bei aktivierter Umgebung; das nackte `where` ist in
     PowerShell das Cmdlet `Where-Object`).
   - Mit WSL: `llvm-21` in Ubuntu installieren und die Variable in derselben PowerShell-Sitzung setzen, in der du
-    `make_game.py` startest:
+    `build_port.py` startest:
 
     ```powershell
     $env:LLVM_MC = 'wsl -d Ubuntu -e /usr/lib/llvm-21/bin/llvm-mc'
@@ -84,7 +84,7 @@ gesammelt.
    ```powershell
    git clone --recursive https://github.com/the original project
    ```
-   Ein „Download ZIP“ von GitHub lässt `third_party/arc9-explorer` weg. Der Build holt es nach, wenn `git`
+   Ein „Download ZIP“ von GitHub lässt `vendor/arc9-explorer` weg. Der Build holt es nach, wenn `git`
    installiert ist, und sagt dir sonst, was zu tun ist.
 3. Doppelklicke auf **`Build.bat`**.
 
@@ -102,20 +102,20 @@ Der Platzbedarf oben gilt für den vollständigen Build. Um den Port nur zu *sta
 Asset-Tools da, und `--wav` kommt mit einem Mehrfachen der Ogg-Opus-Größe hinzu. `--work` und `--out` können auf
 einem anderen Laufwerk liegen. Die Runtime liest das Paket an Ort und Stelle; liegt es auf einem schreibgeschützten
 Laufwerk, brauchst du `palmetto --overlay <beschreibbarer Ordner>` (eine Option von `palmetto`, nicht von
-`make_game.py`). Lösche die `.s`-Dateien in `work/shaders/dxbc/disasm` nicht: Ohne sie und ohne
+`build_port.py`). Lösche die `.s`-Dateien in `work/shaders/dxbc/disasm` nicht: Ohne sie und ohne
 `work/shaders/spirv/index.json` kann die Stufe `shaders` mit null Shadern fertig aussehen.
 
-### Aus dem Terminal (`make_game.py`)
+### Aus dem Terminal (`build_port.py`)
 
 ```powershell
-python -I make_game.py --find                          # zeigt die auf diesem PC gefundenen Kopien
-python -I make_game.py --pick                          # Spielordner in einem Ordnerdialog auswählen
-python -I make_game.py --check                         # prüft deine Kopie, baut nichts
-python -I make_game.py --check --full-check            # vergleicht zusätzlich die SHA-256 jeder Datei (langsam)
-python -I make_game.py --game "D:\pfad\zum\paket" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
-python -I make_game.py --stages shaders,assets         # nur bestimmte Stufen
-python -I make_game.py --game "D:\pfad\zum\paket" --wav   # dekodiert Opus zusätzlich zu PCM-WAV (groß)
-python -I make_game.py --wave64-emulate auto           # auto (Standard), on oder off
+python -I build_port.py --find                          # zeigt die auf diesem PC gefundenen Kopien
+python -I build_port.py --pick                          # Spielordner in einem Ordnerdialog auswählen
+python -I build_port.py --check                         # prüft deine Kopie, baut nichts
+python -I build_port.py --check --full-check            # vergleicht zusätzlich die SHA-256 jeder Datei (langsam)
+python -I build_port.py --game "D:\pfad\zum\paket" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
+python -I build_port.py --stages shaders,assets         # nur bestimmte Stufen
+python -I build_port.py --game "D:\pfad\zum\paket" --wav   # dekodiert Opus zusätzlich zu PCM-WAV (groß)
+python -I build_port.py --wave64-emulate auto           # auto (Standard), on oder off
 ```
 
 Die Stufen laufen in dieser Reihenfolge: `check` → `shaders` → `assets` → `runtime` → `pipelines`.
@@ -133,10 +133,10 @@ Die Stufen laufen in dieser Reihenfolge: `check` → `shaders` → `assets` → 
   `VK_KHR_fragment_shader_barycentric`), `--texel-offset-fallback` (ohne `VK_KHR_maintenance8`) und `--mesh-compute`
   (ohne `VK_EXT_mesh_shader`). Siehe [`docs/design.md`](../../design.md).
 - **Was automatisch neu gemacht wird**: Der Build merkt sich Befehl und Version von `llvm-mc`, die Quellen des
-  Übersetzers und den Asset-Decoder (`third_party/arc9-explorer` und `tools/arc9dump`). Ändert sich etwas davon,
+  Übersetzers und den Asset-Decoder (`vendor/arc9-explorer` und `tooling/arc9dump`). Ändert sich etwas davon,
   wird nur der betroffene Schritt wiederholt (Disassemblierung, Übersetzung oder Export der Modelle und Texturen).
-- **Linux und Wine/Proton**: `make_game.py` läuft auch unter Linux. Die Stufe `pipelines` nutzt
-  `vk_pipeline_check` (mit CMake in `runtime/build/linux` gebaut; fehlt es, baut das Skript es selbst). Der Loader ist
+- **Linux und Wine/Proton**: `build_port.py` läuft auch unter Linux. Die Stufe `pipelines` nutzt
+  `vk_pipeline_check` (mit CMake in `port/build/linux` gebaut; fehlt es, baut das Skript es selbst). Der Loader ist
   ein Windows-Programm und läuft unter Wine oder Proton: Die Stufe `runtime` cross-kompiliert ihn mit clang-cl und
   lld-link (LLVM 19+, aber nicht 22.1.7 oder 22.1.8) gegen das Windows SDK, das
   [xwin](https://github.com/Jake-Shadle/xwin) bereitlegt; siehe [`docs/testing.md`](../../testing.md). Alternativ
@@ -151,10 +151,10 @@ GPU der Runtime es kann, denn dieser Treiber kann bei emuliertem LDS-Code abstü
 
 ## Häufige Probleme
 
-- **Repository über „Download ZIP“ auf GitHub geladen**: Das ZIP enthält das Submodul `third_party/arc9-explorer`
+- **Repository über „Download ZIP“ auf GitHub geladen**: Das ZIP enthält das Submodul `vendor/arc9-explorer`
   nicht. Nimm `git clone --recursive` oder führe im Repository-Ordner `git submodule update --init --recursive` aus.
 - **`llvm-mc` lehnt `gfx1013` / AMDGPU ab**: Du hast vermutlich den offiziellen LLVM-Installer für Windows. Nimm
-  `scripts\build_llvm_mc.ps1` oder setze `LLVM_MC` auf das `llvm-mc` aus WSL (`llvm-21`).
+  `tooling/scripts\build_llvm_mc.ps1` oder setze `LLVM_MC` auf das `llvm-mc` aus WSL (`llvm-21`).
 - **Fehler `D3D12_ROOT_SIGNATURE_DESC2` beim Bauen der Runtime**: Aktualisiere das Windows SDK auf `10.0.26100` oder
   neuer (über den Visual Studio Installer oder `winget install Microsoft.WindowsSDK.10.0.26100`), lösche den
   Build-Ordner und konfiguriere neu.

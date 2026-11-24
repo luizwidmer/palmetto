@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 TESTS = Path(__file__).resolve().parent
-TOOLS = TESTS.parent / "tools"
+TOOLS = TESTS.parent / "tooling"
 sys.path[:0] = [str(TESTS), str(TOOLS)]
 from test_ped_assemble_malformed_glb import container, document
 import glb_skinning

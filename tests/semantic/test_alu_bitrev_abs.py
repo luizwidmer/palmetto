@@ -19,7 +19,7 @@ Features covered:
       * Non-negative values are identity: |x| == x for x >= 0.
       * Strictly negative values are negated: |x| == -x for x < 0.
       * Two's-complement overflow: |-2147483648| == -2147483648 (0x80000000).
-  - Synthetic shader translation via tools/rdna2spirv.py and execution via tests/semantic/spirv_mini_interp.py.
+  - Synthetic shader translation via tooling/rdna2spirv.py and execution via tests/semantic/spirv_mini_interp.py.
 
 Zero game data, standard library Python only, Python 3.9+ compatible.
 """
@@ -34,7 +34,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:
@@ -679,7 +679,7 @@ class AbsTests(unittest.TestCase):
 
 
 class SpirvEmissionTests(unittest.TestCase):
-    """Verify that tools/rdna2spirv emits expected SPIR-V instructions and structures."""
+    """Verify that tooling/rdna2spirv emits expected SPIR-V instructions and structures."""
 
     def test_v_bfrev_b32_emission(self):
         spv = translate_lines(["v_mov_b32 v2, 0x12345678", "v_bfrev_b32_e32 v0, v2"])

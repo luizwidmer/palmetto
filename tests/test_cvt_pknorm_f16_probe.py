@@ -1,4 +1,4 @@
-"""Unit tests for tools/cvt_pknorm_f16_probe.py (reference model, kernels, evaluator, CLI, live gfx1036).
+"""Unit tests for tooling/cvt_pknorm_f16_probe.py (reference model, kernels, evaluator, CLI, live gfx1036).
 
 Standard library only; no game files. Live hardware check runs on gfx1036 when available and skips otherwise.
 """
@@ -13,7 +13,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-TOOLS = Path(__file__).resolve().parents[1] / "tools"
+TOOLS = Path(__file__).resolve().parents[1] / "tooling"
 sys.dont_write_bytecode = True
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))

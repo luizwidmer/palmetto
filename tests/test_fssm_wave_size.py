@@ -1,4 +1,4 @@
-"""Authoritative FSSM wave-size detection in tools/rdna2spirv.py (stdlib only, no game data).
+"""Authoritative FSSM wave-size detection in tooling/rdna2spirv.py (stdlib only, no game data).
 
 Tests that rdna2spirv.translate() reads u32[0xD4] bit 5 (0x20 = wave32, 0 = wave64) from the
 sidecar fssm/<name>.fssm blob via fssm_header.wave_size(), cross-checks against code markers,
@@ -18,7 +18,7 @@ import unittest
 import warnings
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import fssm_header  # noqa: E402
 import rdna2spirv  # noqa: E402

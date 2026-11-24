@@ -2,7 +2,7 @@
 
 Standard library only; no GPU, no LLVM, no game files.
 
-These are RDNA2 Data Share instructions that tools/rdna2spirv.py has no rule for:
+These are RDNA2 Data Share instructions that tooling/rdna2spirv.py has no rule for:
   * ds_add_src2_u32, ds_sub_src2_u32, ds_inc_src2_u32, ds_dec_src2_u32: the second operand is LDS[B] (B = vaddr +
     offset1 * 4), not a register, and the result goes to LDS[A] (A = vaddr + offset0 * 4);
   * ds_add_u64, ds_sub_u64 and their _rtn_ forms: a 64-bit atomic on two dwords (Workgroup memory has no Int64
@@ -19,7 +19,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import support  # noqa: E402  (also puts tools/ on sys.path)
+import support  # noqa: E402  (also puts tooling/ on sys.path)
 
 rdna2spirv = support.rdna2spirv
 

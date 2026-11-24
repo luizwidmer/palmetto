@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tooling"))
 from spirv_asm import assemble  # noqa: E402
 
 NAMES = ["m_alpha", "m_bravo", "m_charlie", "m_delta", "m_echo"]
@@ -42,7 +42,7 @@ def find_binary():
     env = os.environ.get("PALMETTO_VK_PIPELINE_CHECK")
     if env:
         return Path(env) if Path(env).is_file() else None
-    build = ROOT / "runtime" / "build"
+    build = ROOT / "port" / "build"
     paths = ((build / "vk_pipeline_check.exe", build / "RelWithDebInfo" / "vk_pipeline_check.exe") if WINDOWS else
              (build / "linux" / "vk_pipeline_check", build / "vk_pipeline_check"))
     for p in paths:

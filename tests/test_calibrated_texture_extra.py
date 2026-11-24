@@ -1,4 +1,4 @@
-"""Expanded stdlib-only unit tests for tools/calibrated_texture.py.
+"""Expanded stdlib-only unit tests for tooling/calibrated_texture.py.
 
 Covers native loader wiring, array validation, zig/distance/accumulate helpers,
 tile address mapping, BC1/BC3/BC4/BC5/BC7 block rebuilders, LocalDecoder chunk
@@ -27,7 +27,7 @@ from unittest import mock
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLS_DIR = ROOT / "tools"
+TOOLS_DIR = ROOT / "tooling"
 TESTS_DIR = ROOT / "tests"
 for _p in (str(TESTS_DIR), str(TOOLS_DIR)):
     if _p not in sys.path:
@@ -947,7 +947,7 @@ def _make_fake_numpy():
 
 
 def _load_calibrated_texture():
-    """Load tools/calibrated_texture.py using real NumPy if present, else the stdlib shim."""
+    """Load tooling/calibrated_texture.py using real NumPy if present, else the stdlib shim."""
     if importlib.util.find_spec("numpy") is not None:
         import calibrated_texture
         return calibrated_texture, False

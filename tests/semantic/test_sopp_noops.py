@@ -5,7 +5,7 @@ code padding), s_version (ISA version marker), ds_nop (the DS no-operation), v_c
 bits, which nothing translated reads), s_atc_probe / s_atc_probe_buffer (an address-translation-cache prefetch) and
 s_incperflevel / s_decperflevel (performance-counter step) / s_wakeup (early wake of s_sleep waves) have no register, memory, SCC, VCC or EXEC effect, so the translator
 emits nothing for them, as for s_nop or v_nop. Each case translates a synthetic pixel shader with
-tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and checks that values, SCC and VCC set before the
+tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and checks that values, SCC and VCC set before the
 instruction come out unchanged, and that the program behaves as without it. The data-cache invalidations
 (buffer_gl0_inv, buffer_gl1_inv, s_dcache_inv, s_gl1_inv) are about coherence between waves and stay Unsupported.
 """
@@ -18,7 +18,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

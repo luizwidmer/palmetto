@@ -12,7 +12,7 @@ All **28,798 passes** in the two databases satisfy the same rule. For a nonempty
 
 ## Reproduce on a local package
 
-Use the `shaders.arc` listed in the [Xbox 1.0.2.1 manifest](../game/xbox-1.0.2.1.json). The two SGD5 databases start at `0x9000` and `0x10287000`. They contain 910 and 22 effects. Use each effect's own six program lists and its own state tables. [Named-pass reader and package test](https://github.com/the original project/pull/3036)
+Use the `shaders.arc` listed in the [Xbox 1.0.2.1 manifest](../profiles/xbox-1.0.2.1.json). The two SGD5 databases start at `0x9000` and `0x10287000`. They contain 910 and 22 effects. Use each effect's own six program lists and its own state tables. [Named-pass reader and package test](https://github.com/the original project/pull/3036)
 
 1. From the end of the six program ordinal arrays, skip 80 bytes. For each row width in `(16, 24, 68, 36)`, read one little-endian u32 count, record the offset of the first row, and advance by `count * width`. The fourth table is needed to locate the techniques.
 2. Read the u32 technique count and skip four bytes per technique. The next u32 is the pass count. For every 24-byte pass, check offsets 6, 7 and 8 against counts 0, 1 and 2 respectively. For a nonempty table the selected row starts at `first_row + pass_byte * width`.

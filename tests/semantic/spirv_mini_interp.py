@@ -1,4 +1,4 @@
-"""A deliberately tiny interpreter for the SPIR-V assembly that tools/rdna2spirv.py emits for branch-free pixel
+"""A deliberately tiny interpreter for the SPIR-V assembly that tooling/rdna2spirv.py emits for branch-free pixel
 shaders and simple structured compute shaders. It exists so tests can check *computed values*, not just that the
 module validates.
 

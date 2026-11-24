@@ -20,7 +20,7 @@ if not defined PY (
   pause
   exit /b 1
 )
-%PY% -I "%~dp0tools\palmetto_mods.py" gui %*
+%PY% -I "%~dp0tooling\palmetto_mods.py" gui %*
 set "RC=%ERRORLEVEL%"
 if not "%RC%"=="0" pause
 exit /b %RC%

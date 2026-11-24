@@ -3,7 +3,7 @@
 s_absdiff_i32 (RDNA2 ISA): D = S0 - S1 as a signed 32-bit value, negated if negative; SCC = (D != 0). The
 subtraction wraps first, so 0x7FFFFFFF - 0x80000000 is -1 and gives 1, and a difference of -2^31 stays 0x80000000.
 s_mul_hi_i32: D = the high 32 bits of the signed 64-bit product S0 * S1; SCC is not written. Each case translates a
-synthetic pixel shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the
+synthetic pixel shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the
 exported words (D, and SCC through s_cselect_b32) with a plain-Python reference.
 """
 import os
@@ -16,7 +16,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

@@ -1,9 +1,9 @@
 """A half NaN in a typed buffer load widens by shifting its payload (measured on RDNA2).
 
-The widening had never been measured: tools/mem_diff.py decoded 16_FLOAT with struct's '<e' (payload kept from
+The widening had never been measured: tooling/mem_diff.py decoded 16_FLOAT with struct's '<e' (payload kept from
 Python 3.14) while the translator decoded it with UnpackHalf2x16, which the mini interpreter canonicalises to
 0x7FC00000. Measured natively on the AMD Radeon integrated GPU of a Ryzen 9 9950X3D (gfx1036, RDNA2) with
-tools/f16_widen_probe.py (AMD clang 23, wave32 and wave64 alike; formats 13 16_FLOAT, 29 16_16_FLOAT and
+tooling/f16_widen_probe.py (AMD clang 23, wave32 and wave64 alike; formats 13 16_FLOAT, 29 16_16_FLOAT and
 71 16_16_16_16_FLOAT; buffer_load_format_* and tbuffer_load_format_*): every half NaN becomes f32 with
 sign | 0x7F800000 | (payload << 13). The sign is kept, the 10-bit payload moves into the f32 mantissa unchanged,
 and the quiet bit is NOT forced: the signalling half 0x7DDB gives 0x7FBB6000, bit 22 clear.
@@ -23,7 +23,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

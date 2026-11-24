@@ -10,11 +10,11 @@ Covers:
 Per docs/design.md ("16-bit results"), all five write one 16-bit half of the destination VGPR while preserving the
 other 16-bit half (VOP2 _e32 writes the low half; VOP3 _e64 op_sel:[src,dst] selects source/destination halves).
 
-All five ops are executed end-to-end through tools/rdna2spirv.py and tests/semantic/spirv_mini_interp.py across
+All five ops are executed end-to-end through tooling/rdna2spirv.py and tests/semantic/spirv_mini_interp.py across
 finite values, subnormals, +-0.0, .5 ties, +-inf, NaNs, op_sel:[src,dst], VOP3 source/output modifiers, inline f16
 constants, SGPR sources, destination aliasing, and EXEC masking.
 
-tools/rdna2spirv.py lowers v_fract_f16 to GLSL.std.450 Fract, which tests/semantic/spirv_mini_interp.py computes
+tooling/rdna2spirv.py lowers v_fract_f16 to GLSL.std.450 Fract, which tests/semantic/spirv_mini_interp.py computes
 exactly. A Fract result that rounded up to 1.0 is mapped to 0x3bff (the largest f16 below 1.0); ref_fract_f16 below
 models that fix-up for the end-to-end cases.
 """
@@ -32,7 +32,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

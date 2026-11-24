@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/navmesh_decode.py. No game files are read or needed."""
+"""Synthetic tests for tooling/navmesh_decode.py. No game files are read or needed."""
 import csv
 import json
 import os
@@ -10,10 +10,10 @@ import unittest
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import navmesh_decode as nd  # noqa: E402
 
-TOOL = os.path.join(ROOT, "tools", "navmesh_decode.py")
+TOOL = os.path.join(ROOT, "tooling", "navmesh_decode.py")
 BASE = nd.BASE
 
 

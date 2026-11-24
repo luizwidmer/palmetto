@@ -1,4 +1,4 @@
-"""Unit tests for tools/x64_recomp.py: the x86-64 -> arm64 static recompiler groundwork.
+"""Unit tests for tooling/x64_recomp.py: the x86-64 -> arm64 static recompiler groundwork.
 
 Two layers are covered:
 
@@ -21,7 +21,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 

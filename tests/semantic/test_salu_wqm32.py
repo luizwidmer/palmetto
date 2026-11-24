@@ -3,8 +3,8 @@
   s_wqm_b32 D, S0   D = every 4-bit quad of S0 that has any bit set becomes 0xF (else 0x0); SCC = (D != 0).
 
 Covers both:
-  - Data path (32-bit nibble expansion + SCC) via tools/rdna2spirv.py -> spirv_mini_interp.py.
-  - Lane-mask path (32-lane wave32, 8 quads) via tools/rdna2spirv.py -> spirv_wave_interp.py (vertex stage
+  - Data path (32-bit nibble expansion + SCC) via tooling/rdna2spirv.py -> spirv_mini_interp.py.
+  - Lane-mask path (32-lane wave32, 8 quads) via tooling/rdna2spirv.py -> spirv_wave_interp.py (vertex stage
     uses OpGroupNonUniformShuffle for quad_any; fragment/compute stages are checked for OpGroupNonUniformQuadSwap).
 
 Standard library only; no game data.

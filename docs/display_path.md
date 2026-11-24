@@ -121,14 +121,14 @@ null. This has the shape of the earlier mis-forwarded console extensions (slots 
 ## 5. Why the presenter is still not wired
 
 `XboxPresentation::PresentX` refuses a plane whose `ppResources[0]` is null with `E_INVALIDARG` before it touches the
-presenter (`runtime/shims/xbox_present.cpp`), by design: presenting a null resource would show a stale frame. The
+presenter (`port/shims/xbox_present.cpp`), by design: presenting a null resource would show a stale frame. The
 prepared core (window presenter over the Vulkan swapchain, frame pacer, token bridge for the device proxy's frame-event
 counter) has nothing to present while the title's surface carries no resource, and wiring it now would change no boot
 number (the present already fails one call earlier). The honest order is section 3 first, then the registration and the
 token bridge.
 
 **No source file was changed for this page.** The tree is being edited for the replay/submit work in
-`runtime/shims/d3d12_vulkan_device.cpp` and `runtime/src/vulkan_backend.h`; a build of that state would measure that
+`port/shims/d3d12_vulkan_device.cpp` and `port/src/vulkan_backend.h`; a build of that state would measure that
 hunk, not this diagnosis, so no gate was run here.
 
 ## 6. Boots behind this page

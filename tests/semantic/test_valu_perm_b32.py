@@ -4,7 +4,7 @@
     8..11 0xFF or 0x00 from the sign bit of S1[15], S1[31], S0[15], S0[31] (bits 15, 31, 47, 63 of {S0, S1})
     12    0x00                  >=13  0xFF
 
-Each case is translated by tools/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
+Each case is translated by tooling/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
 words are written by hand. (An earlier copy of this file checked a private model that picked other sign bits for
 selectors 8..11 than the ISA and the translator do.) Standard library only: no GPU, no LLVM, no game data.
 """

@@ -8,7 +8,7 @@ were, and `s_mov_b32 vcc_hi, 0` must clear lanes 32-63 and keep lanes 0-31.
 Each case builds VCC in a 64-thread compute shader from two push-constant words (bit i of s4 for lanes 0-31, of s5
 for lanes 32-63), writes one half with a 0 / -1 constant (a mask value in every representation), then stores what
 every lane sees: v_cndmask_b32 on VCC (its own bit) and the s_cbranch_vccz outcome (the wave's). Translated by
-tools/rdna2spirv.py and run on all 64 lanes with tests/semantic/spirv_mini_interp.run_workgroup; no llvm-mc, GPU
+tooling/rdna2spirv.py and run on all 64 lanes with tests/semantic/spirv_mini_interp.run_workgroup; no llvm-mc, GPU
 or game data. The listing carries `; encoding:` bytes (zeros; only their length is read) so the branch target is
 placed.
 """
@@ -22,7 +22,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 for p in (HERE, TOOLS_DIR):

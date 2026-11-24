@@ -1,11 +1,11 @@
 # Map lights and the vehicle lane graph (`levels.arc`)
 
 Both live in the same self-describing `0x7a` resources as the map placements ([world.md](world.md)), and
-`tools/world_lights_paths.py` reads them through each resource's own schema: every field below is found by its
+`tooling/world_lights_paths.py` reads them through each resource's own schema: every field below is found by its
 member hash in the resource's member table, not by a fixed offset. Counts only; no game data.
 
 ```
-python -I tools/world_lights_paths.py <levels.arc> --jobs 24 --out reports/world_lights_paths.json \
+python -I tooling/world_lights_paths.py <levels.arc> --jobs 24 --out reports/world_lights_paths.json \
     [--entities <world_index.py --entities-out rows>] [--lights-out <local file>]
 ```
 

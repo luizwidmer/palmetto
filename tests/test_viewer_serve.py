@@ -1,4 +1,4 @@
-"""Tests for viewer/serve.py: the loopback Host check, /world/ path resolution and the HTTP layer.
+"""Tests for app/serve.py: the loopback Host check, /world/ path resolution and the HTTP layer.
 
     python -I tests/test_viewer_serve.py
 
@@ -22,7 +22,7 @@ import urllib.parse
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-VIEWER = ROOT / "viewer"
+VIEWER = ROOT / "app"
 if str(VIEWER) not in sys.path:
     sys.path.insert(0, str(VIEWER))
 

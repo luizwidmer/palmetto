@@ -13,7 +13,7 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TOOL = pathlib.Path(os.environ.get("PALMETTO_GAMEDATA_XML", str(ROOT / "tools" / "gamedata_xml.py")))
+TOOL = pathlib.Path(os.environ.get("PALMETTO_GAMEDATA_XML", str(ROOT / "tooling" / "gamedata_xml.py")))
 XML = (b'<?xml version="1.0" encoding="utf-8"?>\n'
        b'<CDataFileMgr__ContentChangeSetDef version="1"><id>fixture</id></CDataFileMgr__ContentChangeSetDef>')
 

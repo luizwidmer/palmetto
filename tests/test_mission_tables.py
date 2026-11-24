@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/mission_tables.py (no game data: every byte below is built here)."""
+"""Synthetic tests for tooling/mission_tables.py (no game data: every byte below is built here)."""
 import json
 import os
 import struct
@@ -9,8 +9,8 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "mission_tables.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "mission_tables.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import mission_tables as M  # noqa: E402
 

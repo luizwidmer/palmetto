@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "first_look.ps1"
+SCRIPT = Path(__file__).resolve().parents[1] / "tooling/scripts" / "first_look.ps1"
 POWERSHELL = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass"]
 
 
@@ -17,8 +17,8 @@ class FirstLookExitTest(unittest.TestCase):
     def test_reports_are_written_and_dry_run_exit_status_is_returned(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            scripts = root / "scripts"
-            tools = root / "tools"
+            scripts = root / "tooling/scripts"
+            tools = root / "tooling"
             build = root / "runtime" / "build"
             for folder in (scripts, tools, build):
                 folder.mkdir(parents=True)
@@ -47,8 +47,8 @@ class FirstLookExitTest(unittest.TestCase):
             subprocess.run([*POWERSHELL, "-Command", compile_loader], cwd=scripts, env=env, check=True, timeout=30)
             fixture = scripts / "palmetto.exe"
             (scripts / "build_runtime.ps1").write_text(
-                'Copy-Item "$PSScriptRoot/palmetto.exe" "$PSScriptRoot/../runtime/build/palmetto.exe"\n'
-                'New-Item -ItemType File -Force "$PSScriptRoot/../runtime/build/palmetto_tls_host.dll" | Out-Null\n'
+                'Copy-Item "$PSScriptRoot/palmetto.exe" "$PSScriptRoot/../port/build/palmetto.exe"\n'
+                'New-Item -ItemType File -Force "$PSScriptRoot/../port/build/palmetto_tls_host.dll" | Out-Null\n'
                 'Set-Content "$PSScriptRoot/built.txt" built\n', encoding="utf-8", newline="\n",
             )
             source = root / "runtime" / "src" / "loader.cpp"

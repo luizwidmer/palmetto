@@ -1,4 +1,4 @@
-"""Tests for tools/bink_names.py, built from synthetic Bink 2 headers and mount lists (no game data).
+"""Tests for tooling/bink_names.py, built from synthetic Bink 2 headers and mount lists (no game data).
 
     python -I tests/test_bink_names.py
 """
@@ -17,7 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_module():
-    path = os.path.join(ROOT, "tools", "bink_names.py")
+    path = os.path.join(ROOT, "tooling", "bink_names.py")
     spec = importlib.util.spec_from_file_location("bink_names_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

@@ -1,4 +1,4 @@
-"""Index-identity metadata for tools/rdna2spirv.py (no game data, no GPU).
+"""Index-identity metadata for tooling/rdna2spirv.py (no game data, no GPU).
 
 Run from the repository root:  python -m pytest tests/test_shader_index.py
 Needs nothing but the standard library: Gen objects are built by hand and the
@@ -9,7 +9,7 @@ import hashlib
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tooling"))
 import rdna2spirv  # noqa: E402
 from rdna2spirv import Gen, Unsupported, shader_meta
 

@@ -1,10 +1,10 @@
-"""tools/wave_diff.py: its reference for the cross-lane instructions, its canaries and a short seeded run.
+"""tooling/wave_diff.py: its reference for the cross-lane instructions, its canaries and a short seeded run.
 
     python -I tests/test_wave_diff.py
 
 The known-answer cases derive each value by hand from the RDNA2 rule written next to the instruction in
 wave_diff.WaveRef, with lane values chosen so that a wrong lane, a wrong half or an ignored EXEC bit gives a different
-number. The seeded runs execute the repository's translator (tools/rdna2spirv.py) on tests/semantic/spirv_mini_interp.py
+number. The seeded runs execute the repository's translator (tooling/rdna2spirv.py) on tests/semantic/spirv_mini_interp.py
 across a whole wave. Standard library only: no llvm-mc, SPIR-V tools, GPU or game data.
 """
 import os
@@ -13,7 +13,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import cf_ref  # noqa: E402
 import wave_diff  # noqa: E402

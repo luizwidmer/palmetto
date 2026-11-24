@@ -13,7 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.dont_write_bytecode = True
 sys.path.insert(0, HERE)
 
-from test_lds_atomics_values import run_atomic  # noqa: E402  (also puts tools/ on sys.path)
+from test_lds_atomics_values import run_atomic  # noqa: E402  (also puts tooling/ on sys.path)
 
 M32 = 0xFFFFFFFF
 VALUES = [0, M32, 0x12345678, 0xF0F0F0F0, 0x0000FFFF, 0x80000001]

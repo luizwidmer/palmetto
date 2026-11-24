@@ -1,4 +1,4 @@
-"""tools/ps_oracle.py: the msgpack subset, the PAL ELF rewrite that puts new pixel-shader code in a pipeline binary,
+"""tooling/ps_oracle.py: the msgpack subset, the PAL ELF rewrite that puts new pixel-shader code in a pipeline binary,
 the binary file format, and (with PALMETTO_PS_ORACLE_BUILD set to a runtime build and an AMD GPU selected) a real
 draw with patched code. Standard library only."""
 import os
@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import ps_oracle as P  # noqa: E402
 
 S_ENDPGM = struct.pack("<I", 0xBF810000)

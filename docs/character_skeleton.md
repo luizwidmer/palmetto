@@ -18,7 +18,7 @@ fragments, while world fragments do have them; see
 Source resource: `ambient_femalebody_upper_nohead.#ft` in `packs.arc`, stream offset
 `0x45449F70` (stored 17,434 bytes, inflated 42,384 bytes).
 
-This stream is the **name table**, not the skeleton fragment. `tools/anim_glb.py --skeleton` takes a
+This stream is the **name table**, not the skeleton fragment. `tooling/anim_glb.py --skeleton` takes a
 fragment offset; on 1.0.2.1 the sibling `ambient_femalebody_head.#ft` at `0x45417010` exports the
 596-joint skeleton with a 5.13e-6 bind error, while passing `0x45449F70` fails with
 `page directory: not a system pointer`.
@@ -122,7 +122,7 @@ largest difference between a joint's composed origin and the one its inverse bin
 560-bone male one (`ambient_malebody_head.#ft`). All 14,212 skeletons that read this way in
 `packs.arc` (13,900 drawable-dictionary children and 312 fragments) agree within 1e-3. The
 matrices are row-vector (D3D) matrices; stored row by row they are glTF's column-major layout as
-is. `tools/anim_glb.py` exports them as the glTF skin's `inverseBindMatrices` and checks them.
+is. `tooling/anim_glb.py` exports them as the glTF skin's `inverseBindMatrices` and checks them.
 
 ## Master skeletons and standing space
 
@@ -165,7 +165,7 @@ Subsystem roles (counts shown for the 596-bone `ambient_femalebody` master rig):
 standing space with **`SKEL_ROOT = (0, 0, +1.0 m)`** in the engine Z-up (`(0, +1.0 m, 0)` in glTF Y-up)
 so feet rest on the ground plane. Translating the skeleton root node (or static mesh vertices) by
 `+1.0 m` vertically aligns all modular ped parts without per-slot offset tables; see
-`tools/ped_assemble.py` and [character_models.md](character_models.md#standing-space-coordinate-convention).
+`tooling/ped_assemble.py` and [character_models.md](character_models.md#standing-space-coordinate-convention).
 
 ## Model-side bone mapping
 
@@ -200,7 +200,7 @@ Unresolved hashes are genuinely absent from the ambient table; they should be em
 
 ## Vertex skin streams (ASSET-12)
 
-Measured with `tools/skin_streams.py` over every drawable resource that carves out of `packs.arc`,
+Measured with `tooling/skin_streams.py` over every drawable resource that carves out of `packs.arc`,
 `data.arc` and `levels.arc` of the 1.0.2.1 package: the tool walks the same drawable → LOD →
 `grmModel` → geometry chain as the readers above, joins each resource's pages (system pages first,
 then graphics pages, one zlib stream per page) and reads the FVF semantic table, whose per-semantic
@@ -261,16 +261,16 @@ are higher because that recovery also walks nested archives.
 
 ## Animated glTF export
 
-`tools/anim_glb.py` puts the three readers together: the skeleton above, the part meshes' skin
-streams, and the clip dictionaries of `anim.arc` (`tools/anim_clips.py`, see
+`tooling/anim_glb.py` puts the three readers together: the skeleton above, the part meshes' skin
+streams, and the clip dictionaries of `anim.arc` (`tooling/anim_clips.py`, see
 [animation.md](animation.md#keyframe-decoding)). It writes one GLB with a glTF skin and one glTF
 animation per `.clip`:
 
 ```powershell
-python -I tools/anim_glb.py <package>\packs.arc <work>\walk.glb --skeleton <fragment offset> `
+python -I tooling/anim_glb.py <package>\packs.arc <work>\walk.glb --skeleton <fragment offset> `
     --part <part offset>[:<child>] --part ... `
     --anim <package>\anim.arc --dictionary <clip dictionary offset> [--clip <name> ...]
-python -I tools/anim_glb.py <package>\packs.arc --coverage --skeleton <fragment offset> `
+python -I tooling/anim_glb.py <package>\packs.arc --coverage --skeleton <fragment offset> `
     --anim <package>\anim.arc --jobs 8 --report <work>\coverage.json
 ```
 
@@ -282,7 +282,7 @@ one value selects every path with that leaf: in dictionary `0xfc91b010`, `0xe61d
 `joaat32("move")` and selects all six `/move` clips. Pass the full label (for example
 `gameplay@locomotion@female_generic@normal@standing@walk@slope@up/move`) to export one clip.
 
-Offsets are zlib stream offsets (as `tools/skin_streams.py` and `arc9dump` report them). The
+Offsets are zlib stream offsets (as `tooling/skin_streams.py` and `arc9dump` report them). The
 output is a standard glTF 2.0 file; Blender and the three.js editor play its animations. What
 it does and why:
 
@@ -338,7 +338,7 @@ No textures are exported. A part binds to the one skeleton given, so clothing wh
 are not in it does not bind (see the table).
 ## Skinned GLB export
 
-`tools/skinned_glb.py` writes one skinned glTF 2.0 binary from a decoded ped skeleton
+`tooling/skinned_glb.py` writes one skinned glTF 2.0 binary from a decoded ped skeleton
 `model.json` and one or more decoded drawable directories. It reads the drawable's palette
 (`grmModel + 0x20`), maps each palette hash through the drawable's own skeleton/string table
 and then the ped table, and reads the 8-influence streams from the graphics buffer. The
@@ -372,7 +372,7 @@ normalised to 1.0. Bind and inverse-bind matrices use the same Z-up to Y-up conv
 positions, `(x, y, z) -> (x, z, -y)`.
 
 ```bash
-python -I tools/skinned_glb.py out.glb \
+python -I tooling/skinned_glb.py out.glb \
     --skeleton <ped>/model.json \
     --component <head>/model.json \
     --component <jacket>/model.json
@@ -384,12 +384,12 @@ exported, and no body or other unrequested component is assembled. No game data 
 GLB is stored in the repository; `tests/test_skinned_glb.py` builds its own skeleton, skin
 buffer and GLB.
 
-`python -I tools/glb_inspect.py out.glb` reads the written file back with no glTF library and
+`python -I tooling/glb_inspect.py out.glb` reads the written file back with no glTF library and
 prints its mesh, skin (joint count) and animation counts, the POSITION bounding box and any
 field the exporter dropped; [models.md](models.md#skinned-glb-export) lists what the rest of
 the report carries.
 
-`python -I tools/glb_skinning.py out.glb` checks the skin data itself: each skin's joint and
+`python -I tooling/glb_skinning.py out.glb` checks the skin data itself: each skin's joint and
 `inverseBindMatrices` counts, the accessor types and finite values, which primitives carry
 skinning data and which are static, `JOINTS_n`/`WEIGHTS_n` pairing, every vertex's weight sum
 as FLOAT or normalized `UNSIGNED_BYTE`/`UNSIGNED_SHORT`, the joint-index range and the POSITION
@@ -416,7 +416,7 @@ The practical rule for exporters: use `0xC8E8C282` as albedo, and **do not fall 
 first texture** when it is absent. A normal map painted as a base colour is the usual symptom
 of that fallback.
 
-To apply this rule, pass `--base-color-param C8E8C282` to `tools/world_build.py` (or
+To apply this rule, pass `--base-color-param C8E8C282` to `tooling/world_build.py` (or
 `base_color_param="C8E8C282"` to `build_world`): only references with that parameter hash are
 used as base colour, and materials without a resolvable match stay untextured clay. Without the
 option the exporter keeps its existing first-resolvable-reference behaviour, because these hash
@@ -534,14 +534,14 @@ reproduce them with a standard zlib/ARC9 reader:
    NUL-separated names; verify `joaat32` lowercased.
 2. Inflate the following 131,072-byte graphics page at `0x4544F010`; parse the records at
    `0x110 + 0x50*i`: rotation at +0x00, translation at +0x10, hash at +0x1C, parent at +0x46
-   (see the correction above). `tools/anim_glb.py` reads the same records through the
+   (see the correction above). `tooling/anim_glb.py` reads the same records through the
    skeleton header at drawable `+0x18`.
 3. For a character `#dr` system page, read `grmModel+0x28`, then the `u32` bone hashes.
 4. Map each hash through step 1; unresolved hashes are hash-only fallbacks.
-5. Run `python -I tools/skin_streams.py <your copy's packs.arc> [...] --json out.json` for the
+5. Run `python -I tooling/skin_streams.py <your copy's packs.arc> [...] --json out.json` for the
    skin-stream census and validation; `python -I tests/test_skin_streams.py` runs the same walk
    and the same checks on synthetic resources built by the test.
-6. Run `python -I tools/anim_glb.py ... --coverage` (above) for the clip-track counts, and
+6. Run `python -I tooling/anim_glb.py ... --coverage` (above) for the clip-track counts, and
    `python -I tests/test_anim_glb.py` for the export on synthetic skeleton, part and clip data.
 
 No archive, model, texture or audio file is stored in the repository or in any test fixture.

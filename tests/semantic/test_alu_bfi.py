@@ -15,7 +15,7 @@ Bitmask composition:
     field = (value << O) & mask
     result = v_bfi_b32(mask, field, base)
 
-In SPIR-V (as emitted by tools/rdna2spirv.py):
+In SPIR-V (as emitted by tooling/rdna2spirv.py):
   v_bfi_b32 translates to:
     %p = OpBitwiseAnd %uint %src0 %src1
     %n = OpNot %uint %src0
@@ -34,7 +34,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 if HERE not in sys.path:

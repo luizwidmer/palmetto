@@ -2,7 +2,7 @@
 
 Standard library only (spirv-val is used when it is on PATH); no GPU, no LLVM, no game files.
 
-The GPU fixtures are runtime/test/shaders/ps_sample_c.asm and ps_sample_c_b.asm (vk_texture_test dref_c, dref_c_b). Here:
+The GPU fixtures are port/test/shaders/ps_sample_c.asm and ps_sample_c_b.asm (vk_texture_test dref_c, dref_c_b). Here:
 the shape of the SPIR-V in a pixel shader (OpImageSampleDrefImplicitLod, a Bias operand for _c_b, the Offset for _o),
 LOD 0 for _c and explicit bias LOD for _c_b outside the pixel stage, d16 and a16 forms, and that the module validates.
 """

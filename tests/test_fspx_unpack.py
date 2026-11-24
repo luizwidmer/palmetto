@@ -1,4 +1,4 @@
-"""Unit tests for tools/fspx_unpack.py (the FSPX payloads of the FidelityFX DLL's shader containers) and for the
+"""Unit tests for tooling/fspx_unpack.py (the FSPX payloads of the FidelityFX DLL's shader containers) and for the
 translator's FSPX sidecar reads (rdna2spirv.native_blob / cs_dispatch_state).
 
     python -I tests/test_fspx_unpack.py
@@ -16,8 +16,8 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "fspx_unpack.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "fspx_unpack.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import fspx_unpack  # noqa: E402
 
@@ -190,7 +190,7 @@ class Cli(unittest.TestCase):
             f.write(body)
         out = os.path.join(tmp.name, "out")
         env = dict(os.environ, LLVM_MC=f'"{sys.executable}" "{mc}"')
-        result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "fspx_unpack.py"),
+        result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "fspx_unpack.py"),
                                  src, "--out", out, "--disasm"], capture_output=True, text=True, env=env)
         return result, out
 

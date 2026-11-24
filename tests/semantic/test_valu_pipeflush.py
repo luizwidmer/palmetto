@@ -2,7 +2,7 @@
 
 v_pipeflush (GFX10 VOP1) flushes the VALU pipeline and has no architectural effect: no register, memory, VCC, SCC
 or EXEC changes. It is translated as nothing, like v_nop. Each case translates a synthetic pixel shader with
-tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and checks that the values around the
+tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and checks that the values around the
 instruction come out unchanged.
 """
 import os
@@ -14,7 +14,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

@@ -1,6 +1,6 @@
 """SHADER-10: wave64 vertex/pixel shaders on 32-wide subgroups. Tier classification and partition invariance.
 
-tools/wave64_halves.py decides from the code whether a wave64 VS/PS/GS gives the same results when its wave is cut
+tooling/wave64_halves.py decides from the code whether a wave64 VS/PS/GS gives the same results when its wave is cut
 into two 32-lane halves (the criterion of docs/design.md, "Wave64 graphics: partition invariance"). Two kinds of
 check, both on hand-written listings (no llvm-mc, GPU or game data):
 
@@ -14,7 +14,7 @@ check, both on hand-written listings (no llvm-mc, GPU or game data):
     both ways and the words the header derives; tier C programs must differ in the words the test names, which
     shows the detector is right to refuse them.
 
-The GPU twin of the execution half is runtime/test/shaders/w64_graphics.py (pixel shaders, one subgroup size forced
+The GPU twin of the execution half is port/test/shaders/w64_graphics.py (pixel shaders, one subgroup size forced
 to 64 and to 32 on the same GPU).
 """
 import os
@@ -1221,7 +1221,7 @@ class GeometryRing(unittest.TestCase):
            "s_sendmsg sendmsg(MSG_GS_DONE, GS_OP_NOP)", "s_endpgm"]
 
     def tier(self, body):
-        sys.path.insert(0, os.path.join(HERE, "..", "..", "runtime", "test", "shaders"))
+        sys.path.insert(0, os.path.join(HERE, "..", "..", "port", "test", "shaders"))
         import build                                       # gs_container: gs_tri's ISG1/OSG1
         name = "gs_w64_ring_test"
         translate_listing(name, listing(name, self.PRO + body + self.EPI), build.gs_container())
@@ -1294,10 +1294,10 @@ def _run_ps_cut(asm, wave, push=None, memory=None):
 
 
 class PixelShaders(unittest.TestCase):
-    """TEST-722: run every runtime/test/shaders/ps_w64_*.asm fixture on spirv_wave_interp (wave 64 vs 2x32)."""
+    """TEST-722: run every port/test/shaders/ps_w64_*.asm fixture on spirv_wave_interp (wave 64 vs 2x32)."""
 
     def test_ps_w64_fixtures(self):
-        sys.path.insert(0, os.path.join(HERE, "..", "..", "runtime", "test", "shaders"))
+        sys.path.insert(0, os.path.join(HERE, "..", "..", "port", "test", "shaders"))
         import w64_graphics as wg
 
         ps_names = sorted(n for n in wg.FIXTURES if n.startswith("ps_w64_"))

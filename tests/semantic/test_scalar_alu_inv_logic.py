@@ -2,7 +2,7 @@
 
 Covers s_not_b32, s_andn2_b32, s_orn2_b32, s_nand_b32, s_nor_b32 and s_xnor_b32,
 verifying both the 32-bit result D and the SCC flag (int(D != 0)). Each case
-translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in
+translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in
 tests/semantic/spirv_mini_interp.py and compares the exported words with a
 plain-Python reference.
 """
@@ -15,7 +15,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

@@ -56,7 +56,7 @@ loop and a real frame. In order of size and safety:
    runtime refuses and the console accepts. Measured by muting slots one at a time: slot 146 alone reproduces the
    `E_INVALIDARG`; muting it removes it (section 7). The conversion (a resource-less texture barrier becomes a
    global barrier) is a measurement decision, not a guess: dump the title's barrier groups first.
-4. `PresentX` (queue slot 32) is still refused; [xbox_present.h](../runtime/shims/xbox_present.h) already
+4. `PresentX` (queue slot 32) is still refused; [xbox_present.h](../port/shims/xbox_present.h) already
    implements the presenter that would consume its planes.
 
 Even after all four, the first executed frame draws nothing: the loop binds render targets, heaps, root signatures,
@@ -68,7 +68,7 @@ renderer's pipeline/draw path is measured.
 
 Two independent instruments, both committed in this tree:
 
-* `runtime/shims/d3d12_xs_device.cpp`, all environment-gated and off by default:
+* `port/shims/d3d12_xs_device.cpp`, all environment-gated and off by default:
   * `PALMETTO_XS_CALLERS=1` logs the title's return address for the first four distinct call sites of every
     device/queue/fence/allocator/list proxy slot, with the four argument words of that call.
   * `PALMETTO_XS_CALLERS_PROFILE=1` adds per-site hit counts and prints the hottest sites every 20 s (a boot killed by
@@ -79,7 +79,7 @@ Two independent instruments, both committed in this tree:
     bisect which recorded call makes the list report `E_INVALIDARG`.
   * `PALMETTO_XS_LIST_DUMP=slot[,slot...]` prints the arguments and the first 0x40 bytes of the pointed-to structure
     of the first four calls of a console list slot.
-* `tools/inline_scan.py <image> --sites` for the title's own inline writers into the console list (section 8).
+* `tooling/inline_scan.py <image> --sites` for the title's own inline writers into the console list (section 8).
 
 The return addresses are raw (the GPU-free test binaries do not link `shims`' module lookup); the boot's JSONL map
 event names the image base (`0x140000000` in these runs), so `game+RVA` is `address - 0x140000000`. The RVAs below
@@ -260,7 +260,7 @@ never calls a draw: `game+0x31D50` is the title's draw wrapper (console slots 12
 `DrawIndexedInstanced`) and `game+0x32520` has a `SetPipelineState` wrapper call at `game+0x327B6`, and **neither is
 reached in the boot** - the trace records draw and `SetPipelineState` when they happen, and it has zero of either.
 
-`tools/inline_scan.py` on the retail image finds 110 inline-write sites into the console list, **all checked**
+`tooling/inline_scan.py` on the retail image finds 110 inline-write sites into the console list, **all checked**
 (none unchecked), with fallback vtable slots 20, 24, 35, 43, 45 and 47. So no draw is being lost to an unchecked
 inline write: the renderer simply is not issuing draws in this loop. That is consistent with a clear-and-present
 frame (a loading or "no scene yet" frame); why the renderer takes that branch is a separate measurement and is not
@@ -295,5 +295,5 @@ recordings worth executing.
 
 After that, in order: the list lifecycle emulation (measured here, four `S_OK`-per-frame runs), the resource-less
 texture barrier conversion (measured here, muted-slot bisection), and `PresentX` at queue slot 32
-([xbox_present.h](../runtime/shims/xbox_present.h) is the prepared presenter). The first frame after those will be a
+([xbox_present.h](../port/shims/xbox_present.h) is the prepared presenter). The first frame after those will be a
 clear-and-present frame; the draw path of section 8 is the next frontier after that.

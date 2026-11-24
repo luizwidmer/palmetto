@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 TEST_DIR = Path(__file__).resolve().parent
-sys.path[:0] = [str(TEST_DIR.parent / "tools"), str(TEST_DIR)]
+sys.path[:0] = [str(TEST_DIR.parent / "tooling"), str(TEST_DIR)]
 
 from listing import translate_listing
 

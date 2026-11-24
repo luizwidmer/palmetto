@@ -26,7 +26,7 @@ Le projet en est à ses débuts : **le jeu ne démarre pas encore**.
 
 Rien n'est jouable, sur aucune plateforme. Ce qui tourne aujourd'hui :
 
-- **Windows** : tout (`make_game.py`, les outils, et le runtime `palmetto` avec la couche D3D12 → Vulkan et ses tests).
+- **Windows** : tout (`build_port.py`, les outils, et le runtime `palmetto` avec la couche D3D12 → Vulkan et ses tests).
 - **Linux** : le traducteur, les outils de ressources et les outils de test GPU Vulkan tournent nativement (testés
   sur RADV et NVIDIA). Le runtime est du code Windows : il se compile en croisé avec clang-cl et xwin, et ses tests
   tournent sous Wine ou Proton. Le jeu est prévu pour tourner de la même façon (#217).
@@ -51,7 +51,7 @@ l'[issue #166](https://github.com/the original project/issues/166).
 - [SDK Vulkan](https://vulkan.lunarg.com/) (`spirv-as`, `spirv-val` et `vulkaninfo`).
 - [LLVM 21+](https://github.com/llvm/llvm-project/releases) avec la **cible AMDGPU** (`llvm-mc`) :
   - La version officielle de LLVM pour Windows **n'inclut pas** la cible AMDGPU.
-  - Pour compiler un `llvm-mc.exe` natif avec cette cible, lancez `.\scripts\build_llvm_mc.ps1` dans PowerShell
+  - Pour compiler un `llvm-mc.exe` natif avec cette cible, lancez `.\tooling/scripts\build_llvm_mc.ps1` dans PowerShell
     depuis la racine du dépôt. Le script a besoin de `git` et des outils C++ de Visual Studio. Il définit `LLVM_MC`
     pour votre utilisateur : ouvrez ensuite un nouveau terminal pour que la variable soit prise en compte. Comptez
     20 à 40 minutes.
@@ -60,7 +60,7 @@ l'[issue #166](https://github.com/the original project/issues/166).
     installé (`where.exe llvm-mc` l'affiche une fois l'environnement activé ; le `where` seul est
     l'alias `Where-Object` de PowerShell).
   - Avec WSL, installez `llvm-21` dans Ubuntu et donnez la commande entière à `LLVM_MC`, dans la session PowerShell
-    où vous lancerez `make_game.py` :
+    où vous lancerez `build_port.py` :
 
     ```powershell
     $env:LLVM_MC = 'wsl -d Ubuntu -e /usr/lib/llvm-21/bin/llvm-mc'
@@ -82,7 +82,7 @@ l'[issue #166](https://github.com/the original project/issues/166).
    ```powershell
    git clone --recursive https://github.com/the original project
    ```
-   Un « Download ZIP » depuis GitHub n'inclut pas `third_party/arc9-explorer` : la compilation le récupère si `git`
+   Un « Download ZIP » depuis GitHub n'inclut pas `vendor/arc9-explorer` : la compilation le récupère si `git`
    est installé, et sinon vous dit quoi faire.
 3. Double-cliquez sur **`Build.bat`**.
 
@@ -100,20 +100,20 @@ L'espace indiqué plus haut correspond à la compilation complète. Pour *lancer
 `--stages check,shaders,runtime` a besoin d'environ 30 Go ; l'étape `assets`, qui prend presque tout le reste, ne sert
 qu'aux outils de ressources, et `--wav` ajoute plusieurs fois la taille de l'Ogg Opus. `--work` et `--out` peuvent être sur un autre disque. Le runtime lit le paquet sur
 place : si son disque est en lecture seule, passez `palmetto --overlay <dossier accessible en écriture>` (c'est une
-option de `palmetto`, pas de `make_game.py`). Ne supprimez pas les fichiers `.s` de `work/shaders/dxbc/disasm` : sans
+option de `palmetto`, pas de `build_port.py`). Ne supprimez pas les fichiers `.s` de `work/shaders/dxbc/disasm` : sans
 eux et sans `work/shaders/spirv/index.json`, l'étape `shaders` peut sembler terminée avec zéro shader.
 
-### Depuis un terminal (`make_game.py`)
+### Depuis un terminal (`build_port.py`)
 
 ```powershell
-python -I make_game.py --find                          # liste les copies trouvées sur ce PC
-python -I make_game.py --pick                          # ouvre une fenêtre pour choisir le dossier du jeu
-python -I make_game.py --check                         # vérifie votre copie, sans rien compiler
-python -I make_game.py --check --full-check            # vérifie aussi le SHA-256 de chaque fichier (lent)
-python -I make_game.py --game "D:\chemin\vers\le\paquet" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
-python -I make_game.py --stages shaders,assets         # seulement certaines étapes
-python -I make_game.py --game "D:\chemin\vers\le\paquet" --wav  # décode aussi l'Opus en WAV PCM (volumineux)
-python -I make_game.py --wave64-emulate off            # auto (par défaut), on ou off
+python -I build_port.py --find                          # liste les copies trouvées sur ce PC
+python -I build_port.py --pick                          # ouvre une fenêtre pour choisir le dossier du jeu
+python -I build_port.py --check                         # vérifie votre copie, sans rien compiler
+python -I build_port.py --check --full-check            # vérifie aussi le SHA-256 de chaque fichier (lent)
+python -I build_port.py --game "D:\chemin\vers\le\paquet" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
+python -I build_port.py --stages shaders,assets         # seulement certaines étapes
+python -I build_port.py --game "D:\chemin\vers\le\paquet" --wav  # décode aussi l'Opus en WAV PCM (volumineux)
+python -I build_port.py --wave64-emulate off            # auto (par défaut), on ou off
 ```
 
 `check` passe toujours en premier ; ensuite, `shaders`, `assets` et `runtime` tournent en même temps quand ils sont
@@ -135,13 +135,13 @@ encore ce cache.
   `--texel-offset-fallback` (sans `VK_KHR_maintenance8`) et `--mesh-compute` (sans `VK_EXT_mesh_shader`). Voir
   [`docs/design.md`](../../design.md).
 - **Ce qui est refait automatiquement** : la compilation enregistre la commande et la version de `llvm-mc`, les
-  sources du traducteur et le décodeur des ressources (`third_party/arc9-explorer` et `tools/arc9dump`). Si l'un
+  sources du traducteur et le décodeur des ressources (`vendor/arc9-explorer` et `tooling/arc9dump`). Si l'un
   d'eux change, seule l'étape concernée est refaite (désassemblage, traduction ou export des modèles et textures).
 - **`--work`** : choisissez un disque avec au moins 350 Go libres. La traduction des shaders est l'étape la plus
   longue ; elle utilise par défaut la moitié des threads du processeur (réglable avec `--jobs`).
 - **`--wav`** : désactivé par défaut, car le WAV PCM 16 bits est plusieurs fois plus volumineux que l'Ogg Opus.
-- **Linux et Wine/Proton** : `make_game.py` fonctionne aussi sous Linux. L'étape `pipelines` utilise
-  `vk_pipeline_check` (compilé avec CMake dans `runtime/build/linux`, ou par le script lui-même s'il manque). Le
+- **Linux et Wine/Proton** : `build_port.py` fonctionne aussi sous Linux. L'étape `pipelines` utilise
+  `vk_pipeline_check` (compilé avec CMake dans `port/build/linux`, ou par le script lui-même s'il manque). Le
   chargeur est un programme Windows et tourne sous Wine ou Proton : l'étape `runtime` le compile en croisé avec
   clang-cl et lld-link (LLVM 19+, sauf 22.1.7 et 22.1.8) et le SDK Windows préparé par
   [xwin](https://github.com/Jake-Shadle/xwin) ; voir [`docs/testing.md`](../../testing.md). Vous pouvez aussi passer
@@ -152,14 +152,14 @@ encore ce cache.
 ## Problèmes courants
 
 - **Vous avez utilisé « Download ZIP » sur GitHub** : le ZIP ne contient pas le sous-module
-  `third_party/arc9-explorer`. Utilisez `git clone --recursive`, ou lancez `git submodule update --init --recursive`
+  `vendor/arc9-explorer`. Utilisez `git clone --recursive`, ou lancez `git submodule update --init --recursive`
   dans le dossier du dépôt.
 - **`llvm-mc` refuse `gfx1013` ou la cible AMDGPU** : vous utilisez probablement l'installateur officiel de LLVM pour
-  Windows. Lancez `scripts\build_llvm_mc.ps1`, ou faites pointer `LLVM_MC` vers le `llvm-mc` de WSL (`llvm-21`).
+  Windows. Lancez `tooling/scripts\build_llvm_mc.ps1`, ou faites pointer `LLVM_MC` vers le `llvm-mc` de WSL (`llvm-21`).
 - **CMake s'arrête sur « needs the Windows SDK 10.0.26100 or newer »**, ou MSVC signale que `Desc_1_2` n'est pas
   membre de `D3D12_VERSIONED_ROOT_SIGNATURE_DESC` : mettez à jour le SDK Windows en `10.0.26100` ou plus récent, par
   le Visual Studio Installer ou avec `winget install Microsoft.WindowsSDK.10.0.26100`, puis supprimez
-  `runtime/build` et relancez la configuration.
+  `port/build` et relancez la configuration.
 - **Plus de place sur `C:`** : passez `--work "D:\palmetto-work"` pour placer les fichiers temporaires sur un autre
   disque.
 - **Windows refuse de lancer les programmes de test tout juste compilés** (« An Application Control policy has

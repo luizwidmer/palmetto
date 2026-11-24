@@ -1,7 +1,7 @@
 # Crash report: the faulting thread's stack
 
 **Status: implemented and tested on synthetic images; the exception hook itself is not wired yet.** The code is
-`runtime/src/crash_unwind.{h,cpp}` and its test is `runtime/test/crash_unwind_test.cpp` (CTest name
+`port/src/crash_unwind.{h,cpp}` and its test is `port/test/crash_unwind_test.cpp` (CTest name
 `crash_unwind`).
 
 ## What it does

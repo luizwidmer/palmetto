@@ -163,7 +163,7 @@ class DataPairTests(unittest.TestCase):
                     self.assertEqual(words, [want & MASK32, want >> 32, 0, 0])
 
     def test_constant_pairs_are_not_mistaken_for_masks(self):
-        # 0 / -1 are EITHER in tools/lane_masks.py (the same bits as data), so
+        # 0 / -1 are EITHER in tooling/lane_masks.py (the same bits as data), so
         # they must not be mistaken for lane masks here.
         for src_asm, src in (("-1", MASK64), ("0", 0)):
             for scc in (0, 1):

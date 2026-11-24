@@ -1,4 +1,4 @@
-"""Tests for scripts/ci_expected_failures.py, which judges the macOS CI job's test runs.
+"""Tests for tooling/scripts/ci_expected_failures.py, which judges the macOS CI job's test runs.
 
     python -I tests/test_ci_expected_failures.py
 """
@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "scripts"
+SCRIPTS = ROOT / "tooling" / "tooling/scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 

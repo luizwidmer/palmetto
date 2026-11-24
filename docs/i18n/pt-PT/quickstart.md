@@ -31,7 +31,7 @@ Ainda não é possível jogar o jogo em nenhuma plataforma; consulte a secção 
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0).
 - [Vulkan SDK](https://vulkan.lunarg.com/) (`spirv-as` e `spirv-val`).
 - [LLVM 21+](https://github.com/llvm/llvm-project/releases) com o **alvo AMDGPU** para `llvm-mc`. O instalador
-  oficial do LLVM para Windows não inclui esse alvo. No Windows, `scripts\build_llvm_mc.ps1` compila um
+  oficial do LLVM para Windows não inclui esse alvo. No Windows, `tooling/scripts\build_llvm_mc.ps1` compila um
   `llvm-mc.exe` nativo com o alvo e define `LLVM_MC` (demora cerca de 20–40 minutos e precisa do git e das
   ferramentas C++ do Visual Studio). Outra opção é instalar `llvm-21` no WSL e definir
   `LLVM_MC="wsl -d Ubuntu -e /usr/lib/llvm-21/bin/llvm-mc"`. No Linux, basta ter `llvm-mc` no `PATH`.
@@ -41,16 +41,14 @@ Ainda não é possível jogar o jogo em nenhuma plataforma; consulte a secção 
 - [ffmpeg](https://ffmpeg.org/download.html) no `PATH` *(opcional: descodifica streams XMA2; obrigatório com
   `--wav`)*.
 
-**Este PC chega?** `python -I tools/pc_checker.py --cli` deteta CPU, GPU e RAM e compara-os com os perfis de
-referência antes de uma compilação longa. `--profile 1` (predefinição) equivale a um PC target console e
-`--profile 2` é uma estimativa da comunidade para 1080p Low. `python -I tools/pc_checker.py --check --json`
+**Este PC chega?** `python -I build_port.py --check` reports whether this PC and the package look usable before a long build.
 imprime o mesmo resultado em JSON e devolve-o como código de saída (0 bom, 1 fraco, 2 desconhecido).
 
 **Pouco espaço em disco:** os ~400 GB são para a compilação completa. Para *executar* o port,
 `--stages check,shaders,runtime` precisa de cerca de 30 GB; a etapa `assets` (~370 GB) serve apenas para as
 ferramentas de extração e `--wav` acrescenta várias vezes o tamanho do Ogg Opus. `--work` e `--out` podem ficar
 noutra unidade. O runtime mapeia o pacote no local, pelo que uma unidade só de leitura exige
-`palmetto --overlay <pasta gravável>` — `--overlay` é uma opção do `palmetto`, não do `make_game.py`. Mantenha os
+`palmetto --overlay <pasta gravável>` — `--overlay` é uma opção do `palmetto`, não do `build_port.py`. Mantenha os
 ficheiros `.s` em `work/shaders/dxbc/disasm`: a execução seguinte compara-os com `disasm.done` e refaz os que
 faltam. Uma pasta `disasm` que seja uma ligação simbólica é recusada quando a etapa precisa de a limpar.
 
@@ -63,7 +61,7 @@ faltam. Uma pasta `disasm` que seja uma ligação simbólica é recusada quando 
    ```powershell
    git clone --recursive https://github.com/the original project
    ```
-   Um *Download ZIP* do GitHub não inclui `third_party/arc9-explorer`.
+   Um *Download ZIP* do GitHub não inclui `vendor/arc9-explorer`.
 3. Abra a pasta `Palmetto` e faça duplo clique em **`Build.bat`**.
 
 O script procura a sua cópia do jogo em Downloads, Ambiente de Trabalho, Documentos (incluindo OneDrive), Games,
@@ -75,14 +73,14 @@ O resultado vai para `Documents\Palmetto`. Uma compilação interrompida continu
 ### Pelo terminal
 
 ```powershell
-python -I make_game.py --find                          # lista as cópias encontradas neste PC
-python -I make_game.py --pick                          # escolhe a pasta do jogo numa janela de diálogo
-python -I make_game.py --check                         # verifica a cópia sem compilar
-python -I make_game.py --check --full-check            # compara também o SHA-256 de cada ficheiro (lento)
-python -I make_game.py --game "D:\caminho\do\pacote" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
-python -I make_game.py --stages shaders,assets         # executa apenas as etapas escolhidas
-python -I make_game.py --game "D:\caminho\do\pacote" --wav   # descodifica também Opus para PCM WAV (grande)
-python -I make_game.py --wave64-emulate off            # auto (predefinição), on ou off; veja abaixo
+python -I build_port.py --find                          # lista as cópias encontradas neste PC
+python -I build_port.py --pick                          # escolhe a pasta do jogo numa janela de diálogo
+python -I build_port.py --check                         # verifica a cópia sem compilar
+python -I build_port.py --check --full-check            # compara também o SHA-256 de cada ficheiro (lento)
+python -I build_port.py --game "D:\caminho\do\pacote" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
+python -I build_port.py --stages shaders,assets         # executa apenas as etapas escolhidas
+python -I build_port.py --game "D:\caminho\do\pacote" --wav   # descodifica também Opus para PCM WAV (grande)
+python -I build_port.py --wave64-emulate off            # auto (predefinição), on ou off; veja abaixo
 ```
 
 As etapas executam-se nesta ordem: `check` primeiro; depois `shaders`, `assets` e `runtime` em conjunto quando
@@ -115,23 +113,23 @@ Os logs completos ficam em `work/logs/`.
 Com CMake 3.24+, um compilador C++20, cabeçalhos de desenvolvimento e o carregador Vulkan instalados:
 
 ```sh
-cmake -S runtime -B runtime/build/linux
-cmake --build runtime/build/linux --parallel
-./runtime/build/linux/vk_pipeline_check /caminho/para/spirv
+cmake -S runtime -B port/build/linux
+cmake --build port/build/linux --parallel
+./port/build/linux/vk_pipeline_check /caminho/para/spirv
 ```
 
-Passe a pasta que contém `index.json` e os ficheiros SPIR-V traduzidos. No Linux, `make_game.py` também corre;
+Passe a pasta que contém `index.json` e os ficheiros SPIR-V traduzidos. No Linux, `build_port.py` também corre;
 a etapa `pipelines` usa o `vk_pipeline_check` acima e compila-o se ainda não existir.
 
 ### Runtime no Linux com Wine ou Proton
 
 O loader é um programa Windows e corre sob Wine ou Proton. No Linux, a etapa `runtime` compila-o de forma
-cruzada para `runtime/build/windows` com clang-cl e lld-link contra o CRT do MSVC e o Windows SDK que o
+cruzada para `port/build/windows` com clang-cl e lld-link contra o CRT do MSVC e o Windows SDK que o
 [xwin](https://github.com/Jake-Shadle/xwin) organiza em `XWIN_DIR` ou `~/.local/share/xwin-sdk`. Sem isso, a
 etapa fica fora da execução predefinida. Também pode reutilizar um build Windows existente:
 
 ```sh
-python3 -I make_game.py --runtime-build ~/Downloads/runtime-windows
+python3 -I build_port.py --runtime-build ~/Downloads/runtime-windows
 ```
 
 Em ambos os casos, o script copia `palmetto.exe` e `palmetto_tls_host.dll` para `--out` e cria `palmetto.sh`, que
@@ -145,22 +143,22 @@ Com `PALMETTO_D3D12=vulkan`, o runtime encontra os shaders em `<work>/shaders/sp
 
 | Parte | O que faz | Onde |
 |---|---|---|
-| Verificação de versão | Nome, tamanho e SHA-256 de cada ficheiro do pacote para cada versão suportada | `game/`, `make_game.py` |
-| Pipeline de shaders | Extrai contentores DXBC sem a tabela de conteúdos encriptada; desempacota o programa RDNA2 `XBCH` → `FSSM`; desmonta com LLVM (`gfx1013`) e traduz para SPIR-V | `tools/shader_carve.py`, `fssm_unpack.py`, `shader_disasm.py`, `rdna2spirv.py` |
-| Exportação de recursos | Encontra recursos validados em arquivos ARC9 e nos pools `.ttpf` soltos | `tools/arc9dump` |
-| Runtime | Mapeia a imagem PE, resolve importações para *shims* (GDK, XMem, `d3d12_xs`) | `runtime/` |
-| Ferramentas de investigação | Inspeção PE/RTTI, extração, sondas de mosaicos, harnesses GPU | `tools/`, `runtime/test/` |
-| Painel de progresso | Uma página offline com o que passa e o que bloqueia o próximo passo, gerada a partir de testes e das próprias tabelas da documentação | `tools/progress_dashboard.py` |
+| Verificação de versão | Nome, tamanho e SHA-256 de cada ficheiro do pacote para cada versão suportada | `game/`, `build_port.py` |
+| Pipeline de shaders | Extrai contentores DXBC sem a tabela de conteúdos encriptada; desempacota o programa RDNA2 `XBCH` → `FSSM`; desmonta com LLVM (`gfx1013`) e traduz para SPIR-V | `tooling/shader_carve.py`, `fssm_unpack.py`, `shader_disasm.py`, `rdna2spirv.py` |
+| Exportação de recursos | Encontra recursos validados em arquivos ARC9 e nos pools `.ttpf` soltos | `tooling/arc9dump` |
+| Runtime | Mapeia a imagem PE, resolve importações para *shims* (GDK, XMem, `d3d12_xs`) | `port/` |
+| Ferramentas de investigação | Inspeção PE/RTTI, extração, sondas de mosaicos, harnesses GPU | `tooling/`, `port/test/` |
+| Painel de progresso | Uma página offline com o que passa e o que bloqueia o próximo passo, gerada a partir de testes e das próprias tabelas da documentação | `tooling/progress_dashboard.py` |
 
 O contrato do tradutor e todas as notas de formato estão em [`docs/design.md`](../../design.md); as notas de
 formato, recursos, runtime e validação estão indexadas em [`docs/README.md`](../../README.md). O plano D3D12
 está em [`docs/d3d12_vulkan.md`](../../d3d12_vulkan.md), os formatos de áudio em
 [`docs/audio.md`](../../audio.md) e as referências relacionadas em
-[`docs/related_projects.md`](../../related_projects.md).
+[`the removed comparison notes`](../../related_projects.md).
 
 ## Problemas comuns
 
-- **Usou o botão “Download ZIP” do GitHub**: o ZIP não inclui o submódulo `third_party/arc9-explorer`. Use
+- **Usou o botão “Download ZIP” do GitHub**: o ZIP não inclui o submódulo `vendor/arc9-explorer`. Use
   `git clone --recursive` ou `git submodule update --init --recursive`.
 - **`llvm-mc` recusa `gfx1013` / AMDGPU**: está provavelmente a usar o instalador oficial do LLVM para Windows.
   Siga uma das opções de `LLVM_MC` acima.

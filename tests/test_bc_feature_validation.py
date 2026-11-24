@@ -1,4 +1,4 @@
-"""Validation tests for tools/bc_feature.py block_average and bc1_average.
+"""Validation tests for tooling/bc_feature.py block_average and bc1_average.
 
     python -m pytest tests/test_bc_feature_validation.py
 """
@@ -7,7 +7,7 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 

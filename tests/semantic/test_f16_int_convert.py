@@ -2,7 +2,7 @@
 
 `Gen.f16_bits` replaces GLSL.std.450 PackHalf2x16 at the f16 ALU sites, because drivers fold a PackHalf2x16 ->
 UnpackHalf2x16 round trip to a no-op (#513, #512). These tests run `v_cvt_f16_f32` (round to nearest even) and
-`v_cvt_pkrtz_f16_f32` (round toward zero) through tools/rdna2spirv.py and the mini interpreter, and compare the
+`v_cvt_pkrtz_f16_f32` (round toward zero) through tooling/rdna2spirv.py and the mini interpreter, and compare the
 f16 bits with a Python reference over edge values (ties, the subnormal boundary, the overflow boundary, +-0,
 +-inf, NaN) and a seeded sweep over every f32 exponent that can reach an f16. Each exported word has a zero high
 half, so no word is a NaN bit pattern and the float export can't change it (#509).
@@ -18,7 +18,7 @@ from fractions import Fraction
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

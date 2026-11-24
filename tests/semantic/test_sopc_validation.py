@@ -1,12 +1,12 @@
 """Validation and positive-control semantic tests for all 18 RDNA2 SOPC instructions.
 
-Covers the exact 18 RDNA2 SOPC mnemonics (tools/rdna2_isa_tables.py SOPC):
+Covers the exact 18 RDNA2 SOPC mnemonics (tooling/rdna2_isa_tables.py SOPC):
   - 12 32-bit scalar compares: s_cmp_{eq,lg,gt,ge,lt,le}_{i32,u32}
   - 2  64-bit scalar compares: s_cmp_{eq,lg}_u64
   - 4  scalar bit tests:       s_bitcmp{0,1}_{b32,b64}
 
 Verifies:
-  - Exact ISA table parity with tools/rdna2_isa_tables.SOPC.
+  - Exact ISA table parity with tooling/rdna2_isa_tables.SOPC.
   - Rejection (Unsupported) of nonexistent s_cmp_* / s_bitcmp* mnemonics.
   - Rejection of encoding suffixes (_e32/_e64/_sdwa/_dpp), instruction modifiers, wrong arity,
     operand modifiers (neg/abs/sext), VGPRs/vlist/slist, and mismatched 32-bit vs 64-bit widths.
@@ -29,7 +29,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if HERE not in sys.path:

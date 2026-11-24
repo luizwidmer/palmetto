@@ -1,4 +1,4 @@
-"""Synthetic-header tests for tools/restofworld_index.py.
+"""Synthetic-header tests for tooling/restofworld_index.py.
 
     python -I tests/test_restofworld_index.py
 
@@ -18,8 +18,8 @@ import unittest.mock
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "restofworld_index.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "restofworld_index.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import restofworld_index  # noqa: E402
 

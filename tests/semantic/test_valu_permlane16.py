@@ -7,20 +7,20 @@ where the 4-bit lane selector nibbles `sel[0..7]` come from `src1` (bits `[4*k+3
 32-lane row (`[0..15]` and `[16..31]`, and in wave64 `[32..47]` and `[48..63]`). Only lanes active
 in `EXEC` write `vD`; inactive destination lanes preserve their prior `vD`.
 
-Executed end-to-end through `tools/rdna2spirv.py` and `tests/semantic/spirv_mini_interp.py`
+Executed end-to-end through `tooling/rdna2spirv.py` and `tests/semantic/spirv_mini_interp.py`
 (`run_workgroup`) across 32 lanes (wave32) and 64 lanes (wave64 on both one 64-wide subgroup and
 two 32-wide subgroups), as well as partial waves (20 and 40 lanes), and checked against
 hand-computed constants and an independent plain-Python RDNA2 ISA reference model. Standard library
 only; zero game data; hand-written RDNA2 disassembly listings only.
 
-Documented findings (observed in `tools/rdna2spirv.py`; no shared files modified):
-  1. `op_sel:[fi, bound_ctrl]` and inactive source lanes (`tools/rdna2spirv.py` lines 4608-4632):
+Documented findings (observed in `tooling/rdna2spirv.py`; no shared files modified):
+  1. `op_sel:[fi, bound_ctrl]` and inactive source lanes (`tooling/rdna2spirv.py` lines 4608-4632):
      In RDNA2 ISA (measured on RDNA2 gfx1036 and RDNA3.5 gfx1150; see `docs/shader_validation.md`
-     and `tools/crosslane_fuzz.py`), when a source lane is inactive in `EXEC` (`EXEC[src] == 0`):
+     and `tooling/crosslane_fuzz.py`), when a source lane is inactive in `EXEC` (`EXEC[src] == 0`):
        - `fi=1` (`op_sel:[1,0]`, `op_sel:[1,1]`): reads the inactive source lane's pre-existing `vS`.
        - `fi=0, bound_ctrl=0` (`op_sel:[0,0]` or omitted): keeps the destination lane's prior `vD`.
        - `fi=0, bound_ctrl=1` (`op_sel:[0,1]`): writes `0` to the destination lane.
-     `tools/rdna2spirv.py` lines 4608-4632 do not inspect `mods` (`op_sel:[fi, bound_ctrl]`) and emit
+     `tooling/rdna2spirv.py` lines 4608-4632 do not inspect `mods` (`op_sel:[fi, bound_ctrl]`) and emit
      `self.g_shuffle(r, v, src)` unconditionally without checking the source lane's `%active` bit.
      Therefore:
        - When all accessed source lanes are active in `EXEC`, all four `op_sel` modes (`[0,0]`,
@@ -33,7 +33,7 @@ Documented findings (observed in `tools/rdna2spirv.py`; no shared files modified
          reference tests (`OracleTests`) and excluded from passing end-to-end assertions rather
          than relaxing expected values; structural SPIR-V translation is verified in
          `EmulationAndFindingTests`.
-  2. `--wave64-emulate` (`tools/rdna2spirv.py` lines 2671-2810, 2890-2895, 4608-4632):
+  2. `--wave64-emulate` (`tooling/rdna2spirv.py` lines 2671-2810, 2890-2895, 4608-4632):
      With `WAVE64_EMULATE = True`, wave64 compute/mesh shaders lower `g_shuffle` and `sub_lane`
      through `%x_buf` Workgroup-memory exchanges, `OpControlBarrier`, and a round loop (`OpLoopMerge`
      with a backward branch). `tests/semantic/spirv_mini_interp.py` rejects `Workgroup` barriers and
@@ -55,7 +55,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:
@@ -707,7 +707,7 @@ class EmulationAndFindingTests(unittest.TestCase):
         self.assertEqual(spv_w32_plain, spv_w32_emu)
 
     def test_op_sel_fi0_translates_cleanly_while_inactive_src_handling_is_excluded(self):
-        # Documented finding (tools/rdna2spirv.py lines 4608-4632): op_sel:[0,0] and op_sel:[0,1]
+        # Documented finding (tooling/rdna2spirv.py lines 4608-4632): op_sel:[0,0] and op_sel:[0,1]
         # are accepted by shader_ir/rdna2spirv without raising Unsupported, and lower to
         # OpGroupNonUniformShuffle without inspecting mods or source %active; inactive-source fi=0
         # value assertions stay excluded from Wave32ExecutionTests / Wave64ExecutionTests.

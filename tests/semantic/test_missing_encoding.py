@@ -1,6 +1,6 @@
 """A hand-written listing without `; encoding:` bytes: instructions that need their own size are rejected cleanly.
 
-tools/shader_ir.parse_file advances the PC by each instruction's encoding bytes. Without them (a listing written by
+tooling/shader_ir.parse_file advances the PC by each instruction's encoding bytes. Without them (a listing written by
 hand, like the fixtures in tests/semantic/fixtures/disasm) the PC of the next instruction is unknown, which
 s_getpc_b64 and every PC-relative branch need. Until 2026-11-22 both raised TypeError in the translator; now they
 raise rdna2spirv.Unsupported, which callers such as the batch translator count as an unsupported shader. Straight-line
@@ -16,7 +16,7 @@ import warnings
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling"))
 
 import rdna2spirv  # noqa: E402
 

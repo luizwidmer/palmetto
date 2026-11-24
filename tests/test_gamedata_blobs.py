@@ -19,7 +19,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 TOOL = os.environ.get("PALMETTO_GAMEDATA_BLOBS", os.path.join(TOOLS, "gamedata_blobs.py"))
 sys.path.insert(0, TOOLS)
 

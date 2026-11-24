@@ -13,7 +13,7 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TOOL = pathlib.Path(os.environ.get("PALMETTO_GAMEDATA_MAPS", str(ROOT / "tools" / "gamedata_maps.py")))
+TOOL = pathlib.Path(os.environ.get("PALMETTO_GAMEDATA_MAPS", str(ROOT / "tooling" / "gamedata_maps.py")))
 
 
 class BadGamedataMapsIndexTest(unittest.TestCase):

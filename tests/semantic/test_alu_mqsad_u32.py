@@ -5,7 +5,7 @@ Four masked byte-SADs with full 32-bit accumulators (RDNA ISA pseudocode). S0 is
   D[k] = (S2[k] + sum over the 4 bytes of |W_k.byte - S1.byte|, skipping bytes where S1's byte is 0) mod 2^32,
   W_k = S0 bits [8k+31 : 8k]
 so the four windows slide over S0 one byte at a time, as for v_qsad_pk_u16_u8, but each result is a whole dword.
-Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py
+Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py
 and compares D with a plain-Python reference. D leaves through exp as eight 16-bit halves ORed into 0x40000000, so no
 export channel is a NaN or denormal pattern that a float round trip could change.
 """
@@ -22,7 +22,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

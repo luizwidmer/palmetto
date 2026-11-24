@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/anim_move.py (ASSET-86).
+"""Synthetic tests for tooling/anim_move.py (ASSET-86).
 
     python -I -m unittest tests/test_anim_move.py -v
 
@@ -17,8 +17,8 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "anim_move.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "anim_move.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import anim_move  # noqa: E402

@@ -1,4 +1,4 @@
-"""tools/wave64_graphics_scan.py: classification, counting and privacy; no game data.
+"""tooling/wave64_graphics_scan.py: classification, counting and privacy; no game data.
 
     python -I tests/test_wave64_graphics_scan.py -v
 """
@@ -12,7 +12,7 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tooling"))
 import fssm_header  # noqa: E402
 import wave64_graphics_scan as scan  # noqa: E402
 

@@ -1,4 +1,4 @@
-"""Run runtime/test/check_d3d12_trace.py through a fake runner, without a Windows build."""
+"""Run port/test/check_d3d12_trace.py through a fake runner, without a Windows build."""
 import os
 from pathlib import Path
 import subprocess
@@ -9,7 +9,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CHECK = ROOT / "runtime" / "test" / "check_d3d12_trace.py"
+CHECK = ROOT / "port" / "test" / "check_d3d12_trace.py"
 
 COMMAND_LIST_TRACE = [
     "ID3D12GraphicsCommandList::SetPipelineState called",

@@ -13,7 +13,7 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TOOL = ROOT / "tools" / "character_textures.py"
+TOOL = ROOT / "tooling" / "character_textures.py"
 
 
 def model(materials, name="synthetic_model"):

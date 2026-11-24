@@ -1,4 +1,4 @@
-"""v_sad_hi_u32 is not an RDNA2 instruction, and tools/rdna2spirv.py rejects it.
+"""v_sad_hi_u32 is not an RDNA2 instruction, and tooling/rdna2spirv.py rejects it.
 
 The previous version of this file (944 lines) modelled "v_sad_hi_u32 = high 32 bits of |S0 - S1| + S2" with a private
 Python function and hand-written SPIR-V, and never called the translator.  RDNA2 has v_sad_u8, v_sad_hi_u8, v_sad_u16

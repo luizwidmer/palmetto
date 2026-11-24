@@ -164,7 +164,7 @@ respect.
 
 ## Two classes among the eleven, and what each needs
 
-Repairing the listings with `tools/widen_smem_decode.py` split the eleven refusals into two classes, which need different
+Repairing the listings with `tooling/widen_smem_decode.py` split the eleven refusals into two classes, which need different
 work:
 
 | class | what it is | state |
@@ -222,9 +222,9 @@ and stops inside the title itself.
 
 Three consequences for anyone continuing:
 
-* `tools/shader_library.py` now writes `<name>.state`; a pipeline cannot resolve without it;
-* nothing in `make_game.py` runs the pipeline-library step yet, so a fresh build still reproduces the old failure;
-* `tools/rdna2spirv.py`'s stage fallback reads `lib_cs_*` as stage `lib`, so a library listing needs an `index.json`
+* `tooling/shader_library.py` now writes `<name>.state`; a pipeline cannot resolve without it;
+* nothing in `build_port.py` runs the pipeline-library step yet, so a fresh build still reproduces the old failure;
+* `tooling/rdna2spirv.py`'s stage fallback reads `lib_cs_*` as stage `lib`, so a library listing needs an `index.json`
   beside it (or the fallback fixed) or it is refused as an unknown stage.
 
 ## The stop is independent of the compute pipelines
@@ -448,7 +448,7 @@ measurements come from a reassembled library held outside the repository; nothin
 ## Frontier 2026-11-24 (the corpus was rebuilt; the missing pipelines are not the blocker)
 
 Publishing the graphics programs triggered the shader stage's own fingerprint check: a commit of ours had changed a
-translator source, so `make_game --stages shaders` deleted the root index and started a full retranslation. That run was
+translator source, so `build_port --stages shaders` deleted the root index and started a full retranslation. That run was
 interrupted at 93% (an agent turn ended, and its background job with it), which left the work folder with no
 `shaders/spirv/index.json` and every boot failing early with a host C++ exception. Recovery, in order: rerun the one
 shard that crashed (shard 6, 0xC0000005; 1,657/1,657 translated, all `spirv-val` clean), merge the 16 parts (26,501
@@ -604,7 +604,7 @@ the first recording call that reaches it closed (measured: with the console barr
 successful closes), and console list slot 146 needs a barrier conversion the PC runtime rejects today.
 
 So the frontier is presentation, in this order: **PresentX (queue slot 32)** - the one call the frame makes that we refuse,
-with the prepared path in runtime/shims/xbox_present.* - then the command-list lifecycle so the frame's recording is not
+with the prepared path in port/shims/xbox_present.* - then the command-list lifecycle so the frame's recording is not
 discarded, then the console barrier conversion.
 
 

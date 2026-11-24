@@ -7,7 +7,7 @@ Each VOP3P mixed-precision FMA computes fma(src0, src1, src2) in f32:
 - v_fma_mix_f32 writes the f32 result; v_fma_mixlo_f16 narrows to f16 in the low half (keeping bits [31:16]);
   v_fma_mixhi_f16 narrows to f16 in the high half (keeping bits [15:0]).
 
-Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in
+Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in
 tests/semantic/spirv_mini_interp.py and compares the exported word with a plain-Python reference.
 """
 from fractions import Fraction
@@ -23,7 +23,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)
@@ -213,7 +213,7 @@ class FmaMixF16Tests(unittest.TestCase):
         self.assertEqual(got, pack_h(1.5, 3.5))
 
     def test_single_rounding_discriminating_cases(self):
-        # Discriminating test cases A through G from tools/fma_mix_probe.py where
+        # Discriminating test cases A through G from tooling/fma_mix_probe.py where
         # hardware single rounding gives 1 ulp difference from double rounding.
         # Case A: 1 * 2^-40 + (1 + 2^-11) -> single: 0x3c01, double: 0x3c00
         got_a = run("v_fma_mixlo_f16 v0, v1, v2, v3", 0x3F800000, 0x2B800000, 0x3F801000, old=OLD)

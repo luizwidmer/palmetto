@@ -1,4 +1,4 @@
-"""tools/spirv_metal_set0.py: set 0's descriptor arrays get fixed, non-overlapping Metal IDs (SHADER-161)."""
+"""tooling/spirv_metal_set0.py: set 0's descriptor arrays get fixed, non-overlapping Metal IDs (SHADER-161)."""
 import os
 import shutil
 import subprocess
@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tooling"))
 import spirv_metal_set0 as m  # noqa: E402
 
 # The set-0 part of a translated pixel shader (spirv-dis, names kept): sampled 2D images, samplers, the hash table.

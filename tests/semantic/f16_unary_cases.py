@@ -2,7 +2,7 @@
 
 A test file subclasses `UnaryF16` together with unittest.TestCase and sets OP, ref (a plain-Python reference taking
 and returning binary16 words), CASES (hand-written (S0, D) pairs from the ISA), MOD_INPUTS and INLINE. Every case is
-translated by tools/rdna2spirv.py and run on tests/semantic/spirv_mini_interp.py; the reference in f16_ref.py rounds
+translated by tooling/rdna2spirv.py and run on tests/semantic/spirv_mini_interp.py; the reference in f16_ref.py rounds
 exactly once, to nearest even, which is what the hardware does for these ops (docs/design.md, f16 transcendentals).
 """
 import math

@@ -5,9 +5,9 @@ All blobs and shaders here are built by hand; no game data is used, and nothing 
 llvm-mc, spirv-as/val or a GPU: the .s listings are written directly in the disassembler
 listing format, and values are checked with tests/semantic/spirv_mini_interp.py.
 
-Rule under test (tools/rdna2spirv.py, PS input path):
+Rule under test (tooling/rdna2spirv.py, PS input path):
   * When a sidecar fssm/<name>.fssm next to the disasm directory holds a non-empty
-    pixel-input table (tools/fssm_header.py), every table position 0..count-1 is declared
+    pixel-input table (tooling/fssm_header.py), every table position 0..count-1 is declared
     as a fragment input at that Location, including positions the code never reads (the
     table overcounts the code's distinct v_interp attrs in 775 of 12,101 corpus PS).
     Position in the table is the v_interp attr number, not the record's slot byte.
@@ -27,7 +27,7 @@ import tempfile
 import warnings
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.join(ROOT, "tests", "semantic"))
 
 import rdna2spirv  # noqa: E402

@@ -1,7 +1,7 @@
 """Semantic tests for RDNA2 v_div_fixup_f32 against native gfx1036 measurements.
 
 Every row in MEASURED ran natively on an AMD Radeon(TM) Graphics RDNA2 GPU (gfx1036,
-Windows AMD driver 32.0.21042.62) through tools/hw_oracle in both wave32 and wave64
+Windows AMD driver 32.0.21042.62) through tooling/hw_oracle in both wave32 and wave64
 (identical on every row) under the game's inferred MODE (IEEE=0, denorm32=0, DX10_CLAMP=1).
 """
 import os
@@ -14,7 +14,7 @@ import warnings
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling"))
 sys.path.insert(0, HERE)
 
 import rdna2spirv  # noqa: E402

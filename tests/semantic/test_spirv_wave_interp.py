@@ -1,6 +1,6 @@
 """Tests of tests/semantic/spirv_wave_interp.py against hand-written SPIR-V (standard library only).
 
-The interpreter is the SPIR-V side of tools/cf_diff.py, so its convergence rules are pinned here on modules
+The interpreter is the SPIR-V side of tooling/cf_diff.py, so its convergence rules are pinned here on modules
 written by hand, with the expected words derived from the SPIR-V specification in each test:
   * a subgroup operation inside a selection sees only the invocations that took that side;
   * after the merge block every invocation is back and sees the whole subgroup;

@@ -1,11 +1,11 @@
 """The wave size of an FSPX program (the FidelityFX DLL's, docs/fspx.md) comes from its dispatch state: kind 0 word 4
-bit 20 set = wave32, which tools/fspx_unpack.py writes to fspx/<name>.json as `wave32`. Before, a program without an
+bit 20 set = wave32, which tooling/fspx_unpack.py writes to fspx/<name>.json as `wave32`. Before, a program without an
 FSSM sidecar got the code heuristic, which also counts any _b64 op on vcc or exec as wave64; the DLL's wave32
 programs move vcc as an ordinary SGPR pair, so they were translated as wave64, and a wave64 program without any
 marker as wave32.
 
 Every case is a hand-written listing in the FSPX layout (disasm/, fspx/<name>.json and .code, no fssm/), translated
-by tools/rdna2spirv.py. The last class runs the result, where the two wave sizes give different answers.
+by tooling/rdna2spirv.py. The last class runs the result, where the two wave sizes give different answers.
 Standard library only; no GPU, no LLVM, no game files.
 """
 import json
@@ -19,7 +19,7 @@ import warnings
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling"))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 

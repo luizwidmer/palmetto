@@ -5,7 +5,7 @@
   v_sqrt_f32  D = sqrt(S0)
   v_rsq_f32   D = 1 / sqrt(S0)
 
-Every test translates synthetic hand-written RDNA2 disassembly via tools/rdna2spirv.py and executes the emitted
+Every test translates synthetic hand-written RDNA2 disassembly via tooling/rdna2spirv.py and executes the emitted
 SPIR-V in tests/semantic/spirv_mini_interp.py. Undefined domains (log2/rsq of x <= 0, sqrt of x < 0) are verified
 to raise UnsupportedConstruct in spirv_mini_interp.py. Standard library only; no game data.
 """

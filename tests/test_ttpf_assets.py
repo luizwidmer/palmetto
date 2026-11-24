@@ -11,8 +11,8 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT), str(ROOT / "tools"), str(ROOT / "tests")]
-import make_game
+sys.path[:0] = [str(ROOT), str(ROOT / "tooling"), str(ROOT / "tests")]
+import build_port
 import ttpf_assets
 import ttpf_mips
 import world_build
@@ -35,17 +35,17 @@ class TextureAssets(unittest.TestCase):
         self.pool.parent.mkdir(parents=True)
         self.folder = self.work / "assets/ttpf/pool"
         self.folder.mkdir(parents=True)
-        (self.folder / make_game.DECODER_RECORD).write_text(make_game.decoder_digest(), encoding="utf-8")
+        (self.folder / build_port.DECODER_RECORD).write_text(build_port.decoder_digest(), encoding="utf-8")
         self.catalog = self.folder / "manifest.json"
         self.row = dict(Index=0, AssetKey="CAFEBABE12345678", SourceMips=5, BaseMipLevel=0,
                         Mips=0, File=None, DxgiFormat=71, Limitation="BCPack")
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.stack.enter_context(mock.patch.object(make_game, "MODEL_ARCHIVES", ()))
-        self.stack.enter_context(mock.patch.object(make_game, "log"))
+        self.stack.enter_context(mock.patch.object(build_port, "MODEL_ARCHIVES", ()))
+        self.stack.enter_context(mock.patch.object(build_port, "log"))
 
     def build(self):
-        make_game.assets(str(self.game), str(self.work), False, 1)
+        build_port.assets(str(self.game), str(self.work), False, 1)
 
     def legacy(self, **changes):
         self.catalog.write_text(json.dumps({"Count": 1, "Textures": [self.row | changes]}), encoding="utf-8")
@@ -238,7 +238,7 @@ class TextureAssets(unittest.TestCase):
         pack.parent.mkdir(parents=True)
         _, linear, _ = build_bc1_bcpack_pool(self.pool)
         pack.write_bytes(self.pool.read_bytes())
-        with mock.patch.object(make_game, "arc9dump", return_value=str(exe)):
+        with mock.patch.object(build_port, "arc9dump", return_value=str(exe)):
             self.build()
         for folder in (self.folder, self.work / "assets/ttpf_pack/story/pool"):
             row = json.loads((folder / "manifest.json").read_bytes())["Textures"][0]
@@ -346,7 +346,7 @@ class ProfileRules(unittest.TestCase):
 
     def test_a_decoder_source_edit_changes_both_stamps_and_the_pass_is_done_again(self):
         # A pool stamped before a bcpack.py fix kept its limited rows for good: the strict stamp was a constant.
-        tools = self.work / "tools"
+        tools = self.work / "tooling"
         tools.mkdir()
         for name in ttpf_assets.DECODER_SOURCES:
             (tools / name).write_text(f"# {name}\n", encoding="utf-8")

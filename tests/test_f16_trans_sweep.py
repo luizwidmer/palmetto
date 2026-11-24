@@ -1,4 +1,4 @@
-"""tools/f16_trans_sweep.py: the f16 reference and its rounding, which input each kernel thread computes and where it
+"""tooling/f16_trans_sweep.py: the f16 reference and its rounding, which input each kernel thread computes and where it
 stores it, the classification, and the exit-77 contract. The last test runs on the hardware when the oracle tools
 are present and is skipped otherwise. Standard library only."""
 import io
@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-TOOLS = Path(__file__).resolve().parents[1] / "tools"
+TOOLS = Path(__file__).resolve().parents[1] / "tooling"
 sys.path.insert(0, str(TOOLS))
 import f16_trans_sweep as sw  # noqa: E402
 from hw_oracle import asm, runner  # noqa: E402

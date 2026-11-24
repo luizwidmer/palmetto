@@ -1,4 +1,4 @@
-"""Unit-level checks for tools/wave64_emulate_opt.py: the CFG analyses behind --wave64-emulate.
+"""Unit-level checks for tooling/wave64_emulate_opt.py: the CFG analyses behind --wave64-emulate.
 
 This complements the end-to-end workgroup suite at tests/semantic/test_wave64_emulate_opt.py, which
 executes whole translated modules and caught nothing about the per-opcode read/write tables; these
@@ -25,7 +25,7 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import wave64_emulate_opt as w  # noqa: E402
 

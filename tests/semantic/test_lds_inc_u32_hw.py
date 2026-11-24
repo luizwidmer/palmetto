@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 
@@ -629,7 +629,7 @@ class TestDSIncU32NegativeAndTranslator(unittest.TestCase):
         self.assertNotEqual(oracle_res, mutant_res)
 
     def test_translator_emits_cas_loop_with_ugreater_than_equal(self) -> None:
-        """Verifies tools/rdna2spirv.py emits OpAtomicCompareExchange and OpUGreaterThanEqual."""
+        """Verifies tooling/rdna2spirv.py emits OpAtomicCompareExchange and OpUGreaterThanEqual."""
         lines = [
             "v_mov_b32_e32 v1, 0x40",
             "v_mov_b32_e32 v2, 10",

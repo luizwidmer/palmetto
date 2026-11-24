@@ -1,6 +1,6 @@
 """Semantic SPIR-V and interpreter tests for RDNA2 v_cvt_pknorm_i16_f16 / u16_f16 modifiers.
 
-Covers every textual probe case from tools/cvt_pknorm_f16_probe.py across plain, VOP3 `clamp` (hardware no-op),
+Covers every textual probe case from tooling/cvt_pknorm_f16_probe.py across plain, VOP3 `clamp` (hardware no-op),
 and destination `op_sel:[s0,s1,1]` (16-bit left shift zeroing D[15:0] and overwriting D), checks byte-identical
 SPIR-V emission for `clamp`, verifies `OpShiftLeftLogical` emission on dst `op_sel`, checks inactive EXEC lane
 preservation, asserts `Unsupported` on rejected modifiers/forms, and validates SPIR-V with spirv-as/spirv-val.
@@ -17,7 +17,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 sys.dont_write_bytecode = True
 for p in (TOOLS, HERE):
     if p not in sys.path:
@@ -40,7 +40,7 @@ def _translate(lines):
             f.write(STUB_DXBC)
     src = os.path.join(_TMP.name, "disasm", "ps_cvt_pknorm_f16_mods.s")
     with open(src, "w", encoding="utf-8", newline="\n") as f:
-        f.write("; ps_cvt_pknorm_f16_mods\n" + "".join(f"\t{ln}\n" for ln in lines))
+        f.write("; ps_cvt_pknorm_f16_extensions\n" + "".join(f"\t{ln}\n" for ln in lines))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", ResourceWarning)
         return rdna2spirv.translate(src)

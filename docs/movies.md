@@ -101,7 +101,7 @@ parsing the index.
 
 ## 3. How the streams are found
 
-`tools/arc9_carve.py` treats the data area as zlib streams or Bink 2 streams laid end to end. It:
+`tooling/arc9_carve.py` treats the data area as zlib streams or Bink 2 streams laid end to end. It:
 
 1. Starts at the u32 at archive offset +4 (27,328 here; the first stream begins 1,344 bytes later).
 2. Searches for the zlib header bytes or `KB2[a-z]`.
@@ -112,7 +112,7 @@ parsing the index.
    padding; any other gap is counted as unread.
 5. `--index-only` performs steps 1-4 without writing the streams.
 
-`tools/bink_index.py` is the stdlib-only indexer added with this document. It scans an ARC, a single `.bk2`, or a
+`tooling/bink_index.py` is the stdlib-only indexer added with this document. It scans an ARC, a single `.bk2`, or a
 directory, applies the same signature and size checks plus header sanity (duplicate frame count, fps, audio count),
 reads the 44-byte header and audio descriptors, and writes CSV or JSON. It never extracts unless `--probe` is used,
 and then only to a temporary file that is deleted.
@@ -255,7 +255,7 @@ The raw buffer and PNG stay in temp. FFmpeg is only the raw-to-PNG step here; it
 
 ### ABI over the archive
 
-[`runtime/test/bink_abi_test.cpp`](../runtime/test/bink_abi_test.cpp) ([notes](../runtime/test/bink_abi_test.md)) maps `Bink2Console.dll` with `rt::Loader` and
+[`port/test/bink_abi_test.cpp`](../port/test/bink_abi_test.cpp) ([notes](../port/test/bink_abi_test.md)) maps `Bink2Console.dll` with `rt::Loader` and
 opens each of the 515 streams inside `movies.arc` (`BinkSetFileOffset`, then `BinkOpen` with flag `0x20`), so nothing
 is extracted. For each stream, it reads the first 256 bytes of the `HBINK` and the `BINKSUMMARY` that `BinkGetSummary`
 writes, and keeps the 32-bit word offsets that hold the stream header's value. An offset is listed only if it
@@ -285,7 +285,7 @@ that rate take effect. RAD's Bink 1 value, `0x00080000`, changes nothing.
 - `BinkWait` returns 0 before the first frame. It returns 1 when it is called straight after a decode, that is,
   before the next frame is due at the stream's rate.
 - The `HBINK` is readable for at least 256 bytes. Fields that matched no header value are not named here; the
-  `BINKTRACK` prefix is in [`bink_audio_test.md`](../runtime/test/bink_audio_test.md).
+  `BINKTRACK` prefix is in [`bink_audio_test.md`](../port/test/bink_audio_test.md).
 ### Audio track decoding (`BinkOpenTrack` / `BinkGetTrackData`, ASSET-323)
 
 Using the same temporary `xmem.dll` → `msvcrt.dll` (`malloc`/`free`) copy of `Bink2Console.dll` on Windows 11,
@@ -306,13 +306,13 @@ default open state and after `BinkSetSoundTrack(0, NULL)`, which behaved identic
 - **Decoded packet sizes (`BinkGetTrackData` after `BinkDoFrame`):** every track overwrote the sentinel buffer with
   decoded bytes — **145,920 bytes** on frame 0 (initial pre-roll, matching `header_max_size` in 229/229) and
   **7,680 bytes** on frame 1 (229/229; confirmed through frame 2 on 1-, 2-, and 4-track samples).
-The loader-side runs behind these numbers are recorded in [`runtime/test/bink_decode_test.md`](../runtime/test/bink_decode_test.md),
-[`runtime/test/bink_audio_test.md`](../runtime/test/bink_audio_test.md) and
-[`runtime/test/bink_play.md`](../runtime/test/bink_play.md).
+The loader-side runs behind these numbers are recorded in [`port/test/bink_decode_test.md`](../port/test/bink_decode_test.md),
+[`port/test/bink_audio_test.md`](../port/test/bink_audio_test.md) and
+[`port/test/bink_play.md`](../port/test/bink_play.md).
 
 ## 5. What is still unknown
 
-- **Roles.** The ARC9 table of contents is encrypted, but `tools/bink_names.py` recovers each stream's path from
+- **Roles.** The ARC9 table of contents is encrypted, but `tooling/bink_names.py` recovers each stream's path from
   the mount lists ([section 8](#8-names-from-the-mount-lists)), and the folder names group the streams by use. What
   the game does with each folder at run time is not established.
 - **Audio association.** The header gives a track count, sample rate, flags and track IDs, but not which audio
@@ -320,7 +320,7 @@ The loader-side runs behind these numbers are recorded in [`runtime/test/bink_de
   `BinkGetTrackID`, `BinkGetTrackType`, `BinkGetTrackMaxSize`, and `BinkGetTrackData` succeed on all 229 tracks
   across the 196 audio-bearing streams
   ([section 4](#audio-track-decoding-binkopentrack--binkgettrackdata-asset-323)) and return 16-bit PCM for every
-  one of them (the byte count each run prints; `runtime/test/bink_audio_test.md`,
+  one of them (the byte count each run prints; `port/test/bink_audio_test.md`,
   [coverage above](#decode-coverage-over-the-whole-archive)): positional track index `i` maps 1:1 to header
   `track_ids[i]` (`0..3`), `BinkGetTrackType` returns `(flags << 16) | sample_rate`, and `BinkGetTrackData`
   returned 145,920 bytes on frame 0 and 7,680 bytes on frame 1 across all 229 tracks (with frame 2 also checked on
@@ -361,14 +361,14 @@ and audio header flags only. Keep carved streams and decoded frames in your own 
 
 ```sh
 # 1. Index-only carve of the archive (no stream written)
-python -I tools/arc9_carve.py <package>/movies.arc <temp>/movies-index --index-only
+python -I tooling/arc9_carve.py <package>/movies.arc <temp>/movies-index --index-only
 
 # 2. Stdlib index: CSV from the archive, or JSON from a carved directory
-python -I tools/bink_index.py <package>/movies.arc --out <temp>/movies.csv
-python -I tools/bink_index.py <temp>/movies --out <temp>/movies.json --format json
+python -I tooling/bink_index.py <package>/movies.arc --out <temp>/movies.csv
+python -I tooling/bink_index.py <temp>/movies --out <temp>/movies.json --format json
 
 # 3. Optional ffprobe columns (forced Bink demuxer; expects "no" for Bink 2 today)
-python -I tools/bink_index.py <temp>/movies --out <temp>/movies-probe.csv --probe
+python -I tooling/bink_index.py <temp>/movies --out <temp>/movies-probe.csv --probe
 ```
 
 The measured run produced 515 rows, 8,831,336,892 stream bytes, 1,094,744 zero bytes and 22,812 unread bytes from
@@ -426,7 +426,7 @@ mount list as `<filename>$(common)/movies/<folder>/<name>.bk2</filename>`. For `
 `core_binks` and `core_stinger_binks` lists in `common.arc`; each other pack carries its own `<pack>_binks` list.
 The archive stores a pack's streams in the order of its list sorted by lowercase path: folder first, then file name
 without the extension, compared as bytes (so `x_final_y` sorts before `x_finale`). A list can name more files than
-the archive holds, because some entries are stored in other packs, so `tools/bink_names.py` aligns the two rather
+the archive holds, because some entries are stored in other packs, so `tooling/bink_names.py` aligns the two rather
 than zipping them. The longest list (`core_binks`, 74,268 bytes) spans two zlib streams with an entry cut at the
 boundary, so `--mount` rebuilds whole XML payloads with `gamedata_index.py` when it is given an archive or an
 `arc9_carve.py` directory.
@@ -467,9 +467,9 @@ The output names game files. Like the index, it is a local work product: do not 
 
 ```sh
 # Lists read straight from common.arc (a list split over several zlib streams is rebuilt whole)
-python -I tools/bink_names.py <package>/movies.arc --mount <package>/common.arc --out <temp>/movies-names.csv
+python -I tooling/bink_names.py <package>/movies.arc --mount <package>/common.arc --out <temp>/movies-names.csv
 
 # Reuse an index or an arc9_carve.py directory, add pins, or name another pack's streams with its own list
-python -I tools/bink_names.py <temp>/movies.csv --mount <temp>/common --pins <temp>/pins.csv --out <temp>/names.json
-python -I tools/bink_names.py <package>/pack/story000/story000.arc --mount <package>/pack/story000/story000.arc --out <temp>/story000-names.csv
+python -I tooling/bink_names.py <temp>/movies.csv --mount <temp>/common --pins <temp>/pins.csv --out <temp>/names.json
+python -I tooling/bink_names.py <package>/pack/story000/story000.arc --mount <package>/pack/story000/story000.arc --out <temp>/story000-names.csv
 ```

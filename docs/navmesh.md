@@ -1,6 +1,6 @@
 # Navmesh archive (`navmeshes.arc`)
 
-**Status: decoded at container, header, schema and spatial-table level; stdlib decoder in `tools/navmesh_decode.py`.**
+**Status: decoded at container, header, schema and spatial-table level; stdlib decoder in `tooling/navmesh_decode.py`.**
 All 90,295 carved streams in `navmeshes.arc` are classified with **0 unclassified streams** into four top-level
 resource classes (`0DRP` cover-point resources, `0x00010015` navmesh tiles, Band-3 `grid` sparse-table resources and
 `PSIN` metadata containers) plus their single continuation streams. Every number below is aggregate metadata from a
@@ -13,11 +13,11 @@ is in this document or the repository.
   `6,707,510,576` bytes.
 - Walked sequentially with the fixed zlib carver rule (`ZHDR = \x78[\x01\x5e\x9c\xda]`, advance by bytes actually
   consumed). The encrypted ARC9 table of contents and encrypted sub-ARC headers were never touched.
-- Stream totals match the carver threshold (`inflated >= 64` bytes) for exact parity with `tools/navmesh_index.py`.
-  `tools/navmesh_decode.py` also accepts `< 64`-byte zlib streams strictly as continuations when a resource's block
+- Stream totals match the carver threshold (`inflated >= 64` bytes) for exact parity with `tooling/navmesh_index.py`.
+  `tooling/navmesh_decode.py` also accepts `< 64`-byte zlib streams strictly as continuations when a resource's block
   map declares a second stream, recovering **10** tiny continuations (`3` `0DRP`, `7` `0x00010015`) that the carver's
   64-byte cutoff skipped.
-- Full-archive `--deep` verification (`tools/navmesh_decode.py navmeshes.arc --deep`) ran in 236 s on Windows x64
+- Full-archive `--deep` verification (`tooling/navmesh_decode.py navmeshes.arc --deep`) ran in 236 s on Windows x64
   (Python 3.13, stdlib only) with **0 check failures** across all `64,729` `pgBase` resources (`9,603` `0DRP`,
   `27,644` `0x00010015` navmesh tiles, `27,482` Band-3 `grid` resources).
 
@@ -130,7 +130,7 @@ Across all **9,603 / 9,603** pages (`0` exceptions), `u16@0x4e` is either `0` or
 
 Only **10 distinct schemas** (6 root structs) occur across all `9,603` `0DRP` pages — **all cover-point data, not
 navmesh polygons**. Struct/enum/member hashes match standard the engine cover names under **case-sensitive joaat32**
-(verified from hand-typed clean-room candidates in `tools/navmesh_decode.py`):
+(verified from hand-typed clean-room candidates in `tooling/navmesh_decode.py`):
 
 | Root struct (joaat32) | Pages | Schemas | Summary |
 |---|---:|---:|---|
@@ -229,11 +229,11 @@ the first four fields of C's `struct tm` in their order. No month or year is sto
   placed at random with the same frequencies. Taking the first tile instead gives 99.95% against 99.95%, which says
   nothing, because almost every first tile is day 9.
 
-Method: `tools/navmesh_decode.py`'s own scan of `navmeshes.arc`, with each tile's `u32@0xE8`, `u32@0xC8`, flags,
+Method: `tooling/navmesh_decode.py`'s own scan of `navmeshes.arc`, with each tile's `u32@0xE8`, `u32@0xC8`, flags,
 counts and archive offset recorded per tile. No geometry was kept.
 
 The `+4` word of a polygon packs `(index start << 4) | count`; the runs tile the index pool in order
-(`tools/navmesh_decode.py --deep` checks it on all `124,768,148` polygons, 0 failures), which caps a polygon at 15
+(`tooling/navmesh_decode.py --deep` checks it on all `124,768,148` polygons, 0 failures), which caps a polygon at 15
 vertices. an open research project independently reads the same packing. Its polygon `+0x28` bit 17 and `+0x18` bit 27
 road/pavement labels were not adopted: a 1,027,984-polygon sample over 238 tiles sets both bits on 258 polygons, so
 they are not a partition, and in the lane-graph count [below](#polygon-flags-under-the-lane-graph) neither is under
@@ -325,7 +325,7 @@ shares the identical 20-byte prefix `+0x00..+0x13` (`3,123,445 / 3,123,445`):
 | `+0x5A` | 6 | `u8[6]` | Trailing zero padding (`0` on `6,246,890 / 6,246,890`) |
 ### Polygon flags under the lane graph
 
-`tools/navmesh_nodes.py` puts the lane graph of `levels.arc` ([world_lights_paths.md](world_lights_paths.md)) on
+`tooling/navmesh_nodes.py` puts the lane graph of `levels.arc` ([world_lights_paths.md](world_lights_paths.md)) on
 the navmesh: for each node it takes the polygon of the node's tile that contains the node in plan view and is
 closest in height, and counts that polygon's flag bits. A polygon's height is the mean of its vertex heights, not
 the surface height under the node, so on a slope the two differ (the 3 m cutoff below absorbs that). For comparison
@@ -458,7 +458,7 @@ fragment-part or kit names rather than models.
 
 The vehicle navmeshes are **stored**, not left to a runtime generator: the 161 local-space non-grid meshes in this
 archive (`flags = 7`, the non-grid partition above) were built on cell grids, and 9 of them on the one cell size
-only these documents set. Measured over all 161 on 1.0.2.1 with `tools/navmesh_cell_fit.py`:
+only these documents set. Measured over all 161 on 1.0.2.1 with `tooling/navmesh_cell_fit.py`:
 
 - **Cell grid.** A mesh's `u16` vertices are dequantised over its `+0x60` extents (step `extent / 65535`, at most
   0.0011 m on these meshes) and an x or y coordinate counts as on a grid of cell size `c` when it is within 1.5 steps
@@ -523,16 +523,16 @@ are authoring/build-time inputs to that partition:
 
 ## Tools
 
-- `tools/navmesh_cell_fit.py` (stdlib-only) measures the cell grid of the local-space meshes and, with `--common`,
+- `tooling/navmesh_cell_fit.py` (stdlib-only) measures the cell grid of the local-space meshes and, with `--common`,
   counts the `CVehiclePoints` cell sizes and searches the meshes for the models' name hashes; `--static-every N`
   adds a static-tile control. It prints aggregates only (ASSET-332).
-- `tools/navmesh_index.py` (stdlib-only) performs the quick `0DRP` header inventory (`offset`, sizes, version, `+0x20`,
+- `tooling/navmesh_index.py` (stdlib-only) performs the quick `0DRP` header inventory (`offset`, sizes, version, `+0x20`,
   raw `+0x60`/`+0x68`). For a carve directory, `--pattern` selects paths recursively. Each matching pathname
   counts once, including when the pattern itself contains `**`.
-- `tools/navmesh_decode.py` (stdlib-only) decodes all four resource classes (`0DRP`, `0x00010015`, `grid`, `PSIN`),
+- `tooling/navmesh_decode.py` (stdlib-only) decodes all four resource classes (`0DRP`, `0x00010015`, `grid`, `PSIN`),
   joins continuations (including tiny `< 64`-byte continuations), validates structural invariants, and writes aggregate
   JSON and optional numeric CSV metadata. It never writes payload bytes and never touches the TOC.
-- `tools/navmesh_links.py` (stdlib-only) decodes and verifies the 12-byte `+0x88` adjacent-polygon edges, the polygon
+- `tooling/navmesh_links.py` (stdlib-only) decodes and verifies the 12-byte `+0x88` adjacent-polygon edges, the polygon
   `+0x20` special-link prefix-sum chain, and the 32-byte `+0xA8` special links and `+0xB0` index table.
   Pass `--reciprocity` to include a `reciprocity` object. `tiles_counted` covers tiles with verified pool bounds
   and contiguous polygon spans. Within each tile, `excess_directed` sums the positive differences between the
@@ -606,19 +606,19 @@ are authoring/build-time inputs to that partition:
   The coincidence test ignores extra vertices along straight sides. The remaining 8,901,758 slots
   have at least one undefined ring. These counts describe polygon geometry only.
 
-- `tools/navmesh_nodes.py` (stdlib-only) counts the polygon flag bits under the lane-graph nodes
+- `tooling/navmesh_nodes.py` (stdlib-only) counts the polygon flag bits under the lane-graph nodes
   ([above](#polygon-flags-under-the-lane-graph)). It reads `navmeshes.arc` and `levels.arc` and writes counts only.
   An `--out` this run cannot write (a folder that cannot be created or written, a read-only existing summary, or
   one of the two archives) is one `ERROR` line and exit 2 before either archive is read.
 
 ```powershell
-python -I tools/navmesh_decode.py <package>\navmeshes.arc --out <temp>/navmesh-decode.json --csv <temp>/navmesh-decode.csv
-python -I tools/navmesh_decode.py <package>\navmeshes.arc --deep --out <temp>/navmesh-decode-deep.json
-python -I tools/navmesh_decode.py <carve-dir> --out <temp>/carved-decode.json
-python -I tools/navmesh_links.py <package>\navmeshes.arc --out <temp>/navmesh-links.json
+python -I tooling/navmesh_decode.py <package>\navmeshes.arc --out <temp>/navmesh-decode.json --csv <temp>/navmesh-decode.csv
+python -I tooling/navmesh_decode.py <package>\navmeshes.arc --deep --out <temp>/navmesh-decode-deep.json
+python -I tooling/navmesh_decode.py <carve-dir> --out <temp>/carved-decode.json
+python -I tooling/navmesh_links.py <package>\navmeshes.arc --out <temp>/navmesh-links.json
 python -I -W error::ResourceWarning tests/test_navmesh_decode.py -v
 python -I tests/test_navmesh_links.py -v
-python -I tools/navmesh_nodes.py <package>\navmeshes.arc <package>\levels.arc --jobs 8 --out <temp>/navmesh-nodes.json
+python -I tooling/navmesh_nodes.py <package>\navmeshes.arc <package>\levels.arc --jobs 8 --out <temp>/navmesh-nodes.json
 python -I -W error::ResourceWarning tests/test_navmesh_decode.py -v
 python -I tests/test_navmesh_nodes.py
 python -I tests/test_navmesh_index.py
@@ -640,7 +640,7 @@ this repository.
 
 ## Inspect one tile locally
 
-Run `python -I tools/navmesh_tile_obj.py navmeshes.arc --tile 0 --out <private-folder>/tile.obj`
+Run `python -I tooling/navmesh_tile_obj.py navmeshes.arc --tile 0 --out <private-folder>/tile.obj`
 with a zero-based tile ordinal. The reader walks complete navmesh resources in archive order and stops at the
 selection. Dynamic tiles count toward the ordinal and lack the static world-space placement required for export.
 

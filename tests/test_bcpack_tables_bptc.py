@@ -1,4 +1,4 @@
-"""Unit tests for tools/bcpack_tables_bptc.py covering public BPTC
+"""Unit tests for tooling/bcpack_tables_bptc.py covering public BPTC
 specification tables, BC7 signature configuration mappings, and runtime
 history loader validation.
 
@@ -17,7 +17,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 

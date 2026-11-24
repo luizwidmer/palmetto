@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/restofworld_model_join.py.
+"""Synthetic tests for tooling/restofworld_model_join.py.
 
     python -I tests/test_restofworld_model_join.py -v
 
@@ -17,8 +17,8 @@ import unittest.mock
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "restofworld_model_join.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "restofworld_model_join.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import restofworld_model_join as joiner  # noqa: E402
 

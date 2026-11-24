@@ -4,7 +4,7 @@ const { join } = require('node:path');
 const vm = require('node:vm');
 const { test } = require('node:test');
 
-const html = readFileSync(join(__dirname, '..', 'viewer', 'studio.html'), 'utf8');
+const html = readFileSync(join(__dirname, '..', 'app', 'studio.html'), 'utf8');
 const script = html.match(/<script>\n([\s\S]*?)<\/script>/)[1];
 
 function fakeElement() {

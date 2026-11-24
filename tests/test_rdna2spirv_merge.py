@@ -1,4 +1,4 @@
-"""tools/rdna2spirv.py --merge: an incomplete shard set is refused, not published as a partial index.
+"""tooling/rdna2spirv.py --merge: an incomplete shard set is refused, not published as a partial index.
 
     python -I tests/test_rdna2spirv_merge.py
 """
@@ -10,10 +10,10 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tooling"))
 import rdna2spirv as R  # noqa: E402
 
-TOOL = ROOT / "tools" / "rdna2spirv.py"
+TOOL = ROOT / "tooling" / "rdna2spirv.py"
 
 
 class MergeShardPartsTest(unittest.TestCase):

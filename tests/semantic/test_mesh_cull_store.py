@@ -4,7 +4,7 @@ llvmpipe (Mesa 25.2.8, LLVM 20) aborts compiling the wave64-emulated mesh epilog
 stored as a computed value ("Cannot emit physreg copy instruction"), and Mesa 26.3.1 drew no primitives for the same
 shaders. Storing %true or %false behind a branch on the same bool means the same on every driver and compiles there.
 
-The program is runtime/test/shaders/ms_tri.asm, the mesh GPU test (128 threads, 64/64 outputs, triangles), translated
+The program is port/test/shaders/ms_tri.asm, the mesh GPU test (128 threads, 64/64 outputs, triangles), translated
 natively and with --wave64-emulate. Standard library only; the spirv-val check needs SPIRV-Tools.
 """
 import os
@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import support  # noqa: E402  (path set above)
 import rdna2spirv  # noqa: E402
 
-MS_TRI = os.path.join(support.ROOT, "runtime", "test", "shaders", "ms_tri.asm")
+MS_TRI = os.path.join(support.ROOT, "port", "test", "shaders", "ms_tri.asm")
 
 
 def _dxbc(chunks):

@@ -2,9 +2,9 @@
 
 Builds BCPack chunks with the synthetic encoder of `test_bcpack.py` (no game
 files), some of them corrupted or cut short, and decodes each one both ways.
-Skipped unless `tools/bcpack_calibration` has a release build:
+Skipped unless `tooling/bcpack_calibration` has a release build:
 
-    cargo build --release --locked --offline --manifest-path tools/bcpack_calibration/Cargo.toml
+    cargo build --release --locked --offline --manifest-path tooling/bcpack_calibration/Cargo.toml
 """
 import os
 import random
@@ -12,7 +12,7 @@ import sys
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "tooling"))
 sys.path.insert(0, HERE)
 
 import bcpack  # noqa: E402
@@ -50,7 +50,7 @@ def _cases(seed, count):
         yield codec, size, bytes(raw), lanes if kind >= 0.4 else None
 
 
-@unittest.skipIf(bcpack._native_unpack() is None, "tools/bcpack_calibration is not built")
+@unittest.skipIf(bcpack._native_unpack() is None, "tooling/bcpack_calibration is not built")
 class NativeLaneDecoderTest(unittest.TestCase):
     def test_native_accepts_exactly_what_python_accepts(self):
         accepted = refused = 0
@@ -68,7 +68,7 @@ class NativeLaneDecoderTest(unittest.TestCase):
 
     def test_uniform_model_and_virtual_zeros(self):
         # q = 0 fragments end on a zero byte the encoder leaves out; the model
-        # shifts it back in (docs/textures.md, flush = 1). third_party/bcpack-rs,
+        # shifts it back in (docs/textures.md, flush = 1). vendor/bcpack-rs,
         # which follows the hardware RTL, refuses these.
         widths = bcpack.LANE_WIDTHS[4]
         for sym in (0, 1, 3, 63):
@@ -216,7 +216,7 @@ def _encode_two_element_blocks(codec, blocks, ref_dists):
 
 
 
-@unittest.skipIf(bcpack._native_unpack() is None, "tools/bcpack_calibration is not built")
+@unittest.skipIf(bcpack._native_unpack() is None, "tooling/bcpack_calibration is not built")
 class NativeBlockRebuildTest(unittest.TestCase):
     """BC1, BC3, BC4 and BC5 chunks give the same bytes, provisional entries and errors with the native rebuild."""
 

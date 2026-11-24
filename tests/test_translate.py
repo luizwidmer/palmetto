@@ -1,4 +1,4 @@
-"""Regression tests for tools/rdna2spirv.py (RDNA2 -> SPIR-V).
+"""Regression tests for tooling/rdna2spirv.py (RDNA2 -> SPIR-V).
 
 Run from the repository root:  python -m pytest tests
 Needs llvm-mc (AMDGPU target) and spirv-tools; the tests skip themselves when those are missing.
@@ -18,7 +18,7 @@ from conftest import (EMPTY_DXBC, KNOWN_VAL_ISSUES, ROOT, SAMPLE_DXBC, Shader, m
 
 pytestmark = requires_tools
 
-SAMPLES = sorted(glob.glob(os.path.join(ROOT, "runtime", "test", "shaders", "*.asm")))
+SAMPLES = sorted(glob.glob(os.path.join(ROOT, "port", "test", "shaders", "*.asm")))
 SAMPLES += sorted(glob.glob(os.path.join(ROOT, "tests", "semantic", "fixtures", "ps_*.asm")))
 
 # One minimal pixel shader per instruction family listed in the "Supported" section of rdna2spirv.py's docstring.
@@ -96,7 +96,7 @@ def test_dpp_controls_translate_and_validate(case, make_shader):
     assert "OpGroupNonUniformShuffle" in spvasm
 
 
-@pytest.mark.parametrize("mods", [[], ["row_share:20"], ["row_shl:0"], ["row_shl:1", "row_shr:2"]])
+@pytest.mark.parametrize("extensions", [[], ["row_share:20"], ["row_shl:0"], ["row_shl:1", "row_shr:2"]])
 def test_dpp_bad_control_is_rejected(mods):
     """A missing, out-of-range or duplicate DPP control must fail instead of guessing."""
     gen = rdna2spirv.Gen("ps")
@@ -249,7 +249,7 @@ def test_constants_asked_for_late_are_defined(make_shader):
 
 
 def test_a16_sample_gradients_use_full_vgprs(make_shader):
-    path = os.path.join(ROOT, "runtime", "test", "shaders", "ps_texture_grad_a16.asm")
+    path = os.path.join(ROOT, "port", "test", "shaders", "ps_texture_grad_a16.asm")
     with open(path, encoding="utf-8") as fixture:
         shader = make_shader(fixture.read(), "ps_texture_grad_a16")
     spvasm = shader.translate()
@@ -286,7 +286,7 @@ def test_compute_translates_and_validates(make_shader):
 
 def test_cs_store_packed_atomic_pointers(make_shader):
     """Packed stores need element zero of the physical dword array for Metal atomics."""
-    with open(os.path.join(ROOT, "runtime", "test", "shaders", "cs_store.asm"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "port", "test", "shaders", "cs_store.asm"), encoding="utf-8") as f:
         spvasm = make_shader(f.read(), "cs_store").translate()
     defs = dict(re.findall(r"^\s*(%\w+) = (Op[^\n]+)", spvasm, re.M))
     atomics = re.findall(r"= (OpAtomicAnd|OpAtomicOr) %uint (%\w+) ", spvasm)
@@ -336,7 +336,7 @@ def test_geometry_emit_cut_starts_a_new_triangle_strip(tmp_path: Path) -> None:
 
 def test_geometry_without_signatures_is_rejected(make_shader):
     """A gs needs ISG1/OSG1 to know which registers LDS holds and which outputs to write."""
-    with open(os.path.join(ROOT, "runtime", "test", "shaders", "gs_tri.asm"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "port", "test", "shaders", "gs_tri.asm"), encoding="utf-8") as f:
         shader = make_shader(f.read(), "gs_tri")                   # empty DXBC
     with pytest.raises(rdna2spirv.Unsupported):
         shader.translate()
@@ -344,7 +344,7 @@ def test_geometry_without_signatures_is_rejected(make_shader):
 
 def test_gs_packed_input_register_emits_one_variable(make_shader):
     """Packed ISG1 elements sharing a register must emit one %gs_inN variable and pass spirv-val."""
-    with open(os.path.join(ROOT, "runtime", "test", "shaders", "gs_tri.asm"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "port", "test", "shaders", "gs_tri.asm"), encoding="utf-8") as f:
         asm = f.read()
     dxbc = make_dxbc([
         signature_chunk(b"ISG1", [(0, 1, 0xF), (1, 0, 0x3), (1, 0, 0xC)]),
@@ -362,7 +362,7 @@ def test_gs_packed_input_register_emits_one_variable(make_shader):
 
 def test_gs_conflicting_position_and_user_in_same_register_rejected(make_shader):
     """Sharing one GS input register between SV_Position and a user varying cannot map to one variable."""
-    with open(os.path.join(ROOT, "runtime", "test", "shaders", "gs_tri.asm"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "port", "test", "shaders", "gs_tri.asm"), encoding="utf-8") as f:
         asm = f.read()
     dxbc = make_dxbc([
         signature_chunk(b"ISG1", [(0, 1, 0x3), (0, 0, 0xC)]),
@@ -376,14 +376,14 @@ def test_gs_conflicting_position_and_user_in_same_register_rejected(make_shader)
 @pytest.mark.parametrize("kw", [dict(topology=1), dict(threads=(2048, 1, 1)), dict(max_vertices=0)],
                          ids=["not-triangles", "over-1024-threads", "no-vertices"])
 def test_mesh_bad_psv0_is_rejected(make_shader, kw):
-    with open(os.path.join(ROOT, "runtime", "test", "shaders", "ms_tri.asm"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "port", "test", "shaders", "ms_tri.asm"), encoding="utf-8") as f:
         shader = make_shader(f.read(), "ms_tri", dxbc=make_dxbc([mesh_psv0_chunk(**kw)]))
     with pytest.raises(rdna2spirv.Unsupported):
         shader.translate()
 
 
 def test_mesh_without_psv0_is_rejected(make_shader):
-    with open(os.path.join(ROOT, "runtime", "test", "shaders", "ms_tri.asm"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "port", "test", "shaders", "ms_tri.asm"), encoding="utf-8") as f:
         shader = make_shader(f.read(), "ms_tri")                   # empty DXBC
     with pytest.raises(rdna2spirv.Unsupported):
         shader.translate()
@@ -391,7 +391,7 @@ def test_mesh_without_psv0_is_rejected(make_shader):
 
 def test_wave32_readlane_writelane_mask_31(make_shader):
     """SHADER-52: wave32 lane select is & 31; wave64 keeps & 63."""
-    with open(os.path.join(ROOT, "runtime", "test", "shaders", "cs_w32_lane_wrap.asm"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "port", "test", "shaders", "cs_w32_lane_wrap.asm"), encoding="utf-8") as f:
         w32 = make_shader(f.read(), name="cs_w32_lane_wrap", cs_header=(0x8088, (32, 1, 1)))
     w32_spv = w32.translate()
     w32.validate(w32_spv)
@@ -400,7 +400,7 @@ def test_wave32_readlane_writelane_mask_31(make_shader):
     assert not re.search(r"OpBitwiseAnd %uint %\w+ %c3f\b", w32_spv)
     assert rdna2spirv.translate.last_gen.wave64 is False
 
-    with open(os.path.join(ROOT, "runtime", "test", "shaders", "cs_w64x_readlane.asm"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "port", "test", "shaders", "cs_w64x_readlane.asm"), encoding="utf-8") as f:
         w64 = make_shader(f.read(), name="cs_w64x_readlane")
     w64_spv = w64.translate()
     assert rdna2spirv.translate.last_gen.wave64 is True
@@ -410,7 +410,7 @@ def test_wave32_readlane_writelane_mask_31(make_shader):
 @pytest.mark.parametrize("threads", [96, 128], ids=["96-threads", "128-threads"])
 def test_mesh_v5_seed_and_threads_constant(make_shader, threads):
     """Mesh prologue computes v5 = %wlin * NumThreads + %lidx and registers NumThreads before assembly (7b82460)."""
-    with open(os.path.join(ROOT, "runtime", "test", "shaders", "ms_tri.asm"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "port", "test", "shaders", "ms_tri.asm"), encoding="utf-8") as f:
         asm = f.read()
     dxbc = make_dxbc([mesh_psv0_chunk(threads=(threads, 1, 1), max_vertices=64, max_primitives=64)])
     shader = make_shader(asm, name=f"ms_v5_seed_{threads}", dxbc=dxbc)
@@ -424,7 +424,7 @@ def test_mesh_v5_seed_and_threads_constant(make_shader, threads):
     shader.validate(spvasm, KNOWN_VAL_ISSUES.get("ms_tri"))
 def test_mesh_cull_primitive_is_block_bool(make_shader):
     """CullPrimitiveEXT must be a Block bool member (VUID-07036); array-of-bool trips SPIRV-Tools ≤2025.1."""
-    with open(os.path.join(ROOT, "runtime", "test", "shaders", "ms_v5_workgroup.asm"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "port", "test", "shaders", "ms_v5_workgroup.asm"), encoding="utf-8") as f:
         shader = make_shader(f.read(), "ms_v5_workgroup", dxbc=SAMPLE_DXBC["ms_v5_workgroup"])
     spvasm = shader.translate()
     shader.validate(spvasm)
@@ -839,7 +839,7 @@ s_endpgm
 def test_float_controls_declared(stage, make_shader):
     """Every module declares SignedZeroInfNanPreserve for 32-bit floats, so the driver keeps NaN, inf and -0 as
     RDNA2 computes them (AMD folded x != x to false and turned -0 products into +0 without it; see
-    runtime/test/shaders/cs_signed_zero_nan.asm), and DenormPreserve for 16-bit floats, so it keeps an f16 denormal
+    port/test/shaders/cs_signed_zero_nan.asm), and DenormPreserve for 16-bit floats, so it keeps an f16 denormal
     instead of flushing it (NVIDIA read the 0x0040 of ps_sdwa_f16_const's `src0_sel:BYTE_1` as +0 without it,
     SHADER-526). Its index entry names the device properties the runtime checks."""
     body = FLOAT_CONTROLS_CS if stage == "cs" else program("v_mul_f32 v1, v0, v0")
@@ -898,7 +898,7 @@ BARRIER_SAMPLES = ("cs_barrier_divergent", "cs_barrier_early_end", "cs_barrier_l
 def test_nested_barrier_runs_in_barrier_rounds(stem, make_shader):
     """No OpControlBarrier is left among the blocks (the cases of the switch over %pc): s_barrier ends a segment
     there. The only two are before the round loop and at its end, where the whole workgroup is."""
-    with open(os.path.join(ROOT, "runtime", "test", "shaders", stem + ".asm"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "port", "test", "shaders", stem + ".asm"), encoding="utf-8") as f:
         shader = make_shader(f.read(), stem)
     asm = shader.translate()
     shader.validate(asm)
@@ -950,7 +950,7 @@ def test_top_level_barrier_over_the_depth_bound_runs_in_barrier_rounds(make_shad
 def test_barrier_rounds_are_wave32_compute_only(make_shader, monkeypatch):
     """Native wave64 (AMD's 64-wide subgroups) keeps the barrier where s_barrier is; under --wave64-emulate the
     emulated round loop already holds the only barrier."""
-    with open(os.path.join(ROOT, "runtime", "test", "shaders", "cs_barrier_divergent.asm"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "port", "test", "shaders", "cs_barrier_divergent.asm"), encoding="utf-8") as f:
         src = f.read()
     shader = make_shader("s_mov_b64 exec, -1\n" + src, "cs_barrier_divergent_w64")   # a 64-bit EXEC write: wave64
     asm = shader.translate()
@@ -1386,7 +1386,7 @@ def test_wave64_emulate_reuses_a_mask_exchange(make_shader, monkeypatch):
 
 def test_mesh_s3_wave_id_emits_local_index_shift_and_bfe(make_shader):
     """Mesh shader prologue initializes s3[27:24] from LocalInvocationIndex >> 6 and s_bfe_u32 extracts it."""
-    path = os.path.join(ROOT, "runtime", "test", "shaders", "ms_wave_info_s3.asm")
+    path = os.path.join(ROOT, "port", "test", "shaders", "ms_wave_info_s3.asm")
     with open(path, encoding="utf-8") as f:
         shader = make_shader(f.read(), "ms_wave_info_s3", dxbc=SAMPLE_DXBC["ms_wave_info_s3"])
     asm = shader.translate()
@@ -1561,7 +1561,7 @@ def _eval_resinfo(lines, view, level, word3):
 
 @pytest.mark.parametrize("array", [False, True])
 def test_resinfo_words_follow_rdna2(array):
-    """SHADER-388 (tools/image_query_probe.py on gfx1036): a 2D depth word is 0; a 2D array's layer count is
+    """SHADER-388 (tooling/image_query_probe.py on gfx1036): a 2D depth word is 0; a 2D array's layer count is
     minified from BASE_LEVEL; past the last level width, height and depth are 0 and the level count stays; a level
     with bit 31 set is past the last level too (the address VGPR is unsigned)."""
     cases = {  # (T# full size w, h, layers, BASE_LEVEL, LAST_LEVEL, level) -> words, as measured

@@ -7,7 +7,7 @@ comparing as unsigned (_u32) or two's-complement signed (_i32); the _rtn_ form a
 plain form leaves vdst alone. The two comparisons differ exactly when the operands differ in bit 31: 0x80000000 is the
 largest signed-negative and the 2^31-th unsigned value.
 
-Each case is a compute shader translated by tools/rdna2spirv.py (support.translate_lines) and run in
+Each case is a compute shader translated by tooling/rdna2spirv.py (support.translate_lines) and run in
 tests/semantic/spirv_mini_interp.py (one lane: that interpreter does not share LDS between lanes, see lds_run.py).
 It writes a few LDS dwords, runs a sequence of atomics and stores each returned value and the final dwords. The
 tables are written out by hand; seeded random sequences are checked against a plain-Python LDS. Until this file, the
@@ -19,7 +19,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import lds_run as L  # noqa: E402  (also puts tools/ on sys.path)
+import lds_run as L  # noqa: E402  (also puts tooling/ on sys.path)
 
 M32 = L.M32
 

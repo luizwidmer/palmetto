@@ -1,4 +1,4 @@
-"""Tests for tools/rtti_scan.py covering synthetic MSVC RTTI structures.
+"""Tests for tooling/rtti_scan.py covering synthetic MSVC RTTI structures.
 
     python -I tests/test_rtti_scan.py
 
@@ -15,11 +15,11 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tooling"))
 import rtti_scan
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "rtti_scan.py")
+TOOL = os.path.join(ROOT, "tooling", "rtti_scan.py")
 
 
 def make_synthetic_pe(text_bytes: bytes = b"", rdata_bytes: bytes = b"", image_base: int = 0x140000000) -> bytes:

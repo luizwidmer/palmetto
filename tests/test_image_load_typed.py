@@ -1,4 +1,4 @@
-"""Typed image_load in tools/rdna2spirv.py reads every format from the sampled array (SHADER-151; standard library only:
+"""Typed image_load in tooling/rdna2spirv.py reads every format from the sampled array (SHADER-151; standard library only:
 no GPU, LLVM or game files; SPIRV-Tools only for the optional validation test).
 
     python -I tests/test_image_load_typed.py
@@ -10,7 +10,7 @@ reads a storage image, so a shader that only loads declares no StorageImageReadW
 lacks, #619) and no StorageImageWriteWithoutFormat. These tests translate small pixel shaders and check the SPIR-V:
 the capabilities, which binding and component type each fetch reads, and, with a small evaluator of the code that
 picks the branch, the branch taken for all 512 FORMAT values with a hit and with a miss.
-runtime/test/shaders/cs_imgload.asm checks the result on a GPU (vk_store_test load).
+port/test/shaders/cs_imgload.asm checks the result on a GPU (vk_store_test load).
 """
 import itertools
 import os
@@ -24,7 +24,7 @@ from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import rdna2spirv  # noqa: E402
 
 EMPTY_DXBC = b"DXBC" + bytes(16) + struct.pack("<III", 1, 32, 0)
@@ -235,7 +235,7 @@ class LoadOnlyShaders(unittest.TestCase):
                 m = Module(load_shader(dim))
                 self.assertFalse(m.caps & STORAGE_IMAGE_CAPS, sorted(m.caps))
                 self.assertNotIn("OpImageRead", m.text)
-                # Set 0 bindings 4 and 7-19 are storage images (runtime/src/vulkan_bindless.h).
+                # Set 0 bindings 4 and 7-19 are storage images (port/src/vulkan_bindless.h).
                 self.assertEqual(set(m.binding.values()), {0, 1, 2, DIMS[dim][1]})
 
     def test_each_component_type_is_fetched_from_the_sampled_binding_of_its_dimension(self):

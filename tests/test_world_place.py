@@ -18,7 +18,7 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS = os.path.dirname(os.path.abspath(__file__))
-for p in (os.path.join(ROOT, "tools"), TESTS):
+for p in (os.path.join(ROOT, "tooling"), TESTS):
     if p not in sys.path:
         sys.path.insert(0, p)
 

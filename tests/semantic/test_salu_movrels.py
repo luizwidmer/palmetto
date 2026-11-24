@@ -1,7 +1,7 @@
 """Semantic interpreter tests for RDNA2 s_movrels_b32 and s_movrels_b64 (relative SGPR reads through M0).
 
 RDNA2 ISA SOP1: s_movrels_b32 D = SGPR[S0 + M0]; s_movrels_b64 reads the pair SGPR[S0 + M0], SGPR[S0 + M0 + 1].
-SCC is not written. Each case translates a synthetic pixel shader with tools/rdna2spirv.py and runs it in
+SCC is not written. Each case translates a synthetic pixel shader with tooling/rdna2spirv.py and runs it in
 tests/semantic/spirv_mini_interp.py; results leave through exp as 16-bit halves ORed into 0x40000000. s_movreld (the
 relative write) stays Unsupported. Standard library only; no GPU, no game files.
 """
@@ -14,7 +14,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

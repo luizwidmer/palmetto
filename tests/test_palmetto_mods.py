@@ -1,4 +1,4 @@
-"""tools/palmetto_mods.py: local mod manifests, folders and ZIP packages. No game data.
+"""tooling/palmetto_mods.py: local mod manifests, folders and ZIP packages. No game data.
 
     python -I tests/test_palmetto_mods.py -v
 """
@@ -13,7 +13,7 @@ import unittest
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tooling"))
 import palmetto_mods  # noqa: E402
 
 MANDY = {
@@ -77,7 +77,7 @@ class ManifestTests(unittest.TestCase):
 class ManagerTests(unittest.TestCase):
     def test_new_list_enable_disable_and_uninstall(self):
         with tempfile.TemporaryDirectory() as tmp:
-            mods = os.path.join(tmp, "mods")
+            mods = os.path.join(tmp, "extensions")
             code, out, err = cli("--dir", mods, "new", "lucia_to_mandy", "--name", "Mandy",
                                  "--game-version", "1.0.2.1",
                                  "--swap", "player_story000_00=cs_mandy")
@@ -104,7 +104,7 @@ class ManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             package = Path(tmp, "package", "mandy_prison_intro")
             write_json(package / "mod.json", MANDY)
-            mods = os.path.join(tmp, "mods")
+            mods = os.path.join(tmp, "extensions")
             code, out, err = cli("--dir", mods, "install", str(Path(tmp, "package")))
             self.assertEqual((code, err), (0, ""))
             self.assertIn("installed mandy_prison_intro", out)
@@ -130,7 +130,7 @@ class ManagerTests(unittest.TestCase):
             with zipfile.ZipFile(package, "w") as archive:
                 archive.writestr("mod.json", json.dumps(MANDY))
                 archive.writestr("../escape.txt", "nope")
-            code, out, err = cli("--dir", os.path.join(tmp, "mods"), "install", str(package))
+            code, out, err = cli("--dir", os.path.join(tmp, "extensions"), "install", str(package))
             self.assertEqual(code, 2)
             self.assertEqual(out, "")
             self.assertIn("unsafe ZIP member", err)
@@ -138,10 +138,10 @@ class ManagerTests(unittest.TestCase):
 
     def test_check_reports_broken_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
-            broken = Path(tmp, "mods", "broken")
+            broken = Path(tmp, "extensions", "broken")
             broken.mkdir(parents=True)
             broken.joinpath("mod.json").write_text("{not json", encoding="utf-8")
-            code, out, err = cli("--dir", os.path.join(tmp, "mods"), "check")
+            code, out, err = cli("--dir", os.path.join(tmp, "extensions"), "check")
             self.assertEqual(code, 1)
             self.assertIn("skipped broken:", out)
             self.assertEqual(err, "")
@@ -161,14 +161,14 @@ class ManagerTests(unittest.TestCase):
             self.assertEqual((code, err), (0, ""))
             self.assertIn(" --dry-run ", " " + out)
             self.assertIn("--mods", out)
-            self.assertIn(os.path.join(str(port), "mods"), out)
+            self.assertIn(os.path.join(str(port), "extensions"), out)
             self.assertIn("--archetype-lookup 1A2B3C0", out)
             self.assertTrue(out.rstrip().endswith("--windowed"))
 
 
 class SamplesAndGuiTests(unittest.TestCase):
     def test_bundled_basic_mods_are_valid_and_safe(self):
-        mods, errors = palmetto_mods.load_mods(str(ROOT / "mods"))
+        mods, errors = palmetto_mods.load_mods(str(ROOT / "extensions"))
         self.assertEqual(errors, [])
         by_folder = {m.folder: m for m in mods}
         self.assertIn("mandy_prison_intro", by_folder)
@@ -183,11 +183,11 @@ class SamplesAndGuiTests(unittest.TestCase):
         self.assertEqual(active, {0xE472B687: by_folder["mandy_prison_intro"].swaps[0]})
 
     def test_gui_is_an_explicit_lazy_tkinter_entry_point(self):
-        source = (ROOT / "tools" / "palmetto_mods.py").read_text(encoding="utf-8")
+        source = (ROOT / "tooling" / "palmetto_mods.py").read_text(encoding="utf-8")
         self.assertIn('commands.add_parser("gui"', source)
         self.assertIn("import tkinter as tk", source)
         self.assertLess(source.index("def run_gui"), source.index("import tkinter as tk"))
-        args = palmetto_mods.build_parser().parse_args(["--dir", "mods", "gui"])
+        args = palmetto_mods.build_parser().parse_args(["--dir", "extensions", "gui"])
         self.assertEqual(args.command, "gui")
 
     def test_windows_launcher_opens_the_gui(self):

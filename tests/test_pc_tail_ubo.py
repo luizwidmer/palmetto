@@ -4,7 +4,7 @@ Devices with maxPushConstantsSize 128 (Vulkan's minimum: AMD's Windows driver on
 drivers) can't take the default 144-byte block (152 with --mesh-compute). With the flag, the push-constant block is
 s0..s31 alone, and the tail that follows them by default (heap base, code base, the --mesh-compute output address)
 is a uniform block at set 1, binding 0, in the same order. The inputs are the hand-written GPU tests in
-runtime/test/shaders with conftest's synthetic containers (no game data). Here:
+port/test/shaders with conftest's synthetic containers (no game data). Here:
 * without the flag the module and its metadata are what they were;
 * with it the push-constant block is 128 bytes, every tail read goes through %pc_tail, the block is in the entry
   point's interface, the module passes spirv-val, and the metadata records "pc_tail" without counting its binding
@@ -20,7 +20,7 @@ import pytest
 
 from conftest import ROOT, SAMPLE_DXBC, requires_tools
 
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import rdna2spirv  # noqa: E402
 
 TAIL_READERS = ("cs_store", "ps_m15")     # heap base (memory); ps_m15 also the code base (s_getpc_b64)
@@ -28,7 +28,7 @@ TAIL_READERS = ("cs_store", "ps_m15")     # heap base (memory); ps_m15 also the 
 
 def _translate(make_shader, name=None, asm=None, tail=True, mesh_compute=False):
     if asm is None:
-        with open(os.path.join(ROOT, "runtime", "test", "shaders", name + ".asm"), encoding="utf-8") as f:
+        with open(os.path.join(ROOT, "port", "test", "shaders", name + ".asm"), encoding="utf-8") as f:
             asm = f.read()
     kw = {"dxbc": SAMPLE_DXBC[name]} if name in SAMPLE_DXBC else {}
     shader = make_shader(asm, name or "ps_test", **kw)

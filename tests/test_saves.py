@@ -1,4 +1,4 @@
-"""Tests for tools/saves.py: ASAV/JSAV/SLAYER1 parsing, the byte-exact JSAV rebuild, extract/pack, diff, and the
+"""Tests for tooling/saves.py: ASAV/JSAV/SLAYER1 parsing, the byte-exact JSAV rebuild, extract/pack, diff, and the
 import into the offline XGameSave folder layout. Every container here is synthetic, built by the test itself; no real
 save data is used or quoted.
 
@@ -17,8 +17,8 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "saves.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "saves.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import saves  # noqa: E402
 
 CODE_GROUP = "$0x11111111"
@@ -610,7 +610,7 @@ class MalformedSlayerTest(unittest.TestCase):
 
 class ImportTest(unittest.TestCase):
     def test_encoding_matches_the_shim(self):
-        # Same rule as encode_name() in runtime/shims/xgameruntime_gamesave.cpp.
+        # Same rule as encode_name() in port/shims/xgameruntime_gamesave.cpp.
         self.assertEqual(saves.xgs_encode("slot 1/main"), "slot%201%2Fmain")
         self.assertEqual(saves.xgs_encode("world.dat"), "world.dat")
         self.assertEqual(saves.xgs_encode(".hidden"), "%2Ehidden")
@@ -629,7 +629,7 @@ class ImportTest(unittest.TestCase):
     def test_import_rejects_flag_as_value(self):
         with tempfile.TemporaryDirectory() as tmp:
             story, _, _ = self._folders(tmp)
-            tool = os.path.join(ROOT, "tools", "saves.py")
+            tool = os.path.join(ROOT, "tooling", "saves.py")
             result = subprocess.run(
                 [sys.executable, "-I", tool, "import", story, "--out", "--dry-run"],
                 cwd=tmp, capture_output=True, text=True,
@@ -641,7 +641,7 @@ class ImportTest(unittest.TestCase):
     def test_import_map_needs_old_equals_new(self):
         with tempfile.TemporaryDirectory() as tmp:
             story, _, _ = self._folders(tmp)
-            tool = os.path.join(ROOT, "tools", "saves.py")
+            tool = os.path.join(ROOT, "tooling", "saves.py")
             result = subprocess.run(
                 [sys.executable, "-I", tool, "import", story, "--map", "SLOT3", "--dry-run"],
                 cwd=tmp, capture_output=True, text=True,
@@ -679,7 +679,7 @@ class ImportTest(unittest.TestCase):
                                            "--map", "SLOT3=Same/blob", "--map", "Player=same/BLOB"])
 
     def test_container_names_follow_the_runtime_rule(self):
-        # The same rule as valid_container_name() in runtime/shims/xgameruntime_gamesave.cpp.
+        # The same rule as valid_container_name() in port/shims/xgameruntime_gamesave.cpp.
         for good in ("SLOT3", "slots/SAVE_00.sav-1", "a/b/c"):
             self.assertTrue(saves.valid_container_name(good), good)
         for bad in ("slot 0", "a..b", "x.", "dir/", "a/b-c/d", "", "é", "a" * 257):

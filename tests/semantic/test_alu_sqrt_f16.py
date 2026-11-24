@@ -1,6 +1,6 @@
 """End-to-end semantic tests for RDNA2 v_sqrt_f16 (D.f16 = sqrt(S0.f16)).
 
-Covers v_sqrt_f16 executed end-to-end through tools/rdna2spirv.py (via
+Covers v_sqrt_f16 executed end-to-end through tooling/rdna2spirv.py (via
 support.translate_lines) and tests/semantic/spirv_mini_interp.py:
   - Exact binary16 square roots (0.0, -0.0, 0.25, 1.0, 4.0, 9.0, powers of 2,
     and exact subnormal squares) plus fractional/non-exact and max finite
@@ -31,7 +31,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

@@ -57,7 +57,7 @@ Ordinals are documented in
 [`docs/d3d12-xs-bridge.md:99-113`](a public prior-art project)
 and the individual stubs in
 [`components/runtime-bridge/src/d3d12_xs_bridge.cpp`](a public prior-art project).
-"Palmetto today" describes `runtime/shims/d3d12_xs.cpp` at the time of writing.
+"Palmetto today" describes `port/shims/d3d12_xs.cpp` at the time of writing.
 
 | # | Export (the prior art's spelling) | Kind | Palmetto today | Note |
 |---:|---|---|---|---|
@@ -204,9 +204,9 @@ have no ordinal here and are absent from this export dump.
 This matters if the table is used to build a replacement DLL. a public prior-art project deliberately de-brands the
 vendor token:
 
-- `tools/gen_def.py` derives the console-only token from the export table, then emits
+- `tooling/gen_def.py` derives the console-only token from the export table, then emits
   `EXPORTS <real-name>=<internal-name>` using `OUR_TOKEN = "Cons"`
-  ([`tools/gen_def.py:2-24,38,149-183`](a public prior-art project)).
+  ([`tooling/gen_def.py:2-24,38,149-183`](a public prior-art project)).
   The generated `.def` is **not committed**; it is built from the user-supplied vendor DLL.
 - The bridge source defines `D3D12ConsCreateDevice` and `D3D12Cons*` symbols
   ([`d3d12_xs_bridge.cpp:451-475`](a public prior-art project)).
@@ -277,8 +277,8 @@ in this session.
 Reproduce the first link:
 
 ```
-python tools/d3d12_xs_surface.py --check --sdk
-python tools/d3d12_xs_surface.py --check --sdk --prior-art <a public prior-art project clone>
+python tooling/d3d12_xs_surface.py --check --sdk
+python tooling/d3d12_xs_surface.py --check --sdk --prior-art <a public prior-art project clone>
 python -I tests/test_d3d12_xs_surface.py
 ```
 
@@ -640,9 +640,9 @@ None of these has a numeric value in a public prior-art project, and none has a 
 therefore **described, not answered**: the names tell Palmetto what to look for in the game's
 resource descriptions, and the copy/state names tell it which compression transitions the game
 may perform, but the actual swizzle and DCC metadata format still has to come from Palmetto's own
-`tools/amd_swizzle.py` (the mode's equation, read from the public AMD header and evaluated to
-detile with), `tools/tile_probe.py` (the block-endpoint feature and smoothness score measured on
-a blob) and `tools/swizzle_search.py` (the brute-force search over every bit ordering with the
+`tooling/amd_swizzle.py` (the mode's equation, read from the public AMD header and evaluated to
+detile with), `tooling/tile_probe.py` (the block-endpoint feature and smoothness score measured on
+a blob) and `tooling/swizzle_search.py` (the brute-force search over every bit ordering with the
 right x/y split inside a tile, scored with `tile_probe`), or from the console `xg_xs.dll`
 functions `XGComputeOptimalSwizzleMode`, `XGEncodeDCC`, `XGDecodeDCC` (a public prior-art project names them; it does
 not call them).
@@ -748,7 +748,7 @@ are taken from them; no code or prose is copied.
 
 If any code is later adapted from a public prior-art project, it must carry the a public prior-art project copyright and
 `GPL-3.0-only` notice, and the file must say exactly which a public prior-art project file it came from. The checker
-in `tools/d3d12_xs_surface.py` is original code written for this repository; it reads only the
+in `tooling/d3d12_xs_surface.py` is original code written for this repository; it reads only the
 tables above and, optionally, a local SDK or a public prior-art project checkout.
 
 ## 12. References
@@ -768,7 +768,7 @@ a public prior-art project, pinned at `d304fa2`:
 - `components/runtime-bridge/src/d3d12_xs_bridge.cpp:336-576` — the function stubs.
 - `components/extension-wrapper/console_extensions.h:45-191` — type/method declarations.
 - `components/extension-wrapper/src/wrap.cpp:279-326` — `CreateCommandList` interception.
-- `tools/gen_def.py:2-24,38,149-183` — the token alias rule.
+- `tooling/gen_def.py:2-24,38,149-183` — the token alias rule.
 - `components/present-adapter/include/present_adapter.h`, `components/memory-adapter/include/memory_adapter.h`
   — the two seams.
 
@@ -783,4 +783,4 @@ Palmetto:
 
 - [d3d12_vulkan.md](d3d12_vulkan.md) §3.5, §4.5, §7, §8.2 — the gaps this page maps onto.
 - `docs/runtime_imports.md` (runtime-imports branch) — which imports the shipped DLLs actually bind.
-- `runtime/shims/d3d12_xs.cpp` — the four functions Palmetto serves today.
+- `port/shims/d3d12_xs.cpp` — the four functions Palmetto serves today.

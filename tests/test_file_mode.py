@@ -1,4 +1,4 @@
-"""tools/file_mode.py and its callers never change the process umask; no game data.
+"""tooling/file_mode.py and its callers never change the process umask; no game data.
 
     python -I tests/test_file_mode.py -v
 """
@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tooling"))
 import file_mode  # noqa: E402
 import awc_manifest  # noqa: E402
 import classify_carve  # noqa: E402

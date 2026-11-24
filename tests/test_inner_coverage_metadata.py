@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tooling"))
 from feature_scan import inner_coverage_metadata, scan_dxbc
 
 
@@ -75,7 +75,7 @@ class Metadata(unittest.TestCase):
             self.assertEqual(result["inner_coverage_metadata"], expected)
             self.assertEqual(result["unreadable"], 1)
             output = Path(tmp) / "counts.json"
-            run = subprocess.run([sys.executable, "-I", str(ROOT / "tools" / "feature_scan.py"),
+            run = subprocess.run([sys.executable, "-I", str(ROOT / "tooling" / "feature_scan.py"),
                                   str(shaders), "--out", str(output)], capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertIn("ISG1 absence does not disprove use", run.stdout)

@@ -1,6 +1,6 @@
 """SHADER-1264: a computed 32-bit value written to exec_lo / exec_hi turns on the lanes whose bit is set.
 
-runtime/test/shaders/cs_w32_exec_computed.asm and cs_w64_exec_computed.asm write values the translator can't fold
+port/test/shaders/cs_w32_exec_computed.asm and cs_w64_exec_computed.asm write values the translator can't fold
 (built from v_readfirstlane_b32) into EXEC with s_lshl_b32, s_add_u32, s_bfm_b32, s_not_b32, s_mov_b32 and a lane
 mask s_and_b32 a number. Each lane of that half takes its own bit of the value; testing the value for non-zero turns
 on the whole half. Run on all lanes of one wave (32, and 64 without --wave64-emulate) with a heap of 0xee bytes; the
@@ -23,9 +23,9 @@ class ExecComputed(unittest.TestCase):
                   "cs_w64_exec_computed": [8224, 8192, 16384, 16384]}
 
     def run_words(self, name, lanes):
-        sys.path.insert(0, os.path.join(support.ROOT, "runtime", "test", "shaders"))
+        sys.path.insert(0, os.path.join(support.ROOT, "port", "test", "shaders"))
         from compute_fixture import compute_header
-        header = compute_header(os.path.join(support.ROOT, "runtime", "test", "shaders", name + ".asm"))
+        header = compute_header(os.path.join(support.ROOT, "port", "test", "shaders", name + ".asm"))
         spv = support.translate_fixture(name, fssm=bytes(header))
         memory = {a: 0xEEEEEEEE for a in range(0, 0x100, 4)}
         si.run_workgroup(spv, lanes, lanes,

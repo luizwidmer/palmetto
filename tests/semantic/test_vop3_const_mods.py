@@ -12,7 +12,7 @@ literals as ``neg(<imm>)``, ``|<imm>|`` and ``-|<imm>|`` (and the assembler also
   * ``|0xbf800000|``, ``-|0x3f800000|``, ``-|0|`` preserve ``abs`` and ``neg`` on integer/hex literals (previously
     ``shader_ir`` dropped ``abs`` on ``imm`` operands).
 
-Each case translates a synthetic pixel shader with ``tools/rdna2spirv.py`` and executes it in
+Each case translates a synthetic pixel shader with ``tooling/rdna2spirv.py`` and executes it in
 ``tests/semantic/spirv_mini_interp.py`` (no llvm-mc, SPIRV-Tools, GPU or game data needed).
 """
 import os
@@ -26,7 +26,7 @@ from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)
@@ -62,7 +62,7 @@ def translate(lines, export="v0, v1, v2, v3"):
     if _TMP_DIR is None:
         setUpModule()
     asm = (
-        "; test_vop3_const_mods\n"
+        "; test_vop3_const_extensions\n"
         + "".join(f"\t{ln}\n" for ln in lines)
         + f"\texp mrt0 {export} done vm\n"
         + "\ts_endpgm\n"

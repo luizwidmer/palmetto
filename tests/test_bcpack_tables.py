@@ -1,4 +1,4 @@
-"""Unit tests for tools/bcpack_tables.py covering BC encoding lookup tables,
+"""Unit tests for tooling/bcpack_tables.py covering BC encoding lookup tables,
 format descriptors, and mode bit validation.
 
 All tests operate strictly on codec-level lookup tables and synthetic inputs;
@@ -13,7 +13,7 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 

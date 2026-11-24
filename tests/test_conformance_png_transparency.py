@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "conformance" / "compare.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "tooling" / "conformance" / "compare.py"
 SPEC = importlib.util.spec_from_file_location("conformance_compare_transparency", SCRIPT)
 C = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = C

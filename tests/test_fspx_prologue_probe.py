@@ -1,4 +1,4 @@
-"""Unit tests for tools/fspx_prologue_probe.py (TEST-849). Standard library only; no GPU or game files needed."""
+"""Unit tests for tooling/fspx_prologue_probe.py (TEST-849). Standard library only; no GPU or game files needed."""
 import io
 import sys
 import unittest
@@ -7,7 +7,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLS = ROOT / "tools"
+TOOLS = ROOT / "tooling"
 sys.dont_write_bytecode = True
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))

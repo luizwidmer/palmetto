@@ -5,12 +5,12 @@
   v_fmac_f32       D = fma(S0, S1, D)                          (fused, accumulates into vdst)
   v_mad_legacy_f32 D = f32(legacy_mul(S0, S1) + S2)            (0 * anything -> +0.0, unfused)
 
-Each test builds a hand-written RDNA2 pixel or compute shader listing, translates it with tools/rdna2spirv.py,
+Each test builds a hand-written RDNA2 pixel or compute shader listing, translates it with tooling/rdna2spirv.py,
 executes the SPIR-V in tests/semantic/spirv_mini_interp.py, and compares the result words against an independent
 plain-Python IEEE-754 binary32 / RDNA2 ISA reference oracle (stdlib only, no game data).
 
 Observed translator / interpreter findings (kept out of failing assertions and documented here):
-  1. v_min3_f32 / v_max3_f32 with NaN operands: tools/rdna2spirv.py emits GLSL.std.450 NMin / NMax, which give the
+  1. v_min3_f32 / v_max3_f32 with NaN operands: tooling/rdna2spirv.py emits GLSL.std.450 NMin / NMax, which give the
      other operand for a NaN, as RDNA2 hardware does. Those rows are asserted in tests/semantic/
      test_float_nan_fract.py; NaN inputs stay out of the value assertions here (clamp-on-NaN is still FClamp, which
      spirv_mini_interp.py rejects). NaN semantics are tested on v_mad_f32, v_fmac_f32, and v_mad_legacy_f32.
@@ -38,7 +38,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:
@@ -711,7 +711,7 @@ class DenormalFlushTests(unittest.TestCase):
     1922c0c9244e41ed056f71e897512c72e24c7022), which only forms these instructions when f32 denormals are
     flushed. The translator emulates that with Gen.flush_f32, so the RDNA2 column below is what it computes.
     9,297 of the 26,503 shaders in shaders.arc use at least one of the three (440,858 occurrences, 0.99% of the
-    corpus), counted with tools/shader_profile.py over the gfx1013 disassembly.
+    corpus), counted with tooling/shader_profile.py over the gfx1013 disassembly.
     """
 
     CASES = [

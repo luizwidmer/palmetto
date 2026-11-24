@@ -1,4 +1,4 @@
-"""Tests for tools/mem_diff.py, the FUZZ-5 memory differential fuzzer (standard library only; no game data, GPU or
+"""Tests for tooling/mem_diff.py, the FUZZ-5 memory differential fuzzer (standard library only; no game data, GPU or
 llvm-mc).
 
     python -I tests/test_mem_diff.py
@@ -10,7 +10,7 @@ import unittest
 from fractions import Fraction
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.dont_write_bytecode = True
 
 import mem_diff as md  # noqa: E402

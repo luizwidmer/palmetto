@@ -1,4 +1,4 @@
-"""Negative and out-of-range indices for tools/zero_span.py.
+"""Negative and out-of-range indices for tooling/zero_span.py.
 
 The helper documents that its counts match len(buf[start:end]) and that all_zero() is true only for an empty
 or all-zero slice. Python slices normalize negative indices and clamp out-of-range ones; the helper used to
@@ -11,7 +11,7 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import zero_span  # noqa: E402
 
 DATA = b"ABCDEFGHIJ" * 20          # 200 non-zero bytes

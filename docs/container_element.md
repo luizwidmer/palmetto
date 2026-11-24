@@ -110,9 +110,9 @@ non-zero and the record's flag byte `+0xD` is 0. The failure is in the finalize 
 which builds the `D3D12_RESOURCE_DESC` (`0xC4B030` at `0x193E06B`) and asks its allocation-info helper `0xABFAD0` for
 the size; that helper calls console device slot 108.
 
-The runtime's slot-108 conversion (`runtime/shims/d3d12_xs_device.cpp`, `Slot == 108`) forwards the description to the
+The runtime's slot-108 conversion (`port/shims/d3d12_xs_device.cpp`, `Slot == 108`) forwards the description to the
 PC `GetResourceAllocationInfo`. The PC device's `allocation()` sizes through `DeviceState::texture_format()`, and that
-function has an explicit rule (`runtime/shims/d3d12_vulkan_device.cpp:957`):
+function has an explicit rule (`port/shims/d3d12_vulkan_device.cpp:957`):
 
 ```text
 if (desc.Format == DXGI_FORMAT_A8_UNORM &&
@@ -191,7 +191,7 @@ array at `+0x98`/`+0xA0`. Nothing on the measured stop reads it, so it should no
 
 ## 7. What was changed
 
-`runtime/shims/startup_trace.h` - the `PALMETTO_POKE_LOG` memory dump was extended from "four qwords at `rax` and at
+`port/shims/startup_trace.h` - the `PALMETTO_POKE_LOG` memory dump was extended from "four qwords at `rax` and at
 `rsi`" to a small table (`rax`/`rbx`/`rdx`/`r8`/`rdi` four qwords each, `rsi` twelve) because the container's fields
 live in the second half of a 0x60-byte object and the descriptor travels in `rdx`. The diagnostic stays behind
 `PALMETTO_POKE_LOG`, so an unset boot is unchanged; the baseline table in section 5 is the measurement that it is.
@@ -200,7 +200,7 @@ Nothing else in the repository was touched.
 ## 8. The smallest next change
 
 Teach the format gate that `A8_UNORM` is a render-target format: in `DeviceState::texture_format()`
-(`runtime/shims/d3d12_vulkan_device.cpp:957`) accept `A8_UNORM` for a 2D, single-sample description whose flags are
+(`port/shims/d3d12_vulkan_device.cpp:957`) accept `A8_UNORM` for a 2D, single-sample description whose flags are
 `ALLOW_RENDER_TARGET` and neither depth-stencil nor unordered access, returning the same `VK_FORMAT_R8_UNORM` colour
 mapping the creation path already uses for A8 (`texture_storage_format`, line 374) - the view code already places an
 A8 view's bits in the alpha channel (`A8_UNORM` swizzle at line 5067) and the PSO path already has the alpha-only
@@ -210,7 +210,7 @@ title's own feature queries agree with creation. Then re-measure: the expected s
 appears for this target, element 0 is non-null, and the boot passes `game+0xcc2861` to a new stop.
 
 A second, smaller robustness change is worth making at the same time but is not sufficient alone: the slot-108 bridge
-(`runtime/shims/d3d12_xs_device.cpp:2297`) should treat `SizeInBytes == UINT64_MAX` as "the host cannot size it" and
+(`port/shims/d3d12_xs_device.cpp:2297`) should treat `SizeInBytes == UINT64_MAX` as "the host cannot size it" and
 use its 64 KiB fallback instead of publishing D3D12's invalid allocation. Without the A8 fix, a 64 KiB answer only
 moves the failure to the placed-resource creation, because the 3840 x 2160 target needs far more than that.
 

@@ -1,4 +1,4 @@
-"""make_game.py's FSPX step (fspx_shaders) and the index key the runtime finds FSPX programs by (fspx_code_sha256).
+"""build_port.py's FSPX step (fspx_shaders) and the index key the runtime finds FSPX programs by (fspx_code_sha256).
 
     python -I tests/test_fspx_shaders_stage.py
 
@@ -19,14 +19,14 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
-import make_game  # noqa: E402
+import build_port  # noqa: E402
 import fspx_unpack  # noqa: E402
 import shader_meta  # noqa: E402
 from test_fspx_unpack import kind0, make_dxbc, make_fspx, program, psv0  # noqa: E402
 
-UNPACK = os.path.join(ROOT, "tools", "fspx_unpack.py")
+UNPACK = os.path.join(ROOT, "tooling", "fspx_unpack.py")
 
 
 def container(code, state=None, **fspx):
@@ -41,7 +41,7 @@ def dll_like(*containers):
 
 
 def runtime_key(bytecode):
-    """What runtime/src/shader_library.h's compute_program() hashes: the kind-6 bytes of a container's ACCC payload,
+    """What port/src/shader_library.h's compute_program() hashes: the kind-6 bytes of a container's ACCC payload,
     or a bare program as it is."""
     if bytecode[:4] == b"DXBC":
         status, entries = fspx_unpack.parse_fspx(fspx_unpack.dxbc_parts(bytecode).get(b"ACCC", b""))
@@ -141,7 +141,7 @@ class FspxStage(unittest.TestCase):
         self.work = os.path.join(self.tmp.name, "work")
         self.game = os.path.join(self.tmp.name, "game")
         os.makedirs(self.game)
-        self.dll = os.path.join(self.game, make_game.FSPX_DLL)
+        self.dll = os.path.join(self.game, build_port.FSPX_DLL)
         self.write_dll(program())
         self.unpacked = os.path.join(self.work, "shaders", "fspx")
         self.spirv = os.path.join(self.work, "shaders", "spirv", "fspx")
@@ -172,8 +172,8 @@ class FspxStage(unittest.TestCase):
 
     def run_step(self, signature="llvm-mc 23", emulate=False, fallbacks=()):
         self.calls = []
-        with mock.patch.object(make_game, "py", self.fake_py), mock.patch.object(make_game, "log", lambda *a: None):
-            make_game.fspx_shaders(self.game, self.work, signature, emulate=emulate, fallbacks=fallbacks)
+        with mock.patch.object(build_port, "py", self.fake_py), mock.patch.object(build_port, "log", lambda *a: None):
+            build_port.fspx_shaders(self.game, self.work, signature, emulate=emulate, fallbacks=fallbacks)
         return [tool for tool, _ in self.calls]
 
     def test_runs_once_then_nothing(self):
@@ -214,7 +214,7 @@ class FspxStage(unittest.TestCase):
         mc = os.path.join(self.tmp.name, "fake_mc.py")
         with open(mc, "w", encoding="utf-8", newline="\n") as f:
             f.write("import sys\nsys.stderr.write('error: disassembly stopped\\n')\nsys.exit(23)\n")
-        real_py = make_game.py
+        real_py = build_port.py
 
         def run_tool(tool, *args):
             if tool == "fspx_unpack.py":
@@ -224,10 +224,10 @@ class FspxStage(unittest.TestCase):
                 self.fake_py(tool, *args)
 
         env = dict(LLVM_MC=f'"{sys.executable}" "{mc}"')
-        with mock.patch.dict(os.environ, env), mock.patch.object(make_game, "py", run_tool), \
-                mock.patch.object(make_game, "log", lambda *a: None):
+        with mock.patch.dict(os.environ, env), mock.patch.object(build_port, "py", run_tool), \
+                mock.patch.object(build_port, "log", lambda *a: None):
             with self.assertRaises(SystemExit) as error, contextlib.redirect_stderr(io.StringIO()):
-                make_game.fspx_shaders(self.game, self.work, "llvm-mc 23")
+                build_port.fspx_shaders(self.game, self.work, "llvm-mc 23")
             self.assertEqual(error.exception.code, 1)
             self.assertEqual([tool for tool, _ in self.calls], ["fspx_unpack.py"])
             self.assertFalse(os.path.exists(os.path.join(self.spirv, "index.json")))
@@ -236,12 +236,12 @@ class FspxStage(unittest.TestCase):
             with open(mc, "w", encoding="utf-8", newline="\n") as f:
                 f.write("print('\\ts_endpgm')\n")
             self.calls = []
-            make_game.fspx_shaders(self.game, self.work, "llvm-mc 23")
+            build_port.fspx_shaders(self.game, self.work, "llvm-mc 23")
             self.assertEqual([tool for tool, _ in self.calls], ["fspx_unpack.py", "rdna2spirv.py"])
             self.assertTrue(os.path.isfile(os.path.join(self.spirv, "index.json")))
             self.assertTrue(os.path.isfile(os.path.join(self.spirv, "fspx_build.json")))
             self.calls = []
-            make_game.fspx_shaders(self.game, self.work, "llvm-mc 23")
+            build_port.fspx_shaders(self.game, self.work, "llvm-mc 23")
             self.assertEqual(self.calls, [])
 
     def test_missing_cached_module_is_rebuilt(self) -> None:
@@ -274,7 +274,7 @@ class FspxStage(unittest.TestCase):
         self.assertEqual(self.run_step(signature="llvm-mc 24", emulate=True, fallbacks=flags),
                          ["fspx_unpack.py", "rdna2spirv.py"])
         self.assertEqual(self.run_step(signature="llvm-mc 24", emulate=True, fallbacks=flags), [])
-        with mock.patch.object(make_game, "translation_sources_digest", return_value="another translator"):
+        with mock.patch.object(build_port, "translation_sources_digest", return_value="another translator"):
             self.assertEqual(self.run_step(signature="llvm-mc 24", emulate=True, fallbacks=flags),
                              ["fspx_unpack.py", "rdna2spirv.py"])
 
@@ -304,9 +304,9 @@ class FspxStage(unittest.TestCase):
             if tool == "rdna2spirv.py":
                 raise KeyboardInterrupt
             self.fake_py(tool, *args)
-        with mock.patch.object(make_game, "py", stop), mock.patch.object(make_game, "log", lambda *a: None):
+        with mock.patch.object(build_port, "py", stop), mock.patch.object(build_port, "log", lambda *a: None):
             with self.assertRaises(KeyboardInterrupt):
-                make_game.fspx_shaders(self.game, self.work, "llvm-mc 24")
+                build_port.fspx_shaders(self.game, self.work, "llvm-mc 24")
         self.assertFalse(os.path.exists(os.path.join(self.spirv, "index.json")))
         self.assertFalse(os.path.exists(os.path.join(self.spirv, "fspx_build.json")))
         self.assertFalse(os.path.exists(os.path.join(self.spirv, "upscaler.spv")))   # from the run before
@@ -323,7 +323,7 @@ class ShadersStageWithTheDll(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             work, game = os.path.join(t, "work"), os.path.join(t, "game")
             os.makedirs(game)
-            dll = os.path.join(game, make_game.FSPX_DLL)
+            dll = os.path.join(game, build_port.FSPX_DLL)
             with open(dll, "wb") as f:
                 f.write(dll_like(container(program())))
             ran = []
@@ -345,7 +345,7 @@ class ShadersStageWithTheDll(unittest.TestCase):
                         f.write('[{"name": "shader"}]')
                 elif tool == "shader_disasm.py":
                     os.makedirs(os.path.join(dxbc, "disasm"), exist_ok=True)
-                    # make_game checks that every unpacked shader got a non-empty listing
+                    # build_port checks that every unpacked shader got a non-empty listing
                     with open(os.path.join(dxbc, "disasm", "shader.s"), "w") as f:
                         f.write("s_endpgm\n")
                 elif tool == "rdna2spirv.py":
@@ -363,12 +363,12 @@ class ShadersStageWithTheDll(unittest.TestCase):
 
             def stage():
                 ran.clear()
-                with mock.patch.object(make_game, "py", fake_py), \
-                        mock.patch.object(make_game, "need", lambda *a: None), \
-                        mock.patch.object(make_game, "translate", fake_translate), \
-                        mock.patch.object(make_game, "llvm_mc_signature", return_value="llvm-mc 23"), \
-                        mock.patch.object(make_game, "log", lambda *a: None):
-                    make_game.shaders(game, work, 2)
+                with mock.patch.object(build_port, "py", fake_py), \
+                        mock.patch.object(build_port, "need", lambda *a: None), \
+                        mock.patch.object(build_port, "translate", fake_translate), \
+                        mock.patch.object(build_port, "llvm_mc_signature", return_value="llvm-mc 23"), \
+                        mock.patch.object(build_port, "log", lambda *a: None):
+                    build_port.shaders(game, work, 2)
                 return list(ran)
 
             self.assertEqual(stage(), ["shader_carve.py", "fssm_unpack.py", "shader_disasm.py", "translate",
@@ -396,30 +396,30 @@ class FspxCacheComplete(unittest.TestCase):
 
     def test_empty_index_is_not_complete(self):
         self.write_index("{}")
-        self.assertFalse(make_game.fspx_cache_complete(self.spirv))
+        self.assertFalse(build_port.fspx_cache_complete(self.spirv))
 
     def test_missing_index_is_not_complete(self):
-        self.assertFalse(make_game.fspx_cache_complete(self.spirv))
+        self.assertFalse(build_port.fspx_cache_complete(self.spirv))
 
     def test_malformed_index_is_not_complete(self):
         self.write_index("{not json")
-        self.assertFalse(make_game.fspx_cache_complete(self.spirv))
+        self.assertFalse(build_port.fspx_cache_complete(self.spirv))
 
     def test_non_mapping_indexes_are_not_complete(self):
         for text in ("[]", "null"):
             with self.subTest(text=text):
                 self.write_index(text)
-                self.assertFalse(make_game.fspx_cache_complete(self.spirv))
+                self.assertFalse(build_port.fspx_cache_complete(self.spirv))
 
     def test_one_entry_with_its_module_is_complete(self):
         self.write_index(json.dumps({"upscaler_00": {"stage": "cs", "fspx_code_sha256": "e" * 64}}))
         with open(os.path.join(self.spirv, "upscaler_00.spv"), "wb") as f:
             f.write(b"synthetic module")
-        self.assertTrue(make_game.fspx_cache_complete(self.spirv))
+        self.assertTrue(build_port.fspx_cache_complete(self.spirv))
 
     def test_one_entry_without_its_module_is_not_complete(self):
         self.write_index(json.dumps({"upscaler_00": {"stage": "cs", "fspx_code_sha256": "e" * 64}}))
-        self.assertFalse(make_game.fspx_cache_complete(self.spirv))
+        self.assertFalse(build_port.fspx_cache_complete(self.spirv))
 
     def test_existing_module_without_runtime_lookup_metadata_is_not_complete(self):
         with open(os.path.join(self.spirv, "upscaler_00.spv"), "wb") as f:
@@ -429,7 +429,7 @@ class FspxCacheComplete(unittest.TestCase):
                          {"stage": "ps", "fspx_code_sha256": "e" * 64}):
             with self.subTest(metadata=metadata):
                 self.write_index(json.dumps({"upscaler_00": metadata}))
-                self.assertFalse(make_game.fspx_cache_complete(self.spirv))
+                self.assertFalse(build_port.fspx_cache_complete(self.spirv))
 
 
 if __name__ == "__main__":

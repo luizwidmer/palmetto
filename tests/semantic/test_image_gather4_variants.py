@@ -22,7 +22,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 SEMANTIC = os.path.dirname(os.path.abspath(__file__))
 for _p in (TOOLS, SEMANTIC):
     if _p not in sys.path:
@@ -364,7 +364,7 @@ class TestImageGather4Variants(unittest.TestCase):
 
     def test_ps_gather4_c_l_fixture_emits_dynamic_depth_compare(self) -> None:
         # Guard against constant-folding S# word 0 in the GPU fixture's run-time S# case (G).
-        asm_path = os.path.join(ROOT, "runtime", "test", "shaders", "ps_gather4_c_l.asm")
+        asm_path = os.path.join(ROOT, "port", "test", "shaders", "ps_gather4_c_l.asm")
         with open(asm_path, "r", encoding="utf-8") as f:
             lines = [ln.split(";")[0].strip() for ln in f if ln.split(";")[0].strip()]
         spv = support.translate_lines("ps_gather4_c_l_fixture", lines)

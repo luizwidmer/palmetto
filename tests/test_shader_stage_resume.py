@@ -1,4 +1,4 @@
-"""Shader stage of make_game.py: resuming a stopped build, Windows-safe carve names, an empty unpack (#126).
+"""Shader stage of build_port.py: resuming a stopped build, Windows-safe carve names, an empty unpack (#126).
 
 Standard library only; no game data: the tools are mocked or fed hand-made inputs.
 """
@@ -15,11 +15,11 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
-import make_game  # noqa: E402
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
+import build_port  # noqa: E402
 import shader_carve  # noqa: E402
 
-UNPACK = os.path.join(ROOT, "tools", "fssm_unpack.py")
+UNPACK = os.path.join(ROOT, "tooling", "fssm_unpack.py")
 
 
 class CarveFileNameTest(unittest.TestCase):
@@ -77,8 +77,8 @@ class ShaderStageResumeTest(unittest.TestCase):
         self.dxbc = os.path.join(self.work, "shaders", "dxbc")
         self.spirv = os.path.join(self.work, "shaders", "spirv")
         self.ran = []
-        self.real_llvm_mc_signature = make_game.llvm_mc_signature
-        version_probe = mock.patch.object(make_game, "llvm_mc_signature", return_value="test llvm-mc 21")
+        self.real_llvm_mc_signature = build_port.llvm_mc_signature
+        version_probe = mock.patch.object(build_port, "llvm_mc_signature", return_value="test llvm-mc 21")
         self.llvm_mc_signature = version_probe.start()
         self.addCleanup(version_probe.stop)
 
@@ -114,11 +114,11 @@ class ShaderStageResumeTest(unittest.TestCase):
     def run_stage(self, emulate=None, jobs=2):
         self.ran = []
         kw = {} if emulate is None else {"emulate": emulate}
-        with mock.patch.object(make_game, "py", self.fake_py), \
-                mock.patch.object(make_game, "need", lambda *a: None), \
-                mock.patch.object(make_game, "translate", self.fake_translate), \
-                mock.patch.object(make_game, "log", lambda *a: None):
-            make_game.shaders(os.path.join(self.work, "game"), self.work, jobs, **kw)
+        with mock.patch.object(build_port, "py", self.fake_py), \
+                mock.patch.object(build_port, "need", lambda *a: None), \
+                mock.patch.object(build_port, "translate", self.fake_translate), \
+                mock.patch.object(build_port, "log", lambda *a: None):
+            build_port.shaders(os.path.join(self.work, "game"), self.work, jobs, **kw)
         return self.ran
 
     def test_fresh_folder_runs_every_step_then_nothing(self):
@@ -132,37 +132,37 @@ class ShaderStageResumeTest(unittest.TestCase):
                     "assert sys.argv[1:] == ['--version']\n"
                     "print('LLVM version ' + os.environ['TEST_LLVM_VERSION'])\n")
         command = f'"{sys.executable}" "{wrapper}"'
-        with mock.patch.object(make_game, "llvm_mc_signature", self.real_llvm_mc_signature):
+        with mock.patch.object(build_port, "llvm_mc_signature", self.real_llvm_mc_signature):
             with mock.patch.dict(os.environ, {"LLVM_MC": command, "TEST_LLVM_VERSION": "23.1.5"}):
                 self.run_stage()
                 self.assertEqual(self.run_stage(), [])
                 self.touch(self.dxbc, "disasm", "old.s")
                 self.touch(self.dxbc, "disasm", "notes.txt")
-                self.touch(self.spirv, make_game.SHARD_PLAN)
+                self.touch(self.spirv, build_port.SHARD_PLAN)
             with mock.patch.dict(os.environ, {"LLVM_MC": command, "TEST_LLVM_VERSION": "21.1.0"}):
                 self.assertEqual(self.run_stage(), ["shader_disasm.py", "translate"])
                 self.assertFalse(os.path.exists(os.path.join(self.dxbc, "disasm", "old.s")))
                 self.assertTrue(os.path.isfile(os.path.join(self.dxbc, "disasm", "notes.txt")))
-                self.assertFalse(os.path.exists(os.path.join(self.spirv, make_game.SHARD_PLAN)))
+                self.assertFalse(os.path.exists(os.path.join(self.spirv, build_port.SHARD_PLAN)))
                 self.assertEqual(self.run_stage(), [])
 
     def test_llvm_change_leaves_no_completion_markers_if_disassembly_stops(self):
         self.run_stage()
-        self.touch(self.spirv, make_game.SHARD_PLAN)
+        self.touch(self.spirv, build_port.SHARD_PLAN)
         self.llvm_mc_signature.return_value = "test llvm-mc 23"
-        with mock.patch.object(make_game, "py", side_effect=KeyboardInterrupt):
+        with mock.patch.object(build_port, "py", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
-                make_game.shaders(os.path.join(self.work, "game"), self.work, 2)
+                build_port.shaders(os.path.join(self.work, "game"), self.work, 2)
         self.assertFalse(os.path.exists(os.path.join(self.dxbc, "disasm.done")))
         self.assertFalse(os.path.exists(os.path.join(self.spirv, "index.json")))
-        self.assertFalse(os.path.exists(os.path.join(self.spirv, make_game.SHARD_PLAN)))
+        self.assertFalse(os.path.exists(os.path.join(self.spirv, build_port.SHARD_PLAN)))
         self.assertEqual(self.run_stage(), ["shader_disasm.py", "translate"])
         self.assertEqual(self.run_stage(), [])
 
     def test_version_probe_fails_with_a_clear_error_for_a_failed_command(self):
         failed = subprocess.CompletedProcess([], 1, stdout="", stderr="distribution not found")
-        with mock.patch.object(make_game.subprocess, "run", return_value=failed), \
-                mock.patch.object(make_game, "mc_command", return_value=["wsl", "-e", "llvm-mc"]), \
+        with mock.patch.object(build_port.subprocess, "run", return_value=failed), \
+                mock.patch.object(build_port, "mc_command", return_value=["wsl", "-e", "llvm-mc"]), \
                 mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
             with self.assertRaises(SystemExit) as exc:
                 self.real_llvm_mc_signature()
@@ -231,9 +231,9 @@ class ShaderStageResumeTest(unittest.TestCase):
             self.assertEqual(self.run_stage(), ["shader_disasm.py", "translate"])
         self.assertEqual(self.run_stage(), [])
         os.remove(os.path.join(self.dxbc, "disasm", "s1.s"))
-        self.assertFalse(make_game.shader_outputs_reusable(self.work, False, False))
+        self.assertFalse(build_port.shader_outputs_reusable(self.work, False, False))
 
-        with mock.patch.object(make_game, "fail", side_effect=SystemExit(1)) as fail:
+        with mock.patch.object(build_port, "fail", side_effect=SystemExit(1)) as fail:
             with self.assertRaises(SystemExit):
                 self.run_stage()
         fail.assert_called_once_with("Shader disassembly did not restore all expected listings")
@@ -247,7 +247,7 @@ class ShaderStageResumeTest(unittest.TestCase):
 
         with mock.patch.object(self, "fake_py", side_effect=repair):
             self.assertEqual(self.run_stage(), ["shader_disasm.py", "translate"])
-        self.assertTrue(make_game.shader_outputs_reusable(self.work, False, False))
+        self.assertTrue(build_port.shader_outputs_reusable(self.work, False, False))
 
     def test_finished_disassembly_repairs_a_zero_byte_listing(self):
         self.assertEqual(self.run_stage(), ["shader_carve.py", "fssm_unpack.py", "shader_disasm.py", "translate"])
@@ -255,7 +255,7 @@ class ShaderStageResumeTest(unittest.TestCase):
         self.assertGreater(os.path.getsize(listing), 0)
         open(listing, "wb").close()
 
-        self.assertFalse(make_game.shader_outputs_reusable(self.work, False, False))
+        self.assertFalse(build_port.shader_outputs_reusable(self.work, False, False))
         self.assertEqual(self.run_stage(), ["shader_disasm.py", "translate"])
         self.assertGreater(os.path.getsize(listing), 0)
         self.assertEqual(self.run_stage(), [])
@@ -270,10 +270,10 @@ class ShaderStageResumeTest(unittest.TestCase):
                 os.remove(os.path.join(disasm, name))
         os.remove(os.path.join(self.spirv, "index.json"))
 
-        self.assertFalse(make_game.shader_outputs_reusable(self.work, False, False))
+        self.assertFalse(build_port.shader_outputs_reusable(self.work, False, False))
         self.assertEqual(self.run_stage(), ["shader_disasm.py", "translate"])
         self.assertTrue(os.path.isfile(os.path.join(disasm, "s0.s")))
-        self.assertTrue(make_game.shader_outputs_reusable(self.work, False, False))
+        self.assertTrue(build_port.shader_outputs_reusable(self.work, False, False))
         self.assertEqual(self.run_stage(), [])
 
     def test_translation_stopped_after_many_files_runs_again(self):
@@ -289,11 +289,11 @@ class ShaderStageResumeTest(unittest.TestCase):
 
         def failing_py(tool, *args):
             raise SystemExit(1)
-        with mock.patch.object(make_game, "py", failing_py), \
-                mock.patch.object(make_game, "need", lambda *a: None), \
-                mock.patch.object(make_game, "log", lambda *a: None):
+        with mock.patch.object(build_port, "py", failing_py), \
+                mock.patch.object(build_port, "need", lambda *a: None), \
+                mock.patch.object(build_port, "log", lambda *a: None):
             with self.assertRaises(SystemExit):
-                make_game.shaders(os.path.join(self.work, "game"), self.work, 2)
+                build_port.shaders(os.path.join(self.work, "game"), self.work, 2)
         self.assertFalse(os.path.exists(os.path.join(self.dxbc, "disasm.done")))
 
     def test_rerunning_a_step_reruns_the_steps_after_it(self):
@@ -305,14 +305,14 @@ class ShaderStageResumeTest(unittest.TestCase):
         self.run_stage()
         with open(os.path.join(self.dxbc, "fssm_index.json"), "w", encoding="utf-8") as f:
             json.dump([{"name": "s0"}, {"name": "removed"}], f)
-        self.assertFalse(make_game.shader_outputs_reusable(self.work, False, False))
+        self.assertFalse(build_port.shader_outputs_reusable(self.work, False, False))
         self.assertEqual(self.run_stage(), ["fssm_unpack.py", "shader_disasm.py", "translate"])
         self.assertEqual(self.run_stage(), [])
 
     def test_old_disassembly_with_a_noncurrent_shader_is_refreshed(self):
         self.run_stage()
         self.touch(self.dxbc, "disasm", "removed.s")
-        self.assertFalse(make_game.shader_outputs_reusable(self.work, False, False))
+        self.assertFalse(build_port.shader_outputs_reusable(self.work, False, False))
         self.assertEqual(self.run_stage(), ["shader_disasm.py", "translate"])
         self.assertFalse(os.path.exists(os.path.join(self.dxbc, "disasm", "removed.s")))
         self.assertEqual(self.run_stage(), [])
@@ -333,9 +333,9 @@ class ShaderStageResumeTest(unittest.TestCase):
         self.touch(self.dxbc, "fssm_index.json")
         self.touch(self.spirv, "index.json")
         with open(os.path.join(self.dxbc, "disasm.done"), "w", encoding="utf-8", newline="\n") as f:
-            f.write(make_game.llvm_mc_signature() + "\n")
+            f.write(build_port.llvm_mc_signature() + "\n")
         os.makedirs(os.path.join(self.dxbc, "disasm"))
-        self.assertFalse(make_game.shader_outputs_reusable(self.work, False, False))
+        self.assertFalse(build_port.shader_outputs_reusable(self.work, False, False))
 
         original = self.fake_py
 
@@ -345,7 +345,7 @@ class ShaderStageResumeTest(unittest.TestCase):
 
         with mock.patch.object(self, "fake_py", side_effect=disassemble):
             self.assertEqual(self.run_stage(), ["shader_disasm.py", "translate"])
-        self.assertTrue(make_game.shader_outputs_reusable(self.work, False, False))
+        self.assertTrue(build_port.shader_outputs_reusable(self.work, False, False))
         self.assertEqual(self.run_stage(), [])
 
     def test_old_disassembly_layout_is_rebuilt_in_the_current_location(self):
@@ -390,12 +390,12 @@ class ShaderStageResumeTest(unittest.TestCase):
         def translate_then_die(disasm, spirv, jobs, emulate=False, fallbacks=()):
             self.touch(spirv, "index.json")                 # rdna2spirv.py --merge finished ...
             raise KeyboardInterrupt                         # ... and the PC died right after
-        with mock.patch.object(make_game, "py", self.fake_py), \
-                mock.patch.object(make_game, "need", lambda *a: None), \
-                mock.patch.object(make_game, "translate", translate_then_die), \
-                mock.patch.object(make_game, "log", lambda *a: None):
+        with mock.patch.object(build_port, "py", self.fake_py), \
+                mock.patch.object(build_port, "need", lambda *a: None), \
+                mock.patch.object(build_port, "translate", translate_then_die), \
+                mock.patch.object(build_port, "log", lambda *a: None):
             with self.assertRaises(KeyboardInterrupt):
-                make_game.shaders(os.path.join(self.work, "game"), self.work, 2, emulate=emulate)
+                build_port.shaders(os.path.join(self.work, "game"), self.work, 2, emulate=emulate)
 
     def test_a_kill_right_after_the_merge_keeps_the_finished_emulated_translation(self):
         self.kill_after_merge(emulate=True)
@@ -415,11 +415,11 @@ class ShaderStageResumeTest(unittest.TestCase):
     # emulated translation is exact on every GPU, so auto keeps it instead of translating the corpus again.
     def run_auto(self, emulate):
         self.ran = []
-        with mock.patch.object(make_game, "py", self.fake_py), \
-                mock.patch.object(make_game, "need", lambda *a: None), \
-                mock.patch.object(make_game, "translate", self.fake_translate), \
-                mock.patch.object(make_game, "log", lambda *a: None):
-            make_game.shaders(os.path.join(self.work, "game"), self.work, 2, emulate=emulate, keep_emulated=True)
+        with mock.patch.object(build_port, "py", self.fake_py), \
+                mock.patch.object(build_port, "need", lambda *a: None), \
+                mock.patch.object(build_port, "translate", self.fake_translate), \
+                mock.patch.object(build_port, "log", lambda *a: None):
+            build_port.shaders(os.path.join(self.work, "game"), self.work, 2, emulate=emulate, keep_emulated=True)
         return self.ran
 
     def test_auto_keeps_an_emulated_translation_when_this_run_would_not_emulate(self):
@@ -450,11 +450,11 @@ class ShaderStageResumeTest(unittest.TestCase):
             f.write(digest + "\n")
 
     def copy_tools(self):
-        tools = os.path.join(self.work, "tools")
+        tools = os.path.join(self.work, "tooling")
         os.makedirs(tools)
-        for name in make_game.TRANSLATION_SOURCES + ("shader_disasm.py",):
-            shutil.copy(os.path.join(make_game.TOOLS, name), tools)
-        patch = mock.patch.object(make_game, "TOOLS", tools)
+        for name in build_port.TRANSLATION_SOURCES + ("shader_disasm.py",):
+            shutil.copy(os.path.join(build_port.TOOLS, name), tools)
+        patch = mock.patch.object(build_port, "TOOLS", tools)
         patch.start()
         self.addCleanup(patch.stop)
         return tools
@@ -469,7 +469,7 @@ class ShaderStageResumeTest(unittest.TestCase):
     def test_editing_any_translation_source_translates_again_once(self):
         tools = self.copy_tools()
         self.run_stage()
-        for name in make_game.TRANSLATION_SOURCES:
+        for name in build_port.TRANSLATION_SOURCES:
             with open(os.path.join(tools, name), "ab") as f:
                 f.write(b"\n")
             self.assertEqual(self.run_stage(), ["translate"], name)
@@ -504,12 +504,12 @@ class ShaderStageResumeTest(unittest.TestCase):
         def failing_translate(disasm, spirv, jobs, emulate=False, fallbacks=()):
             self.assertTrue(emulate)
             raise SystemExit(1)
-        with mock.patch.object(make_game, "py", self.fake_py), \
-                mock.patch.object(make_game, "need", lambda *a: None), \
-                mock.patch.object(make_game, "translate", failing_translate), \
-                mock.patch.object(make_game, "log", lambda *a: None):
+        with mock.patch.object(build_port, "py", self.fake_py), \
+                mock.patch.object(build_port, "need", lambda *a: None), \
+                mock.patch.object(build_port, "translate", failing_translate), \
+                mock.patch.object(build_port, "log", lambda *a: None):
             with self.assertRaises(SystemExit):
-                make_game.shaders(os.path.join(self.work, "game"), self.work, 2, emulate=False, keep_emulated=True)
+                build_port.shaders(os.path.join(self.work, "game"), self.work, 2, emulate=False, keep_emulated=True)
         self.assertFalse(os.path.exists(os.path.join(self.spirv, "index.json")))
         self.assertEqual(self.run_auto(emulate=False), ["translate (emulated)"])
         self.assertEqual(self.mode(), "on")
@@ -535,7 +535,7 @@ class TranslationSourcesTest(unittest.TestCase):
             if name in seen:
                 continue
             seen.add(name)
-            with open(os.path.join(make_game.TOOLS, name + ".py"), encoding="utf-8") as f:
+            with open(os.path.join(build_port.TOOLS, name + ".py"), encoding="utf-8") as f:
                 tree = ast.parse(f.read())
             for node in ast.walk(tree):                     # function-level imports too
                 if isinstance(node, ast.Import):
@@ -545,16 +545,16 @@ class TranslationSourcesTest(unittest.TestCase):
                 else:
                     continue
                 todo += [m.split(".")[0] for m in mods
-                         if os.path.isfile(os.path.join(make_game.TOOLS, m.split(".")[0] + ".py"))]
+                         if os.path.isfile(os.path.join(build_port.TOOLS, m.split(".")[0] + ".py"))]
         self.assertEqual({n + ".py" for n in seen},
-                         {n for n in make_game.TRANSLATION_SOURCES if n.endswith(".py")})
+                         {n for n in build_port.TRANSLATION_SOURCES if n.endswith(".py")})
 
 
 class MergePublishesLastTest(unittest.TestCase):
-    """rdna2spirv.py --merge writes the stubs before index.json, which tells make_game.py the translation finished."""
+    """rdna2spirv.py --merge writes the stubs before index.json, which tells build_port.py the translation finished."""
 
     def merge(self, out):
-        tool = os.path.join(make_game.TOOLS, "rdna2spirv.py")
+        tool = os.path.join(build_port.TOOLS, "rdna2spirv.py")
         return subprocess.run([sys.executable, "-I", tool, out, "--out", out, "--merge"],
                               capture_output=True, text=True, errors="replace")
 

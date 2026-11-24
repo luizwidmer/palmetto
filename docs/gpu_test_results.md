@@ -6,8 +6,8 @@ post counts and pass/fail lines there, never game shaders, logs or private paths
 
 | GPU | Driver, OS | Commit | build.py | check.py | run_gpu_tests.py | Failed | Entry |
 |---|---|---|---|---|---|---|---|
-| AMD Radeon RX 9070 GRE (RDNA4, GFX1201), subgroup 32..64 | RADV, Mesa 26.3.1-arch3.5, Vulkan 1.4.363, CachyOS | `05961f0` | 264/264 translated and valid | 203/206 pass, 3 skipped | 218/235 passed, 16 skipped (native and emulated) | `ms_wave_info_s3`, flaky (see below) | [local note](../gpu-test-results/RX9070GRE.txt) |
-| AMD Radeon RX 9070 XT (RDNA4, GFX1201), subgroup 32..64 | AMD 26.11.2 (LLPC), Vulkan 1.4.359, Windows 11 26300.9550 | `5d74c27` | not run | not run | 224/241 passed, 16 skipped, 1 failed (native); 225/241 passed, 0 failed (`PALMETTO_W64_EMULATE=1`) | `ms_wave_info_s3`, every native run, flaky emulated (see below) | [local note](../gpu-test-results/RX9070XT.txt) |
+| AMD Radeon RX 9070 GRE (RDNA4, GFX1201), subgroup 32..64 | RADV, Mesa 26.3.1-arch3.5, Vulkan 1.4.363, CachyOS | `05961f0` | 264/264 translated and valid | 203/206 pass, 3 skipped | 218/235 passed, 16 skipped (native and emulated) | `ms_wave_info_s3`, flaky (see below) | [local note](../reports/gpu/RX9070GRE.txt) |
+| AMD Radeon RX 9070 XT (RDNA4, GFX1201), subgroup 32..64 | AMD 26.11.2 (LLPC), Vulkan 1.4.359, Windows 11 26300.9550 | `5d74c27` | not run | not run | 224/241 passed, 16 skipped, 1 failed (native); 225/241 passed, 0 failed (`PALMETTO_W64_EMULATE=1`) | `ms_wave_info_s3`, every native run, flaky emulated (see below) | [local note](../reports/gpu/RX9070XT.txt) |
 | AMD Radeon RX 7900 GRE (RDNA3, gfx1100), subgroup 32..64 | AMD proprietary 26.11.2 (LLPC), Vulkan 1.4.359, Windows 11 x64 | `5d74c27` | 247/247 translated and valid | run via run_gpu_tests.py | 225/241 passed, 16 skipped | none | [#166](https://github.com/the original project/issues/166#issuecomment-7115041436) |
 
 ## AMD Radeon RX 9070 GRE — 2026-11-23
@@ -26,7 +26,7 @@ Failed:     ms_wave_info_s3: at (0,0) got (-1,-1,-1,-1), want (0.0078,0.0078,0.5
 Skipped:    16 skips are the documented "run by d3d12_*_test / w64_graphics.py" cases.
 ```
 
-Setup: `cmake -S runtime -B runtime/build/linux -G Ninja -DCMAKE_BUILD_TYPE=Release -DPALMETTO_VULKAN_HEADERS_FETCH=ON`;
+Setup: `cmake -S runtime -B port/build/linux -G Ninja -DCMAKE_BUILD_TYPE=Release -DPALMETTO_VULKAN_HEADERS_FETCH=ON`;
 implicit Vulkan layers disabled (`VK_LOADER_LAYERS_DISABLE='~implicit~'`) because MangoHud/Steam layers are installed.
 Inside `run_gpu_tests.py`, 241/241 shaders translated and passed `spirv-val` in both the native and emulated runs.
 Every pixel test other than the flaky mesh fixture was exact (4096/4096).
@@ -55,8 +55,8 @@ Failed:     ms_wave_info_s3: at (0,0) got (-1,-1,-1,-1), want (0.0078,0.0078,0.5
 Skipped:    16 skips are the documented "run by d3d12_*_test / w64_graphics.py" cases.
 ```
 
-Setup: `cmake -S runtime -B runtime/build` (default Visual Studio 17 2022 generator) and
-`cmake --build runtime/build --config RelWithDebInfo`. The suite ran on the AMD LLPC driver with
+Setup: `cmake -S runtime -B port/build` (default Visual Studio 17 2022 generator) and
+`cmake --build port/build --config RelWithDebInfo`. The suite ran on the AMD LLPC driver with
 the project's own `vk_harness`, `vk_compute_test` and `vk_store_test` binaries; no implicit layer
 beyond the Vulkan SDK's. Every other pixel and compute case was exact.
 
@@ -89,7 +89,7 @@ Failed:     none
 Skipped:    16 skips are the documented "run by d3d12_*_test / w64_graphics.py" cases.
 ```
 
-Setup: `scripts\build_runtime.ps1` from a plain PowerShell. Without Ninja on `PATH` it took the cl.exe fallback, which
+Setup: `tooling/scripts\build_runtime.ps1` from a plain PowerShell. Without Ninja on `PATH` it took the cl.exe fallback, which
 builds every Vulkan program the GPU tests use. `llvm-mc` came from the MSYS2 package `mingw-w64-ucrt-x86_64-llvm`
 (23.1.5, AMDGPU target included) with `C:\msys64\ucrt64\bin` on `PATH`; on an old MSYS2 install, run `pacman -Syu`
 until it reports nothing to do before installing it. Loader warnings from installed Medal/OBS Vulkan layers did not

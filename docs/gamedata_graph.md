@@ -6,7 +6,7 @@ reference tokens, and uses the same local carve. Only aggregate counts, root/cat
 reference-prefix names are recorded here. No archive, carved file, XML value, content-set id, entry
 name or target path is committed.
 
-`tools/gamedata_graph.py` rebuilds the documents with `gamedata_index.py` and
+`tooling/gamedata_graph.py` rebuilds the documents with `gamedata_index.py` and
 `gamedata_xml.load_documents`, then keeps the reference strings long enough to join them. It is
 standard-library only and reads the same carve as the index and catalog. XML with an unsupported
 encoding counts as an unparsed payload; it supplies no edges and does not stop the other documents.
@@ -148,8 +148,8 @@ form and all 40 resolve (none ambiguous), in one document; the linked items sit 
 ## Reproduce
 
 ```powershell
-python -I tools/arc9_carve.py common.arc <work>\carve\common
-python -I tools/gamedata_graph.py <work>\carve\common --json <work>\graph.json
+python -I tooling/arc9_carve.py common.arc <work>\carve\common
+python -I tooling/gamedata_graph.py <work>\carve\common --json <work>\graph.json
 python -I tests/test_gamedata_graph.py
 ```
 

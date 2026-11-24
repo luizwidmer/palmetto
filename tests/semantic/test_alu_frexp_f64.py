@@ -19,7 +19,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)
@@ -289,7 +289,7 @@ class FrexpF64Tests(unittest.TestCase):
         validate_spirv(spv)
 
     def test_mant_output_modifiers_and_validation(self):
-        # Measured on gfx1036 through tools/hw_oracle (wave32 and wave64 identical, tools/f64_omod_probe.py):
+        # Measured on gfx1036 through tooling/hw_oracle (wave32 and wave64 identical, tooling/f64_omod_probe.py):
         # a binary64 result ignores mul:2/mul:4/div:2 while denorm_mode_16_64 = 3, the MODE the translator
         # assumes, so those forms keep the integer-only lowering. clamp applies in every MODE. See
         # docs/design.md, "v_frexp_mant_f64, v_frexp_exp_i32_f64".

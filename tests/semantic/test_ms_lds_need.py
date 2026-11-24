@@ -15,7 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)  # python -I leaves the script's folder off sys.path
 
-import support  # noqa: E402  (support puts tools/ on sys.path, honouring PALMETTO_TOOLS_DIR)
+import support  # noqa: E402  (support puts tooling/ on sys.path, honouring PALMETTO_TOOLS_DIR)
 
 rdna2spirv = support.rdna2spirv
 

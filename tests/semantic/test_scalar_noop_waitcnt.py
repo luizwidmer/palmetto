@@ -1,6 +1,6 @@
 """Semantic and translation tests for RDNA2 scalar no-op, hint, waitcnt, and mode instructions.
 
-Covers the 11 named scalar instructions and their syntax variants in tools/shader_ir.py and tools/rdna2spirv.py:
+Covers the 11 named scalar instructions and their syntax variants in tooling/shader_ir.py and tooling/rdna2spirv.py:
   * In rdna2spirv.NOOPS (emits no SPIR-V instructions, preserves VGPRs, SGPRs, VCC, SCC, and EXEC):
     s_clause, s_delay_alu (RDNA3 hint kept in NOOPS), s_inst_prefetch, s_setprio, s_sleep,
     s_waitcnt_depctr, s_waitcnt_expcnt, s_waitcnt_lgkmcnt, s_waitcnt_vmcnt,
@@ -23,7 +23,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 for _p in (HERE, TOOLS_DIR):
@@ -307,7 +307,7 @@ def run_cs(spv: str, lanes: int) -> list[tuple[int, int, int, int]]:
 
 
 class ScalarNoopWaitcntParsingTests(unittest.TestCase):
-    """Exact syntax and operand parsing in tools/shader_ir.py for all 11 scalar ops and variants."""
+    """Exact syntax and operand parsing in tooling/shader_ir.py for all 11 scalar ops and variants."""
 
     def test_parse_all_scalar_noop_waitcnt_and_mode_forms(self):
         cases = [

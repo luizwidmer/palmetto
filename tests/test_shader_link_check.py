@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tooling"))
 import shader_link_check as link  # noqa: E402
 import spirv_interface as spv  # noqa: E402
 import spirv_stubs  # noqa: E402
@@ -394,7 +394,7 @@ class CommandLineTest(unittest.TestCase):
         return path
 
     def command(self, *args):
-        return subprocess.run([sys.executable, "-I", ROOT / "tools" / "shader_link_check.py", *args],
+        return subprocess.run([sys.executable, "-I", ROOT / "tooling" / "shader_link_check.py", *args],
                               capture_output=True, text=True, timeout=15)
 
     def write_manifest(self, *items):
@@ -511,7 +511,7 @@ class CommandLineTest(unittest.TestCase):
         self.assertIn("bom: compatible", result.stdout)
 
     def test_corpus_style_names_are_accepted_and_paths_are_not(self):
-        # make_game's corpus names (shader_carve stems) contain "~", "!", "&", "(", a leading "." and more: 21,043 of
+        # build_port's corpus names (shader_carve stems) contain "~", "!", "&", "(", a leading "." and more: 21,043 of
         # 26,503 on a 1.0.2.1 copy failed the old [a-zA-Z0-9_.-] rule. Only names that leave --shader-dir fail.
         for stem in ("VS~1", "pixel!2&x", "a(b)c", "x y", "_~-.ok", ".dotted"):
             with self.subTest(stem=stem):

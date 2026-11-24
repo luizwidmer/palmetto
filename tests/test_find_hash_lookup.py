@@ -1,4 +1,4 @@
-"""tools/find_hash_lookup.py ranks the function a model hash is passed to (standard library only, no game data).
+"""tooling/find_hash_lookup.py ranks the function a model hash is passed to (standard library only, no game data).
 
     python -I tests/test_find_hash_lookup.py
 
@@ -14,8 +14,8 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "find_hash_lookup.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "find_hash_lookup.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import find_hash_lookup as fhl  # noqa: E402
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for tools/navmesh_links.py using synthetic navmesh tiles only."""
+"""Unit tests for tooling/navmesh_links.py using synthetic navmesh tiles only."""
 
 import json
 import os
@@ -17,7 +17,7 @@ if ROOT not in sys.path:
 from tools import navmesh_decode as nd
 from tools import navmesh_links as nl
 
-TOOL = os.path.join(ROOT, "tools", "navmesh_links.py")
+TOOL = os.path.join(ROOT, "tooling", "navmesh_links.py")
 BASE = nd.BASE
 
 

@@ -1,16 +1,16 @@
 """An inline literal that does not fit in 32 bits on a binary64 VOP3 source is the whole constant.
 
 LLVM's gfx1013 listing prints the two-dword literal of an f64 instruction as one `0x` value of 16 hex
-digits, the same form `tools/f64_diff.py` writes. `docs/design.md` ("f64 literal sources") covers the
+digits, the same form `tooling/f64_diff.py` writes. `docs/design.md` ("f64 literal sources") covers the
 other encoding: a single literal dword supplies bits 63:32 of the constant with bits 31:0 zero, and an
 inline integer is sign-extended. A literal wider than a 32-bit word is therefore the two words of one
 double, not the high word of one.
 
-Each case translates a hand-written pixel-shader listing with tools/rdna2spirv.py and checks the
+Each case translates a hand-written pixel-shader listing with tooling/rdna2spirv.py and checks the
 (low, high) dword pair the module builds for the source. The constants are exact: 0x3FF8000000000001
 splits into the low word 0x00000001 and the high word 0x3FF80000, 0x40100000 is the high word of 4.0,
 and 4 is 4.0 as an inline integer. The behaviour of a literal source is executed and compared against
-the CPU reference in `tools/f64_diff.py` (its own `v_add_f64`/`v_rsq_f64`/`v_sqrt_f64` cases).
+the CPU reference in `tooling/f64_diff.py` (its own `v_add_f64`/`v_rsq_f64`/`v_sqrt_f64` cases).
 Standard library only.
 """
 import os
@@ -23,7 +23,7 @@ for p in (HERE, TESTS_DIR):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from support import translate_lines  # noqa: E402  (support puts tools/ on sys.path)
+from support import translate_lines  # noqa: E402  (support puts tooling/ on sys.path)
 
 MASK32 = 0xFFFFFFFF
 ONE_HALF_UP = 0x3FF8000000000001          # 1.5 + 2^-52: not expressible as one literal dword
@@ -89,7 +89,7 @@ class WholeLiteralTests(unittest.TestCase):
 
     def test_a_printed_width_picks_the_rule_not_the_value(self):
         # 0x12345678 fits one dword, but the 16-digit spelling is the full-width form, so its value
-        # is the whole constant: the low word here, not the high one (tools/f64_diff.py writes it).
+        # is the whole constant: the low word here, not the high one (tooling/f64_diff.py writes it).
         self.assertEqual(source_words("v_sqrt_f64", "0x12345678"), (0, 0x12345678))
         self.assertEqual(source_words("v_sqrt_f64", "0x0000000012345678"), (0x12345678, 0))
         self.assertEqual(frexp_words("0x0000000012345678"), (0x12345678, 0))

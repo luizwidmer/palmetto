@@ -2,11 +2,11 @@
 
 Standard library only; no GPU, no LLVM, no game files.
 
-runtime/test/shaders/cs_w32_int_ext.asm has lane 0 of a wave32 group store one result of each of s_absdiff_i32,
+port/test/shaders/cs_w32_int_ext.asm has lane 0 of a wave32 group store one result of each of s_absdiff_i32,
 s_lshl2_add_u32, the SCC of s_lshl1_add_u32, s_pack_lh_b32_b16, s_mul_hi_i32, v_mul_hi_i32_i24, v_sad_u8 and v_lerp_u8
 (derivations in its header). This runs its fixture (tests/semantic/regen_fixtures.py) as one invocation through
 spirv_mini_interp and checks the eight words against values computed here from the ISA definitions, and that
-check.py and scripts/run_gpu_tests.py expect the same words on the GPU.
+check.py and tooling/scripts/run_gpu_tests.py expect the same words on the GPU.
 """
 import os
 import re
@@ -68,7 +68,7 @@ class IntExtFixture(unittest.TestCase):
                 self.assertEqual(mem[4 * k], want)
 
     def test_gpu_runners_expect_the_same_words(self):
-        for rel in (("runtime", "test", "shaders", "check.py"), ("scripts", "run_gpu_tests.py")):
+        for rel in (("port", "test", "shaders", "check.py"), ("tooling", "tooling/scripts", "run_gpu_tests.py")):
             with open(os.path.join(ROOT, *rel), encoding="utf-8") as f:
                 text = f.read()
             m = re.search(r'"cs_w32_int_ext"\)?[,:]\s*\[([^\]]*)\]', text)

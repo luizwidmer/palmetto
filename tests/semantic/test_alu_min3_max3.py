@@ -5,12 +5,12 @@
 - v_max3_u32: 3-way unsigned 32-bit integer maximum
 (also covers v_min3_u32 and v_max3_i32 for completeness).
 
-Each test case translates a synthetic pixel shader listing using tools/rdna2spirv.py,
+Each test case translates a synthetic pixel shader listing using tooling/rdna2spirv.py,
 executes the resulting SPIR-V in tests/semantic/spirv_mini_interp.py, and compares the
 exported mrt0 color output words against independent plain-Python reference models.
 
 Float min/max and IEEE 754 / RDNA2 semantics:
-- Lowering to SPIR-V in tools/rdna2spirv.py maps v_min3_f32 and v_max3_f32 to GLSL.std.450
+- Lowering to SPIR-V in tooling/rdna2spirv.py maps v_min3_f32 and v_max3_f32 to GLSL.std.450
   NMin and NMax (OpExtInst %float %glsl NMin/NMax).
 - NMin and NMax implement IEEE 754-2008 minNum / maxNum NaN skipping: if any operand is NaN,
   the non-NaN operand is chosen; if all operands are NaN, NaN is returned.
@@ -41,7 +41,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

@@ -22,7 +22,7 @@ RDNA2 Floating-Point Rules:
      Input modifiers: neg (-src), abs (|src|), and neg-abs (-|src|).
      Output modifier: clamp to [0.0, 1.0].
   5. Translation lowering:
-     tools/rdna2spirv.py maps v_min_f32, v_max_f32, v_min3_f32, and v_max3_f32 to GLSL.std.450
+     tooling/rdna2spirv.py maps v_min_f32, v_max_f32, v_min3_f32, and v_max3_f32 to GLSL.std.450
      NMin and NMax (OpExtInst %float %glsl NMin/NMax), which enforce identical NaN-skipping and
      signed-zero rules. v_med3_f32 lowers to FClamp with an OpIsNan check selecting NMin(NMin(x, y), z).
   6. Wavefront SIMD execution:
@@ -44,7 +44,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

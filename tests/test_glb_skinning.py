@@ -1,4 +1,4 @@
-"""Synthetic GLB fixtures for tools/glb_skinning.py. No game data is read.
+"""Synthetic GLB fixtures for tooling/glb_skinning.py. No game data is read.
 
     python -I tests/test_glb_skinning.py -v
 
@@ -22,7 +22,7 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOLS = ROOT / "tools"
+TOOLS = ROOT / "tooling"
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 

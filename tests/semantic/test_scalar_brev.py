@@ -37,7 +37,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -251,7 +251,7 @@ class ScalarBrevInterpreter:
         return val
 
     def execute_ir(self, insn: dict) -> int:
-        """Execute an IR instruction dictionary matching tools/rdna2spirv.py AST format."""
+        """Execute an IR instruction dictionary matching tooling/rdna2spirv.py AST format."""
         op = insn["op"]
         args = insn["args"]
         if op == "s_brev_b32":

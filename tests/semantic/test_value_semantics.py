@@ -478,7 +478,7 @@ def _fssm(rsrc2, group):
 PS_FLAT_DXBC = _isg1_dxbc([(0, 0x3, 0, 3), (1, 0x1, 0, 3)])
 FLAT_ATTR1_X = struct.unpack("<f", struct.pack("<I", 0x101))[0]
 # 4 user SGPRs (the output V#), workgroup id in s4, 512 bytes of LDS, 64x1x1 threads: the header cs_bounds was
-# written for in runtime/test/shaders/build.py.
+# written for in port/test/shaders/build.py.
 CS_BOUNDS_FSSM = _fssm(0x8088, (64, 1, 1))
 
 
@@ -650,7 +650,7 @@ class TranslatorValueSemantics(unittest.TestCase):
     def test_narrow_integer_typed_buffers(self):
         # cs_fmt_int_narrow.asm in the interpreter against the words check.py expects from the GPU, which are the
         # same program's output on gfx1036 run natively: a 136-word heap filled with 0xee as vk_compute_test's.
-        sys.path.insert(0, os.path.join(support.ROOT, "runtime", "test", "shaders"))
+        sys.path.insert(0, os.path.join(support.ROOT, "port", "test", "shaders"))
         try:
             import check
         finally:
@@ -881,7 +881,7 @@ class RawBufferTailBounds(unittest.TestCase):
 
 
 class MeasuredBoundsShaders(unittest.TestCase):
-    """The four GPU tests of the measured SMEM / raw MUBUF rules (runtime/test/shaders/cs_smem_bounds.asm,
+    """The four GPU tests of the measured SMEM / raw MUBUF rules (port/test/shaders/cs_smem_bounds.asm,
     cs_smem_stride_align.asm, cs_smem_sload_neg.asm, cs_buf_tail.asm), run here in the interpreter on a 256-byte
     heap filled with 0xee like vk_compute_test's. The words are the ones derived in each .asm header."""
 
@@ -909,7 +909,7 @@ class MeasuredBoundsShaders(unittest.TestCase):
 
 
 class LaneMaskConstants(unittest.TestCase):
-    """runtime/test/shaders/cs_w32_mask_imm.asm and cs_w64_mask_imm.asm: a constant read as a lane mask (saveexec,
+    """port/test/shaders/cs_w32_mask_imm.asm and cs_w64_mask_imm.asm: a constant read as a lane mask (saveexec,
     wrexec, s_and_b64 / s_not_b64 / s_mov_b64 into EXEC or VCC) gives lane L its bit L, not bit 0 for every lane.
     Run on all lanes of one wave (32 on a 32-wide subgroup, 64 on a 64-wide one, no --wave64-emulate) with a heap
     of 0xee bytes; the words are the GPU check's (check.py CS_DUMPS), derived by hand in each .asm header."""
@@ -921,9 +921,9 @@ class LaneMaskConstants(unittest.TestCase):
            "cs_w64_mask_imm": [0xFFFFFF00] * 7 + [2080]}
 
     def run_words(self, name, lanes):
-        sys.path.insert(0, os.path.join(support.ROOT, "runtime", "test", "shaders"))
+        sys.path.insert(0, os.path.join(support.ROOT, "port", "test", "shaders"))
         from compute_fixture import compute_header
-        header = compute_header(os.path.join(support.ROOT, "runtime", "test", "shaders", name + ".asm"))
+        header = compute_header(os.path.join(support.ROOT, "port", "test", "shaders", name + ".asm"))
         spv = support.translate_fixture(name, fssm=bytes(header))
         memory = {a: 0xEEEEEEEE for a in range(0, 0x100, 4)}
         si.run_workgroup(spv, lanes, lanes,

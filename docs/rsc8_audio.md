@@ -1,6 +1,6 @@
 # `RSC8` audio-bank resources (AWC tag `0x5c`)
 
-**Status: decoded at container, object-graph, property, animation-block, track-directory and keyframe level; stdlib decoder in [`tools/rsc8_audio.py`](../tools/rsc8_audio.py).**
+**Status: decoded at container, object-graph, property, animation-block, track-directory and keyframe level; stdlib decoder in [`tooling/rsc8_audio.py`](../tooling/rsc8_audio.py).**
 
 [story.md](story.md) measured 225,281 raw `RSC8` (version `8001` / `0x1F41`) headers in `story000.arc`
 (plus 1,957 in `shared_minigame000.arc` and 9 in `story000_restofworld.arc`), and the mission-music
@@ -25,7 +25,7 @@ Full-package scanning resolves what `RSC8` is:
 
 Every figure below is an aggregate measurement from one local target console 1.0.2.1 package. No game
 strings, asset names, dialogue lines, audio streams or raw payloads are committed here or emitted by
-`tools/rsc8_audio.py`.
+`tooling/rsc8_audio.py`.
 
 ## Corpus counts
 
@@ -59,7 +59,7 @@ zero-stream bank, so only `audio.arc`'s bank and byte counts changed (banks 7,16
 `{0x36,0x55,0x5a,0x76,0xa3}` × 381, and one `{0x36,0x55,0x5a,0x76,0xa3,0xbd,0xd9}`), all declaring **32,000 Hz**
 (one 32,007).
 
-`tools/rsc8_audio.py` decodes both structurally (`decode_grid20_table`, `decode_index_runs`) and validates
+`tooling/rsc8_audio.py` decodes both structurally (`decode_grid20_table`, `decode_index_runs`) and validates
 them per stream in its scan tallies (`grid20_*`, `indexrun_*` summary keys): over the whole archive
 **387,233 `0x5a` entries / 0 invalid** and **4,853 `0xd9` groups / 0 invalid / 0 index overruns**. Every
 invariant below was measured on that full population; the field names describe structure, and the meaning of
@@ -83,7 +83,7 @@ trailer: f32             (2/3 = 0x3f2aaaab on 1,182 streams, 0.666812 on 1, 0.72
 ```
 
 The position is a sample position in the stream (ASSET-256, all 1,185 streams and 387,233 entries;
-`tools/rsc8_audio.py`'s `grid20_position_past_samples` = 0). It ascends strictly and stays below the `0x76`
+`tooling/rsc8_audio.py`'s `grid20_position_past_samples` = 0). It ascends strictly and stays below the `0x76`
 sample count: the largest is 0.9986 of the stream's samples, and the last one ends p10/p50/p90 0.8/1.85/5.4
 mean entry steps before the stream's end. One entry lasts one period of its `value` read as a frequency:
 `(position[k+1] − position[k]) × value[k] / rate` is within 1% of 1 on 365,803 of the 386,048 entry pairs
@@ -128,7 +128,7 @@ streamed-music descriptor), speech streams carrying `0x5c` consistently carry th
 ### The `0xbd` cue records
 
 An earlier version of this table called `0xbd` "a 16-byte header starting with magic `0xE5C74063`". It is a list
-of 16-byte records with no header, and `0xE5C74063` is one cue name among 167. `tools/rsc8_audio.py` decodes the
+of 16-byte records with no header, and `0xE5C74063` is one cue name among 167. `tooling/rsc8_audio.py` decodes the
 list (`decode_marker_records`) and counts it in every scan (`marker_*` summary keys: 420,168 streams, 781,350
 records, 0 invalid on `audio.arc`). Over all of `audio.arc`:
 
@@ -171,7 +171,7 @@ The name word is 0 on 96 records (78 tags start with one); what a nameless recor
 
 The five names whose `value` is the hash of `start` or `end` have 841 records in 22 tags of `audio.arc`: 420
 `start`, 420 `end` and one with a third value. An earlier version of this page read the near-equal counts per name
-(196/197, 101/101, 54/54, 49/49, 20/19) as region pairs without matching them. `tools/rsc8_audio.py` now matches
+(196/197, 101/101, 54/54, 49/49, 20/19) as region pairs without matching them. `tooling/rsc8_audio.py` now matches
 them (`pair_marker_regions`, the `marker_regions` block of every scan summary): inside one tag it takes the
 records of one name in stored order, and a pair is a `start` whose next record of the same name is an `end` at the
 same or a later offset. Every other record of such a name is counted as an exception.
@@ -332,7 +332,7 @@ block after it, or splits long dialogue animations across `2` or `3` blocks):
 +0x20  ...  one keyframe sequence (`payload_size` bytes), see section 7
 ```
 
-The field names are the ones `tools/rsc8_audio.py` reports; the notes on the right are what section 7 measured.
+The field names are the ones `tooling/rsc8_audio.py` reports; the notes on the right are what section 7 measured.
 
 Multi-block animations share their boundary frame between consecutive blocks, so across `N` blocks:
 
@@ -353,7 +353,7 @@ and `restofworld` clips; `90`, `88`, or `87` on `audio.arc`) × 12-byte records 
 ```
 
 This is the 12-byte track entry of the clip dictionaries in `anim.arc` (`{id, track-type hash, value format}`,
-[animation.md](animation.md#objects)); `facialtranslation` is one of the track types `tools/anim_clips.py` names.
+[animation.md](animation.md#objects)); `facialtranslation` is one of the track types `tooling/anim_clips.py` names.
 
 ### 7. Keyframes
 
@@ -383,7 +383,7 @@ Over those 641,428 clips:
 
 ## Full-corpus validation results
 
-`tools/rsc8_audio.py` validates every resource against 24 structural integrity checks (wrapper size,
+`tooling/rsc8_audio.py` validates every resource against 24 structural integrity checks (wrapper size,
 version, flags, 16-byte alignment, SSO strings, `crProperties`, `crClipAnimation`, `crAnimation`
 descriptor, all packed `crAnimation` blocks, `max_block_size`, exact frame-to-duration agreement,
 sorted track directory, and absence of embedded audio containers).
@@ -398,7 +398,7 @@ sorted track directory, and absence of embedded audio containers).
 
 *(Note: in `audio.arc`, 4,300 structurally valid speech clips — 1.04% of `audio.arc` — assign an
 internal `RSC8` clip-name hash whose low 29 bits differ from the enclosing AWC `stream_id`;
-`tools/rsc8_audio.py` reports `stream_id_matches` separately from structural validity. On the full
+`tooling/rsc8_audio.py` reports `stream_id_matches` separately from structural validity. On the full
 641,428-clip corpus, all 24 structural checks pass with **0** failures.)*
 
 ## What remains undecoded
@@ -417,10 +417,10 @@ internal `RSC8` clip-name hash whose low 29 bits differ from the enclosing AWC `
 python -I tests/test_rsc8_audio.py
 
 # Validate RSC8 resources in an archive (summary only, zero game strings emitted)
-python -I tools/rsc8_audio.py <package>\pack\story000_restofworld\story000_restofworld.arc --summary-only
-python -I tools/rsc8_audio.py <package>\pack\shared_minigame000\shared_minigame000.arc --summary-only
-python -I tools/rsc8_audio.py <package>\pack\story000\story000.arc --summary-only
-python -I tools/rsc8_audio.py <package>\audio.arc --summary-only
+python -I tooling/rsc8_audio.py <package>\pack\story000_restofworld\story000_restofworld.arc --summary-only
+python -I tooling/rsc8_audio.py <package>\pack\shared_minigame000\shared_minigame000.arc --summary-only
+python -I tooling/rsc8_audio.py <package>\pack\story000\story000.arc --summary-only
+python -I tooling/rsc8_audio.py <package>\audio.arc --summary-only
 
 # Every summary also has the cue counts (marker_* keys) and the region pairing (marker_regions): pairs and
 # exceptions per name hash, pair lengths, overlaps between names and where each exception sits in its tag.
@@ -428,14 +428,14 @@ python -I tools/rsc8_audio.py <package>\audio.arc --summary-only
 
 # Also decode every clip's keyframes and count the outcome (slower: about 40 clips per second per process;
 # split a large archive with --start/--limit and add the summaries)
-python -I tools/rsc8_audio.py <package>\pack\shared_minigame000\shared_minigame000.arc --summary-only --curves
+python -I tooling/rsc8_audio.py <package>\pack\shared_minigame000\shared_minigame000.arc --summary-only --curves
 
 # Optional per-clip structural JSON/CSV export to a local work directory
-python -I tools/rsc8_audio.py <package>\pack\shared_minigame000\shared_minigame000.arc <work>\rsc8.csv
+python -I tooling/rsc8_audio.py <package>\pack\shared_minigame000\shared_minigame000.arc <work>\rsc8.csv
 ```
 
 ## No-sharing rule
 
 Do not commit archives, extracted `.awc` banks, `.rsc8` blobs, Ogg Opus streams, or asset-name dumps.
-`tools/rsc8_audio.py` never writes game strings or raw payloads; `tests/test_rsc8_audio.py` uses
+`tooling/rsc8_audio.py` never writes game strings or raw payloads; `tests/test_rsc8_audio.py` uses
 synthesized bytes only.

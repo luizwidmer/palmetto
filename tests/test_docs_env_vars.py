@@ -1,10 +1,10 @@
-"""Every PALMETTO_* / PALMETTO_* environment variable the runtime and make_game.py read is named in a document.
+"""Every PALMETTO_* / PALMETTO_* environment variable the runtime and build_port.py read is named in a document.
 
     python -I tests/test_docs_env_vars.py
 
-`runtime/README.md` documents the runtime's variables one by one, but five that the `xgameruntime` shim reads
+`port/README.md` documents the runtime's variables one by one, but five that the `xgameruntime` shim reads
 (`PALMETTO_DEVICE_TYPE` and four more) were in no document at all. This collects the variable names that appear as
-string literals in `runtime/src`, `runtime/shims` and `make_game.py` and checks that each is written in some
+string literals in `port/src`, `port/shims` and `build_port.py` and checks that each is written in some
 tracked Markdown file. Sources and Markdown only: no build, no GPU, no game files.
 """
 import os
@@ -15,10 +15,10 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # A variable name as a string literal: "PALMETTO_X", L"PALMETTO_X" or 'PALMETTO_X'.
 LITERAL = re.compile(r"""["']((?:PALMETTO|PALMETTO)_[A-Z0-9_]+)["']""")
-CODE = ("runtime/src/", "runtime/shims/", "make_game.py")
+CODE = ("port/src/", "port/shims/", "build_port.py")
 # Set by the runtime for itself, not by a person: palmetto passes the first to the copy of itself it starts with the
-# image base reserved (runtime/src/base_reservation.h), and the second is a name that is only looked up to make
-# the CRT build its environment table (runtime/shims/process.cpp).
+# image base reserved (port/src/base_reservation.h), and the second is a name that is only looked up to make
+# the CRT build its environment table (port/shims/process.cpp).
 INTERNAL = {"PALMETTO_BASE_RESERVED", "PALMETTO_RT_ENV_INIT"}
 
 
@@ -29,7 +29,7 @@ def tracked_files():
     except (OSError, subprocess.CalledProcessError):
         found = []
         for root, dirs, files in os.walk(ROOT):
-            dirs[:] = [d for d in dirs if d not in (".git", "build", "__pycache__", "third_party", ".pytest_cache")]
+            dirs[:] = [d for d in dirs if d not in (".git", "build", "__pycache__", "vendor", ".pytest_cache")]
             found += [os.path.relpath(os.path.join(root, f), ROOT).replace(os.sep, "/") for f in files]
         return found
 
@@ -62,7 +62,7 @@ class EnvironmentVariablesTest(unittest.TestCase):
         files = tracked_files()
         cls.sources = {f: read(f) for f in files
                        if f.startswith(CODE) and f.endswith((".cpp", ".h", ".py"))}
-        cls.pages = {f: read(f) for f in files if f.endswith(".md") and not f.startswith("third_party/")}
+        cls.pages = {f: read(f) for f in files if f.endswith(".md") and not f.startswith("vendor/")}
 
     def test_the_scan_finds_the_variables(self):
         # A moved folder or a changed spelling must not turn the check below into a no-op.
@@ -81,16 +81,16 @@ class EnvironmentVariablesTest(unittest.TestCase):
             f"  {variable} ({where})" for variable, where in missing))
 
     def test_an_undocumented_variable_is_reported(self):
-        sources = {"runtime/shims/x.cpp": 'GetEnvironmentVariableA("PALMETTO_ONE", s, n);\n'
+        sources = {"port/shims/x.cpp": 'GetEnvironmentVariableA("PALMETTO_ONE", s, n);\n'
                                           'kName[] = L"PALMETTO_TWO";\n// PALMETTO_COMMENT is not a literal\n',
-                   "make_game.py": "os.environ.get('PALMETTO_THREE')\nos.environ.get(\"PALMETTO_BASE_RESERVED\")\n"}
+                   "build_port.py": "os.environ.get('PALMETTO_THREE')\nos.environ.get(\"PALMETTO_BASE_RESERVED\")\n"}
         self.assertEqual(variables_read(sources),
-                         {"PALMETTO_THREE": "make_game.py:1", "PALMETTO_BASE_RESERVED": "make_game.py:2",
-                          "PALMETTO_ONE": "runtime/shims/x.cpp:1", "PALMETTO_TWO": "runtime/shims/x.cpp:2"})
+                         {"PALMETTO_THREE": "build_port.py:1", "PALMETTO_BASE_RESERVED": "build_port.py:2",
+                          "PALMETTO_ONE": "port/shims/x.cpp:1", "PALMETTO_TWO": "port/shims/x.cpp:2"})
         # A longer name that contains the variable does not document it.
         pages = {"a.md": "Set `PALMETTO_ONE=1`.", "b.md": "PALMETTO_TWO_MORE and XPALMETTO_THREE"}
         self.assertEqual(undocumented(sources, pages),
-                         [("PALMETTO_THREE", "make_game.py:1"), ("PALMETTO_TWO", "runtime/shims/x.cpp:2")])
+                         [("PALMETTO_THREE", "build_port.py:1"), ("PALMETTO_TWO", "port/shims/x.cpp:2")])
 
 
 if __name__ == "__main__":

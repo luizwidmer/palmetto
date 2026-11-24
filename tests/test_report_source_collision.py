@@ -15,7 +15,7 @@ import unittest
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR", os.path.join(ROOT, "tools"))
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR", os.path.join(ROOT, "tooling"))
 SENTINEL = b"SYNTHETIC-SOURCE-DO-NOT-OVERWRITE\n" * 4
 
 

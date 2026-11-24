@@ -28,7 +28,7 @@ Semantics:
 
 Each test case verifies:
   1. Pure-Python reference oracle behavior.
-  2. Synthetic RDNA2 pixel shader translation via tools/rdna2spirv.py and execution in
+  2. Synthetic RDNA2 pixel shader translation via tooling/rdna2spirv.py and execution in
      tests/semantic/spirv_mini_interp.py.
   3. Direct SPIR-V shader sequence execution in spirv_mini_interp.py.
   4. Negative controls confirming fault sensitivity to operand swaps, off-by-one shifts,
@@ -50,7 +50,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

@@ -1,4 +1,4 @@
-"""Synthetic-data tests for tools/instance_lists.py.
+"""Synthetic-data tests for tooling/instance_lists.py.
 
     python -I tests/test_instance_lists.py
 
@@ -15,8 +15,8 @@ import unittest
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "instance_lists.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "instance_lists.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import instance_lists as il  # noqa: E402
 

@@ -7,8 +7,8 @@ RDNA2 ISA (VOPC): EXEC = EXEC & compare(S0, S1), per lane, and nothing else is w
   F = 0, T = 1, whatever the sources hold.
   _I64 / _U64 compare the whole 64-bit values signed / unsigned (the low word is never signed).
 
-Three kinds of test, all through tools/rdna2spirv.py and tests/semantic/spirv_mini_interp.py:
-  * ps_vcmpx_forms (runtime/test/shaders, also run on the GPU by check.py and run_gpu_tests.py): the four words
+Three kinds of test, all through tooling/rdna2spirv.py and tests/semantic/spirv_mini_interp.py:
+  * ps_vcmpx_forms (port/test/shaders, also run on the GPU by check.py and run_gpu_tests.py): the four words
     its header derives by hand, compared with a reference written here from the definitions above.
   * every form in both encodings (e32, e64) on a table of operands: the pixel survives exactly when Python's own
     comparison of the operands holds.

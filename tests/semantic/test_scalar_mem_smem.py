@@ -1,6 +1,6 @@
 """Semantic interpreter tests for scalar memory read offsets and descriptor address calculation (s_load_dword).
 
-Covers AMD RDNA2 / GFX10 SMEM (Scalar Memory) ISA semantics and tools/rdna2spirv.py translation:
+Covers AMD RDNA2 / GFX10 SMEM (Scalar Memory) ISA semantics and tooling/rdna2spirv.py translation:
   * 64-bit base pointer reconstruction from SGPR pair s[p:p+1]
   * Buffer Resource Descriptor (V#) 128-bit layout and base address extraction:
       - Dword 0: Base address low 32 bits [31:0]
@@ -12,7 +12,7 @@ Covers AMD RDNA2 / GFX10 SMEM (Scalar Memory) ISA semantics and tools/rdna2spirv
       - 64-bit address wrapping modulo 2^64
   * Multi-dword scalar loads (s_load_dword, s_load_dwordx2, x4, x8, x16) with sequential 4-byte address strides
   * Destination register targeting: SGPR ranges and special registers (vcc_lo, vcc_hi, vcc pair, m0)
-  * tools/rdna2spirv.py translator validation (Gen.scalar_load instruction sequences and operand validation)
+  * tooling/rdna2spirv.py translator validation (Gen.scalar_load instruction sequences and operand validation)
   * SMEM loads with a register offset and an immediate at once ("sOFF offset:IMM"): address = base + sOFF + IMM,
     checked by running the emitted code (SmemBodyEvaluator, SmemSoffsetImmTranslatorTests)
   * The hardware-measured SMEM rules (SmemHardwareRuleTests): base, sOFF and IMM truncated to 4 each, the
@@ -25,7 +25,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:
@@ -296,7 +296,7 @@ class SmemExecutionTests(unittest.TestCase):
 
 
 class SmemTranslatorGenTests(unittest.TestCase):
-    """Tests tools/rdna2spirv.py Gen.scalar_load SPIR-V emission structure and validation rules."""
+    """Tests tooling/rdna2spirv.py Gen.scalar_load SPIR-V emission structure and validation rules."""
 
     def test_s_load_dword_emits_64bit_shift_or_add(self):
         g = rdna2spirv.Gen("ps")
@@ -752,7 +752,7 @@ class SmemHardwareRuleTests(unittest.TestCase):
     def test_num_records_zero_reads_nothing(self):
         self.check("s_buffer_load_dwordx4 s[12:15], s[24:27], 0x0", {"nr": 0}, [None] * 4, [])
 
-    # SHADER-336, measured on gfx1036 (Ryzen 9 9950X3D iGPU, tools/smem_neg_probe.py --oracle hw), wave32 = wave64.
+    # SHADER-336, measured on gfx1036 (Ryzen 9 9950X3D iGPU, tooling/smem_neg_probe.py --oracle hw), wave32 = wave64.
     # Each row runs twice: sOFF in a register, and sOFF known to the translator (folded into the constant).
     def both(self, line, soff, want, reads, extra=None, **kw):
         self.check(line, {40: soff, **(extra or {})}, want, reads, **kw)
@@ -774,7 +774,7 @@ class SmemHardwareRuleTests(unittest.TestCase):
             self.both("s_buffer_load_dword s12, s[24:27], s40", soff, [None], [], extra={"nr": 0x100})
         self.both("s_buffer_load_dword s12, s[24:27], s40", 8, [8], [8], extra={"nr": 0x100})
 
-    # Measured on gfx1036 (RDNA2, Ryzen 9 9950X3D iGPU, AMD Windows driver 32.0.21045.16010) through tools/hw_oracle,
+    # Measured on gfx1036 (RDNA2, Ryzen 9 9950X3D iGPU, AMD Windows driver 32.0.21045.16010) through tooling/hw_oracle,
     # wave32 = wave64, every read inside a seeded region so only the bound decides: the edges docs/design.md listed
     # as not measured.
     def test_x16_is_bounded_per_dword(self):

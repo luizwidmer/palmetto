@@ -173,7 +173,7 @@ group.
 ## Usage
 
 ```sh
-python -I tools/text_tables.py <carve>/data <carve>/story000 <carve>/story000_restofworld <carve>/shared_minigame000 \
+python -I tooling/text_tables.py <carve>/data <carve>/story000 <carve>/story000_restofworld <carve>/shared_minigame000 \
     --labels <temp>/hashes.json \
     --dialogue <temp>/dialogue.csv --tables <temp>/tables.csv --strings <temp>/strings.csv
 ```
@@ -190,7 +190,7 @@ keys and their text sit in different archives.
 
 Standard library only. The four archives above take about 2 minutes on one core from a carve.
 
-`tools/opus_tags.py` writes the `--dialogue` rows into the exported Ogg Opus files as `LABEL`, `SPEAKER` and
+`tooling/opus_tags.py` writes the `--dialogue` rows into the exported Ogg Opus files as `LABEL`, `SPEAKER` and
 `SUBTITLE` comments (see [audio.md](audio.md#tags-names-and-subtitles)).
 
 ## Open questions

@@ -1,6 +1,6 @@
 """Ballots and votes on a lane mask, through the translator (TEST-603).
 
-Each test translates a short RDNA2 compute listing with tools/rdna2spirv.py and runs every lane of it with
+Each test translates a short RDNA2 compute listing with tooling/rdna2spirv.py and runs every lane of it with
 tests/semantic/spirv_mini_interp.run_workgroup (which models OpGroupNonUniformBallot/All/Any/BitwiseOr over the
 running lanes). The listing builds a lane mask in VCC from two push constants (lane i's bit is bit i of s4:s5),
 then reads it the ways the translator turns into subgroup operations:
@@ -26,7 +26,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 for p in (HERE, TOOLS_DIR):

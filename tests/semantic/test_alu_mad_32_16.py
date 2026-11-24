@@ -4,7 +4,7 @@ RDNA ISA pseudocode: D = S0.half * S1.half + S2, wrapping at 32 bits. The 16-bit
 v_mad_u32_u16 and sign-extended for v_mad_i32_i16; op_sel bit 0 / 1 reads the high half of S0 / S1 (the low half by
 default). S2 and D are whole dwords. Measured on RDNA2 (gfx1036, EGEN-HW-MAD-U32-U16): op_sel bit 2 adds S2[31:16]
 zero-extended (in the i16 op too), op_sel bit 3 writes the result shifted left by 16, and clamp saturates the sum to
-[0, 0xffffffff] (u16) or [0x80000000, 0x7fffffff] (i16) before that shift. Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it
+[0, 0xffffffff] (u16) or [0x80000000, 0x7fffffff] (i16) before that shift. Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it
 in tests/semantic/spirv_mini_interp.py and compares the result with a plain-Python reference. D leaves through exp as
 two 16-bit halves ORed into 0x40000000, so no export channel is a NaN or denormal pattern that a float round trip
 could change.
@@ -20,7 +20,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

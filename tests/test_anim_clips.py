@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/anim_clips.py.
+"""Synthetic tests for tooling/anim_clips.py.
 
     python -I tests/test_anim_clips.py
 
@@ -18,8 +18,8 @@ import unittest
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "anim_clips.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "anim_clips.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import anim_clips  # noqa: E402
 from anim_index import joaat32  # noqa: E402

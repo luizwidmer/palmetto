@@ -1,4 +1,4 @@
-"""Unit tests for tools/f64_omod_probe.py (gate model, simulated oracle verdicts, CLI).
+"""Unit tests for tooling/f64_omod_probe.py (gate model, simulated oracle verdicts, CLI).
 
 Standard library only; no GPU and no game files. The simulated oracle follows the gate the probe measures, and the
 broken variants exist so the probe has to prove it reports a device that disagrees.
@@ -15,7 +15,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-TOOLS = Path(__file__).resolve().parents[1] / "tools"
+TOOLS = Path(__file__).resolve().parents[1] / "tooling"
 sys.dont_write_bytecode = True
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))

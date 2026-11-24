@@ -1,6 +1,6 @@
 """Semantic value tests for RDNA2 16-bit integer VALU instructions.
 
-Covers all 6 ops end-to-end through tools/rdna2spirv.py and tests/semantic/spirv_mini_interp.py:
+Covers all 6 ops end-to-end through tooling/rdna2spirv.py and tests/semantic/spirv_mini_interp.py:
   v_min_u16       D.u16 = min(S0.u16, S1.u16)           (unsigned 16-bit)
   v_max_u16       D.u16 = max(S0.u16, S1.u16)           (unsigned 16-bit)
   v_min_i16       D.i16 = min(S0.i16, S1.i16)           (signed 16-bit two's complement)
@@ -26,7 +26,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

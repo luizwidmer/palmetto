@@ -22,7 +22,7 @@ offset  size  field
 0x0C    u32   header size
 ```
 
-Optional tables follow the header, selected by `flags`. `tools/awc_opus.py` skips the ones seen in the package:
+Optional tables follow the header, selected by `flags`. `tooling/awc_opus.py` skips the ones seen in the package:
 
 | Flag | Extra bytes before the stream table |
 |---|---|
@@ -53,10 +53,10 @@ The exporters use three tag types:
 | `0x76` | format |
 | `0x48` | streamed-music descriptor |
 
-`tools/rsc8_audio.py` additionally decodes the speech companions `0x36` (peaks), `0xa3` (seek
+`tooling/rsc8_audio.py` additionally decodes the speech companions `0x36` (peaks), `0xa3` (seek
 table), `0xb2` (loudness), `0xbd` (cue records) and the two structural tags below; every other tag type
 is skipped. The `0xbd` record layout is in [rsc8_audio.md](rsc8_audio.md#the-0xbd-cue-records); the music banks
-have the tag too (945 tags in 938 of the 3,008 streamed-music banks, counted by `tools/awc_markers.py`), and
+have the tag too (945 tags in 938 of the 3,008 streamed-music banks, counted by `tooling/awc_markers.py`), and
 what their records mark is in [audio_config.md](audio_config.md#marker-events-awc-tag-0xbd).
 
 | Tag | Meaning |
@@ -108,7 +108,7 @@ the 1.6M-stream corpus). The exporter uses `+0x0C` only when it agrees with `+0`
 and otherwise falls back to `+0 / channels`, so a malformed block cannot silently truncate audio. It never scales
 either count by the rate field, because scaling a 32 kHz stream by 48000/32000 leaves padding untrimmed.
 
-Codec `5` is not handled by `tools/awc_opus.py`. `arc9dump xma` writes it as RIFF XMA2, and ffmpeg does the decode.
+Codec `5` is not handled by `tooling/awc_opus.py`. `arc9dump xma` writes it as RIFF XMA2, and ffmpeg does the decode.
 
 ### Streamed music (`0x48`)
 
@@ -148,16 +148,16 @@ count unchanged. Reading `samples` as a frame count produces a file that reports
 |---|---|
 | `arc9dump audio <audio.arc> <out>` | `<out>/audio/awc/<path>.awc` (the original banks) and `<out>/audio/audio_manifest.json` |
 | `arc9dump xma <audio.arc> <out>` | `<out>/audio/xma/<bank>/<stream id>.xma.wav` for every codec-5 stream |
-| `python -I tools/awc_opus.py <bank or dir> <out> [--jobs N] [--pre-skip N]` | `<out>/<bank>/<stream id>.ogg`, or `.wav` for codec 0/2; `--jobs` processes that many banks at once |
-| `python -I tools/opus_tags.py <ogg dir> --names <csv> [--dialogue <csv>]` | the same `.ogg` files, with names, dialogue labels and subtitles in their `OpusTags` header (see *Tags: names and subtitles*) |
-| `python -I tools/audio_wav.py <ogg dir> --out <wav dir> [--jobs N]` | 16-bit PCM WAV mirroring the Ogg tree; `--jobs` ffmpeg processes at once |
+| `python -I tooling/awc_opus.py <bank or dir> <out> [--jobs N] [--pre-skip N]` | `<out>/<bank>/<stream id>.ogg`, or `.wav` for codec 0/2; `--jobs` processes that many banks at once |
+| `python -I tooling/opus_tags.py <ogg dir> --names <csv> [--dialogue <csv>]` | the same `.ogg` files, with names, dialogue labels and subtitles in their `OpusTags` header (see *Tags: names and subtitles*) |
+| `python -I tooling/audio_wav.py <ogg dir> --out <wav dir> [--jobs N]` | 16-bit PCM WAV mirroring the Ogg tree; `--jobs` ffmpeg processes at once |
 
 When exporting a directory, `awc_opus.py` keeps the path to each bank below the input root. For example,
 `a/music.awc` writes under `<out>/a/music/`. Passing that file on its own writes under `<out>/music/`.
 To regenerate a flat export from an earlier version, run `awc_opus.py` with the original bank directory and a fresh output directory.
 
 To import music cues into Audacity, run
-`python -I tools/awc_cue_labels.py <bank>/cue_regions.json <new-label-directory>` on a sheet
+`python -I tooling/awc_cue_labels.py <bank>/cue_regions.json <new-label-directory>` on a sheet
 exported by `awc_opus.py --cue-sheet`. Open the channel Ogg in Audacity at time zero, then use
 **File > Import > Labels** to load the matching `.txt` by filename stem. Each region shows its
 hexadecimal cue hash followed by its one-based row number in the bank sheet. Overlapping and
@@ -182,7 +182,7 @@ tries the next counter. Plain existing WAVs are
 trusted by name, so resuming into the same output folder assumes the same set of inputs.
 With no `--out`, a directory writes to `<src>/wav` and a single file writes next to itself.
 
-## How `make_game.py --wav` uses them
+## How `build_port.py --wav` uses them
 
 The `assets` stage runs these in order:
 
@@ -290,7 +290,7 @@ it animates, none lies outside a bank, and none contains an `ADAT`, Ogg Opus or 
 ## Stream names
 
 The stream table stores only `joaat(lowercase name) & 0x1FFFFFFF`, so the exporters name files by id.
-`tools/awc_names.py` recovers names by hashing dictionary words against those ids. With about 1.8 million distinct
+`tooling/awc_names.py` recovers names by hashing dictionary words against those ids. With about 1.8 million distinct
 ids in a 2^29 space, roughly 0.3% of arbitrary words collide by chance, so a hit is accepted only under one of two
 rules:
 
@@ -315,7 +315,7 @@ The dictionary comes from two kinds of input:
 Measured on the 1.0.2.1 package (2026-11-22) with 2,455,498 distinct lowercase words: identifiers harvested from the
 carved archives (by a scan like `hashdict.py`, not `hashdict.py` itself) plus the conversation waves. The columns are
 the ones the tool prints per source, so the second one is its distinct bank/ID pairs: an id that appears in two banks
-counts once in each (`Index.streams` in `tools/awc_names.py`):
+counts once in each (`Index.streams` in `tooling/awc_names.py`):
 
 | Archive | Banks | Distinct bank/ID pairs | Named | Dialogue | Family | Control (expected false) |
 |---|---:|---:|---:|---:|---:|---:|
@@ -331,8 +331,8 @@ accepted families claim the same id in one bank (3 rows), the first family in so
 The output names game files: keep it local, and do not commit it or attach it to an issue.
 
 ```sh
-python -I tools/hashdict.py <carve dir> --out <temp>/hashes.json
-python -I tools/awc_names.py <work>/assets/audio/awc --words <temp>/hashes.json \
+python -I tooling/hashdict.py <carve dir> --out <temp>/hashes.json
+python -I tooling/awc_names.py <work>/assets/audio/awc --words <temp>/hashes.json \
     --conversations <carve dir>/story000 --out <temp>/awc_names.csv
 ```
 
@@ -341,9 +341,9 @@ bank, or an `audio_manifest.json` from `arc9dump audio` (read without opening th
 took about 3 minutes on one core.
 
 The dictionary is also readable the other way, which needs no carve folder:
-`python -I tools/hashdict.py --lookup <temp>/hashes.json <hash>...` takes a dictionary path followed by one or more
+`python -I tooling/hashdict.py --lookup <temp>/hashes.json <hash>...` takes a dictionary path followed by one or more
 32-bit hashes in hexadecimal and prints each with the name the dictionary holds for it, or `?` when it holds none
-(`tools/hashdict.py:70,82-93`). That answers "which wave is this id" when another tool prints a hash and no name.
+(`tooling/hashdict.py:70,82-93`). That answers "which wave is this id" when another tool prints a hash and no name.
 
 You can also pass the JSON inventory written by `awc_manifest.py --out inventory.json`. The naming tool reads
 the plain stream IDs and streamed-music channel IDs directly from its rows. Bank labels keep the nested path
@@ -351,7 +351,7 @@ and drop the `.awc` extension to match the export folders. Banks with no stream 
 
 ## Tags: names and subtitles
 
-`awc_opus.py` writes an empty `OpusTags` header, so a player shows only the stream id. `tools/opus_tags.py` fills
+`awc_opus.py` writes an empty `OpusTags` header, so a player shows only the stream id. `tooling/opus_tags.py` fills
 that header in place from the `awc_names.py` CSV and, for dialogue, the `text_tables.py` dialogue CSV
 ([text.md](text.md#dialogue)):
 
@@ -372,7 +372,7 @@ including after subtitle markup is removed. Conflicting labels, speakers or subt
 line diagnostic before any Ogg file is modified; this also applies to `--dry-run`.
 
 ```sh
-python -I tools/opus_tags.py <work>/assets/audio/ogg --names <temp>/awc_names.csv --dialogue <temp>/dialogue.csv
+python -I tooling/opus_tags.py <work>/assets/audio/ogg --names <temp>/awc_names.csv --dialogue <temp>/dialogue.csv
 ```
 
 Only page 1, which holds the `OpusTags` packet alone, is rewritten. The audio pages, page sequence and granule
@@ -415,7 +415,7 @@ music-segment selection; that belongs to the game's audio system.
 
 ## Streamed-music cue sheets
 
-Run `python -I tools/awc_opus.py <bank-or-directory> <output> --cue-sheet` to write
+Run `python -I tooling/awc_opus.py <bank-or-directory> <output> --cue-sheet` to write
 `cue_regions.json` next to the Ogg files for each bank with verified regions. Each row names
 a sibling audio file and the hexadecimal cue-name hash. The integer interval
 `[start_sample, end_sample)` counts 48 kHz frames per channel from the start of playback.

@@ -4,7 +4,7 @@ Standard library only; no GPU, no LLVM, no game files.
 
     python -I tests/semantic/test_lds_subword_d16.py -v
 
-Covers RDNA2 Data Share (DS) sub-dword and d16 operations translated by tools/rdna2spirv.py:
+Covers RDNA2 Data Share (DS) sub-dword and d16 operations translated by tooling/rdna2spirv.py:
   * ds_write_b8 (all 4 byte lanes 0..3) and ds_write_b16 (byte lanes 0 and 2),
     verifying via ds_read_b32 that adjacent bytes/halfwords in the same dword stay intact.
   * ds_write_b8_d16_hi (extracts source bits [23:16]) and ds_write_b16_d16_hi

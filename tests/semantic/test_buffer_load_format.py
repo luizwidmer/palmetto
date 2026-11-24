@@ -1,4 +1,4 @@
-"""Semantic interpreter tests for buffer_load_format_* (the V# FORMAT decode in tools/rdna2spirv.py).
+"""Semantic interpreter tests for buffer_load_format_* (the V# FORMAT decode in tooling/rdna2spirv.py).
 
 The element is read from PhysicalStorageBuffer memory at V#.base + offset. An element under 4 bytes starts at a byte
 shift inside its first dword, and the translation merges dword 1 above it: (w0 >> bsh) | (w1 << (32 - bsh)), picking
@@ -19,7 +19,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)
@@ -176,7 +176,7 @@ class D16NormalizedRounding(unittest.TestCase):
 
 
 class D16NormalizedRoundsOnce(unittest.TestCase):
-    """BUILD-161, measured on an RX 6700 (gfx1031) with tools/d16_format_probe.py: d16 rounds the exact UNORM/SNORM
+    """BUILD-161, measured on an RX 6700 (gfx1031) with tooling/d16_format_probe.py: d16 rounds the exact UNORM/SNORM
     quotient once, straight to f16. The f32 decode followed by f16_bits rounds twice, which is 1 ulp high where the
     f32 lands exactly on an f16 halfway point: UNORM16 0xffaf and 0xffef, SNORM16 0x7ff7 and 0x8009."""
 

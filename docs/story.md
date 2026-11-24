@@ -24,11 +24,11 @@ Readable is the carver's `stored / span`; Bink 2 streams count as readable. The 
 row scans file offsets `0xA120`-`0x4000A11F`.
 
 A first full 20 GB walk was stopped at 72% (about 14.4 billion bytes, 106,000 streams) with one process at
-8.5 GB in memory. A later full walk with `tools/story_index.py` (after #2726 stopped the scanners copying the
+8.5 GB in memory. A later full walk with `tooling/story_index.py` (after #2726 stopped the scanners copying the
 gaps between streams) completes in about 10 minutes and is the full index below; no zlib candidate in the
 archive inflates past 512 MiB.
 
-**Full index.** `python -I tools/story_index.py story000.arc out.json` over all 20,022,508,672 bytes:
+**Full index.** `python -I tooling/story_index.py story000.arc out.json` over all 20,022,508,672 bytes:
 **141,385 streams**, 10,231,531,520 bytes stored (51.1% of the span) and 17,094,635,373 inflated, 182,253,050
 bytes of zero padding and 9,608,682,854 unread (the raw `RSC8` region). By class: zero-prefix 56,228, `0DRP`
 48,084, `42 40 00 00` 5,589, `PSIN` 5,348, type-hash 1,393, clip-stream 875, Bink 2 264, MoVE 119, XML 32, and
@@ -139,7 +139,7 @@ fixed header is 0x30 bytes; a NUL-terminated name follows it before a pointer in
 ### `63 30 00 00` mesh pages
 
 The 45 `shared_minigame000.arc` streams that start with `63 30 00 00` are mesh geometry, not loose float records: each is a run of
-16-byte-aligned chunks of two kinds, a **vertex block** and a **meshlet group**. `tools/meshlet_page.py` walks
+16-byte-aligned chunks of two kinds, a **vertex block** and a **meshlet group**. `tooling/meshlet_page.py` walks
 them; over all 45 pages it parses every chunk and leaves 0 bytes unaccounted for. The same walk over the whole
 archive finds 290 more streams that start with a meshlet group instead (continuation pages, below). Counts are
 from package 1.0.2.1; no value from the pages is stored here.
@@ -213,7 +213,7 @@ formats. Their strides are not measured here, and the tool stops at them instead
 | group-led pages | 290 | 5 | 608 | 748 | 7,015 | 742,141 |
 | total | 335 | 142 | 302,524 | 855 | 9,134 | 996,321 |
 
-**`42 40 00 00` vertex blocks (ASSET-146).** These are sized now, and `tools/meshlet_page.py` walks past them
+**`42 40 00 00` vertex blocks (ASSET-146).** These are sized now, and `tooling/meshlet_page.py` walks past them
 instead of stopping. The header is 0x80 bytes:
 
 | Offset | Field | Measured | Confidence |
@@ -226,7 +226,7 @@ instead of stopping. The header is 0x80 bytes:
 | +0x7C | f32, scale of the type-8 (snorm16) UV slots | 4.0f in every block | high (value); meaning from arc9-explorer |
 
 **The slot tag byte encodes stride and type.** Bits 5-7 times 4 are the stride and the low nibble is the type,
-`tag = (stride / 4) << 5 | type`. This is how `third_party/arc9-explorer/Core/RageModelDecoder.cs` (lines 700-748)
+`tag = (stride / 4) << 5 | type`. This is how `vendor/arc9-explorer/Core/RageModelDecoder.cs` (lines 700-748)
 reads vertex slots. It sizes all 99,184 slot words of the archive's `63 30` and `42 40` blocks:
 
 | Tag | Type | Stride | Slots (blocks) | Reading |
@@ -239,7 +239,7 @@ reads vertex slots. It sizes all 99,184 slot words of the archive's `63 30` and 
 | 0x27 | 7 | 4 | `42 40` 2, 11, 18 | 10:10:10 unit vector: the normal in slot 2, a tangent in slots 11 and 18 (below) |
 
 The slots used in `42 40` blocks are 0-4, 11-15 and 18; slot 15 occurs in 78 blocks and slot 18 in 770.
-`tools/meshlet_page.py` sizes slots with this rule (`tag_stride`), for the types above only, and reads the same
+`tooling/meshlet_page.py` sizes slots with this rule (`tag_stride`), for the types above only, and reads the same
 1,569 streams with identical totals. The vertex count is the slot-0 span divided by 8, and every stream is
 stride × count bytes. Of every 16-byte-aligned `42 40 00 00` word in `shared_minigame000.arc`,
 14,671 have a header that fits this rule exactly. Each of them is followed by another `42 40` block (9,234), a
@@ -249,14 +249,14 @@ headers and are left alone. One `63 30` block also has a slot 12 (tag 0x26, 4 by
 sizes with the same tag rule.
 
 **Slot 0 is a packed position.** It's the `(8, 16)` position form that
-`third_party/arc9-explorer/Core/RageModelDecoder.cs` (lines 772-790) already reads for models. Take the 8 bytes as one
+`vendor/arc9-explorer/Core/RageModelDecoder.cs` (lines 772-790) already reads for models. Take the 8 bytes as one
 u64 `q`:
 - `a` = bits 8-31 (24 bits);
 - `b` = bits 32-47 shifted up 8, or'd with bits 0-7 (24 bits);
 - `c` = bits 48-63 (16 bits).
 
 Then `(a, b, c) = bias + scale × (a, b, c)`. The axis word says how the three are stored: 0 is (z, y, x), 1 is
-(y, z, x), 2 is (x, y, z). `tools/meshlet_page.py` decodes the positions with this rule (`positions_4240`) and reports
+(y, z, x), 2 is (x, y, z). `tooling/meshlet_page.py` decodes the positions with this rule (`positions_4240`) and reports
 counts only.
 
 I checked the rule independently over `shared_minigame000.arc`, counts only:
@@ -297,7 +297,7 @@ read as unorm `x / 511.5 − 1`, unfolded as usual (z = 1 − |u| − |v|, and w
 (1 − |v|)·sign(u) and (1 − |u|)·sign(v)). Bits 20-31 are not decoded; their top two bits are mostly 2 or 3, which
 would fit a tangent angle and sign. With tag 0x27 (type 7, 363 blocks) it is x, y, z in bits 0-9, 10-19 and 20-29,
 in the same unorm. The normals are in world order whatever the +0x6C axis word says, which also confirms the
-position reorder above. `tools/meshlet_page.py --normals` compares each stored normal with the sum of its vertex's
+position reorder above. `tooling/meshlet_page.py --normals` compares each stored normal with the sum of its vertex's
 face normals:
 
 | Archive | Vertices | Within 8° | Within 25° | Opposed |
@@ -313,7 +313,7 @@ which fits mirrored parts. The rest may be groups that the span rule binds to th
 **Meshlet record words +8/+12 hold the meshlet's centre.** Three 12-bit fields give x, y and z: w2 bits 0-11,
 w2 bits 12-23 and w3 bits 0-11. Each counts steps around 2047: the centre is `(field − 2047) × step`, with a step of
 2^e / 16 m, where e is w2 bits 28-31: 1/16 m (±128 m) for most meshlets, coarser for larger ones further out (below). The default `0x007FF7FF / 0x7FF` is the origin.
-`tools/meshlet_page.py --centres` compares each stored
+`tooling/meshlet_page.py --centres` compares each stored
 centre with the centre of its meshlet's vertex box, using the `42 40` positions above. Over all 1,569 streams:
 
 | Meshlets | Default words | Axes | Same step | Within one step |
@@ -535,7 +535,7 @@ The raw region of `story000` that has no zlib stream holds unencrypted `ADAT` (A
 63,861 of them, 9,423,830,212 bytes. Every `RSC8` resource in this family is an AWC tag `0x5c`
 facial/lip-sync clip inside one of those banks, next to its Opus dialogue line
 ([rsc8_audio.md](rsc8_audio.md#resolution-of-the-docsstorymd-raw-gaps), decoded by
-`tools/rsc8_audio.py`).
+`tooling/rsc8_audio.py`).
 
 "Unread" in the index tables means bytes the zlib walk could not inflate. It is not a claim that
 those bytes are empty or unimportant; in minigame and restofworld they contain `ADAT` banks with
@@ -569,7 +569,7 @@ was found in the inflated sample.
    names, paths and exact entry boundaries remain unavailable.
 2. A recursive ARC9 walker. The flat zlib carve does not group streams by the 441 additional ARC9
    headers in `story000`; a decoder needs their spans and TOCs to group resources.
-3. An `RSC8` decoder for version 8001: done. `tools/rsc8_audio.py` decodes the header and the
+3. An `RSC8` decoder for version 8001: done. `tooling/rsc8_audio.py` decodes the header and the
    facial/lip-sync clip payload ([rsc8_audio.md](rsc8_audio.md)).
 4. A `PSIN` section walker. The tag/length chain is measured; `LSCH`, `LENM`, `LSNS`, `LGID`,
    `LRSC` and `CHKS` semantics are still open.
@@ -589,10 +589,10 @@ sizes, signatures and header fields; it does not write resource payloads or carv
 ## Reproduce
 
 ```powershell
-python -I tools/story_index.py <archive.arc> <out.csv|out.json> [--start N] [--limit BYTES]
-python -I tools/arc9_carve.py <archive.arc> <out_dir> --index-only [--start N] [--limit BYTES]
+python -I tooling/story_index.py <archive.arc> <out.csv|out.json> [--start N] [--limit BYTES]
+python -I tooling/arc9_carve.py <archive.arc> <out_dir> --index-only [--start N] [--limit BYTES]
 python -I tests/test_story_index.py
-python -I tools/meshlet_page.py <archive.arc | carved-dir | page.bin> [...] [--json out.json] [--quiet]
+python -I tooling/meshlet_page.py <archive.arc | carved-dir | page.bin> [...] [--json out.json] [--quiet]
 python -I tests/test_meshlet_page.py
 ```
 

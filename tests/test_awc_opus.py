@@ -1,4 +1,4 @@
-"""Regression tests for tools/awc_opus.py, built entirely from synthetic AWC data (no game files).
+"""Regression tests for tooling/awc_opus.py, built entirely from synthetic AWC data (no game files).
 
     python -I tests/test_awc_opus.py
 """
@@ -20,7 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_awc_opus():
-    path = os.path.join(ROOT, "tools", "awc_opus.py")
+    path = os.path.join(ROOT, "tooling", "awc_opus.py")
     spec = importlib.util.spec_from_file_location("awc_opus_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

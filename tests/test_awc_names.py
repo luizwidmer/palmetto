@@ -1,4 +1,4 @@
-"""Tests for tools/awc_names.py, built from synthetic AWC stream tables and words (no game data).
+"""Tests for tooling/awc_names.py, built from synthetic AWC stream tables and words (no game data).
 
     python -I tests/test_awc_names.py
 """
@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_module():
-    path = os.path.join(ROOT, "tools", "awc_names.py")
+    path = os.path.join(ROOT, "tooling", "awc_names.py")
     spec = importlib.util.spec_from_file_location("awc_names_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -53,7 +53,7 @@ def write(path, data):
 
 class TestJoaat(unittest.TestCase):
     def test_reference_values(self):
-        # Jenkins one-at-a-time, lowercased (the same function as tools/hashdict.py)
+        # Jenkins one-at-a-time, lowercased (the same function as tooling/hashdict.py)
         self.assertEqual(A.joaat("a"), 0xCA2E9442)
         self.assertEqual(A.joaat("ABC"), A.joaat("abc"))
 
@@ -63,7 +63,7 @@ class TestJoaat(unittest.TestCase):
 
     def test_matches_hashdict(self):
         import importlib.util as u
-        spec = u.spec_from_file_location("hashdict_ref", os.path.join(ROOT, "tools", "hashdict.py"))
+        spec = u.spec_from_file_location("hashdict_ref", os.path.join(ROOT, "tooling", "hashdict.py"))
         hd = u.module_from_spec(spec)
         spec.loader.exec_module(hd)
         for w in ("x", "Some_Name_01", "path/to/thing", "caf\xe9"):

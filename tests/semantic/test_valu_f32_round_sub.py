@@ -6,7 +6,7 @@
   v_sub_f32      D = S0 - S1
   v_subrev_f32   D = S1 - S0
 
-Each case translates a hand-written pixel-shader listing with tools/rdna2spirv.py
+Each case translates a hand-written pixel-shader listing with tooling/rdna2spirv.py
 and executes the resulting SPIR-V via tests/semantic/spirv_mini_interp.py.
 Results are compared as raw 32-bit IEEE-754 binary32 words so +0.0 (0x00000000)
 and -0.0 (0x80000000) are strictly distinguished. Standard library only.
@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from support import mrt0_words, translate_lines  # noqa: E402  (support puts tools/ on sys.path)
+from support import mrt0_words, translate_lines  # noqa: E402  (support puts tooling/ on sys.path)
 
 POS_ZERO = 0x00000000
 NEG_ZERO = 0x80000000

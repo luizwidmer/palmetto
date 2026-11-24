@@ -25,7 +25,7 @@ stream is zlib; "unread" is non-zero bytes between streams that did not inflate,
 
 ### Second pass (bounded map-band scan)
 
-The second pass used `tools/world_index.py` on the gaps and on every 2 GiB around the two known map areas. The
+The second pass used `tooling/world_index.py` on the gaps and on every 2 GiB around the two known map areas. The
 requested 72–76 GiB window does not exist: the file ends at 70.92 GiB. The tail window is 70.8–70.92 GiB
 (134,143,917 bytes). Coverage is scanned compressed bytes / window span; streams and `0x7a` resources are from
 the same tool.
@@ -92,7 +92,7 @@ archives. Those names explain the cell layout, but the outer `levels.arc` does n
 table stays encrypted.
 
 The 20–21 GiB map count needs a correction: a first system page of exactly 65,536 bytes is often followed by a
-small continuation stream (usually 1–2 KiB) that the next stream scan alone would miss. `tools/world_index.py`
+small continuation stream (usually 1–2 KiB) that the next stream scan alone would miss. `tooling/world_index.py`
 joins that continuation when the schema still has unresolved pointers. The join turns 630 first-page maps into
 698 complete map files and 55,564 entities into 75,551. The other first-pass windows did not change. This is a
 format rule, not a heuristic: the continuation is reached by system pointers in the first page, and the joined
@@ -236,9 +236,9 @@ table, not fixed offsets.
 assuming it. A local 79,738-name dictionary resolved 5,107/24,105 distinct archetype hashes (8,263/203,799
 entities) in two 1 GiB windows, every one confirmed by the 64-bit key, and rejected one 32-bit-only candidate.
 The same dictionary resolved 5/23,535 map names and 1/2,089 parent rows, all confirmed by the map key. This is a
-name-source lower bound, not a formula limit: with the names `tools/arc9_names.py` lists in `levels.arc`, 99.85%
+name-source lower bound, not a formula limit: with the names `tooling/arc9_names.py` lists in `levels.arc`, 99.85%
 of the 1,670,435 entities a whole-archive `world_index.py` run reads resolve, all verified by the 64-bit key. See [world_names.md](world_names.md) and
-`tools/world_names.py`.
+`tooling/world_names.py`.
 
 ## Archetype definitions (`CMapTypes`)
 
@@ -247,7 +247,7 @@ file, counted as `meta` by `world_index.py`. Its archetypes are stored the way e
 fixed-size instances per struct, `CBaseArchetypeDef` (`82d6fc83`, 0xb8 bytes) and `CMloArchetypeDef`
 (`10506455`, 0x220 bytes). The interior struct repeats the base members at the same offsets and adds its own
 from +0xb8. `CTimeArchetypeDef` (`76b0c56c`) did not occur in the measured window. All three names, and the
-member names below, are case-sensitive joaat. `tools/world_archetypes.py` finds every field by hash in the
+member names below, are case-sensitive joaat. `tooling/world_archetypes.py` finds every field by hash in the
 resource's own member table.
 
 | Field | Hash | Offset | Type | Meaning |
@@ -274,7 +274,7 @@ Measured in the 8–9 GiB window of `levels.arc`: 119
 name is defined more than once, every copy has the same box.
 
 `assetType`, measured by name: each distinct `name` of the window against the `name.#dr` / `name.#ft` strings
-that `tools/arc9_names.py --types dr,ft,dd` lists in the whole `levels.arc` (266,456 `.#dr`, 50,801 `.#ft`, no
+that `tooling/arc9_names.py --types dr,ft,dd` lists in the whole `levels.arc` (266,456 `.#dr`, 50,801 `.#ft`, no
 `.#dd`):
 
 | `assetType` | names | listed as `.#ft` | listed as `.#dr` | not listed |
@@ -311,7 +311,7 @@ than the stored extents, without scale none is. This says how the extents were c
 applies scale; the scale rule of [Map placement records](#map-placement-records) stays as it is.
 
 ```powershell
-python -I tools\world_archetypes.py <game>\levels.arc --start 8589934592 --limit 1073741824 --check-extents --out <work>\world\archetypes_8-9.json
+python -I tooling\world_archetypes.py <game>\levels.arc --start 8589934592 --limit 1073741824 --check-extents --out <work>\world\archetypes_8-9.json
 ```
 
 ### Measured placement summary
@@ -373,7 +373,7 @@ Hash-only or opaque:
   dictionary resolves 5 names and 1 parent; all five names are confirmed by the map root's 64-bit key. The
   remaining map-cell names are not in the local model/XML exports;
 - `archetypeName` values are 32-bit hashes, but nearly all of them resolve. With the `name.#dr`/`name.#ft` strings
-  that `tools/arc9_names.py` lists in `levels.arc` as the dictionary, 1,667,978 of 1,670,435 entities (99.85%,
+  that `tooling/arc9_names.py` lists in `levels.arc` as the dictionary, 1,667,978 of 1,670,435 entities (99.85%,
   227,422 of 228,681 distinct hashes) resolve, every one verified by the entity's 64-bit key; see
   [world_names.md](world_names.md#whole-archive-coverage). The earlier figures (5,107 of 24,105 hashes, 8,263 of
   203,799 entities = 4.05%, in two 1 GiB windows) used only names already exported locally;
@@ -413,7 +413,7 @@ The place names shown to the player come from one `GameShape__Data__LocationName
 
 ### Interior keys and interior placements
 
-`tools/world_interior_names.py` reads every interior definition and every interior placement in `levels.arc`
+`tooling/world_interior_names.py` reads every interior definition and every interior placement in `levels.arc`
 and joins them with the `InteriorNames` section (full archive, `--jobs 15`, about 2 minutes):
 
 | Measured | Count |
@@ -467,8 +467,8 @@ names are lower-cased joaat; all 1,706 interiors have rooms, and in every one th
 (`keys_in_a_room_key_member`).
 
 ```powershell
-python -I tools\gamedata_reader.py <work>\common --root GameShape__Data__LocationNameLoopkup --out <work>\gamedata
-python -I tools\world_interior_names.py <game>\levels.arc --names <work>\gamedata\GameShape__Data__LocationNameLoopkup_<offset>.json `
+python -I tooling\gamedata_reader.py <work>\common --root GameShape__Data__LocationNameLoopkup --out <work>\gamedata
+python -I tooling\world_interior_names.py <game>\levels.arc --names <work>\gamedata\GameShape__Data__LocationNameLoopkup_<offset>.json `
     --jobs 15 --out <work>\world\interior_names.json
 python -I tests\test_world_interior_names.py
 ```
@@ -523,7 +523,7 @@ is not stated here either.
 
 ## Tool
 
-`tools/world_index.py` scans an ARC9 archive or a directory of carved streams and writes JSON/CSV with
+`tooling/world_index.py` scans an ARC9 archive or a directory of carved streams and writes JSON/CSV with
 `offset, size, signature, version, kind, structs, blocks, entities, extents, position bounds, LOD counts`,
 map name/parent hashes and the map root's 64-bit name key. It implements the header/schema validation above
 and the continuation join. It does not decrypt anything and does not extract models/textures. Its JSON/CSV
@@ -541,18 +541,18 @@ These fields are optional. Older exports, unavailable references and unsupported
 the corresponding keys. A missing or ambiguous target stays unresolved, including when a scan covers only
 part of the map set.
 
-`tools/world_census.py` scans the whole `levels.arc` data area in shards and counts every validated
+`tooling/world_census.py` scans the whole `levels.arc` data area in shards and counts every validated
 `0x7a` map resource and placement entity. The measured full pass is 23,535 maps / 1,670,442 entities
 with 98.32% stream coverage; the exactness condition and byte accounting are in
 [world_census.md](world_census.md).
 
-`tools/world_names.py` builds the hash→name dictionary from local model manifests, level-scan paths, name
+`tooling/world_names.py` builds the hash→name dictionary from local model manifests, level-scan paths, name
 lists and XML, then resolves `world_index`/`world_census` map rows and aggregate archetype counts. It
 reports 32-bit-only candidates separately from matches confirmed by the 64-bit key. The measured dictionary
 and coverage are in [world_names.md](world_names.md).
 
 ```powershell
-python -I tools\world_index.py <levels.arc> --start 21474836480 --limit 1073741824 `
+python -I tooling\world_index.py <levels.arc> --start 21474836480 --limit 1073741824 `
     --out work\world\levels-20-21.json --csv work\world\levels-20-21.csv
 python -I tests\test_world_index.py
 python -I tests\test_world_names.py
@@ -564,7 +564,7 @@ reported with fewer entities or as `meta` rather than guessed.
 
 ## Building a placed world
 
-`tools/world_build.py --placements` builds the viewer's chunks from map placements instead of each model's own
+`tooling/world_build.py --placements` builds the viewer's chunks from map placements instead of each model's own
 coordinates. It covers points 3 and 4 of *What a runtime needs*, and approximates point 5 with `--lod-sets`
 (below).
 
@@ -731,10 +731,10 @@ the 99.96% was measured on 917e9b9 with both applied and has not been recounted 
 - Textures were not part of these runs (`--no-textures`).
 
 ```powershell
-python -I tools\world_index.py <levels.arc> --out work\world\index.json --entities-out work\world\entities.jsonl
-python -I tools\world_build.py work\assets --out work\world\placed --no-textures --jobs 16 `
+python -I tooling\world_index.py <levels.arc> --out work\world\index.json --entities-out work\world\entities.jsonl
+python -I tooling\world_build.py work\assets --out work\world\placed --no-textures --jobs 16 `
     --placements work\world\entities.jsonl
-python -I tools\world_build.py work\assets --out work\world\lod --no-textures --jobs 16 `
+python -I tooling\world_build.py work\assets --out work\world\lod --no-textures --jobs 16 `
     --placements work\world\entities.jsonl --lod-sets
 python -I tests\test_world_place.py
 python -I tests\test_world_instancing.py
@@ -773,7 +773,7 @@ Ranges: `defaultMaxSpeed` 8 to 15 (median 8), `maxAcceleration` 1 and `maxDecele
 
 Map resources can carry two instance lists besides `CEntityDef`. All four struct names are the case-sensitive
 joaat of the TARGET V class names, and every member below is named by the resource's own member table.
-`tools/instance_lists.py` reads them through that table (by name hash) and writes counts only.
+`tooling/instance_lists.py` reads them through that table (by name hash) and writes counts only.
 
 | Hash | Struct | Size | Members (offset) |
 |---|---|---:|---|
@@ -872,7 +872,7 @@ Cross-checks:
 ### The 16 surface entries and the deformation map (ASSET-305)
 
 Measured on a 1.0.2.1 package (one `CSnowTrackData` document, one complete stream, found with
-`tools/gamedata_xml.py` on a `arc9_carve.py` carve of `common.arc`). Classes and counts only; the entry and
+`tooling/gamedata_xml.py` on a `arc9_carve.py` carve of `common.arc`). Classes and counts only; the entry and
 material strings are not reproduced.
 
 - **11 surfaces are defined and 5 slots are empty.** Entries 0 to 10 each have a `Name`, a distinct opaque
@@ -922,7 +922,7 @@ player), and how an entry is chosen at run time (the material's flag, the surfac
 ## Map lights and the vehicle lane graph
 
 Light emitters on archetypes and entities, and the vehicle path nodes, links and junctions, are in
-[world_lights_paths.md](world_lights_paths.md) (`tools/world_lights_paths.py`).
+[world_lights_paths.md](world_lights_paths.md) (`tooling/world_lights_paths.py`).
 
 ## No-sharing rule
 

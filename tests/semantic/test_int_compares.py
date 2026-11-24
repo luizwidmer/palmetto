@@ -2,7 +2,7 @@
 (e32 into VCC and e64 into an SGPR pair, read back with v_cndmask_b32) and s_cmp_{eq,lg,lt,le,gt,ge}_{u32,i32},
 s_cmp_{eq,lg}_u64 (SCC, read back with s_cselect_b32).
 
-Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py
+Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py
 and compares the result with Python's own comparison of the operands, read at the instruction's width and signedness
 (16-bit compares ignore the high half of each 32-bit source).
 """
@@ -16,7 +16,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

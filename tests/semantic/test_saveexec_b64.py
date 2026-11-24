@@ -6,14 +6,14 @@ RDNA2 ISA:
   s_andn2_saveexec_b64  D = EXEC; EXEC = S0 & ~EXEC; SCC = (EXEC != 0).
   s_andn2_wrexec_b64    EXEC = S0 & ~EXEC; D = EXEC (the new one); SCC = (EXEC != 0).
 
-Programs are written here (no game data) and translated by tools/rdna2spirv.py; spirv_mini_interp.run_workgroup runs
+Programs are written here (no game data) and translated by tooling/rdna2spirv.py; spirv_mini_interp.run_workgroup runs
 one workgroup of 64 lanes on a 64-wide subgroup. S0 is written by v_cmp into VCC (_e32) or into s[10:11] (_e64),
 EXEC is a constant in each half. Every lane stores whether it is on in the new EXEC, and lane 0 stores SCC and the
 population count and lowest lane of D. The expected values come from the ISA lines above, written as integers in
 `model`, not from the translator. Constant sources are in test_value_semantics.py (cs_w64_mask_imm); the VCC form of
 the andn2 ops is in test_andn2_exec_b64.py.
 
-The GPU test is runtime/test/shaders/cs_w64x_saveexec_b64.asm; its fixture also runs here. The --wave64-emulate
+The GPU test is port/test/shaders/cs_w64x_saveexec_b64.asm; its fixture also runs here. The --wave64-emulate
 output needs Workgroup memory, which the interpreter rejects, so it is covered by the GPU test only.
 """
 import struct

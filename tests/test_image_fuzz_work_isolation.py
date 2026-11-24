@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tooling"))
 import image_fuzz as imf
 
 
@@ -85,7 +85,7 @@ raise SystemExit(image_fuzz.main())
             parent.mkdir()
             sentinel = parent / "texels.bin"
             sentinel.write_bytes(b"caller data")
-            tools = str(Path(__file__).resolve().parents[1] / "tools")
+            tools = str(Path(__file__).resolve().parents[1] / "tooling")
             command = [sys.executable, "-I", "-c", child, tools, str(parent)]
             workers = []
             try:
@@ -113,7 +113,7 @@ raise SystemExit(image_fuzz.main())
         with tempfile.TemporaryDirectory() as tmp:
             parent = Path(tmp) / "not-a-directory"
             parent.write_bytes(b"caller data")
-            script = Path(__file__).resolve().parents[1] / "tools" / "image_fuzz.py"
+            script = Path(__file__).resolve().parents[1] / "tooling" / "image_fuzz.py"
             result = subprocess.run([sys.executable, "-I", str(script), "--programs", "1", "--work", str(parent)],
                                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 2, result.stderr)

@@ -1,4 +1,4 @@
-"""Synthetic-data tests for tools/draw_ownership.py.
+"""Synthetic-data tests for tooling/draw_ownership.py.
 
     python -I tests/test_draw_ownership.py
 
@@ -23,7 +23,7 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import draw_ownership as dwo  # noqa: E402
 

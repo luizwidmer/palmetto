@@ -1,5 +1,5 @@
 """Exhaustive/sweep bit-exact tests of an integer f32->f16 (RTE) reference, and a check that the d16 pair packer in
-tools/rdna2spirv.py (pack_f16_pair_int, through Gen.f16_bits) is integer ops only.
+tooling/rdna2spirv.py (pack_f16_pair_int, through Gen.f16_bits) is integer ops only.
 
 Runs with the standard library only (no GPU, LLVM, or SPIRV-Tools required):
     python -I tests/test_d16_pack.py
@@ -12,7 +12,7 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import rdna2spirv  # noqa: E402
 
 

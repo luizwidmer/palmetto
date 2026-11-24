@@ -1,4 +1,4 @@
-"""runtime/test/shaders/compute_fixture.py: the user-data shift for D3D12 compute fixtures (D3D-448).
+"""port/test/shaders/compute_fixture.py: the user-data shift for D3D12 compute fixtures (D3D-448).
 
     python -I tests/test_compute_fixture_shift.py
 
@@ -12,7 +12,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "runtime", "test", "shaders"))
+sys.path.insert(0, os.path.join(ROOT, "port", "test", "shaders"))
 
 import compute_fixture as cf  # noqa: E402
 

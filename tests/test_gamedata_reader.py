@@ -14,7 +14,7 @@ import unittest
 from unittest import mock
 import xml.etree.ElementTree as ET
 
-TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")
+TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tooling")
 sys.path.insert(0, TOOLS)
 import gamedata_reader as R  # noqa: E402
 

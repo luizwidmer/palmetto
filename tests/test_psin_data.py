@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/psin_data.py (no game data: every hash is the joaat of an invented name)."""
+"""Synthetic tests for tooling/psin_data.py (no game data: every hash is the joaat of an invented name)."""
 import json
 import os
 import struct
@@ -8,8 +8,8 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "psin_data.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "psin_data.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import psin_data as D  # noqa: E402

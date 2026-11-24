@@ -3,7 +3,7 @@
     python -I tests/test_no_game_data_workflow.py
 
 By default `git ls-files` prints a name with a byte outside printable ASCII (an accented letter, a tab) in double
-quotes with octal escapes, so a line-anchored `\\.spvasm$` never matches it. scripts/check_no_game_data.py cannot
+quotes with octal escapes, so a line-anchored `\\.spvasm$` never matches it. tooling/scripts/check_no_game_data.py cannot
 stand in for that step: it reads magics, and text formats such as `.spvasm` and `.obj` have none. This test takes
 the step's `run:` script out of the workflow (not a copy, so it cannot drift) and runs it with bash in a throwaway
 git repository of empty files. Needs git and bash; no game files.

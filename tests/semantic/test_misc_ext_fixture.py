@@ -2,11 +2,11 @@
 
 Standard library only; no GPU, no LLVM, no game files.
 
-runtime/test/shaders/cs_w32_misc_ext.asm has lane 0 of a wave32 group store one word of each of s_nand_b64,
+port/test/shaders/cs_w32_misc_ext.asm has lane 0 of a wave32 group store one word of each of s_nand_b64,
 s_xnor_b64, v_cvt_pk_u16_u32, v_cvt_pk_i16_i32, v_mad_u32_u16, v_mad_i32_i16, ds_cmpst_rtn_b32 (old value and the
 LDS word after it) and ds_write2_b64 / ds_read2_b64 (derivations in its header). This runs the fixture
 (tests/semantic/regen_fixtures.py) through spirv_mini_interp, checks the eight words against values computed here
-from the ISA definitions, and checks that check.py and scripts/run_gpu_tests.py expect the same words on the GPU.
+from the ISA definitions, and checks that check.py and tooling/scripts/run_gpu_tests.py expect the same words on the GPU.
 """
 import os
 import re
@@ -78,13 +78,13 @@ class MiscExtFixture(unittest.TestCase):
     def test_lds_ops_run_in_lane_0_only(self):
         # spirv_mini_interp gives each invocation its own LDS, so lanes racing on one address are invisible here;
         # the .asm must cut EXEC to lane 0 before its first ds_ op (#1850).
-        with open(os.path.join(ROOT, "runtime", "test", "shaders", "cs_w32_misc_ext.asm"), encoding="utf-8") as f:
+        with open(os.path.join(ROOT, "port", "test", "shaders", "cs_w32_misc_ext.asm"), encoding="utf-8") as f:
             lines = [ln.strip() for ln in f if ln.strip() and not ln.startswith(";")]
         self.assertLess(lines.index("v_cmpx_eq_u32_e32 0, v0"),
                         min(i for i, ln in enumerate(lines) if ln.startswith("ds_")))
 
     def test_gpu_runners_expect_the_same_words(self):
-        for rel in (("runtime", "test", "shaders", "check.py"), ("scripts", "run_gpu_tests.py")):
+        for rel in (("port", "test", "shaders", "check.py"), ("tooling", "tooling/scripts", "run_gpu_tests.py")):
             with open(os.path.join(ROOT, *rel), encoding="utf-8") as f:
                 text = f.read()
             m = re.search(r'"cs_w32_misc_ext"\)?[,:]\s*\[([^\]]*)\]', text)

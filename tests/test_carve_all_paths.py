@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "carve_all.ps1"
+SCRIPT = Path(__file__).resolve().parents[1] / "tooling/scripts" / "carve_all.ps1"
 INDEX = {"summary": {"files": 1, "bink2_files": 0, "span": 10, "compressed_bytes": 5, "unread_bytes": 5,
                      "inflated_bytes": 5}, "files": []}
 
@@ -130,7 +130,7 @@ class CarveAllGamePathTest(unittest.TestCase):
     def test_failed_carver_stops_without_replacing_coverage(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            game, out, tools = root / "game", root / "out", root / "tools"
+            game, out, tools = root / "game", root / "out", root / "tooling"
             for folder in (game, out, tools):
                 folder.mkdir()
             (game / "first.arc").write_bytes(b"x")

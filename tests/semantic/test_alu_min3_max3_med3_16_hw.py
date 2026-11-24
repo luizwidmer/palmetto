@@ -1,7 +1,7 @@
 """v_min3/v_max3/v_med3 on f16, i16 and u16 against words an RDNA2 GPU returned for the same instruction (no model in this test).
 
 Every row was run natively on an AMD Radeon RDNA2 iGPU (gfx1036, Ryzen 9 9950X3D, Windows AMD driver
-32.0.21045.16010) through tools/hw_oracle with AMD clang 23 (rocm-sdk-core 10.0.0), in the MODE inferred for the game
+32.0.21045.16010) through tooling/hw_oracle with AMD clang 23 (rocm-sdk-core 10.0.0), in the MODE inferred for the game
 (IEEE 0, DX10_CLAMP 1, f32 denormals flushed, f16 denormals kept): v1..v3 hold the operands, v4 starts as 0xDEADBEEF and
 the word after the instruction is the expected one. The rows are a sample of the 6,092 measured cases (every triple of
 10 f16 values, among them +-0, a denormal, +-inf, a quiet and a signalling NaN, and of 8 i16/u16 values; each source's
@@ -20,7 +20,7 @@ import warnings
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling"))
 sys.path.insert(0, HERE)
 
 import rdna2spirv  # noqa: E402

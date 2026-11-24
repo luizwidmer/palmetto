@@ -17,7 +17,7 @@ RDNA2 Scalar Arithmetic Logic Unit (SALU) Architecture:
     SCC = 1 if sdst != 0 else 0
 
 Standard library only: Python 3.9+ compatible, zero game data, zero external dependencies.
-Exercises tools/rdna2spirv.py via support.translate_lines(...) and support.mrt0_words for hardware-accurate translation.
+Exercises tooling/rdna2spirv.py via support.translate_lines(...) and support.mrt0_words for hardware-accurate translation.
 """
 
 from dataclasses import dataclass
@@ -29,7 +29,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 sys.path.insert(0, TOOLS_DIR)
 sys.path.insert(0, HERE)
 

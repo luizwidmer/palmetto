@@ -1,4 +1,4 @@
-"""Unit tests for tools/swizzle_search.py covering permutation matching and coordinate inversion.
+"""Unit tests for tooling/swizzle_search.py covering permutation matching and coordinate inversion.
 
     python -I tests/test_swizzle_search.py
 """
@@ -16,7 +16,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLS_DIR = ROOT / "tools"
+TOOLS_DIR = ROOT / "tooling"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 

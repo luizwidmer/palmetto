@@ -1,6 +1,6 @@
 """Wave64 whole-wave mask and vote tests, run across every lane of the translated SPIR-V.
 
-Eight GPU tests from runtime/test/shaders (hand-written, no game data; fixtures from regen_fixtures.py), translated
+Eight GPU tests from port/test/shaders (hand-written, no game data; fixtures from regen_fixtures.py), translated
 without --wave64-emulate and run by spirv_mini_interp.run_workgroup the way vk_compute_test runs them: one group
 of the size in the .asm header (64 threads, 40 for cs_w64x_partial), a heap filled with 0xEE bytes, s[0:3] = a V#
 with base 0 and num_records 0xFFFFFFFF.
@@ -30,11 +30,11 @@ import unittest
 import support
 import spirv_mini_interp as si
 
-sys.path.insert(0, os.path.join(support.ROOT, "runtime", "test", "shaders"))
+sys.path.insert(0, os.path.join(support.ROOT, "port", "test", "shaders"))
 import check  # noqa: E402  (the GPU check's expected words)
 from compute_fixture import compute_header  # noqa: E402
 
-ASM_DIR = os.path.join(support.ROOT, "runtime", "test", "shaders")
+ASM_DIR = os.path.join(support.ROOT, "port", "test", "shaders")
 GPU_DUMPS = dict(check.CS_DUMPS + check.W64X_DUMPS + check.W64X_PARTIAL)
 DUMPS = ("cs_w64x_ballot", "cs_w64x_readfirstlane", "cs_w64x_load_ballot_load", "cs_w64x_partial",
          "cs_wave64_ballot", "cs_wm_bfm64", "cs_wm_half_cmp")

@@ -1,4 +1,4 @@
-"""tools/sampler_source_census.py on hand-written listings and containers (no game files, no GPU)."""
+"""tooling/sampler_source_census.py on hand-written listings and containers (no game files, no GPU)."""
 import contextlib
 import io
 import json
@@ -10,11 +10,11 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import sampler_source_census as ssc  # noqa: E402
 
-TOOL = os.path.join(ROOT, "tools", "sampler_source_census.py")
+TOOL = os.path.join(ROOT, "tooling", "sampler_source_census.py")
 SFI0_SMP = 1 << 26
 SAMPLE = ("image_sample v[0:3], v[4:5], s[20:27], s[28:31] dmask:0xf dim:SQ_RSRC_IMG_2D", 8)
 END = ("s_endpgm", 4)
@@ -26,7 +26,7 @@ def enc(n):
 
 
 def listing(name, lines):
-    """lines: (text, bytes) pairs -> a tab-indented listing as tools/shader_disasm.py writes it."""
+    """lines: (text, bytes) pairs -> a tab-indented listing as tooling/shader_disasm.py writes it."""
     end = 0x100 + sum(n for _, n in lines)
     body = "".join(f"\t{text:<40}{enc(n)}\n" for text, n in lines)
     return f"; {name}.fssm code 0x100..0x{end:x}\n{body}"

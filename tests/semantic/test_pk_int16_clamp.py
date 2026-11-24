@@ -1,6 +1,6 @@
 """Semantic SPIR-V and interpreter tests for RDNA2 VOP3P clamp on v_pk_mul_lo_u16 and v_pk_{max,min}_{u16,i16}.
 
-Covers every probe case from tools/pk_int16_clamp_probe.py (overflowing products wrapping modulo 2^16, op_sel and
+Covers every probe case from tooling/pk_int16_clamp_probe.py (overflowing products wrapping modulo 2^16, op_sel and
 op_sel_hi permutations, inline/literal constants, SGPR operands, destination aliasing), checks SPIR-V emits no
 UMin/SClamp saturation on mul_lo/max/min clamp (unlike v_pk_add_u16 clamp), verifies inactive EXEC preservation and
 rejected invalid modifiers, and validates SPIR-V with spirv-as/spirv-val when available. Standard library only.
@@ -16,7 +16,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 sys.dont_write_bytecode = True
 for p in (TOOLS, HERE):
     if p not in sys.path:

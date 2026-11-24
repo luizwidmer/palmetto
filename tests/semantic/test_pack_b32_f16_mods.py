@@ -24,7 +24,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)
@@ -59,7 +59,7 @@ def run(lines, export=None):
     path = os.path.join(_TMP.name, "disasm", "ps_packmods.s")
     exp = export or ("v0",) * 4
     with open(path, "w", encoding="utf-8") as f:
-        f.write("; ps_packmods\n" + "".join(f"\t{ln}\n" for ln in lines) +
+        f.write("; ps_packextensions\n" + "".join(f"\t{ln}\n" for ln in lines) +
                 "\texp mrt0 " + ", ".join(exp) + " done vm\n\ts_endpgm\n")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", ResourceWarning)
@@ -125,7 +125,7 @@ class PackModsTests(unittest.TestCase):
         self.assertEqual(run(["v_mov_b32 v1, 0x7c01", "v_pack_b32_f16 v0, v1, v2"])[0], 0x00007C01)
 
     def test_gpu_fixture_words(self):
-        # The words in runtime/test/shaders/ps_f16_pack_mods.asm are what a GPU must give.
+        # The words in port/test/shaders/ps_f16_pack_mods.asm are what a GPU must give.
         words = run(["v_mov_b32 v0, 0x42003400", "v_mov_b32 v1, 0x34004400",
                      "v_pack_b32_f16 v2, -v0, |v1|", "v_pack_b32_f16 v3, v0, -v1",
                      "v_pack_b32_f16 v4, -|v0|, v1 op_sel:[1,0,0]",

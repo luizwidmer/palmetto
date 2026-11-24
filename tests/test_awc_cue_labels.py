@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 
-TOOL = Path(__file__).resolve().parents[1] / "tools" / "awc_cue_labels.py"
+TOOL = Path(__file__).resolve().parents[1] / "tooling" / "awc_cue_labels.py"
 
 
 class LabelTests(unittest.TestCase):

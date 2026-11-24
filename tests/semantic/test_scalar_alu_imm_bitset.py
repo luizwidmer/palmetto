@@ -1,6 +1,6 @@
 """Semantic interpreter tests for RDNA2 scalar inline-immediate and bit-set ALU instructions.
 
-Covers end-to-end translation via ``tools/rdna2spirv.py`` and execution via
+Covers end-to-end translation via ``tooling/rdna2spirv.py`` and execution via
 ``tests/semantic/spirv_mini_interp.py`` for:
   * s_movk_i32    (SOPK: D = signext(simm16); SCC unchanged)
   * s_addk_i32    (SOPK: D = D + signext(simm16) mod 2^32; SCC = signed 32-bit overflow)
@@ -21,7 +21,7 @@ RDNA2 ISA rules (AMD RDNA2 "Instruction Set Architecture" reference, SOP1/SOP2/S
     width = 32 masks to 0 (yielding 0, not 0xFFFFFFFF), and bits shifted past bit 31 are
     truncated (zeroed), not wrapped around to bit 0.
 
-Translator notes observed in ``tools/rdna2spirv.py``:
+Translator notes observed in ``tooling/rdna2spirv.py``:
   * ``s_mulk_i32``, ``s_bitset0_b32``, and ``s_bitset1_b32`` read their in-place destination
     with ``src_u(a[0])`` (matching ``s_addk_i32``), supporting SGPR and non-SGPR targets
     such as ``m0``, ``vcc_lo``, ``vcc_hi``, and ``null``.
@@ -41,7 +41,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True      # never drop __pycache__ into the tree under test
 sys.path.insert(0, TOOLS_DIR)

@@ -1,4 +1,4 @@
-"""Tests for tools/tex_export.py, on synthetic textures and swizzle equations (no game data, no addrlib header).
+"""Tests for tooling/tex_export.py, on synthetic textures and swizzle equations (no game data, no addrlib header).
 
     python -m pytest tests/test_tex_export.py -q
 """
@@ -11,7 +11,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tooling"))
 
 np = pytest.importorskip("numpy")
 import tex_export as T  # noqa: E402

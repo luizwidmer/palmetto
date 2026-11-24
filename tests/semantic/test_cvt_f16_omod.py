@@ -2,7 +2,7 @@
 
 Standard library only; no GPU, no LLVM, no game files.
 
-Covers the native RDNA2 (gfx1036) measurements via tools/rdna2spirv.py + spirv_mini_interp:
+Covers the native RDNA2 (gfx1036) measurements via tooling/rdna2spirv.py + spirv_mini_interp:
   * div:2 underflowing a negative exponent-1 normal (-2^-14 .. -(2 - 2^-10) * 2^-14) preserves the sign bit (-0.0,
     0x8000) in both RNE and MODE toward-zero, while exponent-0 inputs (-0.0, -2^-15) give +0.0 (0x0000) and clamp
     still turns -0.0 into +0.0;

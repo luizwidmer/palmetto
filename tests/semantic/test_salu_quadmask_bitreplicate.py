@@ -5,7 +5,7 @@ RDNA2 ISA SOP1:
   * s_quadmask_b64: the same for the 16 quads of the 64-bit S0, D[63:16] = 0; SCC = D != 0.
   * s_bitreplicate_b64_b32: D[2i+1] = D[2i] = S0[i] for i in 0..31; SCC is not written.
 
-Each case translates a synthetic pixel shader with tools/rdna2spirv.py and runs it in
+Each case translates a synthetic pixel shader with tooling/rdna2spirv.py and runs it in
 tests/semantic/spirv_mini_interp.py. Every result word leaves through exp as two 16-bit halves ORed into
 0x40000000, so no export channel is a NaN or denormal pattern that a float round trip could change. A lane-mask
 source or destination stays Unsupported: one invocation holds only its own lane's bit.
@@ -20,7 +20,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

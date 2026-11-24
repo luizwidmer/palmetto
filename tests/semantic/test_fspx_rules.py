@@ -1,7 +1,7 @@
 """Semantic tests for FSPX / FidelityFX translator rules (#1754 follow-ups, docs/fspx.md):
 
 1. LLVM VCCTuple scalar register lists ending in vcc_lo,vcc_hi (`[s100,...,s105,vcc_lo,vcc_hi]` and
-   `[s92,...,s105,vcc_lo,vcc_hi]`) parsed in tools/shader_ir.py, clearing `vcc` in tools/lane_masks.py,
+   `[s92,...,s105,vcc_lo,vcc_hi]`) parsed in tooling/shader_ir.py, clearing `vcc` in tooling/lane_masks.py,
    and handled in s_buffer_load_dwordx*/s_load_dword*, buffer/global addressing, and T#/S# lookups.
 2. `src_scc` special source operand (RDNA2 encoding 253 = SCC, 0 or 1) in scalar and vector ALU ops.
 3. `image_atomic_*` / `image_atomic_cmpswap` with `a16` packed 16-bit unsigned coordinates (2D and 3D).
@@ -20,7 +20,7 @@ import warnings
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling"))
 sys.path.insert(0, HERE)
 
 import lane_masks  # noqa: E402

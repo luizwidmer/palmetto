@@ -1,4 +1,4 @@
-"""Unit tests for the tools/fspx_unpack.py output-directory guard: an unusable --out (a regular file
+"""Unit tests for the tooling/fspx_unpack.py output-directory guard: an unusable --out (a regular file
 at --out, a regular file above the unpack target, or a regular file where fspx/disasm must be
 created) must give one stderr line and exit 2 at main start, before any input is read, instead of
 a raw OSError traceback.
@@ -15,7 +15,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import fspx_unpack  # noqa: E402
 

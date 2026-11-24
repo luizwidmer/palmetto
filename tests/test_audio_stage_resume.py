@@ -1,4 +1,4 @@
-"""Audio steps of make_game.py's assets stage: resuming a stopped build, ffmpeg failures, and awc_opus.py's writes.
+"""Audio steps of build_port.py's assets stage: resuming a stopped build, ffmpeg failures, and awc_opus.py's writes.
 
 Standard library only; no game data: the tools are mocked or fed hand-made inputs.
 """
@@ -14,10 +14,10 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 import awc_opus  # noqa: E402
-import make_game  # noqa: E402
+import build_port  # noqa: E402
 import winbatch  # noqa: E402
 
 
@@ -113,12 +113,12 @@ class AudioStageResumeTest(unittest.TestCase):
         self.ran = []
         self.ffmpeg_ok = True
         # Model/texture manifests and the audio bank manifest present: only the steps under test can run.
-        for rel in make_game.MODEL_ARCHIVES:
+        for rel in build_port.MODEL_ARCHIVES:
             name = os.path.splitext(os.path.basename(rel))[0]
             for mode in ("models", "textures"):
                 self.touch(self.work, "assets", name, mode, "manifest.json")
-                with open(os.path.join(self.work, "assets", name, mode, make_game.DECODER_RECORD), "w") as f:
-                    f.write(make_game.decoder_digest())
+                with open(os.path.join(self.work, "assets", name, mode, build_port.DECODER_RECORD), "w") as f:
+                    f.write(build_port.decoder_digest())
         self.touch(self.audio, "audio_manifest.json")
 
     def tearDown(self):
@@ -151,13 +151,13 @@ class AudioStageResumeTest(unittest.TestCase):
 
     def run_stage(self, ffmpeg="ffmpeg"):
         self.ran = []
-        with mock.patch.object(make_game, "arc9dump", lambda w: "arc9dump"), \
-                mock.patch.object(make_game, "run", self.fake_run), \
-                mock.patch.object(make_game, "py", self.fake_py), \
-                mock.patch.object(make_game.shutil, "which", lambda n: ffmpeg), \
-                mock.patch.object(make_game.subprocess, "run", self.fake_subprocess), \
-                mock.patch.object(make_game, "log", lambda *a: None):
-            make_game.assets(self.game, self.work, False, 2)
+        with mock.patch.object(build_port, "arc9dump", lambda w: "arc9dump"), \
+                mock.patch.object(build_port, "run", self.fake_run), \
+                mock.patch.object(build_port, "py", self.fake_py), \
+                mock.patch.object(build_port.shutil, "which", lambda n: ffmpeg), \
+                mock.patch.object(build_port.subprocess, "run", self.fake_subprocess), \
+                mock.patch.object(build_port, "log", lambda *a: None):
+            build_port.assets(self.game, self.work, False, 2)
         return self.ran
 
     def wavs(self):
@@ -192,11 +192,11 @@ class AudioStageResumeTest(unittest.TestCase):
     def test_failed_ogg_step_leaves_no_marker(self):
         def failing_py(tool, *args):
             raise SystemExit(1)
-        with mock.patch.object(make_game, "arc9dump", lambda w: "arc9dump"), \
-                mock.patch.object(make_game, "py", failing_py), \
-                mock.patch.object(make_game, "log", lambda *a: None):
+        with mock.patch.object(build_port, "arc9dump", lambda w: "arc9dump"), \
+                mock.patch.object(build_port, "py", failing_py), \
+                mock.patch.object(build_port, "log", lambda *a: None):
             with self.assertRaises(SystemExit):
-                make_game.assets(self.game, self.work, False, 2)
+                build_port.assets(self.game, self.work, False, 2)
         self.assertFalse(os.path.exists(os.path.join(self.audio, "ogg.done")))
 
 
@@ -209,7 +209,7 @@ with open(sys.argv[-1], "w", encoding="utf-8") as f:
 
 class DecodeXmaStdinTest(unittest.TestCase):
     """ffmpeg reads stdin for key commands. Given the build's stdin, it stops a build in the background of a terminal
-    ("Stopped (tty output)") at the first XMA2 stream and swallows input piped to make_game.py."""
+    ("Stopped (tty output)") at the first XMA2 stream and swallows input piped to build_port.py."""
 
     def test_ffmpeg_gets_no_stdin(self):
         with tempfile.TemporaryDirectory() as d:
@@ -227,7 +227,7 @@ class DecodeXmaStdinTest(unittest.TestCase):
                     f.write(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n')
                 os.chmod(ffmpeg, 0o755)
             # A child process, so that decode_xma() runs with a stdin this test controls.
-            code = "import sys; sys.path.insert(0, sys.argv[1]); import make_game; make_game.decode_xma(*sys.argv[2:])"
+            code = "import sys; sys.path.insert(0, sys.argv[1]); import build_port; build_port.decode_xma(*sys.argv[2:])"
             p = subprocess.run([sys.executable, "-I", "-c", code, ROOT, ffmpeg, xma],
                                input="tests/test_next.py\n", capture_output=True, text=True)
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)

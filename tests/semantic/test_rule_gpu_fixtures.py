@@ -1,9 +1,9 @@
 """The GPU fixtures for docs/design.md rules that used to be checked on the CPU only (TEST-175).
 
-Each fixture in runtime/test/shaders writes four mrt0 words that its .asm header derives by hand ("Expected mrt0
+Each fixture in port/test/shaders writes four mrt0 words that its .asm header derives by hand ("Expected mrt0
 bits"). These tests keep the three places that state those words in step with the translator: the interpreter run of
 the translated fixture (tests/semantic/fixtures/disasm, made by regen_fixtures.py), check.py's PIXEL_BITS and
-scripts/run_gpu_tests.py's table. A GPU run of check.py or run_gpu_tests.py then compares the same words with what
+tooling/scripts/run_gpu_tests.py's table. A GPU run of check.py or run_gpu_tests.py then compares the same words with what
 the device writes. The two interp fixtures are drawn with vs_interp_consts, whose params are constant over the
 triangle; the interpreter gets those constants, read back from that vertex shader's source.
 """
@@ -15,12 +15,12 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-SHADERS = os.path.join(ROOT, "runtime", "test", "shaders")
+SHADERS = os.path.join(ROOT, "port", "test", "shaders")
 sys.path.insert(0, HERE)
 sys.path.insert(0, SHADERS)
 
 import support  # noqa: E402
-import check    # noqa: E402  (runtime/test/shaders/check.py; importing it runs nothing)
+import check    # noqa: E402  (port/test/shaders/check.py; importing it runs nothing)
 
 FIXTURES = ("ps_cmp_nlg", "ps_cvt_off", "ps_fmac_f16_mods", "ps_vop3_const_mods", "ps_interp_f32_mods",
             "ps_interp_mov_mods")
@@ -40,8 +40,8 @@ def header_words(name):
 
 
 def runner_words(name):
-    """The tuple scripts/run_gpu_tests.py expects for `name` (its table is local to run_suite, so read the source)."""
-    with open(os.path.join(ROOT, "scripts", "run_gpu_tests.py"), encoding="utf-8") as f:
+    """The tuple tooling/scripts/run_gpu_tests.py expects for `name` (its table is local to run_suite, so read the source)."""
+    with open(os.path.join(ROOT, "tooling", "tooling/scripts", "run_gpu_tests.py"), encoding="utf-8") as f:
         m = re.search(r'"%s": \(([^)]*)\)' % re.escape(name), f.read())
     return tuple(int(x, 16) for x in m.group(1).split(",")) if m else None
 

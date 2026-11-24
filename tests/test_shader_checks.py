@@ -273,7 +273,7 @@ class FloatToIntSweep(unittest.TestCase):
             return cvt_answer(env, wrong_for)
 
         with patch.object(check, "run", side_effect=harness):
-            return check.cvt_f32_sat_test("tools", "spirv"), sent
+            return check.cvt_f32_sat_test("tooling", "spirv"), sent
 
     def test_every_input_is_sent_and_exact(self):
         problem, sent = self.sweep()
@@ -296,7 +296,7 @@ class FloatToIntSweep(unittest.TestCase):
 
         with patch.object(check, "run", side_effect=harness), \
                 patch.object(check, "subgroup_size", return_value=32):
-            problem = check.cvt_f32_sat_test("tools", "spirv")
+            problem = check.cvt_f32_sat_test("tooling", "spirv")
         self.assertIsInstance(problem, check.Skip)
         self.assertIn("can't run this shader at 32 lanes", problem)
         self.assertNotIn("inputs wrong", problem)
@@ -577,7 +577,7 @@ class SignedZeroUnjudgedWords(unittest.TestCase):
     def compute(self, device, words, subgroup="32..32"):
         out = f"device: {device} (subgroup {subgroup})\nout[0..7] = " + " ".join(map(str, words)) + "\n"
         with patch.object(check, "run", return_value=(0, out)):
-            return check.compute_test("tools", "spirv", "cs_signed_zero_nan", "1", "dump",
+            return check.compute_test("tooling", "spirv", "cs_signed_zero_nan", "1", "dump",
                                       expected_words=check.SIGNED_ZERO_NAN)
 
     def test_apple_does_not_judge_the_minus_zero_products(self):
@@ -607,7 +607,7 @@ class SignedZeroUnjudgedWords(unittest.TestCase):
         self.assertEqual(check.judged_words("cs_store", out, check.CS_STORE), check.CS_STORE)
 
     def test_run_gpu_tests_uses_the_same_rule(self):
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tooling/scripts"))
         import run_gpu_tests
         for device, words in (("Apple M1 Max (subgroup 32..32)", self.APPLE_WORDS),
                               (self.LLVMPIPE + " (subgroup 8..8)", self.LLVMPIPE_WORDS)):
@@ -649,11 +649,11 @@ class GradientSampleChecks(unittest.TestCase):
     def test_device_without_min_lod_is_a_skip(self):
         answer = 77, "unsupported: shaderResourceMinLod (the shader clamps its LOD with MinLod)\n"
         with patch.object(check, "run", return_value=answer):
-            result = check.texture_gradient_a16_test("tools", "spirv", "ps_texture_grad_cl_a16")
+            result = check.texture_gradient_a16_test("tooling", "spirv", "ps_texture_grad_cl_a16")
         self.assertIsInstance(result, check.Skip)
         self.assertEqual(result, "SKIP (unsupported: shaderResourceMinLod (the shader clamps its LOD with MinLod))")
         with patch.object(check, "run", return_value=(1, "device lost")):
-            failure = check.texture_gradient_a16_test("tools", "spirv", "ps_texture_grad_cl_a16")
+            failure = check.texture_gradient_a16_test("tooling", "spirv", "ps_texture_grad_cl_a16")
         self.assertNotIsInstance(failure, check.Skip)
         self.assertIn("device lost", failure)
 
@@ -705,19 +705,19 @@ class StoreWordsChecks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "cs_imgatomic.spv").touch()
             with patch.object(check, "run", return_value=(0, words_output("cs_imgatomic"))) as run:
-                self.assertEqual(check.store_words_test("tools", tmp, "cs_imgatomic"), "")
+                self.assertEqual(check.store_words_test("tooling", tmp, "cs_imgatomic"), "")
             self.assertIn("vk_store_test", run.call_args.args[0])
             self.assertEqual(run.call_args.args[2:], ("words",))
             answer = 77, "unsupported: shaderStorageImageWriteWithoutFormat=0 shaderInt64=1\n"
             with patch.object(check, "run", return_value=answer):
-                skip = check.store_words_test("tools", tmp, "cs_imgatomic")
+                skip = check.store_words_test("tooling", tmp, "cs_imgatomic")
             self.assertIsInstance(skip, check.Skip)
             self.assertIn("shaderStorageImageWriteWithoutFormat=0", skip)
             with patch.object(check, "run", return_value=(1, "FAILED vkCreateComputePipelines -> -3\n")):
-                failure = check.store_words_test("tools", tmp, "cs_imgatomic")
+                failure = check.store_words_test("tooling", tmp, "cs_imgatomic")
             self.assertNotIsInstance(failure, check.Skip)
             self.assertIn("exit 1", failure)
-            self.assertEqual(check.store_words_test("tools", tmp, "cs_resinfo"), "missing cs_resinfo.spv")
+            self.assertEqual(check.store_words_test("tooling", tmp, "cs_resinfo"), "missing cs_resinfo.spv")
 
 
 class GetLodChecks(unittest.TestCase):
@@ -828,7 +828,7 @@ class TexelOffsetChecks(unittest.TestCase):
             (Path(tmp) / "ps_texoff.spv").touch()
             answer = 77, "unsupported: VK_KHR_maintenance8 (non-constant texel Offset)\n"
             with patch.object(check, "run", return_value=answer) as run:
-                result = check.pixel_test("tools", tmp, "ps_texoff")
+                result = check.pixel_test("tooling", tmp, "ps_texoff")
             self.assertEqual(run.call_args.kwargs["env"]["VKT_NEED_MAINTENANCE8"], "1")
             self.assertIn("vk_texture_test", run.call_args.args[0])
         self.assertIsInstance(result, check.Skip)
@@ -840,7 +840,7 @@ class Wave32LaneDumps(unittest.TestCase):
     def run_dump(self, name, code, out):
         want = dict(check.CS_DUMPS)[name]
         with patch.object(check, "run", return_value=(code, out)):
-            return check.compute_test("tools", "spirv", name, "1", "dump", expected_words=want,
+            return check.compute_test("tooling", "spirv", name, "1", "dump", expected_words=want,
                                       needs_32_lanes=name in check.WAVE32_LANE_DUMPS)
 
     @staticmethod
@@ -875,7 +875,7 @@ class Wave32LaneDumps(unittest.TestCase):
     def test_other_dumps_are_not_skipped_on_narrow_devices(self):
         out = "device: llvmpipe (subgroup 8..8)\nout[0..7] = 1 2 3 4 5 6 7 8\n"
         with patch.object(check, "run", return_value=(0, out)):
-            problem = check.compute_test("tools", "spirv", "cs_store", "1", "dump", expected_words=check.CS_STORE)
+            problem = check.compute_test("tooling", "spirv", "cs_store", "1", "dump", expected_words=check.CS_STORE)
         self.assertTrue(problem)
         self.assertNotIsInstance(problem, check.Skip)
 
@@ -883,13 +883,13 @@ class Wave32LaneDumps(unittest.TestCase):
         # #774: like run_gpu_tests.py, so an 8..32 device (Intel ANV) doesn't judge the dump at a narrower size.
         for name in check.WAVE32_LANE_DUMPS:
             with self.subTest(name=name), patch.object(check, "run", return_value=(0, self.words(name))) as run:
-                check.compute_test("tools", "spirv", name, "1", "dump", expected_words=dict(check.CS_DUMPS)[name],
+                check.compute_test("tooling", "spirv", name, "1", "dump", expected_words=dict(check.CS_DUMPS)[name],
                                    needs_32_lanes=True)
                 self.assertEqual(run.call_args.kwargs["env"]["VKC_SUBGROUP_SIZE"], "32")
 
     def test_other_dumps_keep_the_default_size(self):
         with patch.object(check, "run", return_value=(0, self.words("cs_store"))) as run:
-            check.compute_test("tools", "spirv", "cs_store", "1", "dump", expected_words=check.CS_STORE)
+            check.compute_test("tooling", "spirv", "cs_store", "1", "dump", expected_words=check.CS_STORE)
         self.assertNotIn("env", run.call_args.kwargs)
 
     def test_recorded_wave_size_is_requested(self):
@@ -899,14 +899,14 @@ class Wave32LaneDumps(unittest.TestCase):
             Path(tmp, "index.json").write_text(json.dumps({"cs_barrier_loop": {"subgroup_size": 32},
                                                            "cs_store": {}}), encoding="utf-8")
             with patch.object(check, "run", return_value=(0, "out[0..7] = 128 96 64 32 128 96 64 0\n")) as run:
-                self.assertEqual(check.compute_test("tools", tmp, "cs_barrier_loop", "1", "dump",
+                self.assertEqual(check.compute_test("tooling", tmp, "cs_barrier_loop", "1", "dump",
                                                     expected_words=[128, 96, 64, 32, 128, 96, 64]), "")
             self.assertEqual(run.call_args.kwargs["env"]["VKC_SUBGROUP_SIZE"], "32")
             with patch.object(check, "run", return_value=(0, self.words("cs_store"))) as run:
-                check.compute_test("tools", tmp, "cs_store", "1", "dump", expected_words=check.CS_STORE)
+                check.compute_test("tooling", tmp, "cs_store", "1", "dump", expected_words=check.CS_STORE)
             self.assertNotIn("env", run.call_args.kwargs)                 # nothing recorded: the default size
             with patch.object(check, "run", return_value=(0, "out[0..7] = 0 0 0 0 0 0 0 0\n")) as run:
-                check.compute_test("tools", tmp, "cs_barrier_loop", "1", "dump", expected_words=[1],
+                check.compute_test("tooling", tmp, "cs_barrier_loop", "1", "dump", expected_words=[1],
                                    env={"VKC_SUBGROUP_SIZE": "64"})
             self.assertEqual(run.call_args.kwargs["env"]["VKC_SUBGROUP_SIZE"], "64")   # a caller's choice wins
 
@@ -916,7 +916,7 @@ class Wave32LaneDumps(unittest.TestCase):
                                                encoding="utf-8")
             out = "compute subgroup size: 32 not available\nout[0..7] = 0 0 0 0 0 0 0 0\n"
             with patch.object(check, "run", return_value=(0, out)):
-                problem = check.compute_test("tools", tmp, "cs_barrier_loop", "1", "dump", expected_words=[128])
+                problem = check.compute_test("tooling", tmp, "cs_barrier_loop", "1", "dump", expected_words=[128])
         self.assertIsInstance(problem, check.Skip)
 
     def test_skipped_when_32_lanes_cannot_be_pinned(self):
@@ -1023,7 +1023,7 @@ class FmaFusedChecks(unittest.TestCase):
                 if env_fma:
                     check.os.environ["PALMETTO_FMA"] = env_fma
                 with patch.object(check, "run", return_value=(code, out)) as run:
-                    res = check.fma_fused_test("tools", tmp)
+                    res = check.fma_fused_test("tooling", tmp)
                 self.assertEqual(run.call_args.kwargs["env"]["VKC_SGPRS"], check.FMA_FUSED_ENV["VKC_SGPRS"])
         return res
 
@@ -1122,5 +1122,5 @@ class PixelTestRegistry(unittest.TestCase):
             (Path(tmp) / "ps_legacy_mul.spv").touch()
             want = check.PIXEL_BITS["ps_legacy_mul"]
             with patch.object(check, "pixels", return_value=([want], "")) as pixels:
-                self.assertEqual(check.pixel_test("tools", tmp, "ps_legacy_mul"), "")
+                self.assertEqual(check.pixel_test("tooling", tmp, "ps_legacy_mul"), "")
             self.assertEqual(pixels.call_count, 1)

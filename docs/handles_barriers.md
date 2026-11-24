@@ -6,7 +6,7 @@ RVAs, descriptor handles and the project's own wording only.
 
 Predecessor: [list_lifecycle.md](list_lifecycle.md) section 5 (the two calls bisected out with `PALMETTO_XS_LIST_MUTE`
 and the measurement the next step needed). This page records the arguments of both calls, the conversion each one got
-in `runtime/shims/d3d12_xs_device.cpp`, what is refused instead, and the boot outcome with both converted and no mute.
+in `port/shims/d3d12_xs_device.cpp`, what is refused instead, and the boot outcome with both converted and no mute.
 
 ## 1. What the two calls did to a reopened list
 
@@ -174,7 +174,7 @@ What this says:
   no longer being discarded, not a dropped submission: every recorded frame is submitted and every `Close` succeeds;
 * nothing is drawn yet: `SetPipelineState` and the draw calls are still 0.
 
-## 7. Mock coverage (`runtime/test/xs_proxy_mock_test.cpp`)
+## 7. Mock coverage (`port/test/xs_proxy_mock_test.cpp`)
 
 The GPU-free mock device now writes the layer's target-view capture into the destination of a forwarded
 `CreateRenderTargetView` (a null resource writes an empty capture, a real one resource + one layer), and the mock real
@@ -188,7 +188,7 @@ list at GCL7 records the groups a forwarded `Barrier` is given. `check_console_c
 | a clear of a slot created from `pResource = 0` is not forwarded; the null capture is what the mock wrote | the measured null-view no-op |
 | a clear of a slot created from a real resource is forwarded with the same CPU handle and colour pointer | real clears still record |
 | a clear of an unknown handle, and of a handle created from a real resource whose capture was emptied, are not forwarded | the other two refusal reasons |
-| `static_assert`s tie the proxy's five-word capture mirror to `palmetto::TargetView` in `runtime/src/command_list.h` | the mirror cannot drift |
+| `static_assert`s tie the proxy's five-word capture mirror to `palmetto::TargetView` in `port/src/command_list.h` | the mirror cannot drift |
 
 `xs_proxy_mock_test` passes (`PASS (9 allocations refused on purpose)`); `crash_unwind_test` (54 checks),
 `graphics_record_test` (101) and `unimplemented_policy_test` (98) still pass; `d3d12_fence_timing_test` remains the
@@ -200,14 +200,14 @@ The frames are now recorded, submitted and read their barriers, and the first fr
 clear-only) frame: the renderer binds render targets, heaps, root signatures and descriptor tables and clears a null
 render-target view, but it probes no pipeline state and issues no draw - `SetPipelineState` and the draw calls are
 still 0 in the whole boot, and the target it clears is a null view the title itself created. `PresentX` (queue slot 32)
-is still refused ([xbox_present.h](../runtime/shims/xbox_present.h) is the prepared presenter). The next measurement
+is still refused ([xbox_present.h](../port/shims/xbox_present.h) is the prepared presenter). The next measurement
 is therefore the renderer's pipeline/draw path and the resource binding that would make the null view a real
 back buffer, not another recording call.
 
 ## 9. Files
 
-* `runtime/shims/d3d12_xs_device.cpp`: `translate_console_barrier_groups` and `translate_console_clear` (both run
+* `port/shims/d3d12_xs_device.cpp`: `translate_console_barrier_groups` and `translate_console_clear` (both run
   inside `list_slot`); the destination ring filled by device slot 20; the probe switch
   `PALMETTO_XS_CLEAR_BARRIER_PROBE` (off by default).
-* `runtime/test/xs_proxy_mock_test.cpp`: the mock capture writer, the barrier-group recording, the assertions above.
+* `port/test/xs_proxy_mock_test.cpp`: the mock capture writer, the barrier-group recording, the assertions above.
 * This page.

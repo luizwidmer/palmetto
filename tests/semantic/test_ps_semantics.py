@@ -28,7 +28,7 @@ ISA semantics relied on (AMD RDNA2 "Instruction Set Architecture" reference, VAL
   v_sin_f16           sin(2*pi * f16(S0)) in turns, preserving high half of dst on GFX10.
   v_mul_legacy_f32    IEEE f32 multiply except 0 * anything (including inf and NaN) == +0.0.
 
-Expectations were also recorded as GPU results in the header comments of runtime/test/shaders/ps_*.asm
+Expectations were also recorded as GPU results in the header comments of port/test/shaders/ps_*.asm
 (not re-confirmed on GPU here).
 """
 import math

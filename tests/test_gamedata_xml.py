@@ -17,8 +17,8 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "gamedata_xml.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "gamedata_xml.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import gamedata_xml as g  # noqa: E402
 
 ALPHA = (

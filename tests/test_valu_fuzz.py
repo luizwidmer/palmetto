@@ -1,4 +1,4 @@
-"""CPU checks for tools/valu_fuzz.py (FUZZ-2, FUZZ-5): the reference models and the generators, no GPU.
+"""CPU checks for tooling/valu_fuzz.py (FUZZ-2, FUZZ-5): the reference models and the generators, no GPU.
 
 The GPU side (vk_compute_test, rdna2spirv.py) is what the fuzzer compares against; these tests make sure the models it
 compares with are right, so a mismatch is the translator's and not the fuzzer's.
@@ -19,7 +19,7 @@ import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import valu_fuzz as vf  # noqa: E402
 
 
@@ -504,7 +504,7 @@ def test_oracle_option_is_validated(monkeypatch):
 
 def _mc():
     try:
-        sys.path.insert(0, os.path.join(ROOT, "runtime", "test", "shaders"))
+        sys.path.insert(0, os.path.join(ROOT, "port", "test", "shaders"))
         import mc_command
         cmd = mc_command.mc_command()
         subprocess.run(cmd + ["--version"], capture_output=True, check=True)
@@ -518,7 +518,7 @@ def _mc_accepts_f16_opsel(mc):
 
     Probe a fixed instruction rather than a generated program, so a generator bug can never turn into a skip. The
     probe is the form llvm-mc 18 rejects (docs/testing.md): a 16-bit integer op, which GFX10 has only as op_sel VOP3.
-    An f16 VOP2 op's VOP3 form takes no op_sel on GFX10 (tools/valu_fuzz.py), so no assembler accepts that as a probe.
+    An f16 VOP2 op's VOP3 form takes no op_sel on GFX10 (tooling/valu_fuzz.py), so no assembler accepts that as a probe.
     """
     probe = "v_ashrrev_i16_e64 v0, v1, v2 op_sel:[0,0,0]\n"
     r = subprocess.run(mc + ["-triple=amdgcn--amdpal", "-mcpu=gfx1013"], input=probe,

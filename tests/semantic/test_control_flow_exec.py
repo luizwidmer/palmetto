@@ -9,7 +9,7 @@ Covers:
   2. Multi-lane WaveInterpreter modeling SIMD wave state, vector lane masking,
      scalar registers, and whole-wave control flow (skip patterns, loop convergence,
      and divergent if-then-else joins).
-  3. SPIR-V translation verification via tools/rdna2spirv.py branch_condition():
+  3. SPIR-V translation verification via tooling/rdna2spirv.py branch_condition():
      subgroup vote emission (OpGroupNonUniformAny with Subgroup scope),
      logical negation for execz, and required capability flags.
   4. Invariant and duality verification: execz and execnz are strict complements.
@@ -27,7 +27,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 
@@ -435,7 +435,7 @@ class TestWaveInterpreterExecutionFlow(unittest.TestCase):
 
 
 class TestTranslatorSpirvEmission(unittest.TestCase):
-    """Verifies that tools/rdna2spirv.py emits correct subgroup vote constructs."""
+    """Verifies that tooling/rdna2spirv.py emits correct subgroup vote constructs."""
 
     def test_branch_condition_execz_emission(self):
         """s_cbranch_execz must emit OpGroupNonUniformAny with logical NOT."""

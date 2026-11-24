@@ -1,4 +1,4 @@
-"""Tests for tools/shader_diff.py (no game data, no GPU, no llvm-mc).
+"""Tests for tooling/shader_diff.py (no game data, no GPU, no llvm-mc).
 
 Run from the repository root:
     python -m pytest tests/test_shader_diff.py -v
@@ -11,7 +11,7 @@ import sys
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import shader_diff as sd
 

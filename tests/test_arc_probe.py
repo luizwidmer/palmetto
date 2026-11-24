@@ -1,4 +1,4 @@
-"""Tests for tools/arc_probe.py, built from synthetic archive headers (no game data).
+"""Tests for tooling/arc_probe.py, built from synthetic archive headers (no game data).
 
     python -I tests/test_arc_probe.py
 """
@@ -20,7 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_module():
-    path = os.path.join(ROOT, "tools", "arc_probe.py")
+    path = os.path.join(ROOT, "tooling", "arc_probe.py")
     spec = importlib.util.spec_from_file_location("arc_probe_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -173,7 +173,7 @@ class MainTests(unittest.TestCase):
     def assert_input_refused(self, destination, archive):
         with open(archive, "rb") as f:
             before = f.read()
-        script = os.path.join(ROOT, "tools", "arc_probe.py")
+        script = os.path.join(ROOT, "tooling", "arc_probe.py")
         result = subprocess.run(
             [sys.executable, "-I", script, self.game, "--out", destination],
             capture_output=True, text=True, timeout=30,
@@ -271,7 +271,7 @@ signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
 resource.setrlimit(resource.RLIMIT_FSIZE, (32, 32))
 runpy.run_path(sys.argv.pop(1), run_name="__main__")
 """
-        script = os.path.join(ROOT, "tools", "arc_probe.py")
+        script = os.path.join(ROOT, "tooling", "arc_probe.py")
         result = subprocess.run(
             [sys.executable, "-I", "-c", limited_probe, script, self.game, "--out", self.out],
             capture_output=True, text=True,

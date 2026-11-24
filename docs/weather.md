@@ -4,8 +4,8 @@ This note measures the one `CContentsOfWeatherXmlFile` document that drives weat
 stream offset 0x207000 in `common.arc`). `gamedata.md` has the element tree and the link checks; this page adds
 what the `Mod*` axes correlate with, the exact vocabulary mismatches, and the measured behavior of the numeric
 fields. Counts, schema names and small constants only, no values dump. Everything is reproducible from any
-copy of the Xbox 1.0.2.1 package with the tooling in `gamedata.md`: carve with `tools/arc9_carve.py`, then
-`python -I tools/gamedata_reader.py <work>/carve/common --out <scratch>` and read
+copy of the Xbox 1.0.2.1 package with the tooling in `gamedata.md`: carve with `tooling/arc9_carve.py`, then
+`python -I tooling/gamedata_reader.py <work>/carve/common --out <scratch>` and read
 `CContentsOfWeatherXmlFile_207000.json` (game data, stays local).
 
 The root has 18 direct children. The load-bearing ones:

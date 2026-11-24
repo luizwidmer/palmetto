@@ -1,11 +1,11 @@
 # Differential shader validation
 
 This note describes a value-level check for the RDNA2 → SPIR-V translator; it is not a claim that
-the corpus is correct. The CPU differential oracle in `tools/shader_diff.py` is implemented and
-tested (`tests/test_shader_diff.py`): it compares the ISA model in `tools/cpu_ref.py` against
+the corpus is correct. The CPU differential oracle in `tooling/shader_diff.py` is implemented and
+tested (`tests/test_shader_diff.py`): it compares the ISA model in `tooling/cpu_ref.py` against
 translated SPIR-V run in `tests/semantic/spirv_mini_interp.py` over seeded straight-line programs.
-Run it with `python -I tools/shader_diff.py --programs 200 --seed 7` (`--self-test` checks the
-harness itself). The GPU-side runners are described below: `tools/valu_fuzz.py` (16-bit and memory ops), `tools/lds_fuzz.py`, `tools/crosslane_fuzz.py`, `tools/cf_diff.py` and `tools/ab_control_flow.py` (corpus pixel shaders in both control-flow forms).
+Run it with `python -I tooling/shader_diff.py --programs 200 --seed 7` (`--self-test` checks the
+harness itself). The GPU-side runners are described below: `tooling/valu_fuzz.py` (16-bit and memory ops), `tooling/lds_fuzz.py`, `tooling/crosslane_fuzz.py`, `tooling/cf_diff.py` and `tooling/ab_control_flow.py` (corpus pixel shaders in both control-flow forms).
 
 ## Why `spirv-val` is not enough
 
@@ -48,11 +48,11 @@ a reference to be trusted. A hand-written SPIR-V twin of a test program is a use
 checks the harness and driver without involving the translator, so a harness failure is not blamed on
 translation.
 
-Assembling needs no external `spirv-as` binary: `tools/spirv_asm.py` encodes SPIR-V assembly text into binary
+Assembling needs no external `spirv-as` binary: `tooling/spirv_asm.py` encodes SPIR-V assembly text into binary
 words in process, as a module (`assemble(text, target_env="vulkan1.2")`) or from the command line
-(`python -I tools/spirv_asm.py in.spvasm -o out.spv`, with `--target-env` choosing the environment and
-`vulkan1.2` the default), using the Khronos SPIRV-Headers grammar kept in `tools/spirv_asm_tables.py`.
-`tools/rdna2spirv.py --assembler python` takes that path instead of the `spirv-as` subprocess and its
+(`python -I tooling/spirv_asm.py in.spvasm -o out.spv`, with `--target-env` choosing the environment and
+`vulkan1.2` the default), using the Khronos SPIRV-Headers grammar kept in `tooling/spirv_asm_tables.py`.
+`tooling/rdna2spirv.py --assembler python` takes that path instead of the `spirv-as` subprocess and its
 temporary `.spvasm` file; `spirv-val` stays the external validator. `tests/test_spirv_asm.py` and
 `tests/test_spirv_asm_tables.py` cover the assembler and the tables.
 
@@ -61,11 +61,11 @@ operands; it never consumes SPIR-V. That independence is what makes a disagreeme
 
 ## The two sides
 
-### CPU interpreter (`tools/cpu_ref.py`, prototype)
+### CPU interpreter (`tooling/cpu_ref.py`, prototype)
 
-- Input is a `.s` listing in the format produced by `tools/shader_disasm.py` and by
-  `runtime/test/shaders/build.py`: a header line, then tab-indented instructions with an optional
-  `; encoding: [...]` comment per line. `tools/shader_ir.py` parses the listing and treats line 1 as
+- Input is a `.s` listing in the format produced by `tooling/shader_disasm.py` and by
+  `port/test/shaders/build.py`: a header line, then tab-indented instructions with an optional
+  `; encoding: [...]` comment per line. `tooling/shader_ir.py` parses the listing and treats line 1 as
   the header, so a raw `llvm-mc` dump has to be given the same header `build.py` writes.
 - State is an SGPR file (32-bit values), a VGPR file (one 32-bit value per lane), VCC, EXEC, SCC and
   a program counter. Float registers keep raw bits; only float instructions reinterpret them.
@@ -88,8 +88,8 @@ operands; it never consumes SPIR-V. That independence is what makes a disagreeme
 
 ### GPU side (existing tools, future driver)
 
-The repository already has the pieces: `runtime/test/shaders/build.py` assembles `.asm` with
-`llvm-mc`, `tools/rdna2spirv.py` translates the resulting `.s`, and the `runtime/test/vk_*_test.cpp`
+The repository already has the pieces: `port/test/shaders/build.py` assembles `.asm` with
+`llvm-mc`, `tooling/rdna2spirv.py` translates the resulting `.s`, and the `port/test/vk_*_test.cpp`
 programs dispatch SPIR-V on Vulkan and read buffers/images back. A GPU-side differential runner would:
 
 1. assemble the `.asm` to a `.s` listing with `llvm-mc -show-encoding`;
@@ -105,7 +105,7 @@ the test measures the parser, not the translation.
 
 Hand-written RDNA2 assembly is the source of truth. Each test is an `.asm` file whose header comment
 states the inputs, the observable outputs and the expected bits, matching the existing convention in
-`runtime/test/shaders/*.asm`. The CPU expected values are computed by the interpreter and pinned in
+`port/test/shaders/*.asm`. The CPU expected values are computed by the interpreter and pinned in
 the test table; the GPU must produce the same bits. Pinning the values catches a regression in the
 CPU model as well as in the translator.
 
@@ -129,12 +129,12 @@ s_endpgm
 The prototype can check the CPU side of that case directly:
 
 ```
-python -I tools/cpu_ref.py <listing.s> --parse-only
-python -I tools/cpu_ref.py <listing.s> --json
+python -I tooling/cpu_ref.py <listing.s> --parse-only
+python -I tooling/cpu_ref.py <listing.s> --json
 python -I tests/test_cpu_ref.py
 ```
 
-The scalar ALU has its own differential fuzzer (FUZZ-4), `tools/salu_diff.py`: a separate reference for 87
+The scalar ALU has its own differential fuzzer (FUZZ-4), `tooling/salu_diff.py`: a separate reference for 87
 SOP1/SOP2/SOPC/SOPK opcodes with SCC kept explicit, seeded programs, the translated SPIR-V run in
 `tests/semantic/spirv_mini_interp.py`, and failing programs shrunk to the instructions that matter.
 64-bit mask ops are left out by default (the translator models them as wave masks), and `s_bfe_*` control
@@ -147,12 +147,12 @@ instructions (no loops or nesting), and half the instructions are SCC producers.
 default seeds keep their programs; translator oracle only.
 
 ```
-python -I tools/salu_diff.py --programs 2000 --seed 1
-python -I tools/salu_diff.py --branches --programs 2000 --seed 1
+python -I tooling/salu_diff.py --programs 2000 --seed 1
+python -I tooling/salu_diff.py --branches --programs 2000 --seed 1
 python -I tests/test_salu_diff.py
 ```
 
-The `_sdwa` VALU forms have one too, `tools/sdwa_diff.py`: a separate reference for 92 VOP1/VOP2/VOPC opcodes in an
+The `_sdwa` VALU forms have one too, `tooling/sdwa_diff.py`: a separate reference for 92 VOP1/VOP2/VOPC opcodes in an
 integer and an f16 family (source selects, `sext()`, `dst_sel` with `dst_unused` PAD/SEXT/PRESERVE, SGPR and
 inline-constant sources, `clamp`, f16 neg/abs), seeded one-lane programs that chain through v1..v7 and VCC, the same
 interpreter, shrinking and exit codes as `salu_diff.py`. Forms where the translator is known to differ
@@ -163,8 +163,8 @@ with `dst_sel:DWORD` zeroes the high half, and a float inline constant in an f16
 f16 value.
 
 ```
-python -I tools/sdwa_diff.py --programs 2000 --seed 1
-python -I tools/sdwa_diff.py --oracle hw --programs 500 --seed 1
+python -I tooling/sdwa_diff.py --programs 2000 --seed 1
+python -I tooling/sdwa_diff.py --oracle hw --programs 500 --seed 1
 python -I tests/test_sdwa_diff.py
 ```
 
@@ -177,8 +177,8 @@ translator. No tool is needed unless you pass `--oracle hw`; when one is missing
 `hardware oracle unavailable: <what>` and exits 77, so CI is unaffected.
 
 ```
-python -I tools/salu_diff.py --oracle hw --programs 5000 --seed 1
-python -I tools/hw_oracle/runner.py        # checks the setup: prints the device, or what is missing (exit 77)
+python -I tooling/salu_diff.py --oracle hw --programs 5000 --seed 1
+python -I tooling/hw_oracle/runner.py        # checks the setup: prints the device, or what is missing (exit 77)
 ```
 
 Setup on Windows, about 800 MB and no admin rights:
@@ -199,17 +199,17 @@ Setup on Windows, about 800 MB and no admin rights:
   `PALMETTO_AMD_CLANG` to that `clang.exe`.
 - **Linux** has a launcher of its own, without ROCm: see the next list. `hw_oracle.c` is the Windows one (it loads
   the driver's DLL).
-- **Host C compiler.** `tools/hw_oracle/hw_oracle.c` is built once into the temp folder by MinGW gcc (on PATH or in
+- **Host C compiler.** `tooling/hw_oracle/hw_oracle.c` is built once into the temp folder by MinGW gcc (on PATH or in
   `C:\msys64`), else by MSVC: a `cl` on PATH (a Developer shell), else the Visual Studio that `vswhere` finds, through
   its `vcvars64.bat`. The Visual Studio the runtime needs is therefore enough. `PALMETTO_HOST_CC` overrides the choice
-  (gcc or `cl.exe`). By hand: `gcc -O1 tools/hw_oracle/hw_oracle.c -o hw_oracle.exe` or `cl /O1 tools\hw_oracle\hw_oracle.c`.
+  (gcc or `cl.exe`). By hand: `gcc -O1 tooling/hw_oracle/hw_oracle.c -o hw_oracle.exe` or `cl /O1 tooling\hw_oracle\hw_oracle.c`.
 - `PALMETTO_HW_ARCH` overrides the detected architecture (`amdgpu-arch`, else `gfx1150`). GFX10 spellings
   (`s_load_dwordx2`, `global_store_dwordx4`) are used for `gfx10xx`, so the same kernels assemble for an RDNA2 card
   (checked by assembling for gfx1030 with clang and gfx1013 with `llvm-mc`, and run on gfx1036 on Linux).
   `gfx12xx` (RDNA4) uses the GFX11 spellings. An architecture outside gfx10, gfx11 and gfx12 is `unavailable`
   (exit 77), like a missing tool.
 
-Setup on Linux, without ROCm. `tools/hw_oracle/hw_oracle_drm.c` submits each kernel as a raw compute dispatch
+Setup on Linux, without ROCm. `tooling/hw_oracle/hw_oracle_drm.c` submits each kernel as a raw compute dispatch
 through the kernel driver (`libdrm_amdgpu`), so nothing sits between the instructions and the GPU:
 
 - **GPU.** GFX10 only, which is RDNA1 and RDNA2 (compute engine version 10); the launcher answers anything else
@@ -221,7 +221,7 @@ through the kernel driver (`libdrm_amdgpu`), so nothing sits between the instruc
   `PALMETTO_HW_DRM_ALLOW_DISPLAY=1`. An integrated GPU next to a discrete card is the convenient case.
 - **Tools.** `clang` with the amdgcn target (the distribution's LLVM has it; `PALMETTO_AMD_CLANG` overrides), `gcc`
   and the libdrm headers. The launcher is built once into the temp folder. By hand:
-  `gcc -O1 tools/hw_oracle/hw_oracle_drm.c -o hw_oracle_drm $(pkg-config --cflags --libs libdrm_amdgpu)`.
+  `gcc -O1 tooling/hw_oracle/hw_oracle_drm.c -o hw_oracle_drm $(pkg-config --cflags --libs libdrm_amdgpu)`.
 - **Access.** Your user must be able to open the render node (the `render` or `video` group on most
   distributions).
 - **The command stream** is libdrm's own compute dispatch test for GFX10 (`amdgpu_test_dispatch_memset`), with what
@@ -241,7 +241,7 @@ through the kernel driver (`libdrm_amdgpu`), so nothing sits between the instruc
     a process ran the first one's commands, every time; `tests/test_hw_oracle.py` runs 300 distinct kernels to
     catch that.
 
-How it works: each program becomes one kernel (`tools/hw_oracle/asm.py`: load the output pointer, run the program,
+How it works: each program becomes one kernel (`tooling/hw_oracle/asm.py`: load the output pointer, run the program,
 store `v[8:11]`), 500 kernels per code object. The code object needs an `.amdgpu_metadata` block; without it the HIP
 runtime fails the load with error 209 (`hipErrorNoBinaryForGpu`), which looks like a wrong GPU. The launcher starts
 one workgroup of one thread per kernel and pre-fills the buffer with `0xDEAD0000`, so a kernel that did not write
@@ -288,17 +288,17 @@ RDNA4 (Radeon RX 9070, gfx1201, driver 26.11.2, `rocm-sdk-core` 10.0.0 clang): 1
 500, 2000 each, and seed 500 with `--bfe-any`) gave 0 mismatches, so gfx1201 follows the same `s_bfe` rule. With
 `--oracle translator,hw`, 200 of 200 programs matched (seed 1).
 
-#### RDNA2 integer rows (`tools/int_hw_probe.py`, SHADER-137)
+#### RDNA2 integer rows (`tooling/int_hw_probe.py`, SHADER-137)
 
-`tools/int_hw_probe.py` runs 87 hand-written cases across 19 integer groups (both wave32 and wave64) natively on
-an AMD GPU through `tools/hw_oracle` and compares every output word against `tools/rdna2spirv.py` +
+`tooling/int_hw_probe.py` runs 87 hand-written cases across 19 integer groups (both wave32 and wave64) natively on
+an AMD GPU through `tooling/hw_oracle` and compares every output word against `tooling/rdna2spirv.py` +
 `tests/semantic/spirv_mini_interp.py` (with scalar ops run twice, SCC preset to 0 and 1, so SCC written vs kept is
 observed directly).
 
 Measured on an **AMD Radeon 680M (gfx1035, RDNA2)**, Windows 11 (`10.0.26300`), AMD driver `26.5.1`
 (`32.0.21043.7012`, `amdhip64_6.dll`), conda-forge `clang 22.1.8` + `lld 23.1.6` (`--oracle both --wave both`):
 **87 cases: 82 bit-exact matches, 5 known live translator divergences, 0 unexpected mismatches, 0 wave32/wave64
-differences** (plus `tools/salu_diff.py --oracle hw,translator --bfe-any --programs 500 --seed 1`: 500/500 match).
+differences** (plus `tooling/salu_diff.py --oracle hw,translator --bfe-any --programs 500 --seed 1`: 500/500 match).
 
 - **Matched RDNA2 silicon in both wave32 and wave64 (82/87):** `s_absdiff_i32`, `s_mul_hi_i32/u32`, `s_lshl1..4_add_u32`
   (64-bit shift-out and add carry into SCC), `s_sext_i32_i8/i16`, `s_flbit_i32`, `s_cmov_b32`, `s_cmovk_i32`,
@@ -316,18 +316,18 @@ differences** (plus `tools/salu_diff.py --oracle hw,translator --bfe-any --progr
   saturating by its sign). All are fixed (#1831, #1856), so `KNOWN_DIVERGENCES` is empty and all 87 cases
   match.
 
-#### RDNA2 swizzled buffer addressing (`tools/buffer_swizzle_probe.py`, SHADER-343)
+#### RDNA2 swizzled buffer addressing (`tooling/buffer_swizzle_probe.py`, SHADER-343)
 
-`tools/buffer_swizzle_probe.py` runs 22 hand-written MUBUF/MTBUF buffer-swizzle cases across 8 groups (both wave32
-and wave64) natively on an AMD GPU through `tools/hw_oracle` and compares every output word against
-`tools/rdna2spirv.py` + `tests/semantic/spirv_mini_interp.py`.
+`tooling/buffer_swizzle_probe.py` runs 22 hand-written MUBUF/MTBUF buffer-swizzle cases across 8 groups (both wave32
+and wave64) natively on an AMD GPU through `tooling/hw_oracle` and compares every output word against
+`tooling/rdna2spirv.py` + `tests/semantic/spirv_mini_interp.py`.
 
 Measured on an **AMD Radeon(TM) Graphics (gfx1036, RDNA2)**, Windows AMD driver `32.0.21042.62`, ROCm clang
 (`--oracle both --wave both`): **22 cases: 22 bit-exact matches, 0 known divergences, 0 unexpected mismatches,
 0 unexpected wave32/wave64 diffs** (and the 64-thread `add_tid_wave_lane` case matches wave32 and wave64
 individually, confirming wave-lane wrap at 32 vs 64).
 
-Six silicon divergences from the earlier ISA-only implementation were found and fixed in `tools/rdna2spirv.py`:
+Six silicon divergences from the earlier ISA-only implementation were found and fixed in `tooling/rdna2spirv.py`:
 
 - `idxen = 1` ignores `ADD_TID_ENABLE` completely (both address and bounds, linear and swizzled).
 - `SWIZZLE_ENABLE = 1` with `idxen = 0` and `ADD_TID_ENABLE = 0` has no effect (linear address, mode 3 stays RAW).
@@ -372,13 +372,13 @@ land exactly on a binary32 midpoint, and a tiny third addend decides the roundin
 rational arithmetic for FMA; a test pins the result so the implementation cannot regress to the
 double-rounded answer.
 
-#### `v_interp` ALU ops (`tools/interp_hw_probe.py`, SHADER-430)
+#### `v_interp` ALU ops (`tooling/interp_hw_probe.py`, SHADER-430)
 
 `v_interp_*` also run in a compute wave: they read the attribute words from LDS at M0. On gfx1036 with M0 = 0,
 attribute N takes 12 dwords from byte 48·N; channel c's P0 and P10 words are dwords 2c and 2c+1, and its P20 word is
 dword 8+c (found by filling LDS with markers and reading them back with `v_interp_mov_f32`). So the tool writes
 random parameter words there itself, packed f16 pairs and plain f32 values, runs every interp op through
-`tools/hw_oracle` and checks each result against exact rational models. It also runs 30 hand-built f16 rounding ties
+`tooling/hw_oracle` and checks each result against exact rational models. It also runs 30 hand-built f16 rounding ties
 that tell one rounding of `p2_f16` from two.
 
 Measured on the **Radeon iGPU of a Ryzen 7 9800X3D (gfx1036, RDNA2)**, AMD driver 32.0.13036.4, Windows 10 22H2,
@@ -401,13 +401,13 @@ words or per-half f16 differences under `FP16_INTERP_MODE`. That needs a pixel-s
 covered either: `v_interp_p1lv_f16`, and f16 inf/NaN halves.
 
 ```powershell
-python -I tools/interp_hw_probe.py                     # exit 0: all match; 77: no hardware oracle here
-python -I tools/interp_hw_probe.py --denorm32 0 --seeds 1,2,3,4,5,6,7,8
+python -I tooling/interp_hw_probe.py                     # exit 0: all match; 77: no hardware oracle here
+python -I tooling/interp_hw_probe.py --denorm32 0 --seeds 1,2,3,4,5,6,7,8
 ```
 
 ## Harness design
 
-`tools/shader_diff.py` owns the test table, the seed and the comparison, leaving
+`tooling/shader_diff.py` owns the test table, the seed and the comparison, leaving
 `cpu_ref.py` a pure interpreter (it is never modified by the runner). Per case:
 
 - **Inputs.** Initial SGPRs/VGPRs (per lane), VCC, EXEC, and later buffer/image contents. Inputs are
@@ -426,14 +426,14 @@ python -I tools/interp_hw_probe.py --denorm32 0 --seeds 1,2,3,4,5,6,7,8
 - **No silent skips.** Count `pass`, `mismatch`, `skip(reason)` and `harness-error`. A run whose
   mismatch count is zero but whose skip count is 90% is not evidence of broad correctness.
 
-The existing `runtime/test` tools already expose the hard parts (device selection, push constants,
+The existing `port/test` tools already expose the hard parts (device selection, push constants,
 descriptor setup, readback). The differential runner should call them rather than grow a second
 Vulkan stack.
 
-### Integer VALU across the whole wave (`tools/wint_diff.py`)
+### Integer VALU across the whole wave (`tooling/wint_diff.py`)
 
 The one-lane fuzzers cannot see which lanes an instruction writes or the lane masks it reads and makes.
-`tools/wint_diff.py` runs seeded integer VALU programs on every lane of a wave32 or wave64 wave (`--wave 32|64|both`)
+`tooling/wint_diff.py` runs seeded integer VALU programs on every lane of a wave32 or wave64 wave (`--wave 32|64|both`)
 with EXEC rewritten between instructions: compares into SGPR masks and VCC (e64 and e32), `v_cmpx` into EXEC,
 `v_cndmask_b32` on those masks, the carry-out and carry-in forms (`v_add/sub/subrev_co_u32`, `_co_ci_u32`, e64
 and e32), `v_mad_u64_u32`/`v_mad_i64_i32` with a mask carry-out, 16-bit e64/VOP3 ops with `op_sel` writing one half,
@@ -445,14 +445,14 @@ one wave on an AMD GPU and compares every lane; on an RDNA2 iGPU (gfx1036) 1,000
 the known forms included, matched the reference.
 
 ```
-python -I tools/wint_diff.py --programs 2000 --seed 1 --wave both
-python -I tools/wint_diff.py --oracle hw --programs 500 --seed 1 --wave both
+python -I tooling/wint_diff.py --programs 2000 --seed 1 --wave both
+python -I tooling/wint_diff.py --oracle hw --programs 500 --seed 1 --wave both
 python -I tests/test_wint_diff.py
 ```
 
-### LDS and `ds_*` on the GPU (`tools/lds_fuzz.py`, FUZZ-6)
+### LDS and `ds_*` on the GPU (`tooling/lds_fuzz.py`, FUZZ-6)
 
-LDS ops are workgroup-wide, so `tools/lds_fuzz.py` runs on the GPU rather than one lane in the
+LDS ops are workgroup-wide, so `tooling/lds_fuzz.py` runs on the GPU rather than one lane in the
 interpreter. Each seeded program is one 64-thread group (wave64, or two wave32s) with 4 KiB of LDS
 that starts from a known pattern. It runs 4 to 12 random `ds_*` instructions, each followed by
 `s_waitcnt` and `s_barrier`, then stores all 16 result VGPRs of every thread and the whole LDS.
@@ -501,16 +501,16 @@ First results on an RX 6700 XT (RADV, Mesa 26.3.1), native wave64/wave32 and wit
 
 #### Hardware oracle for the LDS programs (`--oracle hw`)
 
-`--oracle hw` runs each program natively on an AMD GPU through `tools/hw_oracle/` (setup: "Hardware oracle" under
+`--oracle hw` runs each program natively on an AMD GPU through `tooling/hw_oracle/` (setup: "Hardware oracle" under
 FUZZ-4) and compares every stored word, 16 result registers per thread and all 1,024 LDS dwords, with the model;
 `--oracle translator,hw` does both and prints what the translator did with each program the hardware disagrees
 with. It tests the **model**, not the translator. Without the tools it prints `hardware oracle unavailable: ...` and
 exits 77.
 
 ```
-python -I tools/lds_fuzz.py --oracle hw --programs 2000 --seed 1
-python -I tools/lds_fuzz.py --oracle hw --extended --programs 2000 --seed 1 --negative-control
-python -I tools/lds_fuzz.py --oracle hw --programs 50 --seed 1 --wave 32 --only 1,18,20,24 --minimize
+python -I tooling/lds_fuzz.py --oracle hw --programs 2000 --seed 1
+python -I tooling/lds_fuzz.py --oracle hw --extended --programs 2000 --seed 1 --negative-control
+python -I tooling/lds_fuzz.py --oracle hw --programs 50 --seed 1 --wave 32 --only 1,18,20,24 --minimize
 ```
 
 - **What runs.** The program's real group size (`--threads 32|64|128|256|mix`: one partial wave, one wave, or several
@@ -600,7 +600,7 @@ hardware gives 0 (the swizzle hypothesis above). So the translator differs from 
 fixed here. Partial-wave programs (`--threads` 32
 in wave64) are skipped for the translator, which cannot launch them. NVIDIA was not run.
 
-**Other backends.** The Linux libdrm launcher of #1265 (`tools/hw_oracle/drm.py`) now runs these programs too. It
+**Other backends.** The Linux libdrm launcher of #1265 (`tooling/hw_oracle/drm.py`) now runs these programs too. It
 programs `COMPUTE_PGM_RSRC2.LDS_SIZE` from the descriptor's group segment (the assembler leaves that field 0, so the
 4,096 bytes of LDS `lds_fuzz` asks for reach the hardware) and its output buffer takes 16,384 words like the Windows
 launcher's, so a 64x64 `image_fuzz` case fits. On the integrated Radeon of a Ryzen 7 7700X (gfx1036, RDNA2, Linux
@@ -624,17 +624,17 @@ masks, in wave32 and wave64, and in multi-wave groups. The Intel mismatches went
 (50/50 native and 100/100 emulated for seeds 1 to 3). `ds_bpermute` (SHADER-31, #253) matches the model on gfx1150
 too, including "an off source lane reads 0" in both wave sizes.
 
-### Memory instructions (`tools/mem_diff.py`, FUZZ-5)
+### Memory instructions (`tooling/mem_diff.py`, FUZZ-5)
 
-`cpu_ref.py` has no memory model, so memory instructions get their own runner. `tools/mem_diff.py`
+`cpu_ref.py` has no memory model, so memory instructions get their own runner. `tooling/mem_diff.py`
 carries a small reference model written from the RDNA2 addressing rules (V# base and stride, MUBUF
 `soffset + offset + voffset + vindex * stride`, SMEM pointer/V# plus offsets, signed 12-bit `global_*`
 offsets, 32-bit buffer atomics) and compares it with the translation run in `spirv_mini_interp`. Both
 the exported words and the whole final memory are compared, so stores and atomics are checked too.
 
 ```powershell
-python -I tools/mem_diff.py --programs 3000 --seed 1 [--family buffer_load] [--max-ops 4]
-python -I tools/mem_diff.py --self-test
+python -I tooling/mem_diff.py --programs 3000 --seed 1 [--family buffer_load] [--max-ops 4]
+python -I tooling/mem_diff.py --self-test
 python -I tests/test_mem_diff.py
 ```
 
@@ -644,13 +644,13 @@ dword aligned (sub-dword loads at their natural alignment), with no format in wo
 results, `OOB_SELECT`, swizzling and the `s_buffer_load` alignment truncation depend on descriptor
 fields the translator does not model yet, so they need a GPU-confirmed rule before they are fuzzed.
 `spirv_mini_interp` gained `OpSConvert` and the 32-bit atomics on PhysicalStorageBuffer memory for
-this. Images have their own fuzzer (`tools/image_fuzz.py`, below).
+this. Images have their own fuzzer (`tooling/image_fuzz.py`, below).
 
 The `buffer_format` family covers `buffer_load_format_*` on every format the translator decodes, with a
 random DST_SEL of 0/1/X/Y/Z/W, and `tbuffer_load_format_*` on the five formats the 1.0.2.1 corpus uses
 (`16_16_SNORM`, `8_8_8_8_UNORM`, `8_8_8_8_UINT`, `2_10_10_10_UNORM`, `16_16_16_16_UINT`, about 53,000
 instructions). Generated MTBUF cases use a bound 32_UINT V# and take their data format from the
-instruction. The reference decodes elements from the GFX10 format *name* in `tools/gfx10_formats.json`
+instruction. The reference decodes elements from the GFX10 format *name* in `tooling/gfx10_formats.json`
 (channel widths listed from the top bit). UNORM/SNORM values use correctly rounded division.
 MUBUF repeats missing channels (*c* mod *n*) and DST_SEL 1 gives integer 1 for UINT/SINT and 1.0f
 otherwise (SHADER-86, RX 6700). MTBUF loads return instruction-format channels in order, zero-fill
@@ -666,11 +666,11 @@ Over 5,000 programs the reference and translator match bit for bit; breaking the
 A mutation check (inst offset dropped, V# stride narrowed, the SMEM pointer's high word dropped) makes
 76, 45 and 42 of 150 programs fail, so the runner does catch address errors.
 
-### Sum-of-absolute-differences family (`tools/sad_diff.py`)
+### Sum-of-absolute-differences family (`tooling/sad_diff.py`)
 
 The subset interpreter `cpu_ref.py` has no SAD ops, so the family gets its own runner, like the memory
 instructions above. The family is seven opcodes — `v_sad_u8`, `v_sad_hi_u8`, `v_sad_u16`, `v_sad_u32`,
-`v_msad_u8` and the packed quad forms `v_qsad_pk_u16_u8`, `v_mqsad_pk_u16_u8`. `tools/sad_diff.py`
+`v_msad_u8` and the packed quad forms `v_qsad_pk_u16_u8`, `v_mqsad_pk_u16_u8`. `tooling/sad_diff.py`
 carries a small reference written from the ISA pseudocode recorded in `docs/design.md`'s contract rows
 (the "Sum of absolute differences" row hardware-verified on gfx1035 through SHADER-137's `int_hw_probe`
 run; the `v_qsad` row bit-exact on an RTX 3060 in #623) and compares it with the translation run in
@@ -695,8 +695,8 @@ rejections in `--self-test`), `op_sel`/`neg`/`abs` (the ISA does not define them
 subject).
 
 ```powershell
-python -I tools/sad_diff.py --programs 2000 --seed 7
-python -I tools/sad_diff.py --self-test
+python -I tooling/sad_diff.py --programs 2000 --seed 7
+python -I tooling/sad_diff.py --self-test
 python -I tests/test_sad_diff.py
 ```
 
@@ -707,11 +707,11 @@ pair replaced by a wrapped subtraction, and the `v_sad_hi_u8` shift dropped — 
 programs fail (`--programs 60 --seed 2 --max-ops 5 --no-sweep`), so the runner does catch arithmetic
 errors.
 
-### Images on the GPU (`tools/image_fuzz.py`)
+### Images on the GPU (`tooling/image_fuzz.py`)
 
-`tools/image_fuzz.py` starts on the image path, where the T# format, the view type and the binding layout
+`tooling/image_fuzz.py` starts on the image path, where the T# format, the view type and the binding layout
 meet the driver. Each case assembles a pixel shader that reads one texel with `image_load` (a nonzero `dmask`, the
-T# in `s[8:15]`), runs it through `runtime/test/vk_image_fuzz.cpp` against a synthetic texture of a chosen
+T# in `s[8:15]`), runs it through `port/test/vk_image_fuzz.cpp` against a synthetic texture of a chosen
 format, and compares every RGBA32F pixel with an oracle that models the RDNA2 texel fetch for that format: a
 fetch is a memory read, so there is no filter, border or LOD to model.
 
@@ -726,9 +726,9 @@ Each run keeps its generated files in a unique output folder. With `--work DIR`,
 path is printed; existing contents and other runs are left alone. Without `--work`, it is in the system temporary folder.
 
 ```sh
-cmake --build runtime/build --target vk_image_fuzz
-python -I tools/image_fuzz.py --programs 8 --seed 1 [--show]
-python -I tools/image_fuzz.py --self-test
+cmake --build port/build --target vk_image_fuzz
+python -I tooling/image_fuzz.py --programs 8 --seed 1 [--show]
+python -I tooling/image_fuzz.py --self-test
 python -m pytest tests/test_image_fuzz.py
 ```
 
@@ -753,16 +753,16 @@ case. Not covered yet: wider UINT/SINT formats, mips, 1D/2D-array/3D/cube,
 
 #### Hardware oracle for the image fetches (`--oracle hw`)
 
-`--oracle hw` runs the same fetches natively on an AMD GPU through `tools/hw_oracle/` (setup: "Hardware oracle" under
+`--oracle hw` runs the same fetches natively on an AMD GPU through `tooling/hw_oracle/` (setup: "Hardware oracle" under
 FUZZ-4) and compares every result register of every texel, bit for bit, with the CPU model above;
 `--oracle translator,hw` does both on the same textures and says, for each case the hardware disagrees with, what the
 translator did. It tests the **model**: whether `image_load` on real hardware returns what the oracle says. Without the
 tools it prints `hardware oracle unavailable: ...` and exits 77.
 
 ```
-python -I tools/image_fuzz.py --oracle hw --programs 2400 --seed 1
-python -I tools/image_fuzz.py --oracle hw --programs 180 --seed 1 --negative-control
-python -I tools/image_fuzz.py --oracle translator,hw --programs 90 --seed 1
+python -I tooling/image_fuzz.py --oracle hw --programs 2400 --seed 1
+python -I tooling/image_fuzz.py --oracle hw --programs 180 --seed 1 --negative-control
+python -I tooling/image_fuzz.py --oracle translator,hw --programs 90 --seed 1
 python -m pytest tests/test_image_fuzz_hw.py
 ```
 
@@ -829,14 +829,14 @@ Negative control (`--oracle hw --programs 180 --seed 1 --negative-control`): the
 `sint_unsigned` 30, `alpha_zero` 16, `dmask_in_place` 132, `no_sentinels` 168, `transpose` 166), and a kernel built
 with the next format's `FORMAT` code is caught on every format (24 to 30 of 30 cases each). So the GFX10 T# words of
 `hw_oracle/tsharp.py` and the texel-fetch model hold on RDNA2 for these formats; `--oracle translator,hw` was not run
-there. The Linux libdrm backend of #1265 (`tools/hw_oracle/drm.py`) now runs these cases too: `--oracle hw
+there. The Linux libdrm backend of #1265 (`tooling/hw_oracle/drm.py`) now runs these cases too: `--oracle hw
 --programs 120 --seed 1` on the same gfx1036 iGPU matched on 120 of 120 cases (60 per wave), four of them 64x64 and
 therefore 16,384 words, with no rejections (Linux 7.3.5-zen1-1-zen, libdrm 2.4.134, AMD clang 23.1.5). It copies
 only `.text`, which is where the texture lives, and the loaded code is 256-byte aligned.
 
-### 32-bit integer VALU in every encoding (`tools/vint_diff.py`)
+### 32-bit integer VALU in every encoding (`tooling/vint_diff.py`)
 
-`tools/shader_diff.py` checks the common integer opcodes with VGPR sources in their e32 form. `tools/vint_diff.py`
+`tooling/shader_diff.py` checks the common integer opcodes with VGPR sources in their e32 form. `tooling/vint_diff.py`
 adds the rest of the 32-bit integer VALU a compiler emits: the VOP1/VOP2 opcodes as e32 and e64, the VOP3-only ones
 (`v_add3_u32`, `v_lshl_add_u32`, `v_alignbit/alignbyte/perm_b32`, `v_min3/max3/med3`, the 24- and 16-bit
 multiplies with `op_sel`, `v_bcnt`, `v_bfm`, `v_ffbh/ffbl`, `v_cvt_pk_*16_*32`, ...) and VOPC e64 into a mask with
@@ -847,14 +847,14 @@ encoding allows (one literal and two scalar values per VOP3). It runs one lane t
 programs on an AMD GPU; on an RDNA2 iGPU (gfx1036) 1,500 programs, the known form included, matched the reference. A 32-bit literal in a 16-bit source of `v_mad_u32_u16`/`v_mad_i32_i16` does not assemble, so literals there have 16 bits (zero-extended, measured).
 
 ```
-python -I tools/vint_diff.py --programs 2000 --seed 1
-python -I tools/vint_diff.py --oracle hw --programs 500 --seed 1
+python -I tooling/vint_diff.py --programs 2000 --seed 1
+python -I tooling/vint_diff.py --oracle hw --programs 500 --seed 1
 python -I tests/test_vint_diff.py
 ```
 
-### 16-bit and memory ops on the GPU (`tools/valu_fuzz.py`, FUZZ-2, FUZZ-5)
+### 16-bit and memory ops on the GPU (`tooling/valu_fuzz.py`, FUZZ-2, FUZZ-5)
 
-`tools/valu_fuzz.py --family f16|mem` uses the same runner shape as `lds_fuzz.py`. It generates seeded
+`tooling/valu_fuzz.py --family f16|mem` uses the same runner shape as `lds_fuzz.py`. It generates seeded
 64-thread compute programs, translates them, runs them with `vk_compute_test`'s `VKC_DUMP`, and compares every
 thread's 16 result VGPRs (plus the scratch memory for `mem`) bit for bit with a model of the instructions written in
 the same file. The model doesn't import the translator. `tests/test_valu_fuzz.py` checks the models on the CPU:
@@ -883,15 +883,15 @@ programs assemble for gfx1013.
 
 #### Hardware oracle (`--oracle hw`, `translator,hw`)
 
-`--oracle hw` runs the same programs natively on the AMD GPU through `tools/hw_oracle/` (setup: "Hardware oracle"
+`--oracle hw` runs the same programs natively on the AMD GPU through `tooling/hw_oracle/` (setup: "Hardware oracle"
 above; exit 77 without it) and compares the 16 result VGPRs per thread (and the scratch memory for `mem`) with the
 model, in wave32 and in native wave64, 64 threads, so it tests the **model** and not the translator. With
 `translator,hw` both run on the same programs. `--negative-control` runs deliberately wrong models (six for `f16`,
 eight for `mem`) and fails unless each one is caught.
 
 ```
-python -I tools/valu_fuzz.py --family mem --oracle hw --programs 2000 --seed 1
-python -I tools/valu_fuzz.py --family f16 --oracle hw --negative-control --programs 300
+python -I tooling/valu_fuzz.py --family mem --oracle hw --programs 2000 --seed 1
+python -I tooling/valu_fuzz.py --family f16 --oracle hw --negative-control --programs 300
 ```
 
 *What differs on GFX11 (gfx1150) and how it is handled.* The programs are the same ones the translator gets, so
@@ -965,10 +965,10 @@ on gfx1150 (they were measured on RDNA2 and, for the vector part, on this GPU be
 `idxen offen` and offset-only soffset forms are new on gfx1150). The one difference is `v_pack_b32_f16` quieting
 signaling NaNs (only signaling NaN halves are not judged; a quiet NaN is compared). The default translator path of `mem` ran on the Radeon 880M (`VK_LOADER_DRIVERS_SELECT=*amd*`, `vk_compute_test` built with g++ as in the lab script): `--family mem --programs 200 --seed 1` gave 400 of 400 programs (native wave64 and wave32) matching the model, 0 not translated, 0 harness errors, so the translator agrees with the model on the OOB_SELECT, straddle, `s_load` and `s_buffer_load` rules there. On the RTX 5070 `vk_compute_test` loses the device (-4) for this and for the unchanged generator of `main`, so use the AMD device.
 
-### Packed and 16-bit integer VALU (`tools/pk16_diff.py`)
+### Packed and 16-bit integer VALU (`tooling/pk16_diff.py`)
 
 `valu_fuzz.py --family f16` runs the 16-bit shifts, `v_add/sub_nc_u16`, `v_mul_lo_u16` and the 16-bit min/max on
-the GPU with VGPR sources. `tools/pk16_diff.py` adds the packed integer ops (`v_pk_add/sub_u16/i16`,
+the GPU with VGPR sources. `tooling/pk16_diff.py` adds the packed integer ops (`v_pk_add/sub_u16/i16`,
 `v_pk_mul_lo_u16`, `v_pk_min/max_u16/i16`, `v_pk_mad_u16/i16` and the packed shifts) with `op_sel`, `op_sel_hi` and
 `clamp`, and the 16-bit VOP3 ops (`v_add/sub_nc_i16`, `v_min3/max3/med3_u16/i16`, `v_mad_u16/i16` next to the ones
 above) with `op_sel` on every source and on the destination half and `clamp`. Sources are VGPRs, SGPRs, integer and
@@ -987,12 +987,12 @@ reason, rules that depend on the encoding bytes, such as a literal's 12-byte VOP
 its reach.
 
 ```
-python -I tools/pk16_diff.py --programs 3000 --seed 11 --max-ops 8
-python -I tools/pk16_diff.py --oracle hw --programs 500 --seed 1
+python -I tooling/pk16_diff.py --programs 3000 --seed 11 --max-ops 8
+python -I tooling/pk16_diff.py --oracle hw --programs 500 --seed 1
 python -I tests/test_pk16_diff.py
 ```
 
-### Wave and cross-lane ops on the GPU (`tools/crosslane_fuzz.py`, FUZZ-7)
+### Wave and cross-lane ops on the GPU (`tooling/crosslane_fuzz.py`, FUZZ-7)
 
 Cross-lane ops read other lanes, so like FUZZ-6 this runs on the GPU and not in the one-lane interpreter.
 Each seeded program is one compute group of a wave32 or wave64 program. Group sizes cover one full wave, two or
@@ -1038,7 +1038,7 @@ every scalar. `vk_compute_test` reads them back with `VKC_OUT_WORDS` / `VKC_DUMP
   EXEC is modelled as the DPP "invalid source" case (vD kept). That is now measured, with the same result on both:
   @aslan2142 on RDNA2 and @AlxcBTW on RDNA3.5 (#374). FI = 1 returns the source lane's value, FI = 0 leaves the
   destination unwritten and FI = 0 with BOUND_CTRL gives 0; #580 (SHADER-74) makes the translator do that. The
-  fuzzer's docstring (`tools/crosslane_fuzz.py`, since #750) already says it was measured, but `op_permlane` still
+  fuzzer's docstring (`tooling/crosslane_fuzz.py`, since #750) already says it was measured, but `op_permlane` still
   tags the case `hyp` because the translator models it only with #580, so a program that hits it and mismatches
   is filed as `hyp_only` instead of `mismatch` (one that matches still counts as `match`). The model (vD kept)
   already matches the measurement; dropping the tag once #580 lands is a follow-up.
@@ -1046,7 +1046,7 @@ every scalar. `vk_compute_test` reads them back with `VKC_OUT_WORDS` / `VKC_DUMP
 - **Modes.** Wave32 runs natively. Wave64 runs with `--wave64-emulate`; `--w64-native` adds the plain build,
   which on a 32-wide subgroup is the documented cross-half approximation and is expected to mismatch.
 - **Hardware oracle (optional).** `--oracle hw` (or `translator,hw`) also runs every program natively on the AMD
-  GPU through `tools/hw_oracle/` (setup: see the FUZZ-4 section above) and compares all stored words with the model;
+  GPU through `tooling/hw_oracle/` (setup: see the FUZZ-4 section above) and compares all stored words with the model;
   without the tools it prints `hardware oracle unavailable: ...` and exits 77. It tests the **model**, in wave32
   and in native wave64 (`.amdhsa_wavefront_size32 0`, wave64 code objects are assembled with
   `-mwavefrontsize64`), with the program's real group size (partial waves, two or more waves) and its EXEC setup,
@@ -1150,7 +1150,7 @@ First results on an RTX 4090 (subgroup 32, driver 621.14):
   - `--wave64-emulate auto` stays native on that driver, because it can crash on emulated LDS code (#857).
 - **Closed question (#374):** what hardware does for permlane with FI = 0 was measured on RDNA2 and RDNA3.5 (see above).
 
-### Wave and cross-lane ops on the CPU (`tools/wave_diff.py`)
+### Wave and cross-lane ops on the CPU (`tooling/wave_diff.py`)
 
 The same family as `crosslane_fuzz.py`, without a GPU or llvm-mc, so it can run wherever the translator tests run.
 The reference is `cf_ref.WaveMachine` (FUZZ-8) extended in `wave_diff.WaveRef` with the instructions it leaves out:
@@ -1169,12 +1169,12 @@ Results (`--max-ops 16`, half wave32, half wave64, nothing skipped): it found `s
 wave32 and `s_ff0_i32_b64` of a negative constant (#1409), both fixed on `main` since; on `main` 7b7d73f8, 600 of
 600 match (seeds 401 to 403).
 
-For one case from a default wave32 run, `tools/wave_trace.py` writes a self-contained HTML report. Use the seed,
+For one case from a default wave32 run, `tooling/wave_trace.py` writes a self-contained HTML report. Use the seed,
 zero-based case index, and `--max-ops` from `wave_diff.py --wave 32`. The report compares all 32 lanes after
 initialization and after each subsequent instruction. Select a register or jump to the first observed mismatch.
 
 ```powershell
-python -I tools/wave_trace.py --seed 1 --case 0 --max-ops 12 --out wave.html
+python -I tooling/wave_trace.py --seed 1 --case 0 --max-ops 12 --out wave.html
 ```
 
 Each checkpoint re-translates a shorter program with the same observation epilogue, so liveness and lowering can
@@ -1183,7 +1183,7 @@ original case. The tool uses synthetic programs and the CPU interpreters above. 
 and unavailable checkpoints as well. Exit 1 means a mismatch was observed, 2 means the comparison was incomplete
 or the command failed, and 0 means all checkpoints matched.
 
-### 32-bit float VALU on the GPU (`tools/f32_fuzz.py`, FUZZ-3)
+### 32-bit float VALU on the GPU (`tooling/f32_fuzz.py`, FUZZ-3)
 
 `--oracle hw` (or `translator,hw`) runs the same seeded VOP1/VOP2/VOP3 f32 programs natively on the AMD GPU and judges
 the hardware's `v8` and VCC against `F32Model` bit for bit (NaN matches any NaN; an f16 NaN in a `v_cvt_f16_f32` /
@@ -1192,9 +1192,9 @@ the hardware's `v8` and VCC against `F32Model` bit for bit (NaN matches any NaN;
 a hardware mismatch also prints what the translated SPIR-V did.
 
 ```
-python -I tools/f32_fuzz.py --oracle hw --programs 5000 --seed 1            # table + informational hardware tables
-python -I tools/f32_fuzz.py --oracle hw --negative-control                   # wrong models must be caught
-python -I tools/f32_fuzz.py --oracle hw --perturb mul_rtz --programs 500     # one wrong model, mismatches must appear
+python -I tooling/f32_fuzz.py --oracle hw --programs 5000 --seed 1            # table + informational hardware tables
+python -I tooling/f32_fuzz.py --oracle hw --negative-control                   # wrong models must be caught
+python -I tooling/f32_fuzz.py --oracle hw --perturb mul_rtz --programs 500     # one wrong model, mismatches must appear
 ```
 
 - **Float MODE.** An assembled kernel's descriptor starts with IEEE 1, DX10_CLAMP 1, f32 denormals flushed
@@ -1206,7 +1206,7 @@ python -I tools/f32_fuzz.py --oracle hw --perturb mul_rtz --programs 500     # o
   fixed and AMD clang rejects `.amdhsa_ieee_mode` / `.amdhsa_dx10_clamp` ("directive unsupported on gfx1170+"), so
   `asm.mode_skip_reason` reports a kernel that sets either as not runnable there and the runner never assembles it;
   the MODE probe then fails naming that reason instead of a whole chunk failing to assemble (FUZZ-43).
-- **GFX11 against GFX10, handled explicitly** (`tools/hw_oracle/asm.py`, checked by assembling every opcode for gfx1013,
+- **GFX11 against GFX10, handled explicitly** (`tooling/hw_oracle/asm.py`, checked by assembling every opcode for gfx1013,
   gfx1010, gfx1030, gfx1100, gfx1150 and gfx1200):
   - *Skipped, never substituted:* `v_mad_f32`, `v_mac_f32`, `v_madak_f32` and `v_mad_legacy_f32` exist on GFX10.1 only
     (gfx1010/1011/1013, the console's family); gfx1030 and every GFX11 part reject them. The fused replacements
@@ -1223,7 +1223,7 @@ python -I tools/f32_fuzz.py --oracle hw --perturb mul_rtz --programs 500     # o
     The transcendental unit is separate on GFX11, so a `s_nop 7` follows the instruction in the native kernel
     (`--no-hw-guard` leaves it out).
   - *Not covered:* wave64 (the f32 ALU does not depend on it), `v_fma_mix*` and f16 arithmetic. The translated f64 VALU
-    forms have a separate CPU differential harness in `tools/f64_diff.py` (below).
+    forms have a separate CPU differential harness in `tooling/f64_diff.py` (below).
 - **Programs.** The seeded random ones, plus `--probes N` (default 12) per op and kind: denormal operand, denormal
   result, NaN payloads, clamp of NaN/-0, invalid operations (inf - inf, 0 * inf, ...), and `cancel` (`z = -round(x * y)`,
   which separates fused from unfused). `v_min/max/min3/max3/med3_f32` are in the table for the hardware only, with the
@@ -1332,9 +1332,9 @@ What the hardware answered where the model does not judge (gfx1150; the RDNA2 ru
   payload bits and the quiet bit set (not the canonical `0x7e00` the model writes; payload not judged, quietness is).
   `v_cvt_f32_f16` keeps the f16 payload shifted left by 13 and does not quiet it (the model agrees).
 
-### f32 misc ops and float compares (`tools/fmisc_diff.py`)
+### f32 misc ops and float compares (`tooling/fmisc_diff.py`)
 
-`tools/f32_fuzz.py` generates the f32 arithmetic. `tools/fmisc_diff.py` covers the f32 ops it leaves out:
+`tooling/f32_fuzz.py` generates the f32 arithmetic. `tooling/fmisc_diff.py` covers the f32 ops it leaves out:
 `v_fract_f32`, `v_frexp_mant_f32`, `v_frexp_exp_i32_f32`, `v_ldexp_f32`, `v_cvt_u32_f32`, `v_cvt_i32_f32`,
 `v_cvt_off_f32_i4` and `v_fmamk_f32`. It also covers the 16 `v_cmp_*_f32` conditions (e32 into VCC, e64 into an SGPR
 mask or VCC) and `v_cmp_class_f32` e64, each read back with `v_cndmask_b32_e64`. Programs use VOP3 `neg`/`abs`,
@@ -1355,14 +1355,14 @@ interpreter that quiets the NaN. That form is left out unless `--known` (`class-
 `v_cmp_class_f32` without modifiers and `v_cvt_f32_ubyteN` are in `f32_fuzz.py`.
 
 ```
-python -I tools/fmisc_diff.py --programs 3000 --seed 11 --max-ops 8
-python -I tools/fmisc_diff.py --oracle hw --programs 500 --seed 1
-python -I tools/fmisc_diff.py --oracle hw,vk --programs 600 --seed 11 --max-ops 8 [--wave 64]
+python -I tooling/fmisc_diff.py --programs 3000 --seed 11 --max-ops 8
+python -I tooling/fmisc_diff.py --oracle hw --programs 500 --seed 1
+python -I tooling/fmisc_diff.py --oracle hw,vk --programs 600 --seed 11 --max-ops 8 [--wave 64]
 python -I tests/test_fmisc_diff.py
 ```
 
-`--oracle hw,vk` also runs the translated programs on a real Vulkan GPU (`tools/vk_fuzz_run.py`: llvm-mc for gfx1013,
-`rdna2spirv.py`, `runtime/build/vk_compute_test`, `PALMETTO_VK_DEVICE`, `--build DIR`) as one wave of 32 or, with
+`--oracle hw,vk` also runs the translated programs on a real Vulkan GPU (`tooling/vk_fuzz_run.py`: llvm-mc for gfx1013,
+`rdna2spirv.py`, `port/build/vk_compute_test`, `PALMETTO_VK_DEVICE`, `--build DIR`) as one wave of 32 or, with
 `--wave 64`, 64 identical lanes (the lane masks as 64-bit pairs; the hardware kernels run in the same wave size), and
 judges lane 0's four words against the hardware's, not the reference's: the interpreter cannot see a driver's denormal,
 NaN and rounding rules. The seeds are computed from the buffer fill at run time (`--vk-constants` keeps them as
@@ -1377,8 +1377,8 @@ wave64 593 match, 3 denormal, 4 omod_neg_zero; RTX 5080 wave32 595 match, 3 omod
 
 These fuzzers judge the translator in `spirv_mini_interp`, which cannot see what a driver does with the SPIR-V. `f32_fuzz`
 has no Vulkan path (its GPU oracle is `--oracle hw`, above). With
-`--oracle hw,vk` each program also runs through llvm-mc (gfx1013), `rdna2spirv.py` and `runtime/build/vk_compute_test`
-(`tools/vk_fuzz_run.py`; `--build DIR`, `--work DIR`, `PALMETTO_VK_DEVICE`) as one wave, and its words are judged against
+`--oracle hw,vk` each program also runs through llvm-mc (gfx1013), `rdna2spirv.py` and `port/build/vk_compute_test`
+(`tooling/vk_fuzz_run.py`; `--build DIR`, `--work DIR`, `PALMETTO_VK_DEVICE`) as one wave, and its words are judged against
 the hardware's words from a kernel run in the same wave size (`--wave 32` or `--wave 64`; wave64 needs native 64-wide
 subgroups, so the Radeon and not the RTX 5080). `pk16_diff`, `vint_diff` and `fmisc_diff` run identical lanes and judge
 lane 0, `sdwa_diff` too (its VCC seed differs per lane), `wint_diff` runs its per-lane programs in the wave size they were
@@ -1388,10 +1388,10 @@ xor the buffer fill vk_compute_test leaves in the output (`--vk-constants` keeps
 a NaN at run time.
 
 ```
-python -I tools/pk16_diff.py --oracle hw,vk --programs 500 --seed 201 --max-ops 8 [--wave 64]
-python -I tools/vint_diff.py --oracle hw,vk --programs 500 --seed 203
-python -I tools/sdwa_diff.py --oracle hw,vk --family f16 --programs 500 --seed 211
-python -I tools/wint_diff.py --oracle hw,vk --wave both --programs 400 --seed 221
+python -I tooling/pk16_diff.py --oracle hw,vk --programs 500 --seed 201 --max-ops 8 [--wave 64]
+python -I tooling/vint_diff.py --oracle hw,vk --programs 500 --seed 203
+python -I tooling/sdwa_diff.py --oracle hw,vk --family f16 --programs 500 --seed 211
+python -I tooling/wint_diff.py --oracle hw,vk --wave both --programs 400 --seed 221
 ```
 
 Fresh seeds, 400 to 500 programs each (AMD Radeon iGPU gfx1036, driver 26.10.1, and NVIDIA GeForce RTX 5080, driver
@@ -1413,9 +1413,9 @@ src0_sel:BYTE_0` with v3 = 0xffff gives 0xffffff00 where the hardware gives 0x00
 with the field extracts written as shifts and a mask), and `v_cvt_f32_f16_sdwa ... dst_sel:WORD_1` of an f16 denormal
 differs in the low bits of the result.
 
-### binary64 VALU on the CPU and Vulkan (`tools/f64_diff.py`, FUZZ-55)
+### binary64 VALU on the CPU and Vulkan (`tooling/f64_diff.py`, FUZZ-55)
 
-`tools/f64_diff.py` covers the 47 binary64 instruction forms `tools/rdna2spirv.py` translates on main: four rounding
+`tooling/f64_diff.py` covers the 47 binary64 instruction forms `tooling/rdna2spirv.py` translates on main: four rounding
 ops, add, f64-to-f32 conversion, reciprocal/reciprocal-square-root/square-root, division fixup and scaled FMA, both
 frexp results, all 16 `v_cmp_*_f64` and 16 `v_cmpx_*_f64` predicates, and both class compares. It generates one-lane
 programs with VGPR and SGPR pairs, float immediates, inline constants, 32-bit literals where the translator marks
@@ -1449,18 +1449,18 @@ driver-dependent NaN or signed-zero clamp results, and `v_div_fixup_f64` with a 
 division. The latter follows the RDNA2 ISA reference (`NaN(S0) -> signed infinity`), while the current translator
 preserves the NaN payload. Therefore `--known` can intentionally return 1 when this known mismatch is reproduced;
 the minimized case is printed. `--oracle gpu` translates the same
-fragment shader and runs it through `runtime/build/vk_harness`, comparing the raw RGBA32F output words. It assembles
+fragment shader and runs it through `port/build/vk_harness`, comparing the raw RGBA32F output words. It assembles
 the fragment module with `spirv-as` and the full-screen vertex shader with the Vulkan SDK's `glslc`; use `--exe PATH`
 to select another `vk_harness`. It exits 77 if the executable, SDK tools, Vulkan device or required `shaderFloat64`
-feature is unavailable. `--oracle hw` runs the same programs natively on an AMD GPU through `tools/hw_oracle` (one lane
-of a wave32 compute kernel, as `tools/fmisc_diff.py` does) and compares the four words with the reference only, not with
+feature is unavailable. `--oracle hw` runs the same programs natively on an AMD GPU through `tooling/hw_oracle` (one lane
+of a wave32 compute kernel, as `tooling/fmisc_diff.py` does) and compares the four words with the reference only, not with
 the translator; `--hw-arch` picks the architecture to assemble for (default: detected). The campaign is one launch, and a
 failing program is re-run alone while it is shrunk. The hardware runs every form, so the known-divergence exclusions
 (translator limits) do not apply: output modifiers, clamp, negated/absolute operands and directed rounding are compared
 too, and the kernels start in the game's inferred float MODE (IEEE off, DX10_CLAMP on). `v_rcp_f64`, `v_rsq_f64` and
 `v_sqrt_f64` are counted skips there, because the native results are approximations (PROC-216) and the reference is exact;
 an architecture that cannot set that MODE (gfx1170 and later) or a program the assembler rejects is a counted skip with the
-runner's reason. It exits 77 only when the `tools/hw_oracle` tools or device are missing. The path is covered by
+runner's reason. It exits 77 only when the `tooling/hw_oracle` tools or device are missing. The path is covered by
 `tests/test_f64_diff.py` with a fake oracle (routing, `--hw-arch`, exit 77, skips, shrinking); **no AMD hardware run has
 been done for it yet**.
 Exit codes are 0 for no unexpected
@@ -1468,11 +1468,11 @@ mismatch, 1 for a mismatch (with instruction-removal shrinking), 2 for CLI/harne
 oracles. Skips always include a reason.
 
 ```
-python -I tools/f64_diff.py --programs 300 --seed 1
-python -I tools/f64_diff.py --known --programs 300 --seed 1
-python -I tools/f64_diff.py --oracle gpu --programs 300 --seed 1
-python -I tools/f64_diff.py --oracle hw --programs 300 --seed 1
-python -I tools/f64_diff.py --self-test
+python -I tooling/f64_diff.py --programs 300 --seed 1
+python -I tooling/f64_diff.py --known --programs 300 --seed 1
+python -I tooling/f64_diff.py --oracle gpu --programs 300 --seed 1
+python -I tooling/f64_diff.py --oracle hw --programs 300 --seed 1
+python -I tooling/f64_diff.py --self-test
 python -I tests/test_f64_diff.py
 ```
 
@@ -1488,14 +1488,14 @@ python -I tests/test_f64_diff.py
 The skips are counted by reason: subnormal FTZ, implementation-defined binary64 `InverseSqrt`/`Sqrt` precision,
 non-finite scaled FMA, and translator-rejected directed rounding. The compared cases had no mismatches.
 
-### Output modifiers of the binary64 and f16 division ops (`tools/f64_omod_probe.py`)
+### Output modifiers of the binary64 and f16 division ops (`tooling/f64_omod_probe.py`)
 
-`tools/f64_omod_probe.py` measures what `mul:2`, `mul:4`, `div:2` and `clamp` do to six VOP3 results: the binary64
+`tooling/f64_omod_probe.py` measures what `mul:2`, `mul:4`, `div:2` and `clamp` do to six VOP3 results: the binary64
 conversions `v_cvt_f64_i32` and `v_cvt_f64_u32`, `v_cvt_f32_f64` (an f32 destination), `v_frexp_mant_f64`,
 `v_div_fixup_f64` and `v_div_fixup_f16`. Each case is measured plain and with each modifier in the same kernel launch,
 so the probe compares the modifier's effect and not the semantics of the op. A hand-written kernel writes the whole
 destination (both words for binary64, the low half only for the 16-bit form, as the ISA defines) and runs once in
-wave32 and once in wave64, which must agree word for word. It needs `tools/hw_oracle` on a GFX10 AMD GPU: the kernels
+wave32 and once in wave64, which must agree word for word. It needs `tooling/hw_oracle` on a GFX10 AMD GPU: the kernels
 set their own MODE from the descriptor, and a device of another family is reported as unavailable, since the gate was
 measured on RDNA2. It reads no game files.
 
@@ -1504,11 +1504,11 @@ The five MODEs are `game_i0_d3` (the game's, and the translator's: IEEE 0, `deno
 turns out to be **per result precision, not per instruction family**: the f32 result of `v_cvt_f32_f64` follows
 `denorm_mode_32` and scales whenever it is 0, while the f16 and binary64 results scale only with IEEE 0 and
 `denorm_mode_16_64 = 0` and ignore the modifiers in the game's MODE. `clamp` applies in every MODE. That is why
-`tools/rdna2spirv.py` keeps only `clamp` for these destinations, and the rows for these ops in `docs/design.md` carry
+`tooling/rdna2spirv.py` keeps only `clamp` for these destinations, and the rows for these ops in `docs/design.md` carry
 the measurement.
 
 `--modes` takes a comma-separated subset of the five (all by default), `--waves` the wave sizes (`32,64` by default),
-`--hw-arch` the architecture handed to `tools/hw_oracle`, and `--json` a path for the report: the device, the
+`--hw-arch` the architecture handed to `tooling/hw_oracle`, and `--json` a path for the report: the device, the
 architecture, the modes, the wave sizes, the modifier forms, the ops and the counts `scaling_gated_on`,
 `scaling_gated_off`, `scaling_changed_value`, `clamp_changed_value`, `mismatches` and `wave_diffs`, with the first
 cases of each. `--self-test` checks the model's own cases without a GPU. Exit 0 when every word matches the model and
@@ -1517,9 +1517,9 @@ and 77 when the oracle or a GFX10 device is missing. `tests/test_f64_omod_probe.
 fake oracle.
 
 ```
-python -I tools/f64_omod_probe.py                  # all five MODEs, wave32 and wave64
-python -I tools/f64_omod_probe.py --waves 64 --json f64_omod.json
-python -I tools/f64_omod_probe.py --self-test
+python -I tooling/f64_omod_probe.py                  # all five MODEs, wave32 and wave64
+python -I tooling/f64_omod_probe.py --waves 64 --json f64_omod.json
+python -I tooling/f64_omod_probe.py --self-test
 python -I tests/test_f64_omod_probe.py
 ```
 
@@ -1534,7 +1534,7 @@ output scaling. This is a translation for the **inferred game MODE**, not a clai
 denormal-preserving or IEEE modes; native gfx1013 measurements of these new fixtures were not available.
 
 
-### f16 transcendentals on the hardware (`tools/f16_trans_sweep.py`, FUZZ-29)
+### f16 transcendentals on the hardware (`tooling/f16_trans_sweep.py`, FUZZ-29)
 
 The `16-bit results` row of `docs/design.md` listed `v_exp_f16`/`v_log_f16` and the NaN and denormal operands as
 unverified. f16 has only 65,536 bit patterns, so instead of sampling, this tool runs every one of them through
@@ -1554,9 +1554,9 @@ wave32 and wave64 and under five MODEs, and MODE is read back with `s_getreg_b32
 All modes have DX10_CLAMP 1 and f32 denormals flushed.
 
 ```
-python -I tools/f16_trans_sweep.py                                  # all ops and modes, about 5 minutes
-python -I tools/f16_trans_sweep.py --ops v_exp_f16 --modes keep16 --json out.json
-python -I tools/f16_trans_sweep.py --self-test                      # the reference, no GPU
+python -I tooling/f16_trans_sweep.py                                  # all ops and modes, about 5 minutes
+python -I tooling/f16_trans_sweep.py --ops v_exp_f16 --modes keep16 --json out.json
+python -I tooling/f16_trans_sweep.py --self-test                      # the reference, no GPU
 ```
 
 The reference is the exact result correctly rounded to f16, computed with `decimal` at 60 digits: for sin/cos that is
@@ -1608,7 +1608,7 @@ reset in the kernel log.
   inputs is computed once and stored in its own half (`tests/test_f16_trans_sweep.py`). On a GPU the test checks
   exp2 of integers and wave32 = wave64.
 
-### d16 rounding of UNORM/SNORM buffer loads (`tools/d16_format_probe.py`, BUILD-161)
+### d16 rounding of UNORM/SNORM buffer loads (`tooling/d16_format_probe.py`, BUILD-161)
 
 `docs/design.md` ("d16 and f16 format narrowing") narrows the f16 of a typed d16 buffer load the way it narrows an
 image result: the exact binary32 decode, then integer round to nearest even (`Gen.f16_bits`). For buffer loads that
@@ -1618,8 +1618,8 @@ oracle. Every value of UNORM8, SNORM8, UNORM10 (the x channel of format 50), UNO
 runs in wave32 and wave64.
 
 ```
-python -I tools/d16_format_probe.py --json d16.json          # about 1,040 kernels of 1,024 threads; exit 77 without the oracle
-python -I tools/d16_format_probe.py --self-test               # the rules against docs/design.md's #489 counts, no GPU
+python -I tooling/d16_format_probe.py --json d16.json          # about 1,040 kernels of 1,024 threads; exit 77 without the oracle
+python -I tooling/d16_format_probe.py --self-test               # the rules against docs/design.md's #489 counts, no GPU
 ```
 
 - **The kernels stage their own inputs.** Thread t stores the format bits of one value at dword t of the output
@@ -1667,17 +1667,17 @@ Measured on an RX 6700 (gfx1031, AMD Windows driver 32.0.21045.29003, ROCm wheel
 each value is staged once, and that the kernels assemble for gfx1031. A fake oracle plays the GPU to check the exit
 codes. On a GFX10 GPU the test runs UNORM8 and checks the controls.
 
-### Widening a 16-bit float NaN in a typed buffer load (`tools/f16_widen_probe.py`)
+### Widening a 16-bit float NaN in a typed buffer load (`tooling/f16_widen_probe.py`)
 
-A typed buffer load of a half NaN had never been measured: `tools/mem_diff.py` decoded 16_FLOAT with
+A typed buffer load of a half NaN had never been measured: `tooling/mem_diff.py` decoded 16_FLOAT with
 `struct`'s `'<e'` (payload kept from Python 3.14, canonical before) while the translator decoded it with
 `UnpackHalf2x16`, whose result for a NaN is undefined and which the mini interpreter canonicalises to
 0x7FC00000. The probe stages one half word with an untyped `buffer_store_dword`, waits, loads it with
 `buffer_load_format_*` / `tbuffer_load_format_*`, waits, and stores the f32 lanes back.
 
 ```
-python -I tools/f16_widen_probe.py --json f16_widen.json    # 380 kernels of one thread (190 per wave); exit 77 without the oracle
-python -I tools/f16_widen_probe.py --self-test              # the three candidate rules, no GPU
+python -I tooling/f16_widen_probe.py --json f16_widen.json    # 380 kernels of one thread (190 per wave); exit 77 without the oracle
+python -I tooling/f16_widen_probe.py --self-test              # the three candidate rules, no GPU
 ```
 
 - Formats 13 (`16_FLOAT`), 29 (`16_16_FLOAT`) and 71 (`16_16_16_16_FLOAT`), `buffer_` and `tbuffer_`
@@ -1709,7 +1709,7 @@ python -I tools/f16_widen_probe.py --self-test              # the three candidat
   version independent) and `tests/semantic/test_buffer_f16_widen_hw.py` pins the ten measured words for
   MUBUF and MTBUF, formats 13/29/71.
 
-### `image_get_resinfo` and `image_get_lod` (`tools/image_query_probe.py`, SHADER-388)
+### `image_get_resinfo` and `image_get_lod` (`tooling/image_query_probe.py`, SHADER-388)
 
 `docs/design.md` ("Image atomics, size and LOD queries") took resinfo's depth word, the clamped LOD under a linear mip
 filter and the order of u and v in the LOD query from the T# fields and the spec. The probe runs both instructions
@@ -1717,8 +1717,8 @@ natively on a GFX10 GPU through the hardware oracle. Neither reads memory, so a 
 enough. Each case runs in wave32 and wave64.
 
 ```
-python -I tools/image_query_probe.py --json query.json      # 614 results; exit 77 without the oracle or on non-GFX10
-python -I tools/image_query_probe.py --self-test             # the rules against values measured on gfx1036, no GPU
+python -I tooling/image_query_probe.py --json query.json      # 614 results; exit 77 without the oracle or on non-GFX10
+python -I tooling/image_query_probe.py --self-test             # the rules against values measured on gfx1036, no GPU
 ```
 
 - **resinfo:** 2D and 2D-array T#s with WORD4 DEPTH 0, 5, the GFX10.3 pitch and 0x1FFF, BASE_LEVEL 0 to 2, levels
@@ -1739,15 +1739,15 @@ clang), every result matched the rules in the tool's docstring:
 `tests/test_image_query_probe.py` checks the rules against the measured values, the descriptor bits and the
 kernels. A fake oracle plays the GPU to check the comparison and the exit codes; with a 2D depth of 1 it fails. On
 a GFX10 GPU the test runs the whole probe.
-### d16 image loads of 32-bit integer texels (`tools/image_d16_probe.py`, SHADER-387)
+### d16 image loads of 32-bit integer texels (`tooling/image_d16_probe.py`, SHADER-387)
 
 `docs/design.md` ("Typed image loads") saturates a 32-bit UINT or SINT texel to the 16-bit range of its signedness
 when a d16 `image_load` packs it (Mesa sets `integer_dest_saturates` for AMD). Native gfx1036 had shown that on 2D
 images; the probe measures it on every dimension the translator handles, through the hardware oracle on a GFX10 GPU.
 
 ```
-python -I tools/image_d16_probe.py --json d16_image.json   # 16 kernels, one lane per texel; exit 77 without the oracle
-python -I tools/image_d16_probe.py --self-test             # the rules, T# words and kernels, no GPU
+python -I tooling/image_d16_probe.py --json d16_image.json   # 16 kernels, one lane per texel; exit 77 without the oracle
+python -I tooling/image_d16_probe.py --self-test             # the rules, T# words and kernels, no GPU
 ```
 
 - **Cases.** `SQ_RSRC_IMG_1D`, `2D`, `2D_ARRAY` (3 layers) and `3D` (depth 3), each with 32_UINT and 32_SINT
@@ -1780,7 +1780,7 @@ from saturation. The translator's `saturate_int16` follows this on every dimensi
 `tests/test_image_d16_probe.py` checks the rules, the T# fields and the kernels without a GPU, assembles them for
 gfx1036 when AMD clang is there, and checks the exit codes with a fake oracle. On a GFX10 GPU it runs the probe.
 
-### `v_fma_mix*` f16 rounding in nearest mode (`tools/fma_mix_probe.py`)
+### `v_fma_mix*` f16 rounding in nearest mode (`tooling/fma_mix_probe.py`)
 
 `docs/design.md` leaves one f16 question open. In round-to-nearest mode, does `v_fma_mixlo_f16` / `v_fma_mixhi_f16`
 round the exact x · y + z once, straight to f16? Or does it round to f32 first and then narrow, which is what the
@@ -1798,9 +1798,9 @@ seven such inputs, each one f16 ulp apart under the two rules, plus one control:
 Every side reports which rule its words follow:
 
 ```
-python -I tools/fma_mix_probe.py                       # the translator, on the CPU interpreter
-python -I tools/fma_mix_probe.py --oracle hw           # also the native instruction on an AMD GPU (hardware oracle)
-python -I tools/fma_mix_probe.py --oracle vulkan --build runtime/build   # also the translated shader on this GPU
+python -I tooling/fma_mix_probe.py                       # the translator, on the CPU interpreter
+python -I tooling/fma_mix_probe.py --oracle hw           # also the native instruction on an AMD GPU (hardware oracle)
+python -I tooling/fma_mix_probe.py --oracle vulkan --build port/build   # also the translated shader on this GPU
 ```
 
 The `hw` side is the measurement. It runs one wave32 lane per input, under the MODE inferred for the game: IEEE 0,
@@ -1833,7 +1833,7 @@ E `0x7bff`, F `0x3c01`, G `0x3c01`), which the translator produces across all 7 
 `fma_mix_odd` in both nearest-even and toward-zero modes (SHADER-297). On Vulkan, using `fma_mix_odd` matches the
 exact single-rounded hardware words for all inputs.
 
-### `v_cvt_pknorm_*` NaN and rounding on RDNA2 (`tools/pknorm_probe.py`, SHADER-339)
+### `v_cvt_pknorm_*` NaN and rounding on RDNA2 (`tooling/pknorm_probe.py`, SHADER-339)
 
 `docs/design.md` said `v_cvt_pknorm_i16_f32` / `v_cvt_pknorm_u16_f32` give 0 for a NaN, as `v_cvt_i32_f32` does,
 without a hardware measurement. The probe puts each NaN pattern in S0 and in S1 next to a finite value: quiet
@@ -1844,8 +1844,8 @@ rounds to exactly k + 0.5 in f32, while the exact product is just below or just 
 `OpFMul` then `RoundEven` and a single rounding of the exact product differ by one, in either direction.
 
 ```
-python -I tools/pknorm_probe.py                 # the translator, on the CPU interpreter
-python -I tools/pknorm_probe.py --oracle hw     # also the native instruction on an AMD GPU (hardware oracle)
+python -I tooling/pknorm_probe.py                 # the translator, on the CPU interpreter
+python -I tooling/pknorm_probe.py --oracle hw     # also the native instruction on an AMD GPU (hardware oracle)
 ```
 
 The `hw` side runs one lane per case in wave32 and wave64, under five MODEs:
@@ -1877,9 +1877,9 @@ on k + 0.5, the error's sign gives floor(p) + 1 or floor(p), and a zero error ke
 probe then exits 0 on the same iGPU: all 134 words equal the translator's in all ten runs (wave32 and wave64, five
 MODEs), including the 28 near ties.
 
-### Division fixup (`tools/div_fixup_diff.py`)
+### Division fixup (`tooling/div_fixup_diff.py`)
 
-No other fuzzer generates `v_div_fixup_f16`, `v_div_fixup_f32` or `v_div_fixup_f64`. `tools/div_fixup_diff.py`
+No other fuzzer generates `v_div_fixup_f16`, `v_div_fixup_f32` or `v_div_fixup_f64`. `tooling/div_fixup_diff.py`
 runs them through the translator and `tests/semantic/spirv_mini_interp.py`, against a model of the `docs/design.md`
 rows that works on the operand bits and shares no code with the translator, and compares the four exported words bit
 for bit. The model:
@@ -1892,7 +1892,7 @@ for bit. The model:
   The sign is sign(S1) ^ sign(S2).
 - On f32, `mul:2`/`mul:4`/`div:2` scale the result, then `clamp` takes a NaN or any negative value to +0.
 - On f16 and f64, `mul:2`/`mul:4`/`div:2` change nothing: the `docs/design.md` row (#6314, measured on gfx1036 with
-  `tools/f64_omod_probe.py`) drops the scaling under `denorm_mode_16_64 = 3`, the game's `MODE`, while an f16 `clamp`
+  `tooling/f64_omod_probe.py`) drops the scaling under `denorm_mode_16_64 = 3`, the game's `MODE`, while an f16 `clamp`
   still saturates. The measured inputs are normal values; the reference applies the row to every result.
 
 `tests/test_div_fixup_diff.py` pins the model to the 73 gfx1036 rows of `tests/semantic/test_alu_div_fixup_f32.py`
@@ -1921,12 +1921,12 @@ Stages:
 A translator skip exits 1, as a mismatch does.
 
 ```
-python -I tools/div_fixup_diff.py --programs 3000 --seed 11 --max-ops 8
-python -I tools/div_fixup_diff.py --ops v_div_fixup_f64 --programs 1000
+python -I tooling/div_fixup_diff.py --programs 3000 --seed 11 --max-ops 8
+python -I tooling/div_fixup_diff.py --ops v_div_fixup_f64 --programs 1000
 python -I tests/test_div_fixup_diff.py
 ```
 
-### `v_mad_f32`, `v_mac_f32`, `v_mad_legacy_f32` denormal flush on RDNA1 (`tools/mad_denorm_probe.py`, SHADER-340)
+### `v_mad_f32`, `v_mac_f32`, `v_mad_legacy_f32` denormal flush on RDNA1 (`tooling/mad_denorm_probe.py`, SHADER-340)
 
 `docs/design.md` ("Denormal flush in `v_mad_f32`, `v_mac_f32`, `v_mad_legacy_f32`") had no hardware measurement: GFX10.3+
 dropped these opcodes, and flushing only after `omod` (`div:2`/`mul:2`/`mul:4`) was an unverified assumption. The probe
@@ -1937,8 +1937,8 @@ subnormal threshold (`omod`, 8), `v_mad_legacy_f32`'s `0 * anything -> +0` with 
 the device (`0x00000000` with `denorm32=0`, `0x00400000` with `denorm32=3`).
 
 ```
-python -I tools/mad_denorm_probe.py                             # the translator, on the CPU interpreter
-python -I tools/mad_denorm_probe.py --oracle hw                 # also the native instruction on an AMD GPU
+python -I tooling/mad_denorm_probe.py                             # the translator, on the CPU interpreter
+python -I tooling/mad_denorm_probe.py --oracle hw                 # also the native instruction on an AMD GPU
 ```
 
 Results (48 cases per run, wave32 and wave64 across 5 MODEs; `tests/test_mad_denorm_probe.py` checks the translator side):
@@ -1957,8 +1957,8 @@ Two findings from the RDNA1 measurement:
 a0acd33d.* Raw kernels written by hand, one lane each. The MODE comes from the kernel descriptor (`ieee`,
 `dx10_clamp`, `denorm_mode_32`, `denorm_mode_16_64`). Every program writes one word, starting from a destination of
 `0x5a5a5a5a`, so a half the op must not write shows up. 1,385 programs assembled, each run in wave32 and wave64, and
-the two wave sizes agree on every word. `tools/fma_mix_probe.py --oracle hw` (the section above) and
-`tools/f16_trans_sweep.py --ops v_exp_f16,v_log_f16` ran on the same GPU.
+the two wave sizes agree on every word. `tooling/fma_mix_probe.py --oracle hw` (the section above) and
+`tooling/f16_trans_sweep.py --ops v_exp_f16,v_log_f16` ran on the same GPU.
 
 - **An omod on an f16 result acts only with IEEE 0 and f16 denormals flushed (`denorm_mode_16_64 = 0`).** In that
   MODE `mul:2`, `mul:4` and `div:2` scale the results of `v_add_f16`, `v_mul_f16`, `v_fma_f16`, `v_fmac_f16_e64`,
@@ -2014,20 +2014,20 @@ are not NaN, and for the f16 denormals. It differs in five ways, none fixed here
    the canonical quiet NaN (`0x7fc00000`, `0x7e00`). For example, `v_fmac_f16` keeps `0x7c01`. This is the "not
    modelled yet" note of the f16 transcendentals row in `docs/design.md`, here for these ops too.
 
-### Integer operations and scalar ALU verification (`tools/salu_diff.py`, gfx1036 follow-up to #1746)
+### Integer operations and scalar ALU verification (`tooling/salu_diff.py`, gfx1036 follow-up to #1746)
 
-As a follow-up to #1746 (SHADER-137), `tools/salu_diff.py` and `tests/test_salu_diff.py` were expanded to include 12 integer SALU operations (`s_absdiff_i32`, `s_mul_hi_i32`, `s_lshl1..4_add_u32`, `s_sext_i32_i8`, `s_sext_i32_i16`, `s_flbit_i32`, and `s_pack_ll/lh/hh_b32_b16`) and tested on native desktop RDNA2 silicon (`gfx1036`), complementing #1746's laptop `gfx1035` probe.
+As a follow-up to #1746 (SHADER-137), `tooling/salu_diff.py` and `tests/test_salu_diff.py` were expanded to include 12 integer SALU operations (`s_absdiff_i32`, `s_mul_hi_i32`, `s_lshl1..4_add_u32`, `s_sext_i32_i8`, `s_sext_i32_i16`, `s_flbit_i32`, and `s_pack_ll/lh/hh_b32_b16`) and tested on native desktop RDNA2 silicon (`gfx1036`), complementing #1746's laptop `gfx1035` probe.
 
-Hardware validation was executed via `tools/hw_oracle` and `tools/salu_diff.py` on native AMD RDNA2 silicon:
+Hardware validation was executed via `tooling/hw_oracle` and `tooling/salu_diff.py` on native AMD RDNA2 silicon:
 
 - **GPU**: AMD Radeon(TM) Graphics (`gfx1036`), AMD Windows driver `32.0.21045.29003`, Windows 11, `amdhip64_6.dll`, AMD clang 23.0.0git (`rocm-sdk-core 10.0.0`).
-- **Second-silicon verification of #1746 (`tools/int_hw_probe.py`)**:
-  - `python -I tools/int_hw_probe.py --oracle both --wave both`: **87 cases: 87 match, 0 known divergence, 0 unexpected mismatch, 0 wave32/64 diff** on native `gfx1036` (corroborating that the 5 divergences originally reported by #1746 are now fully resolved on `main`).
+- **Second-silicon verification of #1746 (`tooling/int_hw_probe.py`)**:
+  - `python -I tooling/int_hw_probe.py --oracle both --wave both`: **87 cases: 87 match, 0 known divergence, 0 unexpected mismatch, 0 wave32/64 diff** on native `gfx1036` (corroborating that the 5 divergences originally reported by #1746 are now fully resolved on `main`).
 - **SALU operations (`s_absdiff_i32`, `s_mul_hi_i32`, `s_lshl1..4_add_u32`)**:
-  - `python -I tools/salu_diff.py --ops s_absdiff_i32,s_mul_hi_i32,s_lshl1_add_u32,s_lshl2_add_u32,s_lshl3_add_u32,s_lshl4_add_u32 --programs 500 --oracle translator,hw`: **500 passed, 0 mismatches**.
+  - `python -I tooling/salu_diff.py --ops s_absdiff_i32,s_mul_hi_i32,s_lshl1_add_u32,s_lshl2_add_u32,s_lshl3_add_u32,s_lshl4_add_u32 --programs 500 --oracle translator,hw`: **500 passed, 0 mismatches**.
   - Confirmed SCC preserved across operations with prior SCC=0 and SCC=1.
 - **Sign-extension and pack (`s_sext_i32_i8`, `s_sext_i32_i16`, `s_flbit_i32`, `s_pack_ll/lh/hh_b32_b16`)**:
-  - `python -I tools/salu_diff.py --ops s_sext_i32_i8,s_sext_i32_i16,s_flbit_i32,s_pack_ll_b32_b16,s_pack_lh_b32_b16,s_pack_hh_b32_b16 --programs 500 --oracle translator,hw`: **500 passed, 0 mismatches**.
+  - `python -I tooling/salu_diff.py --ops s_sext_i32_i8,s_sext_i32_i16,s_flbit_i32,s_pack_ll_b32_b16,s_pack_lh_b32_b16,s_pack_hh_b32_b16 --programs 500 --oracle translator,hw`: **500 passed, 0 mismatches**.
   - `s_cmov_b32` verified on hardware under SCC=0 (destination preserved) and SCC=1 (destination loaded).
 - **VALU product-sum (`v_mad_u64_u32`, `v_mad_i64_i32`)**:
   - 292 programs in wave32 across special and random 32/64-bit inputs: **292 passed, 0 mismatches**.
@@ -2051,12 +2051,12 @@ Hardware validation was executed via `tools/hw_oracle` and `tools/salu_diff.py` 
 
 - **Constant operands under `op_sel` / `op_sel_hi`:** Integer constants under VOP3P are uniformly treated as 32-bit dwords `C`. When `op_sel[i] == 0`, bits `[15:0]` are selected; when `op_sel[i] == 1`, bits `[31:16]` are selected. Positive inline constants zero-extend (`5` → `0x00000005`: lo=`0x0005`, hi=`0x0000`; `64` → `0x00000040`: lo=`0x0040`, hi=`0x0000`). Negative inline constants sign-extend (`-1` → `0xFFFFFFFF`: lo=`0xFFFF`, hi=`0xFFFF`; `-16` → `0xFFFFFFF0`: lo=`0xFFF0`, hi=`0xFFFF`). 32-bit literals preserve their full dword (`0x12345678`: lo=`0x5678`, hi=`0x1234`; `0x80017fff`: lo=`0x7fff`, hi=`0x8001`). Float inline tokens (`0.5`, `1.0`, `-2.0`, `4.0`) assemble as their 32-bit IEEE 754 bit patterns (`1.0` → `0x3f800000`: lo=`0x0000`, hi=`0x3f80`).
 - **`clamp` saturation:** Unsigned add/mad saturate to `0xFFFF`; unsigned sub saturates underflow to `0x0000`; signed add/sub/mad saturate to `[-32768, 32767]`.
-- **Silicon vs Translator parity:** 380 of 380 kernels match bit-for-bit between native hardware and `tools/rdna2spirv.py` lowered to SPIR-V (0 mismatches, 0 wave32/wave64 differences).
-### Pixel-shader ISA on the hardware (`tools/ps_oracle.py`, EGEN-TOOL-PS-ORACLE)
+- **Silicon vs Translator parity:** 380 of 380 kernels match bit-for-bit between native hardware and `tooling/rdna2spirv.py` lowered to SPIR-V (0 mismatches, 0 wave32/wave64 differences).
+### Pixel-shader ISA on the hardware (`tooling/ps_oracle.py`, EGEN-TOOL-PS-ORACLE)
 
-`tools/hw_oracle` only launches compute kernels, so what only a pixel shader has (`v_interp_*` and the parameter
+`tooling/hw_oracle` only launches compute kernels, so what only a pixel shader has (`v_interp_*` and the parameter
 words the SPI writes into LDS, the barycentric VGPRs, exports and their formats, helper lanes) could not be
-measured there. `tools/ps_oracle.py` runs hand-written RDNA2 pixel-shader ISA in a real draw on an AMD GPU, through
+measured there. `tooling/ps_oracle.py` runs hand-written RDNA2 pixel-shader ISA in a real draw on an AMD GPU, through
 Vulkan's `VK_KHR_pipeline_binary`:
 
 1. `vk_harness` builds a pipeline from a template vertex + pixel shader and writes its binary (`VKH_BINARY_OUT`).
@@ -2077,8 +2077,8 @@ the vertex shader's locations 0 = (u, v, 0, 1) and 1 = (u, v, 0, 0), u and v goi
 
 ```powershell
 $env:PALMETTO_VK_DEVICE = "radeon"
-python -I tools/ps_oracle.py --build <runtime build> --template interp2 --show-template
-python -I tools/ps_oracle.py --build <runtime build> --template interp2 --asm body.s --size 4 1 [--json out.json]
+python -I tooling/ps_oracle.py --build <runtime build> --template interp2 --show-template
+python -I tooling/ps_oracle.py --build <runtime build> --template interp2 --asm body.s --size 4 1 [--json out.json]
 ```
 
 Checked on an AMD Radeon iGPU (gfx1036, Windows driver 26.10.1): the driver accepts a patched binary (there is no
@@ -2114,12 +2114,12 @@ the hardware does not support is not refused here.
 
 - **Constant operands under `op_sel` / `op_sel_hi`:** Integer constants under VOP3P are uniformly treated as 32-bit dwords `C`. When `op_sel[i] == 0`, bits `[15:0]` are selected; when `op_sel[i] == 1`, bits `[31:16]` are selected. Positive inline constants zero-extend (`5` → `0x00000005`: lo=`0x0005`, hi=`0x0000`; `64` → `0x00000040`: lo=`0x0040`, hi=`0x0000`). Negative inline constants sign-extend (`-1` → `0xFFFFFFFF`: lo=`0xFFFF`, hi=`0xFFFF`; `-16` → `0xFFFFFFF0`: lo=`0xFFF0`, hi=`0xFFFF`). 32-bit literals preserve their full dword (`0x12345678`: lo=`0x5678`, hi=`0x1234`; `0x80017fff`: lo=`0x7fff`, hi=`0x8001`). Float inline tokens (`0.5`, `1.0`, `-2.0`, `4.0`) assemble as their 32-bit IEEE 754 bit patterns (`1.0` → `0x3f800000`: lo=`0x0000`, hi=`0x3f80`).
 - **`clamp` saturation:** Unsigned add/mad saturate to `0xFFFF`; unsigned sub saturates underflow to `0x0000`; signed add/sub/mad saturate to `[-32768, 32767]`.
-- **Silicon vs Translator parity:** 380 of 380 kernels match bit-for-bit between native hardware and `tools/rdna2spirv.py` lowered to SPIR-V (0 mismatches, 0 wave32/wave64 differences).
-### Pixel-shader ISA on the hardware (`tools/ps_oracle.py`, EGEN-TOOL-PS-ORACLE)
+- **Silicon vs Translator parity:** 380 of 380 kernels match bit-for-bit between native hardware and `tooling/rdna2spirv.py` lowered to SPIR-V (0 mismatches, 0 wave32/wave64 differences).
+### Pixel-shader ISA on the hardware (`tooling/ps_oracle.py`, EGEN-TOOL-PS-ORACLE)
 
-`tools/hw_oracle` only launches compute kernels, so what only a pixel shader has (`v_interp_*` and the parameter
+`tooling/hw_oracle` only launches compute kernels, so what only a pixel shader has (`v_interp_*` and the parameter
 words the SPI writes into LDS, the barycentric VGPRs, exports and their formats, helper lanes) could not be
-measured there. `tools/ps_oracle.py` runs hand-written RDNA2 pixel-shader ISA in a real draw on an AMD GPU, through
+measured there. `tooling/ps_oracle.py` runs hand-written RDNA2 pixel-shader ISA in a real draw on an AMD GPU, through
 Vulkan's `VK_KHR_pipeline_binary`:
 
 1. `vk_harness` builds a pipeline from a template vertex + pixel shader and writes its binary (`VKH_BINARY_OUT`).
@@ -2140,8 +2140,8 @@ the vertex shader's locations 0 = (u, v, 0, 1) and 1 = (u, v, 0, 0), u and v goi
 
 ```powershell
 $env:PALMETTO_VK_DEVICE = "radeon"
-python -I tools/ps_oracle.py --build <runtime build> --template interp2 --show-template
-python -I tools/ps_oracle.py --build <runtime build> --template interp2 --asm body.s --size 4 1 [--json out.json]
+python -I tooling/ps_oracle.py --build <runtime build> --template interp2 --show-template
+python -I tooling/ps_oracle.py --build <runtime build> --template interp2 --asm body.s --size 4 1 [--json out.json]
 ```
 
 Checked on an AMD Radeon iGPU (gfx1036, Windows driver 26.10.1): the driver accepts a patched binary (there is no
@@ -2174,7 +2174,7 @@ RADV moves `interp2`'s `in0 + in1` into the vertex shader and the pixel shader r
 (2u, 2v, 0, 1); `--show-template` shows the layout a run gets.
 
 ```sh
-PALMETTO_VK_DEVICE=raphael python -I tools/ps_oracle.py --build <runtime build> --template interp2 --show-template
+PALMETTO_VK_DEVICE=raphael python -I tooling/ps_oracle.py --build <runtime build> --template interp2 --show-template
 ```
 
 Checked on the Ryzen 7 9800X3D iGPU (`RADV RAPHAEL_MENDOCINO`, gfx1036, wave64 pixel stage, Mesa 26.3.1, CachyOS):
@@ -2184,8 +2184,8 @@ is cached).
 
 - **Constant operands under `op_sel` / `op_sel_hi`:** Integer constants under VOP3P are uniformly treated as 32-bit dwords `C`. When `op_sel[i] == 0`, bits `[15:0]` are selected; when `op_sel[i] == 1`, bits `[31:16]` are selected. Positive inline constants zero-extend (`5` → `0x00000005`: lo=`0x0005`, hi=`0x0000`; `64` → `0x00000040`: lo=`0x0040`, hi=`0x0000`). Negative inline constants sign-extend (`-1` → `0xFFFFFFFF`: lo=`0xFFFF`, hi=`0xFFFF`; `-16` → `0xFFFFFFF0`: lo=`0xFFF0`, hi=`0xFFFF`). 32-bit literals preserve their full dword (`0x12345678`: lo=`0x5678`, hi=`0x1234`; `0x80017fff`: lo=`0x7fff`, hi=`0x8001`). Float inline tokens (`0.5`, `1.0`, `-2.0`, `4.0`) assemble as their 32-bit IEEE 754 bit patterns (`1.0` → `0x3f800000`: lo=`0x0000`, hi=`0x3f80`).
 - **`clamp` saturation:** Unsigned add/mad saturate to `0xFFFF`; unsigned sub saturates underflow to `0x0000`; signed add/sub/mad saturate to `[-32768, 32767]`.
-- **Silicon vs Translator parity:** 380 of 380 kernels match bit-for-bit between native hardware and `tools/rdna2spirv.py` lowered to SPIR-V (0 mismatches, 0 wave32/wave64 differences).
-#### Helper lanes at a triangle edge (`tools/ps_helper_probe.py`, SHADER-681)
+- **Silicon vs Translator parity:** 380 of 380 kernels match bit-for-bit between native hardware and `tooling/rdna2spirv.py` lowered to SPIR-V (0 mismatches, 0 wave32/wave64 differences).
+#### Helper lanes at a triangle edge (`tooling/ps_helper_probe.py`, SHADER-681)
 
 What a pixel wave does with the helper lanes of a partly covered 2x2 quad, which the translator's EXEC model and
 `s_wqm` lowering depend on (`docs/design.md` row "Whole-quad mode"). The probe draws one triangle, (-1, -1), (1.3, -1),
@@ -2195,7 +2195,7 @@ a shader that needs quads. Seven wave64 programs replace the pixel shader. A hel
 so a covered lane of the same quad reads the helper's registers through DPP `quad_perm` and exports them.
 
 ```sh
-PALMETTO_VK_DEVICE=raphael python -I tools/ps_helper_probe.py --build <runtime build> [--json out.json]
+PALMETTO_VK_DEVICE=raphael python -I tooling/ps_helper_probe.py --build <runtime build> [--json out.json]
 ```
 
 On the Ryzen 7 9800X3D iGPU (`RADV RAPHAEL_MENDOCINO`, gfx1036, Mesa 26.3.1): 137 covered pixels in three waves,
@@ -2227,10 +2227,10 @@ pixel stage (`RADV_PERFTEST=pswave32`) and GFX11+ exit 77. Not measured: wave32,
 
 - **Constant operands under `op_sel` / `op_sel_hi`:** Integer constants under VOP3P are uniformly treated as 32-bit dwords `C`. When `op_sel[i] == 0`, bits `[15:0]` are selected; when `op_sel[i] == 1`, bits `[31:16]` are selected. Positive inline constants zero-extend (`5` → `0x00000005`: lo=`0x0005`, hi=`0x0000`; `64` → `0x00000040`: lo=`0x0040`, hi=`0x0000`). Negative inline constants sign-extend (`-1` → `0xFFFFFFFF`: lo=`0xFFFF`, hi=`0xFFFF`; `-16` → `0xFFFFFFF0`: lo=`0xFFF0`, hi=`0xFFFF`). 32-bit literals preserve their full dword (`0x12345678`: lo=`0x5678`, hi=`0x1234`; `0x80017fff`: lo=`0x7fff`, hi=`0x8001`). Float inline tokens (`0.5`, `1.0`, `-2.0`, `4.0`) assemble as their 32-bit IEEE 754 bit patterns (`1.0` → `0x3f800000`: lo=`0x0000`, hi=`0x3f80`).
 - **`clamp` saturation:** Unsigned add/mad saturate to `0xFFFF`; unsigned sub saturates underflow to `0x0000`; signed add/sub/mad saturate to `[-32768, 32767]`.
-- **Silicon vs Translator parity:** 380 of 380 kernels match bit-for-bit between native hardware and `tools/rdna2spirv.py` lowered to SPIR-V (0 mismatches, 0 wave32/wave64 differences).
+- **Silicon vs Translator parity:** 380 of 380 kernels match bit-for-bit between native hardware and `tooling/rdna2spirv.py` lowered to SPIR-V (0 mismatches, 0 wave32/wave64 differences).
 
 
-### Real pixel shaders on two GPUs (`tools/ps_sweep.py`, `runtime/test/vk_ps_sweep.cpp`)
+### Real pixel shaders on two GPUs (`tooling/ps_sweep.py`, `port/test/vk_ps_sweep.cpp`)
 
 The oracles above run hand-written programs. This one draws translated corpus pixel shaders, to find what only real
 shaders trigger. `ps_sweep.py sample` takes a fixed-seed stratified sample of the translated pixel shaders (strata:
@@ -2287,7 +2287,7 @@ RTX 4080 SUPER and Intel UHD 770 (32.0.101.6129), Windows 11, 480 of 12,101 pixe
 
 **With the fallbacks (`--bary-fallback` plus the MinLod fallback of #4642, same 480 shaders, variant z).** The same sample was
 retranslated with both flags and drawn through `<name>.bary_gs.spv` where a shader reads raw barycentrics (`VKS_GS`,
-`tools/bary_fallback_gs.py`). The Intel UHD 770 creates 440 of the 480 (265 before; the 207 that needed
+`tooling/bary_fallback_gs.py`). The Intel UHD 770 creates 440 of the 480 (265 before; the 207 that needed
 `fragmentShaderBarycentric` or `shaderResourceMinLod` are gone), 32 time out (zeroed-heap loops, which the same
 translation also hits on the RTX 4080 SUPER), and 8 are not translated (`computed I/J pair under --bary-fallback`,
 #3898). Intel against NVIDIA on the same fallback translation: 434 OK on both, 0 differ, 4 NVIDIA device losses
@@ -2299,7 +2299,7 @@ again, `--bary-fallback` alone, without the MinLod flag of #4642, against the de
 both are byte-identical, so ordinary `v_interp_p1/p2/mov_f32` is not translated differently (the remaining 8 are not
 translated under the fallback). `--bary-fallback` has no `PerVertexKHR` inputs, so a 16-bit interpolant is read as the
 smooth f32 of its packed word (design.md, "16-bit interpolation"); `--f16-interp-fallback` is its companion, and
-`make_game.py` turns it on with it wherever the device has no per-vertex inputs, as an Intel UHD has none. The sweep
+`build_port.py` turns it on with it wherever the device has no per-vertex inputs, as an Intel UHD has none. The sweep
 used the first flag without the second, and its generated vertex shader wrote the decoded halves nowhere. The synthetic
 `ps_interp_f16_high` drawn with `vs_f16_pack` agrees: with `--bary-fallback` alone its f16 halves are off by 0.984 on
 both GPUs, with both flags and by default they are within 2e-3 on both, and `ps_interp_f32_mods` / `ps_interp_mov_mods`
@@ -2339,20 +2339,20 @@ covers the operations most shaders use. Then add, in order:
    those rules need value tests.
 3. **Branches and loops.** Modelled control flow, then irreducible graphs and the dispatch-loop form.
    The existing control-flow unit tests check graph structure; differential tests check the values.
-   `tools/cf_diff.py` (FUZZ-8) does this for whole waves: seeded programs built from the shapes
+   `tooling/cf_diff.py` (FUZZ-8) does this for whole waves: seeded programs built from the shapes
    compilers emit (saveexec if/else, `v_cmpx`, VCC- and SCC-voted branches, uniform and per-lane
-   loops, two-entry cycles), run by `tools/cf_ref.py` (cpu_ref plus branches, compares and saveexec)
+   loops, two-entry cycles), run by `tooling/cf_ref.py` (cpu_ref plus branches, compares and saveexec)
    and by `tests/semantic/spirv_wave_interp.py` (every invocation of a subgroup, with structured
    reconvergence), compared lane by lane in both the structured and the dispatch-loop form.
-   The corpus-side counterpart is `tools/ab_control_flow.py`: it renders branchy pixel shaders
+   The corpus-side counterpart is `tooling/ab_control_flow.py`: it renders branchy pixel shaders
    translated both ways (real loops and conditionals, and `--dispatch-loop`) and compares the two
-   images byte for byte. It needs a finished shaders stage and `runtime/build/vk_texture_test`, and
+   images byte for byte. It needs a finished shaders stage and `port/build/vk_texture_test`, and
    writes the outcome of each shader to `outcomes.tsv`.
 4. **LDS, global memory, buffers and images.** These need a memory model and descriptor setup; the
    existing `vk_compute_test`/`vk_store_test`/`vk_texture_test` programs show the shape.
 5. **Wave operations.** Ballot, shuffles, DPP, `readlane`/`writelane`, `permlane`, `mbcnt`, and the
    wave64 split on 32-wide subgroups. These are the largest semantic gap and need a 64-lane model
-   plus a subgroup-size-aware host. `tools/crosslane_fuzz.py` (FUZZ-7, above) is that model, run on
+   plus a subgroup-size-aware host. `tooling/crosslane_fuzz.py` (FUZZ-7, above) is that model, run on
    the GPU.
 6. **Pixel interpolation and exports.** Barycentrics, per-vertex inputs, compressed exports, MRT and
    depth. The existing GPU tests already pin several of these; a CPU model makes them differential.
@@ -2376,7 +2376,7 @@ The prototype and the first harness stage deliberately do not cover:
 - **Wave operations.** Ballot, shuffles, DPP, permlane and cross-half wave64 behaviour need a full
   64-lane model and a GPU whose subgroup size matches the wave. On a 32-wide subgroup host, a wave64
   program is not the same execution. The one-lane interpreter still can't run them; the GPU fuzzer
-  `tools/crosslane_fuzz.py` covers them instead, with wave64 checked through `--wave64-emulate`.
+  `tooling/crosslane_fuzz.py` covers them instead, with wave64 checked through `--wave64-emulate`.
 - **Memory and LDS.** Address spaces, out-of-bounds rules, atomics, ordering and barriers. These are
   modelled later, with the same "unsupported, never guessed" rule.
 - **Transcendentals and approximation.** `v_rcp_f32`, `v_rsq_f32`, `v_exp_f32`, `v_log_f32` and the
@@ -2405,7 +2405,7 @@ The technique is described in another project's write-ups; no code from them is 
 
 - [target console shaders](a public prior-art project),
   sections "Execution harness" and "A CPU reference for small real shaders".
-- [tools/xbox README](a public prior-art project),
+- [tooling/xbox README](a public prior-art project),
   which describes `exec` and the check against a Python reference.
 
 Their reported numbers, as a scale reference only: 183 of 872 compute shaders of 3,000 bytes or less
@@ -2421,6 +2421,6 @@ and the reported results, not for code.
 ## Deliberate limits of this change
 
 This change adds the design, the CPU prototype and its unit tests. It does not modify
-`tools/rdna2spirv.py`, does not add a GPU runner, and does not use game data. The prototype is useful
+`tooling/rdna2spirv.py`, does not add a GPU runner, and does not use game data. The prototype is useful
 now because it pins the semantics of the first instruction families and gives the future harness a
 reference that fails loudly on anything it does not understand.

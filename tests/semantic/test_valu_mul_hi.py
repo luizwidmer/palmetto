@@ -1,6 +1,6 @@
 """v_mul_hi_u32 and v_mul_hi_i32 (RDNA2 VOP3): D = high 32 bits of the 64-bit product of two 32-bit sources.
 
-Every case is translated by tools/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
+Every case is translated by tooling/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
 word is written down by hand next to each case and also recomputed by the plain-Python reference below.
 Standard library only: no GPU, no LLVM, no game data.
 """

@@ -17,7 +17,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tooling"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import glb_writer
@@ -113,7 +113,7 @@ class ExtraUvsTest(unittest.TestCase):
         self.root = Path(self.temp.name)
 
     def cli(self, script, *args):
-        result = subprocess.run([sys.executable, "-I", str(ROOT / "tools" / script), *map(str, args)],
+        result = subprocess.run([sys.executable, "-I", str(ROOT / "tooling" / script), *map(str, args)],
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
@@ -265,7 +265,7 @@ class ExtraUvsTest(unittest.TestCase):
         malformed = self.root / "wrong-shape.glb"
         malformed.write_bytes(encode_glb(doc, blob))
         rejected_output = self.root / "must-not-exist.glb"
-        result = subprocess.run([sys.executable, "-I", str(ROOT / "tools/ped_assemble.py"),
+        result = subprocess.run([sys.executable, "-I", str(ROOT / "tooling/ped_assemble.py"),
                                  "assemble", str(malformed), "-o", str(rejected_output)],
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)

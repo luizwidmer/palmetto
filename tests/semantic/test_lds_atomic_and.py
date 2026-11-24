@@ -63,7 +63,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 
@@ -1495,7 +1495,7 @@ class TestReturnValueRetention(unittest.TestCase):
 
 
 class TestTranslatorIntegration(unittest.TestCase):
-    """Verifies that tools/rdna2spirv.py emits conforming SPIR-V for ds_and_b32, ds_and_rtn_b32, and b64 forms."""
+    """Verifies that tooling/rdna2spirv.py emits conforming SPIR-V for ds_and_b32, ds_and_rtn_b32, and b64 forms."""
 
     def _make_mock_gen(self, stage: str = "cs"):
         class MockGen:

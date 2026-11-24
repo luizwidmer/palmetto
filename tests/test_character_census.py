@@ -19,7 +19,7 @@ import unittest
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TOOL = ROOT / "tools" / "character_census.py"
+TOOL = ROOT / "tooling" / "character_census.py"
 
 
 def load_tool():

@@ -1,4 +1,4 @@
-"""Synthetic checks for tools/veh_spawn_intensities.py: the aggregate census of the vehicle
+"""Synthetic checks for tooling/veh_spawn_intensities.py: the aggregate census of the vehicle
 spawn-intensity table, band ranges, mud-band placement and rain grouping. Every entry name and
 value in the fixtures is made up; the checker also asserts the CLI never prints key names, which
 is game data.
@@ -15,8 +15,8 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "veh_spawn_intensities.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "veh_spawn_intensities.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import veh_spawn_intensities as vsi  # noqa: E402
 

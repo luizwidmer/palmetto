@@ -1,4 +1,4 @@
-"""Typed-buffer UNORM/SNORM decode (Gen.norm_bits in tools/rdna2spirv.py) against exact values.
+"""Typed-buffer UNORM/SNORM decode (Gen.norm_bits in tooling/rdna2spirv.py) against exact values.
 
 The RX 6700 returns the correctly rounded f32 of x / (2^n - 1) for UNORM and max(x / (2^(n-1) - 1), -1) for SNORM
 (measured natively, #374). OpFDiv may be 2.5 ULP off and the AMD Windows and NVIDIA drivers return the reciprocal-
@@ -15,7 +15,7 @@ from fractions import Fraction
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

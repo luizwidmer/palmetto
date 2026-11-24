@@ -1,4 +1,4 @@
-"""Unit tests for tools/gallery.py standalone 3D Studio & Asset Gallery server."""
+"""Unit tests for tooling/gallery.py standalone 3D Studio & Asset Gallery server."""
 import functools
 import json
 import io
@@ -17,7 +17,7 @@ from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 
@@ -225,7 +225,7 @@ class TestGalleryServer(unittest.TestCase):
         self.models_secret = os.path.join(self.tmp.name, "models_secret")
         self.textures_dir = os.path.join(self.tmp.name, "textures")
         self.textures_secret = os.path.join(self.tmp.name, "textures_secret")
-        self.viewer_dir = os.path.join(self.tmp.name, "viewer")
+        self.viewer_dir = os.path.join(self.tmp.name, "app")
         self.viewer_secret = os.path.join(self.tmp.name, "viewer_secret")
         self.vendor_dir = os.path.join(self.viewer_dir, "vendor")
         for d in (self.models_dir, self.models_secret, self.textures_dir,

@@ -4,7 +4,7 @@ RDNA2 ISA (wave32 SOP1):
   s_andn2_wrexec_b32  EXEC = S0 & ~EXEC; D = EXEC (the new one); SCC = (EXEC != 0).
   s_andn1_wrexec_b32  EXEC = ~S0 & EXEC; D = EXEC (the new one); SCC = (EXEC != 0).
 
-Programs are written here (no game data) and translated by tools/rdna2spirv.py; spirv_mini_interp.run_workgroup runs
+Programs are written here (no game data) and translated by tooling/rdna2spirv.py; spirv_mini_interp.run_workgroup runs
 one workgroup of 32 lanes on a 32-wide subgroup. S0 is a compare result in VCC_LO (via v_cmp_eq_u32_e32), and
 exec_lo is initialized to multiple masks (including all-zero results giving SCC=0 and partial masks 0x0000FFFF,
 0x55555555, 0x80000001). Only lanes left active in the new EXEC write to the lane output slots; SCC is pre-seeded

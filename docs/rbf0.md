@@ -15,7 +15,7 @@ payload, carved stream, path list or string dump is committed here.
 | Is there a name or hash table? | **No.** Schema names are inline UTF-8 with a u16 length. There is no hash table and no readable hash string. The 64-bit integers are mostly small codes; none is identified as a name hash. |
 | What do the streams carry? | UI framework and UI data schemas, movie-subtitle containers, and three tuning/config schemas. No animation, mesh or audio payload. |
 | Is it the same format as the `anim.arc` rig blob? | **Yes, same container and grammar.** That blob is one `rage__crRigSetManager` resource; its 9 descriptors and 28,962 elements parse with the same rules. |
-| Can it be decoded to a tree? | **Yes.** `tools/rbf0_tree.py` decodes all 1,263 resources to element/value/text trees. Unknown descriptors and record types fail closed. |
+| Can it be decoded to a tree? | **Yes.** `tooling/rbf0_tree.py` decodes all 1,263 resources to element/value/text trees. Unknown descriptors and record types fail closed. |
 | Compression inside `RBF0`? | **None observed.** The only compression is the outer ARC9 zlib framing. |
 
 ## 1. Method and coverage
@@ -28,7 +28,7 @@ The 1,263 starts are 0.48% of the carved stored bytes (2,040,469) and 1.03% of t
 The RBF0 count is the same as the earlier scan; the carve fix changes trailing streams, not this class.
 
 Each start was inflated, joined to its continuations by archive order, and parsed with the grammar in section 3.
-**1,263 of 1,263 resources parse exactly to the last byte** after joining. The parser is `tools/rbf0_index.py`;
+**1,263 of 1,263 resources parse exactly to the last byte** after joining. The parser is `tooling/rbf0_index.py`;
 the unit test builds only synthetic headers.
 
 ## 2. Sizes and chunking
@@ -271,11 +271,11 @@ the rig-set root, an `anim/` string or a `SKEL_` string. The `data.arc` RBF0s ar
    There is no byte-blob value type and the parse consumes every byte, so there is no place for a nested frame.
 
 The chunk join, descriptor/type pairing, width selection, attribute count and tree build are implemented in
-`tools/rbf0_tree.py`; section 9 records what that decoder measured and what it still cannot name.
+`tooling/rbf0_tree.py`; section 9 records what that decoder measured and what it still cannot name.
 
 ## 9. Tree decoder
 
-`tools/rbf0_tree.py` turns the record stream into a tree. It reads a carve directory or one complete resource,
+`tooling/rbf0_tree.py` turns the record stream into a tree. It reads a carve directory or one complete resource,
 joins the 64 KiB continuations, and writes one JSON file with one object per resource, plus optional per-resource
 generic XML files. It is stdlib-only and uses no schema file.
 
@@ -452,7 +452,7 @@ the last byte. The corpus has 0 bad, 0 truncated and 0 trailing resources.
 
 ### 9.6 Encoder and round trip
 
-`tools/rbf0_encode.py` writes a tree document back to bytes with the grammar of section 3. It emits each descriptor
+`tooling/rbf0_encode.py` writes a tree document back to bytes with the grammar of section 3. It emits each descriptor
 name at its first use, then the element header words `0, 0, attribute count`, the attributes, and the content in tree
 order. Text and strings keep their recorded bytes and terminating NUL. `--check` decodes every resource of a carve,
 joining continuations as `rbf0_tree.py` does, encodes it, and compares the result with the original bytes. It exits 0
@@ -488,22 +488,22 @@ An export with no refusals exits 0.
 
 ```powershell
 # Index the archive: CSV or JSON, root/counts/strings; no payload is written
-python -I tools/rbf0_index.py <package>\data.arc <work>\rbf0.json
-python -I tools/rbf0_index.py <package>\data.arc <work>\rbf0.csv --quiet
+python -I tooling/rbf0_index.py <package>\data.arc <work>\rbf0.json
+python -I tooling/rbf0_index.py <package>\data.arc <work>\rbf0.csv --quiet
 
 # Index a directory of already-carved streams (offsets from leading hex file names)
-python -I tools/rbf0_index.py <work>\data-carve <work>\rbf0.json
+python -I tooling/rbf0_index.py <work>\data-carve <work>\rbf0.json
 
 # Decode trees from the same carve; JSON plus optional CSV node table and per-resource XML
-python -I tools/rbf0_tree.py <work>\data-carve <work>\rbf0-tree.json
-python -I tools/rbf0_tree.py <work>\data-carve <work>\rbf0-tree.json --csv <work>\rbf0-nodes.csv
-python -I tools/rbf0_tree.py <work>\data-carve <work>\rbf0-tree.json --xml <work>\rbf0-xml
-python -I tools/rbf0_tree.py <work>\data-carve <work>\subtitle.json --root CMovieSubtitleContainer --limit 1
+python -I tooling/rbf0_tree.py <work>\data-carve <work>\rbf0-tree.json
+python -I tooling/rbf0_tree.py <work>\data-carve <work>\rbf0-tree.json --csv <work>\rbf0-nodes.csv
+python -I tooling/rbf0_tree.py <work>\data-carve <work>\rbf0-tree.json --xml <work>\rbf0-xml
+python -I tooling/rbf0_tree.py <work>\data-carve <work>\subtitle.json --root CMovieSubtitleContainer --limit 1
 
 # Round trip: decode and re-encode every resource and compare with the original bytes (counts only)
-python -I tools/rbf0_encode.py --check <work>\data-carve
+python -I tooling/rbf0_encode.py --check <work>\data-carve
 # Write the resources of a (possibly edited) tree report back as .rbf files into a new folder
-python -I tools/rbf0_encode.py <work>\rbf0-tree.json <work>\rbf0-encoded
+python -I tooling/rbf0_encode.py <work>\rbf0-tree.json <work>\rbf0-encoded
 
 # Unit tests: synthetic headers and trees only
 python -I tests/test_rbf0_index.py
@@ -513,7 +513,7 @@ python -I tests/test_imhex_patterns.py
 ```
 
 To look at one resource in a hex editor, open the inflated and joined resource (not the archive) in
-[ImHex](https://imhex.werwolv.net/) with [tools/imhex/rbf0.hexpat](../tools/imhex/rbf0.hexpat). The pattern follows
+[ImHex](https://imhex.werwolv.net/) with [tooling/imhex/rbf0.hexpat](../tooling/imhex/rbf0.hexpat). The pattern follows
 the grammar in section 3, picks the 8- or 4-byte value width from the prologue, and stops where the root element
 closes. `tests/test_imhex_patterns.py` builds wide and narrow streams with every record type, checks them with
 `rbf0_index.parse_rbf0`, and when ImHex is installed (on `PATH`, in its default Windows folder, or named by

@@ -1,4 +1,4 @@
-"""tools/pk16_diff.py: the packed and 16-bit integer reference against hand-worked values, a short seeded fuzz run,
+"""tooling/pk16_diff.py: the packed and 16-bit integer reference against hand-worked values, a short seeded fuzz run,
 and canaries. Standard library only; no GPU."""
 import contextlib
 import io
@@ -9,7 +9,7 @@ import subprocess
 import sys
 import unittest
 
-TOOL = Path(__file__).resolve().parents[1] / "tools" / "pk16_diff.py"
+TOOL = Path(__file__).resolve().parents[1] / "tooling" / "pk16_diff.py"
 sys.path.insert(0, str(TOOL.parent))
 import pk16_diff as d  # noqa: E402
 

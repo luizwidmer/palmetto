@@ -1,4 +1,4 @@
-"""Tests for tools/ttpf_mips.py: tile modes, mip-tail layout, BC decode, metric, and a
+"""Tests for tooling/ttpf_mips.py: tile modes, mip-tail layout, BC decode, metric, and a
 synthetic RDS5/ETPF pool round trip. No game data is used.
 
     python -I tests/test_ttpf_mips.py
@@ -20,7 +20,7 @@ from contextlib import ExitStack, closing, redirect_stderr, redirect_stdout
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "ttpf_mips.py")
+TOOL = os.path.join(ROOT, "tooling", "ttpf_mips.py")
 spec = importlib.util.spec_from_file_location("ttpf_mips", TOOL)
 ttpf = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ttpf)

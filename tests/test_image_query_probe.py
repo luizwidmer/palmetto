@@ -1,4 +1,4 @@
-"""tools/image_query_probe.py: the resinfo and get_lod rules against the values measured on gfx1036, the descriptor
+"""tooling/image_query_probe.py: the resinfo and get_lod rules against the values measured on gfx1036, the descriptor
 bits, the kernels, and the comparison and its exit codes (through a fake oracle that plays the GPU with the rules).
 The last class runs on the hardware when the oracle tools are present and the GPU is GFX10, and is skipped otherwise.
 Standard library only."""
@@ -13,7 +13,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-TOOLS = Path(__file__).resolve().parents[1] / "tools"
+TOOLS = Path(__file__).resolve().parents[1] / "tooling"
 sys.path.insert(0, str(TOOLS))
 import image_query_probe as pr  # noqa: E402
 from hw_oracle import runner  # noqa: E402

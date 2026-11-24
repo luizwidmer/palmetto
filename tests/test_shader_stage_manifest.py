@@ -1,4 +1,4 @@
-"""Unit and caller integration tests for tools/shader_stage_manifest.py.
+"""Unit and caller integration tests for tooling/shader_stage_manifest.py.
 
     py -3.13 -I tests/test_shader_stage_manifest.py -v
 
@@ -14,13 +14,13 @@ from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
-import make_game  # noqa: E402
+import build_port  # noqa: E402
 from shader_stage_manifest import shader_stems  # noqa: E402
 
-FSSM_UNPACK = os.path.join(ROOT, "tools", "fssm_unpack.py")
-SHADER_DISASM = os.path.join(ROOT, "tools", "shader_disasm.py")
+FSSM_UNPACK = os.path.join(ROOT, "tooling", "fssm_unpack.py")
+SHADER_DISASM = os.path.join(ROOT, "tooling", "shader_disasm.py")
 
 
 class ShaderStemsTests(unittest.TestCase):
@@ -178,17 +178,17 @@ class CallerIntegrationTests(unittest.TestCase):
             json.dump([{"name": "."}], f)
         with open(os.path.join(dxbc, "index.json"), "w", encoding="utf-8") as f:
             json.dump([{"file": "..dxbc"}], f)
-        self.assertIsNone(make_game.unpacked_shader_stems(dxbc))
+        self.assertIsNone(build_port.unpacked_shader_stems(dxbc))
 
         with open(os.path.join(dxbc, "index.json"), "w", encoding="utf-8") as f:
             json.dump([{"file": "...dxbc"}], f)
         with open(os.path.join(dxbc, "fssm_index.json"), "w", encoding="utf-8") as f:
             json.dump([{"name": ".."}], f)
-        self.assertIsNone(make_game.unpacked_shader_stems(dxbc))
+        self.assertIsNone(build_port.unpacked_shader_stems(dxbc))
 
         with open(os.path.join(dxbc, "index.json"), "w", encoding="utf-8") as f:
             f.write("{truncated")
-        self.assertIsNone(make_game.unpacked_shader_stems(dxbc))
+        self.assertIsNone(build_port.unpacked_shader_stems(dxbc))
 
     def test_fssm_unpack_carve_index_rejects_traversal_and_malformed_json(self):
         src = os.path.join(self.dir, "carved")
@@ -217,7 +217,7 @@ class CallerIntegrationTests(unittest.TestCase):
             f.write("[]")
         # Decoders can use different stack limits across Python versions.
         with patch("shader_stage_manifest.json.load", side_effect=RecursionError("decoder depth limit")):
-            self.assertIsNone(make_game.unpacked_shader_stems(self.dir))
+            self.assertIsNone(build_port.unpacked_shader_stems(self.dir))
 
     def test_shader_commands_name_the_index_when_an_integer_exceeds_the_decoder_limit(self):
         src = os.path.join(self.dir, "empty")

@@ -7,7 +7,7 @@ In LLVM AMDGPU disassembly print order, both compute a[1] * a[2] + a[3], with th
 slot in v_madak_f32 and the second multiplicand slot in v_madmk_f32.
 
 Each test builds a hand-written RDNA2 pixel or compute shader listing (stdlib only, zero game data), translates it
-with tools/rdna2spirv.py, executes the SPIR-V in tests/semantic/spirv_mini_interp.py, and checks the output words
+with tooling/rdna2spirv.py, executes the SPIR-V in tests/semantic/spirv_mini_interp.py, and checks the output words
 against an independent plain-Python IEEE-754 binary32 Fraction reference oracle.
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

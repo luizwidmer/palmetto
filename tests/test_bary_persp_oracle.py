@@ -9,7 +9,7 @@ import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "runtime" / "test" / "shaders"))
+sys.path.insert(0, str(ROOT / "port" / "test" / "shaders"))
 import check
 
 CLEAR = (-1.0, -1.0, -1.0, -1.0)
@@ -57,7 +57,7 @@ class BaryPerspReference(unittest.TestCase):
         self.assertIn("ps_persp_bary", check.PIXEL_TESTS)
         self.assertEqual(check.PIXEL_VERTEX["ps_persp_bary"], "vs_persp")
         for name in ("ps_persp_bary", "vs_persp"):
-            self.assertTrue((ROOT / "runtime" / "test" / "shaders" / f"{name}.asm").is_file())
+            self.assertTrue((ROOT / "port" / "test" / "shaders" / f"{name}.asm").is_file())
 
 
 if __name__ == "__main__":

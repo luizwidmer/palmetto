@@ -22,7 +22,7 @@ Palmetto مشروع لإعادة ترجمة إصدار target console من the t
   عند تثبيت Python على Windows، اختر إضافة `python.exe` إلى `PATH`.
 - [حزمة Vulkan SDK](https://vulkan.lunarg.com/) لتوفير `spirv-as` و`spirv-val` و`vulkaninfo`.
 - [LLVM 21 أو أحدث](https://github.com/llvm/llvm-project/releases) مع دعم AMDGPU في `llvm-mc`.
-  نسخة LLVM الرسمية لـWindows لا تتضمن هذا الدعم. من جذر المستودع، شغّل `scripts/build_llvm_mc.ps1` من PowerShell لبناء `llvm-mc.exe`.
+  نسخة LLVM الرسمية لـWindows لا تتضمن هذا الدعم. من جذر المستودع، شغّل `tooling/scripts/build_llvm_mc.ps1` من PowerShell لبناء `llvm-mc.exe`.
   يتطلب السكربت Git وأدوات C++ في Visual Studio ويضبط `LLVM_MC`. افتح نافذة PowerShell جديدة بعد انتهائه.
   إذا كنت تستخدم [conda](https://docs.conda.io/)، فطريقة أسرع هي `conda install -c conda-forge llvm-tools` (نسخة Windows منه تتضمن هدف AMDGPU؛ استخدم [دليل الاختبارات](../../testing.md) الإصدار 23.1.6)، ثم اضبط `LLVM_MC` على المسار الكامل لملف `llvm-mc.exe` الذي يثبّته (يعرض `where.exe llvm-mc` مساره بعد تنشيط البيئة؛ أما `where` المجرد في PowerShell فهو `Where-Object`).
   إذا ثبّتَّ `llvm-21` على Ubuntu داخل WSL، اضبط `LLVM_MC` في نافذة PowerShell التي ستشغّل منها البناء.
@@ -53,11 +53,11 @@ cd Palmetto
 يضيف `--full-check` مقارنة بصمة SHA-256 لكل ملف، وقد يستغرق ذلك وقتًا. في أمر البناء، استبدل المسارات بالمسارات على جهازك.
 
 ```powershell
-python -I make_game.py --find
-python -I make_game.py --pick
-python -I make_game.py --check
-python -I make_game.py --check --full-check
-python -I make_game.py --game "D:\path\to\package" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
+python -I build_port.py --find
+python -I build_port.py --pick
+python -I build_port.py --check
+python -I build_port.py --check --full-check
+python -I build_port.py --game "D:\path\to\package" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
 ```
 
 ترتيب المراحل هو `check` ثم `shaders` ثم `assets` ثم `runtime` ثم `pipelines`.
@@ -67,7 +67,7 @@ python -I make_game.py --game "D:\path\to\package" --out "D:\Games\Palmetto" --w
 
 ### البناء على Linux
 
-يعمل `make_game.py` على Linux، ويجد `llvm-mc` تلقائيًا إذا كان ضمن `PATH`. تأكد من أن نسخته تدعم AMDGPU.
+يعمل `build_port.py` على Linux، ويجد `llvm-mc` تلقائيًا إذا كان ضمن `PATH`. تأكد من أن نسخته تدعم AMDGPU.
 يعمل محمّل اللعبة، وهو برنامج Windows، عبر Wine أو Proton. إذا كان لديك بناء Windows جاهز للمحمّل،
 فمرّر مجلده باستخدام `--runtime-build`. راجع [تعليمات البناء والتشغيل على Linux](../../../README.md#running-the-loader-on-linux).
 

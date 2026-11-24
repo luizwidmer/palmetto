@@ -1,4 +1,4 @@
-"""Unit tests for tools/shader_meta.py and rdna2spirv.shader_meta() (standard library only, no game data).
+"""Unit tests for tooling/shader_meta.py and rdna2spirv.shader_meta() (standard library only, no game data).
 
     python -I tests/test_shader_meta.py
 """
@@ -13,7 +13,7 @@ import unittest
 import warnings
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import rdna2spirv  # noqa: E402
 import shader_meta as M  # noqa: E402
@@ -81,7 +81,7 @@ def translate_synthetic(name, lines, dxbc=None, fssm=None):
 
 
 def vk_pipeline_check_read_index(text):
-    """Mirror of runtime/test/vk_pipeline_check.cpp:read_index to verify index.json compatibility."""
+    """Mirror of port/test/vk_pipeline_check.cpp:read_index to verify index.json compatibility."""
     out = {}
     i, depth, key = 0, 0, ""
     n = len(text)

@@ -1,4 +1,4 @@
-"""Tests for tools/world_lights_paths.py, built from synthetic 0x7a resources (no game data).
+"""Tests for tooling/world_lights_paths.py, built from synthetic 0x7a resources (no game data).
 
     python -I tests/test_world_lights_paths.py
 """
@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # Imported by name (not from a spec) so that --jobs worker processes can import it too, also under spawn.
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import world_lights_paths as T  # noqa: E402
 M = T.M
 PTR = 0x50000000

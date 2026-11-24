@@ -1,4 +1,4 @@
-"""Unit and 64/128-lane workgroup execution tests for tools/wave64_emulate_opt.py (--wave64-emulate).
+"""Unit and 64/128-lane workgroup execution tests for tooling/wave64_emulate_opt.py (--wave64-emulate).
 
 Verifies both exact optimizations introduced for Issue #884:
   1. Backward CFG SCC liveness: dead `scc_from_mask` / `scc_any_half` votes on lane-mask ops are elided
@@ -1148,8 +1148,8 @@ class LocalExecFoldTests(unittest.TestCase):
             for lane in range(lx):
                 self.assertEqual(mem2[lane * 4], 222, f"lx={lx} lane={lane}")
 
-        # 3) Every opcode in tools/rdna2spirv.py that emits `OpLoad %uint %scc` must satisfy reads_scc().
-        src_path = os.path.join(os.path.dirname(os.path.dirname(HERE)), "tools", "rdna2spirv.py")
+        # 3) Every opcode in tooling/rdna2spirv.py that emits `OpLoad %uint %scc` must satisfy reads_scc().
+        src_path = os.path.join(os.path.dirname(os.path.dirname(HERE)), "tooling", "rdna2spirv.py")
         with open(src_path, encoding="utf-8") as f:
             lines = f.readlines()
         scc_ops = set()
@@ -1496,7 +1496,7 @@ class StructuredEmulationTests(unittest.TestCase):
         self.assertGreaterEqual(spv.count("OpFunctionCall %uint %x_pre_vote_fn"), 2)
         self.assertEqual(spv.count("OpFunctionCall %uint %x_pre_both_fn"), 1)
         self.assertEqual(spv.count("OpFunctionCall %uint %x_pre_data_fn"), 1)
-        # Verify binary SPIR-V assembly with tools/spirv_asm.py
+        # Verify binary SPIR-V assembly with tooling/spirv_asm.py
         import spirv_asm
         binary = spirv_asm.assemble(spv, target_env="vulkan1.2")
         self.assertEqual(binary[:4], struct.pack("<I", 0x07230203))

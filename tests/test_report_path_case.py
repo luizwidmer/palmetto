@@ -19,7 +19,7 @@ import unittest
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TOOLS = ROOT / "tools"
+TOOLS = ROOT / "tooling"
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 

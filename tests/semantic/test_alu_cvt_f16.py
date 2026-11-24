@@ -5,7 +5,7 @@ even (RNE). On GFX10, this is a 16-bit operation that preserves the high 16 bits
 v_cvt_f32_f16 converts a binary16 float in S0[15:0] to a binary32 float in D[31:0], completely overwriting the 32-bit
 destination and ignoring S0[31:16].
 
-Each test case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in
+Each test case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in
 tests/semantic/spirv_mini_interp.py, and compares the exported dwords with a plain-Python reference.
 The suite verifies:
   - Normal binary32 <-> binary16 conversions and exact representation.
@@ -33,7 +33,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

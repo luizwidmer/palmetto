@@ -7,7 +7,7 @@
   v_ashrrev_i32  D = sext(S1) >> (S0 & 31)   (note: S0 is shift amount, S1 is value)
   v_not_b32      D = ~S0
 
-Every test translates synthetic hand-written RDNA2 disassembly via tools/rdna2spirv.py and executes the emitted
+Every test translates synthetic hand-written RDNA2 disassembly via tooling/rdna2spirv.py and executes the emitted
 SPIR-V in tests/semantic/spirv_mini_interp.py. Standard library only; no game data.
 """
 import os

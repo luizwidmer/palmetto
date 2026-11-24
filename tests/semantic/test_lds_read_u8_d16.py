@@ -12,7 +12,7 @@ RDNA2 ISA, "Data Share Instructions" (DS opcodes 162-165), the d16 forms of the 
 ADDR = vaddr + offset (bytes). The "other half kept" rule is the one the translator already applies to
 ds_read_u16_d16 / ds_read_u16_d16_hi.
 
-The input is the GPU test runtime/test/shaders/cs_w32_lds_u8_d16.asm (fixture from regen_fixtures.py): it stores
+The input is the GPU test port/test/shaders/cs_w32_lds_u8_d16.asm (fixture from regen_fixtures.py): it stores
 LDS dword 0 = 0x7F80FF01, presets every destination to 0xBEEF1234 and reads single bytes with a non-zero offset
 or base. It is translated for wave32 and run as one invocation (lane 0); the eight words it stores are compared
 with values derived here from the ISA text above (the same values check.py / run_gpu_tests.py expect).

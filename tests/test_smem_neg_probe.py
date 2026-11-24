@@ -1,4 +1,4 @@
-"""tools/smem_neg_probe.py without a GPU: encodings, translator expectations, kernel builder, and oracle lifecycle.
+"""tooling/smem_neg_probe.py without a GPU: encodings, translator expectations, kernel builder, and oracle lifecycle.
 
     python -I tests/test_smem_neg_probe.py
 """
@@ -10,8 +10,8 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
-sys.path.insert(0, os.path.join(ROOT, "tools", "hw_oracle"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
+sys.path.insert(0, os.path.join(ROOT, "tooling", "hw_oracle"))
 
 import runner  # noqa: E402
 import smem_neg_probe as p  # noqa: E402

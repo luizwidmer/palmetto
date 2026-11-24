@@ -1,6 +1,6 @@
 """image_store and coherent image_load (glc) on dim:SQ_RSRC_IMG_CUBE (RDNA2 ISA).
 
-Cube storage images are bound as 6-layer 2D array views (runtime/src/vulkan_bindless.h, STORE_DIMS index 1:
+Cube storage images are bound as 6-layer 2D array views (port/src/vulkan_bindless.h, STORE_DIMS index 1:
 bindings 11/12/13 for float/uint/sint, OpTypeImage ... 2D 0 1 0 2 Unknown, %v3int coordinates (x, y, face)),
 matching non-coherent image_load on dim:SQ_RSRC_IMG_CUBE.
 

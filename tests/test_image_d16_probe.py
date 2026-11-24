@@ -1,4 +1,4 @@
-"""tools/image_d16_probe.py: the rules, the T# words and kernels per dimension, the comparison and its exit codes
+"""tooling/image_d16_probe.py: the rules, the T# words and kernels per dimension, the comparison and its exit codes
 (through a fake oracle that plays the GPU), and the exit-77 contract. The last class runs on the hardware when the
 oracle tools are present and the GPU is GFX10, and is skipped otherwise. Standard library only."""
 import io
@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-TOOLS = Path(__file__).resolve().parents[1] / "tools"
+TOOLS = Path(__file__).resolve().parents[1] / "tooling"
 sys.path.insert(0, str(TOOLS))
 import image_d16_probe as pr  # noqa: E402
 from hw_oracle import asm, runner  # noqa: E402

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "build_runtime.ps1"
+SCRIPT = Path(__file__).resolve().parents[1] / "tooling/scripts" / "build_runtime.ps1"
 
 
 @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell and cmd.exe")

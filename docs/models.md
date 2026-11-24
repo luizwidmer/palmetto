@@ -1,19 +1,19 @@
 # Model recovery
 
-Measured state of `tools/arc9dump models` on the target console 1.0.2.1 package, and the
+Measured state of `tooling/arc9dump models` on the target console 1.0.2.1 package, and the
 upstream `arc9-explorer` fixes that close it. The fixes are merged upstream and the submodule is
 pinned at `e293917`, where a full ten-archive re-count recovers **382,781 models** (**0 decode
 failures**), up from 350,251 at `917e9b9` and 190,792 at `c3708fb`.
 
 Before the fix, the exporter did not reject any vertex or index layout in the tested archives. It
-dropped valid models in three validation paths, all in `third_party/arc9-explorer` at commit
+dropped valid models in three validation paths, all in `vendor/arc9-explorer` at commit
 `48557ea`.
 
 ## Upstream status
 
 [Palmetto issue #29](https://github.com/the original project/issues/29) tracks this work. The decoder
 fix in [arc9-explorer PR #1](https://github.com/breadbbbb/arc9-explorer/pull/1) is merged, and
-`third_party/arc9-explorer` is now pinned at upstream `e293917` (was `917e9b9`, originally
+`vendor/arc9-explorer` is now pinned at upstream `e293917` (was `917e9b9`, originally
 `48557ea`). Commits up to `917e9b9` added the `packs.arc` drawable-dictionary roots (one drawable
 per entry), the TTPF compact/array/cubemap/volume layouts, and the external drawable-skeleton
 reader. Commits `917e9b9..e293917` add upstream `v1.2` model-discovery changes (PRs #8–#12:
@@ -111,7 +111,7 @@ What moved between `917e9b9` and `e293917`:
   `RequiredSystemBytes` extending into subsequent 16-byte-aligned zlib continuation blocks.
 
 Method checks: sharded 4 MiB `FindCandidateOffsets` was verified exact-equal against the
-single-threaded scan on `packs.arc` (`26,389 == 26,389`), and `tools/arc9dump models` end-to-end
+single-threaded scan on `packs.arc` (`26,389 == 26,389`), and `tooling/arc9dump models` end-to-end
 OBJ + manifest export was spot-checked on `story000_restofworld.arc` (`ok=3 fail=0 skip=0`) and
 `data.arc` (`ok=3175 fail=0 skip=0`).
 
@@ -191,7 +191,7 @@ with the real code on all 206,981 `levels.arc` candidates). Measured on the 1.0.
 | `pack/story000/story000.arc` | 1 | 0 | 1 | 0 | 0 |
 | `packs.arc` | 0 | 0 | 0 | 0 | 0 |
 
-Line numbers are in `third_party/arc9-explorer/Core/RageModelDecoder.cs`.
+Line numbers are in `vendor/arc9-explorer/Core/RageModelDecoder.cs`.
 
 - **Texture dictionaries (1,242).** `LooksLikeDrawableDictionary` (`:78`) checks only the
   dictionary header, which texture dictionaries share, so they become model candidates and fail
@@ -278,17 +278,17 @@ segment, probes the extents, and calls `RageModelDecoder.Decode`.
 `--start`/`--length` scan one window of the file instead of the whole archive. Neither `models`
 nor `textures` needs the archive directory: the entry list comes from this run's scan or from the
 index cache, and every resource is read from its own compression blocks
-(`tools/arc9dump/Segments.cs`). A window is therefore a raw slice - a copy of `levels.arc` from an
+(`tooling/arc9dump/Segments.cs`). A window is therefore a raw slice - a copy of `levels.arc` from an
 offset, which has no `9FPR` header - and the scan covers exactly the slice. A sub-range is never
 written to the index cache, which describes a whole file; the manifest records `Scan.Start` and
 `Scan.Length` for it. One measured 1 GiB slice of `levels.arc`: 1,228 models scanned, recovered,
 decoded and exported in about 2 s (497 MB of OBJ and manifest).
 
-To locate a named drawable before decoding, `tools/arc9_names.py` indexes the measured
+To locate a named drawable before decoding, `tooling/arc9_names.py` indexes the measured
 `name.#dr`/`#ft`/`#dd` spellings in bounded zlib prefixes without the encrypted TOC; see
 [resource_names.md](resource_names.md).
 
-For each returned entry, `tools/arc9dump/Program.cs` reads the segments, splits at
+For each returned entry, `tooling/arc9dump/Program.cs` reads the segments, splits at
 `ResourceSystemBytes`, decodes the model, writes one OBJ, and writes the manifest. The manifest is
 `<outdir>/<archive>/models/manifest.json` with `src`, `Count`, and `Items[]`. Each item records the
 offset, OBJ name, model name, mesh/vertex/triangle counts, fragment and bone-binding flags, bounds,
@@ -297,7 +297,7 @@ per-mesh shader indices, embedded textures, and material texture references.
 Three arrays describe the geometries one by one, in the same order as the OBJ's `o` groups:
 `MeshTris` (triangles), `MeshModels` (the position of the model in the drawable's primary-LOD model
 list) and `MeshGeoms` (the position of the geometry in that model). That pair is the geometry index
-a dehydrated BLAS leaf stores ([bvh.md](bvh.md) §4a), which is what `tools/bvh_match.py` matches on;
+a dehydrated BLAS leaf stores ([bvh.md](bvh.md) §4a), which is what `tooling/bvh_match.py` matches on;
 `MeshShaders` maps each geometry to its entry in `Materials`, and therefore to its shader name hash.
 
 The manifest has no failure, skip, or layout fields. `Program.cs` increments `fail` only when a
@@ -492,7 +492,7 @@ maps into it. The measured name table, the following 597-record hierarchy/refere
 the model mapping and the texture-parameter split are in
 [character_skeleton.md](character_skeleton.md). The character inverse bind matrices are at
 skeleton header `+0x30` and agree with the default bone transforms (see that page);
-`tools/anim_glb.py` exports a skinned part with them.
+`tooling/anim_glb.py` exports a skinned part with them.
 
 The character-part inventory (Lucia's named records and decoded parts, the `player_story000_00`
 drawable set, slot-name counts and texture coverage) is in
@@ -500,10 +500,10 @@ drawable set, slot-name counts and texture coverage) is in
 
 ### Character census
 
-`tools/character_census.py` totals a decoded model tree or an `arc9dump models` manifest:
+`tooling/character_census.py` totals a decoded model tree or an `arc9dump models` manifest:
 
 ```powershell
-python -I tools/character_census.py <models-dir-or-manifest> [--json FILE] [--csv FILE]
+python -I tooling/character_census.py <models-dir-or-manifest> [--json FILE] [--csv FILE]
 ```
 
 It reads every nested `model.json` (the decoded-pack layout: `type`, `vertex_count`,
@@ -543,7 +543,7 @@ Names are per model and a building holds glass, decal and opaque shaders alike, 
 in absolute terms; the enrichment against bucket 0 is the signal. For export: bucket 1 needs blending, 2 is
 a projected decal, 3 needs alpha testing, 6 is a water surface.
 
-`common.arc` carries the matching preset-to-effect table (`SPS1`, decoded by `tools/gamedata_sps1.py`,
+`common.arc` carries the matching preset-to-effect table (`SPS1`, decoded by `tooling/gamedata_sps1.py`,
 [`gamedata.md`](gamedata.md#sps1-shader-preset-table)): `858` `.sps` presets map onto `539` `SGD5` Database 0 effects
 with a default `u8` render bucket (`0..7`), `63` effects accept multiple buckets, and the single bucket-`4`
 and bucket-`5` presets both resolve to effect `fc34f08b`.
@@ -566,7 +566,7 @@ file names), so the effect is recoverable from them. Measured on a 1.0.2.1 copy,
 | Materials whose hash is the joaat of a native effect record's name (both SGD5 databases, below) | 3,340 (100%), 18 of the 18 hashes, one record each |
 
 So a material leads to its effect. Through the carved compute names it reaches only 8 of the 18 hashes; the
-effect records' own names reach all 18 (@jeremygold02, `tools/sgd5_effects.py` in #3036). The draw (VS/PS/MS)
+effect records' own names reach all 18 (@jeremygold02, `tooling/sgd5_effects.py` in #3036). The draw (VS/PS/MS)
 programs are not reachable through the carved programs' names, order or suffixes:
 
 - None of the 23,619 graphics programs (2,236 VS, 12,101 PS, 9,282 MS; the 195 GS are left out here) carries an
@@ -626,7 +626,7 @@ are little-endian:
    otherwise `stage_list[selector - 1]`.
 
 The group walk and its counts above were reproduced on a 1.0.2.1 copy (the same `shaders.arc`, SHA-256
-`0bc16345…`). So was @jeremygold02's census of both databases' effects with `tools/sgd5_effects.py
+`0bc16345…`). So was @jeremygold02's census of both databases' effects with `tooling/sgd5_effects.py
 --list-effects` (#3036, `0029eba7`): 932 effect records with 932 distinct name hashes, 913 of them with a
 technique table, 25,037 techniques and 28,798 passes. Since `c0439966` the tool also **walks** the records
 forward from each database's effect count, using only stored lengths: every record's string pool, the next
@@ -651,7 +651,7 @@ Until both are settled, a real model is drawn with a chosen pair ([first_light.m
 records already give that choice a pair that can be checked independently.
 
 So a material leads to its effect. Through the carved compute names it reaches only 8 of the 18 hashes; the
-effect records' own names reach all 18 (@jeremygold02, `tools/sgd5_effects.py` in #3036). The draw (VS/PS/MS)
+effect records' own names reach all 18 (@jeremygold02, `tooling/sgd5_effects.py` in #3036). The draw (VS/PS/MS)
 programs are not reachable through the carved programs' names, order or suffixes:
 
 - None of the 23,619 graphics programs (2,236 VS, 12,101 PS, 9,282 MS; the 195 GS are left out here) carries an
@@ -711,7 +711,7 @@ are little-endian:
    otherwise `stage_list[selector - 1]`.
 
 The group walk and its counts above were reproduced on a 1.0.2.1 copy (the same `shaders.arc`, SHA-256
-`0bc16345…`). So was @jeremygold02's census of both databases' effects with `tools/sgd5_effects.py
+`0bc16345…`). So was @jeremygold02's census of both databases' effects with `tooling/sgd5_effects.py
 --list-effects` (#3036, `0029eba7`): 932 effect records with 932 distinct name hashes, 913 of them with a
 technique table, 25,037 techniques and 28,798 passes. Since `c0439966` the tool also **walks** the records
 forward from each database's effect count, using only stored lengths: every record's string pool, the next
@@ -760,7 +760,7 @@ vehicle models to far-away light recipes. Counts only; no model names.
   so distant vehicle lights cannot be reconstructed from it.
 
 To reproduce the joins, locate the XML roots in the [common carve catalog](gamedata.md) with
-`python -I tools/gamedata_xml.py <common-carve-dir> --json xml.json`. Trim and lowercase the field
+`python -I tooling/gamedata_xml.py <common-carve-dir> --json xml.json`. Trim and lowercase the field
 text, then match each nonempty `CVehicleDistantLightData/recipeLights/Item` by `vehicleModelName`
 and its sorted list of `secondaryRecipes/Item` values against `vehicleName` and the same list on
 `CPaletteIndexedRecipeTintsArray` rows at `.//recipeCombinations/Item`. For the carriage check,
@@ -786,11 +786,11 @@ Which physical parts or liveries a token selects, and where the runtime obtains 
 
 ## Skinned GLB export
 
-`tools/skinned_glb.py` writes a skinned GLB from decoded pack components and the shared ped
+`tooling/skinned_glb.py` writes a skinned GLB from decoded pack components and the shared ped
 skeleton:
 
 ```
-python -I tools/skinned_glb.py out.glb --skeleton <dir> --component <dir> [--component ...]
+python -I tooling/skinned_glb.py out.glb --skeleton <dir> --component <dir> [--component ...]
 ```
 
 It reads the 8-influence `JOINTS_0/1` and `WEIGHTS_0/1` streams from the graphics buffer, resolves
@@ -801,11 +801,11 @@ head (8,983 v) and biker jacket (9,818 v) produce one skin with 596 ped joints (
 jacket's `GM_U01_*` helpers); every weight sums to 255 and the rest-pose reconstruction error is
 6e-8 m. `python -I tests/test_skinned_glb.py` runs 24 synthetic tests and needs no game files.
 
-`tools/glb_inspect.py` reads such a GLB back without a library, so an export can be checked
+`tooling/glb_inspect.py` reads such a GLB back without a library, so an export can be checked
 before it is opened in a viewer:
 
 ```
-python -I tools/glb_inspect.py out.glb [--json report.json]
+python -I tooling/glb_inspect.py out.glb [--json report.json]
 ```
 
 It prints the chunk layout and padding, the `counts` of scenes, nodes, meshes, materials, images,
@@ -824,7 +824,7 @@ geometry from the BIN chunk. Standard library only; no game files.
 4. Investigate the 71 remaining unrecovered fragment candidates in `levels.arc` (and the 1
    texture-dictionary candidate in `textures.arc`) if further upstream recovery is wanted.
 5. Keep issue #29 in sync with the `e293917` counts.
-3. **Done:** `tools/arc9dump models` was re-run over the model-bearing archives at `e293917`;
+3. **Done:** `tooling/arc9dump models` was re-run over the model-bearing archives at `e293917`;
    the six non-`levels.arc` archives total 39,454 rows (+3,203, almost all recovered fragments).
    `levels.arc` has the same 343,327 rows in a full export (50,731 fragments, 2,509,947,536
    triangles).
@@ -832,7 +832,7 @@ geometry from the BIN chunk. Standard library only; no game files.
 
 ### Predict model offsets for placements
 
-Run `python -I tools/world_drawable_lookup.py entities.jsonl archetypes.json names.json`
+Run `python -I tooling/world_drawable_lookup.py entities.jsonl archetypes.json names.json`
 with the placement rows from `world_index.py --entities-out`, the definitions from
 `world_archetypes.py`, and a bounded `arc9_names.py --types dr,ft` report. The command
 prints local scratch JSON. Supply `--manifest path/to/models/manifest.json` for each
@@ -847,7 +847,7 @@ can mention another model. Export a window around the predicted offset with
 model identity and run `world_build.py --placements` with the exported geometry.
 
 Save the lookup JSON and run
-`python -I tools/world_drawable_verify.py lookup.json first/models/manifest.json second/models/manifest.json`
+`python -I tooling/world_drawable_verify.py lookup.json first/models/manifest.json second/models/manifest.json`
 to verify single-offset predictions. Supply completed normal model manifests from the
 same source archive. The verifier reads cached JSON only. It uses the world builder's
 name hashes and counts each identity and its placements once. A matching offset and both

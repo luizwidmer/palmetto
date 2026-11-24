@@ -7,7 +7,7 @@ forms move 2/3/4 consecutive dwords, low first (the dword at ADDR + 4 k goes to 
 LDS is `LDS_SIZE` bytes and the address wraps at that size. The 8/16-bit forms address a byte of the dword at ADDR / 4:
 byte position (ADDR & 3), halfword (ADDR & 2), zero or sign extended on a read; a write replaces only those bits.
 
-Each case is a compute shader translated by tools/rdna2spirv.py (support.translate_lines) and run for 32 lanes in
+Each case is a compute shader translated by tooling/rdna2spirv.py (support.translate_lines) and run for 32 lanes in
 tests/semantic/spirv_mini_interp.py; every lane works in its own LDS words and stores what it read to an output
 buffer. The expected words are written out by hand from the rules above, and a plain-Python LDS model gives the same
 words for seeded random data. Until this file, the LDS tests of this name ran a self-built interpreter that never
@@ -19,7 +19,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import lds_run as L  # noqa: E402  (also puts tools/ on sys.path)
+import lds_run as L  # noqa: E402  (also puts tooling/ on sys.path)
 import rdna2spirv  # noqa: E402
 import support  # noqa: E402
 

@@ -1,4 +1,4 @@
-"""CPU-only unit tests for tools/buffer_bounds_probe.py (SHADER-341)."""
+"""CPU-only unit tests for tooling/buffer_bounds_probe.py (SHADER-341)."""
 import os
 import subprocess
 import sys
@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROBE = os.path.join(REPO, "tools", "buffer_bounds_probe.py")
+PROBE = os.path.join(REPO, "tooling", "buffer_bounds_probe.py")
 
 
 class BufferBoundsProbeTests(unittest.TestCase):

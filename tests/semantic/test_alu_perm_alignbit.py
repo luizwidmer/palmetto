@@ -1,6 +1,6 @@
 """Semantic interpreter tests for RDNA2 byte permute and funnel shift (v_perm_b32, v_alignbit_b32).
 
-Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py
+Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py
 and compares the mrt0 word with a plain-Python reference. The interpreter rejects shifts of 32 or more (undefined in
 SPIR-V), so these tests also check that the translation never emits one, including on the discarded side of an
 OpSelect.
@@ -22,7 +22,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

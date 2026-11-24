@@ -13,8 +13,8 @@ Interpolating the decoded halves is the same P0 + i(P1 - P0) + j(P2 - P0). Here:
   that would land on its own params; the metadata lists both sides;
 * a PS whose decoded-half location is also an attribute it reads is rejected rather than mislinked;
 * without the flag nothing changes.
-The GPU check is runtime/test/shaders/ps_interp_f16_high drawn with vs_f16_pack, which run_gpu_tests.py translates
-with the flag where tools/vk_subgroup_info.py reports per_vertex_inputs false (MoltenVK).
+The GPU check is port/test/shaders/ps_interp_f16_high drawn with vs_f16_pack, which run_gpu_tests.py translates
+with the flag where tooling/vk_subgroup_info.py reports per_vertex_inputs false (MoltenVK).
 """
 import re
 import struct

@@ -1,11 +1,11 @@
-"""tools/lds_fuzz.py without a GPU: the reference model's instruction semantics and the generator's guarantees
+"""tooling/lds_fuzz.py without a GPU: the reference model's instruction semantics and the generator's guarantees
 (every access in bounds, no two lanes racing on the same bytes)."""
 from pathlib import Path
 import struct
 import sys
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tooling"))
 import lds_fuzz as f
 
 

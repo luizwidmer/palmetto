@@ -1,4 +1,4 @@
-"""Regression tests for tools/spirv_metal_set0.py file hygiene and aliased set-0 bindings.
+"""Regression tests for tooling/spirv_metal_set0.py file hygiene and aliased set-0 bindings.
 
 Standard library only; uses synthetic SPIR-V disassembly, no game data and no external SPIRV-Tools binaries.
 
@@ -16,7 +16,7 @@ import unittest
 import warnings
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 TOOL_PATH = os.path.join(TOOLS_DIR, "spirv_metal_set0.py")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
@@ -155,7 +155,7 @@ class TestSingleAndAliasedBindings(unittest.TestCase):
         self.assertEqual(bindings, {"%images": 0, "%samplers": 4096, "%desc_map": 5120})
 
     def test_distinct_element_type_aliases_at_same_binding(self):
-        # Mirrors tools/rdna2spirv.py emitting %images + typed %itx* aliases at binding 0
+        # Mirrors tooling/rdna2spirv.py emitting %images + typed %itx* aliases at binding 0
         # and %images_arr + %itx1_1 at binding 3, plus a 3D alias at binding 0.
         module = """\
                OpDecorate %images DescriptorSet 0

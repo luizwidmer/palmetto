@@ -1,4 +1,4 @@
-"""tools/bink_play.py: name matching and the name-table cache. Synthetic names only, no game files."""
+"""tooling/bink_play.py: name matching and the name-table cache. Synthetic names only, no game files."""
 import sys
 import tempfile
 import threading
@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tooling"))
 
 import bink_play  # noqa: E402
 

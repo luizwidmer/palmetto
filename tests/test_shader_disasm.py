@@ -2,7 +2,7 @@
 
 Issue: the official Windows LLVM build ships no llvm-mc and has no AMDGPU target. Before this check, a
 "llvm-mc" that existed but could not disassemble produced empty output, counted 0 invalid words, and every
-shader was reported "clean" (and make_game.py translated nothing). The probe now catches it once, up front.
+shader was reported "clean" (and build_port.py translated nothing). The probe now catches it once, up front.
 
     python -I tests/test_shader_disasm.py
 """
@@ -14,7 +14,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "shader_disasm.py")
+TOOL = os.path.join(ROOT, "tooling", "shader_disasm.py")
 
 # Two instructions: s_nop 0 then s_endpgm. The probe sends only the s_endpgm, so a fake tool can tell the
 # one-instruction probe from the real shader by the input it receives.
@@ -222,7 +222,7 @@ class DisasmInputTest(unittest.TestCase):
         self.assertIn("'reused': 3", result.stdout)
 
     def test_code_range_scans_a_blob_shorter_than_the_header(self):
-        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        sys.path.insert(0, os.path.join(ROOT, "tooling"))
         try:
             import shader_disasm
         finally:
@@ -233,7 +233,7 @@ class DisasmInputTest(unittest.TestCase):
 
     def test_code_range_stops_before_a_constant_data_block(self):
         """s_endpgm, count N, N dwords, s_endpgm, s_code_end padding: the block is data, not code."""
-        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        sys.path.insert(0, os.path.join(ROOT, "tooling"))
         try:
             import shader_disasm
         finally:

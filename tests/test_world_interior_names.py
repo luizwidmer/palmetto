@@ -1,4 +1,4 @@
-"""Tests for tools/world_interior_names.py, built from synthetic 0x7a resources (no game data).
+"""Tests for tooling/world_interior_names.py, built from synthetic 0x7a resources (no game data).
 
     python -I tests/test_world_interior_names.py
 """
@@ -17,7 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # Imported by its real name: --jobs sends scan_window to worker processes, which import it by module name.
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import world_interior_names as T  # noqa: E402
 WA, WI = T.WA, T.WI
 J = WA.joaat_cs
@@ -377,7 +377,7 @@ class CliTest(unittest.TestCase):
         self.assertFalse(os.path.exists(out))
 
     def test_pool_size_goes_through_process_workers(self):
-        # Windows refuses a ProcessPoolExecutor above 61 workers; tools/pool_workers.py caps it there.
+        # Windows refuses a ProcessPoolExecutor above 61 workers; tooling/pool_workers.py caps it there.
         path = os.path.join(self.tmp.name, "levels.arc")
         with open(path, "wb") as f:
             f.write(arc([interiors(), placements()]))

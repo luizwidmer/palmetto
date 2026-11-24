@@ -1,4 +1,4 @@
-"""The text test the index tools share: tools/story_index.py, tools/anim_index.py and tools/restofworld_index.py.
+"""The text test the index tools share: tooling/story_index.py, tooling/anim_index.py and tooling/restofworld_index.py.
 
     python -I tests/test_printable_bytes.py
 
@@ -11,7 +11,7 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import anim_index  # noqa: E402
 import restofworld_index  # noqa: E402

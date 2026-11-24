@@ -1,4 +1,4 @@
-"""CPU-only tests for tools/buffer_format_fuzz.py's command line: an explicit --formats is checked before the GPU.
+"""CPU-only tests for tooling/buffer_format_fuzz.py's command line: an explicit --formats is checked before the GPU.
 
     python -I tests/test_buffer_format_fuzz_cli.py
 
@@ -12,7 +12,7 @@ import sys
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(REPO, "tools", "buffer_format_fuzz.py")
+TOOL = os.path.join(REPO, "tooling", "buffer_format_fuzz.py")
 
 
 def run(*args):

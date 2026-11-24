@@ -22,7 +22,7 @@ import unittest
 
 import support
 
-TOOLS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "tools"))
+TOOLS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "tooling"))
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 

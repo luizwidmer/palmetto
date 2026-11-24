@@ -1,11 +1,11 @@
-"""Synthetic block layout, scoring and preview tests for tools/tile_probe.py."""
+"""Synthetic block layout, scoring and preview tests for tooling/tile_probe.py."""
 import sys
 from pathlib import Path
 
 import pytest
 
 np = pytest.importorskip("numpy")
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tooling"))
 import tile_probe
 
 

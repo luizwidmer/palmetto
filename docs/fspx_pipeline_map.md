@@ -43,6 +43,6 @@ that library's first 31 compute programs, and the 11 remaining calls match its c
 and layout-blob size
 (not by bytes), so none of them is a FidelityFX program of this set, and none of the 39 has a translation in the
 corpus. What that implies for the boot: translating more of the 29 programs cannot reduce the 42 refusals or move the
-stop after them; the build has to unpack the pipeline library's compute programs (not a `make_game.py` step today),
+stop after them; the build has to unpack the pipeline library's compute programs (not a `build_port.py` step today),
 translate and index them by kind-6 and kind-0 keys, and the translator's first gaps after that are the four
 16x16-thread wave64 depth-copy/downsample programs it refuses today as `CS thread-group-size SGPR`.

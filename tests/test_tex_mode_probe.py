@@ -1,4 +1,4 @@
-"""Unit tests for tools/tex_mode_probe.py covering texture tiling mode detection,
+"""Unit tests for tooling/tex_mode_probe.py covering texture tiling mode detection,
 descriptor format classification, mipmap chain alignment, and candidate scoring.
 
     python -I tests/test_tex_mode_probe.py
@@ -16,7 +16,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 

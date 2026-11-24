@@ -13,14 +13,14 @@ honest lifecycle emulation, gives the list proxy the state it lacked, and covers
 
 ## 1. The state the proxy lacked
 
-`runtime/shims/d3d12_xs_device.cpp`'s `ListProxy` wrapped the real PC command list (device slot 73
+`port/shims/d3d12_xs_device.cpp`'s `ListProxy` wrapped the real PC command list (device slot 73
 CreateCommandListX -> PC CreateCommandList) and forwarded the console slots the title reaches. It had no lifecycle
 state, so every forwarded call went straight to the real PC list:
 
 * a PC command list is created **recording**; its first successful `Close` ends the recording;
 * after that the PC layer records nothing more (the list's `CommandList` is closed: the appending calls return early
   or fail) and `Close` returns `E_FAIL` because `list_.close()` finds the list already closed
-  (`runtime/shims/d3d12_com.cpp`, `GraphicsCommandList::Close`);
+  (`port/shims/d3d12_com.cpp`, `GraphicsCommandList::Close`);
 * the title, measured, creates and closes its lists during setup and then records a frame into them every frame
   without ever calling a list `Reset` (render_loop.md sections 1 and 4). That is legal on the console, whose list
   recording memory belongs to the command allocator; on the PC runtime it is not.
@@ -54,7 +54,7 @@ There is no environment switch: this is the correct emulation of the console's a
 a measurement aid. `PALMETTO_XS_LIST_MUTE`/`PALMETTO_XS_LIST_DUMP`/`PALMETTO_XS_LIST_ID` remain the render-loop
 investigation's measurement switches and are unchanged.
 
-## 3. Mock coverage (`runtime/test/xs_proxy_mock_test.cpp`)
+## 3. Mock coverage (`port/test/xs_proxy_mock_test.cpp`)
 
 The mock's simulated real list now has the lifecycle the proxy depends on:
 
@@ -140,7 +140,7 @@ So two console recording calls still make the PC list invalid, and both are on t
 2. **list slot 52 -> PC `ID3D12GraphicsCommandList::ClearRenderTargetView`** (new): the clear is the call whose
    muting changes the outcome, and the trace shows it forwarded between the reopen and the failing `Close`.
    `CommandList::clear_render_target` returns false when the view it captures has no resource or no layers
-   (`runtime/src/command_list.h:916`), which sets the list's invalid flag. The slot-52 dump this measurement asked for
+   (`port/src/command_list.h:916`), which sets the list's invalid flag. The slot-52 dump this measurement asked for
    was run: **the handle is right and the view is null** - the handle is the destination this proxy's own
    `CreateRenderTargetView` wrote, and it was created with `pResource = 0`, so the console's clear is the no-op it is,
    not a handle mismatch. Both calls are now converted (the null-view clear is refused as the no-op; a resource-less
@@ -153,9 +153,9 @@ only holds when 52 is muted too. The `E_INVALIDARG` at the first real close has 
 
 ## 6. Files and gates
 
-* `runtime/shims/d3d12_xs_device.cpp`: `ListProxy` holds the creating allocator and the real recording state;
+* `port/shims/d3d12_xs_device.cpp`: `ListProxy` holds the creating allocator and the real recording state;
   `note_list_reopen` bounds the logging; `list_slot` reopens a closed list before a forwarded recording call
   (PC slot >= 11) and refuses a call it cannot reopen. The old `PALMETTO_XS_LIST_REOPEN` switch is gone.
-* `runtime/test/xs_proxy_mock_test.cpp`: the mock real list's Close/Reset state and event order, and the lifecycle
+* `port/test/xs_proxy_mock_test.cpp`: the mock real list's Close/Reset state and event order, and the lifecycle
   assertions above.
 * This page.

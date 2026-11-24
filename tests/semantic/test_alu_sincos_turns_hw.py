@@ -1,7 +1,7 @@
 """v_sin/v_cos (f32, f16) at whole, half and quarter turns against words an RDNA2 GPU returned (SHADER-134).
 
 Every expected word was read back from an AMD Radeon RDNA2 iGPU (gfx1036, Ryzen 9 9950X3D, Windows AMD driver
-32.0.21045.16010) through tools/hw_oracle with AMD clang 23 (rocm-sdk-core 10.0.0), one instruction per word, v4
+32.0.21045.16010) through tooling/hw_oracle with AMD clang 23 (rocm-sdk-core 10.0.0), one instruction per word, v4
 starting at 0xDEADBEEF, in the MODE inferred for the game (IEEE 0, f32 denormals flushed, f16 denormals kept). The rows
 are the inputs that are a multiple of a quarter turn (both signs, from 0.25 to 2^24 turns, around +-256) plus
 infinities and NaNs: there the hardware's word is exact (+0 for sin at an odd half turn and cos at an odd quarter
@@ -18,7 +18,7 @@ import warnings
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling"))
 sys.path.insert(0, HERE)
 
 import rdna2spirv  # noqa: E402

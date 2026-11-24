@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/psin_index.py (no game data)."""
+"""Synthetic tests for tooling/psin_index.py (no game data)."""
 import json
 import os
 import struct
@@ -9,8 +9,8 @@ import unittest
 import unittest.mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "psin_index.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "psin_index.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import psin_index as P  # noqa: E402
 

@@ -5,10 +5,10 @@ element table was decoded (docs/input_layout.md), one 150 s boot builds **10,241
 graphics pipelines with **0 refusals and 0 PC failures**, and the frame records **42,721 `SetPipelineState` / 42,722
 `DrawInstanced`** (docs/input_layout.md section 6). This is the conversion layer for the console's deserialized graphics
 pipeline record
-(device slot 57): `runtime/src/graphics_record.{h,cpp}` decodes the record (docs/graphics_record.md), and this layer turns
+(device slot 57): `port/src/graphics_record.{h,cpp}` decodes the record (docs/graphics_record.md), and this layer turns
 it into the two things the PC side needs - a library entry for each native stage (`PipelineState::create_graphics`'s
 native branch) and a `D3D12_GRAPHICS_PIPELINE_STATE_DESC` for the record (`rt::graphics_pso::build`). Nothing here calls
-a device: `runtime/test/graphics_pso_test.cpp` builds every byte and a synthetic shader index, 159 checks, no GPU and no
+a device: `port/test/graphics_pso_test.cpp` builds every byte and a synthetic shader index, 159 checks, no GPU and no
 game files. The proxy wiring is described in section 5 and measured in docs/slot57_wiring.md.
 
 The record's remaining gap from docs/graphics_record.md is handled as the project requires - an explicit input, never a
@@ -25,10 +25,10 @@ silent guess:
 
 | file | what it is |
 |---|---|
-| `runtime/src/graphics_pso.h` / `.cpp` | `resolve_native_stage()`, `pick_entry()`, `documented_default_state()`, `GraphicsPsoInputs`, `build()`; the input contract and the refusal surface are in the header comments, the tables below. |
-| `runtime/shims/d3d12_vulkan_device.cpp` | `create_graphics`'s stage loop: the native branch (section 2). The FSSM/DXBC path and the diagnostic stand-in path are unchanged; `pick_entry` moved to the header so compute and graphics share it. |
-| `runtime/test/graphics_pso_test.cpp` | 159 checks over synthetic records, synthetic native programs and a synthetic `fspx/index.json`; the element-table cases are in docs/input_layout.md section 5. |
-| `runtime/CMakeLists.txt` | the `graphics_pso_test` target (`ctest -R graphics_pso`), and `src/graphics_record.cpp` + `src/graphics_pso.cpp` in `palmetto_d3d12_com` because `d3d12_vulkan_device.cpp` now calls into the layer. |
+| `port/src/graphics_pso.h` / `.cpp` | `resolve_native_stage()`, `pick_entry()`, `documented_default_state()`, `GraphicsPsoInputs`, `build()`; the input contract and the refusal surface are in the header comments, the tables below. |
+| `port/shims/d3d12_vulkan_device.cpp` | `create_graphics`'s stage loop: the native branch (section 2). The FSSM/DXBC path and the diagnostic stand-in path are unchanged; `pick_entry` moved to the header so compute and graphics share it. |
+| `port/test/graphics_pso_test.cpp` | 159 checks over synthetic records, synthetic native programs and a synthetic `fspx/index.json`; the element-table cases are in docs/input_layout.md section 5. |
+| `port/CMakeLists.txt` | the `graphics_pso_test` target (`ctest -R graphics_pso`), and `src/graphics_record.cpp` + `src/graphics_pso.cpp` in `palmetto_d3d12_com` because `d3d12_vulkan_device.cpp` now calls into the layer. |
 
 ## 2. The native branch in `create_graphics`
 
@@ -168,7 +168,7 @@ turned into a default.
 
 ## 5. The proxy wiring
 
-`runtime/shims/d3d12_xs_device.cpp`'s slot-57 handler now does this through `convert_slot57_record` (the measured
+`port/shims/d3d12_xs_device.cpp`'s slot-57 handler now does this through `convert_slot57_record` (the measured
 wiring is docs/slot57_wiring.md section 1); the sketch below is the shape it fills:
 
 ```cpp
@@ -244,12 +244,12 @@ draw's resource binding (docs/replay_resolution.md).
 ## 7. Tests and gates
 
 ```
-cmake --build runtime/build --target graphics_pso_test
-runtime/build/graphics_pso_test.exe      # prints the input/refusal tables, exits 0
-ctest --test-dir runtime/build -R graphics_pso
+cmake --build port/build --target graphics_pso_test
+port/build/graphics_pso_test.exe      # prints the input/refusal tables, exits 0
+ctest --test-dir port/build -R graphics_pso
 ```
 
-`runtime/test/graphics_pso_test.cpp` builds, byte by byte:
+`port/test/graphics_pso_test.cpp` builds, byte by byte:
 
 * the record (the same measured shape `graphics_record_test.cpp` uses), the six measured input-layout shapes (80 B/count
   0 through 224 B/count 4) and an unmapped format word;

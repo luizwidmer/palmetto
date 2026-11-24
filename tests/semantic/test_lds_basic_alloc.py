@@ -15,7 +15,7 @@ translator puts the Workgroup array `%lds_arr`:
 test_cs_shared_memory_limit.py runs the bounds-checked reads, writes and atomics; this file pins the array size and
 which of the two forms is chosen.
 
-Each case translates a hand-written listing with tools/rdna2spirv.py (support.translate_lines) and reads the array
+Each case translates a hand-written listing with tooling/rdna2spirv.py (support.translate_lines) and reads the array
 length from the SPIR-V assembly; the wrap cases also run the shader in tests/semantic/spirv_mini_interp.py. The sizes
 are worked out by hand from the rules above. Until this file, the LDS tests of this name ran a self-built
 interpreter that copied the older rule (offsets grow the array) instead of calling the translator.
@@ -26,7 +26,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import lds_run as L  # noqa: E402  (also puts tools/ on sys.path)
+import lds_run as L  # noqa: E402  (also puts tooling/ on sys.path)
 import rdna2spirv  # noqa: E402
 
 LDS_SIZE_SHIFT = 15

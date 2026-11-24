@@ -75,9 +75,9 @@ jobs:
           cache: true
           cache-dependency-path: "**/packages.lock.json"
       - name: Python tools compile
-        run: python -m compileall -q make_game.py tools tests
-      - name: make_game.py help
-        run: python -I make_game.py --help
+        run: python -m compileall -q build_port.py tools tests
+      - name: build_port.py help
+        run: python -I build_port.py --help
       - name: Tests (standard library only, no game data)
         shell: bash
         run: |
@@ -95,24 +95,24 @@ jobs:
             exit 1
           fi
       - name: Build arc9dump
-        run: dotnet build tools/arc9dump/arc9dump.csproj -c Release
+        run: dotnet build tooling/arc9dump/arc9dump.csproj -c Release
       - name: Test TTPF export retry
         env:
-          ARC9DUMP_DLL: tools/arc9dump/bin/Release/net8.0/arc9dump.dll
+          ARC9DUMP_DLL: tooling/arc9dump/bin/Release/net8.0/arc9dump.dll
         run: python -I tests/test_ttpf_export_resume.py
       # The standard-library loop above runs this file before arc9dump is built, where it skips for lack of the DLL.
       - name: Test arc9dump exit codes
         env:
-          ARC9DUMP_DLL: tools/arc9dump/bin/Release/net8.0/arc9dump.dll
+          ARC9DUMP_DLL: tooling/arc9dump/bin/Release/net8.0/arc9dump.dll
         run: python -I tests/test_arc9dump_exit_codes.py
       - name: Build the calibrated BCPack reader and test the texture pipeline
         env:
-          ARC9DUMP_DLL: tools/arc9dump/bin/Release/net8.0/arc9dump.dll
+          ARC9DUMP_DLL: tooling/arc9dump/bin/Release/net8.0/arc9dump.dll
         shell: bash
         run: |
           python -m pip install -c tests/requirements.txt numpy
-          CARGO_HOME="$(mktemp -d)" cargo build --release --locked --offline --manifest-path tools/bcpack_calibration/Cargo.toml
-          python -I -c "import sys; sys.path.insert(0, 'tools'); import calibrated_texture; calibrated_texture.native()"
+          CARGO_HOME="$(mktemp -d)" cargo build --release --locked --offline --manifest-path tooling/bcpack_calibration/Cargo.toml
+          python -I -c "import sys; sys.path.insert(0, 'tooling'); import calibrated_texture; calibrated_texture.native()"
           python -I tests/test_calibrated_texture.py
           python -I tests/test_ttpf_assets.py
       - name: Test arc9dump diagnostics
@@ -135,7 +135,7 @@ jobs:
           # The signing key is checked against apt.llvm.org's published fingerprint before apt trusts it.
           key=$(mktemp)
           curl -fsSL -o "$key" https://apt.llvm.org/llvm-snapshot.gpg.key
-          python3 -I scripts/check_apt_key.py "$key" 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+          python3 -I tooling/scripts/check_apt_key.py "$key" 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
           sudo gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg "$key"
           echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list > /dev/null
           sudo apt-get update
@@ -191,7 +191,7 @@ jobs:
       - name: Translator semantic tests
         env:
           PALMETTO_REQUIRE_SPIRV_TOOLS: ${{ runner.os == 'Linux' && '1' || '0' }}
-        run: python -I scripts/run_semantic_tests.py tests/semantic -v
+        run: python -I tooling/scripts/run_semantic_tests.py tests/semantic -v
 
   # The Python suites on an Apple Silicon Mac: the standard-library loop of the check job, the translator semantic
   # tests and the pytest files of the translator-tests job, with Homebrew's llvm-mc and SPIRV-Tools. macos-26, not
@@ -214,9 +214,9 @@ jobs:
           cache: "pip"
           cache-dependency-path: tests/requirements.txt
       - name: Python tools compile
-        run: python -m compileall -q make_game.py tools tests
-      - name: make_game.py help
-        run: python -I make_game.py --help
+        run: python -m compileall -q build_port.py tools tests
+      - name: build_port.py help
+        run: python -I build_port.py --help
       # Before anything is installed, as in the check job, so these files stay standard library only. The semantic
       # suite runs alongside the loop, on another of the runner's three cores; together they take about 6 minutes.
       - name: Translator semantic tests and tests (standard library only, no game data)

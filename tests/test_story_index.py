@@ -1,4 +1,4 @@
-"""Synthetic-header tests for tools/story_index.py.
+"""Synthetic-header tests for tooling/story_index.py.
 
     python -I tests/test_story_index.py
 
@@ -18,8 +18,8 @@ import zlib
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "story_index.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "story_index.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import story_index  # noqa: E402
 

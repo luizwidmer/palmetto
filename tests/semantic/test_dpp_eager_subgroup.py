@@ -23,7 +23,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-import support  # noqa: E402  (puts tools/ on the path)
+import support  # noqa: E402  (puts tooling/ on the path)
 import spirv_wave_interp as wi  # noqa: E402
 
 # Group ops whose result depends only on their operands' values, not on which invocations run them.
@@ -192,7 +192,7 @@ class DppSubgroupOpsRunInEveryLane(unittest.TestCase):
                     self.assertEqual(got, dpp_reference(form, exec_off))
 
     def test_reference_matches_cs_dpp_ops(self):
-        # runtime/test/shaders/cs_dpp_ops.asm: out[0..7] = 100 10 11 12 13 14 15 16.
+        # port/test/shaders/cs_dpp_ops.asm: out[0..7] = 100 10 11 12 13 14 15 16.
         self.assertEqual(dpp_reference("row_shr:1 row_mask:0xf bank_mask:0xf")[:8],
                          [100, 10, 11, 12, 13, 14, 15, 16])
 

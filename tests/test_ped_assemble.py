@@ -1,4 +1,4 @@
-"""Pure synthetic unit tests for tools/ped_assemble.py (zero game files).
+"""Pure synthetic unit tests for tooling/ped_assemble.py (zero game files).
 
     python -I tests/test_ped_assemble.py
 
@@ -11,7 +11,7 @@ patches, plus nearby non-coplanar geometry) to verify:
 - preservation of nearby non-coplanar triangles,
 - standing-space +1.0 m SKEL_ROOT alignment and the engine Z-up -> glTF Y-up math,
 - valid binary glTF 2.0 (.glb) export (static textured and 8-influence skinned,
-  cross-checked with tools/glb_writer.py and tools/glb_skinning.py),
+  cross-checked with tooling/glb_writer.py and tooling/glb_skinning.py),
 - CLI execution (`--help`, `assemble`, `cull-overlap`, `inspect-seams`).
 """
 from __future__ import annotations
@@ -27,7 +27,7 @@ import unittest
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 

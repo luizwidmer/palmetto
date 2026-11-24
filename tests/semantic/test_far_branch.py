@@ -2,7 +2,7 @@
 
 RDNA2 ISA: s_getpc_b64 returns the address of the next instruction, s_add_u32 / s_addc_u32 add a 64-bit K (high word 0
 forward, 0xffffffff backward) with SCC as the carry, s_setpc_b64 jumps there. The shader is
-runtime/test/shaders/ps_far_branch.asm (also run on the GPU by check.py and run_gpu_tests.py); its header derives the
+port/test/shaders/ps_far_branch.asm (also run on the GPU by check.py and run_gpu_tests.py); its header derives the
 four words by hand. The reference here runs the same loops in plain Python on the byte distances of the header.
 """
 import os
@@ -14,7 +14,7 @@ import support
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 FIXTURE = os.path.join(HERE, "fixtures", "disasm", "ps_far_branch.s")
-ASM = os.path.join(ROOT, "runtime", "test", "shaders", "ps_far_branch.asm")
+ASM = os.path.join(ROOT, "port", "test", "shaders", "ps_far_branch.asm")
 
 EXPECTED = [0x00000007, 0x00000013, 0x00000051, 0x0000000B]       # derivation in ps_far_branch.asm
 

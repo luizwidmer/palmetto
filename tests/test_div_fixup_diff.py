@@ -1,4 +1,4 @@
-"""tools/div_fixup_diff.py: the reference against the words measured on RDNA2 hardware (gfx1036), the generator's
+"""tooling/div_fixup_diff.py: the reference against the words measured on RDNA2 hardware (gfx1036), the generator's
 encoding rules, the sweep and edge grid, and short seeded differential runs. Standard library only; no GPU, no game
 files.
 
@@ -16,7 +16,7 @@ from collections import Counter
 from contextlib import redirect_stdout
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import div_fixup_diff as d  # noqa: E402  (puts tests/semantic on sys.path)
 import test_alu_div_fixup_f32 as mf  # noqa: E402  (the gfx1036-measured v_div_fixup_f32 words)
 

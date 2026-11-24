@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 class ModuleFeatureGateTest(unittest.TestCase):
     def test_dynamic_image_indexing_is_gated_before_module_creation(self):
         # Check the worker's ordering without sending a module to an unsupported Vulkan device.
-        source = (ROOT / "runtime" / "test" / "vk_pipeline_check.cpp").read_text(encoding="utf-8")
+        source = (ROOT / "port" / "test" / "vk_pipeline_check.cpp").read_text(encoding="utf-8")
         before_worker, _, worker = source.partition("auto worker = [&] {")
         self.assertIn("auto check_missing_module_feature", before_worker)
         module_check = before_worker.split("auto check_missing_module_feature", 1)[1].split("};", 1)[0]
@@ -36,7 +36,7 @@ def find_binary():
     env = os.environ.get("PALMETTO_VK_PIPELINE_CHECK")
     if env:
         return Path(env) if Path(env).is_file() else None
-    build = ROOT / "runtime" / "build"
+    build = ROOT / "port" / "build"
     for p in (build / "linux" / "vk_pipeline_check", build / "vk_pipeline_check", build / "vk_pipeline_check.exe",
               build / "Release" / "vk_pipeline_check.exe"):
         if p.is_file():
@@ -49,7 +49,7 @@ class IndexTest(unittest.TestCase):
     def setUpClass(cls):
         cls.exe = find_binary()
         if cls.exe is None:
-            raise unittest.SkipTest("vk_pipeline_check isn't built (cmake -S runtime -B runtime/build/linux)")
+            raise unittest.SkipTest("vk_pipeline_check isn't built (cmake -S runtime -B port/build/linux)")
 
     def run_tool(self, index_text):
         with tempfile.TemporaryDirectory() as d:

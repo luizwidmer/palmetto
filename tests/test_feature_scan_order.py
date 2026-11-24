@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")
+TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tooling")
 sys.path.insert(0, TOOLS)
 import feature_scan as F  # noqa: E402
 

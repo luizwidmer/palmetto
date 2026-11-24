@@ -1,4 +1,4 @@
-"""tools/anim_skel_match.py: matching bone-table names to skeleton joints by joaat32 of the lowercased name, on
+"""tooling/anim_skel_match.py: matching bone-table names to skeleton joints by joaat32 of the lowercased name, on
 skeletons and names built here (no game files), and the exit code for a missing archive. Standard library only."""
 import io
 import os
@@ -9,7 +9,7 @@ import zlib
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-TOOLS = Path(__file__).resolve().parents[1] / "tools"
+TOOLS = Path(__file__).resolve().parents[1] / "tooling"
 sys.path.insert(0, str(TOOLS))
 import anim_index  # noqa: E402
 import anim_skel_match as sm  # noqa: E402

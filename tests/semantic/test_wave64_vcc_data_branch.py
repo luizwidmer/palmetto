@@ -9,7 +9,7 @@ Both SGPR-source and constant writes are covered: @ray3242's original reproducer
 earlier and is then overwritten with data is a separate
 dataflow limitation of #2544 and is not covered here.
 
-Each case is a synthetic 64-thread compute shader translated by tools/rdna2spirv.py and
+Each case is a synthetic 64-thread compute shader translated by tooling/rdna2spirv.py and
 run with tests/semantic/spirv_mini_interp.run_workgroup; output word 0 is 7 when the
 branch was taken and 9 when it fell through. No llvm-mc, GPU or game data is used.
 """
@@ -23,7 +23,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 for p in (HERE, TOOLS_DIR):

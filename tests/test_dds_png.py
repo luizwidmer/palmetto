@@ -1,4 +1,4 @@
-"""Tests for tools/dds_png.py, built from synthetic DDS buffers (no game data).
+"""Tests for tooling/dds_png.py, built from synthetic DDS buffers (no game data).
 
     python -I tests/test_dds_png.py
 """
@@ -16,7 +16,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_module():
-    path = os.path.join(ROOT, "tools", "dds_png.py")
+    path = os.path.join(ROOT, "tooling", "dds_png.py")
     spec = importlib.util.spec_from_file_location("dds_png_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

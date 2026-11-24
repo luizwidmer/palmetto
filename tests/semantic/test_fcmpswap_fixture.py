@@ -2,10 +2,10 @@
 
 Standard library only; no GPU, no LLVM, no game files.
 
-runtime/test/shaders/cs_w32_fcmpswap.asm (derivations in its header) stores eight words from lane 0. This runs its
+port/test/shaders/cs_w32_fcmpswap.asm (derivations in its header) stores eight words from lane 0. This runs its
 fixture as one wave32 group through spirv_mini_interp with the buffer vk_compute_test gives it (every byte 0xEE, a V#
 with num_records 0xFFFFFFFF), checks the words against a float-compare reference computed here, that check.py and
-scripts/run_gpu_tests.py expect the same words, and that EXEC is cut to lane 0 before the first memory op.
+tooling/scripts/run_gpu_tests.py expect the same words, and that EXEC is cut to lane 0 before the first memory op.
 """
 import os
 import re
@@ -17,7 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)  # python -I leaves the script's folder off sys.path
 
-import support  # noqa: E402  (support puts tools/ on sys.path, honouring PALMETTO_TOOLS_DIR)
+import support  # noqa: E402  (support puts tooling/ on sys.path, honouring PALMETTO_TOOLS_DIR)
 import spirv_mini_interp as si  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -65,7 +65,7 @@ class FcmpswapFixture(unittest.TestCase):
                 self.assertEqual(mem[4 * k], want)
 
     def test_gpu_runners_expect_the_same_words(self):
-        for rel in (("runtime", "test", "shaders", "check.py"), ("scripts", "run_gpu_tests.py")):
+        for rel in (("port", "test", "shaders", "check.py"), ("tooling", "tooling/scripts", "run_gpu_tests.py")):
             with open(os.path.join(ROOT, *rel), encoding="utf-8") as f:
                 text = f.read()
             m = re.search(r'"cs_w32_fcmpswap"\)?[,:]\s*\[([^\]]*)\]', text)
@@ -74,7 +74,7 @@ class FcmpswapFixture(unittest.TestCase):
                 self.assertEqual([int(v, 0) for v in m.group(1).split(",")], EXPECTED)
 
     def test_memory_ops_run_in_lane_0_only(self):
-        with open(os.path.join(ROOT, "runtime", "test", "shaders", "cs_w32_fcmpswap.asm"), encoding="utf-8") as f:
+        with open(os.path.join(ROOT, "port", "test", "shaders", "cs_w32_fcmpswap.asm"), encoding="utf-8") as f:
             lines = [ln.strip() for ln in f if ln.strip() and not ln.startswith(";")]
         self.assertEqual(lines[0], "v_cmpx_eq_u32_e32 0, v0")
 

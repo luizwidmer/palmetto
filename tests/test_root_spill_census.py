@@ -1,4 +1,4 @@
-"""tools/root_spill_census.py on hand-written index data (no game files, no GPU).
+"""tooling/root_spill_census.py on hand-written index data (no game files, no GPU).
 
     python -I tests/test_root_spill_census.py
 """
@@ -10,8 +10,8 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "root_spill_census.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "root_spill_census.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import root_spill_census as rsc  # noqa: E402
 

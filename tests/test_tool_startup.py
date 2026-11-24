@@ -1,7 +1,7 @@
 """Every tool that imports a sibling module starts under the project's own `python -I` convention.
 
 `-I` implies `-P`, so the script's directory is not put on `sys.path`; a tool that imports the module next to it
-has to add that directory itself (the pattern in `tools/anim_clips.py:40`). Two tools did not and died with
+has to add that directory itself (the pattern in `tooling/anim_clips.py:40`). Two tools did not and died with
 `ModuleNotFoundError` before `main()` — `calibrated_texture.py` and `ttpf_assets.py` — which this test caught.
 
 The tool list is derived from the sources rather than written down, so a new tool with a sibling import is covered
@@ -19,7 +19,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 TOOL_NAMES = {os.path.splitext(os.path.basename(path))[0] for path in glob.glob(os.path.join(TOOLS, "*.py"))}
 NUMERIC = {"amd_swizzle", "calibrated_texture", "swizzle_search", "tex_export", "tex_mode_probe", "tile_probe"}
 

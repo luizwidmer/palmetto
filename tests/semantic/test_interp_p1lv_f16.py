@@ -1,6 +1,6 @@
 """Semantic and translation tests for v_interp_p1lv_f16, f16 --bary-fallback, and stage/attr guards.
 
-Covers the remaining 16-bit interpolation behaviour in tools/rdna2spirv.py not exercised by
+Covers the remaining 16-bit interpolation behaviour in tooling/rdna2spirv.py not exercised by
 test_interp_f16.py (clamp), test_interp_f16_high.py (p1ll low/high), or test_f16_interp_fallback.py:
 - v_interp_p1lv_f16: PerVertexKHR low/high half decoding, standalone f32 intermediate, paired v_interp_p2_f16
   f16 narrowing and VOP3 clamp, nearest-even tie rounding, SV_Position ISG1 layout coexistence,
@@ -23,7 +23,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

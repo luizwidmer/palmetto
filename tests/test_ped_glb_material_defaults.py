@@ -15,7 +15,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tooling"))
 import ped_assemble as pa
 
 DEFAULTS = {"baseColorFactor": [1.0, 1.0, 1.0, 1.0], "metallicFactor": 1.0, "roughnessFactor": 1.0}
@@ -91,7 +91,7 @@ class GlbMaterialDefaultsTests(unittest.TestCase):
         before = path.read_bytes()
         output = self.root / "out.glb"
         result = subprocess.run(
-            [sys.executable, "-I", str(ROOT / "tools" / "ped_assemble.py"),
+            [sys.executable, "-I", str(ROOT / "tooling" / "ped_assemble.py"),
              "assemble", str(path), "-o", str(output), "--no-cull", "--no-standing-offset"],
             capture_output=True, text=True, timeout=30,
         )

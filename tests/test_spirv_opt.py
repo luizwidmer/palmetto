@@ -1,4 +1,4 @@
-"""Tests for tools/spirv_opt.py (sound basic-block SPIR-V peephole optimizer, #884)."""
+"""Tests for tooling/spirv_opt.py (sound basic-block SPIR-V peephole optimizer, #884)."""
 import contextlib
 import io
 import json
@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 SEMANTIC = os.path.join(ROOT, "tests", "semantic")
 for _p in (TOOLS, SEMANTIC):
     if _p not in sys.path:

@@ -3,7 +3,7 @@
 ``add_executable(foo_test ...)`` without an ``add_test(... COMMAND foo_test)`` builds
 the test but never runs it -- in ``ctest``, in the Windows runtime job or under Wine.
 This happened to ``d3d12_indirect_rt_test``; the only intentional exception is
-``d3d12_clear_test`` (see the comment next to its target in runtime/CMakeLists.txt).
+``d3d12_clear_test`` (see the comment next to its target in port/CMakeLists.txt).
 """
 import os
 import re
@@ -11,9 +11,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CMAKE = Path(os.environ.get("PALMETTO_RUNTIME_CMAKE", str(ROOT / "runtime" / "CMakeLists.txt")))
+CMAKE = Path(os.environ.get("PALMETTO_RUNTIME_CMAKE", str(ROOT / "port" / "CMakeLists.txt")))
 SOURCE = Path(os.environ.get("PALMETTO_RUNTIME_TEST_SOURCE",
-                             str(ROOT / "runtime" / "test" / "d3d12_indirect_rt_test.cpp")))
+                             str(ROOT / "port" / "test" / "d3d12_indirect_rt_test.cpp")))
 
 # d3d12_clear_test is deliberately run by hand until #521's tie rounding lands.
 NOT_IN_CTEST = {"d3d12_clear_test"}
@@ -67,7 +67,7 @@ class CTestRegistrationTest(unittest.TestCase):
     def test_whole_test_skips_return_the_skip_code(self):
         # A test registered with SKIP_RETURN_CODE 77 that prints SKIP and returns 0 is counted as passed although it
         # checked nothing: bink_audio_test did that for a movie without audio tracks after #1580.
-        wrong = whole_test_skips_not_77(self.cmake, ROOT / "runtime")
+        wrong = whole_test_skips_not_77(self.cmake, ROOT / "port")
         self.assertEqual(wrong, [], f"SKIP followed by a return code other than 77: {wrong}")
 
 

@@ -1,7 +1,7 @@
 """Check the SPIR-V data flow for output modifiers (omod, then clamp) on v_add_f64.
 
 LLVM defines v_add_f64 as VOP3Inst<"v_add_f64", VOP3_Profile<VOP_F64_F64_F64>>; VOPProfile gives it HasClamp
-(f64 is a modifier type) and HasOMod (its destination is floating point). runtime/test/shaders/ps_f64_mods.asm is
+(f64 is a modifier type) and HasOMod (its destination is floating point). port/test/shaders/ps_f64_mods.asm is
 the matching GPU test.
 """
 
@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 TEST_DIR = Path(__file__).resolve().parent
-sys.path[:0] = [str(TEST_DIR.parent / "tools"), str(TEST_DIR)]
+sys.path[:0] = [str(TEST_DIR.parent / "tooling"), str(TEST_DIR)]
 
 from listing import translate_listing
 

@@ -1,4 +1,4 @@
-"""tools/semantic_mutants.py: branch lookup, mutant generation, and one end-to-end run on a weak and a strong test."""
+"""tooling/semantic_mutants.py: branch lookup, mutant generation, and one end-to-end run on a weak and a strong test."""
 import os
 import subprocess
 import sys
@@ -7,11 +7,11 @@ import textwrap
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import semantic_mutants as sm  # noqa: E402
 
-TOOL = os.path.join(ROOT, "tools", "semantic_mutants.py")
+TOOL = os.path.join(ROOT, "tooling", "semantic_mutants.py")
 
 SOURCE = textwrap.dedent('''\
     F1 = {"v_a": "InverseSqrt", "v_b": "Sqrt",   # a comment "v_z": "Nope"
@@ -127,7 +127,7 @@ class EndToEnd(unittest.TestCase):
     """v_sad_u8's UMax line: replacing UMax(xa, ya) by UMax(xa, xa) is only right when every byte of S0 >= S1's."""
 
     def umax_line(self):
-        with open(os.path.join(ROOT, "tools", "rdna2spirv.py"), encoding="utf-8") as f:
+        with open(os.path.join(ROOT, "tooling", "rdna2spirv.py"), encoding="utf-8") as f:
             lines = f.read().split("\n")
         first, last = sm.find_branch(lines, "v_sad_u8")
         for i in range(first, last + 1):
@@ -183,7 +183,7 @@ class RunTestEncoding(unittest.TestCase):
             test = os.path.join(tmp, "test_utf8_out.py")
             with open(test, "w", encoding="utf-8", newline="\n") as f:
                 f.write("import sys\nsys.stdout.buffer.write(b'fail: \\xe2\\x86\\x90 bad\\n')\nsys.exit(1)\n")
-            ok, last = sm.run_test(test, os.path.join(ROOT, "tools"), 30)
+            ok, last = sm.run_test(test, os.path.join(ROOT, "tooling"), 30)
         self.assertEqual((ok, last), (False, "fail: \u2190 bad"))
 
     def test_invalid_utf8_bytes_are_replaced_not_raised(self):
@@ -191,7 +191,7 @@ class RunTestEncoding(unittest.TestCase):
             test = os.path.join(tmp, "test_bad_bytes.py")
             with open(test, "w", encoding="utf-8", newline="\n") as f:
                 f.write("import sys\nsys.stderr.buffer.write(b'raw: \\xff\\xfe\\n')\nsys.exit(1)\n")
-            ok, last = sm.run_test(test, os.path.join(ROOT, "tools"), 30)
+            ok, last = sm.run_test(test, os.path.join(ROOT, "tooling"), 30)
         self.assertIs(ok, False)
         self.assertIn("raw:", last)
         self.assertIn("\ufffd", last)

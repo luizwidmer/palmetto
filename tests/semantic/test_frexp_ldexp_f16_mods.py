@@ -1,7 +1,7 @@
 """Semantic SPIR-V and interpreter tests for RDNA2 v_frexp/v_ldexp_f16 VOP3 output modifiers.
 
-Translates synthetic RDNA2 pixel shaders via tools/rdna2spirv.py, runs them in
-tests/semantic/spirv_mini_interp.py against the gfx1036-measured model in tools/frexp_ldexp_f16_mods_probe.py,
+Translates synthetic RDNA2 pixel shaders via tooling/rdna2spirv.py, runs them in
+tests/semantic/spirv_mini_interp.py against the gfx1036-measured model in tooling/frexp_ldexp_f16_mods_probe.py,
 checks byte-identical no-op omod SPIR-V emission, op_sel half preservation, inactive EXEC preservation,
 Unsupported rejection of unmodelled modifiers, and spirv-as/spirv-val validation. Standard library only.
 """
@@ -16,7 +16,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 for p in (TOOLS, HERE):
@@ -53,7 +53,7 @@ def tearDownModule():
 def _translate(lines: list[str]) -> str:
     if _TMP is None:
         setUpModule()
-    asm = "; ps_frexp_ldexp_f16_mods\n" + "".join(f"\t{ln}\n" for ln in lines)
+    asm = "; ps_frexp_ldexp_f16_extensions\n" + "".join(f"\t{ln}\n" for ln in lines)
     with open(_SRC_PATH, "w", encoding="utf-8", newline="\n") as f:
         f.write(asm)
     with warnings.catch_warnings():

@@ -1,10 +1,10 @@
 """A runtime configure without Vulkan headers must say so loudly, or fail when asked to.
 
-Everything under ``if(TARGET Vulkan::Headers)`` in runtime/CMakeLists.txt (the D3D12 COM objects, the Vulkan D3D12
+Everything under ``if(TARGET Vulkan::Headers)`` in port/CMakeLists.txt (the D3D12 COM objects, the Vulkan D3D12
 device in palmetto and most of ctest) is left out without Vulkan headers. It used to be one STATUS line, so a build
 whose VULKAN_SDK never reached CMake ran 45 of 125 tests and reported "100% tests passed".
 
-Runs runtime/cmake/vulkan_headers_missing.cmake with ``cmake -P`` (no compiler needed); skipped without cmake.
+Runs port/cmake/vulkan_headers_missing.cmake with ``cmake -P`` (no compiler needed); skipped without cmake.
 """
 import os
 import re
@@ -15,8 +15,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-MODULE = ROOT / "runtime" / "cmake" / "vulkan_headers_missing.cmake"
-CMAKE_LISTS = ROOT / "runtime" / "CMakeLists.txt"
+MODULE = ROOT / "port" / "cmake" / "vulkan_headers_missing.cmake"
+CMAKE_LISTS = ROOT / "port" / "CMakeLists.txt"
 CMAKE = shutil.which("cmake")
 
 
@@ -66,7 +66,7 @@ class CMakeListsUsesTheModuleTest(unittest.TestCase):
 
     def test_ci_requires_vulkan(self):
         ci = (ROOT / ".github" / "workflows" / "runtime.yml").read_text(encoding="utf-8")
-        configures = re.findall(r"cmake -S runtime -B runtime/build.*?(?=\n\s*- name:)", ci, re.S)
+        configures = re.findall(r"cmake -S runtime -B port/build.*?(?=\n\s*- name:)", ci, re.S)
         self.assertGreaterEqual(len(configures), 2)
         for c in configures:
             self.assertIn("-DPALMETTO_REQUIRE_VULKAN=ON", c)

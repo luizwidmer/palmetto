@@ -7,7 +7,7 @@ RDNA2 ISA, SOP2:
   s_subb_u32  D = S0 - S1 - SCC (mod 2^32),       SCC = 1 if S1 + SCC > S0 (borrow)
 The operands are SGPRs, 32-bit literals or inline constants (-16..64); the carry-in is made with s_cmp_eq_u32.
 
-Each case translates a hand-written pixel shader with tools/rdna2spirv.py (support.translate_lines), runs it
+Each case translates a hand-written pixel shader with tooling/rdna2spirv.py (support.translate_lines), runs it
 (support.mrt0_words) and compares the destination and SCC with a plain-Python reference and with hand-written words.
 test_carry_chain.py already runs the 64-bit add/subtract chains and the vector forms; this file covers the operand
 forms and the SCC in/out of the scalar ones. Until this file, the test of this name ran a self-built interpreter and

@@ -1,4 +1,4 @@
-"""tools/lds_fuzz.py --oracle hw without a GPU: the native kernel text (GFX11 mnemonics, operand order, LDS size,
+"""tooling/lds_fuzz.py --oracle hw without a GPU: the native kernel text (GFX11 mnemonics, operand order, LDS size,
 entry EXEC), the op-mix options, the deliberate model errors and the exit-77 contract. The last test runs on the
 hardware when the oracle tools are present and is skipped otherwise. Standard library only."""
 import contextlib
@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-TOOLS = Path(__file__).resolve().parents[1] / "tools"
+TOOLS = Path(__file__).resolve().parents[1] / "tooling"
 sys.path.insert(0, str(TOOLS))
 import lds_fuzz as f  # noqa: E402
 from hw_oracle import asm, runner  # noqa: E402

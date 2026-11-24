@@ -1,4 +1,4 @@
-"""CPU tests for tools/mad_denorm_probe.py (SHADER-340): RDNA1 mad/mac pre- and post-omod denormal flush.
+"""CPU tests for tooling/mad_denorm_probe.py (SHADER-340): RDNA1 mad/mac pre- and post-omod denormal flush.
 Standard library only; no GPU, no LLVM, no game files.
 """
 import contextlib
@@ -10,7 +10,7 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import mad_denorm_probe as probe  # noqa: E402
 from hw_oracle import runner as hw_runner  # noqa: E402

@@ -1,7 +1,7 @@
-"""Every GFX10 buffer data format the translator knows, decoded and encoded, against tools/buffer_format_fuzz.py's MODEL.
+"""Every GFX10 buffer data format the translator knows, decoded and encoded, against tooling/buffer_format_fuzz.py's MODEL.
 
 MODEL (decode_element / encode_element there) is what the Radeon 880M (gfx1150, RDNA3.5, not RDNA2) did for every
-pattern of tools/buffer_format_fuzz.py --oracle hw: 1.33 million validated elements over 63 formats on the 880M and the same on a real RDNA2, loads through a V# and
+pattern of tooling/buffer_format_fuzz.py --oracle hw: 1.33 million validated elements over 63 formats on the 880M and the same on a real RDNA2, loads through a V# and
 through tbuffer's own format, stores through both (docs/buffer_formats.md, docs/design.md "Typed buffer formats"). This
 file holds the translated SPIR-V to it: the SPIR-V mini interpreter runs `buffer_load_format_xyzw` (the V# format and
 tbuffer's own) and `buffer_store_format_xyzw` of every format added with the SCALED / SINT / 10_11_11 / 11_11_10 /

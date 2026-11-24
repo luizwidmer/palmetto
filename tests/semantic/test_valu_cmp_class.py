@@ -1,6 +1,6 @@
 """Translator-driven semantic tests for v_cmp_class_f32, v_cmp_class_f64, and v_cmpx_class_*.
 
-Translates hand-written RDNA2 listings through tools/rdna2spirv.py, validates with spirv-as/spirv-val when on PATH,
+Translates hand-written RDNA2 listings through tooling/rdna2spirv.py, validates with spirv-as/spirv-val when on PATH,
 and executes them in spirv_mini_interp:
   - exhaustive 10-bit IEEE 754 class matrix for v_cmp_class_f32 and v_cmp_class_f64
     (bit 0 sNaN, 1 qNaN, 2 -Inf, 3 -Normal, 4 -Subnormal, 5 -0.0, 6 +0.0, 7 +Subnormal, 8 +Normal, 9 +Inf);
@@ -24,7 +24,7 @@ if HERE not in sys.path:
 import spirv_mini_interp as si  # noqa: E402
 import support  # noqa: E402
 
-SHADERS = os.path.join(support.ROOT, "runtime", "test", "shaders")
+SHADERS = os.path.join(support.ROOT, "port", "test", "shaders")
 
 F32_CLASSES = [
     ("snan",      0x7F800001, 0),

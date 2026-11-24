@@ -2,13 +2,13 @@
 
 `game.exe` imports 12 functions from `xmem.dll` (`docs/runtime_imports.md`, "The retail executable").
 Seven have no shim yet. This page records, from the file alone, how the executable calls them: how many call sites each
-has and the constant arguments those sites pass. Nothing was run: `tools/import_call_sites.py` finds the call sites, and
+has and the constant arguments those sites pass. Nothing was run: `tooling/import_call_sites.py` finds the call sites, and
 the instructions that load the argument registers before each call were read by hand. No code or data of the executable
 is quoted, only the constants a call passes and the counts. Measured at `main` `1cc6e3c1`, SHA-256
 `e95020b2fa4a721db3df59fdecf75621730ac559d8835252f6c3b658d5a08993`.
 
 ```powershell
-python -I tools/import_call_sites.py game.exe --dll xmem.dll --dll d3d12_xs.dll --dll xg_xs.dll
+python -I tooling/import_call_sites.py game.exe --dll xmem.dll --dll d3d12_xs.dll --dll xg_xs.dll
 ```
 
 The tool finds each import's thunk (`jmp [rip+disp32]` through its address-table slot) and the `call`/`jmp rel32`
@@ -50,7 +50,7 @@ The 23 sites pass these constants (`allocation_type`, `attributes`, `protect`; t
 | `0x20406000` | `0x27` | `0x1004`, `0x1404`, `0x8404`, `0x2404`, `0x2004` | 5 (one each) |
 | `0x42000` | `0x7` | `0x1` | 1 |
 
-Every `attributes` value is nonzero, and `runtime/shims/xmem.cpp` returns `ERROR_NOT_SUPPORTED` for a nonzero value
+Every `attributes` value is nonzero, and `port/shims/xmem.cpp` returns `ERROR_NOT_SUPPORTED` for a nonzero value
 ("until their host mapping is known"), so none of the 23 calls succeeds there. Past that check the shim would also
 refuse the calls with `allocation_type` `0x20003000` (5 sites: the 2 MiB page mode) and those with bits it does not
 know: `0x4000` in `0x20406000` (5 sites) and `0x40000` in `0x42000` (1 site).
@@ -101,7 +101,7 @@ Observed constants, where the window before the call loads one:
 | `XMemGetWorkingSetStatistics` | 3 | kind `0x2000000a` (2 sites), `0x20000001` |
 | `XMemIsToolsMemAvailable` | 1 | arguments not read |
 
-`runtime/shims/xmem.cpp` says one call site "passes `0x5e50000`" as the attribute word. The two `XMemAlloc` sites here
+`port/shims/xmem.cpp` says one call site "passes `0x5e50000`" as the attribute word. The two `XMemAlloc` sites here
 whose attribute is a constant pass `0xf0814000`, not that value, so it comes from another image.
 
 ## What this does not show

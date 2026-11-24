@@ -14,7 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.dont_write_bytecode = True
 sys.path.insert(0, HERE)
 
-from test_lds_atomics_values import run_atomic  # noqa: E402  (also puts tools/ on sys.path)
+from test_lds_atomics_values import run_atomic  # noqa: E402  (also puts tooling/ on sys.path)
 from test_global_atomics import OUT, TARGET, run, si, translate  # noqa: E402
 import rdna2spirv  # noqa: E402
 

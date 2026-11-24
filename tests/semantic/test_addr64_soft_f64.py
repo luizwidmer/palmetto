@@ -8,7 +8,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "tooling"))
 
 import rdna2spirv  # noqa: E402
 from support import translate_lines  # noqa: E402

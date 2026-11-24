@@ -12,8 +12,8 @@ from unittest import mock
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "arc9_carve.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "arc9_carve.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import arc9_carve  # noqa: E402
 

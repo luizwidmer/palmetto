@@ -1,7 +1,7 @@
 # Save files
 
 The game's save containers, measured from one save set (two story saves, a profile record and settings) taken from a
-retail copy, with every file already plain on disk. `tools/saves.py` reads, rebuilds and imports them using only
+retail copy, with every file already plain on disk. `tooling/saves.py` reads, rebuilds and imports them using only
 the standard library. Nothing here decrypts anything. The one high-entropy layer (`SLAYER1`, below) is described
 and left alone.
 
@@ -38,7 +38,7 @@ body  UTF-8 JSON, CRLF between blocks:
       zero padding to a 16-byte boundary
 ```
 
-Both samples have 38 code and 44 script blocks. `tools/saves.py verify` rebuilds them byte for byte from the parsed
+Both samples have 38 code and 44 script blocks. `tooling/saves.py verify` rebuilds them byte for byte from the parsed
 blocks, which confirms the framing, padding and offsets. The JSAV carries no checksum of its own.
 
 Block conventions:
@@ -99,8 +99,8 @@ The profile record (kind 3) has a fixed 1,644-byte payload. Only the first 112 b
 fields, starting with format version 10 and kind 3; the remaining 1,532 bytes (0x5FC) are zero padding reserved for
 future profile expansion and cloud sync.
 
-`tools/saves.py info` reports the profile version, active bytes and verifies the zero-padding boundary;
-`tools/saves.py extract` writes `profile.json`.
+`tooling/saves.py info` reports the profile version, active bytes and verifies the zero-padding boundary;
+`tooling/saves.py extract` writes `profile.json`.
 
 ## SLAYER1: packed copy (not decoded)
 
@@ -120,10 +120,10 @@ to it holds the same save. The wrapper's header is the only place the autosave's
 
 ## Importing into the runtime
 
-The runtime's offline `XGameSaveImpl` (`runtime/shims/xgameruntime_gamesave.cpp`,
+The runtime's offline `XGameSaveImpl` (`port/shims/xgameruntime_gamesave.cpp`,
 [runtime_imports.md](runtime_imports.md)) keeps `XGameSave` data in
 `PALMETTO_SAVE_DIR\local-user\<container>\<blob>`, defaulting to `%LOCALAPPDATA%\Palmetto\saves`, with names
-%-encoded. `python -I tools/saves.py import <save folder>... [--out DIR] [--map OLD=CONTAINER/BLOB] [--with-packed]`
+%-encoded. `python -I tooling/saves.py import <save folder>... [--out DIR] [--map OLD=CONTAINER/BLOB] [--with-packed]`
 writes payloads in that layout with the same encoding, plus `import-manifest.json` (source, size, SHA-256).
 `--with-packed` also imports `chives.dat`, the packed `SLAYER1` copy of the same save (below), as a blob of its own;
 without it only the plain payload is imported.
@@ -140,7 +140,7 @@ name, and `--map` overrides it. Confirm or fix them from the executable's `XGame
 The hash was found from structure, before trying a dictionary: the code and script group keys are the joaat of names
 derived from the clear-text JSON wrappers around them, with case kept. Measured on the sample set (two story saves
 plus settings, **1,059 distinct keys**), with a dictionary of 1.14 million identifier-like strings harvested by
-`tools/save_keys.py` from the raw bytes and zlib streams of four of the game's own data archives (`common`, `script`,
+`tooling/save_keys.py` from the raw bytes and zlib streams of four of the game's own data archives (`common`, `script`,
 `data`, `appdata0`):
 
 | Method | Keys resolved | Expected by chance |
@@ -166,14 +166,14 @@ resolve most of them. The resolved names are game data and stay local; only coun
 otherwise 1 if any rebuild differed, otherwise 0.
 
 ```powershell
-python -I tools/saves.py info    <file or folder>...
-python -I tools/saves.py verify  <JSAV>...              # parse every block, rebuild, compare byte for byte
-python -I tools/saves.py extract <JSAV|ASAV> <outdir>   # blocks/*.json, index.json, save.pretty.json
-python -I tools/saves.py pack    <outdir> <JSAV>        # after editing blocks/*.json
-python -I tools/saves.py diff    <JSAV a> <JSAV b>
-python -I tools/saves.py import  <save folder>... [--out DIR] [--map OLD=CONTAINER/BLOB] [--with-packed] [--dry-run] [--force]
-python -I tools/save_keys.py collect <save file or extract folder>...           # distinct $0x… keys
-python -I tools/save_keys.py resolve <saves>... --dict <files>... [--compose N] [--out FILE]
+python -I tooling/saves.py info    <file or folder>...
+python -I tooling/saves.py verify  <JSAV>...              # parse every block, rebuild, compare byte for byte
+python -I tooling/saves.py extract <JSAV|ASAV> <outdir>   # blocks/*.json, index.json, save.pretty.json
+python -I tooling/saves.py pack    <outdir> <JSAV>        # after editing blocks/*.json
+python -I tooling/saves.py diff    <JSAV a> <JSAV b>
+python -I tooling/saves.py import  <save folder>... [--out DIR] [--map OLD=CONTAINER/BLOB] [--with-packed] [--dry-run] [--force]
+python -I tooling/save_keys.py collect <save file or extract folder>...           # distinct $0x… keys
+python -I tooling/save_keys.py resolve <saves>... --dict <files>... [--compose N] [--out FILE]
 ```
 
 `tests/test_saves.py` and `tests/test_save_keys.py` cover all of it on synthetic containers and names built in the

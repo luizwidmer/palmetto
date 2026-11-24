@@ -6,7 +6,7 @@ Sums of absolute differences, unsigned, wrapping at 32 bits (RDNA ISA pseudocode
   v_sad_u16:   D = S2 + sum over the 2 halves of |S0.half - S1.half|
   v_sad_u32:   D = S2 + |S0 - S1|
   v_msad_u8:   v_sad_u8, skipping each byte where S1's byte is 0 (masked SAD)
-Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py
+Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py
 and compares the result with a plain-Python reference. The result leaves through exp as two 16-bit halves, each ORed
 into 0x40000000, so an export channel is never a NaN or a denormal pattern that a float round trip could change.
 """
@@ -20,7 +20,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

@@ -12,7 +12,7 @@ IEEE-754 binary32 class mask bits for v_cmp_class_f32 / v_cmpx_class_f32 (AMD RD
   bit 4 (0x010): -subnormal   bit 9 (0x200): +inf
 Bits [31:10] of the mask operand are ignored.
 
-Executed end-to-end through tools/rdna2spirv.py and tests/semantic/spirv_mini_interp.py (both single-lane
+Executed end-to-end through tooling/rdna2spirv.py and tests/semantic/spirv_mini_interp.py (both single-lane
 run_fragment and multi-lane compute run_workgroup), and checked against hand-computed constants and independent
 plain-Python RDNA2 ISA reference functions. Standard library only; hand-written RDNA2 listings only.
 
@@ -24,13 +24,13 @@ Findings & exclusions (no shared files modified):
      approximation and the interpreter's exact division agree) with each output modifier. A zero operand stays
      out: `OpFDiv` by zero is undefined in SPIR-V and the interpreter refuses it (docs/design.md, "Denormal flush
      and special results", Not modelled yet). gfx1036 hardware agrees with the translator on 2,570 of 3,000 fuzzed
-     programs with clamp/omod and differs on none (`tools/f32_fuzz.py --oracle translator,hw --ops
+     programs with clamp/omod and differs on none (`tooling/f32_fuzz.py --oracle translator,hw --ops
      v_rcp_iflag_f32`, seeds 1 to 3; the rest are division by zero or cases the model does not judge).
   2. NaN caveats in SPIR-V / spirv_mini_interp.py:
      - For `v_rndne_f32` on NaN (`qNaN` / `sNaN`), SPIR-V / GLSL.std.450 `RoundEven` leaves NaN payload/quieting
        unspecified (spirv_mini_interp.py returns the input NaN unchanged; hardware quiets `sNaN`). Tests assert
        that the result is a binary32 NaN rather than pinning an exact NaN payload.
-     - For `v_cmp_class_f32` / `v_cmpx_class_f32` VOP3 source modifiers (`-`, `|..|`), tools/rdna2spirv.py emits
+     - For `v_cmp_class_f32` / `v_cmpx_class_f32` VOP3 source modifiers (`-`, `|..|`), tooling/rdna2spirv.py emits
        float `OpFNegate`/`FAbs`, which in spirv_mini_interp.py goes through Python float packing and quiets `sNaN`
        (see tests/semantic/test_interp.py). Source modifiers are therefore tested on `+-inf`, `+-normal`,
        `+-subnormal`, `+-0.0`, and `qNaN`; raw `sNaN` (`+sNaN` / `-sNaN`) is tested without float modifiers.
@@ -47,7 +47,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

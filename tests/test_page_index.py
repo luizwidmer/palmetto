@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/page_index.py. No game files are read or needed."""
+"""Synthetic tests for tooling/page_index.py. No game files are read or needed."""
 import contextlib
 import csv
 import io
@@ -13,7 +13,7 @@ import zlib
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "page_index.py")
+TOOL = os.path.join(ROOT, "tooling", "page_index.py")
 sys.path.insert(0, os.path.dirname(TOOL))
 import page_index
 

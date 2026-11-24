@@ -1,4 +1,4 @@
-"""Tests for tools/spirv_stubs.py and graphics pipeline metadata in tools/rdna2spirv.py.
+"""Tests for tooling/spirv_stubs.py and graphics pipeline metadata in tooling/rdna2spirv.py.
 
 Runs with the standard library only (no GPU required):
     python -I tests/test_spirv_stubs.py
@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import rdna2spirv  # noqa: E402
 import spirv_stubs  # noqa: E402
@@ -203,7 +203,7 @@ class MalformedIndexTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with open(os.path.join(tmp, "index.json"), "w", encoding="utf-8") as f:
                 f.write(contents)
-            tool = os.path.join(ROOT, "tools", "spirv_stubs.py")
+            tool = os.path.join(ROOT, "tooling", "spirv_stubs.py")
             return subprocess.run([sys.executable, "-I", tool, tmp], capture_output=True, text=True)
 
     def test_bad_index_json_is_one_error_not_a_traceback(self):
@@ -214,7 +214,7 @@ class MalformedIndexTest(unittest.TestCase):
         self.assertNotIn("Traceback", p.stderr)
 
     def test_help_prints_usage_and_exits_zero(self):
-        tool = os.path.join(ROOT, "tools", "spirv_stubs.py")
+        tool = os.path.join(ROOT, "tooling", "spirv_stubs.py")
         for flag in ("-h", "--help"):
             with self.subTest(flag=flag):
                 p = subprocess.run([sys.executable, "-I", tool, flag], capture_output=True, text=True)
@@ -278,7 +278,7 @@ class IndexEncodingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with open(os.path.join(tmp, "index.json"), "w", encoding="utf-8-sig") as f:
                 json.dump({"ps_a": {"stage": "ps", "inputs": [0]}}, f)
-            tool = os.path.join(ROOT, "tools", "spirv_stubs.py")
+            tool = os.path.join(ROOT, "tooling", "spirv_stubs.py")
             p = subprocess.run([sys.executable, "-I", tool, tmp], capture_output=True, text=True)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertIn("wrote 1 stubs", p.stdout)

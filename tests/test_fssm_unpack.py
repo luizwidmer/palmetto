@@ -1,4 +1,4 @@
-"""Unit tests for tools/fssm_unpack.py covering XBCH carving, FSSM headers, alignment, and CRC bounds.
+"""Unit tests for tooling/fssm_unpack.py covering XBCH carving, FSSM headers, alignment, and CRC bounds.
 
     python -I tests/test_fssm_unpack.py
 
@@ -17,11 +17,11 @@ from unittest import mock
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import fssm_unpack  # noqa: E402
 
-TOOL = os.path.join(ROOT, "tools", "fssm_unpack.py")
+TOOL = os.path.join(ROOT, "tooling", "fssm_unpack.py")
 S_ENDPGM = b"\x00\x00\x81\xbf"
 
 

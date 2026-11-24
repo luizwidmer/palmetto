@@ -1,4 +1,4 @@
-"""Regression tests for tools/cf_ref.py s_cmp_* validation and exec_hi/vcc_hi mask ops.
+"""Regression tests for tooling/cf_ref.py s_cmp_* validation and exec_hi/vcc_hi mask ops.
 
 Standard library only; uses hand-written synthetic .s listings (no game data, GPU, or llvm-mc).
 
@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import cf_ref  # noqa: E402
 import cpu_ref  # noqa: E402

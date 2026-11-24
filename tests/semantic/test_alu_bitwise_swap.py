@@ -6,7 +6,7 @@ RDNA2 ISA:
   v_or3_b32   D, S0, S1, S2 D = S0 | S1 | S2
   v_xor3_b32  D, S0, S1, S2 D = S0 ^ S1 ^ S2
 
-All tests translate synthetic hand-written RDNA2 disassembly via tools/rdna2spirv.py and execute the emitted
+All tests translate synthetic hand-written RDNA2 disassembly via tooling/rdna2spirv.py and execute the emitted
 SPIR-V in spirv_mini_interp.py (single-lane) and spirv_wave_interp.py (32-lane wave with partial EXEC mask).
 Standard library only; no game data.
 """

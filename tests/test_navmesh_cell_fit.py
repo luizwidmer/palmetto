@@ -1,10 +1,10 @@
-"""tools/navmesh_cell_fit.py: the grid fit, its chance baseline and the per-cell summary, on synthetic vertices.
+"""tooling/navmesh_cell_fit.py: the grid fit, its chance baseline and the per-cell summary, on synthetic vertices.
 No game files."""
 import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tooling"))
 import navmesh_cell_fit as cf  # noqa: E402
 
 

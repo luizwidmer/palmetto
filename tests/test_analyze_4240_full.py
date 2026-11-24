@@ -17,8 +17,8 @@ import zlib
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "analyze_4240_full.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "analyze_4240_full.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import analyze_4240_full as A  # noqa: E402
 

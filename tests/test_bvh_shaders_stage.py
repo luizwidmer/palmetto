@@ -1,10 +1,10 @@
-"""make_game.py's BVH builder step (bvh_shaders) and the index key the runtime finds its programs by (fssm_sha256).
+"""build_port.py's BVH builder step (bvh_shaders) and the index key the runtime finds its programs by (fssm_sha256).
 
     python -I tests/test_bvh_shaders_stage.py
 
 Zero game data: the "DLL" is synthetic bytes around hand-built DXBC containers whose XBCH record is a zlib stream of
 a made-up FSSM blob, and llvm-mc and the translator are stood in for the way tests/test_fspx_shaders_stage.py does.
-The extracting, unpacking and disassembling tools are the repository's own, run as make_game.py runs them.
+The extracting, unpacking and disassembling tools are the repository's own, run as build_port.py runs them.
 """
 import hashlib
 import io
@@ -20,9 +20,9 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
-import make_game  # noqa: E402
+import build_port  # noqa: E402
 import rdna2spirv  # noqa: E402
 import shader_meta  # noqa: E402
 from test_pe_shader_containers import container, ildn, xdat  # noqa: E402
@@ -55,13 +55,13 @@ def dll_like(*containers: bytes) -> bytes:
 
 
 def tool(name: str, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", name), *args],
+    return subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", name), *args],
                           capture_output=True, text=True)
 
 
 class IndexKey(unittest.TestCase):
     """fssm_sha256 is the SHA-256 of the FSSM blob fssm_unpack.py inflates from the container's XBCH record: the
-    bytes runtime/src/shader_library.h's fssm_program() inflates from the container the DLL passes to slot 62."""
+    bytes port/src/shader_library.h's fssm_program() inflates from the container the DLL passes to slot 62."""
 
     def test_the_extracted_layout_gives_the_translator_the_key_and_the_stage(self):
         blobs = {"SortKeys": fssm_blob(1), "WriteNodes": fssm_blob(2)}
@@ -110,7 +110,7 @@ class BvhStage(unittest.TestCase):
         self.work = os.path.join(self.tmp.name, "work")
         self.game = os.path.join(self.tmp.name, "game")
         os.makedirs(self.game)
-        self.dll = os.path.join(self.game, make_game.BVH_DLL)
+        self.dll = os.path.join(self.game, build_port.BVH_DLL)
         self.programs = {"SortKeys": fssm_blob(1), "WriteNodes": fssm_blob(2), "CopyNodes": fssm_blob(3)}
         self.untranslated = set()        # the programs the stand-in translator has no rule for
         self.write_dll()
@@ -164,9 +164,9 @@ class BvhStage(unittest.TestCase):
 
     def run_step(self, signature="llvm-mc 23", emulate=False, fallbacks=(), py=None):
         self.calls, self.logs = [], []
-        with mock.patch.object(make_game, "py", py or self.fake_py), \
-                mock.patch.object(make_game, "log", self.logs.append):
-            make_game.bvh_shaders(self.game, self.work, signature, 3, emulate=emulate, fallbacks=fallbacks)
+        with mock.patch.object(build_port, "py", py or self.fake_py), \
+                mock.patch.object(build_port, "log", self.logs.append):
+            build_port.bvh_shaders(self.game, self.work, signature, 3, emulate=emulate, fallbacks=fallbacks)
         return [name for name, _ in self.calls]
 
     def test_runs_once_then_only_reports(self):
@@ -181,9 +181,9 @@ class BvhStage(unittest.TestCase):
         self.assertEqual(translate, (os.path.join(self.unpacked, "disasm"), "--out", self.spirv, "--no-asm",
                                      "--max-shared-memory", 32768))
         self.assertTrue(os.path.isfile(os.path.join(self.spirv, "bvh_build.json")))
-        self.assertIn(f"shaders: 3 of 3 {make_game.BVH_DLL} programs translated", self.logs)
+        self.assertIn(f"shaders: 3 of 3 {build_port.BVH_DLL} programs translated", self.logs)
         self.assertEqual(self.run_step(), [])
-        self.assertEqual(self.logs, [f"shaders: 3 of 3 {make_game.BVH_DLL} programs translated"])
+        self.assertEqual(self.logs, [f"shaders: 3 of 3 {build_port.BVH_DLL} programs translated"])
 
     def test_the_real_tools_fill_the_folder_and_a_second_run_leaves_no_duplicates(self):
         """Extraction, unpacking and disassembly by the repository's tools (llvm-mc stood in for), twice: the
@@ -197,7 +197,7 @@ class BvhStage(unittest.TestCase):
             self.calls.append((tool_name, args))
             if tool_name == "rdna2spirv.py":
                 return self.fake_translate(*args)
-            make_game.run([sys.executable, "-I", os.path.join(make_game.TOOLS, tool_name), *args],
+            build_port.run([sys.executable, "-I", os.path.join(build_port.TOOLS, tool_name), *args],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         with mock.patch.dict(os.environ, {"LLVM_MC": f'"{sys.executable}" "{mc}"'}):
@@ -214,7 +214,7 @@ class BvhStage(unittest.TestCase):
                     index = json.load(f)
                 self.assertEqual({n: index[n]["fssm_sha256"] for n in index},
                                  {n: hashlib.sha256(blob).hexdigest() for n, blob in self.programs.items()})
-                self.assertIn(f"shaders: 3 of 3 {make_game.BVH_DLL} programs translated", self.logs)
+                self.assertIn(f"shaders: 3 of 3 {build_port.BVH_DLL} programs translated", self.logs)
             self.assertEqual(self.run_step(signature="llvm-mc 24", py=run_tool), [])
 
     def test_no_dll_no_step(self):
@@ -233,7 +233,7 @@ class BvhStage(unittest.TestCase):
         self.assertEqual(self.run_step(), [])
         self.assertFalse(os.path.exists(index))
         self.assertFalse(os.path.exists(settings))
-        self.assertEqual(self.logs, [f"shaders: no {make_game.BVH_DLL} in the game folder, so no BVH builder "
+        self.assertEqual(self.logs, [f"shaders: no {build_port.BVH_DLL} in the game folder, so no BVH builder "
                                      "programs to translate"])
         self.assertEqual(self.run_step(), [])                      # and again, with nothing left to remove
         self.write_dll()
@@ -252,9 +252,9 @@ class BvhStage(unittest.TestCase):
         self.write_dll()
         self.assertEqual(self.run_step(signature="llvm-mc 24", emulate=True, fallbacks=flags), TOOLS)
         self.assertEqual(self.run_step(signature="llvm-mc 24", emulate=True, fallbacks=flags), [])
-        with mock.patch.object(make_game, "translation_sources_digest", return_value="another translator"):
+        with mock.patch.object(build_port, "translation_sources_digest", return_value="another translator"):
             self.assertEqual(self.run_step(signature="llvm-mc 24", emulate=True, fallbacks=flags), TOOLS)
-        with mock.patch.object(make_game, "BVH_MAX_SHARED_MEMORY", 65536):
+        with mock.patch.object(build_port, "BVH_MAX_SHARED_MEMORY", 65536):
             self.assertEqual(self.run_step(signature="llvm-mc 24", emulate=True, fallbacks=flags), TOOLS)
             self.assertEqual(self.calls[3][1][4:6], ("--max-shared-memory", 65536))
 
@@ -264,7 +264,7 @@ class BvhStage(unittest.TestCase):
         self.untranslated = {"WriteNodes"}
         for expected in (TOOLS, [], []):
             self.assertEqual(self.run_step(), expected)
-            self.assertIn(f"shaders: 2 of 3 {make_game.BVH_DLL} programs translated", self.logs)
+            self.assertIn(f"shaders: 2 of 3 {build_port.BVH_DLL} programs translated", self.logs)
             named = [line for line in self.logs if "NOT translated: WriteNodes." in line]
             self.assertEqual(len(named), 1, self.logs)
             self.assertIn("E_INVALIDARG", named[0])
@@ -274,10 +274,10 @@ class BvhStage(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.spirv, "WriteNodes.spv")))
         # Once the translator has the rule, the changed translator runs the step again and the line is gone.
         self.untranslated = set()
-        with mock.patch.object(make_game, "translation_sources_digest", return_value="a translator with the rule"):
+        with mock.patch.object(build_port, "translation_sources_digest", return_value="a translator with the rule"):
             self.assertEqual(self.run_step(), TOOLS)
             self.assertEqual([line for line in self.logs if "NOT translated" in line], [])
-            self.assertIn(f"shaders: 3 of 3 {make_game.BVH_DLL} programs translated", self.logs)
+            self.assertIn(f"shaders: 3 of 3 {build_port.BVH_DLL} programs translated", self.logs)
 
     def test_an_entry_the_runtime_cannot_find_counts_as_not_translated(self):
         """rdna2spirv.py keeps an entry whose metadata failed as {"error": ...}: it has no fssm_sha256, so the
@@ -294,14 +294,14 @@ class BvhStage(unittest.TestCase):
                 json.dump(index, f)
         self.fake_translate = no_key
         self.assertEqual(self.run_step(), TOOLS)
-        self.assertIn(f"shaders: 2 of 3 {make_game.BVH_DLL} programs translated", self.logs)
+        self.assertIn(f"shaders: 2 of 3 {build_port.BVH_DLL} programs translated", self.logs)
         self.assertEqual(len([line for line in self.logs if "NOT translated: SortKeys." in line]), 1)
 
     def test_nothing_translated_fails_and_keeps_no_index(self):
         self.untranslated = set(self.programs)
         with self.assertRaises(SystemExit), mock.patch("sys.stderr", new_callable=io.StringIO) as err:
             self.run_step()
-        self.assertIn(f"none of the {make_game.BVH_DLL} programs translated", err.getvalue())
+        self.assertIn(f"none of the {build_port.BVH_DLL} programs translated", err.getvalue())
         self.assertFalse(os.path.exists(os.path.join(self.spirv, "index.json")))   # nothing for the runtime to load
         self.assertFalse(os.path.exists(os.path.join(self.spirv, "bvh_build.json")))
         self.untranslated = set()
@@ -346,9 +346,9 @@ class ShadersStageWithTheDlls(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             work, game = os.path.join(t, "work"), os.path.join(t, "game")
             os.makedirs(game)
-            with open(os.path.join(game, make_game.FSPX_DLL), "wb") as f:
+            with open(os.path.join(game, build_port.FSPX_DLL), "wb") as f:
                 f.write(fspx_dll(fspx_container(program())))
-            dll = os.path.join(game, make_game.BVH_DLL)
+            dll = os.path.join(game, build_port.BVH_DLL)
             with open(dll, "wb") as f:
                 f.write(dll_like(builder_container("SortKeys", fssm_blob(1))))
             ran = []
@@ -371,7 +371,7 @@ class ShadersStageWithTheDlls(unittest.TestCase):
                     write('[{"name": "%s"}]' % ("SortKeys" if builder else "shader"), bvh if builder else dxbc,
                           "fssm_index.json")
                 elif tool_name == "shader_disasm.py":
-                    # make_game checks that every unpacked shader of the corpus got a non-empty listing
+                    # build_port checks that every unpacked shader of the corpus got a non-empty listing
                     write("s_endpgm\n", bvh if builder else dxbc, "disasm",
                           ("SortKeys" if builder else "shader") + ".s")
                 elif tool_name == "rdna2spirv.py":
@@ -388,12 +388,12 @@ class ShadersStageWithTheDlls(unittest.TestCase):
 
             def stage():
                 ran.clear()
-                with mock.patch.object(make_game, "py", fake_py), \
-                        mock.patch.object(make_game, "need", lambda *a: None), \
-                        mock.patch.object(make_game, "translate", fake_translate), \
-                        mock.patch.object(make_game, "llvm_mc_signature", return_value="llvm-mc 23"), \
-                        mock.patch.object(make_game, "log", lambda *a: None):
-                    make_game.shaders(game, work, 2)
+                with mock.patch.object(build_port, "py", fake_py), \
+                        mock.patch.object(build_port, "need", lambda *a: None), \
+                        mock.patch.object(build_port, "translate", fake_translate), \
+                        mock.patch.object(build_port, "llvm_mc_signature", return_value="llvm-mc 23"), \
+                        mock.patch.object(build_port, "log", lambda *a: None):
+                    build_port.shaders(game, work, 2)
                 return list(ran)
 
             self.assertEqual(stage(), ["shader_carve.py", "fssm_unpack.py", "shader_disasm.py", "translate",
@@ -402,7 +402,7 @@ class ShadersStageWithTheDlls(unittest.TestCase):
             with open(dll, "wb") as f:
                 f.write(dll_like(builder_container("SortKeys", fssm_blob(2))))
             self.assertEqual(stage(), TOOLS)
-            with open(os.path.join(game, make_game.FSPX_DLL), "wb") as f:
+            with open(os.path.join(game, build_port.FSPX_DLL), "wb") as f:
                 f.write(fspx_dll(fspx_container(program() + b"\0\0\x80\xbf")))
             self.assertEqual(stage(), ["fspx_unpack.py", "rdna2spirv.py"])
             for sub in ((), ("fspx",), ("bvh",)):

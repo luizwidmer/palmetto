@@ -1,7 +1,7 @@
 """image_bvh_intersect_ray / image_bvh64_intersect_ray on triangle nodes against words measured on native RDNA2.
 
 Every expected word below was returned by the instruction itself on an AMD Radeon RX 6800 (gfx1030, AMD Windows
-driver 26.11.2, Windows 11, 2026-11-22), through tools/hw_oracle raw kernels (tools/bvh_tri_probe.py builds the same
+driver 26.11.2, Windows 11, 2026-11-22), through tooling/hw_oracle raw kernels (tooling/bvh_tri_probe.py builds the same
 kernels) that write hand-built 64-byte triangle nodes into memory and trace one ray per case in both forms: the
 32-bit node pointer with the descriptor base at the node, and the 64-bit one with base 0. The descriptor is the one
 #3567 measured boxes with (w1 bit 31 box sort, w2 = 0xFFFFFFFF, w3 = 0x81000000). Both forms returned the same four

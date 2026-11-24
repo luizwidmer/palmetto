@@ -66,7 +66,7 @@ formula is proven by every resolved entry.
 ## Whole-archive coverage
 
 The windows above use only names that were already exported locally. The names of almost all the other
-archetypes are in `levels.arc` itself: `tools/arc9_names.py` lists the `name.#dr` and `name.#ft` strings of every
+archetypes are in `levels.arc` itself: `tooling/arc9_names.py` lists the `name.#dr` and `name.#ft` strings of every
 stream. A full pass over the data area (76.15 GB, 5,255 s) inflates 1,116,073 zlib streams (98.32% of
 compressed bytes) and finds 235,814 named streams / 318,266 unique names (267,463 `.#dr`, 50,803 `.#ft`);
 with that list as the dictionary nearly every placement resolves. Whole `levels.arc`, one
@@ -133,13 +133,13 @@ windows.
 
 ## Tool
 
-`tools/world_names.py` builds the dictionary and resolves map rows and aggregate archetype counts:
+`tooling/world_names.py` builds the dictionary and resolves map rows and aggregate archetype counts:
 
 ```powershell
-python -I tools\world_names.py build --manifest <work>\assets --scan <work>\levels-scan.json `
+python -I tooling\world_names.py build --manifest <work>\assets --scan <work>\levels-scan.json `
     --names <work>\names.txt --xml <work>\common-concat.txt --out <work>\world\names.json
 
-python -I tools\world_names.py resolve --dict <work>\world\names.json `
+python -I tooling\world_names.py resolve --dict <work>\world\names.json `
     --maps <work>\world\census\maps.json --archetypes <work>\world\archetypes.json `
     --out <work>\world\names-report.json
 
@@ -153,11 +153,11 @@ separate `_lod`/`_slod` table.
 The whole-archive numbers above come from these four commands (no other inputs):
 
 ```powershell
-python -I tools\arc9_names.py <game>\levels.arc <work>\world\arc9_names.json --types dr,ft --max-inflate 268435456
-python -I tools\world_index.py <game>\levels.arc --out <work>\world\world_index.json `
+python -I tooling\arc9_names.py <game>\levels.arc <work>\world\arc9_names.json --types dr,ft --max-inflate 268435456
+python -I tooling\world_index.py <game>\levels.arc --out <work>\world\world_index.json `
     --archetypes-out <work>\world\archetypes.json
-python -I tools\world_names.py build --arc9-names <work>\world\arc9_names.json --out <work>\world\names.json
-python -I tools\world_names.py resolve --dict <work>\world\names.json `
+python -I tooling\world_names.py build --arc9-names <work>\world\arc9_names.json --out <work>\world\names.json
+python -I tooling\world_names.py resolve --dict <work>\world\names.json `
     --archetypes <work>\world\archetypes.json --out <work>\world\names-report.json
 ```
 
@@ -174,7 +174,7 @@ to a parent map in another. Each child row counts once regardless of file order.
 
 `keys` is optional. With it, a match is reported as verified only when the 32-bit candidate's Murmur3-64 equals
 the stored key; candidates that match only the 32-bit hash are reported as `unconfirmed`, not guessed. Map rows
-may carry `map_name64` to get the same confirmation. `tools/world_index.py` now emits that field, and a fresh
+may carry `map_name64` to get the same confirmation. `tooling/world_index.py` now emits that field, and a fresh
 `world_census` run carries it through; the 23,535-row census JSON used above was produced before the field was
 added, so the plain census run reported the five map-name matches as resolved but unverified. A five-row recheck
 supplied the map root +0x10 keys and verified 5/5.

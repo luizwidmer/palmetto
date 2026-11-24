@@ -1,10 +1,10 @@
-"""Parity and edge-case tests for tools/shader_ir.py parse_line(), split_args(), and operand()."""
+"""Parity and edge-case tests for tooling/shader_ir.py parse_line(), split_args(), and operand()."""
 import os
 import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import shader_ir  # noqa: E402
 

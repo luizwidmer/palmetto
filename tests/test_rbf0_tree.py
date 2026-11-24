@@ -1,4 +1,4 @@
-"""Synthetic-tree tests for tools/rbf0_tree.py.
+"""Synthetic-tree tests for tooling/rbf0_tree.py.
 
     python -I tests/test_rbf0_tree.py
 
@@ -18,7 +18,7 @@ from unittest.mock import patch
 from xml.etree import ElementTree as ET
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import rbf0_tree  # noqa: E402
 import rbf0_index  # noqa: E402
@@ -427,7 +427,7 @@ class OutputTest(unittest.TestCase):
         previous = b'{"previous": true}\n'
         with open(out, "wb") as f:
             f.write(previous)
-        tool = os.path.join(ROOT, "tools", "rbf0_tree.py")
+        tool = os.path.join(ROOT, "tooling", "rbf0_tree.py")
         result = subprocess.run([sys.executable, "-I", tool, source, out, "--quiet"],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)
@@ -495,7 +495,7 @@ class OutputTest(unittest.TestCase):
         self.assertEqual([n for n in os.listdir(self.root) if n.startswith(".rbf0_tree-")], [])
 
     def _run_cli(self, *argv):
-        tool = os.path.join(ROOT, "tools", "rbf0_tree.py")
+        tool = os.path.join(ROOT, "tooling", "rbf0_tree.py")
         return subprocess.run([sys.executable, "-I", tool, *argv, "--quiet"], capture_output=True, text=True)
 
     def test_out_or_csv_over_the_source_file_is_refused(self):
@@ -586,7 +586,7 @@ class OutputTest(unittest.TestCase):
     def test_cli_rejects_invalid_selection_before_writing(self):
         with open(os.path.join(self.root, "00000000.bin"), "wb") as f:
             f.write(wide_blob())
-        tool = os.path.join(ROOT, "tools", "rbf0_tree.py")
+        tool = os.path.join(ROOT, "tooling", "rbf0_tree.py")
         out = os.path.join(self.root, "tree.json")
         for option, value in (("--limit", "0"), ("--limit", "-1"), ("--offset", "-1")):
             with self.subTest(option=option, value=value):

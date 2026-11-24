@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 from content_definitions import ContentError, carve_documents, parse_content
 
 CHANGE = (b'<?xml version="1.0"?><CDataFileMgr__ContentChangeSetDef><id>fixture</id>'
@@ -123,7 +123,7 @@ class ContentTests(unittest.TestCase):
             for path, payload in zip(paths, (SETUP, b"<Other/>", b"<Other>")):
                 with open(path, "wb") as f:
                     f.write(payload)
-            cmd = [sys.executable, "-I", os.path.join(ROOT, "tools", "content_definitions.py")]
+            cmd = [sys.executable, "-I", os.path.join(ROOT, "tooling", "content_definitions.py")]
             for inputs, expected in ((paths[:2], 0), (paths, 1)):
                 with self.subTest(inputs=len(inputs)):
                     result = subprocess.run(cmd + inputs, capture_output=True, text=True)
@@ -135,7 +135,7 @@ class ContentTests(unittest.TestCase):
     def test_cli_reports_counts_only_and_failure_status(self):
         with tempfile.TemporaryDirectory() as directory:
             self.make_carve(directory, [CHANGE, CONTENT, SETUP])
-            cmd = [sys.executable, '-I', os.path.join(ROOT, 'tools', 'content_definitions.py'), directory]
+            cmd = [sys.executable, '-I', os.path.join(ROOT, 'tooling', 'content_definitions.py'), directory]
             result = subprocess.run(cmd, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout), dict(documents=3, change_sets=1, contents=1,

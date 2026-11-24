@@ -5,7 +5,7 @@ the half taken from each source, S0 first (l = bits 15:0, h = bits 31:16):
   s_pack_ll_b32_b16: D = S1[15:0] << 16 | S0[15:0]
   s_pack_lh_b32_b16: D = S1[31:16] << 16 | S0[15:0]
   s_pack_hh_b32_b16: D = S1[31:16] << 16 | S0[31:16]
-SCC is not written. Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in
+SCC is not written. Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in
 tests/semantic/spirv_mini_interp.py and compares the exported words with a plain-Python reference.
 """
 import os
@@ -18,7 +18,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

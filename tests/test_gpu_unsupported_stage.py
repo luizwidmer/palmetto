@@ -11,8 +11,8 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "runtime" / "test" / "shaders"))
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "port" / "test" / "shaders"))
+sys.path.insert(0, str(ROOT / "tooling" / "tooling/scripts"))
 import check
 import run_gpu_tests
 
@@ -51,7 +51,7 @@ class RunGpuTestsUnsupportedDetail(unittest.TestCase):
 
     def test_harness_and_runners_agree_on_the_exit_code(self):
         self.assertEqual(run_gpu_tests.UNSUPPORTED, check.UNSUPPORTED)
-        harness = (ROOT / "runtime" / "test" / "vk_harness.cpp").read_text()
+        harness = (ROOT / "port" / "test" / "vk_harness.cpp").read_text()
         for reason in ("unsupported: no VK_EXT_mesh_shader", "unsupported: no geometryShader"):
             self.assertIn(reason, harness)
 

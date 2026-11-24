@@ -4,7 +4,7 @@ The int -> f16 forms convert the low 16-bit half and round to nearest even (6552
 f16 -> int forms truncate toward zero, saturate to the 16-bit range (an f16 infinity too) and give 0 for NaN, as the
 32-bit conversions do (docs/design.md, "Float-to-int saturation"). op_sel:[src,dst] picks the high half of the
 source / of the destination in the VOP3 form; the other half of the destination is kept. Each case translates a
-synthetic pixel shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the exported word with a
+synthetic pixel shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the exported word with a
 plain-Python reference. Not measured on hardware: the kept half and the behaviour of `clamp` and output
 multipliers, which the translator rejects.
 """
@@ -20,7 +20,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

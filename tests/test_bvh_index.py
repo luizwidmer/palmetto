@@ -1,4 +1,4 @@
-"""Hand-built headings for tools/bvh_index.py. No game data is read.
+"""Hand-built headings for tooling/bvh_index.py. No game data is read.
 
     python -I tests/test_bvh_index.py
 """
@@ -14,7 +14,7 @@ from unittest import mock
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import bvh_index  # noqa: E402
 

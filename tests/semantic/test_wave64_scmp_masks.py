@@ -1,6 +1,6 @@
 """Semantic tests for Wave64/Wave32 s_cmp_* on opposite mask halves and mask-vs-scalar operands.
 
-Translates synthetic .s listings (no llvm-mc or game data required) with tools/rdna2spirv.py and
+Translates synthetic .s listings (no llvm-mc or game data required) with tooling/rdna2spirv.py and
 executes all 64 (wave64) or 32 (wave32) lanes via tests/semantic/spirv_mini_interp.run_workgroup.
 
 Covers:
@@ -25,7 +25,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if HERE not in sys.path:

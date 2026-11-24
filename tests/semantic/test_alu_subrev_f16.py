@@ -3,7 +3,7 @@
 v_subrev_f16: D.f16 = S1.f16 - S0.f16 (VOP2 0x34 on GFX10), the reversed form of v_sub_f16. Like the other f16
 VOP2/VOP3 ops it writes the low half of the destination and keeps the high half; in the VOP3 form op_sel bit 0 / 1
 reads the high half of src0 / src1 and bit 2 writes the high half of the destination instead (docs/design.md,
-"16-bit results"). Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in
+"16-bit results"). Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in
 tests/semantic/spirv_mini_interp.py and compares the exported word with a plain-Python reference: the difference
 of the two f16 values computed in double precision and rounded once to f16 (round to nearest even).
 
@@ -27,7 +27,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

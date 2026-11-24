@@ -11,7 +11,7 @@ submitted.
 
 ## 1. What the refusal is
 
-`ExecuteCommandLists` returns `ReplayResult::unresolved_resource`, which `runtime/shims/d3d12_com.cpp` prints as
+`ExecuteCommandLists` returns `ReplayResult::unresolved_resource`, which `port/shims/d3d12_com.cpp` prints as
 
 ```
 [rt] d3d12: ExecuteCommandLists failed: unknown resource; nothing was submitted
@@ -122,11 +122,11 @@ that must know it.
 
 Bounded, on by default, and behaviour-neutral:
 
-* `runtime/src/vulkan_replay.h` — `unresolved_at(site, id, extra)` replaces the draw-path `unresolved_resource`
+* `port/src/vulkan_replay.h` — `unresolved_at(site, id, extra)` replaces the draw-path `unresolved_resource`
   returns; it prints the first three occurrences per site (`draw.pipeline`, `draw.render_target`, `draw.depth`,
   `draw.vertex_buffer`, `draw.vertex_zero_page`, `draw.index_buffer`, `draw.index_zero_page`) and then counts
   silently. `PALMETTO_REPLAY_MISS=0` silences it.
-* `runtime/src/vulkan_backend.h` — the first misses of the graphics/compute pipeline maps and of `buffer_at` print
+* `port/src/vulkan_backend.h` — the first misses of the graphics/compute pipeline maps and of `buffer_at` print
   the id/VA they could not resolve; a list refused in `prepare` prints its index, the `ReplayResult` value and its
   command count; `mark_device_lost()` and a non-`VK_SUCCESS` `vkQueueSubmit` print one line (first three only).
 

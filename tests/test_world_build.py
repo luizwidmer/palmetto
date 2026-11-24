@@ -3,11 +3,11 @@
     python -I tests/test_world_build.py -v
 
 Covers:
-  - tools/dds_png.py     (DDS header parsing, BGRA8/RGBA8/BGRX8/BC1/BC2/BC3/BC4/BC5, downscale, PNG encoder)
-  - tools/glb_writer.py  (OBJ parser, bounds, binary glTF 2.0 writer, texture dedup, 32-bit indices, summary)
-  - tools/world_build.py (manifest discovery, TTPF indexing, texture resolution, spatial/grid/no-tex/limit builds,
+  - tooling/dds_png.py     (DDS header parsing, BGRA8/RGBA8/BGRX8/BC1/BC2/BC3/BC4/BC5, downscale, PNG encoder)
+  - tooling/glb_writer.py  (OBJ parser, bounds, binary glTF 2.0 writer, texture dedup, 32-bit indices, summary)
+  - tooling/world_build.py (manifest discovery, TTPF indexing, texture resolution, spatial/grid/no-tex/limit builds,
                           --base-color-param selection with GLB pixel readback)
-  - viewer/serve.py      (safe_world_path traversal hardening)
+  - app/serve.py      (safe_world_path traversal hardening)
 
 Every texture, mesh, manifest, and archive layout is generated synthetically in memory or a temporary directory.
 """
@@ -30,8 +30,8 @@ import zlib
 from http.server import HTTPServer, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
-VIEWER = os.path.join(ROOT, "viewer")
+TOOLS = os.path.join(ROOT, "tooling")
+VIEWER = os.path.join(ROOT, "app")
 
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
@@ -45,7 +45,7 @@ def _load_viewer_serve():
     path = os.path.join(VIEWER, "serve.py")
     spec = importlib.util.spec_from_file_location("viewer_serve_under_test", path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load viewer/serve.py from {path}")
+        raise ImportError(f"cannot load app/serve.py from {path}")
     mod = importlib.util.module_from_spec(spec)
     sys.modules["viewer_serve_under_test"] = mod
     spec.loader.exec_module(mod)
@@ -60,7 +60,7 @@ viewer_serve = _load_viewer_serve()
 # ---------------------------------------------------------------------------
 
 def make_bgra8_dds(width: int, height: int, rgba_pixels: bytes) -> bytes:
-    """Build a legacy 32-bit BGRA8 DDS matching tools/arc9dump/Program.cs Util.BgraDds."""
+    """Build a legacy 32-bit BGRA8 DDS matching tooling/arc9dump/Program.cs Util.BgraDds."""
     assert len(rgba_pixels) == width * height * 4
     bgra = bytearray(len(rgba_pixels))
     for i in range(0, len(rgba_pixels), 4):
@@ -345,7 +345,7 @@ def read_accessor_indices(gltf: dict, bin_data: bytes, acc_idx: int) -> list[int
 
 
 # ---------------------------------------------------------------------------
-# 1. tools/dds_png.py tests
+# 1. tooling/dds_png.py tests
 # ---------------------------------------------------------------------------
 
 class DdsPngTest(unittest.TestCase):
@@ -703,7 +703,7 @@ class DdsPngTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 2. tools/glb_writer.py tests
+# 2. tooling/glb_writer.py tests
 # ---------------------------------------------------------------------------
 
 class GlbWriterTest(unittest.TestCase):
@@ -1002,7 +1002,7 @@ class GlbWriterTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 3. tools/world_build.py tests
+# 3. tooling/world_build.py tests
 # ---------------------------------------------------------------------------
 
 def _cube_obj(cx: float, cy: float, cz: float, half: float = 1.0, groups: int = 1) -> str:
@@ -1465,7 +1465,7 @@ class WorldBuildTest(unittest.TestCase):
         return snapshot
 
     def test_compute_spawn_keeps_large_chunks_within_viewer_load_radius(self):
-        load_radius = 1400.0  # viewer/index.html LOAD_R
+        load_radius = 1400.0  # app/index.html LOAD_R
         floor = [{"bounds": [x, -2.0, -7000.0, x + 4000.0, 0.0, -3000.0]} for x in (1000.0, 5000.0, 9000.0)]
         tower = [{"bounds": [-500.0, 0.0, -500.0, -490.0, 3000.0, -490.0]}]
         for chunks, b in ((floor, floor[1]["bounds"]), (tower, tower[0]["bounds"])):
@@ -2070,7 +2070,7 @@ world_build.build_world(assets, output)
 
 
 # ---------------------------------------------------------------------------
-# 4. viewer/serve.py tests
+# 4. app/serve.py tests
 # ---------------------------------------------------------------------------
 
 class ViewerServeTest(unittest.TestCase):

@@ -16,7 +16,7 @@ Architecture:
       * Output modifiers: clamp (clamps result to [0.0, 1.0]), omod (mul:2, mul:4, div:2).
 
 Translator-backed cases (SHADER-1039): a hand-written pixel-shader listing goes through
-tools/rdna2spirv.py and is executed with tests/semantic/spirv_mini_interp.py. The lowering is pure 32-bit
+tooling/rdna2spirv.py and is executed with tests/semantic/spirv_mini_interp.py. The lowering is pure 32-bit
 integer work, so that interpreter can run it and the module carries no OpCapability Float64. The expected
 words there are written by hand from the rules above, never taken from the oracle below, so a rule the
 translator and the oracle share cannot hide a mistake.
@@ -38,7 +38,7 @@ TESTS_DIR = os.path.dirname(HERE)
 for _p in (HERE, TESTS_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
-# The translator-backed cases at the end run a hand-written listing through tools/rdna2spirv.py, so the
+# The translator-backed cases at the end run a hand-written listing through tooling/rdna2spirv.py, so the
 # file is a translator regression test and not only a private oracle (SHADER-1039).
 from support import mrt0_words, translate_lines  # noqa: E402  (tests/semantic is sys.path, see above)
 import rdna2spirv  # noqa: E402
@@ -1555,7 +1555,7 @@ class TestValuLdexpF64Oracle(unittest.TestCase):
 
 
 # --- translator-backed cases (SHADER-1039) -------------------------------------------------------
-# Each case translates a hand-written pixel shader with tools/rdna2spirv.py and runs it through
+# Each case translates a hand-written pixel shader with tooling/rdna2spirv.py and runs it through
 # tests/semantic/spirv_mini_interp.py; the expected word is the rule above applied by hand.
 
 

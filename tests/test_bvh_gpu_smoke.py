@@ -1,4 +1,4 @@
-"""tools/bvh_gpu_smoke.py without a GPU or game files: the heap image, the word count and the judging of runs, with
+"""tooling/bvh_gpu_smoke.py without a GPU or game files: the heap image, the word count and the judging of runs, with
 a fake vk_compute_test in place of the real one."""
 import struct
 import sys
@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tooling"))
 
 import bvh_gpu_smoke as smoke  # noqa: E402
 

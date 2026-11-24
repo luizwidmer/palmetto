@@ -16,7 +16,7 @@ from unittest import mock
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "navmesh_index.py")
+TOOL = os.path.join(ROOT, "tooling", "navmesh_index.py")
 KEY = 0x8A2D3FF3DF663960
 FIELD68 = 141492
 

@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/skinned_glb.py.
+"""Synthetic tests for tooling/skinned_glb.py.
 
     python -I tests/test_skinned_glb.py
 
@@ -18,7 +18,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import glb_writer  # noqa: E402
 import skinned_glb  # noqa: E402
@@ -697,7 +697,7 @@ class SkinnedGlbTest(unittest.TestCase):
 
     def test_cli_returns_nonzero_for_bad_input(self):
         result = subprocess.run(
-            [sys.executable, "-I", os.path.join(ROOT, "tools", "skinned_glb.py"),
+            [sys.executable, "-I", os.path.join(ROOT, "tooling", "skinned_glb.py"),
              os.path.join(self.root, "out.glb"), "--skeleton", self.root,
              "--component", self.root],
             capture_output=True, text=True, check=False,
@@ -714,7 +714,7 @@ class SkinnedGlbTest(unittest.TestCase):
 
     def _run_cli(self, skeleton, component):
         return subprocess.run(
-            [sys.executable, "-I", os.path.join(ROOT, "tools", "skinned_glb.py"),
+            [sys.executable, "-I", os.path.join(ROOT, "tooling", "skinned_glb.py"),
              os.path.join(self.root, "out.glb"), "--skeleton", skeleton, "--component", component],
             capture_output=True, text=True, check=False,
         )
@@ -790,7 +790,7 @@ class SkinnedGlbTest(unittest.TestCase):
                  "component buffer")):
             with self.subTest(victim=key):
                 result = subprocess.run(
-                    [sys.executable, "-I", os.path.join(ROOT, "tools", "skinned_glb.py")] + argv,
+                    [sys.executable, "-I", os.path.join(ROOT, "tooling", "skinned_glb.py")] + argv,
                     capture_output=True, text=True, check=False,
                 )
                 self.assertNotEqual(result.returncode, 0)
@@ -800,7 +800,7 @@ class SkinnedGlbTest(unittest.TestCase):
         alt = os.path.join(component, "MODEL.JSON")
         if os.path.exists(alt):     # case-insensitive volume: MODEL.JSON is model.json, so it must refuse
             result = subprocess.run(
-                [sys.executable, "-I", os.path.join(ROOT, "tools", "skinned_glb.py"), alt,
+                [sys.executable, "-I", os.path.join(ROOT, "tooling", "skinned_glb.py"), alt,
                  "--skeleton", skeleton, "--component", component],
                 capture_output=True, text=True, check=False,
             )
@@ -821,7 +821,7 @@ class SkinnedGlbTest(unittest.TestCase):
                                   os.path.join(component, "buffers", "01_0.bin"))}
         out = os.path.join(self.root, "out.glb")
         result = subprocess.run(
-            [sys.executable, "-I", os.path.join(ROOT, "tools", "skinned_glb.py"), out,
+            [sys.executable, "-I", os.path.join(ROOT, "tooling", "skinned_glb.py"), out,
              "--skeleton", skeleton, "--component", component],
             capture_output=True, text=True, check=False,
         )
@@ -850,7 +850,7 @@ class SkinnedGlbTest(unittest.TestCase):
 
         out = os.path.join(component, "buffers", "export.glb")
         result = subprocess.run(
-            [sys.executable, "-I", os.path.join(ROOT, "tools", "skinned_glb.py"), out,
+            [sys.executable, "-I", os.path.join(ROOT, "tooling", "skinned_glb.py"), out,
              "--skeleton", skeleton, "--component", component],
             capture_output=True, text=True, check=False,
         )

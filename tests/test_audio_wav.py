@@ -19,10 +19,10 @@ from unittest import mock
 import wave
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "audio_wav.py")
+TOOL = os.path.join(ROOT, "tooling", "audio_wav.py")
 FFMPEG = shutil.which("ffmpeg")
 
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 import audio_wav  # noqa: E402
 import awc_opus  # noqa: E402

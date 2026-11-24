@@ -6,7 +6,7 @@ RDNA2 ISA, "Data Share Instructions": ds_wrxchg_rtn_b32 vdst, vaddr, vdata is th
 old dword at (vaddr + offset) / 4 and the dword becomes vdata. There is no plain (non-returning) form of the
 single-dword exchange.
 
-Each case is a compute shader translated by tools/rdna2spirv.py (support.translate_lines) and run in
+Each case is a compute shader translated by tooling/rdna2spirv.py (support.translate_lines) and run in
 tests/semantic/spirv_mini_interp.py (one lane: that interpreter does not share LDS between lanes, see lds_run.py).
 It writes a few LDS dwords, runs exchanges on them and stores each returned value and the final dwords. The tables
 are written out by hand; seeded random sequences are checked against a plain-Python LDS. Until this file, the LDS
@@ -18,7 +18,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import lds_run as L  # noqa: E402  (also puts tools/ on sys.path)
+import lds_run as L  # noqa: E402  (also puts tooling/ on sys.path)
 import rdna2spirv  # noqa: E402
 import support  # noqa: E402
 

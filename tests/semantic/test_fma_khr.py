@@ -16,7 +16,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 sys.path.insert(0, TOOLS_DIR)
 sys.path.insert(0, HERE)
 
@@ -75,7 +75,7 @@ class FmaKhrTests(unittest.TestCase):
         self.assertIn("%glsl Fma", translate(mix, False))
 
     def test_both_forms_give_the_exact_fused_words(self):
-        want = [0x33800000, 0x33800000, 0x33800000, 0x33800000]     # 2^-24, see runtime/test/shaders/cs_fma_fused.asm
+        want = [0x33800000, 0x33800000, 0x33800000, 0x33800000]     # 2^-24, see port/test/shaders/cs_fma_fused.asm
         for ops, expect in zip(F32_FMA_OPS, want):
             for khr in (False, True):
                 with self.subTest(op=ops[2], khr=khr):

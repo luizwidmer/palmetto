@@ -18,7 +18,7 @@ import sys
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(os.path.dirname(os.path.dirname(HERE)), "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(os.path.dirname(os.path.dirname(HERE)), "tooling")
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)

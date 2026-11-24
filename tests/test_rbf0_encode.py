@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/rbf0_encode.py.
+"""Synthetic tests for tooling/rbf0_encode.py.
 
     python -I tests/test_rbf0_encode.py
 
@@ -16,7 +16,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import rbf0_encode  # noqa: E402
 import rbf0_tree  # noqa: E402
@@ -367,7 +367,7 @@ class Cli(unittest.TestCase):
         with open(report, "w", encoding="utf-8", newline="\n") as f:
             json.dump({"tool": "rbf0_tree", "resources": docs}, f)
         out_dir = os.path.join(self.tmp.name, "surrogate-out")
-        result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "rbf0_encode.py"),
+        result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "rbf0_encode.py"),
                                  report, out_dir], capture_output=True, text=True)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("2 resource(s) written, 3 refused", result.stdout)
@@ -385,7 +385,7 @@ class Cli(unittest.TestCase):
         with open(report, "rb") as f:
             before = f.read()
         out_dir = os.path.join(self.tmp.name, "refused-out")
-        result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "rbf0_encode.py"),
+        result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "rbf0_encode.py"),
                                  report, out_dir], capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("0 resource(s) written, 1 refused", result.stdout)

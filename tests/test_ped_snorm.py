@@ -15,7 +15,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tooling"))
 import glb_skinning
 import ped_assemble as pa
 
@@ -107,7 +107,7 @@ class SignedNormalizedPedTests(unittest.TestCase):
 
     def assemble(self, data):
         self.source.write_bytes(data)
-        run = subprocess.run([sys.executable, "-I", str(ROOT / "tools" / "ped_assemble.py"),
+        run = subprocess.run([sys.executable, "-I", str(ROOT / "tooling" / "ped_assemble.py"),
                               "assemble", str(self.source), "-o", str(self.output), "--no-standing-offset"],
                              capture_output=True, text=True, timeout=30)
         self.assertEqual(run.returncode, 0, run.stderr)

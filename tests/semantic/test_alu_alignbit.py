@@ -20,7 +20,7 @@ Properties verified:
       - S1 == 0:  logical shift left of S0 by (32 - shift) for shift in 1..31.
   * Operand encoding forms: VGPR, SGPR, and inline integer constant shift counts.
   * Dual execution paths:
-      1. RDNA2 assembly parsed and translated to SPIR-V via tools/rdna2spirv.py,
+      1. RDNA2 assembly parsed and translated to SPIR-V via tooling/rdna2spirv.py,
          then evaluated in tests/semantic/spirv_mini_interp.py.
       2. Isolated SPIR-V instruction sequence emitted for v_alignbit_b32 to check
          shift guard safety ((32 - m) & 31) against SPIR-V undefined shift rules.
@@ -36,7 +36,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

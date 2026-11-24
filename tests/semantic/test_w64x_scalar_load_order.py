@@ -5,7 +5,7 @@ before the wave's `s_load` of the same address. Under `--wave64-emulate` the two
 32-wide subgroups, which order memory only at the barrier between rounds (docs/design.md, "Wave64 emulation"). Until
 #1587 a scalar load was not one of the accesses `Gen.x_memory_order` cuts a round at, so a store and a later scalar
 load of the same wave sat in one segment, and the other half could load before this half had stored:
-`tools/valu_fuzz.py --family mem --emulate` found lanes 32-63 reading the buffer's fill pattern after an
+`tooling/valu_fuzz.py --family mem --emulate` found lanes 32-63 reading the buffer's fill pattern after an
 `s_buffer_load` / `s_load` of the slot lane 0 had just written (the slot comes from `v_readfirstlane_b32`, which
 the emulation already reads over the whole wave).
 
@@ -24,7 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)  # python -I leaves the script's folder off sys.path
 
-import support  # noqa: E402  (support puts tools/ on sys.path, honouring PALMETTO_TOOLS_DIR)
+import support  # noqa: E402  (support puts tooling/ on sys.path, honouring PALMETTO_TOOLS_DIR)
 
 rdna2spirv = support.rdna2spirv
 

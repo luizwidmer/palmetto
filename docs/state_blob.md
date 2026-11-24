@@ -12,7 +12,7 @@ explicit, logged `documented_default_state()` stand-in (docs/graphics_pso.md sec
 listed in section 8.
 
 The blobs were read from the reassembled pipeline library the shader toolchain already produces
-(`tools/shader_library.py --save`), outside the repository: 25,471 graphics records each name a state blob from the
+(`tooling/shader_library.py --save`), outside the repository: 25,471 graphics records each name a state blob from the
 library's blob table, and those 25,471 references hold 5,680 distinct blobs. Nothing here is game data; the tables
 carry sizes, offsets, counts and decoded structural values only.
 

@@ -1,4 +1,4 @@
-"""CPU test for tools/psocache_usersig.py on a synthetic cache built by this test.
+"""CPU test for tooling/psocache_usersig.py on a synthetic cache built by this test.
 
 The cache has two graphics PSOs. Their stage records name three chunk records: one with SRV/UAV/CBV/sampler
 entries and constants (fits), one with extra slots (fits), and one with 40 constant dwords (does not fit).
@@ -13,7 +13,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "psocache_usersig.py")
+TOOL = os.path.join(ROOT, "tooling", "psocache_usersig.py")
 
 HEADER = 0x80
 GRAPHICS = 2

@@ -2,7 +2,7 @@
 two bytes, rounded up when bit 0 of that byte of S2 is set and down otherwise; bits 7:1 of S2's bytes are ignored and
 no byte can carry into its neighbour (255 + 255 + 1 = 511, shifted 255).
 
-Each case is translated by tools/rdna2spirv.py (support.translate_lines) and executed with
+Each case is translated by tooling/rdna2spirv.py (support.translate_lines) and executed with
 tests/semantic/spirv_mini_interp.py; the expected words are written by hand from that formula and also recomputed by a
 plain-Python reference, with VGPR, SGPR and literal sources and seeded random operands. Standard library only: no GPU,
 no LLVM, no game data. (The old file modelled the instruction in its own classes and never ran the translator;

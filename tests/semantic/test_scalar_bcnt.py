@@ -22,7 +22,7 @@ RDNA2 ISA rules:
     D receives 31 - msb_index (range [0, 31]). If S0 == 0, D receives -1 (0xFFFFFFFF).
     SCC is not modified.
 
-Lowering & Translation (tools/rdna2spirv.py):
+Lowering & Translation (tooling/rdna2spirv.py):
   - s_bcnt0_i32_b32: bitwise NOT of low word, OpBitCount, sets %scc via OpSelect.
   - s_bcnt0_i32_b64: bitwise NOT of both halves, two OpBitCount, OpIAdd, sets %scc.
   - s_ff0_i32_b32: bitwise NOT of source, FindILsb (GLSL.std.450), no SCC store.
@@ -37,7 +37,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)

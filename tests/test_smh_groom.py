@@ -1,4 +1,4 @@
-"""Pure synthetic unit tests for tools/smh_groom.py (no game files, stdlib only).
+"""Pure synthetic unit tests for tooling/smh_groom.py (no game files, stdlib only).
 
 Run with:
     python -I tests/test_smh_groom.py
@@ -19,7 +19,7 @@ from unittest import mock
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 

@@ -1,4 +1,4 @@
-"""One joaat rule across tools: every lowercased copy hashes a name as tools/hashdict.py does.
+"""One joaat rule across tools: every lowercased copy hashes a name as tooling/hashdict.py does.
 
     python -I tests/test_joaat_agreement.py
 
@@ -6,7 +6,7 @@ Each tool carries its own copy of Jenkins one-at-a-time, so nothing stopped one 
 the name differently. Two did: audio_config hashed the lowercased UTF-8 bytes, and world_names encoded
 to UTF-8 first and then lower-cased the bytes (bytes.lower() only folds ASCII). Both gave a different
 32-bit hash for any non-ASCII character, which surfaces as a stream id no bank stores or a name hash
-that never resolves, with no error anywhere. This test imports every copy in tools/ and compares it
+that never resolves, with no error anywhere. This test imports every copy in tooling/ and compares it
 with the dictionary the rest of the pipeline is pinned to.
 
 Synthetic names only; no game data.
@@ -17,7 +17,7 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 for path in (ROOT, TOOLS):
     if path not in sys.path:
         sys.path.insert(0, path)
@@ -39,7 +39,7 @@ EXPECTED = ("anim_index", "audio_config", "awc_names", "hashdict", "mission_tabl
 def string_hash_copies():
     """{module name: function} for every ``def joaat(``/``def joaat32(`` that takes a string.
 
-    ``tools/save_keys.py`` defines ``joaat(data, seed=0)`` over bytes with a seed for the composition
+    ``tooling/save_keys.py`` defines ``joaat(data, seed=0)`` over bytes with a seed for the composition
     probe; it is a different hash and is covered by tests/test_save_keys.py.
     """
     copies = {}

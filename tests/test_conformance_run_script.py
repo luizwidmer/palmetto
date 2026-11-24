@@ -1,8 +1,8 @@
-"""tools/conformance/native/scripts/run.ps1 deletes only what a run wrote: it checks the renderer is built before
+"""tooling/conformance/native/tooling/scripts/run.ps1 deletes only what a run wrote: it checks the renderer is built before
 touching -Output, and refuses (exit 2) an -Output that is a file, a link or junction, or a folder holding anything
 but <scene>.png and manifest.json. Before, `Remove-Item $Output -Recurse -Force` ran first on whatever was passed.
 
-The script runs from a copy of tools/conformance/native in a temporary folder, with where.exe standing in for
+The script runs from a copy of tooling/conformance/native in a temporary folder, with where.exe standing in for
 conform_native.exe: it exits at once and writes nothing, which is all these checks need. Windows only."""
 import os
 from pathlib import Path
@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "conformance" / "native" / "scripts" / "run.ps1"
+SCRIPT = Path(__file__).resolve().parents[1] / "tooling" / "conformance" / "native" / "tooling/scripts" / "run.ps1"
 STAND_IN = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "where.exe"
 
 
@@ -23,10 +23,10 @@ class RunScriptTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
-        native = self.base / "tools" / "conformance" / "native"
-        (native / "scripts").mkdir(parents=True)
-        shutil.copy(SCRIPT, native / "scripts" / "run.ps1")
-        self.script = native / "scripts" / "run.ps1"
+        native = self.base / "tooling" / "conformance" / "native"
+        (native / "tooling/scripts").mkdir(parents=True)
+        shutil.copy(SCRIPT, native / "tooling/scripts" / "run.ps1")
+        self.script = native / "tooling/scripts" / "run.ps1"
         self.exe = native / "build" / "Release" / "conform_native.exe"
 
     def build(self):

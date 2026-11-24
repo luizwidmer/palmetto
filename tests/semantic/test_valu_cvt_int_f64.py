@@ -1,4 +1,4 @@
-"""v_cvt_i32_f64 and v_cvt_u32_f64 are not implemented in tools/rdna2spirv.py. v_cvt_f64_i32 and v_cvt_f64_u32 are
+"""v_cvt_i32_f64 and v_cvt_u32_f64 are not implemented in tooling/rdna2spirv.py. v_cvt_f64_i32 and v_cvt_f64_u32 are
 since #2521, and tests/semantic/test_int32_to_f64.py runs them through the translator.
 
 The previous version of this file tested a private Python model of the four conversions and never called the

@@ -33,14 +33,14 @@ El proyecto está en una fase inicial: **el juego todavía no arranca**.
 - [SDK de Vulkan](https://vulkan.lunarg.com/) (`spirv-as`, `spirv-val` y `vulkaninfo`).
 - [LLVM 21+](https://github.com/llvm/llvm-project/releases) con el **destino AMDGPU** (`llvm-mc`):
   - La versión oficial de LLVM para Windows **no incluye** el destino AMDGPU.
-  - Para compilar un `llvm-mc.exe` nativo con ese destino, ejecute `.\scripts\build_llvm_mc.ps1` en PowerShell
+  - Para compilar un `llvm-mc.exe` nativo con ese destino, ejecute `.\tooling/scripts\build_llvm_mc.ps1` en PowerShell
     desde la raíz del repositorio. El script necesita `git` y las herramientas de C++ de Visual Studio. Define
     `LLVM_MC` para su usuario: abra después un terminal nuevo para que la variable se aplique.
   - Si usa [conda](https://docs.conda.io/), `conda install -c conda-forge llvm-tools` ofrece una alternativa cuyo
     paquete para Windows incluye AMDGPU. Con el entorno activado, `where.exe llvm-mc` muestra la ruta del
     ejecutable; asigne esa ruta completa a `LLVM_MC`.
   - Con WSL, instale `llvm-21` en Ubuntu y pase el comando completo a `LLVM_MC`, en la sesión de PowerShell
-    donde vaya a ejecutar `make_game.py`:
+    donde vaya a ejecutar `build_port.py`:
 
     ```powershell
     $env:LLVM_MC = 'wsl -d Ubuntu -e /usr/lib/llvm-21/bin/llvm-mc'
@@ -86,18 +86,18 @@ El runtime accede al paquete en su ubicación original. Si la unidad del paquete
 Conserve los archivos `.s` de `work/shaders/dxbc/disasm`: la siguiente ejecución los compara con la lista de `disasm.done` y vuelve a desensamblar los que faltan (todos los de una carpeta cuyo `disasm.done` sea anterior a esa lista) y después traduce todos los shaders de nuevo. Borrarlos junto con `work/shaders/spirv/index.json` puede hacer que la etapa de shaders parezca terminada con cero shaders.
 Si la etapa necesita vaciar `disasm`, rechazará esa carpeta cuando sea un enlace simbólico.
 
-### Desde un terminal (`make_game.py`)
+### Desde un terminal (`build_port.py`)
 
 ```powershell
-python -I make_game.py --find                          # enumera las copias encontradas en este PC
-python -I make_game.py --pick                          # elige la carpeta mediante un diálogo
-python -I make_game.py --check                         # verifica su copia, sin compilar nada
-python -I make_game.py --check --full-check            # también comprueba los SHA-256 de todos los archivos (lento)
-python -I make_game.py --game "D:\ruta\al\paquete" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
-python -I make_game.py --stages check,shaders,runtime   # sin la exportación de recursos (unos 30 GB)
-python -I make_game.py --stages shaders,assets         # solo algunas etapas
-python -I make_game.py --game "D:\ruta\al\paquete" --wav  # además decodifica el Opus a WAV PCM (ocupa mucho)
-python -I make_game.py --wave64-emulate off            # auto (predeterminado), on u off
+python -I build_port.py --find                          # enumera las copias encontradas en este PC
+python -I build_port.py --pick                          # elige la carpeta mediante un diálogo
+python -I build_port.py --check                         # verifica su copia, sin compilar nada
+python -I build_port.py --check --full-check            # también comprueba los SHA-256 de todos los archivos (lento)
+python -I build_port.py --game "D:\ruta\al\paquete" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
+python -I build_port.py --stages check,shaders,runtime   # sin la exportación de recursos (unos 30 GB)
+python -I build_port.py --stages shaders,assets         # solo algunas etapas
+python -I build_port.py --game "D:\ruta\al\paquete" --wav  # además decodifica el Opus a WAV PCM (ocupa mucho)
+python -I build_port.py --wave64-emulate off            # auto (predeterminado), on u off
 ```
 
 Las etapas se ejecutan en este orden: `check` → `shaders` → `assets` → `runtime` → `pipelines`.
@@ -148,23 +148,23 @@ carpeta de trabajo es anterior a ese registro, vuelve a desensamblar y traducir,
 También registra los archivos fuente del traductor; un cambio en ellos repite la traducción a partir del
 desensamblado guardado.
 
-Para modelos y texturas registra el commit de `third_party/arc9-explorer` y el código de `tools/arc9dump`. Cuando
+Para modelos y texturas registra el commit de `vendor/arc9-explorer` y el código de `tooling/arc9dump`. Cuando
 cambia ese decodificador, elimina la exportación de cada archivo afectado y la genera de nuevo. Las carpetas
 antiguas sin esos registros necesitan repetir una vez la traducción o la exportación correspondiente.
 
 ### Linux y Wine/Proton
 
-`make_game.py` también funciona en Linux. Las herramientas de diagnóstico Vulkan se compilan de forma nativa
+`build_port.py` también funciona en Linux. Las herramientas de diagnóstico Vulkan se compilan de forma nativa
 con CMake 3.24+, un compilador C++20 y las cabeceras y el cargador de Vulkan:
 
 ```sh
-cmake -S runtime -B runtime/build/linux
-cmake --build runtime/build/linux --parallel
-./runtime/build/linux/vk_pipeline_check /ruta/a/spirv
+cmake -S runtime -B port/build/linux
+cmake --build port/build/linux --parallel
+./port/build/linux/vk_pipeline_check /ruta/a/spirv
 ```
 
 El último comando recibe la carpeta que contiene `index.json` y los shaders traducidos. La etapa `pipelines`
-usa `vk_pipeline_check` de `runtime/build/linux` o `runtime/build`, y lo compila antes de iniciar el resto del
+usa `vk_pipeline_check` de `port/build/linux` o `port/build`, y lo compila antes de iniciar el resto del
 trabajo si falta.
 
 El cargador es un programa de Windows y se ejecuta bajo Wine o Proton. En Linux la etapa `runtime` puede
@@ -185,21 +185,21 @@ descomprimido. Así evita compilar el runtime; la misma opción funciona en Wind
 - **`--work`**: elija un disco con al menos 400 GB libres. La traducción de shaders es la etapa más larga; por
   defecto usa la mitad de los hilos del procesador (ajustable con `--jobs`).
 - **`--wav`**: desactivado por defecto, porque el WAV PCM de 16 bits ocupa varias veces más que el Ogg Opus.
-- **Linux y Wine/Proton**: `make_game.py` también funciona en Linux. El cargador es un programa de Windows y se
+- **Linux y Wine/Proton**: `build_port.py` también funciona en Linux. El cargador es un programa de Windows y se
   ejecuta bajo Wine o Proton. Para la etapa `runtime` puede pasar `--runtime-build <carpeta>` con una compilación
   de Windows (`palmetto.exe` y `palmetto_tls_host.dll`): el script escribe entonces `palmetto.sh`, que lanza
   `palmetto.exe` con `wine`, o con el Wine indicado por la variable `WINE` (para Proton, su `files/bin/wine`).
 
 ## Problemas habituales
 
-- **Usó «Download ZIP» en GitHub**: el ZIP no contiene el submódulo `third_party/arc9-explorer`. Use
+- **Usó «Download ZIP» en GitHub**: el ZIP no contiene el submódulo `vendor/arc9-explorer`. Use
   `git clone --recursive`, o ejecute `git submodule update --init --recursive` en la carpeta del repositorio.
 - **`llvm-mc` rechaza `gfx1013` o el destino AMDGPU**: probablemente usa el instalador oficial de LLVM para
-  Windows. Ejecute `scripts\build_llvm_mc.ps1`, o apunte `LLVM_MC` al `llvm-mc` de WSL (`llvm-21`).
+  Windows. Ejecute `tooling/scripts\build_llvm_mc.ps1`, o apunte `LLVM_MC` al `llvm-mc` de WSL (`llvm-21`).
 - **CMake se detiene en «needs the Windows SDK 10.0.26100 or newer»**, o MSVC indica que `Desc_1_2` no es miembro
   de `D3D12_VERSIONED_ROOT_SIGNATURE_DESC`: actualice el SDK de Windows a `10.0.26100` o superior, con el
   Instalador de Visual Studio o con `winget install Microsoft.WindowsSDK.10.0.26100`, y luego borre
-  `runtime/build` y repita la configuración.
+  `port/build` y repita la configuración.
 - **Se quedó sin espacio en `C:`**: pase `--work "D:\palmetto-work"` para situar los archivos temporales en otra
   unidad; también puede cambiar `--out` u omitir `assets` con `--stages check,shaders,runtime` (unos 30 GB).
 - **Windows se niega a lanzar los programas de prueba recién compilados** («An Application Control policy has

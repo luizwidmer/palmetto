@@ -1,4 +1,4 @@
-"""Known-answer tests for tools/cpu_ref.py.
+"""Known-answer tests for tooling/cpu_ref.py.
 
 These use hand-written .s listings, so they need no llvm-mc, SPIR-V tools, GPU or game data.
 
@@ -14,7 +14,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import cpu_ref  # noqa: E402
 

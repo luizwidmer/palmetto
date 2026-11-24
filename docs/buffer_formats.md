@@ -3,8 +3,8 @@
 What `buffer_load_format_*`, `buffer_store_format_*` and `tbuffer_load_format_*` do for each GFX10 buffer data format
 (V# word 3 `FORMAT` [18:12], or the `format:` modifier of an MTBUF instruction), measured on a Radeon 880M and on a real RDNA2
 (gfx1036) and held against the translator. The contract row is "Typed buffer formats" in [design.md](design.md); the code is
-`Gen.FORMATS`, `Gen.decode_format` and `Gen.encode_format` in `tools/rdna2spirv.py`; the oracle is
-`tools/buffer_format_fuzz.py`.
+`Gen.FORMATS`, `Gen.decode_format` and `Gen.encode_format` in `tooling/rdna2spirv.py`; the oracle is
+`tooling/buffer_format_fuzz.py`.
 
 **Where it was measured.** Locally only on the Radeon 880M (gfx1150, RDNA3.5, GFX11), which numbers its formats differently
 (8_8_8_8_UNORM is 56 on GFX10 and 42 on GFX11), so every format there is mapped by name (`GFX11_CODES` in the tool, taken from
@@ -16,7 +16,7 @@ console's own gfx1013 (GFX10.1) is the same generation but not the same chip, an
 
 ## Which codes there are
 
-GFX10's `FORMAT` is 7 bits, so a buffer can carry codes 1..77 (the table in `tools/gfx10_formats.json` goes to 292
+GFX10's `FORMAT` is 7 bits, so a buffer can carry codes 1..77 (the table in `tooling/gfx10_formats.json` goes to 292
 because images use 9 bits; 128 and up are image-only: sRGB, BC, depth, 5_6_5, 1_5_5_5, 5_5_5_1, 4_4_4_4, 5_9_9_9, 6E4).
 There are no 5_6_5-style formats for buffers. **All 77 are in `Gen.FORMATS`**: every f32/u32/i32 code, the 8/16-bit and
 8_8/16_16/8_8_8_8/16_16_16_16 families in all of UNORM, SNORM, USCALED, SSCALED, UINT, SINT (and FLOAT for 16-bit), the
@@ -72,7 +72,7 @@ the identity and the B/R swap (`zyxw`, the 8_8_8_8 and 2_10_10_10 UNORM case the
 
 ## What ran
 
-`python -I tools/buffer_format_fuzz.py --oracle hw --budget 40 --seed 7` (loads and stores, V# and tbuffer, stores as `_xyzw` and
+`python -I tooling/buffer_format_fuzz.py --oracle hw --budget 40 --seed 7` (loads and stores, V# and tbuffer, stores as `_xyzw` and
 `_xy` with a different value in every register, and for the two-component formats once more with the runtime's X,Y,0,1 selectors):
 
 - **Radeon 880M (gfx1150):** 1,390,400 validated elements, 0 mismatches (63 formats; the table below).

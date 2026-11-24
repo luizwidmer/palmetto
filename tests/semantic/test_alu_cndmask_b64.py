@@ -1,7 +1,7 @@
 """64-bit conditional select on RDNA2: there is no `v_cndmask_b64`; a 64-bit select is two v_cndmask_b32, low and high
 dword, under the same condition bit (D = cond ? S1 : S0 per lane, for the lane's bit of VCC or of an SGPR mask).
 
-Each case is translated by tools/rdna2spirv.py (support.translate_lines) and executed with
+Each case is translated by tooling/rdna2spirv.py (support.translate_lines) and executed with
 tests/semantic/spirv_mini_interp.py (one lane: the translator models a lane mask as that lane's own bit, 0 or 1); the expected words are
 written by hand, and seeded random 64-bit operands are checked against a plain-Python select. `v_cndmask_b64` itself
 stays Unsupported rather than guessed. Standard library only: no GPU, no LLVM, no game data. (The old file ran its own

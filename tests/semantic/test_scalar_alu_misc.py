@@ -8,12 +8,12 @@ Covers:
   * s_cmp_lg_u64    SCC = (S0.u64 != S1.u64)
 
 Each end-to-end test constructs a hand-written RDNA2 disassembly listing, translates it
-with tools/rdna2spirv.py, executes the resulting SPIR-V with tests/semantic/spirv_mini_interp.py
+with tooling/rdna2spirv.py, executes the resulting SPIR-V with tests/semantic/spirv_mini_interp.py
 (run_fragment for single-invocation tests, run_workgroup for wave32/wave64 lane-mask tests),
 and checks the exported words against hand-computed constants and plain-Python ISA references.
 
-Translator finding (s_cselect_b64 in tools/rdna2spirv.py, lines 3564-3570, 1922-1946):
-  tools/rdna2spirv.py unconditionally lowers s_cselect_b64 through mask_src() and mask_dst()
+Translator finding (s_cselect_b64 in tooling/rdna2spirv.py, lines 3564-3570, 1922-1946):
+  tooling/rdna2spirv.py unconditionally lowers s_cselect_b64 through mask_src() and mask_dst()
   (its 1-dword-per-lane wave-mask representation) without checking holds_lane_mask(), unlike
   s_cmp_eq_u64/s_cmp_lg_u64 (lines 3157-3173), s_mov_b64 (lines 426-451), and s_wqm_b64
   (lines 1864-1909). As a result:
@@ -182,7 +182,7 @@ _CS_FSSM_DIR = None
 
 
 def _fssm_blob(rsrc2: int, group: tuple[int, int, int]) -> bytes:
-    """Build the minimal FSSM header words read by tools/rdna2spirv.py for compute shaders."""
+    """Build the minimal FSSM header words read by tooling/rdna2spirv.py for compute shaders."""
     hdr = bytearray(0x148)
     struct.pack_into("<4I", hdr, 0x138, rsrc2, *group)
     return bytes(hdr)
@@ -711,7 +711,7 @@ class TestScalarCmpLgU64(unittest.TestCase):
 class TestScalarCselectB64LaneMasks(unittest.TestCase):
     """End-to-end semantic tests for s_cselect_b64 on uniform 0/-1 masks and wave lane masks.
 
-    Excluded due to translator finding (tools/rdna2spirv.py lines 3564-3570, 1922-1946):
+    Excluded due to translator finding (tooling/rdna2spirv.py lines 3564-3570, 1922-1946):
       64-bit SGPR data pairs with lo != hi and non-mask constants (anything other than 0 or -1)
       are miscompiled by mask_src()/mask_dst(), which drops the high dword of SGPR pair sources,
       duplicates the low 32-bit result into both destination dwords, and collapses constants to

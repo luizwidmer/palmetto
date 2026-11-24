@@ -1,6 +1,6 @@
 """v_sad_u32 (RDNA2 VOP3): D = |S0 - S1| + S2 on unsigned 32-bit operands, modulo 2^32.
 
-Each case is translated by tools/rdna2spirv.py (support.translate_lines) and executed with
+Each case is translated by tooling/rdna2spirv.py (support.translate_lines) and executed with
 tests/semantic/spirv_mini_interp.py; the expected words are written by hand from the ISA formula and also recomputed
 by a plain-Python reference, with VGPR, SGPR and literal/inline-constant sources and seeded random operands.
 Standard library only: no GPU, no LLVM, no game data. (The old file modelled the instruction in its own classes and

@@ -5,7 +5,7 @@
   v_cmp_o_{f32,f16}: ordered, true when neither source is NaN
   v_cmp_u_{f32,f16}: unordered, true when either source is NaN
 The result goes to VCC (VOPC), to an SGPR mask (VOP3) or, for v_cmpx, to EXEC. Each case translates a synthetic pixel
-shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares lane 0's bit with a
+shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares lane 0's bit with a
 plain-Python reference. The bit leaves through exp as 0x40000000 or 0x40000001 (always a normal float).
 """
 import math
@@ -18,7 +18,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

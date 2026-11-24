@@ -1,6 +1,6 @@
 """Semantic translation tests for RDNA2 16-bit signed add v_add_i16.
 
-Translates a synthetic pixel-shader listing through tools/rdna2spirv.translate()
+Translates a synthetic pixel-shader listing through tooling/rdna2spirv.translate()
 -> SPIR-V -> tests/semantic/spirv_mini_interp.py and compares the result against
 a plain-Python reference: sign-extend both operands to 16 bits, add, mask to 16 bits
 (equivalently (x + y) & 0xFFFF for modular addition).
@@ -24,7 +24,7 @@ import random
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

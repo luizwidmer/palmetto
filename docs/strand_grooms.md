@@ -7,7 +7,7 @@ separately as a **groom LOD resource** consumed by the `smh_*` compute and stran
 This document specifies the measured binary layout of `smh` groom LOD resources, the shader-verified compute
 pipeline (`smh_pose_0_CS_PreSkinSimGuides` and `smh_gen_1_CS_InterpolateStrands`), the exact Class 0 strand
 scattering RNG, barycentric strand interpolation, and aggregate corpus measurements verified with the pure
-standard-library decoder in `tools/smh_groom.py`. No game data or shader disassembly is included.
+standard-library decoder in `tooling/smh_groom.py`. No game data or shader disassembly is included.
 
 ## Pipeline overview
 
@@ -103,7 +103,7 @@ hash, as texture indices use 64-bit hashes):
 - **Slot `4` (`+0xc8`)**: style preset hash (`425` distinct values across the corpus; the most frequent value
   `0x74792000` appears in `968` grooms).
 - **Slot `5` (`+0xcc`)**: part class hash (`30` distinct values across the corpus). Measured classes exposed in
-  `tools/smh_groom.py` (`PART_CLASS_NAMES`):
+  `tooling/smh_groom.py` (`PART_CLASS_NAMES`):
 
 | `+0xcc` hash | Part class | Observed properties |
 |---|---|---|
@@ -119,7 +119,7 @@ hash, as texture indices use 64-bit hashes):
 
 ### System page `+0xe8` half-float style parameters
 
-Decoded by `parse_system_page()` in `tools/smh_groom.py` (IEEE 754 `float16`, little-endian):
+Decoded by `parse_system_page()` in `tooling/smh_groom.py` (IEEE 754 `float16`, little-endian):
 
 | System offset | Field | Meaning |
 |---|---|---|
@@ -184,7 +184,7 @@ Entries inside the nested groom archive (`packs.arc`, offset `0xf10fb000`) sort 
 chains are contiguous, but **`396` split assets** in `packs.arc` enclose **`413` inner assets** (`276` in scalp
 hair, `48` in story-character grooms, `24` in beards, `26` in animals, and `39` across other blocks): the outer
 asset's LOD 0 appears first, followed by one or more inner assets whose names share the outer asset's prefix,
-followed by the outer asset's LODs 1..3. `tools/smh_groom.py` rejoins split chains when `nodes_per_guide`,
+followed by the outer asset's LODs 1..3. `tooling/smh_groom.py` rejoins split chains when `nodes_per_guide`,
 `flags`, bounding boxes (within 3 cm), and class 0/1 strand totals (within `max(12, 5%)`) match and guide count
 strictly decreases.
 
@@ -212,7 +212,7 @@ stub drawable holds one material with a system page of `1,712` or `1,728` bytes 
 
 ## Class 0 RNG and barycentric strand interpolation
 
-`tools/smh_groom.py` implements the exact 32-bit unsigned integer arithmetic of `smh_gen_1_CS_InterpolateStrands`
+`tooling/smh_groom.py` implements the exact 32-bit unsigned integer arithmetic of `smh_gen_1_CS_InterpolateStrands`
 in pure Python standard library code:
 
 ### 1. Scalp triangle selection (4 attempts)
@@ -259,7 +259,7 @@ For each unculled strand on triangle `(g0, g1, g2)` with weights `(b0, b1, b2)`:
 
 ## Measured corpus census
 
-Aggregate counts measured with `python -I tools/smh_groom.py census` across the two package archives that hold
+Aggregate counts measured with `python -I tooling/smh_groom.py census` across the two package archives that hold
 groom resources (other archives such as `data.arc`, `story000`, and `shared_minigame000` hold none):
 
 | Archive | Groom assets | LOD resources | Decode errors | GPU buffer bytes | Class 0 strands | Class 1 strands |
@@ -299,22 +299,22 @@ Additional corpus-wide properties across all 20,046 decoded LODs and 5,751 LOD 0
 | Optional arrays `ext_18`, `ext_1c`, `ext_24`, `node_4`, `node_2`, `+0x3c`, `tail` | Undecoded | Spans are parsed and reported; per-field semantics remain open |
 | Groom-to-item name linking | Partial / encrypted TOC | Groom resources store no per-item marker or name hash, and the nested ARC9 file table is encrypted (see [arc.md](arc.md) and [character_models.md](character_models.md)) |
 
-## CLI usage (`tools/smh_groom.py`)
+## CLI usage (`tooling/smh_groom.py`)
 
-`tools/smh_groom.py` uses only the Python standard library (`python -I`) and reuses the binary glTF 2.0 container
-primitives from `tools/glb_writer.py`. Synthetic unit tests live in `tests/test_smh_groom.py`.
+`tooling/smh_groom.py` uses only the Python standard library (`python -I`) and reuses the binary glTF 2.0 container
+primitives from `tooling/glb_writer.py`. Synthetic unit tests live in `tests/test_smh_groom.py`.
 
 ```powershell
 # Inspect a carved .smh file or an archive member at a byte offset
-python -I tools/smh_groom.py inspect <file.smh> --json
-python -I tools/smh_groom.py inspect <archive.arc> --offset 0x1000
+python -I tooling/smh_groom.py inspect <file.smh> --json
+python -I tooling/smh_groom.py inspect <archive.arc> --offset 0x1000
 
 # Run an aggregate census over one or more archives, carved .smh files, or directories
-python -I tools/smh_groom.py census <archive.arc> --json
+python -I tooling/smh_groom.py census <archive.arc> --json
 
 # Export a groom to glTF 2.0 binary (.glb) as 3-sided tubes, flat ribbons, LINES, or LINE_STRIP
-python -I tools/smh_groom.py export-glb <file.smh> out_tubes.glb --geometry tubes --strands 6000
-python -I tools/smh_groom.py export-glb <file.smh> out_ribbons.glb --geometry ribbons --strands 4000
-python -I tools/smh_groom.py export-glb <file.smh> out_curves.glb --curves --strands 12000
-python -I tools/smh_groom.py export-glb <file.smh> out_strips.glb --geometry line-strip --no-scalp --no-guides
+python -I tooling/smh_groom.py export-glb <file.smh> out_tubes.glb --geometry tubes --strands 6000
+python -I tooling/smh_groom.py export-glb <file.smh> out_ribbons.glb --geometry ribbons --strands 4000
+python -I tooling/smh_groom.py export-glb <file.smh> out_curves.glb --curves --strands 12000
+python -I tooling/smh_groom.py export-glb <file.smh> out_strips.glb --geometry line-strip --no-scalp --no-guides
 ```

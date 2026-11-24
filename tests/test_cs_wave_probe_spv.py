@@ -1,4 +1,4 @@
-"""runtime/test/cs_wave_probe_spv.h is the SPIR-V of runtime/test/glsl/cs_wave_probe.comp (vk_compute_test's
+"""port/test/cs_wave_probe_spv.h is the SPIR-V of port/test/glsl/cs_wave_probe.comp (vk_compute_test's
 subgroup probe). Run: python -I tests/test_cs_wave_probe_spv.py"""
 import os
 import re
@@ -9,8 +9,8 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HEADER = os.path.join(ROOT, "runtime", "test", "cs_wave_probe_spv.h")
-SOURCE = os.path.join(ROOT, "runtime", "test", "glsl", "cs_wave_probe.comp")
+HEADER = os.path.join(ROOT, "port", "test", "cs_wave_probe_spv.h")
+SOURCE = os.path.join(ROOT, "port", "test", "glsl", "cs_wave_probe.comp")
 
 
 def header_words():

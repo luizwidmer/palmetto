@@ -1,4 +1,4 @@
-"""Unit tests for tools/tex_headers.py: DDS header synthesis, mipmap dimension calculations,
+"""Unit tests for tooling/tex_headers.py: DDS header synthesis, mipmap dimension calculations,
 GFX10 format mapping, and texture descriptor parsing from synthetic blobs.
 
     python -I tests/test_tex_headers.py
@@ -17,7 +17,7 @@ from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 

@@ -6,8 +6,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "runtime" / "test" / "shaders"))
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "port" / "test" / "shaders"))
+sys.path.insert(0, str(ROOT / "tooling"))
 
 from compute_fixture import compute_header  # noqa: E402
 from rdna2spirv import translate  # noqa: E402

@@ -290,7 +290,7 @@ mutually exclusive forms:
 | `+0x40..+0x47` | `0` or `0x50000000`-based virtual pointer (`stream +0x50`) | `8` bytes of `0xbb` (`0xbbbbbbbbbbbbbbbb`) |
 | `+0x48..+0x4f` | `8` zero bytes (`stream +0x58..+0x5f`) | `8` zero bytes, followed by `CHKS` (`20` bytes) |
 
-`tools/odrp_7a.py` validates both placements, joins contiguous 16-byte-aligned continuation streams when a
+`tooling/odrp_7a.py` validates both placements, joins contiguous 16-byte-aligned continuation streams when a
 standalone `0x7a` resource or `PSIN` container crosses a stream boundary, and detects unjoined `PSIN` tail
 streams ending with `LRSC` (`88` bytes) + `CHKS` (`20` bytes) after an unread gap. Across the six archives
 in this note plus `script.arc`, `data.arc` and `shared_minigame000.arc`, all 22,235 records validate as
@@ -307,7 +307,7 @@ complete (`0` incomplete):
 | `shared_minigame000.arc` (cross-check) | 860 | 787 (`685` / `102`, 20,339 entities) | 13 | 73 | 3 / 0 |
 
 ```powershell
-python -I tools/odrp_7a.py <archive.arc> <work>\odrp.json
+python -I tooling/odrp_7a.py <archive.arc> <work>\odrp.json
 python -I tests/test_odrp_7a.py
 ```
 
@@ -485,10 +485,10 @@ Both offsets are relative to the start of the system segment. Unsupported or
 inconsistent bindings are reported as unresolved.
 
 ```powershell
-python -I tools/meshlet_page.py <graphics-segment> --draw-system <system-segment> --drawable-offset <offset>
+python -I tooling/meshlet_page.py <graphics-segment> --draw-system <system-segment> --drawable-offset <offset>
 ```
 
-**System-to-graphics model-page join (ASSET-157).** `tools/restofworld_model_join.py` joins model system pages to
+**System-to-graphics model-page join (ASSET-157).** `tooling/restofworld_model_join.py` joins model system pages to
 their owning graphics pages directly from an ARC9 archive or a carved stream directory without the encrypted TOC.
 The earlier 37-model figure came from `arc9dump` at `48557ea`, before `pgDictionary<rmcDrawable>`, optional-pointer
 fragment and zero-radius drawable support (`e293917`; see [models.md](models.md)). Four in-band structural rules
@@ -544,12 +544,12 @@ The join accounts for both page populations in full:
   stream); `core_restofworld001.arc` has `0` model candidates and `0` `42 40 00 00` streams.
 
 ```powershell
-python -I tools/restofworld_model_join.py <archive.arc> <work>\model_join.json
-python -I tools/restofworld_model_join.py <work>\carve\<name> <work>\model_join.csv
+python -I tooling/restofworld_model_join.py <archive.arc> <work>\model_join.json
+python -I tooling/restofworld_model_join.py <work>\carve\<name> <work>\model_join.csv
 python -I tests/test_restofworld_model_join.py -v
 ```
 
-**Component types (full corpus).** `tools/vertex_types.py` (at `1aef69e`, with the running-sum fix to
+**Component types (full corpus).** `tooling/vertex_types.py` (at `1aef69e`, with the running-sum fix to
 `group_edges`) was run over the seven archives that hold target blocks: `data`, `packs`, `levels`, `story000`,
 `core_restofworld`, `shared_minigame000` and `story000_restofworld`. It measures a block only when the
 following meshlet group covers it densely, so it uses **60,442 blocks** (138,929,728 vertices,
@@ -568,7 +568,7 @@ edges, so none of the conclusions below depend on it.
 **Slots 6/7 (tag `0x26`) and 8/9 (tag `0x25`) are skin weights and joint indices.** Where slot 8 holds tag
 `0x25`, each `0x25` slot comes with a `0x26` slot two below it (slot 6 with 8, slot 7 with 9), and no block in
 the sample has one without the other. Read as four unorm8 weights per `0x26` slot and four joint indices per
-`0x25` slot, `skin_checks` in `tools/vertex_types.py` counts, per vertex over all weight slots
+`0x25` slot, `skin_checks` in `tooling/vertex_types.py` counts, per vertex over all weight slots
 (core_restofworld, first 500 streams: 612 blocks, 212,564 vertices; 454 blocks with two pairs, 158 with one):
 
 | Check | Vertices |
@@ -586,7 +586,7 @@ skeleton; which list was not traced here.
 
 Of the 9,321 core_restofworld vertices whose weights do not sum to 255, the twelve most common sums (254
 down to 233) all come from one-pair blocks: a four-influence vertex whose weights fall short, as
-`tools/skin_streams.py` also finds for one packed four-influence population of the drawable skin streams.
+`tooling/skin_streams.py` also finds for one packed four-influence population of the drawable skin streams.
 levels (first 400 streams) has 9 skinned blocks (3,910 vertices), all one pair, and every vertex there
 passes: one weight of 255 on joint 0. The colour control never sums to 255 in either sample.
 
@@ -644,7 +644,7 @@ the surface, which fits the `x / 32767 * f32@0x7C` texture-coordinate reading.
 The mesh shaders fetch it with `tbuffer_load_format_xyzw ... BUF_FMT_2_10_10_10_UNORM` (one of the
 four typed vertex formats they use, in 2,162 of the 9,282 mesh shaders) and map every component by
 `v * 2 - 1`. They transform xyz by the same matrix as the normal and cross it with the normal, scaled by
-w. `tangent_0x27` in `tools/vertex_types.py` is that read: xyz = bits 0-9, 10-19, 20-29 over 1023, and
+w. `tangent_0x27` in `tooling/vertex_types.py` is that read: xyz = bits 0-9, 10-19, 20-29 over 1023, and
 w = bits 30-31 over 3. Per `0x27` slot, `tangent27_checks` counts unit length over all vertices; over
 the sampled triangles it counts vectors perpendicular to the face normal (`|cos| < 0.2`) and, for each
 `0x28` stream, vectors within `cos > 0.8` of `dP/du` and the w side:
@@ -677,7 +677,7 @@ corpus (best block-weighted medians: unorm10 xyz 0.479, octahedral unorm8 bytes 
 y = bits 10-19 (`v_and_b32 0x3ff`, `v_bfe_u32 ..., 10, 10`), map each by `v * 2/1023 - 1`, and unfold the
 octahedron (`z = 1 - |x| - |y|`, the `-z` clamp added back with each sign, then `v_rsq_f32`). With bit 31
 clear they take bytes 0 and 1 (`v_cvt_f32_ubyte0/1`), map each by `v / 127.5 - 1`, and unfold the same way.
-`normal_0x21` in `tools/vertex_types.py` is that decode (candidate `oct_bit31_10_or_8`).
+`normal_0x21` in `tooling/vertex_types.py` is that decode (candidate `oct_bit31_10_or_8`).
 
 Scored separately on the first streams of two archives (core_restofworld: 120 streams, 143 blocks;
 levels: 200 streams, 187 blocks), each class matches the face normals only under its own branch:
@@ -702,7 +702,7 @@ With bit 31 set, bits 20-29 are an angle, `v * 2pi/1023 - pi` (`v_fma_f32` by 2p
 `tangent = b1 cos - b2 sin`. With bit 31 clear, bits 16-22 and 23-29 are a 7-bit octahedral tangent
 (`v_bfe_u32 ..., 16, 7` and `23, 7`, each `v / 63.5 - 1`). Bit 30 (`v_lshrrev_b32 30` then `& 1`) is the
 bitangent sign. Of the 6,254 mesh shaders with the bit-31 branch, 5,196 read bits 20-29, 5,191 read the
-two 7-bit fields and 528 read bit 30. `tangent_0x21` in `tools/vertex_types.py` is that decode.
+two 7-bit fields and 528 read bit 30. `tangent_0x21` in `tooling/vertex_types.py` is that decode.
 
 The tool checks it against the first `0x28` stream (texture coordinates): per sampled triangle it projects
 `dP/du` into each vertex's tangent plane and counts tangents within `cos > 0.8` of it ("along u"), the same
@@ -771,18 +771,18 @@ The bytes support the existing **ARC9/the engine family**, not a new container:
 Models are present (37 decoded in core, plus 924 name-bearing pages), but the measured bytes do not
 support a claim that these archives hold map placement, compiled scripts or UI layout. Their only audio banks
 are those 15 in story-rest, with 76 streams: 13 carry a streamed-music `0x48` tag and 9 are dialogue lines with
-a clip. A raw `tools/rsc8_audio.py` scan of the other five archives finds no `ADAT` bank.
+a clip. A raw `tooling/rsc8_audio.py` scan of the other five archives finds no `ADAT` bank.
 The only UI-adjacent evidence is content-manifest XML and text; there is no UI container signature.
 
 ## Content-definition reader (ASSET-149)
 
-`tools/content_definitions.py` reads the three measured XML roots:
+`tooling/content_definitions.py` reads the three measured XML roots:
 `CDataFileMgr__ContentChangeSetDef`, `CDataFileMgr__ContentDef` and `SSetupData`.
 It accepts local XML files or an existing `arc9_carve.py` directory and prints only aggregate counts:
 
 ```powershell
-python -I tools/content_definitions.py <work>/carve/story000_restofworld
-python -I tools/content_definitions.py <local-content.xml> <local-setup.xml>
+python -I tooling/content_definitions.py <work>/carve/story000_restofworld
+python -I tooling/content_definitions.py <local-content.xml> <local-setup.xml>
 python -I tests/test_content_definitions.py
 ```
 
@@ -839,9 +839,9 @@ The stream-start scan above found zero `DDS`, `TXTR`, `DXT` or `BC` signatures b
 not raw stream-start images. Measured on the 1.0.2.1 package, they live in two places:
 
 1. **Embedded RAGE9 `0x980` texture descriptors inside `zero-prefix` CPU-segment streams** (the same `grcTexture`
-   layout `tools/tex_headers.py` reads in the main archives: `q[k-1] == 0x980`, 256-byte-aligned GPU pointer
+   layout `tooling/tex_headers.py` reads in the main archives: `q[k-1] == 0x980`, 256-byte-aligned GPU pointer
    `0x60000000 + offset` at `q[k]`, `(width, height, depth, byte6, dxgi_format)` at `q[k+4]`, `flags | (mips << 16)`
-   at `q[k+5]`), paired with the following GPU-segment stream chain. `tools/restofworld_index.py` now detects these
+   at `q[k+5]`), paired with the following GPU-segment stream chain. `tooling/restofworld_index.py` now detects these
    descriptors inside `zero-prefix` streams (`tex980=`, `dict=`, and summary fields `texture_streams`,
    `texture_dictionaries`, `texture_headers`):
 
@@ -856,7 +856,7 @@ not raw stream-start images. Measured on the 1.0.2.1 package, they live in two p
    within their following GPU-segment stream chain (`data_off + mip0_bytes <= gpu_chain_bytes`).
 
 2. **Companion RDS5/TTPF texture pools** alongside the archives under `pack/core_restofworld*/data/ttdb/` (6 pools,
-   88,795,904 bytes total, **635** 2D textures, already walked and exported by `make_game.py`'s `assets` stage
+   88,795,904 bytes total, **635** 2D textures, already walked and exported by `build_port.py`'s `assets` stage
    under `ttpf_pack/core_restofworld/` and `ttpf_pack/core_restofworld001/`):
 
    | Pool | Bytes | Textures | Formats |
@@ -910,7 +910,7 @@ Pool entry formats of the 543 resolved IDs (DXGI numbers): 71/72 (BC1) 391, 98/9
 
 Method: drawables decoded with a local ARC9 model decoder (the shader parameter layout of textures.md); pool ID
 tables read from each pool's `ETPF` section (count at +8, 16-byte records, then the sorted u64 IDs); embedded
-streams found with `tools/restofworld_index.py`'s `find_rage_textures` / `is_pg_tex_dictionary` (keys at the
+streams found with `tooling/restofworld_index.py`'s `find_rage_textures` / `is_pg_tex_dictionary` (keys at the
 `+0x20` pointer, count at `+0x28`). Counts only; no IDs, names or texture data.
 
 ## What a future decoder needs
@@ -920,7 +920,7 @@ streams found with `tools/restofworld_index.py`'s `find_rage_textures` / `is_pg_
 2. A recursive ARC9 walker. The flat carve crosses 10/18/4 embedded archives; a decoder needs their
    spans and TOCs to group pages into resources.
 3. A Bink 2 decoder for the 11 core and 7 story-rest videos (`KB2n`; see `docs/movies.md`).
-4. An `0DRP`/`0x7a` parser (`tools/odrp_7a.py`, ASSET-156) now distinguishes and validates standalone
+4. An `0DRP`/`0x7a` parser (`tooling/odrp_7a.py`, ASSET-156) now distinguishes and validates standalone
    `0x7a` metadata/map resources (`0x50000000` table pointers at stream `+0x10`) against `PSIN` `LRSC`
    root/count summary records (`0xbb`-filled pointer slots at `LRSC+0x08`) across single and
    continuation-joined streams (see [world.md](world.md) and [psin.md](psin.md)); decoding resource payload
@@ -928,7 +928,7 @@ streams found with `tools/restofworld_index.py`'s `find_rage_textures` / `is_pg_
 5. A `PSIN` section walker for `LSCH`, `LENM`, `LSNS`, `LGID`, `LRSC` and `CHKS`. The chain is
    measured; `LSNS` is a block table and 16-byte records ([psin.md](psin.md#lsns)), not zlib. Do not call it
    bytecode without evidence.
-6. Model-page joining is implemented in `tools/restofworld_model_join.py` (and `arc9dump` at `e293917`):
+6. Model-page joining is implemented in `tooling/restofworld_model_join.py` (and `arc9dump` at `e293917`):
    the `+0x08` `datResourceMap` page counts, 64 KiB stream blocking and `0x60000000` buffer validation join
    all 924 `core_restofworld` model resources (936 drawables across 926 system and 1,020 graphics streams)
    and the single `story000_restofworld` drawable dictionary (3 drawables) without the TOC. Archive path
@@ -938,7 +938,7 @@ streams found with `tools/restofworld_index.py`'s `find_rage_textures` / `is_pg_
    locate the owning geometry when only a graphics page is available. (Texture identification is
    resolved above under **Textures (`ASSET-148`)**: embedded `0x980` descriptors in `zero-prefix`
    CPU-segment streams plus the companion `ttdb/*.ttpf` pools.)
-8. Runtime consumers for the XML content-definition records read by `tools/content_definitions.py`
+8. Runtime consumers for the XML content-definition records read by `tooling/content_definitions.py`
    (see above). Their roots describe configuration, not UI layout; reference resolution and mapping
    to resources remain unimplemented.
 9. A false-positive-aware magic scanner. `ADAT` inside `METADATA`, `AWC` inside names and `ATI2` inside
@@ -948,15 +948,15 @@ streams found with `tools/restofworld_index.py`'s `find_rage_textures` / `is_pg_
 
 Do not commit archives, carved streams, inflated payloads, asset names, path strings, hashes of assets
 or name dumps. This page and its test contain aggregate counts and synthetic bytes only. Keep carves in
-a local work directory, never in the repository or a PR. `tools/restofworld_index.py` writes offsets,
+a local work directory, never in the repository or a PR. `tooling/restofworld_index.py` writes offsets,
 sizes, signatures and header fields; it does not write resource payloads or carved bytes.
 
 ## Reproduce
 
 ```powershell
-python -I tools/arc9_carve.py <archive.arc> <work>\carve\<name> --index-only
-python -I tools/restofworld_index.py <archive.arc> <work>\index.csv
-python -I tools/restofworld_index.py <archive.arc> <work>\index.json
+python -I tooling/arc9_carve.py <archive.arc> <work>\carve\<name> --index-only
+python -I tooling/restofworld_index.py <archive.arc> <work>\index.csv
+python -I tooling/restofworld_index.py <archive.arc> <work>\index.json
 python -I tests/test_restofworld_index.py
 ```
 

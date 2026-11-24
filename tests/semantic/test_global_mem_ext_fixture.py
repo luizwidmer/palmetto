@@ -2,11 +2,11 @@
 
 Standard library only; no GPU, no LLVM, no game files.
 
-runtime/test/shaders/cs_global_mem_ext.asm (header: derivations) has group 0 thread 0 seed a heap with MUBUF stores,
+port/test/shaders/cs_global_mem_ext.asm (header: derivations) has group 0 thread 0 seed a heap with MUBUF stores,
 run global_atomic_add / cmpswap / or_x2, buffer_atomic_xor_x2, a global_store_short that crosses a dword and a
 global_load_sbyte_d16_hi, and store eight words. This runs its fixture (tests/semantic/regen_fixtures.py) as one
 64-thread group through spirv_mini_interp, checks the words against values computed here, and checks that
-check.py and scripts/run_gpu_tests.py expect the same words on the GPU.
+check.py and tooling/scripts/run_gpu_tests.py expect the same words on the GPU.
 """
 import os
 import re
@@ -18,7 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)  # python -I leaves the script's folder off sys.path
 
-import support  # noqa: E402  (support puts tools/ on sys.path, honouring PALMETTO_TOOLS_DIR)
+import support  # noqa: E402  (support puts tooling/ on sys.path, honouring PALMETTO_TOOLS_DIR)
 import spirv_mini_interp as si  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -64,7 +64,7 @@ class GlobalMemExtFixture(unittest.TestCase):
                 self.assertEqual(mem.get(4 * k), want)
 
     def test_gpu_runners_expect_the_same_words(self):
-        for rel in (("runtime", "test", "shaders", "check.py"), ("scripts", "run_gpu_tests.py")):
+        for rel in (("port", "test", "shaders", "check.py"), ("tooling", "tooling/scripts", "run_gpu_tests.py")):
             with open(os.path.join(ROOT, *rel), encoding="utf-8") as f:
                 text = f.read()
             m = re.search(r'"cs_global_mem_ext"[,:]\s*(?:"40",\s*)?\[([^\]]*)\]', text)

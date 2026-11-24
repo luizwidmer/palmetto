@@ -1,12 +1,12 @@
 """Semantic interpreter tests for RDNA2 s_bfm_b64 and s_add_i32.
 
 s_bfm_b64 (RDNA2 ISA): D = ((1 << (S0 & 63)) - 1) << (S1 & 63) as a 64-bit lane mask; SCC is not written.
-Each case translates a synthetic wave64 pixel shader with tools/rdna2spirv.py, executes all 64 lanes in
+Each case translates a synthetic wave64 pixel shader with tooling/rdna2spirv.py, executes all 64 lanes in
 tests/semantic/spirv_wave_interp.py, reads D via v_cndmask_b32_e64 and SCC via s_cselect_b32, and compares
 all 64 lane bits against a plain-Python reference.
 
 s_add_i32 (RDNA2 ISA): D = (S0 + S1) & 0xFFFFFFFF; SCC = signed 32-bit overflow.
-Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in
+Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in
 tests/semantic/spirv_mini_interp.py, and compares (D, SCC) against a plain-Python signed 32-bit reference,
 including direct contrast with s_add_u32 on unsigned wrap without signed overflow.
 """

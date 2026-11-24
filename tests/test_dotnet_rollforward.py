@@ -2,7 +2,7 @@
 
 The projects target net8.0, but a machine with only a newer .NET (the 10 SDK and runtime that current distributions
 ship, for instance) builds them and then cannot start them: the host stops with "You must install or update .NET
-to run this application ... Framework 'Microsoft.NETCore.App', version '8.0.0'" (exit code 150). make_game.py's
+to run this application ... Framework 'Microsoft.NETCore.App', version '8.0.0'" (exit code 150). build_port.py's
 preflight and global.json already accept a newer SDK, so the built program has to accept a newer runtime too: an
 `Exe` project sets <RollForward> to Major or LatestMajor, which goes into its runtimeconfig.json. A machine that has
 the 8 runtime keeps using it. Standard library only; no .NET needed.
@@ -13,7 +13,7 @@ import unittest
 import xml.etree.ElementTree as ET
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SKIP_DIRS = {".git", "bin", "obj", "node_modules", "third_party", "build"}
+SKIP_DIRS = {".git", "bin", "obj", "node_modules", "vendor", "build"}
 POLICIES = {"Major", "LatestMajor"}
 
 

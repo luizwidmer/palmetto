@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/world_names.py (no game data).
+"""Synthetic tests for tooling/world_names.py (no game data).
 
     python -I tests/test_world_names.py
 """
@@ -15,7 +15,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_tool():
-    path = os.path.join(ROOT, "tools", "world_names.py")
+    path = os.path.join(ROOT, "tooling", "world_names.py")
     spec = importlib.util.spec_from_file_location("world_names_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

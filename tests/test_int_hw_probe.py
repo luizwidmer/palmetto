@@ -1,4 +1,4 @@
-"""Unit tests for tools/int_hw_probe.py (SHADER-137). Standard library only; no GPU or game files needed."""
+"""Unit tests for tooling/int_hw_probe.py (SHADER-137). Standard library only; no GPU or game files needed."""
 import io
 import json
 import os
@@ -10,7 +10,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLS = ROOT / "tools"
+TOOLS = ROOT / "tooling"
 sys.dont_write_bytecode = True
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
@@ -157,7 +157,7 @@ class IntHwProbeTests(unittest.TestCase):
 
 
 # v_bfe_u32 / v_bfe_i32 words measured natively on an AMD Radeon 610M (gfx1036, RDNA2), wave32 and wave64 identical:
-# `python -I tools/int_hw_probe.py --oracle both --group valu_bfe_past31`. A field that would run past bit 31 stops
+# `python -I tooling/int_hw_probe.py --oracle both --group valu_bfe_past31`. A field that would run past bit 31 stops
 # there and v_bfe_i32 sign-extends from bit 31 (0xd2f90159, offset 28, width 16 gives 0xfffffffd, not 0xd); offset
 # and width are read from bits [4:0] only (offset 36 is 4, width 32 is 0).
 VALU_BFE_GFX1036 = {

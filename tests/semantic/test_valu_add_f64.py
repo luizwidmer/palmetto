@@ -3,7 +3,7 @@
   v_add_f64   D = S0 + S1   (53-bit significand precision, signed zeros, inf/NaN,
                              neg/abs/clamp/mul:2/mul:4/div:2, MODE.FP_ROUND 0 vs 3)
 
-Each case translates a hand-written pixel-shader listing with tools/rdna2spirv.py
+Each case translates a hand-written pixel-shader listing with tooling/rdna2spirv.py
 and executes the resulting SPIR-V via tests/spirv_interp.py (which supports OpTypeFloat 64,
 whereas spirv_mini_interp.py is 32-bit float only). Standard library only.
 """
@@ -20,7 +20,7 @@ for p in (HERE, TESTS_DIR):
         sys.path.insert(0, p)
 
 import spirv_interp  # noqa: E402
-from support import translate_lines  # noqa: E402  (support puts tools/ on sys.path)
+from support import translate_lines  # noqa: E402  (support puts tooling/ on sys.path)
 
 MASK32 = 0xFFFFFFFF
 MASK64 = 0xFFFFFFFFFFFFFFFF

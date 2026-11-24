@@ -1,4 +1,4 @@
-"""CPU checks for tools/image_fuzz.py: the oracle, the texel mapping and the generated shader, no GPU.
+"""CPU checks for tooling/image_fuzz.py: the oracle, the texel mapping and the generated shader, no GPU.
 
 The GPU side (vk_image_fuzz, rdna2spirv.py) is what the fuzzer compares against; these tests make sure the
 oracle it compares with is right, so a mismatch is the translator's and not the fuzzer's.
@@ -16,7 +16,7 @@ import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import image_fuzz as imf  # noqa: E402
 
 
@@ -370,7 +370,7 @@ def test_exit_status(returncode, want):
 
 
 def test_self_test_runs():
-    r = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "image_fuzz.py"), "--self-test"],
+    r = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "image_fuzz.py"), "--self-test"],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert "self-test: ok" in r.stdout
@@ -386,10 +386,10 @@ def build_dir_main_uses(monkeypatch, argv):
 
 
 def test_default_build_is_runtime_build_on_every_platform(monkeypatch, tmp_path):
-    # It was runtime/build/linux, which only a Linux build following docs/testing.md has: on Windows (and on Linux
+    # It was port/build/linux, which only a Linux build following docs/testing.md has: on Windows (and on Linux
     # following docs/shader_validation.md) every run stopped with "vk_image_fuzz not found" unless --build was given.
     monkeypatch.setattr(imf, "find_test_program", lambda build, name: None)
-    assert build_dir_main_uses(monkeypatch, ["--work", str(tmp_path)]) == os.path.join(imf.ROOT, "runtime", "build")
+    assert build_dir_main_uses(monkeypatch, ["--work", str(tmp_path)]) == os.path.join(imf.ROOT, "port", "build")
 
 
 def test_visual_studio_config_subfolder_is_found(monkeypatch, tmp_path):

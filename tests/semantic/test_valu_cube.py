@@ -1,6 +1,6 @@
 """Semantic value tests for RDNA2 cube-map VALU ops: v_cubeid_f32, v_cubesc_f32, v_cubetc_f32, v_cubema_f32.
 
-Each test translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py,
+Each test translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py,
 and compares the four exported mrt0 binary32 words (face_id, sc, tc, ma) against a plain-Python reference oracle.
 
 RDNA2 ISA cube-map formulas for inputs (S0.f, S1.f, S2.f) = (x, y, z):
@@ -18,7 +18,7 @@ RDNA2 ISA cube-map formulas for inputs (S0.f, S1.f, S2.f) = (x, y, z):
     -Z (5.0): sc = -x, tc = -y, ma = 2.0 * z
 
 Note on v_cubema_f32: RDNA2 ISA returns 2.0 * signed_major_axis (negative on -X/-Y/-Z faces), so |v_cubema_f32| equals
-2.0 * max(|x|, |y|, |z|). That is why hardware cube-sampling sequences such as runtime/test/shaders/ps_cube_sample.asm
+2.0 * max(|x|, |y|, |z|). That is why hardware cube-sampling sequences such as port/test/shaders/ps_cube_sample.asm
 follow v_cubema_f32 with `v_rcp_f32_e64 dst, |src|`.
 """
 import itertools
@@ -32,7 +32,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

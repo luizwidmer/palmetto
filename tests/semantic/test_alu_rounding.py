@@ -4,7 +4,7 @@ Each op rounds to an integral value in the operand's format: floor toward -inf, 
 rndne to the nearest with ties to even. As in IEEE 754 roundToIntegral, a zero result keeps the operand's sign
 (ceil(-0.5) = -0.0), and infinities come back unchanged. The f16 forms write the low half of the destination and keep
 the high half (docs/design.md, "16-bit results"). Each case translates a synthetic pixel shader with
-tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the exported word with a
+tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the exported word with a
 plain-Python reference. NaN inputs are left out (their payload is not modelled), and so are f32 denormals (the
 float mode that would flush them is not modelled either).
 """
@@ -19,7 +19,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

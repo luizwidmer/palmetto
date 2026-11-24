@@ -1,4 +1,4 @@
-"""Synthetic-data tests for tools/skin_streams.py (ASSET-12, the joint-index and skin-weight format).
+"""Synthetic-data tests for tooling/skin_streams.py (ASSET-12, the joint-index and skin-weight format).
 
     python -I tests/test_skin_streams.py
 
@@ -18,8 +18,8 @@ import zlib
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "skin_streams.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "skin_streams.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import skin_streams as ss  # noqa: E402
 

@@ -1,7 +1,7 @@
 """--fma khr on binary64: the f64 fused multiply-adds (v_div_fmas_f64) as OpFmaKHR on doubles.
 
 GLSL.std.450 Fma may round twice on doubles as on floats, and NVIDIA's driver does (RTX 4090, 621.24, Windows:
-runtime/test/shaders/cs_div_fmas_f64.asm gives the split 0 instead of 2^-60). Under FMA_KHR (--fma khr) the
+port/test/shaders/cs_div_fmas_f64.asm gives the split 0 instead of 2^-60). Under FMA_KHR (--fma khr) the
 translator emits OpFmaKHR %double, which SPV_KHR_fma defines as correctly rounded; the index then lists feature
 shaderFmaFloat64 (VK_KHR_shader_fma) and, for a module without an f32 FMA, not shaderFmaFloat32. The default output
 is unchanged.
@@ -15,7 +15,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 sys.path.insert(0, TOOLS_DIR)
 sys.path.insert(0, HERE)
 

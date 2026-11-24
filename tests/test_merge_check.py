@@ -1,4 +1,4 @@
-"""scripts/merge_check.py on throwaway git repositories (no network, no game data).
+"""tooling/scripts/merge_check.py on throwaway git repositories (no network, no game data).
 
     python -I tests/test_merge_check.py
 
@@ -17,7 +17,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "scripts"))
+sys.path.insert(0, os.path.join(ROOT, "tooling/scripts"))
 
 import merge_check as mc  # noqa: E402
 

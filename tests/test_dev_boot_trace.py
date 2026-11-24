@@ -9,8 +9,8 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CLI = ROOT / "scripts" / "dev.py"
-PRODUCER = ROOT / "tools" / "boot_trace.py"
+CLI = ROOT / "tooling" / "tooling/scripts" / "dev.py"
+PRODUCER = ROOT / "tooling" / "boot_trace.py"
 
 
 class BootTraceTests(unittest.TestCase):
@@ -73,7 +73,7 @@ class BootTraceTests(unittest.TestCase):
         self.assertIn(b"absent.log", result.stderr)
 
     def test_missing_producer(self):
-        isolated_cli = self.cwd / "empty checkout" / "scripts" / "dev.py"
+        isolated_cli = self.cwd / "empty checkout" / "tooling/scripts" / "dev.py"
         isolated_cli.parent.mkdir(parents=True)
         shutil.copyfile(CLI, isolated_cli)
         result = self.invoke(isolated_cli, "boot-trace", self.startup, "--json")

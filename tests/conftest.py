@@ -1,7 +1,7 @@
 """Shared fixtures for the translator tests.
 
 Nothing here touches game data: shaders are tiny hand-written assembly programs, assembled with llvm-mc into the
-same ``; encoding:`` listing format that tools/shader_disasm.py produces, next to a synthetic empty DXBC container
+same ``; encoding:`` listing format that tooling/shader_disasm.py produces, next to a synthetic empty DXBC container
 (rdna2spirv.translate() looks for ``<disasm dir>/../<name>.dxbc`` to read the input signature).
 """
 import glob
@@ -15,7 +15,7 @@ import sys
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import mc_command  # noqa: E402
 import rdna2spirv  # noqa: E402
@@ -133,14 +133,14 @@ def mesh_psv0_chunk(threads=(128, 1, 1), max_vertices=64, max_primitives=64, top
     return b"PSV0", struct.pack("<I", len(r)) + bytes(r)
 
 
-# DXBC the hand-written gs_tri / ms_tri samples in runtime/test/shaders need (their header comments say which).
+# DXBC the hand-written gs_tri / ms_tri samples in port/test/shaders need (their header comments say which).
 GS_TRI_DXBC = make_dxbc([signature_chunk(b"ISG1", [(0, 1, 0xF), (1, 0, 0xF)]),      # SV_Position reg 0, TEXCOORD0 reg 1
                          signature_chunk(b"OSG1", [(0, 1, 0xF), (1, 0, 0xF)])])
 MS_TRI_DXBC = make_dxbc([mesh_psv0_chunk()])                                          # 128 threads, 64/64, triangles
 MS_CLIP_DXBC = make_dxbc([mesh_psv0_chunk(),
                           signature_chunk(b"OSG1", [(0, 1, 0xF), (1, 2, 0x1)])])      # SV_Position + SV_ClipDistance.x
 SAMPLE_DXBC = {"gs_tri": GS_TRI_DXBC, "ms_tri": MS_TRI_DXBC, "ms_clip": MS_CLIP_DXBC, "ms_wave_info_s3": MS_TRI_DXBC,
-               "ms_w64x_ballot": MS_TRI_DXBC, "ms_f16_pack": MS_TRI_DXBC,      # scripts/run_gpu_tests.py, ms_tri's PSV0
+               "ms_w64x_ballot": MS_TRI_DXBC, "ms_f16_pack": MS_TRI_DXBC,      # tooling/scripts/run_gpu_tests.py, ms_tri's PSV0
                "gs_w64_a_ring": GS_TRI_DXBC, "gs_w64_c_lane_id": GS_TRI_DXBC,  # build.py gives every gs_* gs_tri's
                "ms_v5_workgroup": make_dxbc([mesh_psv0_chunk(threads=(32, 1, 1), max_vertices=3,
                                                            max_primitives=1, group_shared=128)])}
@@ -153,7 +153,7 @@ KNOWN_VAL_ISSUES = {}
 
 # Compute shaders take their system registers from the FSSM header (rdna2spirv.translate reads it from
 # <disasm dir>/../fssm/<name>.fssm): word 0x138 is COMPUTE_PGM_RSRC2, words 0x13C/0x140/0x144 the thread-group size.
-# 0x8088 = 4 user SGPRs, TGID_X, 512 B of LDS; group 64x1x1 (the header the cs_* samples in runtime/test/shaders use).
+# 0x8088 = 4 user SGPRs, TGID_X, 512 B of LDS; group 64x1x1 (the header the cs_* samples in port/test/shaders use).
 DEFAULT_CS_HEADER = (0x8088, (64, 1, 1))
 
 

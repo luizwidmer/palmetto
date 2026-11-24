@@ -7,7 +7,7 @@ RDNA2 ISA (VOPC), per lane, with unordered = either source is a NaN (quiet or si
 v_cmp writes the result to VCC (e32) or an SGPR pair (e64) and v_cmpx writes EXEC; v_cmpx is checked by the lanes it
 leaves active. VOP3 abs and neg act on the sources before the compare (so -|NaN| is still a NaN).
 Expected values come from the Python predicates below, not from the translator. Each case translates a one-lane pixel
-shader with tools/rdna2spirv.py and runs it in tests/semantic/spirv_mini_interp.py.
+shader with tooling/rdna2spirv.py and runs it in tests/semantic/spirv_mini_interp.py.
 """
 import itertools
 import math

@@ -1,4 +1,4 @@
-"""tools/wave32_pixel_scan.py: families, wave32/stage selection and privacy, on hand-written listings; no game data.
+"""tooling/wave32_pixel_scan.py: families, wave32/stage selection and privacy, on hand-written listings; no game data.
 
     python -I tests/test_wave32_pixel_scan.py -v
 """
@@ -12,7 +12,7 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tooling"))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "semantic"))
 import fssm_header  # noqa: E402
 import shader_ir  # noqa: E402

@@ -1,10 +1,10 @@
-"""Texel offsets of image_sample*_o / image_gather4*_o in tools/rdna2spirv.py: the shape of the SPIR-V.
+"""Texel offsets of image_sample*_o / image_gather4*_o in tooling/rdna2spirv.py: the shape of the SPIR-V.
 
 These tests feed the translator hand-written ``.s`` listings, so they need neither llvm-mc nor spirv-tools.
 
 docs/design.md, "Texel offsets": the first address dword packs signed 6-bit offsets, x = [5:0], y = [13:8],
 z = [21:16], which become the Offset image operand. Sampled values are checked on a GPU by
-runtime/test/shaders/ps_texoff.asm. That test cannot see the sign extension on a driver that itself keeps only the
+port/test/shaders/ps_texoff.asm. That test cannot see the sign extension on a driver that itself keeps only the
 low six bits of an Offset: on an AMD Radeon RX 6800 (driver 26.11.2) a translator that read the fields unsigned
 (60 for -4) sampled the same texels. So the extraction is pinned down here: OpBitFieldSExtract, bit 8k, 6 bits wide.
 """

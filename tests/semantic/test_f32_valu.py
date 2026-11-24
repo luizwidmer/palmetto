@@ -1,4 +1,4 @@
-"""Value tests for 32-bit float VALU rules found by tools/f32_fuzz.py (FUZZ-3), and for the interpreter operations
+"""Value tests for 32-bit float VALU rules found by tooling/f32_fuzz.py (FUZZ-3), and for the interpreter operations
 that tool needs.
 
 ISA semantics used (AMD RDNA2 ISA reference, VOP1/VOP2/VOP3 chapters; LLVM AMDGPU as the cross-check):
@@ -10,7 +10,7 @@ ISA semantics used (AMD RDNA2 ISA reference, VOP1/VOP2/VOP3 chapters; LLVM AMDGP
   v_cvt_f32_f16         D = float(S0.f16); clamp and omod as for any float result (VOP_F32_F16).
   v_rcp_iflag_f32       D = 1 / S0; clamp and omod as above (VOP_F32_F32).
 
-ps_f32_mods (runtime/test/shaders/ps_f32_mods.asm) exports one word per rule; the constants below are written by
+ps_f32_mods (port/test/shaders/ps_f32_mods.asm) exports one word per rule; the constants below are written by
 hand and recomputed by the plain-Python references in ReferenceTests, which use neither the translator nor the
 interpreter.
 """

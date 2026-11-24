@@ -68,7 +68,7 @@ imports are the root-signature calls already recorded in
 prior-art statement that the bundled middleware surface is tiny and the command-object surface
 belongs to the executable.
 
-Reproduce: `python tools/pe_inspect.py <dll> --game-dir <package> --out <dir>` for each DLL, or
+Reproduce: `python tooling/pe_inspect.py <dll> --game-dir <package> --out <dir>` for each DLL, or
 the import scan described in section 8.2.
 
 ### 1.3 What this rules out
@@ -113,7 +113,7 @@ by that work.** They are the four calls a game must make before it can have a qu
 list or fence, so they are the first thing a trace must confirm.
 
 **They cannot be measured from the package either (D3D-350).** The package ships no D3D12 runtime:
-the 16 DLLs in [`game/xbox-1.0.2.1.json`](../game/xbox-1.0.2.1.json) do not include
+the 16 DLLs in [`profiles/xbox-1.0.2.1.json`](../profiles/xbox-1.0.2.1.json) do not include
 `d3d12_xs.dll`, which is part of the console OS, and the device clients that are shipped never call
 these four slots. Measured on 1.0.2.1 (counts only):
 
@@ -130,13 +130,13 @@ can take one from `d3d12_xs.dll`: each imports one function there and no GUID da
 queues, allocators, lists or fences; they record into lists the game gives them. The interfaces
 that *are* present are the positive control: they are what each client is known to create
 (compute PSOs through slot 62, root signatures, descriptor heaps, and resources through slots 27
-and 76). The IID column is reproduced by `python -I tools/d3d12_iid_scan.py <package>/*.dll`
+and 76). The IID column is reproduced by `python -I tooling/d3d12_iid_scan.py <package>/*.dll`
 (`tests/test_d3d12_iid_scan.py`); the call-site column comes from `dumpbin /disasm` listings,
 following each `0x40`/`0x48`/`0x60`/`0x120` call back to its receiver.
 
 So the four slots' callers are in the game executable, which the package does not contain (the
 same blocker as RT-5). Confidence for slots 8, 9, 12 and 36 stays **Open**: the table in §2.1 is
-still the SDK baseline. Once the executable is available, `tools/d3d12_iid_scan.py` run on it
+still the SDK baseline. Once the executable is available, `tooling/d3d12_iid_scan.py` run on it
 shows whether it carries these IIDs, and its call sites through them give the slots.
 
 ### 2.2 Queue, allocator and fence
@@ -275,7 +275,7 @@ names); `PresentX` does not occur in any of the 16 DLLs.
 
 Section 3.2's byte scan can only recognise *known* IIDs; a console-only GUID (the four list IIDs of
 [`d3d12_xs_surface.md §4`](d3d12_xs_surface.md)) would scan as anonymous data. The call-site scan closes
-that hole: `tools/d3d12_guid_sites.py` enumerates every 16-byte constant a module's code can name —
+that hole: `tooling/d3d12_guid_sites.py` enumerates every 16-byte constant a module's code can name —
 RIP-relative `lea` targets in data sections, absolute pointers stored in data, two adjacent
 `movabs` immediates that inline a GUID without a constant pool, and `mov reg, [rip+...]` loads
 through import slots (a GUID imported as data) — and reports which are GUID-shaped. Over all 16
@@ -300,7 +300,7 @@ descriptions (checked by decompiling the referencing function of the upscaler's 
 value past `VIDEO_DECODE` (4), so the DMA type's numeric value has no static source in the package
 either.
 
-Reproduce: `python -I tools/d3d12_guid_sites.py <package>/*.dll --known
+Reproduce: `python -I tooling/d3d12_guid_sites.py <package>/*.dll --known
 IID_ID3D12ConsDmaCommandList=30bc77b9-8379-4b25-95de-b8588c42275d` (prints GUID values and counts
 only). The four list IIDs and the DMA type remain reachable only through the running title, as
 [`d3d12_xs_surface.md §4`](d3d12_xs_surface.md) already requires for the IIDs.
@@ -541,8 +541,8 @@ vtable pointer of a public object.
 - The DLL's 29 shaders are `DXBC` containers with `SFI0`, `ISG1`, `OSG1`, `PSV0`, `RTS0`, `HASH` and `ACCC` parts
   and no `DXIL`. The `ACCC` payload starts with the tag `FSPX` in all 29; the game's own native shaders are `FSSM`
   inside `XBCH` ([design.md](design.md)). `FSPX` is a directory around an uncompressed RDNA2 program and its
-  dispatch state; `tools/fspx_unpack.py` unpacks it for the translator, which takes 17 of the 29 today, and
-  `make_game.py`'s `shaders` stage does both for the package's DLL. What stops the other 12 is listed in
+  dispatch state; `tooling/fspx_unpack.py` unpacks it for the translator, which takes 17 of the 29 today, and
+  `build_port.py`'s `shaders` stage does both for the package's DLL. What stops the other 12 is listed in
   [fspx.md](fspx.md), "Translation status".
 
 **Command list.** The console list is **not** the PC order past `ResourceBarrier`. Each row is backed by the
@@ -597,7 +597,7 @@ them, and it is the simplest contract for a layer that does not want to decode t
 executable makes the same check before writing is unknown until it is available; it is compiled against the same
 console headers.
 
-**Every inline write in the package's DLLs checks first.** `tools/inline_scan.py` finds each cursor store-back
+**Every inline write in the package's DLLs checks first.** `tooling/inline_scan.py` finds each cursor store-back
 (`mov [list+18h],reg` after stores through the cursor) and looks for the compare in front of it. On the 1.0.2.1
 DLLs (dumpbin 14.44 listings):
 
@@ -612,7 +612,7 @@ no inline write, except one checked site in `libHttpClient.GDK.dll`, which impor
 result as an upper bound of about one site per image. Removing the compare and branch in front of the builder's
 `0x14972` write turns exactly that site into "not checked", so a missing check is visible.
 
-On the executable, `python -I tools/inline_scan.py <exe> --sites` answers the question in one pass (see the day-one
+On the executable, `python -I tooling/inline_scan.py <exe> --sites` answers the question in one pass (see the day-one
 list in `docs/design.md`): no unchecked site means a cursor-at-limit layer sees every command the game records; each
 unchecked site is listed by RVA and is a write that layer never sees. Its fallback-slot line is the set of console
 list methods the game reaches through the vtable. Limit offsets other than `+0x28`/`+0x30` would be command kinds
@@ -728,12 +728,12 @@ Even taking both projects at face value, the following remain **Open**:
 The repository already implements the public-chain objects on Vulkan:
 
 - `ID3D12CommandQueue`, `ID3D12CommandAllocator`, `ID3D12GraphicsCommandList7` and
-  `ID3D12Fence1` are defined in `runtime/shims/d3d12_com.cpp:41-352`, on the Windows SDK vtable
+  `ID3D12Fence1` are defined in `port/shims/d3d12_com.cpp:41-352`, on the Windows SDK vtable
   order, with generated stubs for every method they do not implement
-  (`runtime/shims/d3d12_com.h:1-5`);
+  (`port/shims/d3d12_com.h:1-5`);
 - `CreateCommandQueue`/`CreateCommandAllocator`/`CreateCommandList`/`CreateFence` are wired at
-  the public device slots in `runtime/shims/d3d12_vulkan_device.cpp:345-382`;
-- `runtime/test/d3d12_com_test.cpp:77-153` creates all four, records clears and both barrier
+  the public device slots in `port/shims/d3d12_vulkan_device.cpp:345-382`;
+- `port/test/d3d12_com_test.cpp:77-153` creates all four, records clears and both barrier
   kinds, rejects an open list at `ExecuteCommandLists`, executes behind a queue `Wait`, and
   checks fence signalling and `SetEventOnCompletion`. The test is source-level evidence; this
   page did not rebuild the Vulkan runtime.
@@ -741,7 +741,7 @@ The repository already implements the public-chain objects on Vulkan:
 The builder's `ResourceBarrier` call at `+0xd0` and `Dispatch(1,1,1)` at `+0x70` are consistent
 with the SDK slots the runtime already implements. Legacy barriers (slot 26) and enhanced
 barriers (slot 80 in GCL7) both have IR and Vulkan replay support
-(`runtime/src/command_list.h`, `runtime/src/vulkan_replay.h`; see
+(`port/src/command_list.h`, `port/src/vulkan_replay.h`; see
 [d3d12_vulkan.md §3.2](d3d12_vulkan.md)).
 
 ### 5.2 Implementable, but unverified against the Xbox device
@@ -750,7 +750,7 @@ A runtime can create the four objects and hand them out at the **public** device
 today. That is an assumption, not a measurement: the Xbox device was measured at
 1/14/15/16/18/19/27/38/62/76, and slots 8/9/12/36 are exactly the ones this page needs. If the
 Xbox slots differ, a generic forward-to-PC thunk calls the wrong method. The current proxy
-(`runtime/shims/d3d12_xs_device.h:1-18`) forwards every unshadowed slot in PC order and logs
+(`port/shims/d3d12_xs_device.h:1-18`) forwards every unshadowed slot in PC order and logs
 first calls; a wrong slot would therefore be visible as a misnamed call, not a silent success.
 
 Queues and fences are wrapped the same way.
@@ -841,7 +841,7 @@ command object.
 
 The shipped builder's rehydrate exports name `ID3D12GraphicsCommandList8`, and
 `OMSetFrontAndBackStencilRef` is public GCL8 at slot 81. **PR #164 adds the public GCL8 interface**
-to `runtime/shims/d3d12_com.cpp`: it records the front/back values, resets them in `Reset`, answers
+to `port/shims/d3d12_com.cpp`: it records the front/back values, resets them in `Reset`, answers
 `IID_ID3D12GraphicsCommandList8`, and registers the `d3d12_gcl8` CTest (9/9). The values are recorded
 but not applied because this layer still has no pipeline/draw path. The builder's `+0x490` call is the
 enhanced-barrier `Barrier` at console slot 146 (section 3.3), which a console-order list routes to GCL7 slot 80.
@@ -856,7 +856,7 @@ enhanced-barrier `Barrier` at console slot 146 (section 3.3), which a console-or
 | `ID3D12GraphicsCommandList`/1–8 | Most recording methods are `void`; `Close`/`Reset` return `HRESULT`; `GetType` returns the list type; GCL8 `OMSetFrontAndBackStencilRef` is `void` | The builder's `+0xd0` and `+0x70` calls ignore RAX, consistent with `void`; no other convention measured |
 
 The `GetDesc` by-value return is the one place a generic thunk can get the ABI wrong on x64;
-the runtime implements it directly (`runtime/shims/d3d12_com.cpp:309`). No Xbox variant of that
+the runtime implements it directly (`port/shims/d3d12_com.cpp:309`). No Xbox variant of that
 return has been measured.
 
 ## 7. Next measurable step
@@ -891,7 +891,7 @@ than invent slots.
    first argument words (§5.2).
 
 Do not fill the unknown slots with guesses. A wrong slot is worse than a clean refusal; the
-existing device proxy already follows that rule (`runtime/shims/d3d12_xs_device.h:16-18`).
+existing device proxy already follows that rule (`port/shims/d3d12_xs_device.h:16-18`).
 
 ## 8. References and provenance
 
@@ -902,7 +902,6 @@ are cited for ABI facts only. No code, headers, generated stubs, comments or tab
 from either project. The PE and disassembly facts in section 3 were produced locally from the
 shipped `XboxBvhBuilder.dll`; the public slot table was parsed from the installed Windows SDK
 10.0.26100.0. No game data was read, decrypted or executed. See
-[`docs/related_projects.md`](related_projects.md) for the project-level rule.
 
 The XboxBvhBuilder export names quoted in section 3.1 are mangled C++ symbols from the DLL's
 export table, reproduced as ABI facts. The GUID values in section 3.2 are 16-byte constants from
@@ -913,7 +912,7 @@ the SDK; the console GUIDs are attributed to a public prior-art project in
 
 - Package inventory and absent files: directory listing plus
   `layout_3202719e-b4b4-421c-9f8f-70d1c4a7d60b_xs.xml:14`.
-- Imports/exports: `python tools/pe_inspect.py <dll> --game-dir <package> --out <dir>`; the
+- Imports/exports: `python tooling/pe_inspect.py <dll> --game-dir <package> --out <dir>`; the
   16-DLL summary in section 1.2 used `pefile` normal + delay-load directories.
 - IID scan: read the 80 `DEFINE_GUID(IID_ID3D12…)` values from
   `C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um\d3d12.h`, plus the two console
@@ -936,7 +935,7 @@ the SDK; the console GUIDs are attributed to a public prior-art project in
   targeting `0xd7738`–`0xd773f`.
 - Public slots: parse the `MIDL_INTERFACE`/`virtual` declarations in `d3d12.h`; the counts in
   section 2 include the seven `IUnknown`+`ID3D12Object` slots. Cross-check selected values with
-  `python tools/d3d12_xs_surface.py --check --sdk` (116 slots, 83 standard GUIDs) and
+  `python tooling/d3d12_xs_surface.py --check --sdk` (116 slots, 83 standard GUIDs) and
   `python -I tests/test_d3d12_xs_surface.py`.
 
 ### 8.3 References
@@ -953,8 +952,6 @@ the SDK; the console GUIDs are attributed to a public prior-art project in
   [`docs/d3d12-xs-wrapper.md:69-97`](a public prior-art project),
   [`components/extension-wrapper/console_extensions.h:13-31,45-72,84-191`](a public prior-art project),
   [`docs/d3d12-xs-bridge.md:239-245`](a public prior-art project).
-- `a public prior-art project`, a public fork branch:
-  [`docs/xbox/PLATFORM_SURFACE.md`](a public prior-art project),
-  [`tools/xbox/platform/README.md`](a public prior-art project).
+- the public prior-art notes on the platform surface.
 - Windows SDK 10.0.26100.0:
   `um/d3d12.h:5193,5323,5477,6337,7216,7982,8701,9006,9011,9026,9178,20165,21255,30275,31123,31965,32816`.

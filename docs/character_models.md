@@ -1,6 +1,6 @@
 # Character models and ped parts
 
-Measured from the pinned `e293917` export of `packs.arc` (`tools/arc9dump models`): **26,585
+Measured from the pinned `e293917` export of `packs.arc` (`tooling/arc9dump models`): **26,585
 manifest rows**, **11,335 unique names**, **23,720 `.#dr` drawable rows** and **2,865 `.#ft`
 fragment rows**. One row is one LOD or variant, so these are row counts, not character counts.
 
@@ -321,14 +321,14 @@ islands hidden under garments or modular chest/pelvic patches. Rendering both `h
 and `feet_*_nude_cull` offline without culling causes Z-fighting on those 258 waist triangles (and
 on the 26 nipple and 64 female genital backing triangles). Culling the coplanar overlapping
 triangles stitches the body with **0 boundary-edge holes** (watertight on both `fr1` and `mr1`).
-`tools/ped_assemble.py` implements standing-space alignment, canonical vertex-key plus
+`tooling/ped_assemble.py` implements standing-space alignment, canonical vertex-key plus
 coplanar-centroid/normal overlap culling and multi-part glTF 2.0 export, verified on synthetic
 overlapping body meshes in `tests/test_ped_assemble.py`:
 
 ```powershell
-python -I tools/ped_assemble.py assemble <parts...> -o <out.glb>
-python -I tools/ped_assemble.py cull-overlap --target <upper> --ref <lower> -o <out.glb>
-python -I tools/ped_assemble.py inspect-seams <parts...>
+python -I tooling/ped_assemble.py assemble <parts...> -o <out.glb>
+python -I tooling/ped_assemble.py cull-overlap --target <upper> --ref <lower> -o <out.glb>
+python -I tooling/ped_assemble.py inspect-seams <parts...>
 ```
 
 ### 15-channel meshlet vertex layout
@@ -382,7 +382,7 @@ typically span ~**35,000–55,000 t** at Tier 0 excluding GPU hair strands.
 
 ## What is not decoded
 
-- **Fragment children.** A raw child-array walk (`tools/fragment_children.py`) covers every fragment
+- **Fragment children.** A raw child-array walk (`tooling/fragment_children.py`) covers every fragment
   of `packs.arc` and `levels.arc`. The fragment header's u16 at `+0x30` is the number of drawables;
   the records are 0x110 bytes apart, starting at the main drawable that `+0x18` points at, so
   records 1 and up are the child drawables. All 2,865 `packs.arc` fragments have a single drawable
@@ -426,14 +426,14 @@ typically span ~**35,000–55,000 t** at Tier 0 excluding GPU hair strands.
   the 8-influence bone-palette skinning (preview GLBs carry 0 skins, 0 `JOINTS_0` and 0 `WEIGHTS_0`;
   `arc9dump` emits identity inverse-bind matrices). The real inverse bind matrices are at skeleton
   header `+0x30` (drawable `+0x18` points at the header) and agree with the default bone transforms;
-  `tools/anim_glb.py`, `tools/skinned_glb.py` and `tools/ped_assemble.py` export glTF skins with
+  `tooling/anim_glb.py`, `tooling/skinned_glb.py` and `tooling/ped_assemble.py` export glTF skins with
   those matrices (see [character_skeleton.md](character_skeleton.md#animated-gltf-export)).
 
 ## Reproduce
 
 ```powershell
 arc9dump models <packs.arc> <outdir>
-python -I tools/fragment_children.py <package>\levels.arc --jobs 12 --json <work>\levels_fragments.json
+python -I tooling/fragment_children.py <package>\levels.arc --jobs 12 --json <work>\levels_fragments.json
 ```
 
 The second command prints the fragment and child-drawable totals quoted under "Fragment children"; it
@@ -460,7 +460,7 @@ The [Hands and feet](#hands-and-feet) tables also need `core_restofworld.arc` an
 catalogs (`AssetKey` in each pool's `manifest.json`).
 
 `arc9dump ttpf` writes a pool's catalog to `<output root>\<pool basename>\manifest.json`, and pool
-basenames repeat: the 57 pools in [`game/xbox-1.0.2.1.json`](../game/xbox-1.0.2.1.json) have 51
+basenames repeat: the 57 pools in [`profiles/xbox-1.0.2.1.json`](../profiles/xbox-1.0.2.1.json) have 51
 distinct basenames (`ttdb_maps` and `ttdb_terrain_image_based` twice, `ttdb_ui` and `ttdb_vfx` three
 times). With one output root for all of them, later pools overwrite earlier catalogs. Give each pool
 its package-relative parent folder under `<outdir>\ttpf` as its output root:

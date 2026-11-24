@@ -1,7 +1,7 @@
 # Mods
 
 **Status: the mod format, loader and hook are in place; only the lookup's address in the executable is missing.** `palmetto` reads every
-`mods/<folder>/mod.json`, checks it and logs what it would change. A swap takes effect once the game's
+`extensions/<folder>/mod.json`, checks it and logs what it would change. A swap takes effect once the game's
 archetype lookup is hooked, and that needs the executable (RT-5): its address differs per version.
 
 A mod never contains game data. It names models the game already has, by the names (or `joaat` hashes)
@@ -16,7 +16,7 @@ one is ignored. Folders load in name order, and a later one wins when two swap t
 ```text
 Documents\Palmetto\
   palmetto.exe
-  mods\
+  extensions\
     mandy_prison_intro\
       mod.json
 ```
@@ -29,9 +29,9 @@ At start the runtime prints what it loaded, for example:
 [rt] mods: 1 archetype swap(s) loaded; not applied yet: the archetype lookup hook for this executable is not known
 ```
 
-## Managing them (`tools/palmetto_mods.py`)
+## Managing them (`tooling/palmetto_mods.py`)
 
-`tools/palmetto_mods.py` is the small mod manager. It writes only in the port's `mods` folder: it can create,
+`tooling/palmetto_mods.py` is the small mod manager. It writes only in the port's `mods` folder: it can create,
 install, list, check, enable, disable, pack and remove mods. A package is a normal ZIP file (the `.palmettomod`
 extension is only a name) with `mod.json` at its top level or inside one top-level folder. The installer refuses
 paths that climb out of the package, links and manifests the runtime would reject; it never goes online and never
@@ -44,26 +44,26 @@ standard-library code as the CLI below.
 Point `--port` at the built port (the folder with `palmetto.exe` and `game_path.txt`), or `--dir` at a mods folder:
 
 ```powershell
-python -I tools/palmetto_mods.py gui
-python -I tools/palmetto_mods.py --port "D:\Games\Palmetto" list
-python -I tools/palmetto_mods.py --port "D:\Games\Palmetto" install .\mandy.zip
-python -I tools/palmetto_mods.py --port "D:\Games\Palmetto" new lucia_to_mandy `
+python -I tooling/palmetto_mods.py gui
+python -I tooling/palmetto_mods.py --port "D:\Games\Palmetto" list
+python -I tooling/palmetto_mods.py --port "D:\Games\Palmetto" install .\mandy.zip
+python -I tooling/palmetto_mods.py --port "D:\Games\Palmetto" new lucia_to_mandy `
     --name "Mandy" --game-version 1.0.2.1 --swap player_story000_00=cs_mandy
-python -I tools/palmetto_mods.py --port "D:\Games\Palmetto" disable mandy_prison_intro
-python -I tools/palmetto_mods.py --dir "D:\Games\Palmetto\mods" check
+python -I tooling/palmetto_mods.py --port "D:\Games\Palmetto" disable mandy_prison_intro
+python -I tooling/palmetto_mods.py --dir "D:\Games\Palmetto\mods" check
 ```
 
 `pack` writes an installed folder back to a ZIP for sharing; `uninstall` removes it. `run` is a convenience
 launcher for the same options `palmetto` already takes:
 
 ```powershell
-python -I tools/palmetto_mods.py --port "D:\Games\Palmetto" run --archetype-lookup 1A2B3C0
+python -I tooling/palmetto_mods.py --port "D:\Games\Palmetto" run --archetype-lookup 1A2B3C0
 ```
 
 Without the measured `--archetype-lookup` RVA the runtime still loads and reports the manifests but the swaps are
 not applied, as above. The game executable itself is still needed; the manager does not supply it.
 
-The repository's `mods/` folder has four manifest-only examples. `mandy_prison_intro` is enabled; the other three
+The repository's `extensions/` folder has four manifest-only examples. `mandy_prison_intro` is enabled; the other three
 are installed disabled so a copied folder cannot surprise anyone or silently fight it:
 
 | Folder | Swap | State |
@@ -102,9 +102,9 @@ refused until a hook provides the game's mission state, so a mod never silently 
 PowerShell 5.1's `-Encoding utf8`). A UTF-16 file, which PowerShell 5.1's `>` writes, is skipped with
 `mod.json is UTF-16; save it as UTF-8`.
 
-The format is in `runtime/src/mods.h`; `runtime/test/mods_test.cpp` (ctest `mods`) covers it.
+The format is in `port/src/mods.h`; `port/test/mods_test.cpp` (ctest `mods`) covers it.
 
-## The Mandy mod (`mods/mandy_prison_intro`)
+## The Mandy mod (`extensions/mandy_prison_intro`)
 
 Lucia's player model is `player_story000_00` (model id `0xE472B687`); Mandy is `cs_mandy`
 (`0xD7C0CDFF`). Both ids are measured in the packs tables ([character_skeleton.md](character_skeleton.md),
@@ -124,10 +124,10 @@ What is not known yet, and decides how far the swap reaches:
 ## Day one: finding the hook
 
 The swap needs one function in the executable: the archetype lookup by name hash (the engine's
-`fwArchetypeManager::GetArchetypeFromHashKey`). `scripts/first_look.ps1` already ranks candidates with
-`tools/find_hash_lookup.py` (report `hash_lookup.json`): it finds where the code loads `0xE472B687` and
+`fwArchetypeManager::GetArchetypeFromHashKey`). `tooling/scripts/first_look.ps1` already ranks candidates with
+`tooling/find_hash_lookup.py` (report `hash_lookup.json`): it finds where the code loads `0xE472B687` and
 `0xD7C0CDFF`, takes the functions called right after, and orders them by how many direct callers the
-whole image has. Run it alone with `python -I tools/find_hash_lookup.py <exe>`. What it automates:
+whole image has. Run it alone with `python -I tooling/find_hash_lookup.py <exe>`. What it automates:
 
 1. **Constant search.** The player model id `0xE472B687` should appear as an immediate in the code that
    sets up the story player. Its callers pass it to the lookup (or to a function that does).
@@ -144,17 +144,17 @@ palmetto.exe --dry-run game.exe --archetype-lookup 1A2B3C0
 
 `--archetype-lookup RVA[,ARG]` (hex RVA; `ARG` 0 when the hash is the first argument, 1 when it is the
 second, as in a member function) hooks the function right after the image is mapped, before any of its
-code runs (`runtime/src/code_hooks.h`). It does not patch the function: every direct `call` and `jmp`
+code runs (`port/src/code_hooks.h`). It does not patch the function: every direct `call` and `jmp`
 to it in the image's code is pointed at a thunk that passes the hash through
 `palmetto::mods::active().remap()` and continues into the original with every other argument as it was.
 The log line reports how many call sites were redirected, so a `--dry-run` with a candidate RVA shows at
 once whether it is the lookup (hundreds of callers) or not (a handful, or none). ctest `code_hooks` runs
 the thunk on small x64 functions in memory.
 
-That RVA is the only version-specific piece; it can go in `game/xbox-1.0.2.1.json` once confirmed, and
+That RVA is the only version-specific piece; it can go in `profiles/xbox-1.0.2.1.json` once confirmed, and
 the manifests stay as they are.
 
-## First-person view (`mods/first_person`)
+## First-person view (`extensions/first_person`)
 
 ```json
 { "camera": { "view_mode": "first_person", "first_person_value": 4, "contexts": [0] } }
@@ -183,6 +183,6 @@ settings in `mod.json`, so a different answer changes the manifest, not the runt
 line's count of redirected calls. Leads: the code that reads the view-mode input (TARGET V's
 `INPUT_NEXT_CAMERA`, an action hash), the switch over the five view-mode values that selects a camera
 metadata per mode, and the callers of the `UseFirstPersonCameraMatrix` check in the cloth code (they ask
-whether the active view is first person). The hook (`hook_image_results` in `runtime/src/code_hooks.h`) runs
+whether the active view is first person). The hook (`hook_image_results` in `port/src/code_hooks.h`) runs
 the original and overrides its result; it is for getters with at most four register arguments and an
 integer result. ctest `code_hooks` and `mods` cover the thunk and the override.

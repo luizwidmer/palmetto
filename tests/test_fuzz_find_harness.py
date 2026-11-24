@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "runtime" / "test" / "shaders"))
+sys.path.insert(0, str(ROOT / "port" / "test" / "shaders"))
 from compute_fixture import find_test_program  # noqa: E402
 
 EXE = "vk_compute_test" + (".exe" if os.name == "nt" else "")
@@ -32,7 +32,7 @@ class FindTestProgram(unittest.TestCase):
 
 class FuzzerWithoutHarness(unittest.TestCase):
     def test_one_line_instead_of_a_traceback(self):
-        sys.path.insert(0, str(ROOT / "tools"))
+        sys.path.insert(0, str(ROOT / "tooling"))
         import lds_fuzz
         import valu_fuzz
         for module in (valu_fuzz, lds_fuzz):

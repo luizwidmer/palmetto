@@ -4,7 +4,7 @@ All three shift the 64-bit register pair S1 by S0 & 63 ("rev": the shift amount 
   v_lshlrev_b64: D = S1 << (S0 & 63)
   v_lshrrev_b64: D = S1 >> (S0 & 63), zeros shifted in
   v_ashrrev_i64: D = S1 >> (S0 & 63), copies of bit 63 shifted in
-Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py
+Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py
 and compares the exported pair with a plain-Python reference.
 """
 import os
@@ -17,7 +17,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

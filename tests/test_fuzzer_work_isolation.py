@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tooling"))
 import lds_fuzz
 import valu_fuzz
 
@@ -93,7 +93,7 @@ class FuzzerWorkIsolation(unittest.TestCase):
             with self.subTest(fuzzer=module.__name__), tempfile.TemporaryDirectory() as tmp:
                 parent = Path(tmp) / "not-a-directory"
                 parent.write_bytes(b"caller data")
-                script = Path(__file__).resolve().parents[1] / "tools" / (module.__name__ + ".py")
+                script = Path(__file__).resolve().parents[1] / "tooling" / (module.__name__ + ".py")
                 cmd = [sys.executable, "-I", str(script), "--programs", "1", "--wave", "32", "--work", str(parent), *extra]
                 result = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
                 self.assertEqual(result.returncode, 2, result.stderr)

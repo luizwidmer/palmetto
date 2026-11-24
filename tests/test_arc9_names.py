@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/arc9_names.py.
+"""Synthetic tests for tooling/arc9_names.py.
 
     python -I tests/test_arc9_names.py
 
@@ -16,8 +16,8 @@ from unittest import mock
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "arc9_names.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "arc9_names.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import arc9_names  # noqa: E402
 

@@ -1,4 +1,4 @@
-"""tools/spirv_gs_to_compute.py: a translated geometry shader as a compute capture pass (SHADER-159)."""
+"""tooling/spirv_gs_to_compute.py: a translated geometry shader as a compute capture pass (SHADER-159)."""
 import json
 import os
 from pathlib import Path
@@ -12,17 +12,17 @@ import pytest
 from conftest import HAVE_SPIRV, make_dxbc, requires_tools, signature_chunk
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import spirv_gs_to_compute as gsc  # noqa: E402
 
-# gs_tri's signature, as scripts/run_gpu_tests.py builds it: SV_Position in register 0, TEXCOORD0 in register 1.
+# gs_tri's signature, as tooling/scripts/run_gpu_tests.py builds it: SV_Position in register 0, TEXCOORD0 in register 1.
 GS_DXBC = make_dxbc([signature_chunk(b"ISG1", [(0, 1, 0xF), (1, 0, 0xF)]),
                      signature_chunk(b"OSG1", [(0, 1, 0xF), (1, 0, 0xF)])])
 
 
 @pytest.fixture
 def gs_tri(make_shader):
-    asm = open(os.path.join(ROOT, "runtime", "test", "shaders", "gs_tri.asm"), encoding="utf-8").read()
+    asm = open(os.path.join(ROOT, "port", "test", "shaders", "gs_tri.asm"), encoding="utf-8").read()
     shader = make_shader(asm, name="gs_tri", dxbc=GS_DXBC)
     spvasm = shader.translate()
     assert "OpEntryPoint Geometry" in spvasm
@@ -71,7 +71,7 @@ def test_cli_writes_module_and_layout(gs_tri, tmp_path):
     sa.write_text(spvasm)
     subprocess.run(["spirv-as", str(sa), "-o", str(sv), "--target-env", "vulkan1.2"], check=True)
     out = tmp_path / "cs.spv"
-    r = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "spirv_gs_to_compute.py"), str(sv),
+    r = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "spirv_gs_to_compute.py"), str(sv),
                         str(out), "--layout", str(tmp_path / "lay.json")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert out.exists() and (tmp_path / "lay.json").exists()
@@ -160,7 +160,7 @@ def test_cli_preserves_valid_capture_across_spirv_versions(tmp_path: Path, targe
     source, output = tmp_path / "gs.spv", tmp_path / "cs.spv"
     subprocess.run(["spirv-as", "--target-env", target, "-", "-o", source], input=PHI_GS, text=True, check=True)
     subprocess.run(["spirv-val", "--target-env", target, source], check=True)
-    tool = os.path.join(ROOT, "tools", "spirv_gs_to_compute.py")
+    tool = os.path.join(ROOT, "tooling", "spirv_gs_to_compute.py")
     result = subprocess.run([sys.executable, "-I", tool, source, output], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     result = subprocess.run(["spirv-val", "--target-env", target, output], capture_output=True, text=True)
@@ -229,7 +229,7 @@ def test_cli_rejects_overlapping_paths_without_writing(tmp_path, gs_module, over
         except OSError as e:
             pytest.skip(f"hard links unavailable: {e}")
 
-    result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "spirv_gs_to_compute.py"),
+    result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "spirv_gs_to_compute.py"),
                              str(source), str(output), "--layout", str(layout)], capture_output=True, text=True)
     assert result.returncode == 2, result.stderr
     assert "same file" in result.stderr
@@ -243,7 +243,7 @@ def test_cli_accepts_distinct_module_and_layout_paths(tmp_path, gs_module):
     output = tmp_path / "cs.spv"
     layout = tmp_path / "layout.json"
     original = gs_module.read_bytes()
-    result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "spirv_gs_to_compute.py"),
+    result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "spirv_gs_to_compute.py"),
                              str(gs_module), str(output), "--layout", str(layout)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert gs_module.read_bytes() == original

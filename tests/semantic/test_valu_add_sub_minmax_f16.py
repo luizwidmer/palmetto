@@ -5,7 +5,7 @@
   v_min_f16   D.f16 = min(S0.f16, S1.f16)   (-0.0 < +0.0, NaN -> other)
   v_max_f16   D.f16 = max(S0.f16, S1.f16)   (-0.0 < +0.0, NaN -> other)
 
-Each case translates a hand-written pixel-shader listing with tools/rdna2spirv.py
+Each case translates a hand-written pixel-shader listing with tooling/rdna2spirv.py
 and executes the resulting SPIR-V via tests/semantic/spirv_mini_interp.py.
 GFX10 partial-register preservation (the untouched 16-bit half of vdst keeps its
 prior sentinel bits) and VOP3 op_sel/neg/abs/clamp modifiers are verified directly.
@@ -21,7 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from support import mrt0_words, translate_lines  # noqa: E402  (support puts tools/ on sys.path)
+from support import mrt0_words, translate_lines  # noqa: E402  (support puts tooling/ on sys.path)
 
 MASK32 = 0xFFFFFFFF
 POS_ZERO = 0x0000

@@ -1,4 +1,4 @@
-"""Synthetic unit tests for tools/rsc8_audio.py (ASSET-56).
+"""Synthetic unit tests for tooling/rsc8_audio.py (ASSET-56).
 
     python -I tests/test_rsc8_audio.py
 
@@ -17,8 +17,8 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "rsc8_audio.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "rsc8_audio.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import rsc8_audio  # noqa: E402
 

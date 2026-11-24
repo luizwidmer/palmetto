@@ -63,10 +63,10 @@ One diagnostic boot (`F:\palmetto-work\boot-pageva2`, standard environment plus 
 
 ## 3. What was implemented
 
-`runtime/src/console_va_map.h` is the unit: title-VA ranges (`title`, `size`, arena VA, kind = placed buffer or
+`port/src/console_va_map.h` is the unit: title-VA ranges (`title`, `size`, arena VA, kind = placed buffer or
 descriptor heap), a kind-preferring rebase (a VA in both ranges is resolved by what the site means), and
 `patch_descriptor_bases`, which rewrites a 48-bit V# base that names a placed buffer to the arena VA of its stand-in.
-`runtime/test/buffer_va_index_test.cpp` covers it (ranges, overlap preference, V# rewrite, removal, incomplete flag).
+`port/test/buffer_va_index_test.cpp` covers it (ranges, overlap preference, V# rewrite, removal, incomplete flag).
 
 The pieces that use it:
 

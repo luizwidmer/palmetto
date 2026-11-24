@@ -14,7 +14,7 @@ Hardware semantics (RDNA2 ISA / SOP2 encoding):
       - 'h' in second position: selects S1[31:16] (bits 31..16)
   - The scalar condition code (SCC) is NOT written and remains unaltered.
 
-Shaders are translated via tools/rdna2spirv.py and executed using
+Shaders are translated via tooling/rdna2spirv.py and executed using
 tests/semantic/spirv_mini_interp.py against a plain-Python reference oracle.
 
 Standard library only; zero game data, zero proprietary assets.
@@ -31,7 +31,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

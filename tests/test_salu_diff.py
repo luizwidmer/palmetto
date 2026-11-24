@@ -1,4 +1,4 @@
-"""tools/salu_diff.py: the scalar-ALU reference against hand-worked values, and a short seeded fuzz run (FUZZ-4).
+"""tooling/salu_diff.py: the scalar-ALU reference against hand-worked values, and a short seeded fuzz run (FUZZ-4).
 Standard library only; no GPU."""
 import contextlib
 import io
@@ -8,7 +8,7 @@ import sys
 import unittest
 import unittest.mock
 
-TOOL = Path(__file__).resolve().parents[1] / "tools" / "salu_diff.py"
+TOOL = Path(__file__).resolve().parents[1] / "tooling" / "salu_diff.py"
 sys.path.insert(0, str(TOOL.parent))
 import salu_diff as d  # noqa: E402
 

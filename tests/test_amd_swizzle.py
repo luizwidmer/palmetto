@@ -17,7 +17,7 @@ try:
 except ImportError:
     pytest = None
 
-TOOLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")
+TOOLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 
@@ -30,7 +30,7 @@ except ModuleNotFoundError as e:
     A = None
     HAVE_NUMPY = False
 
-# tools/amd_swizzle.py needs numpy (tests/requirements.txt). Without it the module-level tests below are skipped,
+# tooling/amd_swizzle.py needs numpy (tests/requirements.txt). Without it the module-level tests below are skipped,
 # as the __main__ block skips them; the CLI guard tests fake numpy and still run.
 if pytest is not None:
     needs_numpy = pytest.mark.skipif(not HAVE_NUMPY, reason="numpy is not installed")
@@ -215,7 +215,7 @@ def test_64k_block_extent_comes_from_the_element_count():
 
 def cli(tmp_path, *args):
     import subprocess
-    tool = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "amd_swizzle.py")
+    tool = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tooling", "amd_swizzle.py")
     return subprocess.run([sys.executable, "-I", tool, str(tmp_path / "blob.bin"), *args],
                           capture_output=True, text=True, timeout=120, check=False)
 
@@ -292,7 +292,7 @@ def test_cli_detiles_4k_tables_with_4k_blocks():
     # a 64K table name must not be picked by --modes 4K, and the 4K table must detile with 12-bit, 4 KB blocks.
     import subprocess
     import numpy as np
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tooling"))
     from tile_probe import score
     rows = {"NIBBLE01": ["0", "0", "X0", "Y0", "X1", "Y1", "X2", "Y2"], "NIBBLE2": ["X3", "Y3", "X4", "Y4"],
             "NIBBLE3": ["X5", "Y5", "X6", "Y6"], "NIBBLE4": ["0", "0", "0", "0"]}

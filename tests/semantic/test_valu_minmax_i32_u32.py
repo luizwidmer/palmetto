@@ -1,6 +1,6 @@
 """Semantic interpreter unit tests for RDNA2 32-bit integer VALU min/max instructions.
 
-Covers all four ops end-to-end through tools/rdna2spirv.py and tests/semantic/spirv_mini_interp.py:
+Covers all four ops end-to-end through tooling/rdna2spirv.py and tests/semantic/spirv_mini_interp.py:
   v_min_i32   D.i32 = min(S0.i32, S1.i32)   (signed 32-bit two's complement)
   v_max_i32   D.i32 = max(S0.i32, S1.i32)   (signed 32-bit two's complement)
   v_min_u32   D.u32 = min(S0.u32, S1.u32)   (unsigned 32-bit)
@@ -24,7 +24,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

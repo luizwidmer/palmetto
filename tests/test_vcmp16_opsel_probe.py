@@ -1,4 +1,4 @@
-"""tools/vcmp16_opsel_probe.py without a GPU: the raw compare and control words are llvm-mc's with OPSEL where llvm-mc
+"""tooling/vcmp16_opsel_probe.py without a GPU: the raw compare and control words are llvm-mc's with OPSEL where llvm-mc
 puts it, the rows tell the two hypotheses apart, and the kernel builds.
 
     python -I tests/test_vcmp16_opsel_probe.py
@@ -8,8 +8,8 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
-sys.path.insert(0, os.path.join(ROOT, "tools", "hw_oracle"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
+sys.path.insert(0, os.path.join(ROOT, "tooling", "hw_oracle"))
 
 import vcmp16_opsel_probe as p  # noqa: E402
 

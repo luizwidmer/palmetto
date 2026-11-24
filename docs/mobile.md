@@ -1,6 +1,6 @@
 # Mobile / arm64 port notes
 
-The PC port works because the target console CPU is x86-64, the same ISA a PC runs; `runtime/` maps the
+The PC port works because the target console CPU is x86-64, the same ISA a PC runs; `port/` maps the
 PE image and executes it natively. On Apple silicon that stops working for exactly one reason: the
 guest is x86-64 and the host is arm64. Everything else (PE loading, import shims, D3D12→graphics,
 assets) is a port of layers that already exist. This note records the design and the current state
@@ -26,12 +26,12 @@ of the x86-64 → arm64 groundwork.
 
 | Piece | Where | State |
 |---|---|---|
-| x86-64 decoder | `tools/x64_recomp.py` `disasm`/`decode_one` | prefixes/REX, ModRM+SIB, RIP-relative and moffs addressing, hi8 regs (`ah`/`ch`/`dh`/`bh`), `Iv`/`Iz`/`J` immediates incl. imm64, groups 1–5/8/15/1A/11, VEX stubs |
-| arm64 assembler | `tools/x64_recomp.py` `Asm` | integer/logical/bitfield/shift/multiply/load-store/branch/system encoders, label fixups, `li()` with `pad4` for self-referential constant materialization |
-| Translator | `tools/x64_recomp.py` `FunctionTranslator` | linear-sweep over decoded insns; lazy flag analysis picks arm-NZCV when one producer covers a consumer, else materializes canonical x86 EFLAGS in the ctx block; unsupported insns emit `brk` and land in `stats["unhandled"]` |
-| Dispatch runtime | `tools/x64_recomp.py` `emit_rt` | `rt_dispatch` (guest pc → host pc through a generated table), `rt_mkflags` (NZCV+operands → canonical x86 EFLAGS; preserves NZCV), `rt_print` (semihosting result output) |
-| Verification | `tools/x64_recomp.py` `build_test_kernel`/`run_kernel` | flat kernel image → `qemu-system-aarch64 -M virt -cpu cortex-a53 -kernel -semihosting`; guest `ret` off the sentinel stack exits and prints `R=xxxxxxxx` (guest edi) |
-| PE census | `tools/recomp_census.py` | walks every `.pdata` function, decodes + translates it, reports coverage %, hazard mnemonics, indirect control flow, unwind-info flags |
+| x86-64 decoder | `tooling/x64_recomp.py` `disasm`/`decode_one` | prefixes/REX, ModRM+SIB, RIP-relative and moffs addressing, hi8 regs (`ah`/`ch`/`dh`/`bh`), `Iv`/`Iz`/`J` immediates incl. imm64, groups 1–5/8/15/1A/11, VEX stubs |
+| arm64 assembler | `tooling/x64_recomp.py` `Asm` | integer/logical/bitfield/shift/multiply/load-store/branch/system encoders, label fixups, `li()` with `pad4` for self-referential constant materialization |
+| Translator | `tooling/x64_recomp.py` `FunctionTranslator` | linear-sweep over decoded insns; lazy flag analysis picks arm-NZCV when one producer covers a consumer, else materializes canonical x86 EFLAGS in the ctx block; unsupported insns emit `brk` and land in `stats["unhandled"]` |
+| Dispatch runtime | `tooling/x64_recomp.py` `emit_rt` | `rt_dispatch` (guest pc → host pc through a generated table), `rt_mkflags` (NZCV+operands → canonical x86 EFLAGS; preserves NZCV), `rt_print` (semihosting result output) |
+| Verification | `tooling/x64_recomp.py` `build_test_kernel`/`run_kernel` | flat kernel image → `qemu-system-aarch64 -M virt -cpu cortex-a53 -kernel -semihosting`; guest `ret` off the sentinel stack exits and prints `R=xxxxxxxx` (guest edi) |
+| PE census | `tooling/recomp_census.py` | walks every `.pdata` function, decodes + translates it, reports coverage %, hazard mnemonics, indirect control flow, unwind-info flags |
 | Tests | `tests/test_x64_recomp.py`, `tests/test_recomp_census.py` | hand-built byte fixtures only; exec tests skip when qemu is absent |
 
 ### Translator contract (as implemented)

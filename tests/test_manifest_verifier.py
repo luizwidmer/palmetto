@@ -1,4 +1,4 @@
-"""Unit tests for tools/manifest_verifier.py using synthetic file fixtures.
+"""Unit tests for tooling/manifest_verifier.py using synthetic file fixtures.
 
 Verifies SHA-256 manifest integrity in parallel with live progress reporting.
 Zero game data used.
@@ -21,7 +21,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "manifest_verifier.py")
+TOOL = os.path.join(ROOT, "tooling", "manifest_verifier.py")
 
 # Add root directory to sys.path so manifest_verifier can be imported directly
 if ROOT not in sys.path:

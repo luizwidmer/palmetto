@@ -33,7 +33,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -243,7 +243,7 @@ class ScalarLogicInterpreter:
 
 
 def spirv_lowering_model_logic(op: str, s0: int, s1: int) -> tuple[int, int]:
-    """Mathematical emulation of the SPIR-V lowering emitted by tools/rdna2spirv.py.
+    """Mathematical emulation of the SPIR-V lowering emitted by tooling/rdna2spirv.py.
 
     Emulates the mask lowering path in rdna2spirv.py:
       - Inverts operand y via OpNot if the mnemonic ends with n2_b64.
@@ -801,7 +801,7 @@ class TestWaveMaskUseCases(unittest.TestCase):
 
 
 class TestSpirvLoweringEquivalence(unittest.TestCase):
-    """Equivalence between the ISA semantics and the SPIR-V lowering in tools/rdna2spirv.py."""
+    """Equivalence between the ISA semantics and the SPIR-V lowering in tooling/rdna2spirv.py."""
 
     def test_spirv_lowering_model_equivalence(self) -> None:
         rng = random.Random(888)

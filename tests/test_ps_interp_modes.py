@@ -1,7 +1,7 @@
 """The PS interpolation-mode decoder reads PSV0 elements, ISG1 read masks, FSSM read methods
 and classifies the single barycentric pair; malformed containers are refused.
 
-Covers tools/ps_interp_modes.py (SHADER-181).  All containers here are synthetic: the PSV0
+Covers tooling/ps_interp_modes.py (SHADER-181).  All containers here are synthetic: the PSV0
 layout is the one dxc writes (lib/DxilContainer/DxilPipelineStateValidation.cpp), the
 interpolation-mode numbers are DXIL::InterpolationMode ("must match D3D_INTERPOLATION_MODE")
 and the class names come from the SPI_PS_INPUT_ENA fields (Mesa gfx103.json).
@@ -19,7 +19,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 TOOL = os.path.join(TOOLS, "ps_interp_modes.py")
 sys.path.insert(0, TOOLS)
 

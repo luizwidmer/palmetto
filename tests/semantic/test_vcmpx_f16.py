@@ -2,7 +2,7 @@
 
 RDNA2 ISA (VOPC, _F16): a v_cmpx compares like v_cmp (S0.f16 with S1.f16, ordered compares false for a NaN, +0 == -0)
 but writes the result to EXEC (EXEC = EXEC & compare) and to nothing else, so VCC is kept. The shaders are
-runtime/test/shaders/ps_vcmpx_f16.asm and ps_vcmpx_f16_e64.asm (also run on the GPU by check.py and
+port/test/shaders/ps_vcmpx_f16.asm and ps_vcmpx_f16_e64.asm (also run on the GPU by check.py and
 run_gpu_tests.py); their headers derive the eight words by hand. The reference reuses the one of test_vcmp_f16 and
 adds bit 29 (VCC kept, 1) next to bit 30 (marker) and bit 28 (a v_cmpx cannot widen EXEC, 0).
 """

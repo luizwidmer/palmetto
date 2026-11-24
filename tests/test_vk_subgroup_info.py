@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Synthetic unit tests for tools/vk_subgroup_info.py.
+"""Synthetic unit tests for tooling/vk_subgroup_info.py.
 
 Standard library only; no GPU, no Vulkan loader DLL, and no game data: the Vulkan loader ctypes API is replaced
 with an in-memory fake that validates sType/pNext chains and writes real bytes into the caller's ctypes buffers.
@@ -18,7 +18,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 

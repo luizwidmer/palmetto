@@ -1,4 +1,4 @@
-"""Unit tests for the pure-Python RDNA2 binary ISA decoder (tools/rdna2_decode.py, #1901).
+"""Unit tests for the pure-Python RDNA2 binary ISA decoder (tooling/rdna2_decode.py, #1901).
 
 Covers:
   - All major RDNA2 encoding families (SOP1, SOP2, SOPC, SOPK, SOPP, SMEM, VOP1, VOP2, VOPC,
@@ -9,7 +9,7 @@ Covers:
     `s_setreg_imm32_b32`, `ds_swizzle_b32`, and `shader_disasm.disasm(..., backend="python")`.
   - Round-trip translation: raw RDNA2 machine code -> `rdna2_decode.disasm_bytes` -> `rdna2spirv.translate`
     -> `spirv_mini_interp` value verification.
-  - Optional full-suite parity test against `llvm-mc` across all `runtime/test/shaders/*.asm` when
+  - Optional full-suite parity test against `llvm-mc` across all `port/test/shaders/*.asm` when
     `LLVM_MC` (or `llvm-mc` on PATH) is available.
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 SEMANTIC = os.path.join(HERE, "semantic")
 
 sys.dont_write_bytecode = True
@@ -60,7 +60,7 @@ class Rdna2DecodeUnitTests(unittest.TestCase):
                     asm = (f"image_atomic_{name} {data}, v[4:5], s[8:15] "
                            f"dmask:0x{mask:x} dim:SQ_RSRC_IMG_2D unorm" + (" glc" if glc else ""))
                     expected = shader_ir.parse_line(asm)
-                    for field in ("op", "args", "mods"):
+                    for field in ("op", "args", "extensions"):
                         self.assertEqual(ins[field], expected[field])
 
     def test_image_slc_is_independent_of_sampler(self):
@@ -339,20 +339,20 @@ class Rdna2DecodeUnitTests(unittest.TestCase):
                 self.assertEqual(dec["invalid"], 0)
                 (ins,) = dec["insns"]
                 expected = shader_ir.parse_line(asm)
-                for field in ("op", "args", "mods"):
+                for field in ("op", "args", "extensions"):
                     self.assertEqual(ins[field], expected[field])
                 # Formatted text also round-trips cleanly through shader_ir.parse_line.
                 text, bad = rdna2_decode.disasm_bytes(raw)
                 self.assertEqual(bad, 0)
                 reparsed = shader_ir.parse_line(text.strip())
-                for field in ("op", "args", "mods"):
+                for field in ("op", "args", "extensions"):
                     self.assertEqual(reparsed[field], expected[field])
 
     def test_parity_with_llvm_mc_on_shader_fixtures(self):
         mc = os.environ.get("LLVM_MC") or shutil.which("llvm-mc") or shutil.which("llvm-mc-18")
         if not mc:
             self.skipTest("llvm-mc not available")
-        asms = sorted(glob.glob(os.path.join(ROOT, "runtime", "test", "shaders", "*.asm")))
+        asms = sorted(glob.glob(os.path.join(ROOT, "port", "test", "shaders", "*.asm")))
         self.assertGreater(len(asms), 50)
 
         def norm_op(op):
@@ -427,7 +427,7 @@ class Rdna2DecodeUnitTests(unittest.TestCase):
         self.assertGreater(checked, 5000)
 
     def test_sdwa_inline_constants_and_sgpr(self):
-        # Exact encodings from runtime/test/shaders/ps_sdwa_f16_const.asm:
+        # Exact encodings from port/test/shaders/ps_sdwa_f16_const.asm:
         # 1) v_add_f16_sdwa v2, 1.0, v1 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_1 src1_sel:WORD_0
         # 2) v_mul_f16_sdwa v3, 2.0, v1 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:BYTE_1 src1_sel:WORD_1
         # 3) v_add_f16_sdwa v4, s8, v1  dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_1 src1_sel:WORD_0

@@ -1,6 +1,6 @@
 """Semantic interpreter tests for RDNA2 byte permutation (v_perm_b32).
 
-Exercises shader translation via tools/rdna2spirv.py and execution via
+Exercises shader translation via tooling/rdna2spirv.py and execution via
 tests/semantic/spirv_mini_interp.py against a plain-Python reference oracle.
 
 RDNA2 VALU Specification (VOP3 opcode 836, v_perm_b32):
@@ -43,7 +43,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

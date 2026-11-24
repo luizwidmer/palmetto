@@ -5,7 +5,7 @@ import unittest
 
 import support
 
-sys.path.insert(0, os.path.join(support.ROOT, "runtime", "test", "shaders"))
+sys.path.insert(0, os.path.join(support.ROOT, "port", "test", "shaders"))
 from check import CVT_PK_U8_WORDS
 from compute_fixture import compute_header
 
@@ -14,7 +14,7 @@ OUT_V = [0, 0, 32, 0x31016FAC]   # the output V# in s[0:3]: base 0, 32 bytes, FO
 
 class CvtPkU8Test(unittest.TestCase):
     def test_hardware_words(self):
-        asm = os.path.join(support.ROOT, "runtime", "test", "shaders", "cs_cvt_pk_u8.asm")
+        asm = os.path.join(support.ROOT, "port", "test", "shaders", "cs_cvt_pk_u8.asm")
         spv = support.translate_fixture("cs_cvt_pk_u8", fssm=bytes(compute_header(asm)))
         for lane, want in enumerate(CVT_PK_U8_WORDS):
             with self.subTest(lane=lane):

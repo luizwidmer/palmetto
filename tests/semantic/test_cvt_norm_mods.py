@@ -21,7 +21,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 for p in (TOOLS_DIR, HERE):
@@ -69,7 +69,7 @@ def translate_ps(lines: list[str], export_tail: list[str] | None = None) -> str:
             "v_or_b32 v6, 0x40000000, v6",
             "exp mrt0 v5, v6, v5, v5 done vm",
         ]
-    asm_text = "; test_cvt_norm_mods\n" + "".join(f"\t{ln}\n" for ln in list(lines) + export_tail) + "\ts_endpgm\n"
+    asm_text = "; test_cvt_norm_extensions\n" + "".join(f"\t{ln}\n" for ln in list(lines) + export_tail) + "\ts_endpgm\n"
     with open(_SRC_PATH, "w", encoding="utf-8", newline="\n") as f:
         f.write(asm_text)
     with warnings.catch_warnings():

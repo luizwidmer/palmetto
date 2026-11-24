@@ -1,4 +1,4 @@
-"""Synthetic unit and CLI tests for tools/odrp_7a.py.
+"""Synthetic unit and CLI tests for tooling/odrp_7a.py.
 
     python -I tests/test_odrp_7a.py
 
@@ -17,8 +17,8 @@ import unittest.mock
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "odrp_7a.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "odrp_7a.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import odrp_7a  # noqa: E402
 

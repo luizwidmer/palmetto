@@ -1,7 +1,7 @@
 """image_bvh_intersect_ray box nodes against words measured on native RDNA2 hardware (SHADER-650).
 
 Every expected value below was returned by the instruction itself on an AMD Radeon RX 6900 XT (gfx1030, AMD
-driver 26.11.2, Windows), through tools/hw_oracle raw kernels that write the node into memory and trace one ray
+driver 26.11.2, Windows), through tooling/hw_oracle raw kernels that write the node into memory and trace one ray
 with box sorting on (descriptor w1 bit 31, w2 = -1, w3 = 0x81000000). This file runs the same node and ray
 through the translator and compares the four child words. The rule they follow is in the docs/design.md Ray
 tracing row: near/far planes picked by the sign of the inverse direction, NaN skipped in the max/min of the

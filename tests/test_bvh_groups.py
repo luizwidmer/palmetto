@@ -1,4 +1,4 @@
-"""Hand-built descriptor and BVH streams for tools/bvh_groups.py. No game data is read.
+"""Hand-built descriptor and BVH streams for tooling/bvh_groups.py. No game data is read.
 
     python -I tests/test_bvh_groups.py
 """
@@ -14,7 +14,7 @@ import zlib
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import bvh_groups  # noqa: E402
 import bvh_index  # noqa: E402

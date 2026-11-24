@@ -1,4 +1,4 @@
-"""Unit tests for tools/inline_scan.py on hand-written dumpbin-style listings.
+"""Unit tests for tooling/inline_scan.py on hand-written dumpbin-style listings.
 
 The listings are synthetic: the instruction shapes of a checked and an unchecked inline command-list write, written
 here line by line, so the test needs no game files, no dumpbin and no third-party packages.
@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 

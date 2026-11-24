@@ -1,4 +1,4 @@
-"""tools/ps_sweep.py on a synthetic index and synthetic outputs: no GPU, game data or Vulkan tools needed.
+"""tooling/ps_sweep.py on a synthetic index and synthetic outputs: no GPU, game data or Vulkan tools needed.
 
     python -I tests/test_ps_sweep.py
 """
@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tooling"))
 import ps_sweep  # noqa: E402
 
 

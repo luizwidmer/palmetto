@@ -1,4 +1,4 @@
-"""Translation and SPIR-V structure tests for image_get_resinfo and image_get_lod in tools/rdna2spirv.py.
+"""Translation and SPIR-V structure tests for image_get_resinfo and image_get_lod in tooling/rdna2spirv.py.
 
 spirv_mini_interp.py does not yet implement OpImageQuerySizeLod, OpImageQueryLevels, or OpImageQueryLod,
 so this suite characterizes current translator output (capabilities, image/sampler types, query opcodes,
@@ -17,7 +17,7 @@ import warnings
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import rdna2spirv  # noqa: E402
 
 # Minimal valid DXBC container with zero parts (no declared PS inputs).
@@ -124,7 +124,7 @@ class ImageGetResinfoTranslateTests(unittest.TestCase):
         self.assertEqual(src_ops[0], "OpCompositeExtract")
         self.assertEqual(src_ops[1], "OpCompositeExtract")
         self.assertEqual(src_ops[2], "OpBitcast")  # as_int(cu(1)) -> Bitcast %uint
-        # a 2D image's depth word is 0 on RDNA2 (SHADER-388, measured with tools/image_query_probe.py)
+        # a 2D image's depth word is 0 on RDNA2 (SHADER-388, measured with tooling/image_query_probe.py)
         self.assertEqual(defs[defs[stores[2][1]][1][1]][1][1], "%c0")
         self.assertEqual(src_ops[3], "OpImageQueryLevels")
 

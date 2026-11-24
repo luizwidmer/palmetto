@@ -1,6 +1,6 @@
-"""rdna2spirv.py --mesh-compute and tools/mesh_compute_vs.py: mesh shaders without VK_EXT_mesh_shader.
+"""rdna2spirv.py --mesh-compute and tooling/mesh_compute_vs.py: mesh shaders without VK_EXT_mesh_shader.
 
-The inputs are the hand-written GPU tests runtime/test/shaders/ms_*.asm with conftest's synthetic PSV0/OSG1
+The inputs are the hand-written GPU tests port/test/shaders/ms_*.asm with conftest's synthetic PSV0/OSG1
 containers (no game data). On the GPU, run_gpu_tests.py with PALMETTO_MESH_COMPUTE=1 dispatches each one as compute
 and draws its slots with the generated vertex shader (vk_harness VKH_MESH_COMPUTE). Here:
 * the slot layout arithmetic;
@@ -22,11 +22,11 @@ import pytest
 
 from conftest import HAVE_SPIRV, ROOT, SAMPLE_DXBC, requires_tools
 
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import rdna2spirv  # noqa: E402
 import mesh_compute_vs  # noqa: E402
 
-sys.path.insert(0, os.path.join(ROOT, "runtime", "test", "shaders"))
+sys.path.insert(0, os.path.join(ROOT, "port", "test", "shaders"))
 import check  # noqa: E402
 
 MESH_TESTS = ("ms_tri", "ms_clip", "ms_v5_workgroup", "ms_w64x_ballot", "ms_wave_info_s3")
@@ -47,7 +47,7 @@ def test_layout():
 
 
 def _translate(make_shader, name, compute, emulate=False):
-    with open(os.path.join(ROOT, "runtime", "test", "shaders", name + ".asm"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "port", "test", "shaders", name + ".asm"), encoding="utf-8") as f:
         shader = make_shader(f.read(), name, dxbc=SAMPLE_DXBC[name])
     old = rdna2spirv.MESH_COMPUTE, rdna2spirv.WAVE64_EMULATE
     rdna2spirv.MESH_COMPUTE, rdna2spirv.WAVE64_EMULATE = compute, emulate

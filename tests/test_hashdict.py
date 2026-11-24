@@ -1,4 +1,4 @@
-"""Unit tests for tools/hashdict.py: Jenkins one-at-a-time (joaat) hashing, string harvesting,
+"""Unit tests for tooling/hashdict.py: Jenkins one-at-a-time (joaat) hashing, string harvesting,
 lookup CLI, case-insensitivity, and collision handling.
 
     python -I tests/test_hashdict.py
@@ -14,12 +14,12 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "hashdict.py")
+TOOL = os.path.join(ROOT, "tooling", "hashdict.py")
 
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-if os.path.join(ROOT, "tools") not in sys.path:
-    sys.path.insert(0, os.path.join(ROOT, "tools"))
+if os.path.join(ROOT, "tooling") not in sys.path:
+    sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import hashdict
 

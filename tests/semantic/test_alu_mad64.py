@@ -3,7 +3,7 @@
 {sdst, D.u64} = S0 * S1 + S2 as a 65-bit result (RDNA ISA pseudocode): the 32 x 32 -> 64-bit product, unsigned for
 v_mad_u64_u32 and signed for v_mad_i64_i32, plus the 64-bit S2. D is the low 64 bits; sdst, a lane mask, gets bit 64:
 the carry out of the unsigned sum, and for the signed one the sign of the exact sum. Each case translates a synthetic
-pixel shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the result with a
+pixel shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the result with a
 plain-Python reference. v[0:1] and the sdst bit leave through exp as 16-bit halves ORed into 0x40000000, so no
 export channel is a NaN or denormal pattern that a float round trip could change.
 """
@@ -28,7 +28,7 @@ if not hasattr(int, "bit_count"):
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

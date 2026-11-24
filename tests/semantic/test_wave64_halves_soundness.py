@@ -1,4 +1,4 @@
-"""Soundness regression tests for tools/wave64_halves.py.
+"""Soundness regression tests for tooling/wave64_halves.py.
 
 Each regression checks a bug where an unsafe wave64 VS/PS/GS program used to pass as Tier A or B
 (or lose a genuine vote SCC), together with clean control cases that must remain Tier A or B.

@@ -1,4 +1,4 @@
-"""tools/report_paths.py, the one `same_report_path` the tools share, and the tools that use it.
+"""tooling/report_paths.py, the one `same_report_path` the tools share, and the tools that use it.
 
     python -I tests/test_report_paths.py
 
@@ -15,7 +15,7 @@ import unittest
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TOOLS = ROOT / "tools"
+TOOLS = ROOT / "tooling"
 sys.path.insert(0, str(TOOLS))
 import report_paths  # noqa: E402
 
@@ -198,7 +198,7 @@ class NoPrivateCopiesTests(unittest.TestCase):
                 self.assertIn("from report_paths import same_report_path", source)
                 names = self.functions(tool)
                 self.assertFalse({"same_report_path", "_same_report_path", "_path_key", "_case_insensitive_volume"} & names,
-                                 f"{tool} defines its own copy; use tools/report_paths.py")
+                                 f"{tool} defines its own copy; use tooling/report_paths.py")
 
     def test_no_new_copies_of_same_report_path(self):
         copies = set()
@@ -208,7 +208,7 @@ class NoPrivateCopiesTests(unittest.TestCase):
             if any("same_report_path" in name for name in self.functions(path.stem)):
                 copies.add(path.stem)
         self.assertEqual(copies - LEGACY_COPIES, set(),
-                         "a tool defines its own same_report_path: import it from tools/report_paths.py instead")
+                         "a tool defines its own same_report_path: import it from tooling/report_paths.py instead")
 
     def test_tools_still_expose_same_report_path(self):
         # gamedata_xml.py and others call it by this name (and tests or sibling tools may import it).

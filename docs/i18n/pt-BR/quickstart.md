@@ -33,13 +33,13 @@ O projeto está em fase inicial: **o jogo ainda não dá boot**.
   - Para compilar um `llvm-mc.exe` nativo com AMDGPU, rode este comando a partir da raiz do repositório.
 
     ```powershell
-    powershell -ExecutionPolicy Bypass -File scripts\build_llvm_mc.ps1
+    powershell -ExecutionPolicy Bypass -File tooling/scripts\build_llvm_mc.ps1
     ```
 
     O script requer `git` e as ferramentas C++ do Visual Studio, configura `LLVM_MC` para o seu usuário
     e pede que você abra um novo terminal para carregar a variável.
   - Se usar o WSL, instale `llvm-21` no Ubuntu e defina a variável na mesma sessão do PowerShell em que vai
-    executar `make_game.py`.
+    executar `build_port.py`.
 
     ```powershell
     $env:LLVM_MC = 'wsl -d Ubuntu -e /usr/lib/llvm-21/bin/llvm-mc'
@@ -78,17 +78,17 @@ várias vezes o tamanho do Ogg Opus. `--work` e `--out` podem ficar em outro dis
 precisa de `--overlay` em uma gravável. Mantenha os arquivos `.s` em `work/shaders/dxbc/disasm` no lugar: apagá-los
 mantendo a pasta faz o estágio parecer concluído com zero shaders, e um `disasm` com symlink é recusado.
 
-### Pelo terminal (`make_game.py`)
+### Pelo terminal (`build_port.py`)
 
 ```powershell
-python -I make_game.py --find                          # lista as cópias encontradas neste PC
-python -I make_game.py --pick                          # escolhe a pasta do jogo em uma janela de diálogo
-python -I make_game.py --check                         # verifica os arquivos do jogo sem compilar
-python -I make_game.py --check --full-check            # também compara o SHA-256 de cada arquivo (lento)
-python -I make_game.py --game "D:\caminho\do\pacote" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
-python -I make_game.py --stages shaders,assets         # roda apenas os estágios escolhidos
-python -I make_game.py --game "D:\caminho\do\pacote" --wav  # também decodifica Ogg Opus para PCM WAV (grande)
-python -I make_game.py --wave64-emulate off            # auto (padrão), on ou off; veja abaixo
+python -I build_port.py --find                          # lista as cópias encontradas neste PC
+python -I build_port.py --pick                          # escolhe a pasta do jogo em uma janela de diálogo
+python -I build_port.py --check                         # verifica os arquivos do jogo sem compilar
+python -I build_port.py --check --full-check            # também compara o SHA-256 de cada arquivo (lento)
+python -I build_port.py --game "D:\caminho\do\pacote" --out "D:\Games\Palmetto" --work "E:\palmetto-work"
+python -I build_port.py --stages shaders,assets         # roda apenas os estágios escolhidos
+python -I build_port.py --game "D:\caminho\do\pacote" --wav  # também decodifica Ogg Opus para PCM WAV (grande)
+python -I build_port.py --wave64-emulate off            # auto (padrão), on ou off; veja abaixo
 ```
 
 Os estágios executam nesta ordem: `check` → `shaders` → `assets` → `runtime` → `pipelines`.
@@ -103,7 +103,7 @@ Os estágios executam nesta ordem: `check` → `shaders` → `assets` → `runti
 Para preparar o runtime e os shaders com cerca de **30 GB livres**, execute na raiz do repositório:
 
 ```powershell
-python -I make_game.py --stages check,shaders,runtime
+python -I build_port.py --stages check,shaders,runtime
 ```
 
 O estágio `assets` serve às ferramentas de extração e ocupa cerca de 370 GB. A opção `--wav` aumenta ainda mais
@@ -120,18 +120,18 @@ Com CMake 3.24+, um compilador C++20, os cabeçalhos de desenvolvimento e o carr
 rode na raiz do repositório:
 
 ```sh
-cmake -S runtime -B runtime/build/linux
-cmake --build runtime/build/linux --parallel
-./runtime/build/linux/vk_pipeline_check /caminho/para/spirv
+cmake -S runtime -B port/build/linux
+cmake --build port/build/linux --parallel
+./port/build/linux/vk_pipeline_check /caminho/para/spirv
 ```
 
-Passe a pasta que contém `index.json` e os shaders SPIR-V traduzidos. O estágio `pipelines` de `make_game.py`
-usa esse verificador em `runtime/build/linux` ou `runtime/build`. Se ainda não existir, o script o compila
+Passe a pasta que contém `index.json` e os shaders SPIR-V traduzidos. O estágio `pipelines` de `build_port.py`
+usa esse verificador em `port/build/linux` ou `port/build`. Se ainda não existir, o script o compila
 antes de iniciar os estágios.
 
 ### Runtime no Linux com Wine ou Proton
 
-No Linux, `make_game.py` pode compilar o runtime Windows em `runtime/build/windows` com `clang-cl`,
+No Linux, `build_port.py` pode compilar o runtime Windows em `port/build/windows` com `clang-cl`,
 `lld-link` e o SDK Windows com o CRT do MSVC instalado via [xwin](https://github.com/Jake-Shadle/xwin).
 O script procura o SDK em `XWIN_DIR` ou `~/.local/share/xwin-sdk`. Consulte o
 [guia de configuração](../../testing.md#the-windows-runtime-on-linux-under-wine-or-proton) para instalar
@@ -142,7 +142,7 @@ Você também pode reutilizar um build Windows já extraído, como o artefato `r
 Runtime. Passe a pasta que contém `palmetto.exe` e `palmetto_tls_host.dll`:
 
 ```sh
-python3 -I make_game.py --runtime-build ~/Downloads/runtime-windows
+python3 -I build_port.py --runtime-build ~/Downloads/runtime-windows
 ```
 
 Nos dois casos, o script copia os arquivos do runtime para o diretório indicado por `--out` e gera `palmetto.sh` nessa pasta.
@@ -151,7 +151,7 @@ da instalação. No Windows, `--runtime-build` também permite reutilizar um bui
 
 ## Problemas comuns
 
-- **Baixou pelo botão "Download ZIP" do GitHub**: o ZIP não inclui o submódulo `third_party/arc9-explorer`. Use `git clone --recursive` ou execute `git submodule update --init --recursive` dentro da pasta do repositório.
+- **Baixou pelo botão "Download ZIP" do GitHub**: o ZIP não inclui o submódulo `vendor/arc9-explorer`. Use `git clone --recursive` ou execute `git submodule update --init --recursive` dentro da pasta do repositório.
 - **`llvm-mc` recusa `gfx1013` / AMDGPU**: você provavelmente está com o instalador oficial do LLVM para Windows. Siga um dos passos de configuração do LLVM acima.
 - **Erro de `D3D12_ROOT_SIGNATURE_DESC2` ao compilar o runtime**: atualize o Windows SDK para `10.0.26100` ou mais recente pelo Visual Studio Installer ou `winget install Microsoft.WindowsSDK.10.0.26100`, apague a pasta de build e reconfigure.
 - **Falha por falta de espaço no drive `C:`**: passe `--work "D:\palmetto-work"` para mover os arquivos

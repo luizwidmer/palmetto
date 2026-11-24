@@ -1,7 +1,7 @@
 """Semantic interpreter tests for RDNA2 s_cmov_b32 and s_cmovk_i32.
 
 s_cmov_b32: D = SCC ? S0 : D. s_cmovk_i32: D = SCC ? sign_extend(simm16) : D. Both read SCC and leave it unchanged.
-Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py
+Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py
 and compares the result with a plain-Python reference. D leaves through exp as two 16-bit halves ORed into
 0x40000000, so no export channel is a NaN or denormal pattern that a float round trip could change; SCC comes back
 through s_cselect_b32.
@@ -15,7 +15,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

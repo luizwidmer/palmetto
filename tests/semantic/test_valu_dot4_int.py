@@ -1,7 +1,7 @@
 """v_dot4_u32_u8 and v_dot4_i32_i8 (RDNA2 VOP3P): D = S2 + sum of the four byte products of S0 and S1 (unsigned bytes
 for u8, signed for i8), modulo 2^32; with `clamp` the result saturates to [0, 2^32-1] (u8) or [-2^31, 2^31-1] (i8).
 
-Each case is translated by tools/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
+Each case is translated by tooling/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
 words are written by hand and also recomputed by a plain-Python reference. v_dot4acc_u32_u8 is not a RDNA2 opcode the
 translator knows, and stays refused. Standard library only: no GPU, no LLVM, no game data.
 """

@@ -11,7 +11,7 @@ from unittest import mock
 __author__ = "it_komarov"
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tooling"))
 
 import bcpack_history_calib as calibration
 import bcpack_tables_bptc as history
@@ -168,7 +168,7 @@ class JsonBomInputTests(unittest.TestCase):
             })
             for carve in self.variants([], "shaders/dxbc/index.json"):
                 result = subprocess.run([
-                    sys.executable, "-B", "-I", str(ROOT / "tools" / "feature_scan.py"),
+                    sys.executable, "-B", "-I", str(ROOT / "tooling" / "feature_scan.py"),
                     str(carve.parent.parent),
                 ], capture_output=True, text=True, encoding="utf-8", timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)

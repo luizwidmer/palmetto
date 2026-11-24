@@ -1,7 +1,7 @@
 """Semantic interpreter tests for RDNA2 v_alignbyte_b32.
 
 v_alignbyte_b32 D, S0, S1, S2: the low 32 bits of ({S0, S1} >> (8 * (S2 & 3))), S1 being the low word (RDNA2 ISA
-reference, V_ALIGNBYTE_B32). Each case translates a synthetic pixel shader with tools/rdna2spirv.py, runs it in
+reference, V_ALIGNBYTE_B32). Each case translates a synthetic pixel shader with tooling/rdna2spirv.py, runs it in
 tests/semantic/spirv_mini_interp.py and compares the mrt0 word with a plain-Python reference. The interpreter
 rejects shifts of 32 or more (undefined in SPIR-V), so S2 & 3 == 0 also checks that the translation never emits one,
 including on the side of the OpSelect that is discarded.
@@ -15,7 +15,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

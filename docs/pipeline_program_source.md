@@ -62,17 +62,17 @@ are library compute records 0 to 41, and records 31 to 41 translate from the sam
 a fresh build needs is the pipeline-library step itself: extract the library, write the kind-0 state sidecars, translate
 its compute programs, and index them by kind-6 and kind-0 keys. With the zlib stage inflating, the same boot reports
 11,894 D3D12 calls, **0 of 42 pipeline failures and 0 programs dumped**. The pipeline-library step is not yet a
-`make_game.py` stage ([boot_frontier.md](boot_frontier.md)), so a fresh build still reproduces the older failure until
+`build_port.py` stage ([boot_frontier.md](boot_frontier.md)), so a fresh build still reproduces the older failure until
 it is added.
 
 ## Checking
 
-`tools/shader_library.py` extracts the library (all stages with `--stages all`) and writes the `.state` sidecars; the
+`tooling/shader_library.py` extracts the library (all stages with `--stages all`) and writes the `.state` sidecars; the
 record tables are in its `library.json`. The captured dumps stay in the work folder, outside the repository. The fix
-is the zlib stage in the console DirectStorage shim (`runtime/shims/dstorage.cpp`). No GPU run was made in this
+is the zlib stage in the console DirectStorage shim (`port/shims/dstorage.cpp`). No GPU run was made in this
 investigation.
 
-Correction (later): the pipeline-library step is now a `make_game.py` stage (`library_shaders`), so the last paragraph
+Correction (later): the pipeline-library step is now a `build_port.py` stage (`library_shaders`), so the last paragraph
 of "Consequence for a fresh build" no longer applies.
 
 ## The 1,266 graphics programs the next boot asks for
@@ -83,9 +83,9 @@ by the SHA-256 of its bytes as passed, which is the index's `fspx_code_sha256` k
 `create_compute` resolves compute programs with. The hash list is data: it stays outside the repository (a file named
 by `PALMETTO_GRAPHICS_PROGRAMS`, else `<work>/graphics_programs.json`) and is never committed or quoted.
 
-`tools/shader_library.py --wanted LIST.json` adds the programs whose stored bytes have those hashes to the
+`tooling/shader_library.py --wanted LIST.json` adds the programs whose stored bytes have those hashes to the
 extraction (whatever `--stages` selects; the extraction records the outcome in `<out>/wanted.json`). The new
-`make_game.py` step `graphics_shaders` extracts that selection into `<work>/shaders/pipeline_graphics`, translates it
+`build_port.py` step `graphics_shaders` extracts that selection into `<work>/shaders/pipeline_graphics`, translates it
 into `<work>/shaders/spirv/pipeline_graphics`, and publishes the entries in the FSPX index beside the compute
 library's (`merge_library_corpus`, entry names `lib_ps_*` and `lib_vs_*`): the runtime looks a program up by its
 stage and `fspx_code_sha256`, with the module at `fspx/<name>.spv`.
@@ -98,10 +98,10 @@ translation (`pipeline_graphics_build.json`) carry reuse markers, so a rerun is 
 package, the tools, llvm-mc, the wave64/fallback flags or the list changed.
 
 Publishing runs in the shaders stage, so the supported way to republish a work folder is (with `LLVM_MC`,
-`spirv-as` and `spirv-val` on `PATH`, as for the step itself; `scripts\build_llvm_mc.ps1` builds llvm-mc):
+`spirv-as` and `spirv-val` on `PATH`, as for the step itself; `tooling/scripts\build_llvm_mc.ps1` builds llvm-mc):
 
 ```sh
-python -I make_game.py --game "<package>" --work "<work>" --stages shaders
+python -I build_port.py --game "<package>" --work "<work>" --stages shaders
 ```
 
 The list is read from `<work>/graphics_programs.json` in that case; set `PALMETTO_GRAPHICS_PROGRAMS` to name another

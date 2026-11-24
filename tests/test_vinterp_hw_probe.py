@@ -1,4 +1,4 @@
-"""Unit tests for tools/vinterp_hw_probe.py (SHADER-430). Standard library only; no GPU or game files needed."""
+"""Unit tests for tooling/vinterp_hw_probe.py (SHADER-430). Standard library only; no GPU or game files needed."""
 from contextlib import redirect_stdout
 from fractions import Fraction
 import io
@@ -8,7 +8,7 @@ import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLS = ROOT / "tools"
+TOOLS = ROOT / "tooling"
 sys.dont_write_bytecode = True
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))

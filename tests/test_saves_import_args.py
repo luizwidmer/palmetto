@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "saves.py")
+TOOL = os.path.join(ROOT, "tooling", "saves.py")
 
 
 class ImportMissingValueTest(unittest.TestCase):

@@ -27,7 +27,7 @@ Covers AMD RDNA2 / GFX10 SMEM (Scalar Memory) store instruction semantics:
       - Memory overwrites and latest-write persistence
   * Destination / Source register targeting:
       - Source data from SGPRs, SGPR ranges, and special registers (vcc_lo, vcc_hi, vcc pair, m0, null)
-  * Shader IR parsing (tools/shader_ir.py):
+  * Shader IR parsing (tooling/shader_ir.py):
       - Tokenization and AST validation for scalar store instructions and operand variants
       - Validation of invalid operand configurations (wrong register counts, vgpr base)
   * Translator and mini-interpreter contracts:
@@ -41,7 +41,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:
@@ -667,7 +667,7 @@ class SmemStoreProgramEvaluatorTests(unittest.TestCase):
 class SmemStoreTranslatorContractTests(unittest.TestCase):
     """Verifies translator handling of scalar stores.
 
-    tools/rdna2spirv.py Gen currently raises Unsupported on s_store_dword, protecting against
+    tooling/rdna2spirv.py Gen currently raises Unsupported on s_store_dword, protecting against
     silent miscompilations until SMEM store PhysicalStorageBuffer write emission is supported.
     """
 

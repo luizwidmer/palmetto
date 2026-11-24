@@ -3,7 +3,7 @@
 RDNA ISA: D.f32 = CVT_OFF_TABLE[S0[3:0]]: the low 4 bits of S0 as a signed integer, divided by 16, so 0..7 give
 0.0 .. 0.4375 and 8..15 give -0.5 .. -0.0625 (a sample-offset conversion). Bits 4-31 are ignored. Output modifiers
 (mul:2 / mul:4 / div:2, then clamp) apply to the result. Each case translates a synthetic pixel shader with
-tools/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the exported word with a
+tooling/rdna2spirv.py, runs it in tests/semantic/spirv_mini_interp.py and compares the exported word with a
 plain-Python reference (every result is an exact, normal binary32 value or zero).
 """
 import os
@@ -15,7 +15,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, TOOLS_DIR)

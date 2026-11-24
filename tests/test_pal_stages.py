@@ -14,7 +14,7 @@ import unittest
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 TOOL = os.path.join(TOOLS, "pal_stages.py")
 sys.path.insert(0, TOOLS)
 

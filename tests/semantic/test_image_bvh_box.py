@@ -3,10 +3,10 @@
 One pixel shader per case runs the instruction on a hand-built box node and exports the four child words. The ray
 starts at (0, 0, -1) and runs along +z. A box contributes its entry distance only when it is well formed and the
 slab interval overlaps [0, extent); empty boxes (min > max) and boxes the ray misses give 0xFFFFFFFF, in distance
-order, as tools/xdxr_bvh.py `_box_test` does.
+order, as tooling/xdxr_bvh.py `_box_test` does.
 
 box32 (node type 5) stores a child as six f32 at byte 16 + 24 i; box16 (type 4) stores the same six values as
-f16 at byte 16 + 12 i. Both go through the same slab test in tools/rdna2spirv.py.
+f16 at byte 16 + 12 i. Both go through the same slab test in tooling/rdna2spirv.py.
 
     python -m unittest discover -s tests/semantic -p "test_image_bvh_box.py" -v
 """

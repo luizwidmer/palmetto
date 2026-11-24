@@ -1,7 +1,7 @@
 """Semantic interpreter tests for untyped MUBUF buffer loads and stores.
 
 Covers AMD RDNA2 / GFX10 untyped buffer memory load/store ISA semantics and
-tools/rdna2spirv.py translation:
+tooling/rdna2spirv.py translation:
   * Buffer Resource Descriptor (V# 128-bit layout):
       - Dword 0: Base address low 32 bits [31:0]
       - Dword 1: Base address high 16 bits [15:0] in bits [15:0]; Stride in bytes
@@ -46,7 +46,7 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:

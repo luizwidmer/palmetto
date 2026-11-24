@@ -1,4 +1,4 @@
-"""tools/mask_channels.py on synthetic images: every texel is built here, no game data."""
+"""tooling/mask_channels.py on synthetic images: every texel is built here, no game data."""
 import io
 import json
 import os
@@ -10,7 +10,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import mask_channels as mc  # noqa: E402
 import report_paths  # noqa: E402

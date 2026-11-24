@@ -3,7 +3,7 @@
 v_pk_add/sub_u16/i16, v_pk_mul_lo_u16, v_pk_mad_u16/i16 and v_pk_max/min_u16/i16. Result half 0 takes each source's
 half from op_sel[i], result half 1 from op_sel_hi[i] (defaults [0,..], [1,..]); each half wraps to 16 bits, and clamp
 saturates add/sub/mad to the type's range while acting as a hardware no-op on mul_lo/max/min. A constant operand reads as a 32-bit dword under op_sel/op_sel_hi
-(op_sel=0 selects bits [15:0], op_sel=1 selects bits [31:16], measured on gfx1036). Each case translates a synthetic pixel shader with tools/rdna2spirv.py and runs it in
+(op_sel=0 selects bits [15:0], op_sel=1 selects bits [31:16], measured on gfx1036). Each case translates a synthetic pixel shader with tooling/rdna2spirv.py and runs it in
 tests/semantic/spirv_mini_interp.py; D leaves through exp as 16-bit halves ORed into 0x40000000. Standard library
 only; no GPU, no game files.
 """
@@ -18,7 +18,7 @@ import warnings
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling"))
 sys.path.insert(0, HERE)
 
 import rdna2spirv  # noqa: E402

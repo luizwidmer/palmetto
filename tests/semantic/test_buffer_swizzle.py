@@ -1,5 +1,5 @@
 """Swizzled MUBUF addressing (V# SWIZZLE_ENABLE) and ADD_TID_ENABLE, as measured natively on RDNA2 (gfx1036, wave32
-and wave64; docs/design.md, Swizzled buffer addressing; tools/buffer_swizzle_probe.py):
+and wave64; docs/design.md, Swizzled buffer addressing; tooling/buffer_swizzle_probe.py):
 
     SWIZZLE_ENABLE  word1 bit 31          STRIDE      word1 [29:16]
     INDEX_STRIDE    word3 [22:21]         IS = 8 << INDEX_STRIDE indices
@@ -307,7 +307,7 @@ class BufferSwizzle(unittest.TestCase):
 
 
 class SwizzleFixture(unittest.TestCase):
-    """runtime/test/shaders/cs_buf_swizzle.asm in the interpreter: 64 threads (lanes 0 and 1 store through the
+    """port/test/shaders/cs_buf_swizzle.asm in the interpreter: 64 threads (lanes 0 and 1 store through the
     ADD_TID V#), a 256-byte heap filled with 0xee as vk_compute_test's, the words derived in the .asm header."""
 
     WANT = [0x5EED0024, 0x5EED0044, 0x5EED004C, 0x5EED0008, 0x5EED000C, 0, 0xBEEF0000, 0xBEEF0001]

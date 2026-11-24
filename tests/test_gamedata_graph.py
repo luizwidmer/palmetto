@@ -15,8 +15,8 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "gamedata_graph.py")
-TOOLS = os.path.join(ROOT, "tools")
+TOOL = os.path.join(ROOT, "tooling", "gamedata_graph.py")
+TOOLS = os.path.join(ROOT, "tooling")
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 import gamedata_graph as gg  # noqa: E402

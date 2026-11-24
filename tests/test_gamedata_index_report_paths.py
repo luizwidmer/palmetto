@@ -13,7 +13,7 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TOOL = pathlib.Path(os.environ.get("PALMETTO_GAMEDATA_INDEX", str(ROOT / "tools" / "gamedata_index.py")))
+TOOL = pathlib.Path(os.environ.get("PALMETTO_GAMEDATA_INDEX", str(ROOT / "tooling" / "gamedata_index.py")))
 
 
 class ReportPathTest(unittest.TestCase):

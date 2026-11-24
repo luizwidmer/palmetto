@@ -1,4 +1,4 @@
-"""tools/sad_diff.py: the SAD-family reference against hand-pinned ISA words, the source-kind sweep,
+"""tooling/sad_diff.py: the SAD-family reference against hand-pinned ISA words, the source-kind sweep,
 and a short seeded differential run. Standard library only; no GPU, no game files.
 
 The family is v_sad_u8, v_sad_hi_u8, v_sad_u16, v_sad_u32, v_msad_u8, v_qsad_pk_u16_u8 and
@@ -10,7 +10,7 @@ import re
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tooling"))
 import sad_diff as d  # noqa: E402
 
 

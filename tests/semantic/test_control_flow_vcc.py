@@ -12,7 +12,7 @@ Covers:
      - Execution mask (EXEC) interaction: inactive lanes write 0 into VCC.
      - Direct scalar manipulation of VCC (s_mov_b32/b64, s_and_b32/b64, s_or_b32/b64).
      - Skip patterns, divergent loop termination, and structured if-then-else joins.
-  3. SPIR-V translator lowering via tools/rdna2spirv.py branch_condition():
+  3. SPIR-V translator lowering via tooling/rdna2spirv.py branch_condition():
      - Verification of per-lane VCC load (%lane = OpINotEqual %bool %vcc 0).
      - Whole-subgroup vote emission (OpGroupNonUniformAny with Subgroup scope).
      - Logical negation (OpLogicalNot) for s_cbranch_vccz vs unnegated for s_cbranch_vccnz.
@@ -35,7 +35,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 
@@ -803,7 +803,7 @@ class TestWaveInterpreterVccFlow(unittest.TestCase):
 
 
 class TestTranslatorSpirvEmission(unittest.TestCase):
-    """Verifies that tools/rdna2spirv.py emits correct SPIR-V instructions for VCC branching."""
+    """Verifies that tooling/rdna2spirv.py emits correct SPIR-V instructions for VCC branching."""
 
     def test_branch_condition_vccz_emission(self):
         """s_cbranch_vccz must load %vcc, test != 0, vote Any, and negate the result."""

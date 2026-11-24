@@ -144,7 +144,7 @@ class ColorExportMask(unittest.TestCase):
 
 class GpuFixture(unittest.TestCase):
     def test_ps_exp_color_mask(self):
-        """runtime/test/shaders/ps_exp_color_mask.asm: the words of its header, from every lane."""
+        """port/test/shaders/ps_exp_color_mask.asm: the words of its header, from every lane."""
         out = run_fragment(support.translate_fixture("ps_exp_color_mask"))
         self.assertEqual(out, {"%out_mrt0": (0x40000000, 0x40800000, 0x40000000, 0x40800000)})
 

@@ -8,10 +8,10 @@
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../../tools/arc9dump/ModelDecodeFailure.cs" Link="ModelDecodeFailure.cs" />
-    <Compile Include="../../tools/arc9dump/Util.cs" Link="Util.cs" />
-    <Compile Include="../../tools/arc9dump/Segments.cs" Link="Segments.cs" />
-    <Compile Include="../../tools/arc9dump/ScanCounts.cs" Link="ScanCounts.cs" />
-    <ProjectReference Include="../../third_party/arc9-explorer/Core/ArcPreview.Core.csproj" />
+    <Compile Include="../../tooling/arc9dump/ModelDecodeFailure.cs" Link="ModelDecodeFailure.cs" />
+    <Compile Include="../../tooling/arc9dump/Util.cs" Link="Util.cs" />
+    <Compile Include="../../tooling/arc9dump/Segments.cs" Link="Segments.cs" />
+    <Compile Include="../../tooling/arc9dump/ScanCounts.cs" Link="ScanCounts.cs" />
+    <ProjectReference Include="../../vendor/arc9-explorer/Core/ArcPreview.Core.csproj" />
   </ItemGroup>
 </Project>

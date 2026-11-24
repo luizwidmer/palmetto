@@ -10,10 +10,10 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import palmetto_tui  # noqa: E402
-import make_game  # noqa: E402
+import build_port  # noqa: E402
 
 
 class EligibleTest(unittest.TestCase):
@@ -150,7 +150,7 @@ class RestoreConsoleTest(unittest.TestCase):
 
 class BuildRuntimeCaptureTest(unittest.TestCase):
     def test_script_no_longer_shares_the_parent_console(self):
-        path = os.path.join(ROOT, "scripts", "build_runtime.ps1")
+        path = os.path.join(ROOT, "tooling", "tooling/scripts", "build_runtime.ps1")
         with open(path, encoding="utf-8") as f:
             text = f.read()
         # The old Start-Process line shared the console; the new one must hide + redirect.
@@ -227,7 +227,7 @@ class StageScopeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with palmetto_tui.PalmettoBoard(["shaders", "assets"], tmp) as board:
                 with palmetto_tui.stage_scope("shaders"):
-                    make_game.log("from shaders")
+                    build_port.log("from shaders")
                 self.assertTrue(any("from shaders" in line for line in board.consoles["shaders"].snapshot(20)))
                 self.assertEqual(board.consoles["shaders"].status, "done")
 
@@ -298,13 +298,13 @@ class SerialOverlapTest(unittest.TestCase):
             out = os.path.join(tmp, "o")
             work = os.path.join(tmp, "w")
             os.makedirs(game)
-            with mock.patch.object(make_game, "shaders", side_effect=record("shaders")), \
-                    mock.patch.object(make_game, "assets", side_effect=record("assets")), \
-                    mock.patch.object(make_game, "runtime", side_effect=record("runtime")), \
-                    mock.patch.object(make_game, "pipelines", side_effect=record("pipelines")), \
-                    mock.patch.object(make_game, "log"), \
-                    mock.patch.object(make_game, "pipeline_check_exe", return_value="x"):
-                make_game.run_build_stages(
+            with mock.patch.object(build_port, "shaders", side_effect=record("shaders")), \
+                    mock.patch.object(build_port, "assets", side_effect=record("assets")), \
+                    mock.patch.object(build_port, "runtime", side_effect=record("runtime")), \
+                    mock.patch.object(build_port, "pipelines", side_effect=record("pipelines")), \
+                    mock.patch.object(build_port, "log"), \
+                    mock.patch.object(build_port, "pipeline_check_exe", return_value="x"):
+                build_port.run_build_stages(
                     ["shaders", "assets", "runtime", "pipelines"],
                     game=game, work=work, out=out, v={}, wav=False, jobs=2,
                     runtime_build=None, emulate=False, keep_emulated=True, fallbacks=(),
@@ -334,13 +334,13 @@ class SerialOverlapTest(unittest.TestCase):
             out = os.path.join(tmp, "o")
             work = os.path.join(tmp, "w")
             os.makedirs(game)
-            with mock.patch.object(make_game, "shaders", side_effect=record("shaders")), \
-                    mock.patch.object(make_game, "assets", side_effect=record("assets")), \
-                    mock.patch.object(make_game, "runtime", side_effect=record("runtime", hold=0.15)), \
-                    mock.patch.object(make_game, "pipelines", side_effect=record("pipelines")), \
-                    mock.patch.object(make_game, "log"), \
-                    mock.patch.object(make_game, "pipeline_check_exe", return_value="stale_checker"):
-                make_game.run_build_stages(
+            with mock.patch.object(build_port, "shaders", side_effect=record("shaders")), \
+                    mock.patch.object(build_port, "assets", side_effect=record("assets")), \
+                    mock.patch.object(build_port, "runtime", side_effect=record("runtime", hold=0.15)), \
+                    mock.patch.object(build_port, "pipelines", side_effect=record("pipelines")), \
+                    mock.patch.object(build_port, "log"), \
+                    mock.patch.object(build_port, "pipeline_check_exe", return_value="stale_checker"):
+                build_port.run_build_stages(
                     ["shaders", "assets", "runtime", "pipelines"],
                     game=game, work=work, out=out, v={}, wav=False, jobs=2,
                     runtime_build=None, emulate=False, keep_emulated=True, fallbacks=(),

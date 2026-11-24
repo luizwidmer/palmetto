@@ -31,7 +31,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools")
+TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling")
 
 sys.dont_write_bytecode = True
 if TOOLS_DIR not in sys.path:
@@ -226,7 +226,7 @@ def patch_rdna2spirv_dot4_u8():
     def patched_insn(self, ins):
         op = ins.get("op", "")
         if op in ("v_dot4_u32_u8", "v_dot4acc_u32_u8", "v_dot4c_u32_u8"):
-            mods = ins.get("mods", set())
+            mods = ins.get("extensions", set())
             if "clamp" in mods or any(m.startswith("op_sel") for m in mods):
                 raise rdna2spirv.Unsupported(op + (" clamp" if "clamp" in mods else " op_sel"))
             a = ins["args"]

@@ -9,7 +9,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-SCRIPT_PATH = os.path.join(ROOT, "runtime", "test", "shaders", "w64_graphics.py")
+SCRIPT_PATH = os.path.join(ROOT, "port", "test", "shaders", "w64_graphics.py")
 
 spec = importlib.util.spec_from_file_location("w64_graphics", SCRIPT_PATH)
 w64_graphics = importlib.util.module_from_spec(spec)

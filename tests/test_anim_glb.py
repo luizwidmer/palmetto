@@ -1,4 +1,4 @@
-"""Synthetic-data tests for tools/anim_glb.py (skinned part + skeleton + clips -> animated GLB).
+"""Synthetic-data tests for tooling/anim_glb.py (skinned part + skeleton + clips -> animated GLB).
 
     python -I tests/test_anim_glb.py
 
@@ -17,8 +17,8 @@ import zlib
 from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "anim_glb.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "anim_glb.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import anim_clips  # noqa: E402

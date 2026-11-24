@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-RUNNER = Path(__file__).resolve().parents[1] / "scripts" / "run_wine_tests.py"
+RUNNER = Path(__file__).resolve().parents[1] / "tooling/scripts" / "run_wine_tests.py"
 WINDOWS_ROOT = "synthetic-checkout"
 
 

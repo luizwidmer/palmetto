@@ -1,4 +1,4 @@
-"""Tests for tools/buffer_format_fuzz.py GFX11-empty selection and oracle cleanup.
+"""Tests for tooling/buffer_format_fuzz.py GFX11-empty selection and oracle cleanup.
 
     python -I tests/test_buffer_format_fuzz_gfx11_skip.py
 
@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(REPO, "tools")
+TOOLS = os.path.join(REPO, "tooling")
 sys.path.insert(0, TOOLS)
 
 import buffer_format_fuzz as bff  # noqa: E402

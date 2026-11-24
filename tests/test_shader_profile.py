@@ -1,4 +1,4 @@
-"""Unit tests for tools/shader_profile.py.
+"""Unit tests for tooling/shader_profile.py.
 
 Validates instruction classification (ALU vs memory vs branch), operation ratio counting,
 register footprint tracking (VGPR, SGPR, ranges, special registers), LLVM warning words, and CLI corpus profiling.
@@ -19,7 +19,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import shader_profile as P  # noqa: E402
 
@@ -353,7 +353,7 @@ class TestCommandLineEndToEnd(unittest.TestCase):
 
     def run_profile(self, extra=()):
         out_json = os.path.join(self.tmp.name, "custom_profile.json")
-        cmd = [sys.executable, "-I", os.path.join(ROOT, "tools", "shader_profile.py"), self.disasm_dir, "--out", out_json]
+        cmd = [sys.executable, "-I", os.path.join(ROOT, "tooling", "shader_profile.py"), self.disasm_dir, "--out", out_json]
         res = subprocess.run(cmd + list(extra), capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, f"CLI failed: {res.stderr}")
         with open(out_json, encoding="utf-8") as f:
@@ -363,14 +363,14 @@ class TestCommandLineEndToEnd(unittest.TestCase):
         shader_dir = os.path.join(self.tmp.name, "work", "shaders", "dxbc")
         disasm_dir = os.path.join(shader_dir, "disasm")
         os.makedirs(disasm_dir)
-        tool = os.path.join(ROOT, "tools", "shader_profile.py")
+        tool = os.path.join(ROOT, "tooling", "shader_profile.py")
         result = subprocess.run([sys.executable, "-I", tool, disasm_dir], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         with open(os.path.join(shader_dir, "profile.json"), encoding="utf-8") as report:
             self.assertEqual(json.load(report)["shaders"], 0)
 
     def test_cli_bad_source_or_out_is_one_line(self):
-        tool = os.path.join(ROOT, "tools", "shader_profile.py")
+        tool = os.path.join(ROOT, "tooling", "shader_profile.py")
         a_file = os.path.join(self.disasm_dir, "ps_001.s")
         with open(a_file, "w", encoding="utf-8") as f:
             f.write("\tv_mov_b32 v0, 1.0\n")
@@ -620,7 +620,7 @@ class TestCommandLineEndToEnd(unittest.TestCase):
         self.assertFalse(P.same_output_path(a, b))
 
     def assert_carve_index_output_refused(self, output):
-        tool = os.path.join(ROOT, "tools", "shader_profile.py")
+        tool = os.path.join(ROOT, "tooling", "shader_profile.py")
         res = subprocess.run(
             [sys.executable, "-I", tool, self.disasm_dir, "--out", output],
             capture_output=True,
@@ -657,7 +657,7 @@ class TestCommandLineEndToEnd(unittest.TestCase):
             self.assertEqual(f.read(), original)
 
     def test_cli_refuses_output_overwriting_input_shader(self):
-        tool = os.path.join(ROOT, "tools", "shader_profile.py")
+        tool = os.path.join(ROOT, "tooling", "shader_profile.py")
         shader_file = os.path.join(self.disasm_dir, "ps_001.s")
         original_content = "\tv_mov_b32 v0, 1.0\n\ts_endpgm\n"
         with open(shader_file, "w", encoding="utf-8") as f:

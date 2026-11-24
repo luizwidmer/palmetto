@@ -21,7 +21,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 SEMANTIC = os.path.dirname(os.path.abspath(__file__))
 for _p in (TOOLS, SEMANTIC):
     if _p not in sys.path:

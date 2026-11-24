@@ -1,4 +1,4 @@
-"""runtime/test/shaders/build.py under the PerVertexKHR fallbacks (PALMETTO_BARY_FALLBACK=1, PALMETTO_F16_INTERP_FALLBACK=1).
+"""port/test/shaders/build.py under the PerVertexKHR fallbacks (PALMETTO_BARY_FALLBACK=1, PALMETTO_F16_INTERP_FALLBACK=1).
 
 The translator refuses a computed I/J pair (ps_ij_computed) without PerVertexKHR inputs, which both fallbacks take
 away. build.py used to treat that as a failed batch: it exited before publishing anything, so check.py then reported
@@ -24,7 +24,7 @@ from unittest import mock
 from types import SimpleNamespace
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BUILD = os.path.join(ROOT, "runtime", "test", "shaders", "build.py")
+BUILD = os.path.join(ROOT, "port", "test", "shaders", "build.py")
 FALLBACKS = ("PALMETTO_BARY_FALLBACK", "PALMETTO_F16_INTERP_FALLBACK")
 
 

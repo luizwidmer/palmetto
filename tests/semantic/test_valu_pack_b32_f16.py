@@ -3,7 +3,7 @@
 moved as bits: a VOP3 abs clears bit 15 of the half, neg flips it, abs first (docs/design.md, `v_pack_b32_f16` source
 modifiers; measured on gfx1036 with IEEE mode 0, where a signalling NaN keeps its payload).
 
-Every case is translated by tools/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
+Every case is translated by tooling/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
 word is written down by hand next to each case, then compared against a few lines of plain Python, with SGPR / literal /
 inline-constant sources, op_sel and seeded random operands. Standard library only: no GPU, no LLVM, no game data.
 """

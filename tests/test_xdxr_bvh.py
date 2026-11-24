@@ -1,4 +1,4 @@
-"""Synthetic BVHs for tools/xdxr_bvh.py: layout, the traversal step, and closest hits against brute force.
+"""Synthetic BVHs for tooling/xdxr_bvh.py: layout, the traversal step, and closest hits against brute force.
 No game data is read.
 
     python -I tests/test_xdxr_bvh.py
@@ -14,7 +14,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import xdxr_bvh as X  # noqa: E402
 
@@ -86,7 +86,7 @@ class Layout(unittest.TestCase):
                 self.assertGreaterEqual(dhi[c], hi[c])
 
     def test_half_round_edges(self):
-        # runtime/src/xdxr_build.comp half_directed computes the same bits; check-build compares the GPU's BOX16
+        # port/src/xdxr_build.comp half_directed computes the same bits; check-build compares the GPU's BOX16
         # words with encode_box16, which uses this function
         cases = [
             (0.0, False, 0x0000), (0.0, True, 0x0000), (-0.0, False, 0x8000), (-0.0, True, 0x8000),

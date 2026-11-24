@@ -1,4 +1,4 @@
-"""tools/sdwa_diff.py: the SDWA reference against hand-worked values, a short seeded fuzz run, and canaries.
+"""tooling/sdwa_diff.py: the SDWA reference against hand-worked values, a short seeded fuzz run, and canaries.
 Standard library only; no GPU."""
 import contextlib
 import io
@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import unittest
 
-TOOL = Path(__file__).resolve().parents[1] / "tools" / "sdwa_diff.py"
+TOOL = Path(__file__).resolve().parents[1] / "tooling" / "sdwa_diff.py"
 sys.path.insert(0, str(TOOL.parent))
 import sdwa_diff as d  # noqa: E402
 

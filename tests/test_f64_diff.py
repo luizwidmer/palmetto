@@ -1,4 +1,4 @@
-"""CLI and reference checks for tools/f64_diff.py; standard library only."""
+"""CLI and reference checks for tooling/f64_diff.py; standard library only."""
 import contextlib
 import io
 import os
@@ -11,8 +11,8 @@ from unittest import mock
 from fractions import Fraction
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "f64_diff.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "f64_diff.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import f64_diff as fd
 
 
@@ -60,7 +60,7 @@ class F64DiffTests(unittest.TestCase):
         self.assertFalse(fd.equivalent(expected, actual, ("int", "int")))
 
     def test_exit_77_when_requested_oracle_is_unavailable(self):
-        env = dict(os.environ, PALMETTO_AMD_CLANG=os.path.join(ROOT, "tools", "no-such-clang.exe"))
+        env = dict(os.environ, PALMETTO_AMD_CLANG=os.path.join(ROOT, "tooling", "no-such-clang.exe"))
         hw = subprocess.run([sys.executable, "-I", TOOL, "--oracle", "hw", "--programs", "3"], cwd=ROOT,
                             capture_output=True, text=True, timeout=120, env=env)
         self.assertEqual(hw.returncode, 77, hw.stdout + hw.stderr)
@@ -296,7 +296,7 @@ class F64DiffTests(unittest.TestCase):
         self.assertEqual(fd.add_bits(self.ONE, self.ONE, 2), self.TWO)
         self.assertEqual(fd.add_bits(self.PZ, self.NEG1, 2), self.NEG1)
 
-    # ---- --oracle hw: routed through tools/hw_oracle, compared with the reference (a fake stands in for the GPU) ----
+    # ---- --oracle hw: routed through tooling/hw_oracle, compared with the reference (a fake stands in for the GPU) ----
 
     class FakeHW:
         """Answers each raw kernel with the reference's own result, as a hardware stand-in; flip corrupts v_trunc_f64."""
@@ -396,7 +396,7 @@ class F64DiffTests(unittest.TestCase):
         self.assertEqual(fake.calls, [])
 
     def test_hw_oracle_open_failure_without_tools_is_hwunavailable(self):
-        env = dict(os.environ, PALMETTO_AMD_CLANG=os.path.join(ROOT, "tools", "no-such-clang.exe"))
+        env = dict(os.environ, PALMETTO_AMD_CLANG=os.path.join(ROOT, "tooling", "no-such-clang.exe"))
         with mock.patch.dict(os.environ, env), self.assertRaises(fd.HWUnavailable):
             fd.open_hw_oracle("gfx1036")
 

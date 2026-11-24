@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tooling"))
 import first_light
 
 
@@ -26,21 +26,21 @@ class FirstLightHarnessPathsTests(unittest.TestCase):
         return path
 
     def test_finds_windows_release_configuration(self) -> None:
-        release = self.put_harness("runtime", "build", "windows", "Release")
+        release = self.put_harness("port", "build", "windows", "Release")
         self.assertEqual(first_light.find_harness(None), str(release))
 
     def test_finds_relwithdebinfo_in_the_standard_build_tree(self) -> None:
-        self.put_harness("runtime", "build", "Release")
-        optimized = self.put_harness("runtime", "build", "RelWithDebInfo")
+        self.put_harness("port", "build", "Release")
+        optimized = self.put_harness("port", "build", "RelWithDebInfo")
         self.assertEqual(first_light.find_harness(None), str(optimized))
 
     def test_standalone_harness_keeps_priority_over_configured_harness(self) -> None:
-        self.put_harness("runtime", "build", "windows", "Release")
-        standalone = self.put_harness("runtime", "build")
+        self.put_harness("port", "build", "windows", "Release")
+        standalone = self.put_harness("port", "build")
         self.assertEqual(first_light.find_harness(None), str(standalone))
 
     def test_explicit_and_environment_paths_keep_priority(self) -> None:
-        configured = self.put_harness("runtime", "build", "windows", "Release")
+        configured = self.put_harness("port", "build", "windows", "Release")
         explicit = self.put_harness("explicit")
         environment = self.put_harness("environment")
         os.environ["PALMETTO_VK_HARNESS"] = str(environment)

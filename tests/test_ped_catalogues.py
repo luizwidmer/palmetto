@@ -1,4 +1,4 @@
-"""Synthetic unit tests for `tools/ped_catalogues.py`.
+"""Synthetic unit tests for `tooling/ped_catalogues.py`.
 
 All test inputs are synthesized in memory or inside a temporary directory: no game files,
 no real asset names, and no retail hashes are used.
@@ -17,7 +17,7 @@ import unittest
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS = os.path.join(ROOT, "tools")
+TOOLS = os.path.join(ROOT, "tooling")
 sys.path.insert(0, TOOLS)
 
 import odrp_7a  # noqa: E402

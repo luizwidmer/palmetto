@@ -8,7 +8,7 @@ GPU"), where it also decodes their bytes as an invalid encoding. They take one 1
 address of the LDS operand is derived from that offset; neither the translator nor this file models it, and it has
 not been measured on hardware.
 
-`tools/rdna2spirv.py` has no rule for them and raises `Unsupported` naming the op, so a listing that holds one is
+`tooling/rdna2spirv.py` has no rule for them and raises `Unsupported` naming the op, so a listing that holds one is
 refused rather than translated as something else. `RefusedTests` pins that, with the plain `ds_add_u32` as the
 control that the program reaches the translator. `EncodingTests` checks the gfx1013/gfx1030 split and the operand
 form with llvm-mc, and is skipped when no llvm-mc with the AMDGPU target is found (LLVM_MC, as for the tools).
@@ -30,7 +30,7 @@ sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.environ.get("PALMETTO_TOOLS_DIR") or os.path.join(ROOT, "tooling"))
 
 import support  # noqa: E402
 from mc_command import mc_command  # noqa: E402

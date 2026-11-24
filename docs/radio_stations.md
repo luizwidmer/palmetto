@@ -13,7 +13,7 @@ interleaved. Offsets below are relative to one inflated 64 KiB stream. The strea
 streams begin at `0x160B419` (`0x762160`) and `0x3C55D5` (`0xDAEB0`); those concatenation offsets
 change with the carve order.
 
-Only the record side has a committed reader (`tools/audio_config.py`, described in the companion
+Only the record side has a committed reader (`tooling/audio_config.py`, described in the companion
 page). Station identification needs a local hash dictionary, so this page records the measured
 offsets and counts instead of adding a scanner that would have to guess station names.
 
@@ -302,14 +302,14 @@ Inferred:
 ## Reproduce
 
 ```powershell
-python -I tools/arc9_carve.py audio.arc <out> --until-adat
+python -I tooling/arc9_carve.py audio.arc <out> --until-adat
 ```
 
 (`--until-adat` stops at the first AWC bank, `0x129B000` on the measured package; `--limit 0x129B000` gives the
 same window there.)
 
 The carve writes `000000762160.bin` and `0000000daeb0.bin`, both 65,536 bytes. The record table is
-`python -I tools/audio_config.py <out> --join --json`. The station scan is a u32 read of the two
+`python -I tooling/audio_config.py <out> --join --json`. The station scan is a u32 read of the two
 streams; no station scanner is committed, because the station hash set needs a local dictionary.
 
 ## No-sharing rule

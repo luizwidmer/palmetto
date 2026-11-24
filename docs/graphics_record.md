@@ -1,8 +1,8 @@
 # The console graphics pipeline record (device slot 57)
 
-**Status: decoder, not a converter.** `runtime/src/graphics_record.h` / `.cpp` decode the record the title passes to
+**Status: decoder, not a converter.** `port/src/graphics_record.h` / `.cpp` decode the record the title passes to
 device slot 57 into the pieces a PC `D3D12_GRAPHICS_PIPELINE_STATE_DESC` needs, and refuse everything the
-measurements do not pin. `runtime/test/graphics_record_test.cpp` builds every blob byte by byte and prints the
+measurements do not pin. `port/test/graphics_record_test.cpp` builds every blob byte by byte and prints the
 decoded/unknown table; `docs/boot_frontier.md` (*slot 57 is a deserialized graphics pipeline record*),
 `docs/shader_library.md` sections 2 and 3 and `docs/input_layout.md` are the measurements it rests on. Nothing here
 quotes game data: the tables carry counts, offsets and raw words only, and no shader bytes are stored.
@@ -27,7 +27,7 @@ pairs **in record-slot order**. The slot gives the stage; the stage blob itself 
 | `+0x88` .. `+0x108` | zero | measured zero in every sample |
 | `+0x108` .. | unidentified tail | not decoded and not represented |
 
-Slot to stage: `docs/shader_library.md` section 2 and `SLOTS` in `tools/shader_library.py` (0 pixel, 1 vertex,
+Slot to stage: `docs/shader_library.md` section 2 and `SLOTS` in `tooling/shader_library.py` (0 pixel, 1 vertex,
 2 mesh). The library's measured stage sets are PS+VS, PS+MS, MS only and VS only; no record has a vertex and a mesh
 stage together, and D3D12 forbids that pair, so the decoder refuses it.
 
@@ -90,7 +90,7 @@ The two blob decoders then check the contents:
 | `StageBlob.kind` | decoded | word at `+0x00` is 2 (`docs/shader_library.md` section 3) |
 | `StageBlob.declared_size_word` | decoded relation | `+0x04 + 12 == blob size`, measured; why the constant is 12 is not known, so it is a consistency check only |
 | `StageBlob.head_word_08` | **unknown**, kept raw | word at `+0x08` |
-| `StageBlob.head_tag` | decoded | word at `+0x0C` is 0x40 on all 20,318 distinct blobs; `tools/shader_library.py:stage_digest` checks the same word |
+| `StageBlob.head_tag` | decoded | word at `+0x0C` is 0x40 on all 20,318 distinct blobs; `tooling/shader_library.py:stage_digest` checks the same word |
 | `StageBlob.records[i].tag` | decoded | 0x41 then 0x42, 32-byte records from `+0x10` |
 | `StageBlob.records[i].body` | **unknown**, kept raw | the seven body words; the chunk field readings in `docs/pso_cache.md` are marked unproven there |
 | `StageBlob.source_digest` | decoded, opaque | 16 bytes after the final 0x43 tag: the source container's `HASH` digest, `docs/shader_library.md` section 3 / `docs/fspx.md` kind 7 |
@@ -195,12 +195,12 @@ Mapping to `D3D12_GRAPHICS_PIPELINE_STATE_DESC` today: `pRootSignature`, the per
 translated modules and `InputLayout` (one `D3D12_INPUT_ELEMENT_DESC` per decoded element, docs/input_layout.md) can be
 supplied; `RasterizerState`, `BlendState`, `DepthStencilState`, `SampleDesc`, `PrimitiveTopologyType`, `IBStripCutValue`,
 `DSVFormat` and `RTVFormats` cannot, because their console sources are the unknown fields above.
-`runtime/shims/d3d12_vulkan_device.cpp` (create_graphics) shows what the PC side then consumes, and
+`port/shims/d3d12_vulkan_device.cpp` (create_graphics) shows what the PC side then consumes, and
 `docs/graphics_pso.md` is the builder that does the mapping.
 
 ## 8. Tests
 
-`runtime/test/graphics_record_test.cpp` — synthetic blobs only, no device and no game files. It prints the
+`port/test/graphics_record_test.cpp` — synthetic blobs only, no device and no game files. It prints the
 decoded/unknown table and covers: a PS+VS record with every span at its measured offset; a record of fake pointers
 that must decode without being dereferenced; the 80-byte mesh layout; both sides of every measured bound; the decoded
 element table on all six measured shapes (count, name lengths, name offsets, the six words, padding), the 4-byte fill
@@ -209,12 +209,12 @@ reserved byte, vertex+mesh stages, unterminated or unprintable semantic, count c
 size word, head tag, tag order, final 0x43 and trailing zero bytes). 117 checks in all (docs/input_layout.md section 5).
 
 ```
-cmake --build runtime/build --target graphics_record_test
-runtime/build/graphics_record_test.exe     # prints the table, exits 0
-ctest --test-dir runtime/build -R graphics_record
+cmake --build port/build --target graphics_record_test
+port/build/graphics_record_test.exe     # prints the table, exits 0
+ctest --test-dir port/build -R graphics_record
 ```
 
-The target is registered in `runtime/CMakeLists.txt` next to the other pure-stdlib tests (`graphics_record_test` /
+The target is registered in `port/CMakeLists.txt` next to the other pure-stdlib tests (`graphics_record_test` /
 `graphics_record`).
 
 ## 9. The next decision

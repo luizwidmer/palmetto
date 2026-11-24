@@ -1,6 +1,6 @@
 """v_sub_f16 (RDNA2 VOP2 / VOP3): D.f16 = S0.f16 - S1.f16, binary16 with round to nearest even.
 
-Every case is translated by tools/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
+Every case is translated by tooling/rdna2spirv.py and executed with tests/semantic/spirv_mini_interp.py; the expected
 word is written down by hand (from the ISA) next to each case, rechecked against the plain-Python binary16 reference in
 tests/semantic/f16_ref.py, and extended with seeded random operands. Covers the _e32 form (the high half of the
 destination is kept), the _e64 form with op_sel, SGPR / literal / inline-constant sources, neg/abs, omod and clamp.

@@ -1,4 +1,4 @@
-"""Tests for tools/world_archetypes.py, built from synthetic 0x7a resources (no game data).
+"""Tests for tooling/world_archetypes.py, built from synthetic 0x7a resources (no game data).
 
     python -I tests/test_world_archetypes.py
 """
@@ -19,7 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_tool():
-    path = os.path.join(ROOT, "tools", "world_archetypes.py")
+    path = os.path.join(ROOT, "tooling", "world_archetypes.py")
     spec = importlib.util.spec_from_file_location("world_archetypes_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

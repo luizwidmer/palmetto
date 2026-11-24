@@ -1,4 +1,4 @@
-"""Unit tests for tools/boot_trace.py on synthetic traces (no game data, no Windows, no GPU)."""
+"""Unit tests for tooling/boot_trace.py on synthetic traces (no game data, no Windows, no GPU)."""
 
 import contextlib
 import io
@@ -10,7 +10,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import boot_trace as bt
 

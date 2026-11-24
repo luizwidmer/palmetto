@@ -1,4 +1,4 @@
-"""Synthetic tests for tools/audio_config.py (no game data)."""
+"""Synthetic tests for tooling/audio_config.py (no game data)."""
 import json
 import os
 import struct
@@ -10,8 +10,8 @@ import unittest
 from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "audio_config.py")
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+TOOL = os.path.join(ROOT, "tooling", "audio_config.py")
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import audio_config as A  # noqa: E402
 import hashdict  # noqa: E402

@@ -1,4 +1,4 @@
-"""tools/cfg_structure.run stops after `limit` blocks, and a limit of zero or less runs none (standard library only).
+"""tooling/cfg_structure.run stops after `limit` blocks, and a limit of zero or less runs none (standard library only).
 
     python -I tests/test_cfg_run_limit.py
 """
@@ -7,7 +7,7 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 
 import cfg_structure  # noqa: E402
 

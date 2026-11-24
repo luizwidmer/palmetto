@@ -11,7 +11,7 @@ The model is one static drawable exported from `data.arc` by `arc9dump models`: 
 7,968 triangles, with positions and UVs and no bones or fragments. Its OBJ is the only `data.arc` export with
 those counts and has SHA-256
 `a7178cf4b7a00c9df838fb072c59e2c048ceed52306620d859faae4d3991d6b9`; `manifest.json` records it. The tool that
-assembles it, `tools/first_light.py`, centres and fits X/Y to NDC and flattens Z (the chosen VS applies no
+assembles it, `tooling/first_light.py`, centres and fits X/Y to NDC and flattens Z (the chosen VS applies no
 matrix), so the draw is an orthographic projection of the model's own geometry.
 
 The untextured fixture uses two containers from `shaders.arc`, carved and translated by the repository's tools.
@@ -25,10 +25,10 @@ The model's authored shader assignment can be checked separately. In the model e
 above, `MeshShaders[0]` selects material slot 0, the only slot. Looking up its `Materials[0].Shader` in the
 native shader database yields one effect with one technique and four compute-only passes. The VS and PS
 in the table are the fixture's chosen pair. The model's use during gameplay remains unverified.
-See the [effect lookup tool](../tools/sgd5_effects.py) and the
+See the [effect lookup tool](../tooling/sgd5_effects.py) and the
 [Windows reproduction of the UV draw](https://github.com/the original project/pull/2893#issuecomment-7084947193).
 
-Both disassemble with no invalid word, translate, and pass `spirv-val`; `tools/shader_link_check.py check` reports
+Both disassemble with no invalid word, translate, and pass `spirv-val`; `tooling/shader_link_check.py check` reports
 the pair compatible. At 128×128 the draw covers **12,804 of 16,384 pixels (0.781)** and the centre pixel is
 `(0.498, 0.496, 0.0, 1.0)`: the model is the disc its geometry projects to, and the colour is its own UV map. The
 test derives the expected centre UV from the mesh on the CPU (`0.4978, 0.4965`), so the GPU pixel has to match
@@ -56,16 +56,16 @@ pipeline and readback code. The same pair also draws through the port's D3D12 la
 
 ```sh
 git submodule update --init
-dotnet build tools/arc9dump/arc9dump.csproj -c Release
-DOTNET_ROLL_FORWARD=Major tools/arc9dump/bin/Release/net8.0/arc9dump models \
+dotnet build tooling/arc9dump/arc9dump.csproj -c Release
+DOTNET_ROLL_FORWARD=Major tooling/arc9dump/bin/Release/net8.0/arc9dump models \
     "<package>/data.arc" ~/palmetto-work/assets
 
-python -I tools/first_light.py --game "<package>" --work ~/palmetto-work --list
-python -I tools/first_light.py --game "<package>" --work ~/palmetto-work \
+python -I tooling/first_light.py --game "<package>" --work ~/palmetto-work --list
+python -I tooling/first_light.py --game "<package>" --work ~/palmetto-work \
     --obj ~/palmetto-work/assets/data/models/<model>.obj --no-fit --run
 # <model>.obj: 4,213 vertices, 7,968 triangles; the manifest records its SHA-256
 PALMETTO_FIRST_LIGHT_DIR=~/palmetto-work/first_light/out python -I tests/test_first_light.py -v
-python -I tools/first_light.py --check --out ~/palmetto-work/first_light/out
+python -I tooling/first_light.py --check --out ~/palmetto-work/first_light/out
 ```
 
 `--check` on an existing folder re-runs the harness through the same fresh path and `check_image` as the test; a
@@ -90,7 +90,7 @@ inclusive. If several triangles cover a probe there, the last one drawn supplies
 
 ## 4. The harness mode
 
-`runtime/test/vk_harness.cpp` gained two environment options, inert when unset (the existing three-vertex and
+`port/test/vk_harness.cpp` gained two environment options, inert when unset (the existing three-vertex and
 mesh-shader paths are unchanged): `VKH_DRAW_MESH=<file>` with `VKH_VERTEX_LAYOUT=0:3f,1:2f` reads the binary mesh,
 creates a vertex and an index buffer, and draws it with `vkCmdDrawIndexed`. The layout lists `location:components`
 and only float attributes. The first-light pair above uses no other harness option: the VS reads no user SGPRs and
@@ -98,7 +98,7 @@ the PS has no bindings.
 
 ## 5. Through the D3D12 layer
 
-`runtime/test/d3d12_first_light_test.cpp` (ctest `d3d12_first_light`) draws the same model and pair through the
+`port/test/d3d12_first_light_test.cpp` (ctest `d3d12_first_light`) draws the same model and pair through the
 Xbox-ABI device proxy over the Vulkan device, natively on Windows. `CreateGraphicsPipelineState` gets the game's
 own containers and finds both stages by the FSSM hash inside them, in the index `first_light.py` writes next to
 the SPIR-V (`vs.dxbc`, `ps.dxbc`, `index.json`); the input layout (POSITION float3, TEXCOORD float2) is matched
@@ -114,7 +114,7 @@ opposite viewport direction drops one step. `vk_harness` drawing the mesh mirror
 image bit for bit. The test allows that one step and nothing else; it is clean under `PALMETTO_VK_VALIDATION=1`.
 
 ```sh
-python -I tools/first_light.py ... --no-fit --run          # as in section 3; writes vs.dxbc, ps.dxbc, index.json
+python -I tooling/first_light.py ... --no-fit --run          # as in section 3; writes vs.dxbc, ps.dxbc, index.json
 PALMETTO_FIRST_LIGHT_DIR=~/palmetto-work/first_light/out ctest --test-dir <build> -R d3d12_first_light -V
 ```
 
@@ -122,11 +122,11 @@ Without `PALMETTO_FIRST_LIGHT_DIR` the test prints SKIP and exits 77.
 
 ## 6. With a texture (`TEST-524`)
 
-Passing `--dds <exported.dds>` to `tools/first_light.py` switches the default pixel shader to a translated
+Passing `--dds <exported.dds>` to `tooling/first_light.py` switches the default pixel shader to a translated
 single-sample game pixel shader (`PS_Copy_3ea4b38a_Wrapped`, FSSM SHA-256
 `19e2e7612505b9d3b19e6607b47e09dcdde02a2c9987a63e834d9586f217090f`, wave32, `inputs=[0]`, `outputs=[0]`,
 `shader_link_check.py check`: compatible with `VS_main_170e32e6_Wrapped`). `first_light.py` decodes the DDS
-(for example a BCPack-decoded TTPF albedo) with `tools/dds_png.py`, writes `texture.rgba` (`u32 width, u32 height` +
+(for example a BCPack-decoded TTPF albedo) with `tooling/dds_png.py`, writes `texture.rgba` (`u32 width, u32 height` +
 `R8G8B8A8_UNORM` texels) into the output folder, and passes `VKH_TEX_RGBA`, `VKH_TSHARP_VA` (`0x100`),
 `VKH_SSHARP` (the shader's literal sampler `0x92, 0xc00000, 0x14500000, 0`, bilinear + clamp-to-edge) and
 `VKH_SGPRS` (`s9 = 0x100`) to `vk_harness`.
@@ -146,7 +146,7 @@ built `vk_harness`; the 4 `OracleTests` and the other 11 `TexturedOracleTests` r
 `PALMETTO_FIRST_LIGHT_DIR` set against a local package run (and `vk_harness` built) none of the 46 is skipped.
 
 ```sh
-python -I tools/first_light.py --game "<package>" --work ~/palmetto-work \
+python -I tooling/first_light.py --game "<package>" --work ~/palmetto-work \
     --obj ~/palmetto-work/assets/data/models/<model>.obj \
     --dds ~/palmetto-work/assets/ttpf/<pool>/<texture>.dds --no-fit --run
 PALMETTO_FIRST_LIGHT_DIR=~/palmetto-work/first_light/out python -I tests/test_first_light.py -v
@@ -198,7 +198,7 @@ perspective-correct weights on one large triangle instead. Those CPU tests also 
 the VS's loads do (table, V#, num_records, rows) and compare the result with the matrices the prediction uses.
 
 ```sh
-python -I tools/first_light.py --game "<package>" --work ~/palmetto-work \
+python -I tooling/first_light.py --game "<package>" --work ~/palmetto-work \
     --obj ~/palmetto-work/assets/data/models/<model>.obj --camera --run   # coverage window 0.2-0.99
 PALMETTO_FIRST_LIGHT_DIR=~/palmetto-work/first_light/camera python -I tests/test_first_light.py -v
 ```

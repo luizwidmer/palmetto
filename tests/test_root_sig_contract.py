@@ -1,4 +1,4 @@
-"""Contract tests for tools/root_sig_contract.py (no game data, no GPU).
+"""Contract tests for tooling/root_sig_contract.py (no game data, no GPU).
 
 Run from the repository root:  python -m pytest tests/test_root_sig_contract.py
 Everything is hand-built: synthetic root signatures and synthetic index
@@ -15,7 +15,7 @@ import pytest
 import root_sig_contract as rsc
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, "tools", "root_sig_contract.py")
+TOOL = os.path.join(ROOT, "tooling", "root_sig_contract.py")
 
 ROOT_SIG = {
     "version": "1.1",

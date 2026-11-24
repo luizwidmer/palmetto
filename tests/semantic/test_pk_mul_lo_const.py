@@ -10,7 +10,7 @@ import unittest
 
 import support
 
-sys.path.insert(0, os.path.join(support.ROOT, "runtime", "test", "shaders"))
+sys.path.insert(0, os.path.join(support.ROOT, "port", "test", "shaders"))
 from check import PK_MUL_LO_WORDS
 from compute_fixture import compute_header
 
@@ -20,7 +20,7 @@ FILL = 0xEEEEEEEE
 
 class PkMulLoConstTest(unittest.TestCase):
     def test_hardware_words(self):
-        asm = os.path.join(support.ROOT, "runtime", "test", "shaders", "cs_pk_mul_lo_const.asm")
+        asm = os.path.join(support.ROOT, "port", "test", "shaders", "cs_pk_mul_lo_const.asm")
         spv = support.translate_fixture("cs_pk_mul_lo_const", fssm=bytes(compute_header(asm)))
         # Structure: no multiplication result goes straight through a 0xffff mask (the 16-bit wrap is the shift pair)
         self.assertNotRegex(spv, r"(%\S+) = OpIMul %uint \S+ \S+\n\s+%\S+ = OpBitwiseAnd %uint \1 %cffff\b")

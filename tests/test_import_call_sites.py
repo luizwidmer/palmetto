@@ -1,4 +1,4 @@
-"""Unit tests for tools/import_call_sites.py: thunks and the direct calls to them, on an image built here byte by byte.
+"""Unit tests for tooling/import_call_sites.py: thunks and the direct calls to them, on an image built here byte by byte.
 
 The image has two executable-code layouts the tool must tell apart: calls (E8) and tail jumps (E9) to the thunk of an
 import, and an import nothing calls. It needs no game files and no third-party packages.
@@ -15,7 +15,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOLS_DIR = os.path.join(ROOT, "tools")
+TOOLS_DIR = os.path.join(ROOT, "tooling")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 

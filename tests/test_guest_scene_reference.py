@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 
 
-path = Path(__file__).resolve().parents[1] / "scripts" / "run_guest_scene.py"
+path = Path(__file__).resolve().parents[1] / "tooling/scripts" / "run_guest_scene.py"
 spec = importlib.util.spec_from_file_location("run_guest_scene", path)
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)

@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tooling"))
 import world_drawable_verify as verifier
 import world_names
 
@@ -65,7 +65,7 @@ class ArchiveAliasTests(unittest.TestCase):
     def test_cli_accepts_source_archive_alias(self):
         predictions, manifest = self.reports(self.archive, self.hard_link())
         result = subprocess.run(
-            [sys.executable, "-I", str(ROOT / "tools" / "world_drawable_verify.py"),
+            [sys.executable, "-I", str(ROOT / "tooling" / "world_drawable_verify.py"),
              str(predictions), str(manifest)], capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
