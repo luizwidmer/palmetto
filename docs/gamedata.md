@@ -199,7 +199,7 @@ with **IoU 0.61**. Row 0 is therefore `bounds.min.y`, column 0 is
 
 The HMAP header and row-table rules were cross-checked against the public
 [rage-formats](https://github.com/VIRUXE/rage-formats) reader (`Unlicense`)
-and [gta-op/heightmap](https://github.com/gta-op/heightmap) (`MIT`); no code is
+and an open heightmap reader (`MIT`); no code is
 copied. The MHIU field offsets, the span checks and the Z correlation are
 measured on this package.
 
