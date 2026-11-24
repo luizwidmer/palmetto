@@ -7,7 +7,7 @@ Reads the file only; nothing runs. For each --hash (a model name, hashed with jo
 default: Lucia's player model and cs_mandy), it finds every place the executable sections hold that 32-bit value
 (an immediate such as `mov ecx, 0xE472B687`) and the direct calls (E8 rel32) in the next --window bytes. Each call
 target is a candidate; candidates are ranked by how many of the hashes lead to them, then by how many direct calls
-the whole image makes to them. RAGE's archetype lookup by hash takes the hash and is called from hundreds of places,
+the whole image makes to them. the engine's archetype lookup by hash takes the hash and is called from hundreds of places,
 so it should rank first; pass its RVA to `palmetto --archetype-lookup`.
 
 Standard library only. No game data is written: the report holds RVAs and counts. The report destination must not
@@ -28,7 +28,7 @@ IMAGE_SCN_MEM_EXECUTE = 0x20000000
 
 
 def joaat(name):
-    """RAGE's joaat: Jenkins one-at-a-time over the lower-cased name (joaat('cs_mandy') == 0xD7C0CDFF)."""
+    """the engine's joaat: Jenkins one-at-a-time over the lower-cased name (joaat('cs_mandy') == 0xD7C0CDFF)."""
     h = 0
     for c in name.lower().encode("utf-8"):
         h = (h + c) & 0xFFFFFFFF

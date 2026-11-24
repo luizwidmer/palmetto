@@ -8,7 +8,7 @@
 
 ## Palmetto とは
 
-Palmetto は、target console 版 the target title を Windows 上でネイティブに動かすための**静的リコンパイル**
+Palmetto は、target console 版 the target game を Windows 上でネイティブに動かすための**静的リコンパイル**
 プロジェクトです。target console の CPU は PC と同じ x86-64 なので、ゲームのコードはそのまま読み込まれて
 ネイティブに実行され、本体側のシステムソフトウェアは shim として再実装されます。本体用にコンパイル済みの
 RDNA2 GPU プログラムは Vulkan 向けの SPIR-V に翻訳され、モデル・テクスチャ・音声はあなたのパッケージから

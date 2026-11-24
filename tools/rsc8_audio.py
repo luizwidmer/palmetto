@@ -7,7 +7,7 @@ audio codec or audio container: every validated `RSC8` v8001 resource sits insid
 little-endian `ADAT` (AWC) bank as chunk tag `0x5c`, attached to a spoken dialogue stream whose
 audio lives in sibling tag `0x55` (48 kHz mono Opus, codec `0x0b`, format tag `0x76`).
 
-Inside tag `0x5c`, the payload is an unencrypted RAGE `crClipDictionary` + `crClipAnimation` +
+Inside tag `0x5c`, the payload is an unencrypted the engine `crClipDictionary` + `crClipAnimation` +
 `crAnimationDictionary` + `crAnimation` facial/lip-sync animation resource:
   - +0x00  4s   "RSC8"
   - +0x04  u32  version (8001 = 0x00001F41, or 0x01001F41 with version flag bit 24 set)
@@ -174,7 +174,7 @@ def _cstr_info(virt, off, max_scan=1024):
 
 
 def decode_sso_string(virt, voff):
-    """Decode a 16-byte RAGE SSO `atString` at `virt[voff : voff + 16]`.
+    """Decode a 16-byte the engine SSO `atString` at `virt[voff : voff + 16]`.
 
     Layout:
       - Inline mode: `byte[15] & 0x80 != 0`; `length = byte[15] & 0x7F` (<= 14),

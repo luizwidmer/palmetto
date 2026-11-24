@@ -1,6 +1,6 @@
 """Find texture headers in carved CPU-segment blobs and pair them with their GPU blob.
 
-Texture descriptor layout (qwords, found in the target title's resource CPU segments):
+Texture descriptor layout (qwords, found in the target game's resource CPU segments):
   q[k-2]  packed u64 (unknown: size/flags)
   q[k-1]  0x980                     (descriptor type)
   q[k]    0x60000000 + offset       (GPU data pointer into the resource's GPU segment)
@@ -229,7 +229,7 @@ def is_system_pointer(val: int, max_len: int) -> bool:
 
 
 def parse_texture_dict_page(data: bytes):
-    """Parse a small RAGE texture dictionary system page (e.g. the 400-byte stream in textures.arc).
+    """Parse a small the engine texture dictionary system page (e.g. the 400-byte stream in textures.arc).
 
     Layout:
       +0x20: 64-bit pointer to hash array (optional in synthetic tests)

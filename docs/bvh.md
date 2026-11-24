@@ -210,7 +210,7 @@ is fixed and was identical in all 269,106 records (and in all 1,233 records of t
 The `0x5000xxxx` words are constant across records and point at offsets inside the same 208-byte template
 (`0x50`, `0x80`, `0xa0`, `0xb0`, `0xc0`). They behave like serialized virtual addresses built on a fixed
 `0x50000000` base, and `0x60000000` at `0x20` like the base of a second (physical) segment. That reading is a
-**hypothesis** (the RAGE resource convention); what is measured is that every such pointer resolves inside its own
+**hypothesis** (the engine resource convention); what is measured is that every such pointer resolves inside its own
 stream, and §3.2a measures what the template does. They are not per-object pointers: the same constants occur in
 every record.
 
@@ -465,8 +465,8 @@ transform (§4a).
 ## 4a. Rehydration and source geometry (measured)
 
 **Status: measured on 10 BLAS** of the first nested pack in `core_bvh4.arc` (one interior cell), on Windows 11 with
-no GPU involved. The tools that did it live in a fork of another project (`americas-recomp`, GPL-2.0-only,
-`wildheathen/americas-recomp`, branch `feat/bvh-rehydrate-tools`); none of their code is in this repository. Only
+no GPU involved. The tools that did it live in a fork of another project (`a public prior-art project`, GPL-2.0-only,
+`an anonymous author/a public prior-art project`, branch `a public branch`); none of their code is in this repository. Only
 layouts, offsets and counts are reproduced here.
 
 **The library runs on a PC.** `RehydrateRaytracingAccelerationStructureX` in `XboxBvhBuilder.dll` reads the
@@ -559,7 +559,7 @@ meshlet index buffer.
 render bucket of the geometry's material: the byte at `+57` of the shader record, with the bucket mask at `+60`
 (`third_party/arc9-explorer/Core/RageModelDecoder.cs:680`; `arc9dump models` writes the byte as `RenderBucket`). A
 geometry is kept when the low 7 bits of that byte are 0 or 3 and left out otherwise; bit 7 does not change the
-choice. What the buckets mean is not measured here (in earlier RAGE games 1 and 2 are the alpha and decal buckets;
+choice. What the buckets mean is not measured here (in earlier the engine games 1 and 2 are the alpha and decal buckets;
 that is a hypothesis for this one).
 
 * *The 10 samples:* 132 of 132 geometries follow it (all 65 left out are bucket 1 or 2, all 67 kept bucket 0 or 3),

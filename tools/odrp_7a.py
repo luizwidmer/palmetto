@@ -3,7 +3,7 @@
 `0DRP` + version `122` (`0x7a`) occurs in two distinct placements across ARC9 archives:
 
 1. `standalone` (`0x7a` metadata or map-placement resource):
-   Starts an inflated RAGE system stream with an 8-byte zero prefix, a `0x50000000`-based
+   Starts an inflated the engine system stream with an 8-byte zero prefix, a `0x50000000`-based
    page-map pointer at `+0x08`, and the 80-byte `0DRP` header at `+0x10..+0x5f` (`0x60` bytes
    total). Table slots at `+0x28` (structs, 32 B each) and `+0x38` (instance blocks, 16 B each)
    hold `0x50000000`-based virtual pointers (`+0x30` enums and `+0x40` hold `0` or a
@@ -139,7 +139,7 @@ def _optional_virtual_offset(pointer):
 def parse_standalone_header(data):
     """Validate the fixed `0x60`-byte header of a standalone `0DRP`/`0x7a` resource.
 
-    Returns a header dict when `data` begins with the 16-byte RAGE system-page prefix
+    Returns a header dict when `data` begins with the 16-byte the engine system-page prefix
     (`8` zero bytes + `0x50000000` pointer) followed by `"0DRP"`, version `122`, and valid
     `0x50000000` table pointers; otherwise returns `None`.
     """

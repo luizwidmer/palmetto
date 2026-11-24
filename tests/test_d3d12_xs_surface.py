@@ -3,7 +3,7 @@
     python -m pytest tests/test_d3d12_xs_surface.py -q
     python -I tests/test_d3d12_xs_surface.py
 
-The SCARAB cross-check runs only when SCARAB_REF points at a checkout; it is not needed for CI.
+The a public prior-art project cross-check runs only when SCARAB_REF points at a checkout; it is not needed for CI.
 """
 import os
 import sys
@@ -32,7 +32,7 @@ def test_iid_block_is_alphabetical():
 
 
 def test_unrecovered_console_iids_stay_outside_the_table():
-    # SCARAB's provenance says the runtime does not export these; they must not acquire a
+    # the prior art's provenance says the runtime does not export these; they must not acquire a
     # guessed ordinal or GUID value from ordering.
     assert len(S.UNRECOVERED_CONSOLE_IIDS) == 4
     assert S.check_unrecovered_console_iids() == []
@@ -97,7 +97,7 @@ def test_scarab_cross_check():
     root = os.environ.get("SCARAB_REF")
     if not root:
         raise unittest.SkipTest("SCARAB_REF is not set")
-    errors, _notes = S.check_scarab(root)
+    errors, _notes = S.check_prior_art(root)
     assert errors == []
 
 

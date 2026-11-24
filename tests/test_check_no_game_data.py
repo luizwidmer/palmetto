@@ -40,8 +40,8 @@ def pe_header(e_lfanew=0x80):
 CAUGHT = [
     ("archive.bin", b"9FPR" + bytes(12), "ARC9 archive"),
     ("pool.dat", b"TTPF" + bytes(12), "TTPF texture pool"),
-    ("resource.dat", b"RSC8" + bytes(12), "RAGE resource"),
-    ("page.dat", b"0DRP" + bytes(12), "RAGE page directory"),
+    ("resource.dat", b"RSC8" + bytes(12), "the engine resource"),
+    ("page.dat", b"0DRP" + bytes(12), "the engine page directory"),
     ("tree.dat", b"RBF0" + bytes(12), "RBF0 tree"),
     ("shader.txt", b"XBCH" + (3).to_bytes(4, "little") + bytes(8), "XBCH shader container"),
     ("shader2.txt", b"FSSM" + bytes(12), "FSSM shader"),

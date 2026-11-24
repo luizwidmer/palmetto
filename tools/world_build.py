@@ -107,7 +107,7 @@ def _parse_archetype(value) -> int:
 def load_placements(path: str, lod_levels=DEFAULT_LOD_LEVELS, region=None) -> tuple[list[dict], dict]:
     """Read ``world_index.py --entities-out`` rows. Returns (selected rows, counts).
 
-    A row is kept when its lod_level is in lod_levels and, with region = (minx, miny, maxx, maxy) in RAGE
+    A row is kept when its lod_level is in lod_levels and, with region = (minx, miny, maxx, maxy) in the engine
     world metres, its position lies inside it. Rows without a finite position, rotation or archetype are
     counted as malformed and skipped, as are unhashable LOD values. Optional scales that are missing,
     non-numeric or not representable as finite floats default to 1.0.
@@ -193,7 +193,7 @@ def iter_placements(path: str, counts: dict, lod_levels=DEFAULT_LOD_LEVELS, regi
 
 
 def entity_transform(rotation, scale_xy: float, scale_z: float) -> tuple[list[list[float]], list[list[float]], bool]:
-    """3x3 position and normal matrices (RAGE Z-up) for one entity, and whether it mirrors.
+    """3x3 position and normal matrices (the engine Z-up) for one entity, and whether it mirrors.
 
     The stored quaternion (x, y, z, w) is the inverse of the entity's world rotation, so the world rotation is
     its conjugate (-x, -y, -z, w). Positions use R * diag(sxy, sxy, sz); normals use R * diag(1/sxy, 1/sxy, 1/sz).
@@ -217,9 +217,9 @@ def entity_transform(rotation, scale_xy: float, scale_z: float) -> tuple[list[li
 
 
 def place_primitives(prims: list[dict], rotation, scale_xy: float, scale_z: float, position) -> list[dict]:
-    """New primitives for one placed instance: model-space RAGE (Z-up) -> world -> glTF Y-up (x, z, -y).
+    """New primitives for one placed instance: model-space the engine (Z-up) -> world -> glTF Y-up (x, z, -y).
 
-    ``prims`` must come from ``glb_writer.parse_obj(..., up_axis="y")``, i.e. unconverted RAGE coordinates.
+    ``prims`` must come from ``glb_writer.parse_obj(..., up_axis="y")``, i.e. unconverted the engine coordinates.
     """
     m, nm, mirror = entity_transform(rotation, scale_xy, scale_z)
     tx, ty, tz = (float(v) for v in position)
@@ -357,7 +357,7 @@ def placement_trs(rotation, scale_xy: float, scale_z: float, position):
     if mirrored:
         sz = -sz
     px, py, pz = (float(v) for v in position)
-    # RAGE (x, y, z) -> glTF (x, z, -y) for the translation, the rotation axis and the scale axes.
+    # the engine (x, y, z) -> glTF (x, z, -y) for the translation, the rotation axis and the scale axes.
     return (px, pz, -py), (qx, qz, -qy, qw), (sxy, sz, sxy), mirrored
 
 
@@ -412,7 +412,7 @@ def _le_bytes(arr: array.array) -> bytes:
 
 
 def _mirror_packed(prim: dict) -> dict:
-    """The primitive mirrored along glTF Y (the model's RAGE Z): y of positions and normals negated, winding
+    """The primitive mirrored along glTF Y (the model's the engine Z): y of positions and normals negated, winding
     reversed, so a positive-determinant instance of it draws a mirrored placement correctly."""
     pos = _le_array("f", prim["positions"])
     pos[1::3] = array.array("f", [-v for v in pos[1::3]])
@@ -1601,7 +1601,7 @@ def build_world(
             models_dir, item = found
             ck = (models_dir, str(item.get("File")))
             if ck not in cache:
-                cache[ck] = load_model(models_dir, item, "y")   # RAGE axes; converted after the transform
+                cache[ck] = load_model(models_dir, item, "y")   # the engine axes; converted after the transform
             model = cache[ck]
             if model is None:
                 placement_stats["model_not_loadable"] += 1
@@ -1951,7 +1951,7 @@ def main(argv: list[str] | None = None) -> int:
         type=_region,
         default=None,
         metavar="MINX,MINY,MAXX,MAXY",
-        help="With --placements: only entities whose RAGE world X/Y position lies in this box (metres).",
+        help="With --placements: only entities whose the engine world X/Y position lies in this box (metres).",
     )
     ap.add_argument(
         "--instancing",

@@ -31,7 +31,7 @@ class DryRunFlagsTest(unittest.TestCase):
 
     def test_dry_run_check_flag_exits_cleanly_without_invoking_build_stages(self) -> None:
         dummy_version = {
-            "title": "the target title",
+            "title": "the target game",
             "version": "1.0.2.1",
             "files": {},
             "expected_exe": "game.exe",
@@ -59,7 +59,7 @@ class DryRunFlagsTest(unittest.TestCase):
 
     def test_dry_run_full_check_passes_full_flag_and_halts_before_build(self) -> None:
         dummy_version = {
-            "title": "the target title",
+            "title": "the target game",
             "version": "1.0.2.1",
             "files": {},
             "expected_exe": "game.exe",

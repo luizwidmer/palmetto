@@ -8,7 +8,7 @@
 
 ## Palmetto Nedir?
 
-Palmetto, the target title'nın target console sürümünü Windows üzerinde yerel olarak çalıştırmayı hedefleyen statik
+Palmetto, the target game'nın target console sürümünü Windows üzerinde yerel olarak çalıştırmayı hedefleyen statik
 yeniden derleme (recompilation) projesidir. Port, **kendi bilgisayarınızda ve kendi oyun kopyanızdan** oluşturulur.
 Konsolun önceden derlenmiş RDNA2 GPU shader'ları Vulkan için SPIR-V'ye çevrilir, oyun varlıkları doğrudan kendi
 paketinizden okunur ve konsolun sistem yazılımları shim katmanlarıyla yeniden uygulanır.

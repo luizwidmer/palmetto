@@ -136,7 +136,7 @@ def iter_resources(path, start=None, limit=None):
             yield r, f.read(WI.CAP + 1)
 
 
-# ---- transforms (source axes: RAGE world, Z up, metres)
+# ---- transforms (source axes: the engine world, Z up, metres)
 
 def _rotation(q, conjugate):
     x, y, z, w = q or (0.0, 0.0, 0.0, 1.0)

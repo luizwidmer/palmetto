@@ -153,7 +153,7 @@ The default boot keeps the layout-cache path closed, exactly as measured before 
 ```
 # refusal baseline (default) - writes nothing, frame stays black
 python -I tools\\boot_report.py --exe runtime\\build\\palmetto.exe --image <title> --game-dir <package>
-    --overlay F:\\palmetto-overlay --timeout 150 --out <out-dir>
+    --overlay <overlay-dir> --timeout 150 --out <out-dir>
     --env PALMETTO_SHADERS=F:\\palmetto-work\\shaders\\spirv --env PALMETTO_D3D12=vulkan
     --env PALMETTO_SKIP_INT3=1 --env PALMETTO_SEED_GLOBAL=75DF268:D8 --env PALMETTO_XG_TRACE=1
 

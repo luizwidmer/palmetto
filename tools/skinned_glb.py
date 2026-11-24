@@ -1,4 +1,4 @@
-"""Export a skinned GLB from a decoded RAGE pack model and its 8-influence skin streams.
+"""Export a skinned GLB from a decoded the engine pack model and its 8-influence skin streams.
 
 Usage::
 
@@ -43,7 +43,7 @@ so ``0x8B`` is rejected rather than guessed.
 The joint index is local to the drawable model's own palette: a sorted ``u32``
 joaat32 array at ``grmModel + 0x20`` with its length at ``grmModel + 0x0C``. The
 ped skeleton bind pose is ``drawable.skeleton[].bind_matrix`` from a decoded
-skeleton resource (bone -> model, column-major, RAGE Z-up). Palette hashes are
+skeleton resource (bone -> model, column-major, the engine Z-up). Palette hashes are
 resolved against the drawable's own skeleton/string table and then the ped
 skeleton; a hash that resolves nowhere is emitted as ``bone_0x........``.
 
@@ -52,7 +52,7 @@ helper joints named by the palette. Every vertex keeps all eight influences as
 ``JOINTS_0``/``JOINTS_1`` (UNSIGNED_SHORT VEC4) and
 ``WEIGHTS_0``/``WEIGHTS_1`` (FLOAT VEC4). Source weights are u8 values that sum
 to 255; they are normalised to 1.0. Bind matrices and inverse bind matrices use
-the same RAGE Z-up -> glTF Y-up conversion as positions, ``(x, y, z) -> (x, z, -y)``.
+the same the engine Z-up -> glTF Y-up conversion as positions, ``(x, y, z) -> (x, z, -y)``.
 
 Only skinned primitives are exported, with clay materials. Textures, UV atlas
 data and materials of the source package are not copied. This is a static export
@@ -104,7 +104,7 @@ WEIGHT_FORMAT = 0x26  # R8G8B8A8_UNORM
 COMPONENT_SIZES = {5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4}
 TYPE_COMPONENTS = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
 
-# RAGE Z-up -> glTF Y-up: (x, y, z) -> (x, z, -y).
+# the engine Z-up -> glTF Y-up: (x, y, z) -> (x, z, -y).
 _YUP = ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, -1.0, 0.0))
 
 # Attribute names copied from the decoded model.glb. Skin attributes are rebuilt
@@ -126,7 +126,7 @@ class SkinError(ValueError):
 
 # --------------------------------------------------------------------------- math
 def joaat32(name: str) -> int:
-    """RAGE joaat32 over the lowercased Latin-1 bytes of a bone name."""
+    """the engine joaat32 over the lowercased Latin-1 bytes of a bone name."""
     value = 0
     for byte in name.lower().encode("latin-1", "replace"):
         value = (value + byte) & 0xFFFFFFFF
@@ -179,7 +179,7 @@ def invert_affine(m):
 
 
 def bind_to_gltf(m):
-    """Convert a column-major RAGE Z-up matrix to glTF Y-up: ``C * M * C^T``."""
+    """Convert a column-major the engine Z-up matrix to glTF Y-up: ``C * M * C^T``."""
     a = lambda row, column: m[column * 4 + row]
     out = [0.0] * 16
     for row in range(3):

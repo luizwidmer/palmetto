@@ -1,4 +1,4 @@
-"""FSSM container facts cross-checked against SCARAB, plus the duplicate-XBCH payload cases.
+"""FSSM container facts cross-checked against a public prior-art project, plus the duplicate-XBCH payload cases.
 
 The two code-range facts are measured on the 26,503-container corpus; the blobs below are synthetic and
 only reproduce the layout, so the test needs no game data:

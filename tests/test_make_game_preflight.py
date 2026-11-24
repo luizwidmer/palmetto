@@ -709,8 +709,8 @@ class GameDiscoveryTest(unittest.TestCase):
         # ~\OneDrive\Documents, two levels below the home folder, so the home root alone never reaches inside them.
         desktop = os.path.join(self.home, "OneDrive", "Desktop")
         documents = os.path.join(self.home, "OneDrive", "Documents")
-        on_desktop = os.path.join(desktop, "the target title")
-        in_documents = os.path.join(documents, "Games", "the target title")
+        on_desktop = os.path.join(desktop, "the target game")
+        in_documents = os.path.join(documents, "Games", "the target game")
         self.write_probes(on_desktop)
         self.write_probes(in_documents)
 
@@ -793,9 +793,9 @@ class GameDiscoveryTest(unittest.TestCase):
                 self.assertEqual(make_game.volume_roots(), list(make_game.VOLUME_ROOTS))
 
     def test_find_reaches_a_folder_on_a_udisks_drive(self):
-        # <media>/alice/USB DRIVE/the target title: three levels below <media>, two below the user's mount folder.
+        # <media>/alice/USB DRIVE/the target game: three levels below <media>, two below the user's mount folder.
         media = os.path.join(self.home, "media")
-        package = os.path.join(media, "alice", "USB DRIVE", "the target title")
+        package = os.path.join(media, "alice", "USB DRIVE", "the target game")
         self.write_probes(package)
         elsewhere = os.path.join(self.home, "nohome")
 
@@ -822,7 +822,7 @@ class GameDiscoveryTest(unittest.TestCase):
         self.assertNotIn("/Volumes", roots)
 
     def test_find_searches_the_platform_roots(self):
-        package = os.path.join(self.home, "Volumes", "share", "the target title")
+        package = os.path.join(self.home, "Volumes", "share", "the target game")
         self.write_probes(package)
         root = os.path.dirname(os.path.dirname(package))
         with mock.patch.object(make_game, "discovery_roots", return_value=[root]), \

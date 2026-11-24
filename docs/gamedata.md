@@ -88,7 +88,7 @@ and both scale a value into the header's Z box with
 z = bounds.min.z + value / 255 * (bounds.max.z - bounds.min.z)
 ```
 
-`common.arc`'s manifest names `common:/data/levels/americas/heightmap.dat` as a
+`common.arc`'s manifest names `common:/data/levels/<region>/heightmap.dat` as a
 `WORLD_HEIGHTMAP_FILE`, and the `PAMH` magic is the TARGET V `HMAP` magic stored
 little-endian. The row-table layout matches the published TARGET V
 `heightmap.dat` reader (`HMAP`, 44-byte header, 8-byte row headers, max/min
@@ -198,7 +198,7 @@ with **IoU 0.61**. Row 0 is therefore `bounds.min.y`, column 0 is
 `bounds.min.x`, and the linear Z formula above is the same for both.
 
 The HMAP header and row-table rules were cross-checked against the public
-[rage-formats](https://github.com/VIRUXE/rage-formats) reader (`Unlicense`)
+[an open archive-format reader](an open archive-format reader) reader (`Unlicense`)
 and an open heightmap reader (`MIT`); no code is
 copied. The MHIU field offsets, the span checks and the Z correlation are
 measured on this package.
@@ -931,7 +931,7 @@ elements in the 4,291 plain modifiers across all 49 `timecycle_modifier_data` do
 | `== 1` | 6,973 (23.5%) | 3,104 (10.4%) |
 | `> 1` | 5,962 (20.1%) | 342 (1.15%) |
 
-Three patterns establish what the pair stores (matching RAGE's two-float `tcModData` slot):
+Three patterns establish what the pair stores (matching the engine's two-float `tcModData` slot):
 
 1. **`a` carries the variable's value; `b` is zero (`0.0`) on 88.1% of entries.** Across the 1,051 distinct plain
    variables, 624 always have `b == 0.0`, 75 always have `b == 1.0`, and 343 appear with both `b == 0.0` and

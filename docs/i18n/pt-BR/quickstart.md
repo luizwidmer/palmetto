@@ -8,7 +8,7 @@
 
 ## O que é o Palmetto
 
-O Palmetto é um projeto de recompilação estática do the target title (target console) para rodar nativamente no
+O Palmetto é um projeto de recompilação estática do the target game (target console) para rodar nativamente no
 Windows, construído **no seu próprio PC a partir da sua própria cópia**. Os shaders RDNA2 do console são
 traduzidos para SPIR-V (Vulkan), os assets são lidos diretamente do seu pacote e o software de sistema do
 console é reimplementado em shims.

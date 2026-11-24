@@ -195,7 +195,7 @@ which opens none.
 ## Console paths and the write overlay
 
 A title's file calls name the console's drives, so `GAME:\data\x.sps` is a file inside the installed game folder.
-[ivall/xcl](https://github.com/ivall/xcl) (GPL-2.0-only; facts only, no code) documents for target console GDK titles that
+a public runtime project (GPL-2.0-only; facts only, no code) documents for target console GDK titles that
 `GAME:` maps to the game folder and that writes go to a writable overlay instead of the package, which stays read-only.
 `palmetto` therefore shims `CreateFileA/W`, `FindFirstFileA/W`/`FindNextFileA/W`/`FindClose`, `GetFileAttributesA/W`,
 `GetFileAttributesExA/W` and `DeleteFileA/W` (`runtime/shims/file_system.cpp`), under `kernel32.dll`, `kernelbase.dll`
@@ -207,7 +207,7 @@ and the `api-ms-win-core-file-*` sets a GDK title links against.
   both keep naming the same place after the title changes its current directory (CTest `run_tiny_game_dir`).
   `G:\` is the same folder as `GAME:`, and `T:\` is a scratch folder, `<overlay>\.palmetto-temp`, that `GAME:` does
   not see (RT-218; the other console layers map those two drives this way, and only the executable can say which
-  spelling the target title uses). A path under `--game-dir` or the overlay is always a host path, so a package that sits on
+  spelling the target game uses). A path under `--game-dir` or the overlay is always a host path, so a package that sits on
   a host drive `G:` keeps working, and with no folders configured `G:` and `T:` stay host drives.
   `T:\` is a drive root like `GAME:\`: its folder is made on the first `T:` call, so it is a folder before anything
   is written there, and removing or moving it fails with `ERROR_ACCESS_DENIED`.

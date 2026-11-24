@@ -376,7 +376,7 @@ main { flex: 1; position: relative; overflow: hidden; display: flex; }
     <div class="brand-title">
       <div style="font-family: monospace; font-size: 10px; color: var(--accent-pink); letter-spacing: 1px; margin-bottom: 2px;">//digital piece by ESLL</div>
       <h1>PALMETTO // 3D STUDIO</h1>
-      <p id="t-subtitle">Clean-Room Asset Pipeline & Vice City Inspector</p>
+      <p id="t-subtitle">Clean-Room Asset Pipeline & Asset Inspector</p>
     </div>
   </div>
   <div class="tabs">
@@ -459,7 +459,7 @@ let currentLang = localStorage.getItem('palmetto_lang') || 'ru';
 
 const I18N = {
   ru: {
-    subtitle: "Clean-Room Asset Pipeline & Vice City Inspector",
+    subtitle: "Clean-Room Asset Pipeline & Asset Inspector",
     tabModels: "3D Модели",
     tabTextures: "Текстуры",
     searchModelPlaceholder: "Поиск по названию или категории...",
@@ -494,7 +494,7 @@ const I18N = {
     }
   },
   eu: {
-    subtitle: "Clean-Room Asset Pipeline & Vice City Inspector",
+    subtitle: "Clean-Room Asset Pipeline & Asset Inspector",
     tabModels: "3D Models",
     tabTextures: "Textures",
     searchModelPlaceholder: "Search by name or category...",
@@ -625,7 +625,7 @@ function initThree() {
   controls.enableDamping = true;
   controls.dampingFactor = 0.05;
 
-  // Studio Lighting (Vice City Studio Look)
+  // Studio Lighting (studio look)
   const hemiLight = new THREE.HemisphereLight(0xfff5f8, 0x1a1528, 1.4);
   hemiLight.position.set(0, 30, 0);
   scene.add(hemiLight);

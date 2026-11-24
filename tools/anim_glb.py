@@ -27,7 +27,7 @@ Clips: a `.clip` lists animations, each played over its own [start, end] window 
 (vec3) drive the joint with that hash, and bone hash 0 is the mover (root motion), which drives an extra node
 above the skeleton. Other track types (`genericcontrol`, facial, camera) are counted, not exported.
 
-The skeleton, meshes and clips stay in RAGE's Z-up space; one root node turns it into glTF's Y-up.
+The skeleton, meshes and clips stay in the engine's Z-up space; one root node turns it into glTF's Y-up.
 
 Usage:
     python -I anim_glb.py <archive.arc> <out.glb> --skeleton <offset> --part <offset>[:<child>] [--part ...]

@@ -123,7 +123,7 @@ What is not known yet, and decides how far the swap reaches:
 
 ## Day one: finding the hook
 
-The swap needs one function in the executable: the archetype lookup by name hash (RAGE's
+The swap needs one function in the executable: the archetype lookup by name hash (the engine's
 `fwArchetypeManager::GetArchetypeFromHashKey`). `scripts/first_look.ps1` already ranks candidates with
 `tools/find_hash_lookup.py` (report `hash_lookup.json`): it finds where the code loads `0xE472B687` and
 `0xD7C0CDFF`, takes the functions called right after, and orders them by how many direct callers the

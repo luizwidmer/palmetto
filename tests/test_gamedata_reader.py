@@ -1,4 +1,4 @@
-"""gamedata_reader: the generic conversion of RAGE parser XML, root/type dispatch, streaming and the CLI (no game files).
+"""gamedata_reader: the generic conversion of the engine parser XML, root/type dispatch, streaming and the CLI (no game files).
 
     python -I tests/test_gamedata_reader.py
 

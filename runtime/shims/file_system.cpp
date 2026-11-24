@@ -3,7 +3,7 @@
 // A GDK title names its files on the console's drives, "GAME:\\data\\x.sps" being one in the installed game folder, so
 // the imports it makes of CreateFile*, FindFirstFile*/FindNextFile*/FindClose, GetFileAttributes*/GetFileAttributesEx*,
 // DeleteFile*, CreateDirectory*/RemoveDirectory*, MoveFile*, CopyFile*/CopyFile2 and SetFileAttributes* are answered
-// here (docs/runtime_imports.md, "Console paths and the write overlay"; the prefixes come from ivall/xcl,
+// here (docs/runtime_imports.md, "Console paths and the write overlay"; the prefixes come from a public runtime project,
 // GPL-2.0-only, as facts). The rules:
 //   - "GAME:" (any case, "\\" or "/") maps under --game-dir, "G:\\" is the same folder and "T:\\" a scratch folder in
 //     the overlay (RT-218); any other path is a host path and goes to the host;

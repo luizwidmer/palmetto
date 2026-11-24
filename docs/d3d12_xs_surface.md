@@ -1,39 +1,39 @@
-# The measured `d3d12_xs` surface, from SCARAB
+# The measured `d3d12_xs` surface, from a public prior-art project
 
-Status: reference, sourced. This page records what SCARAB measured about the target console
+Status: reference, sourced. This page records what a public prior-art project measured about the target console
 `d3d12_xs.dll` ABI, checks those claims against the files and the Windows SDK, and states what
-Palmetto can use. It does **not** adopt SCARAB's forwarding architecture: Palmetto translates D3D12
-to Vulkan, while SCARAB forwards to PC `d3d12.dll` / vkd3d-proton. Only ABI facts, IID values and
-call-sequence constraints are taken from it. No SCARAB code is copied.
+Palmetto can use. It does **not** adopt the prior art's forwarding architecture: Palmetto translates D3D12
+to Vulkan, while a public prior-art project forwards to PC `d3d12.dll` / vkd3d-proton. Only ABI facts, IID values and
+call-sequence constraints are taken from it. No a public prior-art project code is copied.
 
-Source pin: `p-portela/SCARAB` at commit `d304fa26c0292e2f3ba76f23b15c9f30734bec02`
+Source pin: `an anonymous author/a public prior-art project` at commit `d304fa26c0292e2f3ba76f23b15c9f30734bec02`
 (2026-11-21), read-only clone. Licence: GPL-3.0-only; see §11.
 
 Verification environment: Windows SDK 10.0.26100.0 headers, plus a read-only inventory of the
 local 1.0.2.1 package (the 16 DLL export tables, and the `gameos.xvd` header, entropy and string
 scan). No `d3d12_xs.dll` or game data was opened for this page, and no Wine run was made. Where a
-statement depends on SCARAB's vendor DLL, it is marked **Reported** and cannot be reproduced from
+statement depends on the prior art's vendor DLL, it is marked **Reported** and cannot be reproduced from
 either repository.
 
 Confidence legend, consistent with [d3d12_vulkan.md](d3d12_vulkan.md):
 
 - **Verified** — checked here against a committed file or the Windows SDK headers.
-- **Reported** — SCARAB states it from a vendor binary that is not in either repository.
+- **Reported** — a public prior-art project states it from a vendor binary that is not in either repository.
 - **Derived** — follows from a documented rule plus stated anchors; the derivation is shown.
 - **Open** — no evidence.
 
 ## 1. What the runtime is
 
-SCARAB identifies `d3d12_xs.dll` as a 51,576-byte, PE32+ x86-64 front end
+a public prior-art project identifies `d3d12_xs.dll` as a 51,576-byte, PE32+ x86-64 front end
 (`FileVersion 10.0.26100.6247`, product string `... D3D12.CONSOLE Runtime Library for Offline
 PC`) that loads a user-mode driver at runtime. Its only non-CRT import is `KERNEL32.dll`. That is
 why 116 exports fit in 51 KB: the implementation is in the UMD, not in this DLL
-([`docs/d3d12_xs-findings.md:5-45`](https://github.com/p-portela/SCARAB/blob/d304fa2/docs/d3d12_xs-findings.md)).
+([`docs/d3d12_xs-findings.md:5-45`](a public prior-art project)).
 For a replacement DLL, the export table is therefore the complete free-function contract.
-SCARAB de-brands platform names throughout, so its quoted strings use "console" where the vendor
+a public prior-art project de-brands platform names throughout, so its quoted strings use "console" where the vendor
 string would carry the platform name; §2.3 covers the consequence for export names.
 
-SCARAB also measured that the console runtime and the PC D3D12 runtime define the same COM
+a public prior-art project also measured that the console runtime and the PC D3D12 runtime define the same COM
 interfaces: 28 `IID_*` data exports that exist on both sides are byte-identical. That is the fact
 that makes the standard D3D12 surface forwardable rather than reimplementable — and for Palmetto it
 means a `QueryInterface` for a standard interface can be answered with the PC GUID without a
@@ -44,8 +44,8 @@ exports 55 other standard GUIDs (D3D11, DXGI, `ID3D10Blob`, debug GUIDs). §3 ch
 
 ## 2. The export contract: 116 = 23 functions + 93 GUID data
 
-SCARAB's plan records the composition as 23 functions and 93 GUID data exports
-([`docs/plans/2026-11-21-translation-layer-architecture.md:30`](https://github.com/p-portela/SCARAB/blob/d304fa2/docs/plans/2026-11-21-translation-layer-architecture.md)).
+the prior art's plan records the composition as 23 functions and 93 GUID data exports
+([`docs/plans/2026-11-21-translation-layer-architecture.md:30`](a public prior-art project)).
 The 93 is internally consistent: 5 `DXGI_DEBUG_*` + `IID_ID3D10Blob` + 43 D3D11/DXGI IIDs at
 29–71 + 28 D3D12 IIDs at 72–99 + 16 IIDs at 100–115 = 93, and
 `components/runtime-bridge/src/iid_table.cpp:104` declares `scarab_iid_count = 93` with exactly
@@ -54,12 +54,12 @@ The 93 is internally consistent: 5 `DXGI_DEBUG_*` + `IID_ID3D10Blob` + 43 D3D11/
 ### 2.1 The 23 function exports
 
 Ordinals are documented in
-[`docs/d3d12-xs-bridge.md:99-113`](https://github.com/p-portela/SCARAB/blob/d304fa2/docs/d3d12-xs-bridge.md)
+[`docs/d3d12-xs-bridge.md:99-113`](a public prior-art project)
 and the individual stubs in
-[`components/runtime-bridge/src/d3d12_xs_bridge.cpp`](https://github.com/p-portela/SCARAB/blob/d304fa2/components/runtime-bridge/src/d3d12_xs_bridge.cpp).
+[`components/runtime-bridge/src/d3d12_xs_bridge.cpp`](a public prior-art project).
 "Palmetto today" describes `runtime/shims/d3d12_xs.cpp` at the time of writing.
 
-| # | Export (SCARAB's spelling) | Kind | Palmetto today | Note |
+| # | Export (the prior art's spelling) | Kind | Palmetto today | Note |
 |---:|---|---|---|---|
 | 1 | `D3D12ZeroMemoryX` | console | absent | console fast-zero; `memset` is equivalent |
 | 2 | `PixGetPixieEntryPoints` | console (PIX) | absent | no PIX path |
@@ -93,14 +93,14 @@ on the runtime-imports branch) is the place to see it.
 ### 2.2 The 93 GUID data exports
 
 Ordinals 23–71 and 100–115 are documented per entry in
-[`components/extension-wrapper/src/iid_console.inc`](https://github.com/p-portela/SCARAB/blob/d304fa2/components/extension-wrapper/src/iid_console.inc).
-Ordinals 23–28 and 72–99 are derived in §2.4. Names are SCARAB's; the 10 console-only GUIDs are in
+[`components/extension-wrapper/src/iid_console.inc`](a public prior-art project).
+Ordinals 23–28 and 72–99 are derived in §2.4. Names are the prior art's; the 10 console-only GUIDs are in
 §4. "Std" marks a GUID that is also defined by the Windows SDK; all 83 were checked in §3. The
 order within 23–27 is inferred and immaterial: those are debug GUIDs, not interfaces a title QIs
 for.
 
 The 93 are the documented GUID data exports. They do **not** include the four console
-command-list IIDs in §4: SCARAB's provenance note says the runtime does not export them, so they
+command-list IIDs in §4: the prior art's provenance note says the runtime does not export them, so they
 have no ordinal here and are absent from this export dump.
 
 | # | GUID export | Std | Evidence |
@@ -201,20 +201,20 @@ have no ordinal here and are absent from this export dump.
 
 ### 2.3 The published names are not all wire names
 
-This matters if the table is used to build a replacement DLL. SCARAB deliberately de-brands the
+This matters if the table is used to build a replacement DLL. a public prior-art project deliberately de-brands the
 vendor token:
 
 - `tools/gen_def.py` derives the console-only token from the export table, then emits
   `EXPORTS <real-name>=<internal-name>` using `OUR_TOKEN = "Cons"`
-  ([`tools/gen_def.py:2-24,38,149-183`](https://github.com/p-portela/SCARAB/blob/d304fa2/tools/gen_def.py)).
+  ([`tools/gen_def.py:2-24,38,149-183`](a public prior-art project)).
   The generated `.def` is **not committed**; it is built from the user-supplied vendor DLL.
 - The bridge source defines `D3D12ConsCreateDevice` and `D3D12Cons*` symbols
-  ([`d3d12_xs_bridge.cpp:451-475`](https://github.com/p-portela/SCARAB/blob/d304fa2/components/runtime-bridge/src/d3d12_xs_bridge.cpp)).
-- The string `Xbox` does not occur anywhere in SCARAB's tree, and the README contains the
+  ([`d3d12_xs_bridge.cpp:451-475`](a public prior-art project)).
+- The string `Xbox` does not occur anywhere in the prior art's tree, and the README contains the
   tell-tale "an console Series" — the tree was mechanically de-branded before the first commit.
 
 Therefore `D3D12ConsCreateDevice` (ordinal 13) and the other four `D3D12Cons*` exports are
-SCARAB's internal spellings, not evidence of the runtime's export names. Palmetto already uses
+the prior art's internal spellings, not evidence of the runtime's export names. Palmetto already uses
 `D3D12XboxCreateDevice`, which is the public GDK name and the same call shape
 (`adapter, params, riid, out`). That is the likely wire name, but it should be confirmed from the
 game's import table. The same caveat applies to `IID_ID3D12ConsDmaCommandList`: the GUID in §4 is
@@ -225,16 +225,16 @@ published.
 
 ### 2.4 How ordinals 72–99 were recovered
 
-SCARAB does not publish a per-ordinal map for the 28 standard D3D12 IIDs. The map is derivable
+a public prior-art project does not publish a per-ordinal map for the 28 standard D3D12 IIDs. The map is derivable
 because the runtime's GUID exports behave as if they were ordered alphabetically by name, with one
 deliberate exception:
 
 - Sort the 93 GUID export names. `23 + index` matches **58 of the 59** ordinals documented in
   `iid_console.inc`. The single mismatch is `IID_ID3D12ConsDmaCommandList`: documented at 100,
   alphabetically at 76.
-- SCARAB's own provenance correction says the IID at the runtime's table slot 47 is
+- the prior art's own provenance correction says the IID at the runtime's table slot 47 is
   `IID_ID3D12Debug`, **exported at ordinal 76**
-  ([`components/extension-wrapper/iid_provenance.json:2`](https://github.com/p-portela/SCARAB/blob/d304fa2/components/extension-wrapper/iid_provenance.json)).
+  ([`components/extension-wrapper/iid_provenance.json:2`](a public prior-art project)).
   Alphabetical placement of the 28 standard names puts `IID_ID3D12Debug` at 76. The anchor and the
   rule agree.
 - With `IID_ID3D12ConsDmaCommandList` pinned at 100, the remaining 15 names at 101–115 are again
@@ -244,7 +244,7 @@ deliberate exception:
 
 Confidence: **Derived**. The 23 function ordinals, the 59 documented IID ordinals, and the 28+10
 IID values are **Verified** (the values against the SDK in §3; the console values are **Reported**
-by SCARAB). If a real export table ever contradicts 72–99, the derivation is what is wrong, not
+by a public prior-art project). If a real export table ever contradicts 72–99, the derivation is what is wrong, not
 the rest of the table.
 
 A second lesson from the same data: the runtime exports IIDs only up to `ID3D12Device4`,
@@ -256,21 +256,21 @@ this table to bound the game's interface use.
 
 ## 3. Standard IIDs: 28/28 holds, and 83/83 is the stronger measured fact
 
-SCARAB's headline is exact: the 28 D3D12 `IID_*` values it extracted from the console runtime are
+the prior art's headline is exact: the 28 D3D12 `IID_*` values it extracted from the console runtime are
 byte-identical to the PC headers. I checked all 28 against the Windows SDK 10.0.26100.0 on this
 machine: 27 are in `um/d3d12.h` and `IID_ID3D12Debug` is in `um/d3d12sdklayers.h`; all 28 match
-byte-for-byte. SCARAB's claim that they match "the PC Agility SDK headers" is therefore true, with
+byte-for-byte. the prior art's claim that they match "the PC Agility SDK headers" is therefore true, with
 the nuance that one of the 28 is a debug-layer IID, not a `d3d12.h` IID.
 
-The check extends further. SCARAB's `iid_table.cpp` also reproduces 49 standard D3D11/DXGI IIDs,
+The check extends further. the prior art's `iid_table.cpp` also reproduces 49 standard D3D11/DXGI IIDs,
 `IID_ID3D10Blob`, and 5 `DXGI_DEBUG_*` GUIDs. All **78 standard IIDs + 5 debug GUIDs = 83/83**
 match the SDK headers (`d3d11*.h`, `dxgi*.h`, `dxgi1_*.h`, `d3dcommon.h`, `dxgidebug.h`,
 `d3d11sdklayers.h`, `d3d12sdklayers.h`). The 10 console-only GUIDs are absent from the SDK.
 
 The chain of evidence has two links, and only one is checkable here. This page checks
-**SCARAB's table against the SDK**. SCARAB's gate G1 checks **its table against the vendor
+**the prior art's table against the SDK**. the prior art's gate G1 checks **its table against the vendor
 runtime** (`93/93` GUID bytes); that gate needs the vendor DLL and was not run here. So the
-correct statement is: SCARAB's table is exactly the PC SDK's standard GUID set, and SCARAB reports
+correct statement is: the prior art's table is exactly the PC SDK's standard GUID set, and a public prior-art project reports
 that the table is byte-identical to the runtime's. The second link is **Reported**, not verified
 in this session.
 
@@ -278,12 +278,12 @@ Reproduce the first link:
 
 ```
 python tools/d3d12_xs_surface.py --check --sdk
-python tools/d3d12_xs_surface.py --check --sdk --scarab <SCARAB clone>
+python tools/d3d12_xs_surface.py --check --sdk --prior-art <a public prior-art project clone>
 python -I tests/test_d3d12_xs_surface.py
 ```
 
 The first command checks the 116-slot table and the 83 standard GUIDs against the installed SDK.
-The second also compares all 93 values and the 59 documented ordinals against a SCARAB checkout.
+The second also compares all 93 values and the 59 documented ordinals against a public prior-art project checkout.
 The third is the standalone test; `pytest tests/test_d3d12_xs_surface.py` works where pytest is
 installed.
 
@@ -291,7 +291,7 @@ Consequences for Palmetto:
 
 - A QI for any standard interface can be answered with the SDK GUID. No translation table is
   needed, and a captured GUID can be looked up directly in the SDK headers.
-- The 28-IID claim understates the evidence. If the game uses D3D11 on the console — SCARAB's
+- The 28-IID claim understates the evidence. If the game uses D3D11 on the console — the prior art's
   open question 1 — the existing D3D11/DXGI IIDs are the PC ones too. Palmetto still lists D3D11
   as a non-goal, so this is information, not a work item.
 - The GUID values are facts about the runtime; for the 83 standard GUIDs, the *names* come from
@@ -333,8 +333,8 @@ The 28 D3D12 values, for reference (all verified):
 ## 4. Console-only IIDs
 
 Ten IIDs exported by the runtime are absent from the Windows SDK. Values are **Reported** by
-SCARAB from the vendor runtime's export table; the ordinal is from `iid_console.inc`, so it is
-**Verified** against SCARAB's file, not against the vendor binary.
+a public prior-art project from the vendor runtime's export table; the ordinal is from `iid_console.inc`, so it is
+**Verified** against the prior art's file, not against the vendor binary.
 
 | Ordinal | IID | GUID | What it is | Palmetto relevance |
 |---:|---|---|---|---|
@@ -349,33 +349,33 @@ SCARAB from the vendor runtime's export table; the ordinal is from `iid_console.
 | 39 | `IID_ID3D11CounterSetX` | `f9f6a732-c5f8-4a57-ba36-eae7c27ba74a` | D3D11 counters | Out of scope |
 | 38 | `IID_ID3D11CounterSampleX` | `806ceee4-280b-43d9-9008-b4fdf7febee2` | D3D11 counters | Out of scope |
 
-The four command-list IIDs are **not runtime exports** according to SCARAB's provenance, so they
+The four command-list IIDs are **not runtime exports** according to the prior art's provenance, so they
 have no row above and no ordinal:
-`ID3D12ConsComputeCommandList`, `...6`, `...8`, and `ID3D12ConsCopyCommandList6`. SCARAB's
+`ID3D12ConsComputeCommandList`, `...6`, `...8`, and `ID3D12ConsCopyCommandList6`. the prior art's
 provenance note says they are "NOT exported by the runtime and are NOT recovered" and that a
 `QueryInterface` for one is logged by the wrapper's audit hook
-([`iid_provenance.json:13`](https://github.com/p-portela/SCARAB/blob/d304fa2/components/extension-wrapper/iid_provenance.json)).
+([`iid_provenance.json:13`](a public prior-art project)).
 This 1.0.2.1 package's own DLL export tables do not contain them either: its root has the 16
 middleware/CRT DLLs and no D3D12 runtime DLL, its layout XML lists no `d3d12_xs.dll`, the
 executable that would call `QueryInterface` with them is absent, and `gameos.xvd` is an encrypted
 XVD with a high-entropy payload and no plaintext `d3d12_xs.dll` name in ASCII or UTF-16 (measured
 in [d3d12_command_objects.md](d3d12_command_objects.md) §1 and
-[d3d12_vulkan.md](d3d12_vulkan.md) Appendix A.1). SCARAB also holds seven candidate v4 UUIDs
+[d3d12_vulkan.md](d3d12_vulkan.md) Appendix A.1). a public prior-art project also holds seven candidate v4 UUIDs
 found 16-byte-aligned after `IID_ID3D12Device4` in the UMD's `.rdata` and marks them `CANDIDATE`,
 not used. Do not use them or assign them by position. A QI for one of those interfaces must be
 logged and refused until a title trace or another artifact supplies the GUID.
 
-The DMA IID is the load-bearing one. SCARAB's end-to-end test created a console DMA command list
+The DMA IID is the load-bearing one. the prior art's end-to-end test created a console DMA command list
 through a PC D3D12 device and got an object that served both `IID_ID3D12ConsDmaCommandList` and
 `IID_ID3D12GraphicsCommandList`
-([`docs/d3d12-xs-wrapper.md:134-162`](https://github.com/p-portela/SCARAB/blob/d304fa2/docs/d3d12-xs-wrapper.md)).
+([`docs/d3d12-xs-wrapper.md:134-162`](a public prior-art project)).
 That is **Reported** (Wine, no GPU). It proves the wrapper's QI routing, not the game's use of DMA
 lists.
 
 ## 5. The extension method surface
 
-SCARAB's catalogue has 105 rows labelled `method` and 106 labelled `enum`
-([`components/extension-wrapper/docs/console-extension-catalogue.tsv`](https://github.com/p-portela/SCARAB/blob/d304fa2/components/extension-wrapper/docs/console-extension-catalogue.tsv)).
+the prior art's catalogue has 105 rows labelled `method` and 106 labelled `enum`
+([`components/extension-wrapper/docs/console-extension-catalogue.tsv`](a public prior-art project)).
 The names were mined from the UMD's validation strings. Read the catalogue as a *name list for a
 trace filter*, not as an ABI:
 
@@ -390,15 +390,15 @@ trace filter*, not as an ABI:
   `iid_console.inc`. None of these is a measurement of the ABI; they are documentation drift.
 - Only 10 methods are class-attributed by a UMD message naming the interface, and 6 more by call
   sites in the console SDK samples
-  ([`docs/d3d12-xs-wrapper.md:69-97`](https://github.com/p-portela/SCARAB/blob/d304fa2/docs/d3d12-xs-wrapper.md)).
+  ([`docs/d3d12-xs-wrapper.md:69-97`](a public prior-art project)).
   The rest are unattributed, and the **order within the appended block is not recovered**.
-- SCARAB's own honesty rule is right and worth keeping: every appended slot logs its name and raw
+- the prior art's own honesty rule is right and worth keeping: every appended slot logs its name and raw
   arguments, and unknown slots log their index, so a wrong order is diagnosable.
 
-SCARAB's wrapper class derives from the genuine `ID3D12Device4` and
+the prior art's wrapper class derives from the genuine `ID3D12Device4` and
 `ID3D12GraphicsCommandList6` interfaces and marks every forwarded method `override`, so the
 compiler proves **53 device and 76 command-list** signatures against the real `d3d12.h`
-([`docs/d3d12-xs-wrapper.md:53-63`](https://github.com/p-portela/SCARAB/blob/d304fa2/docs/d3d12-xs-wrapper.md)).
+([`docs/d3d12-xs-wrapper.md:53-63`](a public prior-art project)).
 That proves the PC-side vtable layout of its wrapper; it says nothing about the appended console
 block, which is the part Palmetto must not copy.
 
@@ -413,19 +413,19 @@ Class placement that is evidence-backed:
 | unattributed | the other ~90 names | strings only |
 
 **Do not copy the appended order.** Palmetto implements the public vtable chain; an unknown X
-method should be logged with its slot and arguments and refused, exactly as SCARAB does, until the
+method should be logged with its slot and arguments and refused, exactly as a public prior-art project does, until the
 game's trace identifies it.
 
 ### 5.1 Some "console extensions" are public D3D12 methods
 
-This is the most useful correction in the whole comparison. SCARAB's wrapper derives from
+This is the most useful correction in the whole comparison. the prior art's wrapper derives from
 `ID3D12GraphicsCommandList6`, so it treats anything added to D3D12 later as a console extension.
 The Windows SDK 10.0.26100.0 has since promoted several of these names:
 
-| SCARAB catalogue name | Public method in SDK 10.0.26100.0 | Consequence |
+| a public prior-art project catalogue name | Public method in SDK 10.0.26100.0 | Consequence |
 |---|---|---|
 | `OMSetFrontAndBackStencilRef` | `ID3D12GraphicsCommandList8::OMSetFrontAndBackStencilRef(UINT, UINT)` (`d3d12.h:32819`) | identical signature; it is the GCL8 slot, not an appended slot |
-| `RSSetDepthBiasX` | `ID3D12GraphicsCommandList9::RSSetDepthBias(FLOAT, FLOAT, FLOAT)` (`d3d12.h:33680`) | SCARAB declares `INT` for the first argument and says "no command-list state to set"; both are wrong for the 26100 header |
+| `RSSetDepthBiasX` | `ID3D12GraphicsCommandList9::RSSetDepthBias(FLOAT, FLOAT, FLOAT)` (`d3d12.h:33680`) | a public prior-art project declares `INT` for the first argument and says "no command-list state to set"; both are wrong for the 26100 header |
 | `OMSetDepthBoundsX` | `ID3D12GraphicsCommandList1::OMSetDepthBounds(FLOAT, FLOAT)` (`d3d12.h:7237`) | a base-D3D12 method; the X variant may add something, but "no PC equivalent" needs proof |
 | `RSSetShadingRateX` | `ID3D12GraphicsCommandList5::RSSetShadingRate(...)` (`d3d12.h:30278`) | same |
 | `DispatchMeshX` | `ID3D12GraphicsCommandList6::DispatchMesh(UINT, UINT, UINT)` (`d3d12.h:31126`) | same |
@@ -433,7 +433,7 @@ The Windows SDK 10.0.26100.0 has since promoted several of these names:
 The lesson is not that the catalogue is useless; it is that a name with an `X` suffix is not proof
 of a console-only method. Check every name against the SDK version the game was compiled against
 before treating it as new. For `OMSetFrontAndBackStencilRef` the signature is identical, so a
-GCL8-compiled game calls it at the public slot; SCARAB's placement after GCL6 would land in the
+GCL8-compiled game calls it at the public slot; the prior art's placement after GCL6 would land in the
 wrong slot. Palmetto's public-chain command list already has it at GCL8.
 
 ## 6. Command lists and `CreateCommandList`
@@ -443,14 +443,14 @@ The one measured console command-list rule, quoted from the UMD:
 > `CreateCommandList: An riid of __uuidof(ID3D12ConsDmaCommandList) is required for
 > D3D12CONS_COMMAND_LIST_TYPE_DMA.`
 
-SCARAB records `D3D12CONS_COMMAND_LIST_TYPE_DMA = 6`
-([`console_extensions.h:45-47`](https://github.com/p-portela/SCARAB/blob/d304fa2/components/extension-wrapper/console_extensions.h)).
+a public prior-art project records `D3D12CONS_COMMAND_LIST_TYPE_DMA = 6`
+([`console_extensions.h:45-47`](a public prior-art project)).
 The *name* is evidence-backed; the value 6 is **Derived** from appending to the PC enum (0–5), not
 measured. It is a strong inference, but treat it as a hypothesis until the game's
 `CreateCommandList` call is traced.
 
-SCARAB's interception logic
-([`wrap.cpp:279-326`](https://github.com/p-portela/SCARAB/blob/d304fa2/components/extension-wrapper/src/wrap.cpp)):
+the prior art's interception logic
+([`wrap.cpp:279-326`](a public prior-art project)):
 
 - if `type == 6`, map it to PC `D3D12_COMMAND_LIST_TYPE_COPY` and require the DMA IID;
 - otherwise create the list normally;
@@ -463,14 +463,14 @@ For Palmetto, the transferable facts are the rule and the IID, not the wrapper:
   not a standard GCL IID, treat it as a console list.
 - If `type == 6` **and** `riid == 30bc77b9-8379-4b25-95de-b8588c42275d`, implement it as a copy
   list (Vulkan transfer queue / transfer-only command buffer). If the IID is anything else, log
-  the GUID and refuse; SCARAB reports that the compute/copy console IIDs are not runtime exports
+  the GUID and refuse; a public prior-art project reports that the compute/copy console IIDs are not runtime exports
   and they are not known.
 - `D3D12CONS_COMMAND_LIST_FLAG_ENABLE_IB_CHAINING` is a recovered name (value unknown). A console
   list flag must not be passed to `vkCmd...` as if it were a D3D12 flag.
 - The console also has `ID3D12ConsComputeCommandList` (and 6/8 variants) and
   `ID3D12ConsCopyCommandList6`, plus `D3D12ConsRehydrateRaytracingAccelerationStructure`
-  ([`docs/d3d12-xs-bridge.md:239-245`](https://github.com/p-portela/SCARAB/blob/d304fa2/docs/d3d12-xs-bridge.md)).
-  Their IIDs are not runtime exports according to SCARAB, so this package's export tables cannot
+  ([`docs/d3d12-xs-bridge.md:239-245`](a public prior-art project)).
+  Their IIDs are not runtime exports according to a public prior-art project, so this package's export tables cannot
   supply them; the values and the layouts are **Open**.
 
 What this does not tell us: the slot of `CreateCommandList` in the console device vtable (Palmetto
@@ -480,7 +480,7 @@ proven path.
 
 ## 7. Presentation: `PresentX`, `DXGIX*`, frame events
 
-This is where the expectation that SCARAB closes Palmetto's §7 list is **not** met. SCARAB gives
+This is where the expectation that a public prior-art project closes Palmetto's §7 list is **not** met. a public prior-art project gives
 names and constraints, not signatures, slots or a working present path.
 
 What is evidence-backed:
@@ -488,26 +488,26 @@ What is evidence-backed:
 - `PresentX` is an `ID3D12CommandQueue` method. The UMD message is quoted as
   `ID3D12CommandQueue::PresentX - pPlaneParameters[%d].ResourceCount must currently be less than
   or equal to 2`, and the console SDK samples call it on the queue (367 sites)
-  ([`docs/d3d12-xs-wrapper.md:79-97`](https://github.com/p-portela/SCARAB/blob/d304fa2/docs/d3d12-xs-wrapper.md)).
+  ([`docs/d3d12-xs-wrapper.md:79-97`](a public prior-art project)).
 - Present flags are named `D3D12CONS_PRESENT_FLAG_NONE`, `_IMMEDIATE`, `_PERSIST`,
   `_UNIQUE_VIEW_RESOURCES`; `D3D12CONS_PRESENT_PLANES_MAX = 2` and
   `D3D12CONS_PRESENT_VIEWS_MAX = 8`
-  ([`console_extensions.h:62-72`](https://github.com/p-portela/SCARAB/blob/d304fa2/components/extension-wrapper/console_extensions.h)).
+  ([`console_extensions.h:62-72`](a public prior-art project)).
   The **values are not measured**: `console_extensions.h` assigns 0x1/0x2/0x4, while
   `present_adapter.h:38-44` says the values are unknown and sets them all to 0. The two headers
   contradict each other; use neither as an ABI.
 - `DXGIXPresentArray`, `DXGIXSetFrameNotification`, `DXGIXSetVLineNotification` and
   `DXGIXGetFrameStatistics` are **free functions** at ordinals 20, 21, 22 and 19 — not queue
-  methods. SCARAB's bridge implements them as recorded no-ops; `DXGIXGetFrameStatistics` zeroes
-  64 bytes ([`d3d12_xs_bridge.cpp:520-551`](https://github.com/p-portela/SCARAB/blob/d304fa2/components/runtime-bridge/src/d3d12_xs_bridge.cpp)).
+  methods. the prior art's bridge implements them as recorded no-ops; `DXGIXGetFrameStatistics` zeroes
+  64 bytes ([`d3d12_xs_bridge.cpp:520-551`](a public prior-art project)).
   No parameter layouts are recovered.
 - Device-side frame pacing names: `SetFrameIntervalX`, `ScheduleFrameEventX`, `WaitFrameEventX`,
   `GetFrameStatisticsX`. The first three are called on the device in the samples; the enum names
   `D3D12CONS_FRAME_EVENT_ORIGIN` and `D3D12CONS_SCHEDULE_FRAME_EVENT_FLAG_DISABLE_SIGNAL` exist.
   Queue-side `SuspendX`/`ResumeX` exist. No signatures or slots.
-- SCARAB's `present-adapter` is a seam only: its header proposes a swapchain registry and
+- the prior art's `present-adapter` is a seam only: its header proposes a swapchain registry and
   `D3DKMTWaitForVerticalBlankEvent` for vblank, and its flag enum is all zeroes
-  ([`present_adapter.h:11-66`](https://github.com/p-portela/SCARAB/blob/d304fa2/components/present-adapter/include/present_adapter.h)).
+  ([`present_adapter.h:11-66`](a public prior-art project)).
   Nothing is implemented.
 
 Public samples add the call shapes (not slots). From MIT/zlib code
@@ -533,7 +533,7 @@ with DXGI factory/adapter/output enumeration kept and the DXGI swapchain as fall
 
 The `DXGIX*` free functions are a separate question. If the game imports them from `d3d12_xs.dll`,
 Palmetto's loader will report them as unimplemented; a Vulkan present-array implementation would
-need a swapchain registry, which does not exist yet. SCARAB's no-op behavior is not acceptable for
+need a swapchain registry, which does not exist yet. the prior art's no-op behavior is not acceptable for
 Palmetto because it would silently present nothing.
 
 ### 7.1 Public sources for the presentation and device ABI
@@ -548,16 +548,16 @@ Mesa are public code compiled against the GDK headers, and docs.xbox.com is Micr
 
 | Item | Public source and value | Verdict on this repository's provisional value |
 |---|---|---|
-| Queue `PresentX` slot | `ivall/xcl` (GPL-2.0-only; facts only) dispatches `PresentX(planeCount, planes, params)` at queue slot **30** in the older runtime layout (XDefiant, Minecraft, Fortnite) and slot **32** in a newer one (Unicorn Overlord), with the same SDK version but two methods inserted before `Signal` ([`present.rs`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/crates/xcl/src/hle/d3d12x/present.rs), [`real.rs`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/crates/xcl/src/hle/d3d12x/real.rs), [`HANDOFF.md`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/HANDOFF.md)). | **Confirms a slot, not one number.** The version moves it; trace the game's runtime, do not hard-code either value. |
+| Queue `PresentX` slot | `a public runtime project` (GPL-2.0-only; facts only) dispatches `PresentX(planeCount, planes, params)` at queue slot **30** in the older runtime layout (XDefiant, Minecraft, Fortnite) and slot **32** in a newer one (Unicorn Overlord), with the same SDK version but two methods inserted before `Signal` ([`present.rs`](a public runtime project), [`real.rs`](a public runtime project), [`HANDOFF.md`](a public runtime project)). | **Confirms a slot, not one number.** The version moves it; trace the game's runtime, do not hard-code either value. |
 | Queue `SuspendX` / `ResumeX` slots | No public slot in XCL or the samples. The signatures are `SuspendX(UINT flags)` and `ResumeX()` from the Apache-2.0 ebiten C++ binding ([`api_microsoftgdk_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/api_microsoftgdk_windows.go)); the samples call `SuspendX(0)` and `ResumeX()`. | **Leaves provisional.** |
-| `D3D12XBOX_PRESENT_PLANE_PARAMETERS` | 0x48 bytes on x64: `Token` u64 @0x00, `ResourceCount` u32 @0x08, `ppResources` @0x10, `pSrcViewRects` @0x18, `pDestPlacementBase` @0x20 (four floats), `ColorSpace` int32 @0x28, `ScaleFilter` int32 @0x2C, `ExtendedDescCount` u32 @0x30, `pExtendedDescs` @0x38, `Flags` u32 @0x40. ebiten's Go mirror of the GDK struct ([`d3d12_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/d3d12_windows.go)); XCL independently reads token @0, count @8 and resource list @0x10 ([`present.rs`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/crates/xcl/src/hle/d3d12x/present.rs)). | **Confirms** the field order, types and size in `xbox_present_types.h` and `xbox_present.h`. `ScaleFilter` and `Flags` values stay ours. |
+| `D3D12XBOX_PRESENT_PLANE_PARAMETERS` | 0x48 bytes on x64: `Token` u64 @0x00, `ResourceCount` u32 @0x08, `ppResources` @0x10, `pSrcViewRects` @0x18, `pDestPlacementBase` @0x20 (four floats), `ColorSpace` int32 @0x28, `ScaleFilter` int32 @0x2C, `ExtendedDescCount` u32 @0x30, `pExtendedDescs` @0x38, `Flags` u32 @0x40. ebiten's Go mirror of the GDK struct ([`d3d12_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/d3d12_windows.go)); XCL independently reads token @0, count @8 and resource list @0x10 ([`present.rs`](a public runtime project)). | **Confirms** the field order, types and size in `xbox_present_types.h` and `xbox_present.h`. `ScaleFilter` and `Flags` values stay ours. |
 | `D3D12XBOX_PRESENT_PARAMETERS` | 0x20 bytes on x64: `ImmediateThresholdPercent` float @0x00, `ViewCount` u32 @0x04, `ExtendedDescCount` u32 @0x08, `pExtendedDescs` @0x10, `Flags` u32 @0x18. Mesa's MIT Xbox WGL backend sets `Flags = D3D12XBOX_PRESENT_FLAG_IMMEDIATE` for an immediate present ([`d3d12_wgl_framebuffer_xbox.cpp`](https://github.com/openbsd/xenocara/blob/f3893fcf57cec33c2bd4275edd8ca6d865e3adf2/lib/mesa/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer_xbox.cpp)); ebiten has the field order. The flag's numeric value is not public. | **Corrects** "at least this field": the repository's one-float struct is the first 4 bytes of a 0x20-byte object. Safe as a pointer prefix; never size a copy by it. |
-| Device frame calls | Slots **78** `SetFrameIntervalX`, **79** `ScheduleFrameEventX`, **80** `WaitFrameEventX`, **81** `GetFrameStatisticsX` (0-based, `QueryInterface` = 0). XCL's [`frame.rs`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/crates/xcl/src/hle/d3d12x/frame.rs) numbers the calls and documents the arguments; ebiten's `ID3D12Device` vtable has `SetFrameIntervalX`/`ScheduleFrameEventX`/`WaitFrameEventX` at 78/79/80 and leaves 81 unnamed ([`d3d12_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/d3d12_windows.go)). | **Confirms** all four slots, two independent public sources. |
-| `D3D12XBOX_FRAME_STATISTICS` | The MIT FramePacing sample names `Type`, `Interval`, `Event`, `Render`/`Present`/`Display` with `PlaneIndex`, and `Display.PercentScanned`; it treats `S_FALSE` or a count below the request as "not available yet" ([`FramePacing.cpp`](https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Samples/Graphics/FramePacing/FramePacing.cpp)). XCL's implementation writes `Type` at +0, origin at +0x10 and flip at +0x18, so its record is at least 0x20 bytes ([`frame.rs`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/crates/xcl/src/hle/d3d12x/frame.rs)). | **Partly confirms** the field meanings and the two timestamp offsets; the full record layout and the union members stay unmeasured. |
+| Device frame calls | Slots **78** `SetFrameIntervalX`, **79** `ScheduleFrameEventX`, **80** `WaitFrameEventX`, **81** `GetFrameStatisticsX` (0-based, `QueryInterface` = 0). XCL's [`frame.rs`](a public runtime project) numbers the calls and documents the arguments; ebiten's `ID3D12Device` vtable has `SetFrameIntervalX`/`ScheduleFrameEventX`/`WaitFrameEventX` at 78/79/80 and leaves 81 unnamed ([`d3d12_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/d3d12_windows.go)). | **Confirms** all four slots, two independent public sources. |
+| `D3D12XBOX_FRAME_STATISTICS` | The MIT FramePacing sample names `Type`, `Interval`, `Event`, `Render`/`Present`/`Display` with `PlaneIndex`, and `Display.PercentScanned`; it treats `S_FALSE` or a count below the request as "not available yet" ([`FramePacing.cpp`](https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Samples/Graphics/FramePacing/FramePacing.cpp)). XCL's implementation writes `Type` at +0, origin at +0x10 and flip at +0x18, so its record is at least 0x20 bytes ([`frame.rs`](a public runtime project)). | **Partly confirms** the field meanings and the two timestamp offsets; the full record layout and the union members stay unmeasured. |
 | Token and timeout | `D3D12XBOX_FRAME_PIPELINE_TOKEN` is a 64-bit integer with 0 as `..._NULL` (ebiten). Microsoft's Game Streaming page says `WaitFrameEventX` returns the token at frame start and `PresentX` sends it with the frame to the client ([Learn](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/game-streaming/game-streaming-latency-compensation-deep-dive)). XCL's implementation issues 48-bit nonzero tokens (mask `0xFFFF_FFFF_FFFF`), i.e. it leaves the top 16 bits unused, returns `S_FALSE` on a finite timeout, writes the token on timeout only with flag 2, and returns `E_INVALIDARG` for an unscheduled event; `ScheduleFrameEventX` returns `S_FALSE` or `0x10000000` when it starts the clock. | **Confirms** the 64-bit storage and the `0` null. **Contradicts** this layer's `HRESULT_FROM_WIN32(WAIT_TIMEOUT)` on timeout (XCL: `S_FALSE`) and `ERROR_INVALID_STATE` for an unscheduled event (XCL: `E_INVALIDARG`); both are recorded here, not changed in this PR. The 48-bit range is XCL's implementation choice, not a documented mask. |
 | `D3D12XBOX_CREATE_DEVICE_PARAMETERS` | Public field names and (for ebiten's version) x64 offsets: `Version` @0, `ProcessDebugFlags` @4, `GraphicsCommandQueueRingSizeBytes` @8, `pOffchipTessellationBuffer` @0x10, `GraphicsScratchMemorySizeBytes` @0x18, `ComputeScratchMemorySizeBytes` @0x1C, `DisableGeometryShaderAllocations` @0x20, `DisableTessellationShaderAllocations` @0x24, `DisableDXR` @0x28, `DisableAutomaticDPBBBreakBatchEvents` @0x2C, `pDXRStackBuffer` @0x30, `DXRStackBufferOverrideSizeBytes` @0x38, `CreateDeviceFlags` @0x3C, `AutoHDRPaperWhiteLevelNits` @0x40, `DisableAutomaticCommandSegmentChaining` @0x44 ([`d3d12_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/d3d12_windows.go)). The MIT samples add `AmplificationShaderIndirectArgsBufferSize` and `AmplificationShaderPayloadBufferSize` by name ([`SimpleDeviceAndSwapChain.cpp`](https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Samples/IntroGraphics/SimpleDeviceAndSwapChain/SimpleDeviceAndSwapChain.cpp)). | **Partly confirms.** Seventeen named fields cover the first 18 words (word 3 is the x64 alignment pad at 0x0C); the samples name two more fields without a public layout. A 24-word (96-byte) block still has at least four words with no public name or meaning. |
 | Root-signature flags `0x03000000` | Not documented: the [graphics index](https://docs.xbox.com/_llms/en/apis/gdk-apis/graphics-api-reference.txt) has no `D3D12_ROOT_SIGNATURE_FLAGS` entry, and both URL forms under `docs.xbox.com/reference/graphics/` (`d3d12` and `d3d12_xs`) return 404. | **Leaves provisional.** Keep masking the byte on a copy; no public bit meaning. |
-| `CheckFeatureSupport(D3D12_OPTIONS)` with 0x40 bytes | Microsoft publishes the 15-field PC structure, 0x3C bytes, with no extra member ([`D3D12_FEATURE_DATA_D3D12_OPTIONS`](https://docs.xbox.com/reference/graphics/d3d12/structs/d3d12_feature_data_d3d12_options_public.md)); its `CheckFeatureSupport` page says a size mismatch is `E_INVALIDARG` ([`CheckFeatureSupport`](https://docs.xbox.com/reference/graphics/d3d12/interfaces/id3d12device/methods/id3d12device_checkfeaturesupport_public.md)). XCL measured XDefiant asking 0x40 and retries with 0x3C, zeroing the tail ([`HANDOFF.md`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/HANDOFF.md), [`real.rs`](https://github.com/ivall/xcl/blob/95bda116cfc1b118156901984052ff5698dbf4cc/crates/xcl/src/hle/d3d12x/real.rs)). | **Confirms the 0x40 request size; leaves the extra 4 bytes unknown.** The measurement fixes the size, not the field. No public source names them; `MaxGPUVirtualAddressBitsPerProcess` is a member of the separate `D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT`, not a published member of `D3D12_OPTIONS`. The repository's accept-and-zero-tail behaviour matches the observed failure and is safe. |
+| `CheckFeatureSupport(D3D12_OPTIONS)` with 0x40 bytes | Microsoft publishes the 15-field PC structure, 0x3C bytes, with no extra member ([`D3D12_FEATURE_DATA_D3D12_OPTIONS`](https://docs.xbox.com/reference/graphics/d3d12/structs/d3d12_feature_data_d3d12_options_public.md)); its `CheckFeatureSupport` page says a size mismatch is `E_INVALIDARG` ([`CheckFeatureSupport`](https://docs.xbox.com/reference/graphics/d3d12/interfaces/id3d12device/methods/id3d12device_checkfeaturesupport_public.md)). XCL measured XDefiant asking 0x40 and retries with 0x3C, zeroing the tail ([`HANDOFF.md`](a public runtime project), [`real.rs`](a public runtime project)). | **Confirms the 0x40 request size; leaves the extra 4 bytes unknown.** The measurement fixes the size, not the field. No public source names them; `MaxGPUVirtualAddressBitsPerProcess` is a member of the separate `D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT`, not a published member of `D3D12_OPTIONS`. The repository's accept-and-zero-tail behaviour matches the observed failure and is safe. |
 
 The call shapes are the samples' (and XCL's) shapes: `SetFrameIntervalX(output, interval_us, period, flags)`,
 `ScheduleFrameEventX(type, offset_us, ancillary, flags)`,
@@ -615,9 +615,9 @@ out-of-order token.
 
 ## 8. Memory, heaps, compression and tiling
 
-SCARAB's `memory-adapter` is also a seam only: every flag is declared with value 0 and the header
+the prior art's `memory-adapter` is also a seam only: every flag is declared with value 0 and the header
 says the numeric values are not recovered
-([`memory_adapter.h:21-57`](https://github.com/p-portela/SCARAB/blob/d304fa2/components/memory-adapter/include/memory_adapter.h)).
+([`memory_adapter.h:21-57`](a public prior-art project)).
 The catalogue contributes **names**, which are useful as a checklist:
 
 - Resource flags: `ALLOW_DCC`, `FORCE_DCC_TEXTURE_COMPATIBILITY`, `FORCE_FMASK_TEXTURE_COMPATIBILITY`,
@@ -636,7 +636,7 @@ The catalogue contributes **names**, which are useful as a checklist:
 - Layout/alignment names: `D3D12CONS_TEXTURE_LAYOUT_SWIZZLE_MODE_64KB_R_X`,
   `D3D12CONS_TEXTURE_DATA_PITCH_ALIGNMENT`, `D3D12CONS_DCC_COMPRESSION_LEVEL_128B_TEXTURE_COMPATIBLE`.
 
-None of these has a numeric value in SCARAB, and none has a layout. The tiling/DCC question is
+None of these has a numeric value in a public prior-art project, and none has a layout. The tiling/DCC question is
 therefore **described, not answered**: the names tell Palmetto what to look for in the game's
 resource descriptions, and the copy/state names tell it which compression transitions the game
 may perform, but the actual swizzle and DCC metadata format still has to come from Palmetto's own
@@ -644,7 +644,7 @@ may perform, but the actual swizzle and DCC metadata format still has to come fr
 detile with), `tools/tile_probe.py` (the block-endpoint feature and smoothness score measured on
 a blob) and `tools/swizzle_search.py` (the brute-force search over every bit ordering with the
 right x/y split inside a tile, scored with `tile_probe`), or from the console `xg_xs.dll`
-functions `XGComputeOptimalSwizzleMode`, `XGEncodeDCC`, `XGDecodeDCC` (SCARAB names them; it does
+functions `XGComputeOptimalSwizzleMode`, `XGEncodeDCC`, `XGDecodeDCC` (a public prior-art project names them; it does
 not call them).
 
 Two names are worth adding to the trace filter because they affect correctness, not just
@@ -658,27 +658,27 @@ Mapping to [d3d12_vulkan.md §8.2](d3d12_vulkan.md). "Answered" means a fact Pal
 against; "described" means names or constraints but no layout; "still unknown" means no usable
 evidence.
 
-| Palmetto unknown | Status after SCARAB (and §7.1) | What is actually new |
+| Palmetto unknown | Status after a public prior-art project (and §7.1) | What is actually new |
 |---|---|---|
 | #1 device entry point and 24-word params | **described** | The separate console device export exists at ordinal 13 and is named `D3D12ConsCreateDevice` internally / `D3D12XboxCreateDevice` publicly; the params struct is named `D3D12CONS_CREATE_DEVICE_PARAMETERS`. Public sources name 17 fields and their x64 offsets, plus two more field names; a 24-word block still has at least four words unaccounted (§7.1). |
-| #2 device/heap/queue/command-list slots | **partly measured** | SCARAB has no console slot map. Its appended-after-GCL6 model conflicts with the SDK's GCL8/GCL9 methods (§5.1). Public §7.1 gives the presentation slots (device 78-81, queue 30/32); the heap and command-list slot map is still unknown. Do not use SCARAB as a slot source. |
+| #2 device/heap/queue/command-list slots | **partly measured** | a public prior-art project has no console slot map. Its appended-after-GCL6 model conflicts with the SDK's GCL8/GCL9 methods (§5.1). Public §7.1 gives the presentation slots (device 78-81, queue 30/32); the heap and command-list slot map is still unknown. Do not use a public prior-art project as a slot source. |
 | #3 root signature → `s0..s31` | **still unknown** | Only flag names (`D3D12CONS_ROOT_SIGNATURE_FLAG_FORCE_MEMORY_BASED_ABI`, `_RAYTRACING`); no mapping. Palmetto's own register-based/spill facts already go further. |
 | #4 descriptor bytes and increments | **still unknown** | No measured increment. `D3D12CONS_DESCRIPTOR_HEAP_TYPE_SAMPLER_UNBOUNDED` is a new name, not a size. |
 | #5 VA range / arena capacity | **still unknown** | — |
 | #6 DXGI vs `PresentX` | **partly answered** | `PresentX` is a queue method; public code gives its queue slot (30 in the older runtime layout, 32 in the newer) and the x64 plane/present layouts (§7.1). Public samples give the call sequence and argument counts (no DXGI swapchain; frame events + `PresentX`), see §7. The game itself is not observed. |
 | #7 standard AS vs BVH builder | **still unknown** | New names: `D3D12ConsRehydrateRaytracingAccelerationStructure`, `D3D12CONS_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_DEHYDRATE`, `DispatchRaysX`, `DispatchRaysDimensionsX`. No layouts. |
-| #8 XDXR struct layouts | **still unknown** | Nothing from SCARAB. Measured since from `XboxBvhBuilder.dll` itself, see [xdxr.md](xdxr.md). |
+| #8 XDXR struct layouts | **still unknown** | Nothing from a public prior-art project. Measured since from `XboxBvhBuilder.dll` itself, see [xdxr.md](xdxr.md). |
 | #9 tiled data layout / DCC | **described** | Flag, copy and state names; no values, no swizzle. |
 | #10 binning/DCC/VRS/WMMA usage | **described** | `D3D12CONS_PIPELINE_STATE_FLAG_DISABLE_AUTO_DPBB`, `_DISABLE_RB_PLUS`, `RSSetShadingRateX`; usage still unknown. |
 | #11 `CheckFeatureSupport` answers | **partly measured** | A console title asks `D3D12_OPTIONS` with 0x40 bytes where the PC struct is 0x3C (XCL/XDefiant); the extra 4 bytes are unnamed. The layer answers the PC fields and zeroes the tail (§7.1). |
 | #12 async compute / copy queues | **described** | `CreateCommandQueueX` creates a shader-based queue, which the UMD says only supports `D3D12_COMMAND_LIST_TYPE_COMPUTE`; `SuspendX`/`ResumeX` exist. No params. |
 | #18 heap aliasing / reserved | **still unknown** | — |
-| console IIDs | **10 exported; 4 not exported** | The DMA list IID is proven and the other nine console GUIDs are reported. SCARAB's provenance reports that the four command-list IIDs are not runtime exports, so they have no ordinal; this package has no D3D12 DLL to read. They stay unresolved until a title trace or another artifact supplies them. |
+| console IIDs | **10 exported; 4 not exported** | The DMA list IID is proven and the other nine console GUIDs are reported. the prior art's provenance reports that the four command-list IIDs are not runtime exports, so they have no ordinal; this package has no D3D12 DLL to read. They stay unresolved until a title trace or another artifact supplies them. |
 | standard IIDs | **answered** | 83/83 standard GUIDs match the SDK; the 28 D3D12 ones are exact. |
 | export contract | **answered** | 116 = 23 functions + 93 GUIDs; 23 function ordinals and 59 IID ordinals are documented, 34 are derived. The four command-list IIDs are outside the 93 and have no ordinal. |
 | free-function dispositions | **answered as a list** | 7 standard + 16 console-only; Palmetto serves 4 today. |
 
-The honest summary: SCARAB closes the **export/IID contract** and the **DMA-list rule**, and gives
+The honest summary: a public prior-art project closes the **export/IID contract** and the **DMA-list rule**, and gives
 a **name-level map** of the extension surface. It does not close presentation, slots, struct
 layouts, numeric flags or tiling.
 
@@ -687,15 +687,15 @@ layouts, numeric flags or tiling.
 These are stated plainly because a future reader will otherwise trust the wrong part.
 
 1. **"The 116 export names" are not in the repository.** The `.def` and CSV are generated from the
-   user-supplied vendor DLL; the docs publish SCARAB's internal, de-branded spellings for five
+   user-supplied vendor DLL; the docs publish the prior art's internal, de-branded spellings for five
    `D3D12Cons*` exports (§2.3). Use the ordinals and the 18 token-free names; confirm the other
    five wire names from the game's import table.
-2. **`RSSetDepthBiasX` has a PC equivalent.** SCARAB says depth bias is PSO-only. The 26100 SDK
-   has `ID3D12GraphicsCommandList9::RSSetDepthBias(FLOAT, FLOAT, FLOAT)`. SCARAB's declared
+2. **`RSSetDepthBiasX` has a PC equivalent.** a public prior-art project says depth bias is PSO-only. The 26100 SDK
+   has `ID3D12GraphicsCommandList9::RSSetDepthBias(FLOAT, FLOAT, FLOAT)`. the prior art's declared
    `INT` first argument is also inconsistent with the SDK. Recording the call and dropping it
    would render with the wrong depth bias on a GCL9 title.
 3. **`OMSetFrontAndBackStencilRef` is not a console extension in the 26100 SDK.** It is public
-   GCL8 with the same signature. SCARAB's wrapper puts it after GCL6; a GCL8-compiled game calls
+   GCL8 with the same signature. the prior art's wrapper puts it after GCL6; a GCL8-compiled game calls
    the public slot. Do not copy the placement.
 4. **The catalogue overcounts methods.** 105 rows include at least 11 non-methods (§5); the real
    recovered method-name count is at most 94, and the docs elsewhere say "~95". The wrapper's
@@ -714,46 +714,46 @@ These are stated plainly because a future reader will otherwise trust the wrong 
    proof needs `vendor/d3d12/include/d3d12.h`; the generated `gen_device.inc` / `gen_clist.inc`
    are not committed; the 116/116 export check needs the vendor DLL. The measurements are stated
    with commands, but a clean clone cannot reproduce them without the user-supplied files. That is
-   a deliberate policy, not a false claim; it does mean "verified" in SCARAB's README means
+   a deliberate policy, not a false claim; it does mean "verified" in the prior art's README means
    "verified on the author's artifact set".
 9. **The Wine results are not reproducible here.** "All 7 DLLs load", "the whole console graphics
    stack runs on Linux", and the DMA round-trip are **Reported**. This page did not open
    `d3d12_xs.dll` and did not run Wine. Nothing in this doc depends on them.
 10. **The package's D3D12 DLL exports do not contain the four command-list IIDs with 1.0.2.1.**
-    The package has 16 DLLs and no D3D12 runtime DLL, and `gameos.xvd` is encrypted; SCARAB's
+    The package has 16 DLLs and no D3D12 runtime DLL, and `gameos.xvd` is encrypted; the prior art's
     provenance says the runtime does not export these four IIDs. There is no export ordinal to
     read in this package or in the vendor DLL. A `QueryInterface` trace from the running title is
     one possible way to establish the mapping; the package evidence does not exclude other
     sources.
 
-The central claim does hold, with one link stated: **SCARAB's table reproduces 28/28 D3D12 IIDs,
+The central claim does hold, with one link stated: **the prior art's table reproduces 28/28 D3D12 IIDs,
 and in fact 83/83 standard GUIDs, byte-identically**, checked against the Windows SDK here. That
-the table also equals the vendor runtime's exports is SCARAB's G1 measurement (`93/93` GUID bytes),
+the table also equals the vendor runtime's exports is the prior art's G1 measurement (`93/93` GUID bytes),
 which needs the vendor DLL and was not reproduced. The DMA IID and the export composition also
 hold as files, subject to the name caveat.
 
 ## 11. Licence and provenance
 
-SCARAB is **GPL-3.0-only**: its README says so and every first-party file carries
+a public prior-art project is **GPL-3.0-only**: its README says so and every first-party file carries
 `SPDX-License-Identifier: GPL-3.0-only`. Palmetto is GPL-3.0-or-later. The two are compatible in the
 direction that matters — GPL-3.0-only code can be combined into a GPL-3.0 work — but the combined
-work cannot be relicensed as "or later" for the SCARAB-derived part. This page copies **no SCARAB
+work cannot be relicensed as "or later" for the a public prior-art project-derived part. This page copies **no a public prior-art project
 code**. It records interface names, ordinal numbers and 16-byte GUIDs, which are ABI facts, with
 the source file and line cited. The 28 standard GUIDs are also facts from the Windows SDK; the 10
-console GUIDs are reported from the vendor runtime and are attributed to SCARAB.
+console GUIDs are reported from the vendor runtime and are attributed to a public prior-art project.
 
 The public sources in §7.1 are used as facts only: XCL is GPL-2.0-only (no code copied), ebiten is Apache-2.0,
 the Mesa WGL file is MIT, and the Microsoft samples are MIT. Only names, numbers, field offsets and slot indices
 are taken from them; no code or prose is copied.
 
-If any code is later adapted from SCARAB, it must carry the SCARAB copyright and
-`GPL-3.0-only` notice, and the file must say exactly which SCARAB file it came from. The checker
+If any code is later adapted from a public prior-art project, it must carry the a public prior-art project copyright and
+`GPL-3.0-only` notice, and the file must say exactly which a public prior-art project file it came from. The checker
 in `tools/d3d12_xs_surface.py` is original code written for this repository; it reads only the
-tables above and, optionally, a local SDK or a SCARAB checkout.
+tables above and, optionally, a local SDK or a public prior-art project checkout.
 
 ## 12. References
 
-SCARAB, pinned at `d304fa2`:
+a public prior-art project, pinned at `d304fa2`:
 
 - `README.md:14-39` — the 28/28 claim, component states.
 - `docs/ARCHITECTURE.md:169-185` — E1–E17, the evidence table.

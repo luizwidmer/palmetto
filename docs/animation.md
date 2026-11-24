@@ -6,7 +6,7 @@ excerpts only.
 
 The table of contents of an ARC9 is encrypted. This work does not read or decrypt it. It indexes the data area
 the same way `tools/arc9_carve.py` does: every zlib stream that inflates cleanly to its end is one **stream** in
-the tables below. A logical RAGE resource can span several streams, so "stream" is not "file".
+the tables below. A logical the engine resource can span several streams, so "stream" is not "file".
 
 ## Measured archive composition
 
@@ -145,7 +145,7 @@ carved samples:
 - a plain NUL-terminated bone list (896-byte stream), and
 - a front-coded table (2,064 bytes) whose entries are length-prefixed name fragments plus parent indices.
 
-The `SKEL_<region>_<part>` shape is the conventional RAGE bone naming. The animation pages carry no model name next
+The `SKEL_<region>_<part>` shape is the conventional the engine bone naming. The animation pages carry no model name next
 to the bones, but a skeleton carries its own names (`joaat32` at bone record `+0x1C`, name at `+0x30`,
 [character_skeleton.md](character_skeleton.md)), so the match is measured: see
 [Bone tables and motion matchers](#bone-tables-and-motion-matchers).
@@ -404,12 +404,12 @@ It holds no values. `--decode` prints one dictionary with its decoded values and
 
 Provenance: channel types 0–8 follow the TARGET V `crAnimation` channel set, as named by community tools such as
 CodeWalker's YCD reader (static, quantized, indirect-quantized and cached-quaternion channels). No code was taken
-from them. The resource framing, the the target title-only channel type 10, the type 3 and type 8 rules below and every
+from them. The resource framing, the target game-only channel type 10, the type 3 and type 8 rules below and every
 count in this section were measured on the local copy.
 
-### Clip dictionaries are RAGE resources
+### Clip dictionaries are the engine resources
 
-A clip dictionary is a system-only RAGE resource. Its **root stream** is one of the `starts with 8 zero bytes`
+A clip dictionary is a system-only the engine resource. Its **root stream** is one of the `starts with 8 zero bytes`
 streams above:
 
 ```
@@ -593,7 +593,7 @@ The data holds, in order:
 | 7 | none | rebuilds one quaternion component (below) | 4,942,792 |
 | 8 | none | marks a quaternion with four stored components (below) | 227,655 |
 | 9 | — | not seen | 0 |
-| 10 | variable, see below | second-order delta coding (the target title) | 6,836,654 |
+| 10 | variable, see below | second-order delta coding (the target game) | 6,836,654 |
 
 **Type 10** (new in this build, and the most common animated channel):
 
@@ -978,7 +978,7 @@ python -I tools/anim_move.py <package>\anim.arc <work>\anim-move.json
 
 All 324 resources (325 zlib streams, 331,771 stored / 1,494,188 inflated bytes once the 64 KiB stream at
 `0x105a7d000` is joined with its 5,563-byte continuation stream at `0x105a7f9c0`) decode with 0 errors. Unlike clip
-dictionaries and `0DRP` resources, a `MoVE` resource has no virtual `0x50xxxxxx` pointers or RAGE page map: every
+dictionaries and `0DRP` resources, a `MoVE` resource has no virtual `0x50xxxxxx` pointers or the engine page map: every
 internal cross-reference is a signed 32-bit self-relative byte offset (`target = field_offset + rel_i32`).
 
 ### Header and variable preamble
@@ -1059,7 +1059,7 @@ python -I tools/anim_move.py <package>\anim.arc <work>\anim-move.json
 
 All 324 resources (325 zlib streams, 331,771 stored / 1,494,188 inflated bytes once the 64 KiB stream at
 `0x105a7d000` is joined with its 5,563-byte continuation stream at `0x105a7f9c0`) decode with 0 errors. Unlike clip
-dictionaries and `0DRP` resources, a `MoVE` resource has no virtual `0x50xxxxxx` pointers or RAGE page map: every
+dictionaries and `0DRP` resources, a `MoVE` resource has no virtual `0x50xxxxxx` pointers or the engine page map: every
 internal cross-reference is a signed 32-bit self-relative byte offset (`target = field_offset + rel_i32`).
 
 ### Header and variable preamble
@@ -1173,7 +1173,7 @@ state-machine and motion-tree hierarchy (**1,616** containers across the 324 res
 
 ## Likely format family
 
-The bytes support **new RAGE resource pages**, not the TARGET V `YCD`/`RSC7` family:
+The bytes support **new the engine resource pages**, not the TARGET V `YCD`/`RSC7` family:
 
 - ARC9 container, `0DRP` page directories with `0x50xxxxxx` virtual pointers and page counts.
 - `pack:/...` path tables with 16-byte-aligned names and 16-byte hash/pointer records.

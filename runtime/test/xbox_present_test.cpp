@@ -323,7 +323,7 @@ int main() {
 
     // ---- The window the runtime makes for a swapchain-less title (docs/present_wiring.md) ----
     // PresentX has no DXGI swapchain, so the presentation service makes the window itself. The choice is explicit and
-    // logged: class "PalmettoPresentX", title "the target title Xbox runtime - PresentX", 1280x720 client, hidden until the first
+    // logged: class "PalmettoPresentX", title "the target game Xbox runtime - PresentX", 1280x720 client, hidden until the first
     // presented frame (PALMETTO_PRESENT_WINDOW=auto), with PALMETTO_PRESENT_WINDOW=shown|hidden and
     // PALMETTO_PRESENT_WIDTH/_HEIGHT as the overrides. This exercises that choice without a Vulkan device.
     {

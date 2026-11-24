@@ -543,7 +543,7 @@ their `RSC8` clips, and nested ARC9 archives.
 
 ## Likely format family
 
-The bytes support a **new RAGE resource family in an ARC9 container**:
+The bytes support a **new the engine resource family in an ARC9 container**:
 
 - ARC9 data areas are zlib streams, with page-aligned embedded ARC9 sub-archives (437 of the 442
   `story000` headers are page-aligned).

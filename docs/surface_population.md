@@ -77,7 +77,7 @@ Independent corroboration of the slot's identity: XCL (a public Xbox compatibili
 **127** as `CreateCommittedResource` with a barrier layout in the initial state's place, with exactly these ten
 arguments (heap properties, flags, desc, layout, clear, protected session, castable format count, castable formats,
 riid, out), and numbers **133** as `CreatePlacedResourceX` with a barrier layout - which is the shape this proxy
-already handled. Source: [`xcl-dev/xcl`](https://github.com/xcl-dev/xcl/blob/main/crates/xcl/src/hle/d3d12x/real.rs)
+already handled. Source: a public runtime project
 (the console slot table and `dev_create_committed_resource_layout_x`). The mapping was not copied from public code;
 it is the measured call shape first, and the public source names it.
 

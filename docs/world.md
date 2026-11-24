@@ -160,7 +160,7 @@ extent triples), `0x21` f32 (`scaleXY`, `scaleZ`, `lodDist`, `childLodDist`), `0
 `parentInstance`), `0x15` u32 (`flags`, `numChildren`), `0x08` u64 (`entity id`), `0x60` an 8-bit enum
 (`lodLevel`, `priorityLevel`), `0x4A` a u32 name hash, `0x52` and `0x5C` the two array forms, and `0x05` a struct
 reference whose `extra` word is the referenced struct hash. `0x0C` is a 16-byte vector in the PSIN table but did
-not occur in these schemas. 6stars independently reads these members with the same codes; no code or table was
+not occur in these schemas. an open research project independently reads these members with the same codes; no code or table was
 copied, and its repository has no licence.
 
 Every 0x7a header is checked the same way: the struct/instance table pointers must lie inside the stream, every
@@ -197,7 +197,7 @@ should not be decoded as entity tables. It is the main reason the first two GiB 
 ## Map placement records
 
 Decoded from the entity schema; offsets below are the observed member offsets in the sampled files. `position`
-is RAGE world space in metres, Z up. `rotation` is the stored quaternion and is the inverse of the entity's
+is the engine world space in metres, Z up. `rotation` is the stored quaternion and is the inverse of the entity's
 world rotation (conjugate it for rendering). `scaleXY` applies to X/Y, `scaleZ` to Z.
 
 | Field | Hash | Offset | Type | Meaning |
@@ -346,10 +346,10 @@ that was a lower bound, and the full pass settles the extrapolation. See
 [world_census.md](world_census.md) for the shard layout, the exactness condition and the 98.32% stream
 coverage.
 
-The full count is lower than SixNG's published 30,785 map files / 2,249,490 entities
-(https://github.com/holdmysocks/SixNG), and the whole difference is now accounted for map by map (see
-[world_census.md](world_census.md#the-sixng-difference-map-by-map)). The 23,528 maps both count agree
-on every entity count. SixNG also counts 7,257 `0x7a` resources that have `CEntityDef` objects but no
+The full count is lower than an open research project's published 30,785 map files / 2,249,490 entities
+(an open research project), and the whole difference is now accounted for map by map (see
+[world_census.md](world_census.md#the-an open research project-difference-map-by-map)). The 23,528 maps both count agree
+on every entity count. an open research project also counts 7,257 `0x7a` resources that have `CEntityDef` objects but no
 `CMapData` struct: 961 interior archetype resources (`CMloArchetypeDef`, 540,665 entities in interior
 space) and 6,296 `35abc248` entity groups (39,622 entities in group-local space). It misses 7 maps
 (1,239 entities) whose entity data is in a continuation page. 7,257 − 7 = 7,250 maps and 580,287 −
@@ -482,7 +482,7 @@ python -I tests\test_world_interior_names.py
    offsets: field offsets come from the resource's member table. The map root/entity hashes above identify
    placement files.
 3. **Transforms.** Apply `position`, conjugate the stored quaternion for world rotation, and use `scaleXY` /
-   `scaleZ`. The source is RAGE Z-up; glTF-style Y-up is `(x, z, -y)` with the vector part rotated accordingly.
+   `scaleZ`. The source is the engine Z-up; glTF-style Y-up is `(x, z, -y)` with the vector part rotated accordingly.
 4. **Archetype keys.** Resolve the 32-bit `archetypeName` hash to an exported model. Confirm the match with the
    per-archetype 64-bit key at +0x20 (MurmurHash3 x64 low 64); do not use the +0x08 per-entity id as a name key.
    Hash-only records are normal; the runtime needs a hash→model table, with the bbox/archive-order fallback for
@@ -574,11 +574,11 @@ coordinates. It covers points 3 and 4 of *What a runtime needs*, and approximate
    exported model by the lower-cased joaat of the manifest `Name` without its `.#dr`/`.#ft` suffix. When the
    entity row carries the +0x20 key, the model's Murmur3-64 must equal it, as in `world_names.py`; a 32-bit-only
    match is a `key_mismatch` and is not placed. The model is scaled by (`scaleXY`, `scaleXY`, `scaleZ`), rotated
-   by the **conjugate** of the stored quaternion, translated to `position`, and converted from RAGE Z-up to
+   by the **conjugate** of the stored quaternion, translated to `position`, and converted from the engine Z-up to
    glTF Y-up `(x, z, -y)`.
 
 `--lod-levels` picks the `lodLevel` values to place (default `0,5`: HD and ORPHAN_HD) and `--region
-MINX,MINY,MAXX,MAXY` bounds the RAGE world X/Y. `world.json` then has `"layout": "placements"` and a
+MINX,MINY,MAXX,MAXY` bounds the engine world X/Y. `world.json` then has `"layout": "placements"` and a
 `stats.placements` block: `rows`, `malformed`, `other_lod_level`, `outside_region`, `selected`, `placed`,
 `placed_unverified` (no key in the row), `key_mismatch`, `unresolved_archetype` (no exported model has that name),
 `model_not_loadable`, `degenerate_scale`, `mirrored` and `distinct_models`.
@@ -698,7 +698,7 @@ Checks:
   (4 random and the largest per tier).
 - The LOD-set build's 12,340 chunks pass the same structural check; 1,669,771 placements and 7,527,211,045 drawn
   triangles equal `world.json`.
-- On the downtown box, the conjugate of every stored rotation equals SixNG's independently derived world rotation:
+- On the downtown box, the conjugate of every stored rotation equals an open research project's independently derived world rotation:
   |dot| ≥ 0.9999 on 29,124 of 29,125 entities matched by position and archetype, and the minimum is 0.99894.
   Scales are equal on all 29,125. The instance TRS equals that transform (see the tests).
 

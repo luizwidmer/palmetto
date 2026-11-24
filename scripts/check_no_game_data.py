@@ -5,7 +5,7 @@
 
 The extension check in .github/workflows/no-game-data.yml misses a renamed file: a DDS saved as .bin, an executable
 as .txt. This reads the first bytes of each file and matches the magic numbers of the package's formats and the
-files the build extracts from it: ARC9 archives, TTPF texture pools, RAGE resources, XBCH/FSSM/DXBC shader
+files the build extracts from it: ARC9 archives, TTPF texture pools, the engine resources, XBCH/FSSM/DXBC shader
 containers, SPIR-V, DDS, AWC audio, PSIN/PAMH/MHIU/SPS1/SGD5/RDS5 containers, YSC/SCRP compiled scripts, the
 animation MoVE container and SKEL_ bone table, Ogg, RIFF WAVE, Bink, glTF binaries, PE executables and XVD
 images, the player's saves (JSAV, ASAV and SLAYER1) and world_build.py's LPK1 staging packs of the game's
@@ -41,10 +41,10 @@ MAGICS = (
     ("ARC9 archive", 0, b"9FPR"),
     ("ARC9 archive", 0, b"ARC9"),
     ("TTPF texture pool", 0, b"TTPF"),
-    ("RAGE resource", 0, b"RSC7"),
-    ("RAGE resource", 0, b"RSC8"),
-    ("RAGE resource", 0, b"RSCC"),
-    ("RAGE page directory", 0, b"0DRP"),
+    ("the engine resource", 0, b"RSC7"),
+    ("the engine resource", 0, b"RSC8"),
+    ("the engine resource", 0, b"RSCC"),
+    ("the engine page directory", 0, b"0DRP"),
     ("RBF0 tree", 0, b"RBF0"),
     ("XBCH shader container", 0, b"XBCH"),
     ("FSSM shader", 0, b"FSSM"),

@@ -1,4 +1,4 @@
-// ImHex pattern for one RBF0 resource: RAGE's binary form of an XML data file.
+// ImHex pattern for one RBF0 resource: the engine's binary form of an XML data file.
 //
 // The grammar is the one measured in docs/rbf0.md (section 3) and parsed by tools/rbf0_index.py (parse_rbf0):
 //

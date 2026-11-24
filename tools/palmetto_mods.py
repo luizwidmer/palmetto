@@ -68,7 +68,7 @@ class ModInfo:
 
 
 def joaat(name: str) -> int:
-    """RAGE's joaat over the name's UTF-8 bytes, ASCII-lowercased like the C++ runtime."""
+    """the engine's joaat over the name's UTF-8 bytes, ASCII-lowercased like the C++ runtime."""
     h = 0
     for byte in name.encode("utf-8"):
         if 0x41 <= byte <= 0x5A:

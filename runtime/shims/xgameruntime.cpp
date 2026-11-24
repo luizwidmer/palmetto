@@ -665,14 +665,14 @@ void __stdcall XGameRuntimeUninitialize() {
 
 // ---- XSystem ----
 
-// XSystemDeviceType, in the order of the public documentation: Unknown, Pc, XboxOne, XboxOneS, XboxOneX,
-// XboxOneXDevkit, XboxConsoleLockhart, XboxConsoleAnaconda, XboxConsoleDevkit.
+// XSystemDeviceType, in the order of the public documentation: Unknown, Pc, ConsoleVariant2, ConsoleVariant3, ConsoleVariant4,
+// ConsoleVariant5, ConsoleVariant6, ConsoleVariant7, ConsoleVariant8.
 enum class XSystemDeviceType : uint32_t {
-    Unknown = 0, Pc = 1, XboxOne = 2, XboxOneS = 3, XboxOneX = 4, XboxOneXDevkit = 5,
-    XboxConsoleLockhart = 6, XboxConsoleAnaconda = 7, XboxConsoleDevkit = 8,
+    Unknown = 0, Pc = 1, ConsoleVariant2 = 2, ConsoleVariant3 = 3, ConsoleVariant4 = 4, ConsoleVariant5 = 5,
+    ConsoleVariant6 = 6, ConsoleVariant7 = 7, ConsoleVariant8 = 8,
 };
 
-// XSystemDeviceType XSystemGetDeviceType(). The package is the target console build, so report Series X (Anaconda).
+// XSystemDeviceType XSystemGetDeviceType(). The package is the target console build, so report the newer console variant.
 // PALMETTO_DEVICE_TYPE=<0..8> overrides it, for trying other code paths on day one.
 uint32_t __stdcall XSystemGetDeviceType() {
     char s[16];
@@ -681,7 +681,7 @@ uint32_t __stdcall XSystemGetDeviceType() {
         int v = std::atoi(s);
         if (v >= 0 && v <= 8) return static_cast<uint32_t>(v);
     }
-    return static_cast<uint32_t>(XSystemDeviceType::XboxConsoleAnaconda);
+    return static_cast<uint32_t>(XSystemDeviceType::ConsoleVariant7);
 }
 
 // HRESULT XSystemGetConsoleId(size_t consoleIdSize, char* consoleId, size_t* consoleIdUsed).
@@ -699,7 +699,7 @@ HRESULT __stdcall XSystemGetConsoleId(size_t size, char* out, size_t* used) {
     return S_OK;
 }
 
-// uint64_t XSystemGetAppMemoryUsageLimit(). Reports total physical RAM, or 12 GB fallback for Series X.
+// uint64_t XSystemGetAppMemoryUsageLimit(). Reports total physical RAM, or 12 GB fallback for the newer console variant.
 uint64_t __stdcall XSystemGetAppMemoryUsageLimit() {
     MEMORYSTATUSEX ms{sizeof(ms)};
     if (GlobalMemoryStatusEx(&ms)) return ms.ullTotalPhys;
@@ -818,7 +818,7 @@ XSystemAnalyticsInfo __stdcall XSystemGetAnalyticsInfo() {
     copy_string_padded(info.family, sizeof(info.family), "Xbox");
 
     const uint32_t dt = XSystemGetDeviceType();
-    if (dt == static_cast<uint32_t>(XSystemDeviceType::XboxConsoleLockhart)) {
+    if (dt == static_cast<uint32_t>(XSystemDeviceType::ConsoleVariant6)) {
         copy_string_padded(info.form, sizeof(info.form), "target console");
     } else {
         copy_string_padded(info.form, sizeof(info.form), "target console");
@@ -976,7 +976,7 @@ HRESULT __stdcall XPackageGetMountPath(XPackageMountHandle mount, size_t pathSiz
 }
 
 // bool XPackageIsPackagedProcess().
-// Returns true on target console console. PALMETTO_PACKAGED=0 overrides it.
+// Returns true on target console. PALMETTO_PACKAGED=0 overrides it.
 bool __stdcall XPackageIsPackagedProcess() {
     char s[16];
     const DWORD n = GetEnvironmentVariableA("PALMETTO_PACKAGED", s, sizeof(s));

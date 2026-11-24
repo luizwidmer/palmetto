@@ -2,7 +2,7 @@
 
 Classes:
   bink2        Bink 2 video (KB2x)
-  rbf0         the publisher binary metadata ('RBF0', carries its own field names)
+  rbf0         engine binary metadata ('RBF0', carries its own field names)
   respage      resource page ('42 40 00 00': tagged-pointer structures for textures/meshes/etc.)
   gpu-zerohdr  starts with 16+ zero bytes (GPU data: textures, vertex/index buffers)
   other:<hex>  anything else, keyed by its first 4 bytes

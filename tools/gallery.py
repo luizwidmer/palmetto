@@ -1,7 +1,7 @@
 """Standalone local 3D Web Studio & Texture Gallery server for Palmetto.
 
 Launches a lightweight local HTTP server and opens a modern WebGL/glTF
-3D asset inspector in the browser with Vice City / Palmetto aesthetic.
+3D asset inspector in the browser with sunset / Palmetto aesthetic.
 The texture catalog lists DDS, PNG, JPEG (.jpg or .jpeg) and WebP files.
 
 Usage:
@@ -499,7 +499,7 @@ def start_server(
 
     url = f"http://localhost:{addr[1]}"
     print(f"======================================================")
-    print(f"       PALMETTO 3D ASSET STUDIO (VICE CITY EDITION)    ")
+    print(f"       PALMETTO 3D ASSET STUDIO    ")
     print(f"======================================================")
     print(f"Web Studio URL:     {url}")
     print(f"Models Directory:   {StudioHandler.models_dir}")

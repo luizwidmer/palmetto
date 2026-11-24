@@ -10,7 +10,7 @@ name = "palmetto_xma2_decoder"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-xma = { git = "https://github.com/omonkeyz/xbox-emulator", package = "xma", rev = "27122f7dfcceb9a899555362ee0dde2d530e033c" }
+xma = { git = "a public emulator project", package = "xma", rev = "27122f7dfcceb9a899555362ee0dde2d530e033c" }
 
 [profile.release]
 panic = "unwind"

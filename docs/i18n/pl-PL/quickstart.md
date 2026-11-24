@@ -8,7 +8,7 @@
 
 ## Czym jest Palmetto
 
-Palmetto to projekt statycznej rekompilacji the target title (target console), który uruchamia grę natywnie na
+Palmetto to projekt statycznej rekompilacji the target game (target console), który uruchamia grę natywnie na
 Windowsie. Port jest budowany **na Twoim komputerze z Twojej własnej kopii gry**. Procesor target console jest x86-64
 tak jak w komputerze PC, więc kod gry jest ładowany i wykonywany natywnie, a oprogramowanie systemowe konsoli jest
 implementowane od nowa w postaci tzw. shimów. Skompilowane wcześniej programy GPU konsoli (RDNA2) są tłumaczone na

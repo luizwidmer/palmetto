@@ -354,7 +354,7 @@ HRESULT XboxPresentation::ResumeX() {
 namespace {
 
 constexpr wchar_t k_present_window_class[] = L"PalmettoPresentX";
-constexpr wchar_t k_present_window_title[] = L"the target title Xbox runtime - PresentX";
+constexpr wchar_t k_present_window_title[] = L"the target game Xbox runtime - PresentX";
 constexpr UINT k_default_present_width = 1280;
 constexpr UINT k_default_present_height = 720;
 

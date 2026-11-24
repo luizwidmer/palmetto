@@ -236,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         "--up",
         choices=("z", "y"),
         default="z",
-        help="Source up axis: 'z' converts RAGE Z-up to glTF Y-up (default), 'y' keeps Y-up",
+        help="Source up axis: 'z' converts the engine Z-up to glTF Y-up (default), 'y' keeps Y-up",
     )
     parser.add_argument(
         "--textures",

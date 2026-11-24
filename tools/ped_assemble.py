@@ -6,13 +6,13 @@ Usage:
     python -I tools/ped_assemble.py inspect-seams <parts...> [options]
 
 Pure standard-library Python (`python -I`, no numpy or Pillow). Implements the
-three geometric assembly steps required to combine RAGE 9 modular ped parts
+three geometric assembly steps required to combine the engine 9 modular ped parts
 (`head`, `eyes`, `teeth`, `hand_*_nude_cull`, `feet_*_nude_cull`,
 `bodynipplesgen_*`, `bodygenitalsgen_*`, and garments) into a watertight
 binary glTF 2.0 (`.glb`):
 
 1. **Standing-space alignment:** Human modular drawables store root-relative
-   bind positions anchored at ``SKEL_ROOT = (0, 0, +1.0 m)`` in RAGE Z-up
+   bind positions anchored at ``SKEL_ROOT = (0, 0, +1.0 m)`` in the engine Z-up
    (``(0, +1.0 m, 0)`` in glTF Y-up). Applying the standing-space transform
    places feet on the ground plane and aligns all slots without per-part
    offset tables.
@@ -91,11 +91,11 @@ TYPE_COMPONENTS = {
     "MAT4": 16,
 }
 
-# Standing-space offset between RAGE bind-space (SKEL_ROOT at origin, feet ~ -1.0 m)
+# Standing-space offset between the engine bind-space (SKEL_ROOT at origin, feet ~ -1.0 m)
 # and standing-space (feet at ground plane, SKEL_ROOT at +1.0 m).
 DEFAULT_STANDING_OFFSET_M = 1.0
 
-# Measured coplanar culling tolerances (meters) for RAGE 9 modular ped parts:
+# Measured coplanar culling tolerances (meters) for the engine 9 modular ped parts:
 # - hand_*_nude_cull vs feet_*_nude_cull waist overlap: 258 triangles (<1.5 mm separation)
 # - hand_fr1_000_nude_cull vs bodynipplesgen_fr1_*: 26 triangles
 # - feet_fr1_000_nude_cull vs bodygenitalsgen_fr1_*: 64 triangles
@@ -186,7 +186,7 @@ class SkeletonJoint:
     translation: tuple[float, float, float] = (0.0, 0.0, 0.0)
     rotation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
     scale: tuple[float, float, float] = (1.0, 1.0, 1.0)
-    # 16 column-major floats in glTF Y-up (or RAGE Z-up if skeleton.coord_space == "z-up")
+    # 16 column-major floats in glTF Y-up (or the engine Z-up if skeleton.coord_space == "z-up")
     inverse_bind_matrix: tuple[float, ...] | None = None
 
 
@@ -203,17 +203,17 @@ class SkeletonSpec:
 # --------------------------------------------------------------------------- math & coords
 
 def rage_to_yup_vec3(v: tuple[float, float, float]) -> tuple[float, float, float]:
-    """Convert RAGE Z-up ``(x, y, z)`` to glTF Y-up ``(x, z, -y)``."""
+    """Convert the engine Z-up ``(x, y, z)`` to glTF Y-up ``(x, z, -y)``."""
     return (float(v[0]), float(v[2]), float(-v[1]))
 
 
 def yup_to_rage_vec3(v: tuple[float, float, float]) -> tuple[float, float, float]:
-    """Convert glTF Y-up ``(x, y, z)`` to RAGE Z-up ``(x, -z, y)``."""
+    """Convert glTF Y-up ``(x, y, z)`` to the engine Z-up ``(x, -z, y)``."""
     return (float(v[0]), float(-v[2]), float(v[1]))
 
 
 def rage_to_yup_quat(q: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
-    """Convert a RAGE Z-up quaternion ``(x, y, z, w)`` to glTF Y-up."""
+    """Convert a the engine Z-up quaternion ``(x, y, z, w)`` to glTF Y-up."""
     x, y, z, w = float(q[0]), float(q[1]), float(q[2]), float(q[3])
     nx, ny, nz, nw = x, z, -y, w
     norm = math.sqrt(nx * nx + ny * ny + nz * nz + nw * nw)
@@ -223,7 +223,7 @@ def rage_to_yup_quat(q: tuple[float, float, float, float]) -> tuple[float, float
 
 
 def rage_to_yup_mat4_col(col: Iterable[float]) -> tuple[float, ...]:
-    """Convert a 4x4 column-major matrix from RAGE Z-up to glTF Y-up via ``C * M * C^T``."""
+    """Convert a 4x4 column-major matrix from the engine Z-up to glTF Y-up via ``C * M * C^T``."""
     vals = [float(x) for x in col]
     if len(vals) != 16:
         raise PedAssembleError(f"Expected 16 floats for MAT4, got {len(vals)}")
@@ -675,7 +675,7 @@ def apply_standard_ped_culling(
     vertex_tol: float = DEFAULT_VERTEX_QUANT_TOL,
     compact_vertices: bool = False,
 ) -> tuple[list[MeshPart], list[dict]]:
-    """Apply the RAGE 9 modular ped coplanar overlap culling passes across ``parts``.
+    """Apply the engine 9 modular ped coplanar overlap culling passes across ``parts``.
 
     Passes match the measured ``_nude_cull`` overlap hierarchy:
     1. Upper body (``hand_*_nude_cull`` / ``uppr``) culled against lower body
@@ -748,7 +748,7 @@ def count_mesh_islands(
     """Count disconnected triangle islands (connected components) in a mesh.
 
     With ``by_position=False`` (default), connectivity follows shared vertex
-    indices, matching RAGE 9 physical ``_nude_cull`` island splits (e.g.
+    indices, matching the engine 9 physical ``_nude_cull`` island splits (e.g.
     449 / 290 / 257 / 264 islands). With ``by_position=True``, vertices within
     ``quant_tol`` are welded before computing components.
     """
@@ -2362,7 +2362,7 @@ def _cmd_inspect_seams(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ped_assemble.py",
-        description="Assemble modular RAGE 9 ped parts with standing-space alignment and coplanar overlap culling.",
+        description="Assemble modular the engine 9 ped parts with standing-space alignment and coplanar overlap culling.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

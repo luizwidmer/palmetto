@@ -1,7 +1,7 @@
 """Decode the clip dictionaries in anim.arc: clips, animations and their keyframe channels.
 
 The table of contents is encrypted, so this starts from the same stream walk as anim_index.py: every zlib stream
-that inflates cleanly to its end. A clip dictionary is a RAGE resource whose system pages are one or two of those
+that inflates cleanly to its end. A clip dictionary is a the engine resource whose system pages are one or two of those
 streams. Its root stream starts with 8 zero bytes, a 0x50xxxxxx page-map pointer at +8 and zeros up to +0x38. The
 page map's byte at +8 gives the number of system pages, and the dictionary takes that many back-to-back streams.
 A last page that anim_index does not list (a zlib stream inflating to fewer than 64 bytes, or a 16-byte raw page

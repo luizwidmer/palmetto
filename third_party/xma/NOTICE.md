@@ -1,6 +1,6 @@
 # XMA decoder third-party notice
 
-The Rust package `xma` is consumed as an external Cargo dependency by `runtime/xma_decoder`. Cargo pins the source to commit `27122f7dfcceb9a899555362ee0dde2d530e033c` in [omonkeyz/xbox-emulator](https://github.com/omonkeyz/xbox-emulator/tree/27122f7dfcceb9a899555362ee0dde2d530e033c/crates/compat/xma). The package declares LGPL-2.1-or-later. Its license text is retained in `COPYING.LGPLv2.1`.
+The Rust package `xma` is consumed as an external Cargo dependency by `runtime/xma_decoder`. Cargo pins the source to commit `27122f7dfcceb9a899555362ee0dde2d530e033c` in [omonkeyz/xbox-emulator](a public emulator project). The package declares LGPL-2.1-or-later. Its license text is retained in `COPYING.LGPLv2.1`.
 
 The upstream NOTICE identifies this package as a Rust port of FFmpeg's WMA Pro/XMA decoder from FFmpeg commit `76fa18983e3849595fdc332bf9fa583d5fe7a147`. Original notices:
 

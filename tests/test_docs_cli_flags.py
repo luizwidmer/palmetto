@@ -24,7 +24,7 @@ SOURCE_SUFFIXES = (".py", ".ps1", ".cpp", ".cc", ".c", ".h", ".hpp", ".cmake", "
                    ".bat", ".sh", ".yml", ".yaml", ".csproj")
 # Flags of other programs the docs quote: gh (AGENTS.md), pip (docs/shader_validation.md), argparse itself.
 FOREIGN = {"--search", "--state", "--index-url", "--help"}
-# Pages that quote another project's tree (SCARAB, americas-recomp).
+# Pages that quote another project's tree (a public prior-art project, a public prior-art project).
 OTHER_PROJECTS = {"docs/fssm_crosscheck.md", "docs/d3d12_xs_surface.md"}
 COMMAND = re.compile(r"\bpython3?(?: -I)? ((?:tools|scripts)/[\w/]+\.py|make_game\.py)\b")
 PS1_COMMAND = re.compile(

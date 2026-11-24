@@ -48,9 +48,9 @@ int main() {
 
     // As make_game writes it: UTF-8, no line ending.
     {
-        const Result r = read(config, "C:\\Palmetto work \xce\xbb\\shaders\\spirv");
+        const Result r = read(config, "C:\\work \xce\xbb\\shaders\\spirv");
         EXPECT(!r.threw && r.error.empty());
-        EXPECT(r.path.wstring() == L"C:\\Palmetto work \u03bb\\shaders\\spirv");
+        EXPECT(r.path.wstring() == L"C:\\work \u03bb\\shaders\\spirv");
     }
     // No file, or an empty one, names no folder and is no error.
     {

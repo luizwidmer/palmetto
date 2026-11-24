@@ -1,6 +1,6 @@
 """Stream the game-data XML of a carved ARC9 archive into Python values, dispatching on root tag and ``type``.
 
-The XML in ``common.arc`` is RAGE parser metadata (docs/gamedata.md): 118 root tags and 5,293 element tags, written
+The XML in ``common.arc`` is the engine parser metadata (docs/gamedata.md): 118 root tags and 5,293 element tags, written
 with a handful of conventions. This reader turns any of it into plain values without a schema per tag, and lets a
 caller plug in a schema where one is known:
 

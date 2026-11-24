@@ -60,7 +60,7 @@ then the page fields used by the generic ARC pager. `CHKS` carries the file size
 ## `LSCH` and `LENM`: the type schema
 
 `LSCH` describes the structures of the container's data and `LENM` the enums those structures use. It is a
-reflection schema of the kind RAGE's PSO format keeps in `PSCH`, with names reduced to 32-bit hashes. Neither
+reflection schema of the kind the engine's PSO format keeps in `PSCH`, with names reduced to 32-bit hashes. Neither
 section carries strings.
 
 ### Corpus

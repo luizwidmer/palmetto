@@ -128,7 +128,7 @@ facts put it in that layout:
 * The same submit routine calls `call qword ptr [rax + 0x100]` (`game+0x24824C1`) = console queue slot 32, and the
   runtime's log for it is `queue slot 32 is beyond the PC queue vtable (19 slots); returning E_NOTIMPL (args 0x1 <ptr>
   <ptr> 0x2)` — the `(planeCount, planes, params)` shape of `PresentX`. `docs/d3d12_xs_surface.md` records the public
-  observation (ivall/xcl) that `PresentX` is at queue slot **30** in the older console layout and **32** in the newer
+  observation (a public runtime project) that `PresentX` is at queue slot **30** in the older console layout and **32** in the newer
   one, "with the same SDK version but two methods inserted before `Signal`".
 * Console slot 16 is called with `(fence, value)` (section 3). In the unshifted PC layout slot 16 is
   `GetTimestampFrequency(UINT64*)`, which a title does not call with a fence as its out pointer; `Signal` is the method

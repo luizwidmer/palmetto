@@ -665,29 +665,29 @@ command-object facts from the package are the command-list call sites in section
 
 Prior art is cited for facts only; no code is copied. Licence details are in section 8.
 
-### 4.1 SCARAB (GPL-3.0-only)
+### 4.1 a public prior-art project (GPL-3.0-only)
 
-SCARAB measured the console `d3d12_xs.dll` export surface and reports the console-only
+a public prior-art project measured the console `d3d12_xs.dll` export surface and reports the console-only
 extensions. The parts relevant to this page:
 
 | Claim | Status | Detail |
 |---|---|---|
-| `PresentX` is an `ID3D12CommandQueue` method | **Prior art** | Class-attributed by a UMD validation message and by 367 call sites in the console SDK samples ([`d3d12-xs-wrapper.md:69-97`](https://github.com/p-portela/SCARAB/blob/d304fa2/docs/d3d12-xs-wrapper.md)). |
+| `PresentX` is an `ID3D12CommandQueue` method | **Prior art** | Class-attributed by a UMD validation message and by 367 call sites in the console SDK samples ([`d3d12-xs-wrapper.md:69-97`](a public prior-art project)). |
 | `PresentX` carries at most 2 planes and 8 views per plane | **Prior art** | `D3D12CONS_PRESENT_PLANES_MAX = 2`, `D3D12CONS_PRESENT_VIEWS_MAX = 8`; the UMD message names `pPlaneParameters[%d].ResourceCount <= 2`. |
 | Present flags `NONE`, `IMMEDIATE`, `PERSIST`, `UNIQUE_VIEW_RESOURCES` exist | **Prior art** | Names are recovered; the numeric values are **not** measured. `console_extensions.h` assigns `0x1/0x2/0x4` while `present_adapter.h` says the values are unknown and uses zero; the two contradict each other ([`d3d12_xs_surface.md §7`](d3d12_xs_surface.md)). |
 | `PresentX` signature and slot | **Open** | No signature, slot or call sequence is recovered. |
 | `SuspendX` / `ResumeX` are queue methods | **Prior art** | 122 sample call sites each; no signature or slot. |
-| `CreateCommandQueueX` is a device method | **Prior art** | UMD message ties it to `ID3D12Device`; the inferred shape is `(pDesc, pShaderQueueParams, riid, out)`; the UMD says a shader-based queue supports only `D3D12_COMMAND_LIST_TYPE_COMPUTE`; SCARAB returns `E_NOTIMPL`. Slot and parameter layout are **Open**. |
+| `CreateCommandQueueX` is a device method | **Prior art** | UMD message ties it to `ID3D12Device`; the inferred shape is `(pDesc, pShaderQueueParams, riid, out)`; the UMD says a shader-based queue supports only `D3D12_COMMAND_LIST_TYPE_COMPUTE`; a public prior-art project returns `E_NOTIMPL`. Slot and parameter layout are **Open**. |
 | `ID3D12ConsDmaCommandList` IID `30bc77b9-8379-4b25-95de-b8588c42275d` | **Prior art** | Exported at ordinal 100; the DMA list rule is quoted from the UMD. `D3D12CONS_COMMAND_LIST_TYPE_DMA = 6` is **Derived** by appending to the PC enum, not measured. |
-| Command-list extension order | **Assumed** | SCARAB's own header says the order within the appended block is not recovered; every appended slot logs its name and raw arguments ([`console_extensions.h:13-31`](https://github.com/p-portela/SCARAB/blob/d304fa2/components/extension-wrapper/console_extensions.h)). Do not copy it. |
-| `OMSetFrontAndBackStencilRef` is public GCL8 | **SDK fact, not an extension** | Same signature at `d3d12.h:32819`; the SCARAB catalogue's placement after GCL6 would land in the wrong slot ([`d3d12_xs_surface.md §5.1`](d3d12_xs_surface.md)). |
+| Command-list extension order | **Assumed** | the prior art's own header says the order within the appended block is not recovered; every appended slot logs its name and raw arguments ([`console_extensions.h:13-31`](a public prior-art project)). Do not copy it. |
+| `OMSetFrontAndBackStencilRef` is public GCL8 | **SDK fact, not an extension** | Same signature at `d3d12.h:32819`; the a public prior-art project catalogue's placement after GCL6 would land in the wrong slot ([`d3d12_xs_surface.md §5.1`](d3d12_xs_surface.md)). |
 
 The `DXGIXPresentArray`, `DXGIXSetFrameNotification`, `DXGIXSetVLineNotification` and
 `DXGIXGetFrameStatistics` names are **free functions** at ordinals 20/21/22/19, not queue
 methods; no parameter layouts are recovered. `DXGIXGetFrameStatistics` is reported to write 64
 bytes, so a zero-argument stub is not safe ([`d3d12_xs_surface.md §7`](d3d12_xs_surface.md)).
 
-### 4.2 `americas-recomp` (GPL-2.0-only)
+### 4.2 `a public prior-art project` (GPL-2.0-only)
 
 The prior art that ran the package DLLs against a PC D3D12 device measured the **device**
 surface, not the command objects:
@@ -703,7 +703,7 @@ surface, not the command objects:
 Its own summary explicitly stops before **presentation (`PresentX` and plane parameters),
 command-list extensions, and queue/fence creation slots**
 ([`d3d12_vulkan.md §7`](d3d12_vulkan.md),
-[`PLATFORM_SURFACE.md`](https://github.com/realdody/americas-recomp/blob/xbox-series/docs/xbox/PLATFORM_SURFACE.md)).
+[`PLATFORM_SURFACE.md`](a public prior-art project)).
 So it adds **no** measured queue/list/fence slot to this page. The device slots it did measure
 are useful context: they are the reason a replacement cannot assume the whole device vtable is
 public order, and the reason the four creation slots 8/9/12/36 still need a trace.
@@ -897,7 +897,7 @@ existing device proxy already follows that rule (`runtime/shims/d3d12_xs_device.
 
 ### 8.1 Licence
 
-Palmetto is GPL-3.0-or-later. SCARAB is GPL-3.0-only and `americas-recomp` is GPL-2.0-only; both
+Palmetto is GPL-3.0-or-later. a public prior-art project is GPL-3.0-only and `a public prior-art project` is GPL-2.0-only; both
 are cited for ABI facts only. No code, headers, generated stubs, comments or tables were copied
 from either project. The PE and disassembly facts in section 3 were produced locally from the
 shipped `XboxBvhBuilder.dll`; the public slot table was parsed from the installed Windows SDK
@@ -906,7 +906,7 @@ shipped `XboxBvhBuilder.dll`; the public slot table was parsed from the installe
 
 The XboxBvhBuilder export names quoted in section 3.1 are mangled C++ symbols from the DLL's
 export table, reproduced as ABI facts. The GUID values in section 3.2 are 16-byte constants from
-the SDK; the console GUIDs are attributed to SCARAB in
+the SDK; the console GUIDs are attributed to a public prior-art project in
 [`d3d12_xs_surface.md §4`](d3d12_xs_surface.md).
 
 ### 8.2 Reproduction
@@ -949,12 +949,12 @@ the SDK; the console GUIDs are attributed to SCARAB in
   status.
 - [related_projects.md](related_projects.md) — the GPL-2.0-only and GPL-3.0-only provenance
   rules.
-- SCARAB, pinned at `d304fa26c0292e2f3ba76f23b15c9f30734bec02`:
-  [`docs/d3d12-xs-wrapper.md:69-97`](https://github.com/p-portela/SCARAB/blob/d304fa2/docs/d3d12-xs-wrapper.md),
-  [`components/extension-wrapper/console_extensions.h:13-31,45-72,84-191`](https://github.com/p-portela/SCARAB/blob/d304fa2/components/extension-wrapper/console_extensions.h),
-  [`docs/d3d12-xs-bridge.md:239-245`](https://github.com/p-portela/SCARAB/blob/d304fa2/docs/d3d12-xs-bridge.md).
-- `americas-recomp`, branch `xbox-series`:
-  [`docs/xbox/PLATFORM_SURFACE.md`](https://github.com/realdody/americas-recomp/blob/xbox-series/docs/xbox/PLATFORM_SURFACE.md),
-  [`tools/xbox/platform/README.md`](https://github.com/realdody/americas-recomp/blob/xbox-series/tools/xbox/platform/README.md).
+- a public prior-art project, pinned at `d304fa26c0292e2f3ba76f23b15c9f30734bec02`:
+  [`docs/d3d12-xs-wrapper.md:69-97`](a public prior-art project),
+  [`components/extension-wrapper/console_extensions.h:13-31,45-72,84-191`](a public prior-art project),
+  [`docs/d3d12-xs-bridge.md:239-245`](a public prior-art project).
+- `a public prior-art project`, a public fork branch:
+  [`docs/xbox/PLATFORM_SURFACE.md`](a public prior-art project),
+  [`tools/xbox/platform/README.md`](a public prior-art project).
 - Windows SDK 10.0.26100.0:
   `um/d3d12.h:5193,5323,5477,6337,7216,7982,8701,9006,9011,9026,9178,20165,21255,30275,31123,31965,32816`.

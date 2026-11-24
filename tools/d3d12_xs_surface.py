@@ -2,8 +2,8 @@
 """The measured target console ``d3d12_xs.dll`` export surface, with provenance.
 
 This is the machine-checkable half of ``docs/d3d12_xs_surface.md``. It does not talk to a game, a
-vendor DLL or the network. The data is the surface SCARAB measured from the console runtime
-(``p-portela/SCARAB`` @ d304fa2, GPL-3.0-only), plus the 28 D3D12 IIDs, which are also Windows SDK
+vendor DLL or the network. The data is the surface a public prior-art project measured from the console runtime
+(``an anonymous author/a public prior-art project`` @ d304fa2, GPL-3.0-only), plus the 28 D3D12 IIDs, which are also Windows SDK
 facts. See the doc for the per-item evidence and for the claims that did not hold up.
 
 Checks that always run:
@@ -14,17 +14,17 @@ Checks that always run:
   * the four unresolved console command-list IIDs are not assigned values or ordinals in the local tables.
 
 Optional checks:
-  * ``--scarab PATH`` cross-checks the table against a SCARAB checkout (values, ordinals, catalogue).
+  * ``--prior-art PATH`` cross-checks the table against a public prior-art project checkout (values, ordinals, catalogue).
   * ``--require-sdk`` turns a missing SDK into a failure instead of a skip.
 
 Usage:
   python tools/d3d12_xs_surface.py --check
   python tools/d3d12_xs_surface.py --check --sdk
-  python tools/d3d12_xs_surface.py --check --scarab C:\\path\\to\\scarab-ref
+  python tools/d3d12_xs_surface.py --check --prior-art C:\\path\\to\\prior art-ref
   python tools/d3d12_xs_surface.py --markdown
 """
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Original code. Facts sourced from SCARAB (GPL-3.0-only) and the Windows SDK; no SCARAB code copied.
+# Original code. Facts sourced from a public prior-art project (GPL-3.0-only) and the Windows SDK; no a public prior-art project code copied.
 from __future__ import annotations
 
 import argparse
@@ -35,7 +35,7 @@ import sys
 
 SCARAB_COMMIT = "d304fa26c0292e2f3ba76f23b15c9f30734bec02"
 
-# (ordinal, export, kind). Kind: standard | console. Names are SCARAB's published spellings; the
+# (ordinal, export, kind). Kind: standard | console. Names are the prior art's published spellings; the
 # five D3D12Cons* names are internal aliases, not verified wire names (doc section 2.3).
 FUNCTION_EXPORTS = [
     (1, "D3D12ZeroMemoryX", "console"),
@@ -249,7 +249,7 @@ STANDARD_GUIDS = {
     "IID_IDXGISwapChain1": (0x790A45F7, 0x0D42, 0x4876, 0x98, 0x3A, 0x0A, 0x55, 0xCF, 0xE6, 0xF4, 0xAA),
 }
 
-# The 10 console-only GUIDs, reported by SCARAB from the runtime's export table (doc section 4).
+# The 10 console-only GUIDs, reported by a public prior-art project from the runtime's export table (doc section 4).
 CONSOLE_IIDS = {
     "IID_ID3D11CounterSampleX": (0x806CEEE4, 0x280B, 0x43D9, 0x90, 0x08, 0xB4, 0xFD, 0xF7, 0xFE, 0xBE, 0xE2),
     "IID_ID3D11CounterSetX": (0xF9F6A732, 0xC5F8, 0x4A57, 0xBA, 0x36, 0xEA, 0xE7, 0xC2, 0x7B, 0xA7, 0x4A),
@@ -263,7 +263,7 @@ CONSOLE_IIDS = {
     "IID_IGraphicsUnknown": (0xACEEEA63, 0xE0A9, 0x4A1C, 0xBB, 0xEC, 0x71, 0xB2, 0xF4, 0x85, 0xF7, 0x58),
 }
 
-# The four console command-list interfaces whose IIDs SCARAB reports as not exported and not
+# The four console command-list interfaces whose IIDs a public prior-art project reports as not exported and not
 # recovered (doc section 4). The local tables must not assign a value; a title trace is one
 # possible future source. They must stay out of DATA_EXPORTS and CONSOLE_IIDS.
 UNRECOVERED_CONSOLE_IIDS = (
@@ -378,7 +378,7 @@ def check_guid_values():
 
 def check_unrecovered_console_iids():
     """The four unresolved command-list IIDs are absent from the local export table and CONSOLE_IIDS; the
-    vendor-runtime observation is SCARAB's."""
+    vendor-runtime observation is the prior art's."""
     errors = []
     export_names = {name for _n, name, _kind, _ev in DATA_EXPORTS}
     for interface in UNRECOVERED_CONSOLE_IIDS:
@@ -511,8 +511,8 @@ def parse_scarab_catalogue(path):
     return rows
 
 
-def check_scarab(root):
-    """Cross-check the table against a SCARAB checkout. Returns (errors, notes)."""
+def check_prior_art(root):
+    """Cross-check the table against a public prior-art project checkout. Returns (errors, notes)."""
     errors = []
     notes = []
     iid_table = os.path.join(root, "components", "runtime-bridge", "src", "iid_table.cpp")
@@ -524,10 +524,10 @@ def check_scarab(root):
         mine = dict(STANDARD_GUIDS)
         mine.update(CONSOLE_IIDS)
         if set(theirs) != set(mine):
-            errors.append("SCARAB iid_table names differ from this table")
+            errors.append("a public prior-art project iid_table names differ from this table")
         for name in sorted(set(theirs) & set(mine)):
             if theirs[name] != mine[name]:
-                errors.append("%s: SCARAB %s != table %s"
+                errors.append("%s: a public prior-art project %s != table %s"
                               % (name, guid_text(theirs[name]), guid_text(mine[name])))
         notes.append("iid_table.cpp: %d GUID values compared" % len(theirs))
     else:
@@ -542,7 +542,7 @@ def check_scarab(root):
                 if name in theirs}
         for name in sorted(set(theirs) & set(mine)):
             if theirs[name] != mine[name]:
-                errors.append("%s: SCARAB ordinal %d != table %d"
+                errors.append("%s: a public prior-art project ordinal %d != table %d"
                               % (name, theirs[name], mine[name]))
         notes.append("iid_console.inc: %d documented ordinals compared" % len(set(theirs) & set(mine)))
     else:
@@ -578,7 +578,7 @@ def main(argv=None):
     ap.add_argument("--check", action="store_true", help="run the invariant checks")
     ap.add_argument("--sdk", action="store_true", help="also check the 83 standard GUIDs against the SDK")
     ap.add_argument("--require-sdk", action="store_true", help="fail if the SDK is not found")
-    ap.add_argument("--scarab", metavar="PATH", help="also cross-check a SCARAB checkout")
+    ap.add_argument("--prior-art", metavar="PATH", help="also cross-check a public prior-art project checkout")
     ap.add_argument("--markdown", action="store_true", help="print the 116-row table")
     args = ap.parse_args(argv)
 
@@ -604,17 +604,17 @@ def main(argv=None):
         else:
             print("sdk: SKIP (Windows SDK headers not found)")
 
-    if args.scarab:
-        scarab_errors, notes = check_scarab(args.scarab)
-        errors += scarab_errors
+    if args.prior_art:
+        prior_art_errors, notes = check_prior_art(args.prior_art)
+        errors += prior_art_errors
         for note in notes:
-            print("scarab: " + note)
+            print("prior art: " + note)
 
     if errors:
         for e in errors:
             print("FAIL: " + e)
         return 1
-    if args.check or args.sdk or args.scarab:
+    if args.check or args.sdk or args.prior_art:
         print("PASS: 116 slots (23 functions + 93 GUID data), %d standard + %d console GUIDs, "
               "%d unresolved command-list IIDs absent from local tables"
               % (len(STANDARD_GUIDS), len(CONSOLE_IIDS), len(UNRECOVERED_CONSOLE_IIDS)))

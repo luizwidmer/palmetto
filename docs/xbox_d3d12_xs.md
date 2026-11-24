@@ -22,7 +22,7 @@ six enums (`D3D_FEATURE_LEVEL`, `D3D_NAME`, `D3D_SHADER_INPUT_TYPE`, `D3D12_MESH
 (`DXGI_ADAPTER_DESC2`) ([index](https://docs.xbox.com/_llms/en/apis/gdk-apis/graphics-api-reference.txt)).
 
 Everything about root signatures, state objects, DXIL libraries, hit groups and shader caches lives in the `d3d12`
-unit and is labelled "(XBOX Series consoles)" in its title, with `Header: d3d12_xs.h` and `Library: d3d12_xs.lib` in
+unit and is labelled "(the console family)" in its title, with `Header: d3d12_xs.h` and `Library: d3d12_xs.lib` in
 its Requirements block. Those labels are the only machine-readable difference from the PC pages; the signatures are
 the PC shapes.
 
@@ -233,7 +233,7 @@ Constraints the page states:
 - The same library may appear several times in one state object or collection, or across collections, "as long as the
   names exported each time don't conflict in a given state object".
 - `NumExports` is the length of `pExports`; `0` means "everything gets exported from the library".
-- `pExports` is optional. Requirements: `Header: d3d12_xs.h`, `Library: d3d12_xs.lib`, `XBOX Series consoles`.
+- `pExports` is optional. Requirements: `Header: d3d12_xs.h`, `Library: d3d12_xs.lib`, `the console family`.
 
 Source: <https://docs.xbox.com/reference/graphics/d3d12/structs/d3d12_dxil_library_desc_public.md>
 
@@ -421,7 +421,7 @@ HRESULT CreateStateObject(
 ```
 
 On `ID3D12Device5`. `riid` is `__uuidof(ID3D12StateObject)`. Documented failures: `E_INVALIDARG` for a bad input,
-`E_OUTOFMEMORY` for the handle. Header `d3d12_xs.h`, `Library: d3d12_xs.lib`, `XBOX Series consoles`.
+`E_OUTOFMEMORY` for the handle. Header `d3d12_xs.h`, `Library: d3d12_xs.lib`, `the console family`.
 Source: <https://docs.xbox.com/reference/graphics/d3d12/interfaces/id3d12device5/methods/id3d12device5_createstateobject_public.md>
 
 ```cpp
@@ -473,7 +473,7 @@ HRESULT CreateShaderCacheSession(
 
 On `ID3D12Device9`. Returns `DXGI_ERROR_ALREADY_EXISTS` when "you tried to create a cache with an existing
 identifier", which the description below qualifies to the case where sessions are still open. `riid` receives an
-`ID3D12ShaderCacheSession`. Header `d3d12_xs.h`, `Library: d3d12_xs.lib`, `XBOX Series consoles`.
+`ID3D12ShaderCacheSession`. Header `d3d12_xs.h`, `Library: d3d12_xs.lib`, `the console family`.
 Source: <https://docs.xbox.com/reference/graphics/d3d12/interfaces/id3d12device9/methods/id3d12device9_createshadercachesession_public.md>
 
 ```cpp

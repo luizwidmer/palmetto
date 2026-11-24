@@ -20,6 +20,6 @@ Use the `shaders.arc` listed in the [Xbox 1.0.2.1 manifest](../game/xbox-1.0.2.1
 
 ## Interpretation of the rows
 
-The state names are supported by comparison with the public SGD2 reader and measurements of the Xbox rows. The 16-byte rows have fill mode 3, cull mode in `1..3` and a one-byte front-face flag. In all 124 depth/stencil rows the enable flags and write mask are in `0..1`, and the comparison function is in `1..8`. All 398 blend rows have a four-byte prefix and eight eight-byte render-target entries. Their enable flag is in `0..1` and their write mask is in `0..15`. Individual enum values do not establish the rest of the Xbox state layout. [SGD2 format comparison](https://github.com/Kalmarv/rage-engine-formats/blob/91e5abb68476709fac80f256bc64f928c6fc2d19/src/sgd2_effect.rs)
+The state names are supported by comparison with the public SGD2 reader and measurements of the Xbox rows. The 16-byte rows have fill mode 3, cull mode in `1..3` and a one-byte front-face flag. In all 124 depth/stencil rows the enable flags and write mask are in `0..1`, and the comparison function is in `1..8`. All 398 blend rows have a four-byte prefix and eight eight-byte render-target entries. Their enable flag is in `0..1` and their write mask is in `0..15`. Individual enum values do not establish the rest of the Xbox state layout. [SGD2 format comparison](an open archive-format reader)
 
 The measurements identify the indices stored in the package. Runtime selection of a technique, application of overrides, and the resulting image still require execution evidence.

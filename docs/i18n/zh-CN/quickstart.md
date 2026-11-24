@@ -7,7 +7,7 @@
 
 ## Palmetto 是什么
 
-Palmetto 是一个把 target console 版 the target title **静态重编译**到 Windows 的项目：在**你自己的电脑上、
+Palmetto 是一个把 target console 版 the target game **静态重编译**到 Windows 的项目：在**你自己的电脑上、
 用你自己的游戏拷贝**构建。主机的 RDNA2 着色器翻译为 SPIR-V（Vulkan），资源直接从你的包读取，
 主机的系统软件用 shim 重新实现。
 

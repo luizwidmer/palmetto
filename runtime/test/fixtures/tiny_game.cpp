@@ -107,7 +107,7 @@ int main(int argc, char** argv) {
     check(sum == 500500, "a second thread ran and joined");
 
     check(XGameRuntimeInitialize() == S_OK, "XGameRuntimeInitialize is answered by the palmetto shim (S_OK)");
-    check(XSystemGetDeviceType() == 7, "XSystemGetDeviceType is answered by the palmetto shim (Series X)");
+    check(XSystemGetDeviceType() == 7, "XSystemGetDeviceType is answered by the palmetto shim ");
     XGameRuntimeUninitialize();
 
     if (has_arg(argc, argv, "tls")) {

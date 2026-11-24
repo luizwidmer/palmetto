@@ -4,7 +4,7 @@
 // every `call rel32` (E8) and `jmp rel32` (E9) in the image's executable sections whose target is the function is
 // pointed at a thunk instead. The thunk saves the argument registers (rcx, rdx, r8, r9, xmm0-3), passes one 32-bit
 // argument through a C++ function, restores the rest and jumps to the original. A call through a pointer (vtable,
-// import slot) is not redirected, which suits RAGE's archetype lookup: a static function called directly.
+// import slot) is not redirected, which suits the engine's archetype lookup: a static function called directly.
 //
 // A byte pattern can look like E8/E9 + rel32 inside another instruction; it is only rewritten when its target is
 // exactly the hooked function, so a false match must also point there. x64 Windows only.

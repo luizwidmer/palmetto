@@ -28,7 +28,7 @@ import hashdict  # noqa: E402
 # bytes (0xC3 0xA9), and "ÉLÉGIE" also tells text.lower() apart from lower-casing the encoded bytes.
 NAMES = [
     "adder", "plain_name", "burn", "boardwalk",
-    "café", "Café", "Señor", "Crème Brûlée", "ÉLÉGIE", "Radio_LosSantos_Café",
+    "café", "Café", "Señor", "Dessert Name", "ÉLÉGIE", "Radio_LosSantos_Café",
 ]
 
 # The modules whose name a reviewer would expect here: a rename must not turn the loop below into a
@@ -73,7 +73,7 @@ class JoaatAgreementTest(unittest.TestCase):
         import audio_config
         import awc_names
 
-        for title in ("Café", "Crème Brûlée", "Radio Los Santos", "plain_song"):
+        for title in ("Café", "Dessert Name", "Radio Station", "plain_song"):
             with self.subTest(title=title):
                 self.assertEqual(audio_config.title_stream_id(title),
                                  awc_names.joaat(audio_config.normalized_name(title)) & 0x1FFFFFFF)

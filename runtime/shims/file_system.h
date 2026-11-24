@@ -1,7 +1,7 @@
 // Console (GDK) file paths for a mapped title.
 //
 // A title's file API sees the console's drives: "GAME:\\data\\shaders\\x.sps" is a file inside the installed game
-// folder. ivall/xcl (GPL-2.0-only; facts only here) documents for target console GDK titles that GAME: names the game
+// folder. a public runtime project (GPL-2.0-only; facts only here) documents for target console GDK titles that GAME: names the game
 // folder and that writes go to a writable overlay rather than to the package, which is read-only. palmetto does the
 // same:
 //   GAME:<rest>    a read opens the overlay copy when one exists, else <game dir>\<rest>;

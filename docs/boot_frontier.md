@@ -339,7 +339,7 @@ either by backing the console address range and keeping it coherent with what sh
 address resolve to the resource's host memory. The descriptor-heap work already does this for heap memory
 (`console_heap_back`, placeholder views); resource memory needs the same treatment.
 
-Cross-reference: the public attempt (VIctory) does not need this, because it runs the title on host D3D12 where the
+Cross-reference: the public attempt (a public runtime project) does not need this, because it runs the title on host D3D12 where the
 console's GPU virtual addresses are the host's own resource addresses.
 
 

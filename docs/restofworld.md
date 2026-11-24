@@ -751,7 +751,7 @@ in `story000_script` the 53 MB unread region contains four nested ARC9 headers.
 
 ## Likely format family
 
-The bytes support the existing **ARC9/RAGE family**, not a new container:
+The bytes support the existing **ARC9/the engine family**, not a new container:
 
 - ARC9 data areas are zlib streams with embedded ARC9 sub-archives (10 nested in core, 18 in
   story-rest, 4 in script; most sit on 4 KiB boundaries).

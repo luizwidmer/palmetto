@@ -108,7 +108,7 @@ enum GameInputBatteryStatus : int32_t {
 enum GameInputDeviceFamily : int32_t {
     GameInputFamilyVirtual = -1,
     GameInputFamilyAggregate = 0,
-    GameInputFamilyXboxOne = 1,
+    GameInputFamilyConsoleVariant2 = 1,
     GameInputFamilyXbox360 = 2,
     GameInputFamilyHid = 3,
     GameInputFamilyI8042 = 4,

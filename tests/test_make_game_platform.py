@@ -647,7 +647,7 @@ class RedirectedConsoleEncodingTest(unittest.TestCase):
 
     def test_find_lists_a_dump_whose_path_the_console_code_page_cannot_write(self):
         home = os.path.join(self.tmp.name, "home")
-        dump = os.path.join(home, "Downloads", "the target title-\ue9c3")
+        dump = os.path.join(home, "Downloads", "the target game-\ue9c3")
         os.makedirs(dump)
         with open(os.path.join(ROOT, "game", "xbox-1.0.2.1.json"), encoding="utf-8") as f:
             sizes = json.load(f)["files"]
@@ -660,7 +660,7 @@ class RedirectedConsoleEncodingTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("Traceback", r.stderr)
         self.assertNotIn("UnicodeEncodeError", r.stderr)
-        self.assertTrue(any(f"the target title-{c}" in r.stdout for c in ("\ue9c3", "?")),
+        self.assertTrue(any(f"the target game-{c}" in r.stdout for c in ("\ue9c3", "?")),
                         f"the synthetic dump was not listed: {r.stdout!r}")
 
 

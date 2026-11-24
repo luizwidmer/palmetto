@@ -50,7 +50,6 @@ Next up:
 - decode the texture-layout slots that still refuse (GetResourceLayout record, tile list)
 - decode the serialized fixed-function state blob (behavioural probes) so the pipeline state is measured, not a stand-in
 
-More: [the full measurement ladder](docs/boot_frontier.md), [the null-object chain trace](docs/null_object_chain.md), [how the other public attempt is built](docs/competitor_intel.md), [incoming reports and tracked findings](docs/issues.md).
 
 <!-- progress:end -->
 

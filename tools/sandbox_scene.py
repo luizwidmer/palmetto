@@ -3,7 +3,7 @@
 
 Reads the same inputs as ``world_build.py --placements`` (``world_index.py --entities-out`` rows, the
 ``arc9dump models`` manifests and the ``arc9dump ttpf`` texture manifests), keeps the entities within
---radius metres of --center (RAGE world x y, Z-up), and writes one little-endian file:
+--radius metres of --center (the engine world x y, Z-up), and writes one little-endian file:
 
     "LSB1", u32 version 1, u32 textures, u32 meshes, u32 draws, f32 center[3]
     textures: u32 w, u32 h, w*h RGBA8 (the material's DiffuseTex, mip 0 box-scaled to --tex-size)
@@ -11,7 +11,7 @@ Reads the same inputs as ``world_build.py --placements`` (``world_index.py --ent
     draws:    u32 mesh, i32 texture (-1: none), f32 rows[4][3]
 
 Positions stay in model space; a draw's rows are the entity's world transform as three basis rows plus the
-translation, world = x*row0 + y*row1 + z*row2 + row3 (RAGE Z-up). The file holds decoded game data, so it
+translation, world = x*row0 + y*row1 + z*row2 + row3 (the engine Z-up). The file holds decoded game data, so it
 stays in the user's work folder. Standard library only.
 Usage: `python -I tools/sandbox_scene.py --help` lists the options.
 """
@@ -170,7 +170,7 @@ def main(argv=None):
     ap.add_argument("--models", required=True, help="folder holding arc9dump models manifests")
     ap.add_argument("--textures", action="append", default=[], help="folder holding arc9dump ttpf manifests (repeatable)")
     ap.add_argument("--center", type=float, nargs=2, metavar=("X", "Y"),
-                    help="RAGE world x y (default: densest 50 m cell of resolved model placements)")
+                    help="the engine world x y (default: densest 50 m cell of resolved model placements)")
     ap.add_argument("--radius", type=float, default=150.0)
     ap.add_argument("--max-props", type=int, default=400, help="entities to place, nearest first (each can be several draws)")
     ap.add_argument("--tex-size", type=int, default=256)

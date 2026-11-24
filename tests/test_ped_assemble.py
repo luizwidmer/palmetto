@@ -9,7 +9,7 @@ patches, plus nearby non-coplanar geometry) to verify:
 - watertight seam preservation (zero unintended boundary-edge holes, zero
   non-manifold overlap edges after stitching),
 - preservation of nearby non-coplanar triangles,
-- standing-space +1.0 m SKEL_ROOT alignment and RAGE Z-up -> glTF Y-up math,
+- standing-space +1.0 m SKEL_ROOT alignment and the engine Z-up -> glTF Y-up math,
 - valid binary glTF 2.0 (.glb) export (static textured and 8-influence skinned,
   cross-checked with tools/glb_writer.py and tools/glb_skinning.py),
 - CLI execution (`--help`, `assemble`, `cull-overlap`, `inspect-seams`).
@@ -61,10 +61,10 @@ def _cylinder_band(
     split_islands: bool = False,
     radial_offset: float = 0.0,
 ) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]], list[tuple[float, float]]]:
-    """Generate a synthetic tubular mesh in RAGE Z-up spanning ``z_levels``.
+    """Generate a synthetic tubular mesh in the engine Z-up spanning ``z_levels``.
 
     When ``split_islands=True``, each quad band is emitted with duplicated
-    vertex indices (mirroring RAGE 9's physically split ``_nude_cull`` islands
+    vertex indices (mirroring the engine 9's physically split ``_nude_cull`` islands
     whose positions still weld seamlessly).
     """
     positions: list[tuple[float, float, float]] = []
@@ -165,7 +165,7 @@ class StandingSpaceTests(unittest.TestCase):
         )
         aligned = pa.align_part_to_standing_space(part, standing_offset=1.0, target_space="y-up")
         self.assertEqual(aligned.coord_space, "y-up")
-        # RAGE (0, 0, 0.0) -> glTF (0, 0, 0); RAGE (0.1, 0.2, 1.0) -> glTF (0.1, 1.0, -0.2)
+        # the engine (0, 0, 0.0) -> glTF (0, 0, 0); the engine (0.1, 0.2, 1.0) -> glTF (0.1, 1.0, -0.2)
         self.assertAlmostEqual(aligned.positions[0][1], 0.0, places=7)
         self.assertAlmostEqual(aligned.positions[1][0], 0.1, places=7)
         self.assertAlmostEqual(aligned.positions[1][1], 1.0, places=7)
@@ -174,7 +174,7 @@ class StandingSpaceTests(unittest.TestCase):
         # Normals rotated identically: (0,1,0)->(0,0,-1), (0,0,1)->(0,1,0)
         self.assertEqual(aligned.normals[0], (0.0, 0.0, -1.0))
         self.assertEqual(aligned.normals[1], (0.0, 1.0, 0.0))
-        # Roundtrip back to RAGE Z-up
+        # Roundtrip back to the engine Z-up
         for p in aligned.positions:
             back = pa.rage_to_yup_vec3(pa.yup_to_rage_vec3(p))
             for a, b in zip(p, back):
@@ -302,7 +302,7 @@ class CoplanarCullingAndSeamTests(unittest.TestCase):
         self.assertEqual(after_seams["pairwise_overlaps"], [])
 
     def test_submillimeter_perturbed_waist_and_patch_overlap_culling(self):
-        # 0.8 mm radial offset on waist (< 1.5 mm measured RAGE 9 tolerance) and 0.5 mm shift on
+        # 0.8 mm radial offset on waist (< 1.5 mm measured the engine 9 tolerance) and 0.5 mm shift on
         # nipple/genital patches fail exact vertex-key matching and are caught by spatial-hashed
         # coplanar proximity culling.
         upper, lower, nipples, genitals = self._build_synthetic_body_parts(
@@ -403,7 +403,7 @@ class GlbExportAndCliTests(unittest.TestCase):
             self.assertAlmostEqual(reloaded[0].positions[2][1], 1.1, places=5)
 
     def test_skinned_glb_validates_with_glb_skinning(self):
-        # 2-joint skeleton in RAGE Z-up with identity IBMs and 8-influence vertex weights
+        # 2-joint skeleton in the engine Z-up with identity IBMs and 8-influence vertex weights
         skel = pa.SkeletonSpec(
             name="ambient_femalebody",
             coord_space="z-up",

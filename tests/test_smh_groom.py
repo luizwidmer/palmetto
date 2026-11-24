@@ -197,7 +197,7 @@ def build_synthetic_groom_buffers(
 
 
 def pack_native_resource(system: bytes, gpu: bytes, *, split_gpu_chunks: int = 1) -> bytes:
-    """Pack (system, gpu) into native RAGE resource wire framing (16 zero prefix + 16-aligned zlib streams)."""
+    """Pack (system, gpu) into native the engine resource wire framing (16 zero prefix + 16-aligned zlib streams)."""
     out = bytearray(b"\x00" * 16)
     out.extend(_align16(zlib.compress(system)))
     if split_gpu_chunks <= 1:
@@ -814,7 +814,7 @@ class GlbExportTests(unittest.TestCase):
         blob_y, _ = smh_groom.to_glb(groom, scalp=True, guides=False, classes=(), curves=True, up_axis="y")
         acc_z = glb_writer.read_glb_summary(blob_z)["json"]["accessors"][0]
         acc_y = glb_writer.read_glb_summary(blob_y)["json"]["accessors"][0]
-        # RAGE root z=0.70 maps to glTF y=0.70 when up_axis="z", and stays z=0.70 when up_axis="y".
+        # the engine root z=0.70 maps to glTF y=0.70 when up_axis="z", and stays z=0.70 when up_axis="y".
         self.assertAlmostEqual(acc_z["min"][1], 0.70, places=2)
         self.assertAlmostEqual(acc_y["min"][2], 0.70, places=2)
 

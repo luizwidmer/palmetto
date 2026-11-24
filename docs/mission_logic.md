@@ -46,7 +46,7 @@ u32 archetype hash │ 0 │ 0 │ 0 │ f32 pos.xyz │ f32 pos.xyz (dup) │ r
 
 The 16-dword stride is a histogram peak (319 windows against 25/25 for neighbours), and the duplicated
 archetype hash plus the duplicated position components are what identify the shape. Positions are true
-world coordinates in RAGE space, Z up.
+world coordinates in the engine space, Z up.
 
 ## The key column
 
@@ -121,7 +121,7 @@ a person, a name dictionary turns that name into a 32-bit hash, and the same has
    archive key.
 2. **Resolve the character and its schedule.** `common.arc` stream `0x4C270` lists
    `KeyLento/Perschars/Peds/Unique/Mandy` and `.../Bert` under the pack `PSP_KeyLento_perschars_peds`.
-   SixNG's name dictionary, which is lower-case joaat, resolves the pack to `0x865F0DA9`, Mandy to
+   an open research project's name dictionary, which is lower-case joaat, resolves the pack to `0x865F0DA9`, Mandy to
    `0x03A885E6` and Bert to `0xE34ACBC8`.
 3. **Scan the PSINs for the link hash.** In the 64-byte element above, `linkHash` is the dword at byte
    `+0x34`, not the archetype dword. Inflating the five `story000_script.arc` streams at `0x3FE4000`,

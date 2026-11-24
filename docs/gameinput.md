@@ -63,7 +63,7 @@ controller-button array (`GetControllerButtonState`, indexed in SDL's `SDL_Gamep
   or left stick past half for up/down/left/right, shoulders for page left/right, triggers past half for page up/down,
   right stick past half for scrolling, Menu and View as themselves.
 - Controller axes (`GetControllerAxisState`): LX, LY, RX, RY, LT, RT in 0..1, sticks at rest at 0.5.
-- Every pad is reported as family `GameInputFamilyXboxOne` with its real USB vendor and product id.
+- Every pad is reported as family `GameInputFamilyConsoleVariant2` with its real USB vendor and product id.
 - Player LEDs (and SDL's default lightbar colour) follow connection order: the first pad is player 1, and a pad
   plugged in later takes the lowest free slot.
 
@@ -520,7 +520,7 @@ These need the game executable or a test on hardware:
   did reach 1.00 on one axis.
 - **Motion members the shim does not provide** (magnetic field, orientation) are zero with
   `GameInputMotionAccuracyUnknown`; whether a title wants a synthesised quaternion there is unknown.
-- **Device family**: every pad is reported as `GameInputFamilyXboxOne`; a title that filters on family sees only
+- **Device family**: every pad is reported as `GameInputFamilyConsoleVariant2`; a title that filters on family sees only
   that.
 - **Active input behind Steam Input**: when Steam turns a PlayStation pad into a virtual Xbox pad, SDL may report the
   virtual one's type, and the active input then says Xbox; `PALMETTO_PROMPTS` is the way round it until that is

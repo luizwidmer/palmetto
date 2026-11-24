@@ -1,7 +1,7 @@
-"""Clean-room decoder, strand generator, census tool and GLB exporter for RAGE "smh" strand grooms.
+"""Clean-room decoder, strand generator, census tool and GLB exporter for the engine "smh" strand grooms.
 
 Hair, beards, brows, lashes, body hair and animal fur in this build are stored as GPU strand groom
-LOD resources rather than static triangle meshes. Each groom LOD resource is a native RAGE resource
+LOD resources rather than static triangle meshes. Each groom LOD resource is a native the engine resource
 containing a small system page (type ID ``0x7d8f3db3``) and one GPU asset buffer headed by a table
 of byte offsets into per-guide, per-node and per-triangle arrays.
 
@@ -1024,7 +1024,7 @@ def _convert_up(
 ) -> list[tuple[float, float, float]]:
     if up_axis == "y":
         return [(_clean_zero(x), _clean_zero(y), _clean_zero(z)) for x, y, z in points]
-    # RAGE Z-up -> glTF Y-up: (x, z, -y).
+    # the engine Z-up -> glTF Y-up: (x, z, -y).
     return [(_clean_zero(x), _clean_zero(z), _clean_zero(-y)) for x, y, z in points]
 
 
@@ -1868,7 +1868,7 @@ def _format_census_text(report: dict) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Decode, inspect, census and export RAGE smh GPU strand grooms (stdlib only)."
+        description="Decode, inspect, census and export the engine smh GPU strand grooms (stdlib only)."
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

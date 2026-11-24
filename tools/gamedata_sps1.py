@@ -10,7 +10,7 @@ Format measured on the target console 1.0.2.1 common.arc (offset 0x650000, 43,79
             char preset[preset_len]
             u8   effect_len   byte length of NUL-terminated target SGD5 effect name
             char effect[effect_len]
-            u8   render_bucket  default RAGE render bucket (0..7)
+            u8   render_bucket  default the engine render bucket (0..7)
 
     python -I tools/gamedata_sps1.py <carve_dir_or_arc_or_bin> [--shaders PATH/TO/shaders.arc] [--preset-hash HEX] [--json FILE]
 

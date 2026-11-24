@@ -121,7 +121,7 @@ highest-value debugging gap now that the title runs; O5, O8 and O9 are build/tes
   times); the only display-surface call is `PresentX`, and the slot-133 path measurably creates and stores real surface
   resources. The null population that reaches the present and the views is therefore a different set of surfaces (O12),
   not a missing shim answer.
-- **docs.** `docs/competitor_intel.md` records the public attempt (<https://github.com/Marvisak/VIctory>): DXIL + host
+- **docs.** `docs/competitor_intel.md` records the public attempt (<a public runtime project>): DXIL + host
   D3D12 vs our SPIR-V + Vulkan, prepare-then-map loader, crash reporter with stack unwind, mechanical asset policy;
   GPL-3.0 like ours, so reuse is permitted with attribution. README's progress tracker is generated from
   `docs/progress.json` by `tools/readme_progress.py`; at this refresh both predate the slot-57 wiring, the decode, the

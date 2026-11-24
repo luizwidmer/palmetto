@@ -45,7 +45,7 @@
  }
  
  
- LocklessQueue is based on the the algorithm described in this paper:
+ LocklessQueue is based on the algorithm described in this paper:
 
  Simple, Fast, and Practical Non-Blocking and Blocking Concurrent Queue Algorithms
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""save_keys: collect the hashed `$0x…` keys of the target title saves and resolve them against a local name dictionary.
+"""save_keys: collect the hashed `$0x…` keys of the target game saves and resolve them against a local name dictionary.
 
 Save keys (block ids, group keys and field names in JSAV blocks and ASAV settings JSON) are the **case-sensitive**
 joaat (Jenkins one-at-a-time, no lower-casing, seed 0) of the engine's names, the same rule as the engine member

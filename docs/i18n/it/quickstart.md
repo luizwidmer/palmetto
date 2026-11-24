@@ -8,7 +8,7 @@
 
 ## Che cos'è Palmetto
 
-Palmetto è un progetto di ricompilazione statica di the target title (target console) per eseguirlo nativamente su
+Palmetto è un progetto di ricompilazione statica di the target game (target console) per eseguirlo nativamente su
 Windows, **costruito sul tuo PC a partire dalla tua copia**. Il codice del gioco viene caricato ed eseguito
 nativamente (la CPU di target console è x86-64 come quella di un PC), il software di sistema della console è
 reimplementato in shim e i programmi GPU RDNA2 della console vengono tradotti in SPIR-V per Vulkan. Modelli,

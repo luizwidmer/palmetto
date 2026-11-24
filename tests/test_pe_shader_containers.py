@@ -68,7 +68,7 @@ def dxil_payload(name: str, xbch: bool = True, bitcode: bool = True) -> bytes:
 
 def ildn(name: str) -> bytes:
     path = (
-        "X:\\americas\\src\\dev\\rage\\3rdparty\\Microsoft\\XboxBvhBuilder\\Build\\Release\\Output\\"
+        "<Microsoft toolchain>"
         f"XboxBvhBuilder\\{name}.pdb"
     ).encode()
     return b"\x00\x00" + struct.pack("<H", len(path)) + path

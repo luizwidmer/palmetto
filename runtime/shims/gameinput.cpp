@@ -1154,7 +1154,7 @@ void fill_info(Device* d, SDL_Gamepad* p, const AppLocalDeviceId& id) {
     i.deviceRootId = id;
     // Every pad is presented as an Xbox gamepad, which is all a console title expects (VERIFY: whether a title
     // filters on the family).
-    i.deviceFamily = GameInputFamilyXboxOne;
+    i.deviceFamily = GameInputFamilyConsoleVariant2;
     if (SDL_GetGamepadConnectionState(p) == SDL_JOYSTICK_CONNECTION_WIRELESS) i.capabilities |= GameInputDeviceCapabilityWireless;
     // The per-device kind set: the reading-kind searches take the global kSupportedKinds as the outer bound and this
     // as the per-device one, so only pads with sensors answer a motion query.

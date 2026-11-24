@@ -62,7 +62,7 @@ python -I tools/sandbox.py --work <work> --entities <work>/entities.jsonl --mode
 
 Window keys: WASD move, right mouse button held to look, Q/E down/up (fly), Shift faster, 1 fly, 2 walk (eye 1.7 m
 over the highest scene triangle under the camera), 3 drive (eye 1.2 m, accelerates and steers), P screenshot,
-Esc quit. `--center` is in RAGE world metres; without it the densest 50 m cell of resolved props is used.
+Esc quit. `--center` is in the engine world metres; without it the densest 50 m cell of resolved props is used.
 
 ## 5. Measured
 

@@ -4,7 +4,7 @@ Usage:
     python -I tools/glb_writer.py <in.obj> <out.glb> [--up z|y]
 
 Reads a Wavefront OBJ file (positions, UVs, normals, faces, groups, objects, materials),
-converts coordinates from RAGE Z-up to glTF Y-up (or keeps Y-up), computes smooth
+converts coordinates from the engine Z-up to glTF Y-up (or keeps Y-up), computes smooth
 area-weighted vertex normals when explicit normals are absent, and serializes a strict
 glTF 2.0 binary (.glb) container with optional deduplicated embedded PNG textures.
 Simple planar polygon faces may be convex or concave.
@@ -1378,7 +1378,7 @@ def main(argv: list[str] | None = None) -> int:
         "--up",
         choices=("z", "y"),
         default="z",
-        help="Source up axis: 'z' converts RAGE Z-up to glTF Y-up (default), 'y' keeps Y-up",
+        help="Source up axis: 'z' converts the engine Z-up to glTF Y-up (default), 'y' keeps Y-up",
     )
     args = parser.parse_args(argv)
 

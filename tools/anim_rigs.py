@@ -2,7 +2,7 @@
 
     python -I tools/anim_rigs.py <package>\\anim.arc <work>\\anim-rigs.json [--rigs <work>\\rigs.json]
 
-A rig dictionary has the clip dictionary's root layout (docs/animation.md, "Clip dictionaries are RAGE
+A rig dictionary has the clip dictionary's root layout (docs/animation.md, "Clip dictionaries are the engine
 resources") with `RIG` + a version byte at +0x70 instead of the pack array. Its map is keyed by `joaat32` of a rig
 path. Each value points at +0x20 to a `RIG` block, which holds tables of 8-byte `(hash, word)` items. `--rigs`
 takes the JSON `anim_index.py --rigs` writes and resolves every rig-set entry (source = rig dictionary name,

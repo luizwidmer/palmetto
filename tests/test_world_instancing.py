@@ -40,7 +40,7 @@ def trs_matrix(q, s):
     return [[r[i][j] * s[j] for j in range(3)] for i in range(3)]
 
 
-# RAGE (x, y, z) -> glTF (x, z, -y)
+# the engine (x, y, z) -> glTF (x, z, -y)
 C = [[1, 0, 0], [0, 0, 1], [0, -1, 0]]
 CT = [[1, 0, 0], [0, 0, -1], [0, 1, 0]]
 MIRROR_Y = [[1, 0, 0], [0, -1, 0], [0, 0, 1]]

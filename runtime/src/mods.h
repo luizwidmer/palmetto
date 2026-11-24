@@ -28,7 +28,7 @@
 
 namespace palmetto::mods {
 
-// RAGE's joaat (Jenkins one-at-a-time over the lower-cased name): joaat("player_story000_00") = 0xE472B687,
+// the engine's joaat (Jenkins one-at-a-time over the lower-cased name): joaat("player_story000_00") = 0xE472B687,
 // joaat("cs_mandy") = 0xD7C0CDFF, the model ids docs/character_skeleton.md measured in the packs tables.
 constexpr uint32_t joaat(std::string_view name) {
     uint32_t h = 0;

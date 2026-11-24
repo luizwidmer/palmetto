@@ -160,7 +160,7 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(row_enc["root_element"], "CMapData")
 
     def test_xml_fragment(self):
-        text = b"/americas/map/x_bvh.arc</filename><Item/>" + b" " * 40
+        text = b"/region/map/x_bvh.arc</filename><Item/>" + b" " * 40
         row = bvh_index.classify(text, len(text))
         self.assertEqual(row["kind"], "xml")
         self.assertTrue(row["fragment"])

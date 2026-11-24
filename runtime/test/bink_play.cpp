@@ -6,7 +6,7 @@
 //
 // NAME is a movie's path in the game (Stinger/RSG_STINGER.bk2) or any unique part of it (stinger), looked up in the
 // name table tools/bink_play.py keeps (%LOCALAPPDATA%\Palmetto\bink_names.csv); if there is none yet, bink_play runs
-// that tool once to build it. With no movie at all a windowed run plays the the publisher stinger, so double-clicking
+// that tool once to build it. With no movie at all a windowed run plays the studio's stinger movie, so double-clicking
 // the executable plays it. The game folder comes from --game-dir, PALMETTO_GAME_DIR, or the archive the name table
 // was built from.
 //

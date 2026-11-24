@@ -1,6 +1,6 @@
 # RBF0 resources in `data.arc`
 
-`RBF0` is RAGE's binary form of an XML data file. It is a single record stream with an inline descriptor table, not
+`RBF0` is the engine's binary form of an XML data file. It is a single record stream with an inline descriptor table, not
 a section container. This note measures the 1,263 `RBF0` resources carved from `data.arc` of the target console
 1.0.2.1 package, using the fixed zlib walk from PR #90. It records format facts and aggregate counts only: no
 payload, carved stream, path list or string dump is committed here.

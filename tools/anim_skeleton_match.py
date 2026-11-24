@@ -30,7 +30,7 @@ SKEL_RE = re.compile(rb"SKEL_[A-Za-z0-9_]+")
 
 
 def joaat32(name: str) -> int:
-    """RAGE joaat32 over the lowercased bone name, encoded as hashdict.joaat does (latin-1, '?' for the rest)."""
+    """the engine joaat32 over the lowercased bone name, encoded as hashdict.joaat does (latin-1, '?' for the rest)."""
     h = 0
     for b in name.lower().encode("latin-1", "replace"):
         h = (h + b) & 0xFFFFFFFF

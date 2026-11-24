@@ -33,7 +33,7 @@ Pool element, 64 bytes, 16 dwords:
     +0x04  u32 0
     +0x08  u32 0
     +0x0C  u32 0
-    +0x10  f32 pos.x, pos.y, pos.z     (world coordinates in RAGE space, Z up)
+    +0x10  f32 pos.x, pos.y, pos.z     (world coordinates in the engine space, Z up)
     +0x1C  f32 pos.x                   the first position component, duplicated
     +0x20  f32 rot.x, rot.y, rot.z
     +0x2C  f32 rot.x                   the first rotation component, duplicated

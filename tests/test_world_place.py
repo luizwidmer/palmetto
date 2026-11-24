@@ -1,7 +1,7 @@
 """Tests for placing models at their map placements (no game data).
 
 Covers world_index.py --entities-out and world_build.py --placements: the entity row format, the transform
-(the conjugate of the stored quaternion, non-uniform scale, normals, mirroring, RAGE Z-up to glTF Y-up), the
+(the conjugate of the stored quaternion, non-uniform scale, normals, mirroring, the engine Z-up to glTF Y-up), the
 name/key match against arc9dump manifests, and the placement counts in world.json. Every model, entity and
 resource is synthetic.
 
@@ -44,7 +44,7 @@ def close(a, b, tol=1e-9):
     return all(abs(x - y) <= tol for x, y in zip(a, b))
 
 
-UNIT_BOX_OBJ = """# unit box 0..1 in RAGE axes (Z up)
+UNIT_BOX_OBJ = """# unit box 0..1 in the engine axes (Z up)
 v 0 0 0
 v 1 0 0
 v 1 1 0
@@ -257,7 +257,7 @@ class PlacedBuildTest(unittest.TestCase):
         self.assertEqual(doc["stats"]["models"], 2)
         by_id = {c["id"]: c for c in doc["chunks"]}
         # Box 0..1 scaled (2, 2, 1), turned +90 degrees about Z, moved to (100, 200, 10):
-        # RAGE x 98..100, y 200..202, z 10..11 -> glTF X 98..100, Y 10..11, Z -202..-200.
+        # the engine x 98..100, y 200..202, z 10..11 -> glTF X 98..100, Y 10..11, Z -202..-200.
         self.assertTrue(close(by_id["c_0_-1"]["bounds"], [98, 10, -202, 100, 11, -200], 1e-4))
         self.assertTrue(close(by_id["c_3_-4"]["bounds"], [1000, 0, -1001, 1001, 1, -1000], 1e-4))
         self.assertEqual(by_id["c_0_-1"]["triangles"], 12)

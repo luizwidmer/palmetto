@@ -1,6 +1,6 @@
 """Decode RBF0 resources into strict JSON trees, with an optional CSV node table and simple XML rendering.
 
-RBF0 is RAGE's binary form of an XML data file: one record stream with an inline descriptor table. This tool reads
+RBF0 is the engine's binary form of an XML data file: one record stream with an inline descriptor table. This tool reads
 inflated RBF0 resources from a carve directory or a single resource file, joins the 64 KiB continuation streams of
 one logical resource, and builds the element tree. It reports unknown descriptors, unknown record types, truncated
 payloads and structural violations as errors instead of guessing a value.

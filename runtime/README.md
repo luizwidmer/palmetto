@@ -115,7 +115,7 @@ loaded for the process lifetime. Only static imports go through this step; a run
 does not yet.
 
 It exists for drop-in implementations of console DLLs that have no shim here, such as the `AcpHal`, `chad`, `xapu`
-and `XCRDAPI` crates of [omonkeyz/xbox-emulator](https://github.com/omonkeyz/xbox-emulator) (GPL-3.0-or-later).
+and `XCRDAPI` crates of [omonkeyz/xbox-emulator](a public emulator project) (GPL-3.0-or-later).
 Measured on the 1.0.2.1 executable at `867d922`: without the folder, `--dry-run` leaves 20 imports unimplemented
 (AcpHal 9, chad 5, xapu 5, XCRDAPI 1); with those four DLLs built from `f89e410`, it leaves 0, with the four
 package DLLs still mapped (`module=72`). Those DLLs run static initializers when Windows loads them, and with the
@@ -239,7 +239,7 @@ document names.
 
 | variable | default | what it changes |
 |---|---|---|
-| `PALMETTO_DEVICE_TYPE` | `7` | The `XSystemDeviceType` that `XSystemGetDeviceType` returns: `0` Unknown, `1` Pc, `2` XboxOne, `3` XboxOneS, `4` XboxOneX, `5` XboxOneXDevkit, `6` XboxConsoleLockhart (Series S), `7` XboxConsoleAnaconda (Series X), `8` XboxConsoleDevkit. A number outside 0..8 is ignored; text that is not a number counts as `0`. `6` also makes `XSystemGetAnalyticsInfo` report the form `target console` instead of `target console`. |
+| `PALMETTO_DEVICE_TYPE` | `7` | The `XSystemDeviceType` that `XSystemGetDeviceType` returns: `0` Unknown, `1` Pc, `2` ConsoleVariant2, `3` ConsoleVariant3, `4` ConsoleVariant4, `5` ConsoleVariant5, `6` and `7` newer console variants, `8` ConsoleVariant8. A number outside 0..8 is ignored; text that is not a number counts as `0`. `6` also makes `XSystemGetAnalyticsInfo` report the form `target console` instead of `target console`. |
 | `PALMETTO_ANALYTICS_FORM` | unset | The `form` string of `XSystemGetAnalyticsInfo`, in place of the one the device type gives (up to 63 characters). |
 | `PALMETTO_PACKAGE_ID` | `PalmettoPackageIdentifier00000000` | The identifier `XPackageGetCurrentProcessPackageIdentifier` returns (up to 32 characters). It is also the one identifier `XPackageMount` refuses with `E_ACCESSDENIED`, as the game's own package. |
 | `PALMETTO_CONTENT_PACKAGES` | unset | The content packages `XPackageMount` can mount: `id1=path1;id2=path2` (up to 1,023 characters). The mount path of a listed identifier is its path, as written; any other identifier is `ERROR_NOT_FOUND`, and a path longer than 259 characters is `ERROR_INSUFFICIENT_BUFFER`. |

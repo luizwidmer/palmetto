@@ -248,7 +248,7 @@ silhouette is geometry, not a painted-on atlas.
 
 ## Modular ped construction pipeline and body assembly
 
-RAGE 9 constructs human peds from modular streamed slots rather than monolithic rigged meshes.
+the engine 9 constructs human peds from modular streamed slots rather than monolithic rigged meshes.
 Spawning a character resolves a five-stage data graph across `packs.arc`, `data.arc`, `common.arc`,
 `anim.arc` and `data/ttdb/peds/*.ttpf`:
 
@@ -277,7 +277,7 @@ Spawning a character resolves a five-stage data graph across `packs.arc`, `data.
 ### Standing-space coordinate convention
 
 All human modular drawables share a single standing skeleton space anchored at
-**`SKEL_ROOT = (0, 0, +1.0 m)`** in RAGE Z-up (`(0, +1.0 m, 0)` in glTF Y-up). Vertex buffers
+**`SKEL_ROOT = (0, 0, +1.0 m)`** in the engine Z-up (`(0, +1.0 m, 0)` in glTF Y-up). Vertex buffers
 store root-relative bind positions (feet sit near `Z = -1.0 m`), while drawable bounding boxes
 (`root + 0x30..0x4f`) store standing-space bounds. Translating skinned parts by `(0, 0, +1.0 m)`
 aligns `head`, `eyes`, `eyecap`, `teeth`, `hand_*_nude_cull`, `feet_*_nude_cull`,
@@ -299,7 +299,7 @@ entire torso and pelvis:
   and `mr1` pelvic patches with four geometry variants (`base`, `_alt_00`, `_alt_01`, `_alt_02`;
   female depth `6.83–7.58 cm`, male resting `8.9–9.0 cm` and extended `13.4–13.5 cm`).
 
-RAGE 9 uses a two-level culling architecture to prevent skin poke-through without runtime mesh
+the engine 9 uses a two-level culling architecture to prevent skin poke-through without runtime mesh
 rebuilds:
 
 1. **Catalogue swaps (`0x46e1a048` = `"cull_drawable"`):** 385 unique drawables carry `_cull`

@@ -46,7 +46,7 @@ Two independent measurements fix the slot's identity:
 * **Its neighbours.** The console devices the tier measured next to it are `#57` (a deserialized graphics pipeline
   record, wired through `graphics_pso`, docs/slot57_wiring.md), `#62` (create compute) and `#67` (deserialize a compute
   record). Those same numbers are the console's pipeline-state block in the public HLE's device table
-  ([`xcl-dev/xcl`](https://github.com/xcl-dev/xcl/blob/main/crates/xcl/src/hle/d3d12x/real.rs),
+  (a public runtime project,
   `console_slots`/`device_x`): `#55 CreateDerivedPipelineStateX`, `#56/#66 SerializePipelineStateX`,
   `#57/#67 DeserializePipelineStateX`, `#60` create graphics, `#62` create compute, `#86 CreatePipelineStateX`. The
   tree's own measured #57/#62/#67 already agree with that table, so its #55 is the same table's #55.

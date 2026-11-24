@@ -1,6 +1,6 @@
 """Index RBF0 resources in an ARC9 data area or a folder of carved streams.
 
-RBF0 is RAGE's binary form of an XML data file. This tool walks the same zlib streams as arc9_carve.py, joins the
+RBF0 is the engine's binary form of an XML data file. This tool walks the same zlib streams as arc9_carve.py, joins the
 64 KiB continuation chunks of one logical resource, and parses the record stream far enough to report the root
 schema name, the inline descriptor table, element/value/text counts, scalar counts and readable strings. It never
 decrypts, never writes payloads, and does not turn RBF0 back into XML.

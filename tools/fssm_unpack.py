@@ -1,6 +1,6 @@
 """Unpack the native GPU program from each carved shader container.
 
-Layout found in the target title's Xbox shaders (shader model 6.6 containers):
+Layout found in the target game's Xbox shaders (shader model 6.6 containers):
 
     DXBC
       DXIL part  = DxilProgramHeader (stub) + XDAT
@@ -14,7 +14,7 @@ Some containers carry **two distinct tag-0x0D payloads** (195 of 26,503 measured
 valid FSSM blobs with the same code offset but different code sizes; the first is 64 or 128 bytes
 longer. `xdat_entries_all` preserves their order, `xdat_entries` keeps the previous last-wins mapping
 for compatibility, and `unpack()` defaults to the last payload (the one the existing corpus used) with
-`payload="first"` available for the XDAT-order/SCARAB choice. The CLI exposes `--payload`.
+`payload="first"` available for the XDAT-order/a public prior-art project choice. The CLI exposes `--payload`.
 `unpack_all()` returns every tag-0x0D payload in directory order, for callers that need both (a
 two-payload VS container holds its ES and VS hardware variants; `tools/pal_stages.py` reads them).
       PRIV part  = Xbox private metadata

@@ -7,7 +7,7 @@ internal `(block = ptr & 0xfffff, offset = ptr >> 20)` pointer encoding:
    Standard `PSIN` block table + `LSCH`/`LENM`/`LRSC` sections (`tools/psin_data.py`), with root
    struct `0x8dcb4cf5`.
 2. Resource-packed `0DRP` v122 containers (compiled per-archetype ped catalogues inside ARC9):
-   Standard `0x60`-byte `0DRP`/`0x7a` resource header (`tools/odrp_7a.py`): 16-byte RAGE system
+   Standard `0x60`-byte `0DRP`/`0x7a` resource header (`tools/odrp_7a.py`): 16-byte the engine system
    prefix (`8` zero bytes + `0x50000000` page-map pointer), `b"0DRP"` + version `122` at `+0x10`,
    1-based root block index at `+0x20`, struct table at `+0x28`, enum table at `+0x30`, block
    directory at `+0x38` (`(u32 key, u32 size, u64 virtual_ptr)`), and `(ns, ne, nb, u4e)` `u16`
@@ -111,7 +111,7 @@ def decode_ptr(ptr: int) -> tuple[int, int]:
 
 
 def joaat32(text: str, *, case_sensitive: bool = False) -> int:
-    """32-bit Jenkins one-at-a-time hash matching RAGE name/tag hashes."""
+    """32-bit Jenkins one-at-a-time hash matching the engine name/tag hashes."""
     return world_names.joaat(text, case_sensitive=case_sensitive)
 
 

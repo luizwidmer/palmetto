@@ -1,6 +1,6 @@
 # ARC9 archives and the carve tools
 
-the target title ships its assets in ARC9 archives. The **table of contents** (names, sizes, offsets and flags) is
+the target game ships its assets in ARC9 archives. The **table of contents** (names, sizes, offsets and flags) is
 encrypted/packed; this project does not decode it and does not search for keys. The **data area** is mostly
 zlib streams laid end to end, so it can be measured and carved without the TOC. Names in the recovery view
 are offset-based (`recovered/...`), not the original paths.
@@ -71,7 +71,7 @@ An inflated size of exactly `0x800000` is a chunk head, not a continuation. All 
 indexes are resource or graphics pages. [bvh.md](bvh.md) records the same 8 MiB-first relationship from the payload
 side.
 
-The boundary rule is independently read by meetox80/6stars. No 6stars code, prose or table was used; the
+The boundary rule is independently read by meetox80/an open research project. No an open research project code, prose or table was used; the
 repository has **no licence** (all rights reserved), and every count above was re-measured from this package. See
 [related_projects.md](related_projects.md).
 
@@ -203,4 +203,4 @@ It decodes nothing in that range. `python -I tests/test_imhex_patterns.py` runs 
 - [docs/story.md](story.md) - measured `story000`/`shared_minigame000` composition, nested ARC9 sub-archives and the `PSIN`/`RSC8` headers.
 - [docs/restofworld.md](restofworld.md) - measured composition of the rest-of-world and script archives.
 - `docs/audio.md` - AWC layout and the audio exporters, once the audio guide is merged.
-- the related-projects page - the arc9-explorer/PercyStar/SCARAB licence boundaries.
+- the related-projects page - the arc9-explorer/PercyStar/a public prior-art project licence boundaries.

@@ -6,7 +6,7 @@ tends to get wrong.
 
 ## What this is
 
-A port template for the target console build of the target title, built on the player's PC from their own copy:
+A port template for the target console build of the target game, built on the player's PC from their own copy:
 `make_game.py` carves and translates the shaders (RDNA2 → SPIR-V), exports the assets and builds `runtime/`, a PE
 loader that maps the game's executable and resolves its imports to shims. Nothing of the game is in the repository.
 
@@ -29,7 +29,7 @@ loader that maps the game's executable and resolves its imports to shims. Nothin
   renamed file the extension check in CI misses.
 - **No keys, decryption or protection workarounds.** If a format turns out to be encrypted, write that down in
   `docs/design.md` and stop there.
-- **Nothing online**: no Xbox Live or the publisher services or domains.
+- **Nothing online**: no platform online services, third-party services or domains.
 - **Fix, don't disable**: a shader the translator rejects gets a rule, not a skip list. A new rule goes into the
   contract table in `docs/design.md` with how it was confirmed (a GPU test, a Mesa/LLVM reference, or a count over
   the corpus).

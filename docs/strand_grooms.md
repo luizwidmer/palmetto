@@ -72,7 +72,7 @@ placement sets of one groom, generated alike and drawn together:
 
 ## Binary container and system page layout
 
-On disk inside ARC9 archives (see [arc.md](arc.md)), each groom LOD is stored as a native RAGE resource: a
+On disk inside ARC9 archives (see [arc.md](arc.md)), each groom LOD is stored as a native the engine resource: a
 16-byte all-zero prefix on a 16-byte boundary followed by one zlib-compressed **system page** (464 to 672 bytes
 inflated), padded to a 16-byte boundary, followed by one or more 16-byte-aligned zlib-compressed chunks that
 concatenate to the **GPU asset buffer**.

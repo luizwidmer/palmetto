@@ -15,7 +15,7 @@ INDEX = {"summary": {"files": 1, "bink2_files": 0, "span": 10, "compressed_bytes
 class CarveAllBracketPathTest(unittest.TestCase):
     def test_bracketed_game_folder_finds_its_archives(self):
         with tempfile.TemporaryDirectory() as tmp:
-            game, out = Path(tmp, "the target title [1.0.2.1]"), Path(tmp, "carves [1]")
+            game, out = Path(tmp, "the target game [1.0.2.1]"), Path(tmp, "carves [1]")
             game.mkdir()
             (game / "common.arc").write_bytes(b"x")
             (out / "common").mkdir(parents=True)

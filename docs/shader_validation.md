@@ -2403,9 +2403,9 @@ modelled faithfully stays a reported skip; it is never approximated silently.
 
 The technique is described in another project's write-ups; no code from them is copied.
 
-- [target console shaders](https://github.com/realdody/americas-recomp/blob/xbox-series/docs/xbox/XBOX_SHADERS.md),
+- [target console shaders](a public prior-art project),
   sections "Execution harness" and "A CPU reference for small real shaders".
-- [tools/xbox README](https://github.com/realdody/americas-recomp/blob/xbox-series/tools/xbox/README.md),
+- [tools/xbox README](a public prior-art project),
   which describes `exec` and the check against a Python reference.
 
 Their reported numbers, as a scale reference only: 183 of 872 compute shaders of 3,000 bytes or less

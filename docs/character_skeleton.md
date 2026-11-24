@@ -9,7 +9,7 @@ No game data is reproduced here. Offsets, counts, field layouts and a few short 
 examples are enough to reproduce the measurements against a reader's own package.
 
 The fragment carries the skeleton and a **25-vertex / 32-triangle bounds grid**, not a skin mesh. A
-SixNG fragment-child walk finds no embedded drawables in any of the 2,865 `packs.arc` character
+an open research project fragment-child walk finds no embedded drawables in any of the 2,865 `packs.arc` character
 fragments, while world fragments do have them; see
 [character_models.md](character_models.md#what-is-not-decoded).
 
@@ -162,7 +162,7 @@ Subsystem roles (counts shown for the 596-bone `ambient_femalebody` master rig):
 
 **Standing-space coordinate convention:** In bind space, bipedal feet sit near `Z = -1.0 m` below
 `SKEL_ROOT` at the origin, whereas modular drawable bounds (`root + 0x30..0x4f`) are authored in
-standing space with **`SKEL_ROOT = (0, 0, +1.0 m)`** in RAGE Z-up (`(0, +1.0 m, 0)` in glTF Y-up)
+standing space with **`SKEL_ROOT = (0, 0, +1.0 m)`** in the engine Z-up (`(0, +1.0 m, 0)` in glTF Y-up)
 so feet rest on the ground plane. Translating the skeleton root node (or static mesh vertices) by
 `+1.0 m` vertically aligns all modular ped parts without per-slot offset tables; see
 `tools/ped_assemble.py` and [character_models.md](character_models.md#standing-space-coordinate-convention).
@@ -302,7 +302,7 @@ it does and why:
   plays its animation's `[start, end]` window at `rate`, so animation time `t` is clip time
   `(t − start) / rate`. `(end − start) / rate` equals the clip's `+0x78` duration for all 785,174
   entries of all 61,505 dictionaries, to within 2.2e-4 relative (see [animation.md](animation.md#clip-dictionaries-are-rage-resources)).
-- The whole skeleton sits under one node that turns RAGE Z-up into glTF Y-up. Skinned mesh nodes
+- The whole skeleton sits under one node that turns the engine Z-up into glTF Y-up. Skinned mesh nodes
   sit at the scene root, because glTF ignores a skinned mesh node's own transform.
 
 Measured on the 1.0.2.1 copy:

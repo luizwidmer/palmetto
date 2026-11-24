@@ -942,7 +942,7 @@ int main() {
     check(init() == S_OK, "XGameRuntimeInitialize returns S_OK");
     check(init() == S_OK, "a second XGameRuntimeInitialize also returns S_OK (reference counted)");
 
-    check(get<DeviceTypeFn>("XSystemGetDeviceType")() == 7, "XSystemGetDeviceType reports XboxConsoleAnaconda (7)");
+    check(get<DeviceTypeFn>("XSystemGetDeviceType")() == 7, "XSystemGetDeviceType reports ConsoleVariant7 (7)");
 
     auto console_id = get<ConsoleIdFn>("XSystemGetConsoleId");
     char id[64] = {};

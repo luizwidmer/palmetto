@@ -497,7 +497,7 @@ def measure_block(data, at, T, rng, found=None):
     # gives the same counts); the edge, wrap and per-byte counts above and below stay exhaustive
     stris = tris if len(tris) <= TRI_SAMPLE else rng.sample(tris, TRI_SAMPLE)
     pos_areas = [tri_area(pos[a], pos[b], pos[c]) for a, b, c in stris]
-    # +0x6C = which model axis the 16-bit slot holds (CodeX the target title viewer: k=2 x,y,z; k=1 (y,z,x); k=0 (z,y,x));
+    # +0x6C = which model axis the 16-bit slot holds (CodeX the target game viewer: k=2 x,y,z; k=1 (y,z,x); k=0 (z,y,x));
     # normals are compared in model space
     k = struct.unpack_from("<I", data, at + 0x6C)[0]
     mpos = [(p[1], p[2], p[0]) if k == 1 else (p[2], p[1], p[0]) if k == 0 else p for p in pos]

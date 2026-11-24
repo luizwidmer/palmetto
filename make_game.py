@@ -382,7 +382,7 @@ USER_MOUNT_ROOTS = ("/media", "/run/media")
 
 def volume_roots() -> list:
     """POSIX mount points find_dumps() starts from: VOLUME_ROOTS, then /media/<user> and /run/media/<user>, so a copy
-    in a folder on a udisks2-mounted drive (/media/<user>/<label>/the target title) is two levels down, as D:\\Games\\the target title
+    in a folder on a udisks2-mounted drive (/media/<user>/<label>/the target game) is two levels down, as D:\\Games\\<your copy>
     is on Windows."""
     roots = list(VOLUME_ROOTS)
     try:

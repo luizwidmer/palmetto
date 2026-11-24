@@ -129,7 +129,7 @@ Across all **9,603 / 9,603** pages (`0` exceptions), `u16@0x4e` is either `0` or
 - **`q40` auxiliary table:** `{u32 count, count x {u32 tag, u32 size}, payload bytes}`. Fits cleanly in-bounds on `9,603 / 9,603` pages. On `8,275` world-grid `CCoverPointRegion` pages it holds a single tag `0x101` (`32/48/64/80` B = `2..5` 16-byte entries); on all `137` non-grid `CCoverPointRegion` pages and all `1,187` `0x4712787b` pages `count == 0`; the 4 singleton pages carry larger `0x101`, `0x207` or `0x211` tables.
 
 Only **10 distinct schemas** (6 root structs) occur across all `9,603` `0DRP` pages — **all cover-point data, not
-navmesh polygons**. Struct/enum/member hashes match standard RAGE cover names under **case-sensitive joaat32**
+navmesh polygons**. Struct/enum/member hashes match standard the engine cover names under **case-sensitive joaat32**
 (verified from hand-typed clean-room candidates in `tools/navmesh_decode.py`):
 
 | Root struct (joaat32) | Pages | Schemas | Summary |
@@ -164,7 +164,7 @@ first `q38` payload block starting at `+0x60`:
 
 ## Typed data pages (`27,644` pages — `0x00010015` navmesh tiles)
 
-The 27,644 pages with `u32 0x00010015` at `+0x14` are the actual **navmesh geometry tiles** (RAGE `CNavMesh`-family
+The 27,644 pages with `u32 0x00010015` at `+0x14` are the actual **navmesh geometry tiles** (the engine `CNavMesh`-family
 layout, fixed `0xF0`-byte header, `14.36 GiB` / `15,420,757,856` bytes inflated including continuations).
 
 ### Fixed header (`0x000..0x0EF`, 240 bytes, verified on all `27,644` pages)
@@ -234,10 +234,10 @@ counts and archive offset recorded per tile. No geometry was kept.
 
 The `+4` word of a polygon packs `(index start << 4) | count`; the runs tile the index pool in order
 (`tools/navmesh_decode.py --deep` checks it on all `124,768,148` polygons, 0 failures), which caps a polygon at 15
-vertices. 6stars independently reads the same packing. Its polygon `+0x28` bit 17 and `+0x18` bit 27
+vertices. an open research project independently reads the same packing. Its polygon `+0x28` bit 17 and `+0x18` bit 27
 road/pavement labels were not adopted: a 1,027,984-polygon sample over 238 tiles sets both bits on 258 polygons, so
 they are not a partition, and in the lane-graph count [below](#polygon-flags-under-the-lane-graph) neither is under
-most lane nodes; `+0x18` bits 8 and 13 are. No 6stars code was copied; the repository has no licence.
+most lane nodes; `+0x18` bits 8 and 13 are. No an open research project code was copied; the repository has no licence.
 
 ### Flags (`u32@0x10`) and 512 × 512 world grid
 
@@ -344,12 +344,12 @@ nodes stand on a polygon with the bit; "area" is the share of the plan area such
 
 | Word | Bit | Nodes | Polygons | Area | Reading |
 |---|---|---:|---:|---:|---|
-| `+0x18` | 13 (`0x2000`) | 57,559 (90.2%) | 3,357,132 | 12.0% | under nine in ten nodes; SixNG's "road surface" |
+| `+0x18` | 13 (`0x2000`) | 57,559 (90.2%) | 3,357,132 | 12.0% | under nine in ten nodes; an open research project's "road surface" |
 | `+0x18` | 8 (`0x100`) | 58,528 (91.7%) | 251,917 | 2.6% | under nine in ten nodes, on a fifth of bit 13's area; not named |
 | `+0x18` | 12 (`0x1000`) | 787 (1.2%) | 18,746,182 | 33.6% | not road: a third of the area, almost no node |
 | `+0x18` | 19 (`0x80000`) | 3,980 (6.2%) | 3,263,052 | 23.6% | the water candidate above |
-| `+0x18` | 27 (`0x8000000`) | 5,526 (8.7%) | 2,489,161 | 3.2% | 6stars's label; under few nodes |
-| `+0x28` | 17 (`0x20000`) | 21,246 (33.3%) | 1,083,157 | 4.7% | 6stars's label; seven times its area share, but only a third of the nodes |
+| `+0x18` | 27 (`0x8000000`) | 5,526 (8.7%) | 2,489,161 | 3.2% | an open research project's label; under few nodes |
+| `+0x28` | 17 (`0x20000`) | 21,246 (33.3%) | 1,083,157 | 4.7% | an open research project's label; seven times its area share, but only a third of the nodes |
 
 No other bit of either word has more than 5% of the nodes, except `+0x28` bit 18 (4,520 nodes, 7.1%, on 1.6% of
 the area).
@@ -365,8 +365,8 @@ Bits 8 and 13 are mostly set together. The tool counts the four combinations:
 
 So nine in ten lane nodes stand on polygons that carry both bits, which cover 2.5% of the area. Bit 13
 alone covers almost four times that area (9.5%) with almost no node on it, and bit 8 alone is rare.
-[SixNG](https://github.com/holdmysocks/SixNG) labels bit 13 "road surface" after a visual check
-(`crates/sixng-core/src/navmesh.rs`, commit `0619601`, GPL-3.0; see [related_projects.md](related_projects.md)).
+[an open research project](an open research project) labels bit 13 "road surface" after a visual check
+(`crates/an open research project-core/src/navmesh.rs`, commit `0619601`, GPL-3.0; see [related_projects.md](related_projects.md)).
 The count is consistent with that if road surface is wider than the driven lanes. It does not settle which bit,
 or which combination, means road surface. That stays open, as do bit 8's meaning and the other bits. The vertex
 formula above is stated in the same file and is confirmed by the heights.

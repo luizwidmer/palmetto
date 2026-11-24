@@ -95,7 +95,7 @@ def _packed_buffer(j0_rows, j1_rows):
 
 
 def _skeleton():
-    """A three-bone RAGE Z-up bind pose: root, spine, left upper arm."""
+    """A three-bone the engine Z-up bind pose: root, spine, left upper arm."""
     return [
         {"index": 0, "name": "SKEL_ROOT", "parent": None, "bind_matrix": _matrix()},
         {"index": 1, "name": "SKEL_Spine", "parent": 0,

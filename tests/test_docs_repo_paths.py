@@ -17,7 +17,7 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PATH = re.compile(r"`((?:tools|runtime|tests|scripts|docs|viewer|game)/[A-Za-z0-9_./\-]+)`")
-# Pages that quote another project's tree (SCARAB, americas-recomp): their paths are not this repository's.
+# Pages that quote another project's tree (a public prior-art project, a public prior-art project): their paths are not this repository's.
 OTHER_PROJECTS = {"docs/fssm_crosscheck.md", "docs/d3d12_xs_surface.md"}
 # Build output, not tracked.
 BUILD_OUTPUT = ("runtime/build",)

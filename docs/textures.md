@@ -315,7 +315,7 @@ slots across the 4 KiB tiles), and export cleanly as DX10 DDS.
 2D uncompressed formats (`10/11/28/29/49/54/56/61/65/87/91`; pure stdlib; HDR float16 formats
 `10/54/95/96` are compared after a signed Reinhard tone-map `255 * v / (1 + |v|)`) and compares
 each mip with a 2x2 box downsample of its parent (at 4x4 block resolution for BC, or pixel
-resolution for uncompressed). A correct chain is 0–4 levels, as in the SixNG notes; the
+resolution for uncompressed). A correct chain is 0–4 levels, as in the an open research project notes; the
 control is the first tail mip detiled at origin (0,0).
 
 | Pool # | Descriptor | Mips | non_tail / first_tail | Max error | Tail control |
@@ -629,7 +629,7 @@ byte stream. There is no magic, version, total length or format at offset 0.
 | entropy payload | rest | one shared stream; active lanes read one byte per round in lane order |
 | padding | 0–255 | zero fill to the next 256-byte boundary |
 
-The lane roles and the 6/7-byte records are the public research model (SixNG and bcpack-rs);
+The lane roles and the 6/7-byte records are the public research model (an open research project and bcpack-rs);
 only lane 1 and the entropy budget are independently exact here.
 
 The first byte of a lane (`hdr0`) is `[z:2][length form:1][flush:1][q:4]` in the public
@@ -792,14 +792,14 @@ or dispatcher was found.
 | [US Patent 11,234,023](https://patents.google.com/patent/US11234023B2) | Public MDU rANS architecture, fragment-header/model/lane-schedule description, and banded exponential frequency model structure | Public patent disclosure; concepts only, linked and paraphrased |
 | [silicon-rans](https://github.com/microsoft/silicon-rans) | Exact MDU rANS tables (`mdu_minirans.v`) and legal end states used for the 200-chunk entropy check | [MIT](https://github.com/microsoft/silicon-rans/blob/main/LICENSE); tables used as facts, no Verilog copied into this repository |
 | [Khronos Data Format Specification (BPTC / S3TC / RGTC)](https://registry.khronos.org/DataFormat/specs/1.3/dataformat.1.3.html) | Standard BC1, BC3, BC4, BC5, BC6H and BC7 block layouts and partition/anchor tables | Public specification |
-| [SixNG, `formats/06-bcpack.md`](https://github.com/walkthestars/the target title-Asset-Info/blob/main/formats/06-bcpack.md) | Independent container/header observations and the exact-end-state hard check | [GPL-3.0](https://github.com/walkthestars/the target title-Asset-Info/blob/main/LICENSE); notes only, no code copied |
-| [SixNG, `formats/05-ttpf.md`](https://github.com/walkthestars/the target title-Asset-Info/blob/main/formats/05-ttpf.md) | Independent codec-id table and pool structure | GPL-3.0; notes only |
+| [an open research project, `formats/06-bcpack.md`](a public emulator project target game-Asset-Info/blob/main/formats/06-bcpack.md) | Independent container/header observations and the exact-end-state hard check | [GPL-3.0](a public emulator project target game-Asset-Info/blob/main/LICENSE); notes only, no code copied |
+| [an open research project, `formats/05-ttpf.md`](a public emulator project target game-Asset-Info/blob/main/formats/05-ttpf.md) | Independent codec-id table and pool structure | GPL-3.0; notes only |
 | [arc9-explorer](https://github.com/breadbbbb/arc9-explorer) | The `TtpfReader` catalog checks, limitation strings, and lack of a BCPack decoder | [MIT](https://github.com/breadbbbb/arc9-explorer/blob/main/README.md); no code copied |
 | [bcpack-rs](https://github.com/Ahmet-Dedeler/bcpack-rs) | Candidate BC1 entropy/endpoint/index research cited in the prior 200-chunk check above | [MIT OR Apache-2.0](https://github.com/Ahmet-Dedeler/bcpack-rs/blob/master/LICENSE-MIT); research only, no code copied |
-| SCARAB | No public the target title source found; the public SCARAB repositories are an unrelated GPL-3.0 Hollow Knight mod manager | Search on 2026-11-21; no facts used |
+| a public prior-art project | No public the target game source found; the public a public prior-art project repositories are an unrelated GPL-3.0 Hollow Knight mod manager | Search on 2026-11-21; no facts used |
 
 Microsoft's documentation gives the algorithm class and the mode enum, not the bitstream. The
-public enum is documented for target console consoles; this note does not cover an Xbox One
+public enum is documented for target consoles; this note does not cover an Xbox One
 variant.
 
 ## Clean-room BCPack bitstream specification and decoder
@@ -1028,7 +1028,7 @@ copy, and what the streams are remains open. Method: the carve's
 inflated streams and `tools/ttpf_mips.py`'s `Pool` chunk table; counts only.
 
 **Measured keying and format codes (ASSET-274):**
-All 1,315 system streams are RAGE `pgDictionary<grcTexture>` pages containing descriptor pointers and a 32-bit
+All 1,315 system streams are the engine `pgDictionary<grcTexture>` pages containing descriptor pointers and a 32-bit
 `joaat32` hash table:
 - **Format codes are 1:1 DXGI format enums:**
   - `0x5f` (95) = `DXGI_FORMAT_BC6H_UF16` (1,313 pairs, 128 x 128).
