@@ -1,5 +1,7 @@
 # Palmetto
 
+<p align="center"><img src="assets/mascot.png" alt="Palmetto, the project mascot" width="220"></p>
+
 **A clean-room compatibility runtime that runs a modern console build natively on Windows, built on your own PC from your own copy.**
 
 Palmetto translates a retail console executable and its shaders into a native Windows program at build time: the
