@@ -47,7 +47,7 @@ from report_paths import same_report_path  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATE = os.path.join(ROOT, "tooling", "progress_dashboard.html")
-LOGO = os.path.join(ROOT, "assets", "logo.png")
+LOGO = os.path.join(ROOT, "assets", "mascot.png")
 SCHEMA = "palmetto.progress/1"
 STATUSES = ("verified", "implemented", "partial", "failed", "missing", "blocked", "unknown")
 PYTEST_MARKERS = re.compile(r"^import pytest|^ *HAVE_NUMPY =", re.M)   # the CI selection rule (ci.yml)
@@ -147,9 +147,12 @@ def scrub(text, limit=240):
     checkout_path = rf"{checkout}[^\s'\"]*"
     drive_path = r"(?i:\b[a-z]:[\\/][^\s'\"]*)"
     posix_path = r"(?<![\w.:/~])/[^\s/'\"][^\s'\"]*"
-    line = re.sub(rf"{checkout_path}|{drive_path}|{posix_path}", shown, line)
+    # The home folder first: it can contain a space (a Windows user name), which the generic patterns stop at, and
+    # the rest of the path would then survive the scrub. Redact it whole, in either slash style, before those run.
     if HOME and len(HOME) > 3:
-        line = line.replace(HOME, "~")
+        for variant in (HOME, HOME.replace("\\", "/"), HOME.replace("/", "\\")):
+            line = line.replace(variant, "~")
+    line = re.sub(rf"{checkout_path}|{drive_path}|{posix_path}", shown, line)
     line = re.sub(r"~[\\/][^\s'\"]*", "<path>", line)
     return line[:limit]
 
@@ -973,7 +976,7 @@ def summary_line(snap):
 
 
 def logo_src():
-    """The project logo (assets/logo.png) as a data: URI, so the page stays one file that opens from disk; empty when
+    """The project mascot (assets/mascot.png) as a data: URI, so the page stays one file that opens from disk; empty when
     the asset is absent, and the page then shows no image."""
     try:
         with open(LOGO, "rb") as f:

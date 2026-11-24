@@ -3,8 +3,6 @@
 reports/
 work/
 /assets/*
-!/assets/logo.png
-!/assets/logo.svg
 !/assets/mascot.png
 carve/
 *.arc
