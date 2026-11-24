@@ -375,6 +375,129 @@ int main() {
                     "the default: ok\n");
     }
 
+    // ---- Adopting the title's own window instead of creating a second one (docs/window.md) ----
+    // The measured boot had two visible top-level windows: the title's own (class "sgaWindowClass", made by the title
+    // long before the first PresentX) and the runtime's "Palmetto - PresentX". The rule: present into the title's window
+    // when this process has a usable one, else create the runtime's own; "usable" excludes invisible, minimised, owned,
+    // tool and IME windows, an empty client area and our own class, and of the rest the title's class wins, otherwise the
+    // largest client area. PALMETTO_PRESENT_ADOPT=off keeps the own-window path: that switch is tested here first, and
+    // the tests that present through a window they know set it below.
+    {
+        using rt::d3d12::XboxPresentWindowCandidate;
+        const auto candidate = [](const wchar_t* class_name, HWND handle, bool visible = true, bool minimised = false,
+                                  bool owned = false, bool tool = false, bool ime = false, UINT w = 640, UINT h = 480) {
+            XboxPresentWindowCandidate c;
+            c.window = handle;
+            for (std::size_t i = 0; i + 1 < sizeof(c.class_name) / sizeof(c.class_name[0]) && class_name[i]; ++i)
+                c.class_name[i] = class_name[i];
+            c.visible = visible;
+            c.minimised = minimised;
+            c.owned = owned;
+            c.tool_window = tool;
+            c.ime = ime;
+            c.client_width = w;
+            c.client_height = h;
+            return c;
+        };
+        const HWND h1 = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(1));
+        const HWND h2 = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(2));
+        // The rule over synthetic candidates (no window handles are dereferenced).
+        EXPECT(rt::d3d12::choose_xbox_present_window(nullptr, 0) == nullptr);
+        // The title's class wins outright over a larger ordinary window, in either order.
+        XboxPresentWindowCandidate title_like =
+            candidate(rt::d3d12::xbox_title_window_class, h1, true, false, false, false, false, 800, 600);
+        XboxPresentWindowCandidate bigger =
+            candidate(L"PalmettoOtherWindow", h2, true, false, false, false, false, 1920, 1080);
+        XboxPresentWindowCandidate with_title[] = {bigger, title_like};
+        EXPECT(rt::d3d12::choose_xbox_present_window(with_title, 2) == &with_title[1]);
+        // Without it, the largest client area wins.
+        XboxPresentWindowCandidate smaller =
+            candidate(L"PalmettoSmallWindow", h1, true, false, false, false, false, 320, 240);
+        XboxPresentWindowCandidate two_plain[] = {smaller, bigger};
+        EXPECT(rt::d3d12::choose_xbox_present_window(two_plain, 2) == &two_plain[1]);
+        // Invisible, minimised, owned, tool, IME, empty-client and our own class are all unusable, including the title's
+        // class when it is not visible: none of them is adopted.
+        XboxPresentWindowCandidate unusable[] = {
+            candidate(L"PalmettoHiddenWindow", h1, /*visible=*/false),
+            candidate(L"PalmettoMinimisedWindow", h1, true, /*minimised=*/true),
+            candidate(L"PalmettoOwnedWindow", h1, true, false, /*owned=*/true),
+            candidate(L"PalmettoToolWindow", h1, true, false, false, /*tool=*/true),
+            candidate(L"MSCTFIME UI", h1, true, false, false, false, /*ime=*/true),
+            candidate(L"PalmettoEmptyWindow", h1, true, false, false, false, false, /*w=*/0, /*h=*/0),
+            candidate(L"PalmettoPresentX", h1, true, false, false, false, false, 3840, 2160),  // our own class
+            candidate(rt::d3d12::xbox_title_window_class, h1, /*visible=*/false),  // the title's class, hidden
+        };
+        for (const XboxPresentWindowCandidate& one : unusable)
+            EXPECT(rt::d3d12::choose_xbox_present_window(&one, 1) == nullptr);
+        XboxPresentWindowCandidate own =
+            candidate(L"PalmettoOwnWindow", h2, true, false, false, false, false, 3840, 2160);
+        EXPECT(rt::d3d12::choose_xbox_present_window(&own, 1, h2) == nullptr);  // the window we created is never adopted
+
+        // The environment switch first, before any title-like window exists, so this case tests the switch alone:
+        // PALMETTO_PRESENT_ADOPT=off keeps today's own window, unchanged.
+        _putenv_s("PALMETTO_PRESENT_ADOPT", "off");
+        rt::d3d12::XboxPresentWindow own_window = rt::d3d12::create_or_adopt_xbox_present_window();
+        EXPECT(own_window.window != nullptr && !own_window.adopted);
+        wchar_t own_class[64] = {};
+        EXPECT(GetClassNameW(own_window.window, own_class, 64) > 0 &&
+               std::wstring(own_class) == L"PalmettoPresentX");
+        RECT own_client{};
+        EXPECT(GetClientRect(own_window.window, &own_client));
+        EXPECT(own_client.right - own_client.left == 1280 && own_client.bottom - own_client.top == 720);
+        rt::d3d12::destroy_xbox_present_window(own_window);
+        EXPECT(!IsWindow(own_window.window) && own_window.window == nullptr);  // a created window is destroyed
+        _putenv_s("PALMETTO_PRESENT_ADOPT", "");
+
+        // The real Windows side: real handles, class names and client rects from this process. A visible window of the
+        // measured title's class is adopted by name...
+        WNDCLASSW title_class{};
+        title_class.lpfnWndProc = window_proc;
+        title_class.hInstance = GetModuleHandleW(nullptr);
+        title_class.lpszClassName = rt::d3d12::xbox_title_window_class;
+        title_class.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
+        if (!RegisterClassW(&title_class)) EXPECT(GetLastError() == ERROR_CLASS_ALREADY_EXISTS);
+        RECT title_rect{0, 0, 400, 300};
+        AdjustWindowRect(&title_rect, WS_OVERLAPPEDWINDOW, FALSE);
+        HWND title_window = CreateWindowExW(0, title_class.lpszClassName, L"Palmetto: adoption test", WS_OVERLAPPEDWINDOW,
+                                            200, 200, title_rect.right - title_rect.left,
+                                            title_rect.bottom - title_rect.top, nullptr, nullptr, title_class.hInstance,
+                                            nullptr);
+        EXPECT(title_window != nullptr);
+        ShowWindow(title_window, SW_SHOWNOACTIVATE);
+        UpdateWindow(title_window);
+        pump();
+        rt::d3d12::XboxPresentWindowCandidate found;
+        EXPECT(rt::d3d12::find_xbox_present_title_window(&found));
+        EXPECT(found.window == title_window);
+        EXPECT(std::wstring(found.class_name) == rt::d3d12::xbox_title_window_class);
+        EXPECT(found.client_width == 400 && found.client_height == 300);
+        // ...and the default path adopts it instead of creating a second window, without touching its visibility.
+        _putenv_s("PALMETTO_PRESENT_ADOPT", "");
+        rt::d3d12::XboxPresentWindow adopted = rt::d3d12::create_or_adopt_xbox_present_window();        EXPECT(adopted.window == title_window && adopted.adopted);
+        EXPECT(adopted.width == 400 && adopted.height == 300);
+        EXPECT(adopted.shown && !adopted.show_on_first_frame);
+        rt::d3d12::show_xbox_present_window(adopted);  // a no-op for an adopted window: the title owns its visibility
+        EXPECT(adopted.shown && IsWindowVisible(title_window) != FALSE);
+        rt::d3d12::destroy_xbox_present_window(adopted);
+        EXPECT(adopted.window == nullptr && !adopted.adopted);      // forgotten by the service
+        EXPECT(IsWindow(title_window) != FALSE);                    // but the title's window survives
+        // A hidden title window is skipped: something else (here the test's own window) is next, and with that hidden
+        // too there is nothing to adopt, so the own-window fallback creates one.
+        ShowWindow(title_window, SW_HIDE);
+        pump();
+        EXPECT(rt::d3d12::find_xbox_present_title_window(&found));
+        EXPECT(found.window != title_window);
+        ShowWindow(window, SW_HIDE);
+        pump();
+        EXPECT(!rt::d3d12::find_xbox_present_title_window(&found));
+        ShowWindow(window, SW_SHOWNOACTIVATE);
+        pump();
+        DestroyWindow(title_window);
+        std::printf("adoption: title class wins, largest otherwise, unusable kinds skipped (invisible/minimised/owned/tool/"
+                    "IME/empty class/own class/own window), a real title-like window adopted by name and left alive on "
+                    "destroy, a hidden one skipped, PALMETTO_PRESENT_ADOPT=off keeps the own window: ok\n");
+    }
+
     // ---- The registration hook with nothing registered (docs/present_wiring.md) ----
     // The queue proxy is compiled into GPU-free test binaries that do not link this module, so its console PresentX
     // reaches the presentation only through this hook. Unregistered must be an honest refusal, not a crash or a fake
@@ -628,6 +751,9 @@ int main() {
         // swapchain on the first present. A null plane resource is still E_INVALIDARG, and with the hook empty again
         // the call is the honest refusal a GPU-free build sees.
         {
+            // This case presents through the runtime's own window, whose identity it knows: adoption is off, so the
+            // test's visible windows (there is no title here) are not chosen (docs/window.md, PALMETTO_PRESENT_ADOPT).
+            _putenv_s("PALMETTO_PRESENT_ADOPT", "off");
             palmetto_unregister_xbox_present();
             const rt::d3d12::XboxPresentBackend* backend = rt::d3d12::create_xbox_present_backend(inner);
             EXPECT(backend != nullptr);
@@ -649,6 +775,7 @@ int main() {
             EXPECT(!rt::d3d12::xbox_present_registered());
             EXPECT(rt::d3d12::xbox_present_queue_present(nullptr, 1, &hooked, nullptr) ==
                    HRESULT_FROM_WIN32(ERROR_INVALID_STATE));
+            _putenv_s("PALMETTO_PRESENT_ADOPT", "");  // the service is process-lifetime; only the environment is restored
             std::printf("registered PresentX path: a frame presented through the hook, a null plane resource E_INVALIDARG, "
                         "a token past the bridge E_INVALIDARG, unregistered -> ERROR_INVALID_STATE: ok\n");
         }

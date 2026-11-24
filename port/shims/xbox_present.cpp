@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 
 namespace rt::d3d12 {
 
@@ -411,10 +412,69 @@ bool register_present_window_class() {
     return registered;
 }
 
+// PALMETTO_PRESENT_ADOPT=off|0 keeps today's own PresentX window; unset, empty, on, auto or 1 (or anything else, logged)
+// adopts the title's window when the rule finds one. docs/window.md.
+bool env_adopt_title_window() {
+    char value[16] = {};
+    std::size_t length = 0;
+    if (getenv_s(&length, value, "PALMETTO_PRESENT_ADOPT") != 0 || length <= 1) return true;
+    if (!_stricmp(value, "off") || !_stricmp(value, "0")) return false;
+    if (!_stricmp(value, "on") || !_stricmp(value, "auto") || !_stricmp(value, "1")) return true;
+    std::fprintf(stderr,
+                 "[rt] present: PALMETTO_PRESENT_ADOPT=%s is not on, off, auto, 1 or 0: the title's window is adopted "
+                 "when there is one\n",
+                 value);
+    return true;
+}
+
+// An IME window by class name ("IME", "MSCTFIME UI", ...): it is visible, top-level and not ours, but presenting into it
+// would be wrong. Everywhere else the rule uses the window's own state.
+bool class_name_mentions_ime(const wchar_t* name) {
+    for (const wchar_t* at = name; at[0]; ++at)
+        if ((at[0] == L'I' || at[0] == L'i') && (at[1] == L'M' || at[1] == L'm') && (at[2] == L'E' || at[2] == L'e'))
+            return true;
+    return false;
+}
+
+// EnumWindows context: the candidate array, and whether it was too small.
+struct WindowEnumeration {
+    XboxPresentWindowCandidate* out;
+    std::size_t capacity;
+    std::size_t count;
+    bool truncated;
+};
+
+BOOL CALLBACK collect_window_callback(HWND window, LPARAM parameter) {
+    auto* enumeration = reinterpret_cast<WindowEnumeration*>(parameter);
+    DWORD process = 0;
+    GetWindowThreadProcessId(window, &process);
+    if (process != GetCurrentProcessId()) return TRUE;  // another program's window: not ours to present into
+    if (enumeration->count >= enumeration->capacity) {
+        enumeration->truncated = true;
+        return FALSE;  // enough: stop the enumeration
+    }
+    XboxPresentWindowCandidate& candidate = enumeration->out[enumeration->count++];
+    candidate.window = window;
+    GetClassNameW(window, candidate.class_name,
+                  static_cast<int>(sizeof(candidate.class_name) / sizeof(candidate.class_name[0])));
+    candidate.visible = IsWindowVisible(window) != FALSE;
+    candidate.minimised = IsIconic(window) != FALSE;
+    candidate.owned = GetWindow(window, GW_OWNER) != nullptr;
+    candidate.tool_window = (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0;
+    candidate.ime = class_name_mentions_ime(candidate.class_name);
+    RECT client{};
+    if (GetClientRect(window, &client)) {
+        candidate.client_width = static_cast<UINT>(client.right - client.left);
+        candidate.client_height = static_cast<UINT>(client.bottom - client.top);
+    }
+    return TRUE;
+}
+
 // The one presentation behind the registration hook. The window, the swapchain and the XboxPresentation are created on
 // the first present (or the first reported token, so the token watermark is in place) and then live for the process:
 // the service is intentionally leaked, because a static destructor would release the swapchain after the Vulkan
 // device's own static teardown, and the OS reclaims the window at exit anyway.
+
 struct PresentService {
     std::mutex mutex;  // the lazy creation and one present at a time
     ID3D12Device* device = nullptr;  // borrowed from the registered record
@@ -446,7 +506,9 @@ void PresentService::attach(ID3D12Device* new_device, WindowPresenter* (*factory
 XboxPresentation* PresentService::ensure() {
     if (presentation) return presentation.get();
     if (failed) return nullptr;
-    window = create_xbox_present_window();
+    // The title's own window when this process has one (docs/window.md): a swapchain-less title has usually made it long
+    // before its first present. Only when there is none - or PALMETTO_PRESENT_ADOPT=off - is our own window created.
+    window = create_or_adopt_xbox_present_window();
     if (!window.window) {
         failed = true;
         return nullptr;
@@ -535,7 +597,7 @@ XboxPresentWindow create_xbox_present_window() {
 }
 
 void show_xbox_present_window(XboxPresentWindow& window) {
-    if (!window.window || window.shown) return;
+    if (!window.window || window.shown || window.adopted) return;  // an adopted window is the title's to show
     ShowWindow(window.window, SW_SHOWNOACTIVATE);
     UpdateWindow(window.window);
     window.shown = true;
@@ -545,8 +607,86 @@ void show_xbox_present_window(XboxPresentWindow& window) {
 }
 
 void destroy_xbox_present_window(XboxPresentWindow& window) {
-    if (window.window) DestroyWindow(window.window);
+    // Never destroy an adopted window: it is the title's, which may still be using it (and its messages).
+    if (window.window && !window.adopted) DestroyWindow(window.window);
     window = XboxPresentWindow{};
+}
+
+std::size_t collect_xbox_present_window_candidates(XboxPresentWindowCandidate* out, std::size_t capacity,
+                                                   bool* truncated) {
+    WindowEnumeration enumeration{out, out ? capacity : 0, 0, false};
+    if (enumeration.capacity) EnumWindows(&collect_window_callback, reinterpret_cast<LPARAM>(&enumeration));
+    if (truncated) *truncated = enumeration.truncated;
+    return enumeration.count;
+}
+
+const XboxPresentWindowCandidate* choose_xbox_present_window(const XboxPresentWindowCandidate* candidates,
+                                                             std::size_t count, HWND own_window) {
+    if (!candidates) return nullptr;
+    const XboxPresentWindowCandidate* largest = nullptr;
+    std::uint64_t largest_area = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        const XboxPresentWindowCandidate& candidate = candidates[i];
+        if (!candidate.window || candidate.window == own_window) continue;
+        // Usable: a real window this rule can present into (docs/window.md).
+        if (!candidate.visible || candidate.minimised || candidate.owned || candidate.tool_window || candidate.ime)
+            continue;
+        if (candidate.client_width == 0 || candidate.client_height == 0) continue;  // nothing to present into yet
+        if (!_wcsicmp(candidate.class_name, k_present_window_class)) continue;      // another of our own: never adopt it
+        // The measured title's class: its own window wins outright over any other visible window of the process.
+        if (!_wcsicmp(candidate.class_name, xbox_title_window_class)) return &candidate;
+        const std::uint64_t area = std::uint64_t(candidate.client_width) * candidate.client_height;
+        if (!largest || area > largest_area) {  // the biggest visible window is the best guess for the game's own
+            largest = &candidate;
+            largest_area = area;
+        }
+    }
+    return largest;
+}
+
+bool find_xbox_present_title_window(XboxPresentWindowCandidate* out) {
+    XboxPresentWindowCandidate candidates[xbox_window_candidate_capacity]{};
+    bool truncated = false;
+    const std::size_t count = collect_xbox_present_window_candidates(candidates, xbox_window_candidate_capacity,
+                                                                     &truncated);
+    if (truncated)
+        std::fprintf(stderr,
+                     "[rt] present: this process has more than %zu top-level windows: only the first %zu are "
+                     "considered for adoption\n",
+                     xbox_window_candidate_capacity, xbox_window_candidate_capacity);
+    const XboxPresentWindowCandidate* chosen = choose_xbox_present_window(candidates, count, nullptr);
+    if (!chosen) return false;
+    if (out) *out = *chosen;
+    return true;
+}
+
+XboxPresentWindow create_or_adopt_xbox_present_window() {
+    if (!env_adopt_title_window()) return create_xbox_present_window();
+    XboxPresentWindowCandidate chosen;
+    if (!find_xbox_present_title_window(&chosen)) {
+        std::fprintf(stderr,
+                     "[rt] present: this process has no visible window to present into (the title has not made one, or "
+                     "it is hidden or minimised): creating the runtime's own PresentX window (docs/window.md)\n");
+        return create_xbox_present_window();
+    }
+    if (!IsWindow(chosen.window)) {  // destroyed between the enumeration and here: the own-window path, not a stale handle
+        std::fprintf(stderr, "[rt] present: the window chosen for adoption is gone: creating the runtime's own PresentX "
+                             "window (docs/window.md)\n");
+        return create_xbox_present_window();
+    }
+    XboxPresentWindow adopted;
+    adopted.window = chosen.window;
+    adopted.width = chosen.client_width;
+    adopted.height = chosen.client_height;
+    adopted.shown = chosen.visible;
+    adopted.show_on_first_frame = false;  // the title owns its window's visibility
+    adopted.adopted = true;
+    std::fprintf(stderr,
+                 "[rt] present: adopting the title's own window (class \"%ls\", %ux%u client) instead of creating a "
+                 "second one: frames are presented into it, its title, size and visibility stay the title's "
+                 "(docs/window.md)\n",
+                 chosen.class_name, adopted.width, adopted.height);
+    return adopted;
 }
 
 const XboxPresentBackend* create_xbox_present_backend(ID3D12Device* device) {

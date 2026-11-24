@@ -44,6 +44,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -241,27 +242,76 @@ private:
 
 inline constexpr UINT xbox_frame_event_origin = palmetto::frame_event_origin;
 
-// ---- The window of a swapchain-less title (docs/present_wiring.md) -----------------------------------------------
-// PresentX presents without a DXGI swapchain, so the runtime has to make the window itself: the title calls no
-// CreateSwapChain* and no EnumOutputs (docs/display_path.md 4). The registered presentation service creates exactly
-// one plain Win32 window: class "PalmettoPresentX", title "Palmetto - PresentX", client area 1280x720 by
-// default (PALMETTO_PRESENT_WIDTH / PALMETTO_PRESENT_HEIGHT override, 320..7680 each). It is created hidden; the default
-// PALMETTO_PRESENT_WINDOW=auto shows it from the first frame that is actually presented, so a boot whose present
-// surface is still null never opens a black window, PALMETTO_PRESENT_WINDOW=shown shows it at once and =hidden never
-// shows it. The window lives for the process (the OS reclaims it at exit; a static destructor here would race the
-// Vulkan device's own teardown) and the swapchain is created against it by the registered window presenter factory.
+// ---- The window of a swapchain-less title (docs/window.md) ---------------------------------------------------------
+// PresentX presents without a DXGI swapchain, so the runtime has to present into a window: the title calls no
+// CreateSwapChain* and no EnumOutputs (docs/display_path.md 4). A swapchain-less title usually makes its own top-level
+// window long before its first PresentX (the measured title: one visible window of class "sgaWindowClass" at about 4 s,
+// while the first present is at about 34 s), so the right design is to present into that window and create none. The
+// measured boot used to have two visible top-level windows because the service always made one of its own:
+// class "PalmettoPresentX", title "Palmetto - PresentX", client area 1280x720 by default (PALMETTO_PRESENT_WIDTH /
+// PALMETTO_PRESENT_HEIGHT override, 320..7680 each), created hidden, with PALMETTO_PRESENT_WINDOW=auto showing it from
+// the first frame that is actually presented. That own window is now the fallback: create_or_adopt_xbox_present_window()
+// below adopts the title's window when this process has one the adoption rule accepts.
+// The window lives for the process (the OS reclaims it at exit; a static destructor here would race the Vulkan device's
+// own teardown) and the swapchain is created against it by the registered window presenter factory, which sizes it to the
+// window's client area and recreates it when that size changes.
 struct XboxPresentWindow {
     HWND window = nullptr;
     UINT width = 0;                     // client area
     UINT height = 0;
     bool shown = false;                 // visible now
     bool show_on_first_frame = false;   // auto mode: the service shows it from the first presented frame
+    // The title's own window (docs/window.md), not created here: its title text, size and visibility are the title's, so
+    // show_xbox_present_window does not show it and destroy_xbox_present_window does not destroy it.
+    bool adopted = false;
 };
 // Logs the choice once. `window` is null when the class or the window could not be created (error logged).
 XboxPresentWindow create_xbox_present_window();
 // Shows it (SW_SHOWNOACTIVATE, pumped by nothing in particular: the swapchain does not need a message loop). Logged.
+// A no-op for an adopted window: the title owns its window's visibility.
 void show_xbox_present_window(XboxPresentWindow& window);
+// Destroys a window created here; an adopted window is left alone (the title may still be using it) and only forgotten.
 void destroy_xbox_present_window(XboxPresentWindow& window);
+
+// ---- Adopting the title's own window (docs/window.md) -------------------------------------------------------------
+// The pieces of the adoption rule, in the order they run: enumerate this process's top-level windows, choose one by the
+// rule, and only create our own window when there is none. The rule is pure and unit-tested (port/test/
+// xbox_present_test.cpp); only the enumeration and the creation touch Win32.
+struct XboxPresentWindowCandidate {  // one top-level window of this process, as the rule sees it
+    HWND window = nullptr;
+    wchar_t class_name[64] = {};  // GetClassNameW, truncated
+    bool visible = false;         // IsWindowVisible
+    bool minimised = false;       // IsIconic
+    bool owned = false;           // has an owner window (GW_OWNER): a dialog or a tool/helper of the title
+    bool tool_window = false;     // WS_EX_TOOLWINDOW
+    bool ime = false;             // an Input Method Editor window: "IME" in its class name (MSCTFIME UI and the like)
+    UINT client_width = 0;        // GetClientRect
+    UINT client_height = 0;
+};
+// The class the measured title's window has. The rule prefers it by name; the name is an observation of a window the
+// title creates through host user32 inside this process, not something our tree creates.
+inline constexpr wchar_t xbox_title_window_class[] = L"sgaWindowClass";
+// How many of this process's top-level windows are collected; a process with more (none measured) keeps the first.
+inline constexpr std::size_t xbox_window_candidate_capacity = 64;
+
+// Fills `out` with the current process's top-level windows (EnumWindows plus the process check); returns how many were
+// written. `truncated` (may be null) is set when there were more candidates than `capacity`.
+std::size_t collect_xbox_present_window_candidates(XboxPresentWindowCandidate* out, std::size_t capacity,
+                                                   bool* truncated = nullptr);
+// The adoption rule, no Win32 calls: the best candidate to present into, or null when there is none. A window is usable
+// when it is visible, not minimised, not owned, not a tool window, not an IME window, not this module's own class, and
+// has a non-empty client area. A usable window of the title's class wins outright (the first in enumeration order);
+// otherwise the usable one with the largest client area wins. `own_window` (the one created here, when there is one) is
+// never chosen.
+const XboxPresentWindowCandidate* choose_xbox_present_window(const XboxPresentWindowCandidate* candidates,
+                                                             std::size_t count, HWND own_window = nullptr);
+// The rule over a fresh enumeration of this process's windows: true and `out` filled when there is one to adopt.
+bool find_xbox_present_title_window(XboxPresentWindowCandidate* out);
+// What the presentation service calls instead of create_xbox_present_window(): the title's own window when the rule finds
+// one, else create_xbox_present_window(), unchanged. PALMETTO_PRESENT_ADOPT=off (or 0) keeps today's own window on
+// purpose (an A/B switch and what the tests that present through a known window set); unset or any other value adopts.
+// Logs the choice once: the class name and client size, never the title text.
+XboxPresentWindow create_or_adopt_xbox_present_window();
 
 // ---- The queue proxy's PresentX path: a registration hook (docs/present_wiring.md) --------------------------------
 // d3d12_xs_device.cpp's queue proxy is compiled into GPU-free test binaries (xs_proxy_mock_test, device_proxy_test)
