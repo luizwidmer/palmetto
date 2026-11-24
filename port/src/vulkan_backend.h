@@ -31,9 +31,11 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -986,6 +988,8 @@ public:
         replay_.draw_mesh_tasks = vk.vkCmdDrawMeshTasksEXT;  // null unless VK_EXT_mesh_shader is enabled
         replay_.draw_indexed = vk.vkCmdDrawIndexed;
         replay_.graphics_pipeline = [this](std::uintptr_t id) -> const GraphicsPipeline* {
+            // The frame dump's control draw (docs/frame_capture.md) names this reserved id; it is not in the map.
+            if (id == frame_dump::control_pipeline_id) return &frame_dump_control_pipeline_;
             const auto it = graphics_pipelines_.find(id);
             if (it == graphics_pipelines_.end()) {
                 static std::atomic<unsigned> misses{0};
@@ -1160,6 +1164,11 @@ public:
     ~VulkanContext() {
         fence_dispatcher_.reset();
         deletion_queue_.drain(UINT64_MAX, device_, vk);
+        // The frame dump's control pipeline (docs/frame_capture.md), when the diagnostic created one.
+        if (frame_dump_control_pipeline_.pipeline) vk.vkDestroyPipeline(device_, frame_dump_control_pipeline_.pipeline, nullptr);
+        if (frame_dump_control_pipeline_.layout) vk.vkDestroyPipelineLayout(device_, frame_dump_control_pipeline_.layout, nullptr);
+        if (frame_dump_control_vs_) vk.vkDestroyShaderModule(device_, frame_dump_control_vs_, nullptr);
+        if (frame_dump_control_fs_) vk.vkDestroyShaderModule(device_, frame_dump_control_fs_, nullptr);
         for (const auto& [key, framebuffer] : resolve_framebuffers_)
             vk.vkDestroyFramebuffer(device_, framebuffer, nullptr);
         for (const auto& [key, pass] : resolve_passes_) vk.vkDestroyRenderPass(device_, pass, nullptr);
@@ -1404,6 +1413,146 @@ public:
         capture_format_ = format;
         capture_extent_ = extent;
         capture_armed_.store(true, std::memory_order_relaxed);
+    }
+    // Diagnostic (docs/frame_capture.md): with PALMETTO_FRAME_DUMP_CONTROL set, the queue draws the project's own
+    // known-good full-screen triangle (the test/glsl vs_tri + fs_solid pair, compiled to the SPIR-V files the env
+    // names) into the armed draw's colour target, after the frame's commands and before the one-shot readback copies
+    // that target. The target reading back in the triangle's colour proves the raster, target binding, viewport,
+    // subresource and readback path for it; reading back black points at the replay's raster path instead. Creates the
+    // pipeline once, for `format`; false when the files cannot be loaded or the pipeline cannot be created.
+    bool frame_dump_control_pipeline(VkFormat format) {
+        std::lock_guard lock(frame_dump_control_mutex_);
+        if (frame_dump_control_pipeline_.pipeline) {
+            if (frame_dump_control_pipeline_.color_formats.size() == 1 &&
+                frame_dump_control_pipeline_.color_formats[0] == format)
+                return true;
+            std::fprintf(stderr,
+                         "[rt] replay: frame dump control: target format %d differs from the pipeline's %d; not drawn\n",
+                         static_cast<int>(format),
+                         frame_dump_control_pipeline_.color_formats.empty()
+                             ? -1
+                             : static_cast<int>(frame_dump_control_pipeline_.color_formats[0]));
+            return false;
+        }
+        if (frame_dump_control_failed_) return false;
+        const auto load = [](const char* name, std::vector<std::uint32_t>& words) {
+            const char* path = std::getenv(name);
+            if (!path || !*path) return false;
+            std::FILE* file = std::fopen(path, "rb");
+            if (!file) return false;
+            std::uint32_t word = 0;
+            while (std::fread(&word, sizeof(word), 1, file) == 1) words.push_back(word);
+            std::fclose(file);
+            return words.size() >= 5 && words[0] == 0x07230203u;  // SPIR-V magic
+        };
+        std::vector<std::uint32_t> vs_words, fs_words;
+        if (!load("PALMETTO_FRAME_DUMP_CONTROL_VS", vs_words) ||
+            !load("PALMETTO_FRAME_DUMP_CONTROL_PS", fs_words)) {
+            frame_dump_control_failed_ = true;
+            std::fprintf(stderr,
+                         "[rt] replay: frame dump control: PALMETTO_FRAME_DUMP_CONTROL_VS/PS cannot be read (the "
+                         "build's vs_tri.spv/fs_solid.spv); no control draw\n");
+            return false;
+        }
+        VkShaderModuleCreateInfo module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        module_info.codeSize = vs_words.size() * sizeof(std::uint32_t);
+        module_info.pCode = vs_words.data();
+        if (vk.vkCreateShaderModule(device_, &module_info, nullptr, &frame_dump_control_vs_) != VK_SUCCESS) {
+            frame_dump_control_failed_ = true;
+            return false;
+        }
+        module_info.codeSize = fs_words.size() * sizeof(std::uint32_t);
+        module_info.pCode = fs_words.data();
+        if (vk.vkCreateShaderModule(device_, &module_info, nullptr, &frame_dump_control_fs_) != VK_SUCCESS) {
+            frame_dump_control_failed_ = true;
+            return false;
+        }
+        const VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                                      sizeof(ShaderUserData)};
+        VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        layout_info.pushConstantRangeCount = 1;
+        layout_info.pPushConstantRanges = &push;
+        VkPipelineLayout layout = VK_NULL_HANDLE;
+        if (vk.vkCreatePipelineLayout(device_, &layout_info, nullptr, &layout) != VK_SUCCESS) {
+            frame_dump_control_failed_ = true;
+            return false;
+        }
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = frame_dump_control_vs_;
+        stages[0].pName = "main";
+        stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = frame_dump_control_fs_;
+        stages[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo viewport_state{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        viewport_state.viewportCount = 1;
+        viewport_state.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        raster.polygonMode = VK_POLYGON_MODE_FILL;
+        raster.cullMode = VK_CULL_MODE_NONE;  // the triangle's winding is not what this control measures
+        raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        raster.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+        depth.depthTestEnable = VK_FALSE;
+        depth.depthWriteEnable = VK_FALSE;
+        depth.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+        depth.stencilTestEnable = VK_FALSE;
+        VkPipelineColorBlendAttachmentState blend_attachment{};
+        blend_attachment.blendEnable = VK_FALSE;
+        blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        blend.attachmentCount = 1;
+        blend.pAttachments = &blend_attachment;
+        // Everything the replay's draw path sets dynamically (replay::emit), so the pipeline accepts those calls.
+        constexpr VkDynamicState dynamic_states[] = {
+            VK_DYNAMIC_STATE_VIEWPORT,           VK_DYNAMIC_STATE_SCISSOR,
+            VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY, VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE,
+            VK_DYNAMIC_STATE_STENCIL_REFERENCE,  VK_DYNAMIC_STATE_BLEND_CONSTANTS};
+        VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        dynamic.dynamicStateCount = static_cast<std::uint32_t>(std::size(dynamic_states));
+        dynamic.pDynamicStates = dynamic_states;
+        VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+        rendering.colorAttachmentCount = 1;
+        rendering.pColorAttachmentFormats = &format;
+        VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &rendering};
+        info.stageCount = 2;
+        info.pStages = stages;
+        info.pVertexInputState = &vertex_input;
+        info.pInputAssemblyState = &assembly;
+        info.pViewportState = &viewport_state;
+        info.pRasterizationState = &raster;
+        info.pMultisampleState = &multisample;
+        info.pDepthStencilState = &depth;
+        info.pColorBlendState = &blend;
+        info.pDynamicState = &dynamic;
+        info.layout = layout;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        if (vk.vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
+            vk.vkDestroyPipelineLayout(device_, layout, nullptr);
+            frame_dump_control_failed_ = true;
+            std::fprintf(stderr, "[rt] replay: frame dump control: the control pipeline could not be created\n");
+            return false;
+        }
+        frame_dump_control_pipeline_.pipeline = pipeline;
+        frame_dump_control_pipeline_.layout = layout;
+        frame_dump_control_pipeline_.push_stages = push.stageFlags;
+        frame_dump_control_pipeline_.color_formats = {format};
+        frame_dump_control_pipeline_.samples = 1;
+        frame_dump_control_pipeline_.vertex_slots = 0;
+        frame_dump_control_pipeline_.has_pixel_stage = true;
+        std::fprintf(stderr,
+                     "[rt] replay: frame dump control: built the vs_tri/fs_solid pipeline for format %d; its draws "
+                     "write 32 160 240\n",
+                     static_cast<int>(format));
+        return true;
     }
     // A title-placed texture's page import (docs/texture_import.md): the device registers this, and every queue calls
     // it before recording a submission, so the image holds the title's bytes before anything can sample it.
@@ -1858,6 +2007,13 @@ private:
     VkFormat capture_format_ = VK_FORMAT_UNDEFINED;
     VkExtent2D capture_extent_{};
     std::atomic<bool> capture_armed_{false};
+    // The frame dump's known-good pipeline control (docs/frame_capture.md): the project's vs_tri + fs_solid pipeline,
+    // its modules and its own leaf mutex. Created once, for the armed draw's target format; diagnostic only.
+    GraphicsPipeline frame_dump_control_pipeline_;
+    VkShaderModule frame_dump_control_vs_ = VK_NULL_HANDLE;
+    VkShaderModule frame_dump_control_fs_ = VK_NULL_HANDLE;
+    bool frame_dump_control_failed_ = false;
+    std::mutex frame_dump_control_mutex_;
     std::unordered_map<ResourceId, std::shared_ptr<SparseResource>> sparse_resources_;
     std::unordered_map<std::uintptr_t, ComputePipeline> pipelines_;
     std::unordered_map<std::uintptr_t, GraphicsPipeline> graphics_pipelines_;
@@ -2639,6 +2795,27 @@ private:
             statistics_segments += prepared[i].statistics_segment_count;
             has_queries = has_queries || !prepared[i].queries.empty();
         }
+        // Diagnostic (docs/frame_capture.md): with PALMETTO_FRAME_DUMP set, print this submission's prepared
+        // commands in order with the resource ids each one writes, so the resource the present blits has its last
+        // writer measured. Off, this is one false branch; the recorded commands are unchanged either way.
+        if (frame_dump::enabled())
+            frame_dump::submission(std::span<const PreparedList>(prepared.data(), lists.size()));
+        // Diagnostic (docs/frame_capture.md): the known-good pipeline control. Find whether this is the submission
+        // that holds the draw PALMETTO_FRAME_DUMP_AT_DRAW names, and that draw's colour target, so the project-built
+        // full-screen triangle can be drawn into it after the frame's commands.
+        bool control_armed = false;
+        frame_dump::ArmedTarget control_target;
+        if (frame_dump::control_enabled()) {
+            const std::span<const PreparedList> submission(prepared.data(), lists.size());
+            const frame_dump::Armed armed = frame_dump::armed_submission(submission);
+            if (armed.armed) {
+                control_target = frame_dump::armed_target(submission, armed.first, armed.at);
+                control_armed = control_target.found;
+            }
+            if (armed.armed && !control_armed)
+                std::fprintf(stderr,
+                             "[rt] replay: frame dump control: the armed draw has no resolvable colour target\n");
+        }
         const auto segment_pool = [this](VkQueryType type, std::uint32_t count,
                                          std::shared_ptr<OcclusionSegmentPool>& out) {
             const auto& vk = context_.vk;
@@ -2814,6 +2991,43 @@ private:
             emit(list, command_buffer, replay, &next_tracker, &open_labels);
             wrote_readback |= list.wrote_readback;
             readback_stages |= list.readback_src_stages;
+        }
+        // Diagnostic (docs/frame_capture.md): draw the project's own known-good full-screen triangle into the armed
+        // draw's colour target, after the frame's commands and before the one-shot readback copies it. Its target
+        // reading back 32 160 240 says this target's raster, binding, viewport, subresource and readback path all
+        // write; reading back black says the replay's raster path for this target is what to chase.
+        if (control_armed && context_.frame_dump_control_pipeline(control_target.format)) {
+            CommandList control;
+            Draw control_draw;
+            control_draw.pipeline = frame_dump::control_pipeline_id;
+            control_draw.count = 3;     // vs_tri builds one full-screen triangle from gl_VertexIndex
+            control_draw.instances = 1;
+            control_draw.topology = 4;  // D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST
+            control_draw.viewport = Viewport{0.0f, 0.0f, static_cast<float>(control_target.width),
+                                             static_cast<float>(control_target.height), 0.0f, 1.0f};
+            control_draw.scissor = Rect{0, 0, static_cast<std::int32_t>(control_target.width),
+                                        static_cast<std::int32_t>(control_target.height)};
+            auto control_views = std::make_shared<DrawViews>();
+            control_views->render_target_count = 1;
+            control_views->render_targets[0] = TargetView{control_target.id, 0, 0, 1, ColorViewFormat::resource};
+            control_draw.views = std::move(control_views);
+            PreparedList control_prepared;
+            const ReplayResult control_result = control.draw(std::move(control_draw)) && control.close()
+                                                    ? prepare(control, resolve, replay, control_prepared)
+                                                    : ReplayResult::unsupported;
+            if (control_result == ReplayResult::success) {
+                emit(control_prepared, command_buffer, replay, &next_tracker, &open_labels);
+                std::fprintf(stderr,
+                             "[rt] replay: frame dump control: drew the vs_tri/fs_solid triangle into 0x%llx "
+                             "(%ux%u, format %d) after the frame's commands; the readback below copies it\n",
+                             static_cast<unsigned long long>(control_target.id), control_target.width,
+                             control_target.height, static_cast<int>(control_target.format));
+            } else {
+                std::fprintf(stderr,
+                             "[rt] replay: frame dump control: the control list was refused (result %d); the target "
+                             "is left as the frame wrote it\n",
+                             static_cast<int>(control_result));
+            }
         }
         close_labels(command_buffer, replay, open_labels);
         // Only flush GPU writes to the host domain when this batch actually wrote to a readback buffer.

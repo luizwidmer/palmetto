@@ -246,3 +246,13 @@ Still open, in order:
 6. The readback is one-shot and drains its queue, its write control clears the captured target at frame end, and the
    readback can be armed at a later draw with `PALMETTO_READBACK_AT_DRAW`; the copy-source pull is implemented but
    unexercised by every observed window. These are diagnostics/correctness paths, not behaviour changes.
+
+> **Correction, measured later (docs/frame_capture.md).** The one-shot readback armed at the first (even) draw reads the
+> frame's **intermediate** 4K buffer, not the presented display buffer. Each frame is two draws - the no-image pass writes
+> an intermediate 4K target, the six-image pass writes the display buffer the present names - and the display buffers are
+> double-buffered, so measuring the presented resource needs the readback armed at an odd draw. With the present plane's
+> exact resource id, the **presented** resource is genuinely black immediately after its own last writer (clear first, draw
+> last, only a layout barrier after it), and a known-good full-screen control triangle drawn into that same resource reads
+> back its exact colour (mean 32 160 240, 16,384/16,384 non-black). That proves the raster, target binding, viewport,
+> subresource, layout transition and readback path for the presented target, and leaves the title draw's own pixel output
+> as the frontier.

@@ -3393,6 +3393,590 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
     return ReplayResult::success;
 }
 
+// ---- Frame dump (docs/frame_capture.md) ---------------------------------------------------------------------
+// Bounded diagnostic, PALMETTO_FRAME_DUMP only: prints the commands of the submissions around one draw in replay
+// order, with the resource ids each one reads and writes, so "which command writes the presented resource, and
+// when relative to the draws" is measured rather than guessed. The switch is read once; with it off nothing here
+// runs, and the commands the replay records are the same bytes as without the diagnostic.
+namespace frame_dump {
+
+// The command's kind, one line per command. Pure: no state, no Vulkan call (port/test/frame_dump_test.cpp pins it).
+inline const char* kind_name(const Command& command) {
+    return std::visit(
+        [](const auto& c) -> const char* {
+            using T = std::decay_t<decltype(c)>;
+            if constexpr (std::is_same_v<T, TransitionBarrier> || std::is_same_v<T, UavBarrier> ||
+                          std::is_same_v<T, AliasingBarrier> || std::is_same_v<T, GlobalBarrier> ||
+                          std::is_same_v<T, BufferBarrier> || std::is_same_v<T, TextureBarrier>) {
+                return "barrier";
+            } else if constexpr (std::is_same_v<T, ClearRenderTarget> || std::is_same_v<T, ClearDepthStencil> ||
+                                 std::is_same_v<T, ClearUnorderedAccess>) {
+                return "clear";
+            } else if constexpr (std::is_same_v<T, Draw>) {
+                return "draw";
+            } else if constexpr (std::is_same_v<T, Dispatch>) {
+                return "dispatch";
+            } else if constexpr (std::is_same_v<T, CopyBuffer> || std::is_same_v<T, CopyTexture> ||
+                                 std::is_same_v<T, CopyResource>) {
+                return "copy";
+            } else if constexpr (std::is_same_v<T, ResolveSubresource>) {
+                return "resolve";
+            } else if constexpr (std::is_same_v<T, Predication>) {
+                return "predication";
+            } else if constexpr (std::is_same_v<T, DiscardResource>) {
+                return "discard";
+            } else if constexpr (std::is_same_v<T, WriteImmediate>) {
+                return "write-immediate";
+            } else if constexpr (std::is_same_v<T, AtomicCopyBuffer>) {
+                return "atomic-copy";
+            } else if constexpr (std::is_same_v<T, BeginQuery> || std::is_same_v<T, EndQuery> ||
+                                 std::is_same_v<T, ResolveQueries>) {
+                return "query";
+            } else if constexpr (std::is_same_v<T, DebugMarker>) {
+                return "marker";
+            } else if constexpr (std::is_same_v<T, ExecuteIndirect>) {
+                return "execute-indirect";
+            } else if constexpr (std::is_same_v<T, BuildAccelerationStructure> ||
+                                 std::is_same_v<T, CopyAccelerationStructure> ||
+                                 std::is_same_v<T, AccelerationStructurePostbuild>) {
+                return "acceleration-structure";
+            } else {
+                return "other";
+            }
+        },
+        command);
+}
+
+// Whether the command's own writes reach `id`: a clear, a copy or resolve destination, a UAV clear, a discard, or
+// a draw whose colour or depth attachment is that resource. 0 never matches. Pure, as kind_name is.
+inline bool command_writes(const Command& command, ResourceId id) {
+    if (!id) return false;
+    return std::visit(
+        [id](const auto& c) -> bool {
+            using T = std::decay_t<decltype(c)>;
+            if constexpr (std::is_same_v<T, ClearRenderTarget> || std::is_same_v<T, ClearDepthStencil>) {
+                return c.target.resource == id;
+            } else if constexpr (std::is_same_v<T, ClearUnorderedAccess>) {
+                return c.view.resource == id;
+            } else if constexpr (std::is_same_v<T, Draw>) {
+                if (c.depth.resource == id) return true;
+                if (!c.views) return false;
+                const std::uint32_t count =
+                    std::min<std::uint32_t>(c.views->render_target_count,
+                                            static_cast<std::uint32_t>(c.views->render_targets.size()));
+                for (std::uint32_t slot = 0; slot < count; ++slot)
+                    if (c.views->render_targets[slot].resource == id) return true;
+                return false;
+            } else if constexpr (std::is_same_v<T, CopyBuffer>) {
+                return c.dst == id;
+            } else if constexpr (std::is_same_v<T, CopyTexture>) {
+                return c.dst.resource == id;
+            } else if constexpr (std::is_same_v<T, CopyResource>) {
+                return c.dst == id;
+            } else if constexpr (std::is_same_v<T, ResolveSubresource>) {
+                return c.dst == id;
+            } else if constexpr (std::is_same_v<T, AtomicCopyBuffer>) {
+                return c.dst == id;
+            } else if constexpr (std::is_same_v<T, DiscardResource>) {
+                return c.resource == id;
+            } else {
+                return false;
+            }
+        },
+        command);
+}
+
+// The indices of the commands that write `id`, in order: the ordered writer list of a resource in one submission.
+inline std::vector<std::size_t> writers(std::span<const Command> commands, ResourceId id) {
+    std::vector<std::size_t> out;
+    for (std::size_t i = 0; i < commands.size(); ++i)
+        if (command_writes(commands[i], id)) out.push_back(i);
+    return out;
+}
+
+// The first command after `after` that writes `id`, or commands.size() when none does: whether a frame's resource
+// is written again after its last draw (candidates (a) and (b) for a black frame).
+inline std::size_t first_writer_after(std::span<const Command> commands, ResourceId id, std::size_t after) {
+    for (std::size_t i = after + 1; i < commands.size(); ++i)
+        if (command_writes(commands[i], id)) return i;
+    return commands.size();
+}
+
+inline bool enabled() {
+    static const bool on = [] {
+        const char* value = std::getenv("PALMETTO_FRAME_DUMP");
+        return value && *value && value[0] != '0' && value[0] != 'n';
+    }();
+    return on;
+}
+
+// Which draw's submission is dumped: PALMETTO_FRAME_DUMP_AT_DRAW, else the draw the one-shot readback measures
+// (PALMETTO_READBACK_AT_DRAW), else the first draw. The index is the same zero-based draw index the readback counts.
+inline unsigned long long dump_at_draw() {
+    static const unsigned long long at = [] {
+        const char* value = std::getenv("PALMETTO_FRAME_DUMP_AT_DRAW");
+        if (!value || !*value) value = std::getenv("PALMETTO_READBACK_AT_DRAW");
+        return value && *value ? std::strtoull(value, nullptr, 0) : 0ull;
+    }();
+    return at;
+}
+
+// How many draw-bearing submissions after the two dumped ones watch for a write to the dumped draw's target.
+inline unsigned tracked_window() {
+    static const unsigned window = [] {
+        const char* value = std::getenv("PALMETTO_FRAME_DUMP_WINDOW");
+        const unsigned long long parsed = value && *value ? std::strtoull(value, nullptr, 0) : 16ull;
+        return static_cast<unsigned>(std::min<unsigned long long>(parsed, 64ull));
+    }();
+    return window;
+}
+
+// The known-good pipeline control (docs/frame_capture.md): with PALMETTO_FRAME_DUMP_CONTROL set, the queue draws the
+// project's own full-screen triangle (the test/glsl vs_tri + fs_solid pair) into the armed draw's target after the
+// frame's commands, so a target that reads black can be told apart from a replay raster fault. Diagnostic only.
+inline bool control_enabled() {
+    static const bool on = [] {
+        const char* value = std::getenv("PALMETTO_FRAME_DUMP_CONTROL");
+        return value && *value && value[0] != '0' && value[0] != 'n';
+    }();
+    return on;
+}
+
+// The opaque pipeline id the control draw names; 1 is never a PSO pointer and never a registered pipeline id.
+inline constexpr std::uintptr_t control_pipeline_id = 1;
+
+// One submission's place in the draw sequence, for the control draw: whether it holds the draw the readback and the
+// control name, and the global index of its first draw.
+struct Armed {
+    bool armed = false;
+    unsigned long long first = 0;
+    unsigned long long at = 0;
+};
+
+inline Armed armed_submission(std::span<const PreparedList> lists) {
+    static std::mutex mutex;
+    static unsigned long long next_draw = 0;
+    Armed out;
+    out.at = dump_at_draw();
+    std::lock_guard lock(mutex);
+    out.first = next_draw;
+    std::size_t draws = 0;
+    for (const auto& list : lists) draws += list.draw_count;
+    next_draw += draws;
+    out.armed = draws != 0 && out.first <= out.at && out.at < next_draw;
+    return out;
+}
+
+// The colour target of the draw `at` in a submission whose first draw is `first`: the resource the control draws
+// into and the one-shot readback copies. found is false when the submission does not hold that draw.
+struct ArmedTarget {
+    bool found = false;
+    ResourceId id = 0;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+};
+
+inline ArmedTarget armed_target(std::span<const PreparedList> lists, unsigned long long first,
+                                unsigned long long at) {
+    ArmedTarget out;
+    unsigned long long index = first;
+    for (const auto& list : lists) {
+        const auto commands = list.list->commands();
+        for (std::size_t i = 0; i < commands.size(); ++i) {
+            if (!std::holds_alternative<Draw>(commands[i])) continue;
+            if (index == at) {
+                const detail::Prepared& p = list.commands[i];
+                if (p.draw < list.draws.size()) {
+                    const detail::PreparedDraw& d = list.draws[p.draw];
+                    if (!d.colors.empty() && d.colors[0].id && d.colors[0].binding.image) {
+                        out.found = true;
+                        out.id = d.colors[0].id;
+                        out.format = d.colors[0].binding.format;
+                        out.width = d.colors[0].binding.width;
+                        out.height = d.colors[0].binding.height;
+                    }
+                }
+                return out;
+            }
+            ++index;
+        }
+    }
+    return out;
+}
+
+// Prints one command of the list, with what the prepared entry resolved for it. Everything bounded.
+inline void print_command(const PreparedList& prepared, std::size_t index, unsigned long long draw_index) {
+    const auto commands = prepared.list->commands();
+    const Command& command = commands[index];
+    const detail::Prepared& p = prepared.commands[index];
+    const auto handle = [](auto value) {
+        return static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(value));
+    };
+    std::fprintf(stderr, "[rt] replay: frame dump:  #%zu %s", index, kind_name(command));
+    std::visit(
+        [&](const auto& c) {
+            using T = std::decay_t<decltype(c)>;
+            if constexpr (std::is_same_v<T, TransitionBarrier>) {
+                std::fprintf(stderr, " id 0x%llx subresource %u before %u after %u",
+                             static_cast<unsigned long long>(c.resource), c.subresource, c.before, c.after);
+            } else if constexpr (std::is_same_v<T, UavBarrier>) {
+                std::fprintf(stderr, " id 0x%llx", static_cast<unsigned long long>(c.resource));
+            } else if constexpr (std::is_same_v<T, AliasingBarrier>) {
+                std::fprintf(stderr, " before 0x%llx after 0x%llx", static_cast<unsigned long long>(c.before),
+                             static_cast<unsigned long long>(c.after));
+            } else if constexpr (std::is_same_v<T, GlobalBarrier>) {
+                std::fprintf(stderr, " sync %u->%u access %u->%u", c.sync_before, c.sync_after, c.access_before,
+                             c.access_after);
+            } else if constexpr (std::is_same_v<T, BufferBarrier>) {
+                std::fprintf(stderr, " id 0x%llx sync %u->%u access %u->%u",
+                             static_cast<unsigned long long>(c.resource), c.sync_before, c.sync_after,
+                             c.access_before, c.access_after);
+            } else if constexpr (std::is_same_v<T, TextureBarrier>) {
+                std::fprintf(stderr,
+                             " id 0x%llx layout %u->%u sync %u->%u mip %u+%u layer %u+%u plane %u+%u",
+                             static_cast<unsigned long long>(c.resource), c.layout_before, c.layout_after,
+                             c.sync_before, c.sync_after, c.range.index_or_first_mip, c.range.mip_count,
+                             c.range.first_layer, c.range.layer_count, c.range.first_plane, c.range.plane_count);
+            } else if constexpr (std::is_same_v<T, ClearRenderTarget>) {
+                std::fprintf(stderr,
+                             " rt id 0x%llx mip %u layers %u+%u format %d colour %.3f %.3f %.3f %.3f",
+                             static_cast<unsigned long long>(c.target.resource), c.target.mip, c.target.first_layer,
+                             c.target.layer_count, static_cast<int>(c.target.format),
+                             static_cast<double>(c.color[0]), static_cast<double>(c.color[1]),
+                             static_cast<double>(c.color[2]), static_cast<double>(c.color[3]));
+                std::fprintf(stderr, " image 0x%llx %ux%u", handle(p.binding.image), p.binding.width,
+                             p.binding.height);
+                if (c.rects.empty()) {
+                    std::fprintf(stderr, " rects whole view");
+                } else {
+                    std::fprintf(stderr, " rects %zu", c.rects.size());
+                    for (std::size_t r = 0; r < std::min<std::size_t>(c.rects.size(), 2); ++r)
+                        std::fprintf(stderr, " [%d,%d..%d,%d]", c.rects[r].left, c.rects[r].top, c.rects[r].right,
+                                     c.rects[r].bottom);
+                }
+            } else if constexpr (std::is_same_v<T, ClearDepthStencil>) {
+                std::fprintf(stderr, " depth id 0x%llx mip %u layers %u+%u flags %u depth %.3f stencil %u",
+                             static_cast<unsigned long long>(c.target.resource), c.target.mip,
+                             c.target.first_layer, c.target.layer_count, c.flags,
+                             static_cast<double>(c.depth), unsigned(c.stencil));
+                std::fprintf(stderr, " image 0x%llx %ux%u", handle(p.binding.image), p.binding.width,
+                             p.binding.height);
+                std::fprintf(stderr, " rects %zu", c.rects.size());
+            } else if constexpr (std::is_same_v<T, ClearUnorderedAccess>) {
+                std::fprintf(stderr, " uav id 0x%llx buffer %d format %u rects %zu",
+                             static_cast<unsigned long long>(c.view.resource), c.view.buffer ? 1 : 0,
+                             c.view.format, c.rects.size());
+            } else if constexpr (std::is_same_v<T, Draw>) {
+                const detail::PreparedDraw* d = p.draw < prepared.draws.size() ? &prepared.draws[p.draw] : nullptr;
+                const GraphicsPipeline* g = d ? d->graphics : nullptr;
+                std::fprintf(stderr, " draw %llu pipeline 0x%llx", draw_index,
+                             static_cast<unsigned long long>(c.pipeline));
+                if (g) {
+                    std::fprintf(stderr,
+                                 " ps %s %u image(s) vs %u load(s) vk 0x%llx colour(s) %zu depth format %d",
+                                 g->has_pixel_stage ? "present" : "absent", g->ps_images, g->vs_loads,
+                                 handle(g->pipeline), g->color_formats.size(),
+                                 static_cast<int>(g->depth_format));
+                }
+                if (d) {
+                    const auto views = c.views;
+                    for (std::size_t slot = 0; slot < d->colors.size() && slot < detail::max_render_targets; ++slot) {
+                        const auto& a = d->colors[slot];
+                        if (!a.id) continue;
+                        const std::uint32_t mip = views && slot < views->render_targets.size()
+                                                      ? views->render_targets[slot].mip : 0;
+                        const std::uint32_t first_layer = views && slot < views->render_targets.size()
+                                                              ? views->render_targets[slot].first_layer : 0;
+                        const std::uint32_t layer_count = views && slot < views->render_targets.size()
+                                                              ? views->render_targets[slot].layer_count : 0;
+                        const VkExtent2D extent = detail::mip_extent(a.binding, mip);
+                        std::fprintf(stderr,
+                                     "; rt%zu id 0x%llx image 0x%llx mip %u layers %u+%u format %d %ux%u",
+                                     slot, static_cast<unsigned long long>(a.id), handle(a.binding.image), mip,
+                                     first_layer, layer_count, static_cast<int>(a.binding.format), extent.width,
+                                     extent.height);
+                    }
+                    if (d->depth.id)
+                        std::fprintf(stderr, "; depth id 0x%llx format %d",
+                                     static_cast<unsigned long long>(d->depth.id),
+                                     static_cast<int>(d->depth.binding.format));
+                    std::fprintf(stderr, "; area %ux%u layers %u", d->area.width, d->area.height, d->layers);
+                }
+                std::fprintf(stderr,
+                             "; viewport %.1fx%.1f at %.1f,%.1f depth %.3f..%.3f; scissor %d,%d..%d,%d; "
+                             "topology %u; %s %u/%u first %u",
+                             static_cast<double>(c.viewport.width), static_cast<double>(c.viewport.height),
+                             static_cast<double>(c.viewport.x), static_cast<double>(c.viewport.y),
+                             static_cast<double>(c.viewport.min_depth), static_cast<double>(c.viewport.max_depth),
+                             c.scissor.left, c.scissor.top, c.scissor.right, c.scissor.bottom, c.topology,
+                             c.indexed ? "indices" : "vertices", c.count, c.instances, c.first);
+                if (c.indexed)
+                    std::fprintf(stderr, "; index va 0x%llx size %u format %u",
+                                 static_cast<unsigned long long>(c.index.va), c.index.size, c.index.format);
+                if (const auto* views = c.views.get()) {
+                    unsigned printed = 0;
+                    for (std::uint32_t slot = 0; slot < 32 && printed < 4; ++slot) {
+                        const VertexBufferView& view = views->vertex_buffers[slot];
+                        if (!view.va) continue;
+                        std::fprintf(stderr, "; vb%u va 0x%llx size %u stride %u", slot,
+                                     static_cast<unsigned long long>(view.va), view.size, view.stride);
+                        if (d && slot < d->vertex_buffers.size())
+                            std::fprintf(stderr, " buffer 0x%llx offset %llu", handle(d->vertex_buffers[slot]),
+                                         static_cast<unsigned long long>(d->vertex_offsets[slot]));
+                        ++printed;
+                    }
+                }
+                std::fprintf(stderr, "; user data s0..s15");
+                for (unsigned k = 0; k < 16; ++k) std::fprintf(stderr, " %08x", c.user_data[k]);
+            } else if constexpr (std::is_same_v<T, Dispatch>) {
+                std::fprintf(stderr, " pipeline 0x%llx groups %u,%u,%u user data s0..s15",
+                             static_cast<unsigned long long>(c.pipeline), c.x, c.y, c.z);
+                for (unsigned k = 0; k < 16; ++k) std::fprintf(stderr, " %08x", c.user_data[k]);
+            } else if constexpr (std::is_same_v<T, CopyBuffer>) {
+                std::fprintf(stderr, " dst 0x%llx+%llu src 0x%llx+%llu size %llu",
+                             static_cast<unsigned long long>(c.dst), static_cast<unsigned long long>(c.dst_offset),
+                             static_cast<unsigned long long>(c.src), static_cast<unsigned long long>(c.src_offset),
+                             static_cast<unsigned long long>(c.size));
+                if (c.tiled_resource)
+                    std::fprintf(stderr, " tiled 0x%llx", static_cast<unsigned long long>(c.tiled_resource));
+            } else if constexpr (std::is_same_v<T, CopyTexture>) {
+                std::fprintf(stderr, " dst 0x%llx%s subresource %u offset %llu src 0x%llx%s subresource %u at %u,%u,%u",
+                             static_cast<unsigned long long>(c.dst.resource), c.dst.footprint ? " footprint" : "",
+                             c.dst.subresource, static_cast<unsigned long long>(c.dst.offset),
+                             static_cast<unsigned long long>(c.src.resource), c.src.footprint ? " footprint" : "",
+                             c.src.subresource, c.x, c.y, c.z);
+                if (c.has_box)
+                    std::fprintf(stderr, " box %u,%u,%u..%u,%u,%u", c.box.left, c.box.top, c.box.front, c.box.right,
+                                 c.box.bottom, c.box.back);
+            } else if constexpr (std::is_same_v<T, CopyResource>) {
+                std::fprintf(stderr, " dst 0x%llx src 0x%llx", static_cast<unsigned long long>(c.dst),
+                             static_cast<unsigned long long>(c.src));
+            } else if constexpr (std::is_same_v<T, ResolveSubresource>) {
+                std::fprintf(stderr, " dst 0x%llx subresource %u src 0x%llx subresource %u%s",
+                             static_cast<unsigned long long>(c.dst), c.dst_subresource,
+                             static_cast<unsigned long long>(c.src), c.src_subresource,
+                             c.region ? " (region)" : "");
+            } else if constexpr (std::is_same_v<T, Predication>) {
+                std::fprintf(stderr, " buffer 0x%llx offset %llu op %u",
+                             static_cast<unsigned long long>(c.buffer),
+                             static_cast<unsigned long long>(c.offset), c.op);
+            } else if constexpr (std::is_same_v<T, DiscardResource>) {
+                std::fprintf(stderr, " id 0x%llx first %u count %u partial %d whole %d",
+                             static_cast<unsigned long long>(c.resource), c.first_subresource, c.count,
+                             c.partial ? 1 : 0, c.whole ? 1 : 0);
+            } else if constexpr (std::is_same_v<T, WriteImmediate>) {
+                std::fprintf(stderr, " address 0x%llx value 0x%08x mode %u",
+                             static_cast<unsigned long long>(c.address), c.value, c.mode);
+            } else if constexpr (std::is_same_v<T, AtomicCopyBuffer>) {
+                std::fprintf(stderr, " dst 0x%llx+%llu src 0x%llx+%llu bytes %u dependencies %zu",
+                             static_cast<unsigned long long>(c.dst), static_cast<unsigned long long>(c.dst_offset),
+                             static_cast<unsigned long long>(c.src), static_cast<unsigned long long>(c.src_offset),
+                             c.bytes, c.dependencies.size());
+            } else if constexpr (std::is_same_v<T, BeginQuery> || std::is_same_v<T, EndQuery>) {
+                std::fprintf(stderr, " heap 0x%llx type %u index %u",
+                             static_cast<unsigned long long>(c.heap), c.type, c.index);
+            } else if constexpr (std::is_same_v<T, ResolveQueries>) {
+                std::fprintf(stderr, " heap 0x%llx type %u first %u count %u dst 0x%llx+%llu",
+                             static_cast<unsigned long long>(c.heap), c.type, c.first, c.count,
+                             static_cast<unsigned long long>(c.dst), static_cast<unsigned long long>(c.offset));
+            } else if constexpr (std::is_same_v<T, DebugMarker>) {
+                std::fprintf(stderr, " %s",
+                             c.kind == DebugMarker::Kind::set ? "set"
+                             : c.kind == DebugMarker::Kind::begin ? "begin" : "end");
+            } else if constexpr (std::is_same_v<T, ExecuteIndirect>) {
+                std::fprintf(stderr, " %s stride %u max %u args 0x%llx+%llu count 0x%llx+%llu",
+                             c.kind == IndirectKind::draw ? "draw"
+                             : c.kind == IndirectKind::draw_indexed ? "draw-indexed" : "dispatch",
+                             c.stride, c.max_count, static_cast<unsigned long long>(c.argument_buffer),
+                             static_cast<unsigned long long>(c.argument_offset),
+                             static_cast<unsigned long long>(c.count_buffer),
+                             static_cast<unsigned long long>(c.count_offset));
+            } else if constexpr (std::is_same_v<T, BuildAccelerationStructure>) {
+                std::fprintf(stderr, " %s%s dst 0x%llx src 0x%llx triangles %zu", c.is_tlas ? "tlas" : "blas",
+                             c.update ? " update" : "", static_cast<unsigned long long>(c.dst_va),
+                             static_cast<unsigned long long>(c.src_va), c.triangles.size());
+            } else if constexpr (std::is_same_v<T, CopyAccelerationStructure>) {
+                std::fprintf(stderr, " dst 0x%llx src 0x%llx mode %u",
+                             static_cast<unsigned long long>(c.dst_va),
+                             static_cast<unsigned long long>(c.src_va), c.mode);
+            } else if constexpr (std::is_same_v<T, AccelerationStructurePostbuild>) {
+                std::fprintf(stderr, " dst 0x%llx type %u sources %zu",
+                             static_cast<unsigned long long>(c.dest_va), c.type, c.sources.size());
+            }
+        },
+        command);
+    std::fprintf(stderr, "\n");
+}
+
+// Prints one list's commands in order, then the ordered writers of every resource a draw writes. Returns the first
+// colour target of the draw `selected_draw` (0 when it has none): the resource the one-shot readback copies. When
+// that draw is not in this list, the first draw's first colour target is returned instead.
+inline ResourceId print_list(const PreparedList& prepared, unsigned long long first_draw, std::size_t list_index,
+                             std::size_t list_count, unsigned long long selected_draw) {
+    const auto commands = prepared.list->commands();
+    std::fprintf(stderr,
+                 "[rt] replay: frame dump: list %zu of %zu: %zu command(s), %zu draw(s), draws %llu..%llu\n",
+                 list_index, list_count, commands.size(), prepared.draw_count, first_draw,
+                 first_draw + prepared.draw_count - (prepared.draw_count ? 1 : 0));
+    constexpr std::size_t kMaxCommands = 256;
+    ResourceId readback_target = 0;
+    ResourceId first_target = 0;
+    unsigned long long draw_index = first_draw;
+    std::vector<ResourceId> targets;
+    const auto note = [&targets](ResourceId id) {
+        if (!id) return;
+        if (std::find(targets.begin(), targets.end(), id) == targets.end()) targets.push_back(id);
+    };
+    const auto first_color = [](const Draw& draw) -> ResourceId {
+        if (!draw.views) return 0;
+        const std::uint32_t count = std::min<std::uint32_t>(
+            draw.views->render_target_count, static_cast<std::uint32_t>(draw.views->render_targets.size()));
+        for (std::uint32_t slot = 0; slot < count; ++slot)
+            if (draw.views->render_targets[slot].resource) return draw.views->render_targets[slot].resource;
+        return 0;
+    };
+    for (std::size_t i = 0; i < commands.size(); ++i) {
+        if (i == kMaxCommands) {
+            std::fprintf(stderr, "[rt] replay: frame dump: ... %zu more command(s) not printed (bounded)\n",
+                         commands.size() - i);
+            break;
+        }
+        const bool is_draw = std::holds_alternative<Draw>(commands[i]);
+        print_command(prepared, i, draw_index);
+        if (const auto* draw = std::get_if<Draw>(&commands[i])) {
+            if (!first_target) first_target = first_color(*draw);
+            if (draw_index == selected_draw) readback_target = first_color(*draw);
+            if (draw->views) {
+                const std::uint32_t count =
+                    std::min<std::uint32_t>(draw->views->render_target_count,
+                                            static_cast<std::uint32_t>(draw->views->render_targets.size()));
+                for (std::uint32_t slot = 0; slot < count; ++slot)
+                    note(draw->views->render_targets[slot].resource);
+            }
+            note(draw->depth.resource);
+        }
+        if (is_draw) ++draw_index;
+    }
+    // The ordered writers of each draw target: whether the last write is a draw, and whether anything writes the
+    // resource after its last draw in this submission.
+    for (const ResourceId target : targets) {
+        const auto order = writers(commands, target);
+        if (order.empty()) continue;
+        std::size_t last_draw = commands.size();
+        for (const std::size_t k : order)
+            if (std::holds_alternative<Draw>(commands[k])) last_draw = k;
+        std::fprintf(stderr, "[rt] replay: frame dump: writes to 0x%llx:",
+                     static_cast<unsigned long long>(target));
+        for (const std::size_t k : order) std::fprintf(stderr, " #%zu %s", k, kind_name(commands[k]));
+        std::fprintf(stderr, "; last writer #%zu %s", order.back(), kind_name(commands[order.back()]));
+        if (last_draw != commands.size()) {
+            std::fprintf(stderr, "; last draw writing it #%zu", last_draw);
+            if (const std::size_t after = first_writer_after(commands, target, last_draw);
+                after != commands.size())
+                std::fprintf(stderr, "; WRITTEN AFTER THE LAST DRAW by #%zu %s", after,
+                             kind_name(commands[after]));
+        }
+        std::fprintf(stderr, "\n");
+    }
+    return readback_target ? readback_target : first_target;
+}
+
+// One ExecuteCommandLists: dump the submission that contains the selected draw, then the next draw-bearing
+// submission, then count writes to the first draw's target over a bounded window of later submissions.
+inline void submission(std::span<const PreparedList> lists) {
+    if (!enabled() || lists.empty()) return;
+    struct State {
+        unsigned long long next_draw = 0;  // the global (zero-based) index of the next draw
+        unsigned dumps = 0;
+        unsigned tracked = 0;
+        ResourceId target = 0;  // the target the tracking window watches
+        unsigned writes[5] = {};  // draw, clear, copy, resolve, other
+        unsigned reported = 0;    // non-draw writes printed
+    };
+    static State state;
+    static std::mutex mutex;
+    std::lock_guard lock(mutex);
+    const unsigned window = tracked_window();
+    if (state.dumps >= 2 && state.tracked >= window) return;
+    const unsigned long long first = state.next_draw;
+    std::size_t draws = 0;
+    for (const auto& list : lists) draws += list.draw_count;
+    state.next_draw += draws;
+    if (!draws) return;
+    if (state.dumps < 2) {
+        const unsigned long long at = dump_at_draw();
+        const bool selected = state.dumps > 0 || (first <= at && at < state.next_draw);
+        if (!selected) return;
+        if (state.dumps == 0) {
+            std::fprintf(stderr,
+                         "[rt] replay: frame dump: submission with draws %llu..%llu (%zu list(s)); resource ids are "
+                         "the D3D12 resource pointers (resource_id), as the present trace prints plane resources; "
+                         "the one-shot readback copies mip 0, layer 0, origin 0,0\n",
+                         first, state.next_draw - 1, lists.size());
+        } else {
+            std::fprintf(stderr,
+                         "[rt] replay: frame dump: next submission with draws %llu..%llu (%zu list(s))\n", first,
+                         state.next_draw - 1, lists.size());
+        }
+        unsigned long long base = first;
+        for (std::size_t i = 0; i < lists.size(); ++i) {
+            const ResourceId target = print_list(lists[i], base, i, lists.size(), at);
+            if (state.dumps == 0 && !state.target) state.target = target;
+            base += lists[i].draw_count;
+        }
+        ++state.dumps;
+        if (state.dumps < 2) return;
+        if (!state.target) {
+            std::fprintf(stderr, "[rt] replay: frame dump: the dumped draw has no colour target; no tracking\n");
+            state.tracked = window;
+            return;
+        }
+        std::fprintf(stderr,
+                     "[rt] replay: frame dump: watching the next %u draw submission(s) for writes to 0x%llx\n",
+                     window, static_cast<unsigned long long>(state.target));
+        return;
+    }
+    // The window after the two dumped submissions: which kinds write the dumped draw's target.
+    for (const auto& list : lists) {
+        for (const auto& command : list.list->commands()) {
+            if (!command_writes(command, state.target)) continue;
+            const char* kind = kind_name(command);
+            unsigned slot = 4;
+            if (std::holds_alternative<Draw>(command)) {
+                slot = 0;
+            } else if (std::holds_alternative<ClearRenderTarget>(command) ||
+                       std::holds_alternative<ClearDepthStencil>(command) ||
+                       std::holds_alternative<ClearUnorderedAccess>(command)) {
+                slot = 1;
+            } else if (std::holds_alternative<CopyBuffer>(command) ||
+                       std::holds_alternative<CopyTexture>(command) ||
+                       std::holds_alternative<CopyResource>(command)) {
+                slot = 2;
+            } else if (std::holds_alternative<ResolveSubresource>(command)) {
+                slot = 3;
+            }
+            ++state.writes[slot];
+            if (slot != 0 && state.reported < 8) {
+                ++state.reported;
+                std::fprintf(stderr,
+                             "[rt] replay: frame dump: 0x%llx written at a later draw submission by %s\n",
+                             static_cast<unsigned long long>(state.target), kind);
+            }
+        }
+    }
+    ++state.tracked;
+    if (state.tracked >= window) {
+        std::fprintf(stderr,
+                     "[rt] replay: frame dump: over %u later draw submission(s), writes to 0x%llx: draw %u, clear %u, "
+                     "copy %u, resolve %u, other %u\n",
+                     window, static_cast<unsigned long long>(state.target), state.writes[0], state.writes[1],
+                     state.writes[2], state.writes[3], state.writes[4]);
+    }
+}
+
+} // namespace frame_dump
+
 // A submission is planned against the currently published query state plus its own earlier lists.
 // Keep every physical pool referenced by the recorded batch alive until that batch completes.
 class QueryReplay {
