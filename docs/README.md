@@ -119,3 +119,5 @@ method, scope and caveats. No game data is included.
 ## Other languages
 
 Community quickstarts (stable onboarding text only; English docs remain authoritative): [i18n/README.md](i18n/README.md) (`fr`, `pt-BR`, `pt-PT`, `zh-CN`, `pl-PL`, `tr`, `ru`, `ja`, `es`, `it`, `de`, `ar`).
+| [window.md](window.md) | Presentation window: the measured two-window state, the adoption rule that uses the title's own window, the fallback and the measured one-window boot. |
+| [frame_capture.md](frame_capture.md) | One real frame's command order and targets: which commands write the presented resource, the id mapping to the present plane, and the known-good control draw that proves the presented target can be written. |
