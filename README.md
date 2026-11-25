@@ -25,32 +25,35 @@ console shaders to SPIR-V, and a Vulkan-backed D3D12 device executes the result.
 |---|---|---|
 | Image and platform | **done** | the executable image maps at its preferred base, imports resolve through shims, static TLS is redirected, heap and file system come from the host |
 | Shader corpus | **done** | 26,616 SPIR-V modules indexed; the boot loads 27,890 translated entries with 0 pipeline failures |
-| Console D3D12 on Vulkan | **done** | device, queues, fences, allocators, heaps, command lists, the queue slot shift, the fence value address, the list lifecycle, the clear/barrier conversions, display resources and derived pipelines are measured and mapped |
+| Console D3D12 on Vulkan | **done** | device, queues, fences, allocators, heaps, command lists, the queue slot shift, the fence value address, the list lifecycle, the clear/barrier conversions, the display surfaces (console slot 127), the derived-pipeline extension (console slot 55) and the title's page VAs rebased into one arena are measured and mapped |
 | Console DirectStorage | **done** | 4,096 requests / 256 MiB decompressed at 131-144 MiB/s with every status entry S_OK; packed and swizzled reads refuse rather than guess |
 | Boot chain | **done** | the title boots and runs its own loop past 300 s with no exception |
-| Frame loop | **done** | frames record, close and submit with 0 failed Close calls and 0 refused submissions after the title page VAs were put into the GPU address space |
-| Pipeline construction | **done** | all 10,241 graphics records build into real pipelines (0 refusals) and 41,545 derived pipelines are created (0 failures) |
-| Draw execution | **done** | 42,722 draws recorded and executed per 150 s run; the page pull feeds the buffers draws read (273 MiB per 300 s) |
-| Presentation | **done** | the runtime creates its own window and presents 33,275 frames per 300 s run with 0 failed present calls |
-| Frame content | in progress | the presented 4K image is written by the frame draws but reads back uniformly black; the pipeline stand-ins and the copy path are falsified, and the measured open leads are the texture-data source addresses and the unnamed consumer of the streamed blocks (docs/texture_import.md, docs/page_content.md) |
+| Frame loop | **done** | frames record, close and submit with 0 failed Close and 0 refused submissions; every recorded draw executes after the title's page VAs were rebased into the arena, with no TDR and no lost device |
+| Pipeline construction | **done** | all 10,241 graphics records build into real pipelines (0 refusals) and 41,545 derived pipelines are created through the console slot-55 answer (0 failures) |
+| Draw execution | **done** | 17,674-27,935 draws execute per 150 s run with 0 refused submissions; the page pull keeps the GPU stand-ins holding the title's bytes (273 MiB per 300 s run) |
+| Presentation | **done** | presents into the title's own adopted window: the adoption boot has exactly one visible top-level window in the process and 8,625 present calls with 0 failed; the earlier 300 s run presents 33,275 frames with 0 failed |
+| Frame content | in progress | the presented 4K image is the frame's own draw target and is proven writable (a control draw reads back its exact colour), but reads back uniformly black: the frame's record is clean (clear first, draw last, no copy or resolve), fixed-function stand-ins and culling are falsified, the title's vertex/geometry path produces no fragments even unculled, and the sampled textures are empty (docs/frame_capture.md) |
 
 | Measured | Value |
 |---|---|
 | Boot result | ALIVE beyond 300 s, no exception |
 | Graphics pipelines built | 10,241 of 10,241 (0 refusals) + 41,545 derived |
-| Draws recorded and executed per 150 s run | 42,722 |
-| Frames presented per 300 s run | 33,275 (0 failed) |
-| Presented frame content | uniformly black, proven writable |
+| Draws executed per 150 s run | 17,674-27,935, 0 refused submissions |
+| Frames presented | 8,625 per 90 s adoption boot, 0 failed (33,275 per 300 s run before the window adoption) |
+| Visible game windows | 1 - the title's own window; the runtime's own window is not created when it can adopt |
+| Presented frame content | uniformly black in the presented resource; the target is proven writable and correctly bound |
 
-**Where it stops now:** `no stop - the title boots, runs, executes its draws and presents frames to its own window; the presented frame is still black` - the title boots, runs past 300 s with no exception, executes its draws with 0 refused submissions and presents frames to the runtime's own visible window. The presented 4K image is proven writable and is the draw target, yet its own output reads back uniformly black; the fixed-function stand-ins and the copy path are falsified, and the measured remaining leads are the texture-data source addresses and the consumer of the streamed blocks.
-Measurements and the method behind them: [docs/page_content.md](docs/page_content.md).
+**Where it stops now:** `no stop - the title boots past 300 s, executes its draws and presents into its own window; the presented frame still reads back uniformly black` - the title boots past 300 s with no exception, executes its draws with 0 refused submissions and presents into the title's own adopted window. The presented 4K resource is the frame's own draw target and is proven writable, but the title's draw leaves it black: the frame's record is clean (clear first, draw last, no copy or resolve), the cull hypothesis and the fixed-function stand-ins are falsified, the title's vertex/geometry path produces no fragments even unculled, and the sampled textures are empty.
+Measurements and the method behind them: [docs/frame_capture.md](docs/frame_capture.md).
 
 Next up:
-- find the device-side address of the CPU-built texture bytes (the fill addresses are not any posted texture address)
-- name the consumer of the streamed blocks (caller-RVA traces show nothing maps them yet)
-- decode the serialized fixed-function state blob by behavioural probes
+- dump the positions the translated vertex shader writes and the bytes its input layout reads for a real draw (the cull axis is closed)
+- sample the other texture descriptors and a window away from the origin, to separate an empty image from an empty address
+- name the consumer of the streamed blocks and where the title's CPU-built texture memory is named by a GPU resource
+- decode the XG layout slots 2 and 10 by behaviour, and pin fixed-function state fields only where a probe supports them
+- repair the full configure and build so the remaining test targets compile and run
 
-More: [the full measurement ladder](docs/boot_frontier.md), [the null-object chain trace](docs/null_object_chain.md), [how the other public attempt is built](docs/competitor_intel.md), [incoming reports and tracked findings](docs/issues.md).
+More: [the full measurement ladder](docs/boot_frontier.md), [the frame-capture measurement](docs/frame_capture.md), [the presentation window](docs/window.md), [incoming reports and tracked findings](docs/issues.md).
 
 <!-- progress:end -->
 

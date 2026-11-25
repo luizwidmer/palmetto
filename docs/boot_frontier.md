@@ -734,7 +734,68 @@ shader's `heap_base + console_va` arithmetic, not the fetched data; the candidat
 title-placed page import (O16) and the arena range / VA rebase (O17): [replay_resolution.md](replay_resolution.md).
 Until then a refused submit is the honest behaviour - executing an un-rebased title VA is a device reset.
 
-Where the boot stands now: it runs its own frame loop for the whole 150 s timeout, builds every pipeline it asks for, and
-records its draws - 42,722 in the decode boot, 43,750 in the later replay baseline - while presenting nothing. The
-frontier is the title-VA address space (O17, with O16 behind it); the null display surface is the presentation frontier
-behind that, and the fixed-function state blob (O15) is fidelity work that refuses nothing today.
+## Frontier 2026-11-24 (the page VA rebase: the draws execute)
+
+The increment after that note answers the replay wall by rebasing rather than importing: `port/src/console_va_map.h`
+keeps the title's VA ranges (the slot-133 placed buffer's `0xAE00000` bytes and the console descriptor heap's `0x2600000`
+bytes, overlapping by 27 MiB) with an arena VA each, rewrites a console-heap V# base that names a placed buffer to the
+arena VA of its stand-in, and rebases every shader-visible copy of a title VA (the 32 recorded user-data dwords, scanned
+as 64-bit windows against the root signature's parameter kinds) in the push-constant copy at replay. The recorded
+command is never modified; anything the map cannot place still refuses. One clean 150 s boot: **ALIVE 150.3 s, 0
+exceptions, 0 TDR, 0 `device was lost`**, `ExecuteCommandLists` **35,349 ok / 0 failed / 0 refused**, and **17,674
+`DrawInstanced` / 17,674 `PresentX`**. The mirror refresh costs ~3.8 ms per submission, so the old 43,750 refused draws
+are 17,674 executed ones; the window comes up and the presented frames are in it. Designs, ranges and the measurement
+are in [page_address_space.md](page_address_space.md).
+
+
+## Frontier 2026-11-24 (the pages carry content, and the frame is still black)
+
+The replay now pulls a draw's title pages into the arena stand-in before the submission is recorded - the vertex and
+index views, every decodable V# of the draw's descriptor table, root descriptor VAs, and then copy sources - and the
+measured bytes are the title's, not stand-in zeros (24 non-zero bytes in the 0xFF0-byte vertex view, 78 in the
+0x1E0-byte index view). The A/B and a 300 s boot are still black: in 300 s the frame loop issues **clears and draws
+only** - 0 `CopyBufferRegion`, `CopyTextureRegion`, `CopyResource`, `CopyTiles`, `ResolveSubresource`, 0 dispatches, 0
+indirect commands, 0 reserved-resource creations - while `ExecuteCommandLists` is 66,551 ok / 0 refused with 66,550
+draws and 33,275 presents, and 131,072 pulls / 273.0 MiB of page content. The title never uploads content in the
+measured window, so the render path is not the thing to fix next: [page_content.md](page_content.md).
+
+
+## Frontier 2026-11-24 (one window, a real display surface, and the frame's own target black)
+
+Two fixes behind the present. Console device slot 127 was answered by the generic beyond-vtable stub - `S_OK` without
+writing the out pointer - so the display surfaces carried a null resource; created through a real PC resource, the
+present plane's first resource is non-null and the frame's clears reach the command list
+([surface_population.md](surface_population.md)). `PresentX` is then wired end to end (registration hook, frame-token
+bridge, presenter window) and the present service adopts the title's own `sgaWindowClass` window instead of creating a
+second one: the adoption boot has **exactly one visible top-level window** in the process, **8,625 presents / 0
+failed**, ALIVE with no exception ([present_wiring.md](present_wiring.md), [window.md](window.md)).
+
+A frame dump then answers the black by id: the presented resource is one of the two 4K double-buffered display images,
+the frame's own clear writes it at `#1` before both draws, the display draw is its **last** writer and only a layout
+barrier follows, and no copy or resolve appears anywhere. Read back immediately after that last writer it is uniformly
+black (`mean 0 0 0, non-black 0/16,384`), while the project's own full-screen triangle drawn into the same resource
+reads back its exact colour (`32 160 240, 16,384/16,384`): raster, target binding, viewport, subresource, the layout
+transitions and the readback path are proven for the presented target, so the title's draw is what leaves it black.
+The same measurement corrects `page_content.md` section 4: its first-draw readback was reading an **intermediate** 4K
+target, not the display resource.
+
+
+## Frontier 2026-11-24 (frame content: culling closed, the constants sane, no fragments from the vertex path)
+
+Two controls separate the remaining causes. With the title's own recorded command and pipeline recipe but the project's
+constant-output pixel shader, the presented resource still reads black (`0/16,384`) - and repeating that with raster
+culling forced off changes nothing, so the documented-default back-face culling of the undecoded state record is **not**
+what discards the title's fragments (the cull axis is closed). The constants are not empty either: the draw's one V# (the
+constants buffer) reads back a plausible transform matrix (`3f800000` on the diagonal, 78/480 non-zero bytes), and the
+target's centre window is black too, so the black is not an origin-corner artefact. That leaves the vertex/geometry
+path: the view's 0xFF0 bytes hold 24 non-zero bytes for the frame's three 8-byte vertices, and the next measurement is
+what the translated vertex shader reads and where it writes. A second, independent gap: the six-image pixel shader's
+first sampled texture resolves to a real 4K image whose 128x128 window reads black, so even with coverage that pass
+would sample nothing ([frame_capture.md](frame_capture.md) sections 6-8).
+
+Where the boot stands now: it runs its own frame loop for the whole timeout, builds every pipeline it asks for,
+executes its draws (17,674-27,935 per 150 s, 0 refused submissions) and presents into the title's own window - and the
+presented frame is still black. The frontier is frame content (O18: the title's vertex/geometry path produces no
+fragments), with the empty sampled content behind it (O19); the streamed-block consumer (O20) and the XG layout slots
+(O21) are the measured ways content could arrive, and the fixed-function state blob (O15) is fidelity work that refuses
+nothing today. The open rows and their evidence are in [issues.md](issues.md).
