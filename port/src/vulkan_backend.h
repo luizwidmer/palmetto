@@ -926,6 +926,18 @@ struct SampleCapture {
     VkImage image = VK_NULL_HANDLE;
     VkFormat format = VK_FORMAT_UNDEFINED;
     VkExtent2D extent{};
+    palmetto::ResourceId resource = 0;  // the D3D12 resource behind the layer image (for the id comparison)
+};
+
+// Diagnostic (docs/frame_capture.md): one armed colour-target readback. Several can be armed for the same submission
+// (the frame's even intermediate pass and its odd six-image pass), so each records the draw index and the resource id it
+// copied; the readback prints one labelled line pair (window + write control) per capture.
+struct AttachmentCapture {
+    VkImage image = VK_NULL_HANDLE;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    VkExtent2D extent{};
+    palmetto::ResourceId resource = 0;
+    std::uint64_t draw = 0;
 };
 
 // Per device: what the queues share. Resources are registered by their stable ID (the COM resource pointer).
@@ -1091,13 +1103,15 @@ public:
         replay_.pull_title_arena = [this](std::uint64_t arena_va, std::uint64_t bytes) {
             if (console_arena_pull_) console_arena_pull_(arena_va, bytes);
         };
-        replay_.capture_attachment = [this](VkImage image, VkFormat format, VkExtent2D extent) {
-            arm_attachment_capture(image, format, extent);
+        replay_.capture_attachment = [this](VkImage image, VkFormat format, VkExtent2D extent,
+                                            palmetto::ResourceId resource, std::uint64_t draw) {
+            arm_attachment_capture(image, format, extent, resource, draw);
         };
         // Diagnostic (docs/frame_capture.md): the sampled-texture readback's copy. Off unless the frame dump's sample
         // mode arms it, and it only ever copies.
-        replay_.capture_sample = [this](VkImage image, VkFormat format, VkExtent2D extent) {
-            arm_sample_capture(image, format, extent);
+        replay_.capture_sample = [this](VkImage image, VkFormat format, VkExtent2D extent,
+                                        palmetto::ResourceId resource) {
+            arm_sample_capture(image, format, extent, resource);
         };
         if (xdxr && loaded_) {
             xdxr_ = std::make_unique<XdxrBuilder>(get, device);
@@ -1422,10 +1436,18 @@ public:
     }
     // Diagnostic (docs/page_content.md): read the first draw's colour target back after its submission, so the frame's
     // own bytes can be compared with what the present blits. Armed once per boot; the image's layout is restored.
-    void arm_attachment_capture(VkImage image, VkFormat format, VkExtent2D extent) {
-        capture_image_ = image;
-        capture_format_ = format;
-        capture_extent_ = extent;
+    // Diagnostic (docs/frame_capture.md): arm one colour-target readback. Up to four can be armed for one submission, so
+    // the frame's even intermediate pass and its odd six-image pass are copied together and printed with their draw
+    // indices and resource ids.
+    void arm_attachment_capture(VkImage image, VkFormat format, VkExtent2D extent, ResourceId resource,
+                                std::uint64_t draw) {
+        if (image == VK_NULL_HANDLE || attachment_capture_count_ >= std::size(attachment_captures_)) return;
+        AttachmentCapture& capture = attachment_captures_[attachment_capture_count_++];
+        capture.image = image;
+        capture.format = format;
+        capture.extent = extent;
+        capture.resource = resource;
+        capture.draw = draw;
         capture_armed_.store(true, std::memory_order_relaxed);
     }
     // Diagnostic (docs/frame_capture.md): with PALMETTO_FRAME_DUMP_CONTROL set, the queue draws the project's own
@@ -1656,12 +1678,13 @@ public:
     }
     // Diagnostic (docs/frame_capture.md): arm one of the sampled-texture readbacks (the armed draw's resolved sampled
     // images, up to max_sampled_keys). Copies only; the title's textures are never modified.
-    void arm_sample_capture(VkImage image, VkFormat format, VkExtent2D extent) {
+    void arm_sample_capture(VkImage image, VkFormat format, VkExtent2D extent, ResourceId resource) {
         if (sample_capture_count_ >= max_sampled_keys || image == VK_NULL_HANDLE) return;
         SampleCapture& capture = sample_captures_[sample_capture_count_++];
         capture.image = image;
         capture.format = format;
         capture.extent = extent;
+        capture.resource = resource;
     }
     // A title-placed texture's page import (docs/texture_import.md): the device registers this, and every queue calls
     // it before recording a submission, so the image holds the title's bytes before anything can sample it.
@@ -2120,11 +2143,10 @@ private:
     std::function<void()> placed_texture_import_;                           // title-placed texture pages -> image
     std::function<void()> page_watch_tick_;  // docs/texture_source.md: the page-writer watch, once per submission
     std::function<void(std::uint64_t, std::uint64_t)> console_arena_pull_;  // a copy's source range -> arena stand-in
-    // The one-shot render-target readback of docs/page_content.md, armed by the first draw and taken after its
-    // submission completes.
-    VkImage capture_image_ = VK_NULL_HANDLE;
-    VkFormat capture_format_ = VK_FORMAT_UNDEFINED;
-    VkExtent2D capture_extent_{};
+    // The one-shot colour-target readbacks of docs/page_content.md (up to four per submission, docs/frame_capture.md):
+    // armed by the draws PALMETTO_READBACK_AT_DRAW lists and taken after that submission completes.
+    AttachmentCapture attachment_captures_[4];
+    unsigned attachment_capture_count_ = 0;
     std::atomic<bool> capture_armed_{false};
     // The frame dump's known-good pipeline control (docs/frame_capture.md): the project's vs_tri + fs_solid pipeline,
     // its modules and its own leaf mutex. Created once, for the armed draw's target format; diagnostic only.
@@ -3229,41 +3251,60 @@ private:
                                                  0, 1, &host, 0, nullptr, 0, nullptr);
             }
         }
-        // Diagnostic readback (docs/page_content.md): copy a 128x128 window of the first draw's colour target into host
-        // memory, then read it after this submission completes. The image is put back in the layout the tracker
-        // expects, so the capture changes no later command.
+        // Diagnostic readback (docs/page_content.md, docs/frame_capture.md): copy a 128x128 window of every armed draw's
+        // colour target into host memory, then read them after this submission completes. Up to four draws can be armed
+        // together (PALMETTO_READBACK_AT_DRAW=20000,20001), each window followed by a write control (the same target
+        // cleared by us to a known colour). The images are put back in the layout the tracker expects.
+        constexpr unsigned kMaxAttachmentCaptures = 4;
+        AttachmentCapture attachment_captures[kMaxAttachmentCaptures] = {};
+        unsigned attachment_count = 0;
+        VkExtent2D attachment_regions[kMaxAttachmentCaptures] = {};
+        VkOffset2D attachment_offsets[kMaxAttachmentCaptures] = {};
+        unsigned attachment_texels[kMaxAttachmentCaptures] = {};
+        bool attachment_control_recorded[kMaxAttachmentCaptures] = {};
+        VkDeviceSize attachment_windows[kMaxAttachmentCaptures] = {};
         VkBuffer capture_buffer = VK_NULL_HANDLE;
         VkDeviceMemory capture_memory = VK_NULL_HANDLE;
-        VkExtent2D capture_region{};
-        VkOffset2D capture_offset{0, 0};
-        unsigned capture_texel = 0;
-        const bool capture = context_.capture_armed_.exchange(false) &&
-                             context_.capture_image_ != VK_NULL_HANDLE && context_.vk.vkCmdCopyImageToBuffer;
-        if (capture) {
-            switch (context_.capture_format_) {
-            case VK_FORMAT_R16G16B16A16_UNORM:
-            case VK_FORMAT_R16G16B16A16_SFLOAT: capture_texel = 8; break;
-            case VK_FORMAT_R32G32B32A32_SFLOAT: capture_texel = 16; break;
-            case VK_FORMAT_R32G32_UINT:
-            case VK_FORMAT_R32G32_SINT:
-            case VK_FORMAT_R32G32_SFLOAT: capture_texel = 8; break;
-            default: capture_texel = 4; break;
+        if (context_.capture_armed_.exchange(false) && context_.vk.vkCmdCopyImageToBuffer) {
+            attachment_count = std::min<unsigned>(context_.attachment_capture_count_, kMaxAttachmentCaptures);
+            context_.attachment_capture_count_ = 0;
+            for (unsigned k = 0; k < attachment_count; ++k)
+                attachment_captures[k] = context_.attachment_captures_[k];
+            VkDeviceSize total = 0;
+            for (unsigned k = 0; k < attachment_count; ++k) {
+                const AttachmentCapture& capture = attachment_captures[k];
+                unsigned texel = 4;
+                switch (capture.format) {
+                case VK_FORMAT_R16G16B16A16_UNORM:
+                case VK_FORMAT_R16G16B16A16_SFLOAT: texel = 8; break;
+                case VK_FORMAT_R32G32B32A32_SFLOAT: texel = 16; break;
+                case VK_FORMAT_R32G32_UINT:
+                case VK_FORMAT_R32G32_SINT:
+                case VK_FORMAT_R32G32_SFLOAT: texel = 8; break;
+                default: texel = 4; break;
+                }
+                attachment_texels[k] = texel;
+                attachment_regions[k].width = std::min(128u, capture.extent.width);
+                attachment_regions[k].height = std::min(128u, capture.extent.height);
+                attachment_offsets[k] = {0, 0};
+                // Diagnostic (docs/frame_capture.md): PALMETTO_READBACK_CENTRE=1 copies a window at the target's centre
+                // instead of its origin, so a region that is only black in one corner is not mistaken for an empty target.
+                if (const char* centre = std::getenv("PALMETTO_READBACK_CENTRE");
+                    centre && *centre && *centre != '0' && *centre != 'n')
+                    attachment_offsets[k] = {
+                        static_cast<std::int32_t>((capture.extent.width - attachment_regions[k].width) / 2),
+                        static_cast<std::int32_t>((capture.extent.height - attachment_regions[k].height) / 2)};
+                attachment_windows[k] =
+                    VkDeviceSize(attachment_regions[k].width) * attachment_regions[k].height * texel;
+                total += 2 * attachment_windows[k];
             }
-            capture_region.width = std::min(128u, context_.capture_extent_.width);
-            capture_region.height = std::min(128u, context_.capture_extent_.height);
-            // Diagnostic (docs/frame_capture.md): PALMETTO_READBACK_CENTRE=1 copies a window at the target's centre
-            // instead of its origin, so a region that is only black in one corner is not mistaken for an empty target.
-            if (const char* centre = std::getenv("PALMETTO_READBACK_CENTRE");
-                centre && *centre && *centre != '0' && *centre != 'n')
-                capture_offset = {
-                    static_cast<std::int32_t>((context_.capture_extent_.width - capture_region.width) / 2),
-                    static_cast<std::int32_t>((context_.capture_extent_.height - capture_region.height) / 2)};
             VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-            // Two windows: the frame's own content, then a write control (the same target cleared by us to a known
-            // colour), so an all-zero readback cannot be an artefact of the copy or the host mapping.
-            buffer_info.size = 2 * VkDeviceSize(capture_region.width) * capture_region.height * capture_texel;
+            // Two windows per capture: the frame's own content, then a write control (the same target cleared by us to a
+            // known colour), so an all-zero readback cannot be an artefact of the copy or the host mapping.
+            buffer_info.size = total;
             buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            if (context_.vk.vkCreateBuffer(context_.device(), &buffer_info, nullptr, &capture_buffer) == VK_SUCCESS) {
+            if (total && context_.vk.vkCreateBuffer(context_.device(), &buffer_info, nullptr, &capture_buffer) ==
+                              VK_SUCCESS) {
                 VkMemoryRequirements requirements{};
                 context_.vk.vkGetBufferMemoryRequirements(context_.device(), capture_buffer, &requirements);
                 const auto& memory = context_.occlusion_resolve_memory_;
@@ -3285,60 +3326,71 @@ private:
                     context_.vk.vkAllocateMemory(context_.device(), &allocation, nullptr, &capture_memory) ==
                         VK_SUCCESS &&
                     context_.vk.vkBindBufferMemory(context_.device(), capture_buffer, capture_memory, 0) == VK_SUCCESS) {
-                    VkImageMemoryBarrier to{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-                    to.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-                    to.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-                    to.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    to.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    to.image = context_.capture_image_;
-                    to.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-                    to.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-                    to.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                    context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to);
-                    VkBufferImageCopy region{};
-                    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                    region.imageOffset = {capture_offset.x, capture_offset.y, 0};
-                    region.imageExtent = {capture_region.width, capture_region.height, 1};
-                    context_.vk.vkCmdCopyImageToBuffer(command_buffer, context_.capture_image_,
-                                                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, capture_buffer, 1, &region);
-                    // Write control: clear the same target to a known colour, then copy it into the second window. If
-                    // the frame's window is black and this one carries the colour, the black is the frame's content and
-                    // not the copy.
-                    const VkDeviceSize capture_window =
-                        VkDeviceSize(capture_region.width) * capture_region.height * capture_texel;
-                    if (context_.vk.vkCmdClearColorImage) {
-                        to.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-                        to.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                        to.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                        to.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                        context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
-                                                         &to);
-                        const VkClearColorValue control_colour{{0.2f, 0.4f, 0.8f, 1.0f}};
-                        context_.vk.vkCmdClearColorImage(command_buffer, context_.capture_image_,
-                                                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &control_colour, 1,
-                                                         &to.subresourceRange);
-                        to.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    VkDeviceSize base = 0;
+                    for (unsigned k = 0; k < attachment_count; ++k) {
+                        const AttachmentCapture& capture = attachment_captures[k];
+                        VkImageMemoryBarrier to{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                        to.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
                         to.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-                        to.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                        to.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                        to.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                        to.image = capture.image;
+                        to.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                        to.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
                         to.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                        context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                                                          &to);
-                        VkBufferImageCopy control = region;
-                        control.bufferOffset = capture_window;
-                        context_.vk.vkCmdCopyImageToBuffer(command_buffer, context_.capture_image_,
+                        VkBufferImageCopy region{};
+                        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                        region.imageOffset = {attachment_offsets[k].x, attachment_offsets[k].y, 0};
+                        region.imageExtent = {attachment_regions[k].width, attachment_regions[k].height, 1};
+                        region.bufferOffset = base;
+                        context_.vk.vkCmdCopyImageToBuffer(command_buffer, capture.image,
                                                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, capture_buffer, 1,
-                                                           &control);
+                                                           &region);
+                        // Write control: clear the same target to a known colour, then copy it into the second window.
+                        // Skipped when this target is also an armed sampled input (the frame's own sampled image can be
+                        // one of its render targets): clearing it would corrupt the sampled readback, which is measured
+                        // separately.
+                        bool sampled_input = false;
+                        for (unsigned s = 0; s < std::min(context_.sample_capture_count_, max_sampled_keys); ++s)
+                            if (context_.sample_captures_[s].image == capture.image) sampled_input = true;
+                        if (context_.vk.vkCmdClearColorImage && !sampled_input) {
+                            attachment_control_recorded[k] = true;
+                            to.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                            to.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                            to.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                            to.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                            context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                                             &to);
+                            const VkClearColorValue control_colour{{0.2f, 0.4f, 0.8f, 1.0f}};
+                            context_.vk.vkCmdClearColorImage(command_buffer, capture.image,
+                                                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &control_colour, 1,
+                                                             &to.subresourceRange);
+                            to.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                            to.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                            to.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                            to.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                            context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                                             &to);
+                            VkBufferImageCopy control = region;
+                            control.bufferOffset = base + attachment_windows[k];
+                            context_.vk.vkCmdCopyImageToBuffer(command_buffer, capture.image,
+                                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, capture_buffer, 1,
+                                                               &control);
+                        }
+                        to.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                        to.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                        to.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                        to.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+                        context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr,
+                                                         0, nullptr, 1, &to);
+                        base += 2 * attachment_windows[k];
                     }
-                    to.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-                    to.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-                    to.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                    to.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
-                    context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0,
-                                                     nullptr, 1, &to);
                 } else {
                     context_.vk.vkDestroyBuffer(context_.device(), capture_buffer, nullptr);
                     capture_buffer = VK_NULL_HANDLE;
@@ -3491,73 +3543,127 @@ private:
         // Under tracker_mutex_, so no other flush comes between this submit and the set's note of whether it reached
         // the queue (it keeps a single upload obligation).
         if (bindless_commit) bindless_commit(submitted);
-        // The one-shot render-target readback (docs/page_content.md): drain this queue, read the copied window and say
-        // what the frame's own target contains. `capture_texel` bytes per pixel, first three channels.
-        if (capture && capture_memory && submitted) {
+        // The one-shot readbacks (docs/frame_capture.md): drain this queue, read every copied window and print one line
+        // pair per armed draw - its colour target's content and the write control - labelled with the draw index and the
+        // resource id, so the frame's even (intermediate) and odd (display) draws can be compared in one boot.
+        if (submitted && capture_memory) {
             if (context_.vk.vkQueueWaitIdle(queue_) == VK_SUCCESS) {
                 void* mapped = nullptr;
                 if (context_.vk.vkMapMemory(context_.device(), capture_memory, 0, VK_WHOLE_SIZE, 0, &mapped) ==
                     VK_SUCCESS) {
-                    const auto* bytes = static_cast<const std::uint8_t*>(mapped);
-                    const std::uint64_t pixels = std::uint64_t(capture_region.width) * capture_region.height;
-                    std::uint64_t sums[3] = {0, 0, 0}, non_black = 0, peak = 0;
-                    for (std::uint64_t i = 0; i < pixels; ++i) {
-                        const std::uint8_t* texel = bytes + i * std::size_t(capture_texel);
-                        const unsigned r = texel[0];
-                        const unsigned g = capture_texel > 1 ? texel[1] : 0;
-                        const unsigned b = capture_texel > 2 ? texel[2] : 0;
-                        sums[0] += r;
-                        sums[1] += g;
-                        sums[2] += b;
-                        if (r || g || b) ++non_black;
-                        peak = std::max<std::uint64_t>(peak, std::max(r, std::max(g, b)));
+                    const auto* attachment_bytes = static_cast<const std::uint8_t*>(mapped);
+                    VkDeviceSize base = 0;
+                    for (unsigned k = 0; k < attachment_count; ++k) {
+                        const AttachmentCapture& capture = attachment_captures[k];
+                        const unsigned capture_texel = attachment_texels[k];
+                        const std::uint64_t pixels = std::uint64_t(attachment_regions[k].width) *
+                                                     attachment_regions[k].height;
+                        const auto* bytes = attachment_bytes + base;
+                        std::uint64_t sums[3] = {0, 0, 0}, non_black = 0, peak = 0;
+                        for (std::uint64_t i = 0; i < pixels; ++i) {
+                            const std::uint8_t* texel = bytes + i * std::size_t(capture_texel);
+                            const unsigned r = texel[0];
+                            const unsigned g = capture_texel > 1 ? texel[1] : 0;
+                            const unsigned b = capture_texel > 2 ? texel[2] : 0;
+                            sums[0] += r;
+                            sums[1] += g;
+                            sums[2] += b;
+                            if (r || g || b) ++non_black;
+                            peak = std::max<std::uint64_t>(peak, std::max(r, std::max(g, b)));
+                        }
+                        // Diagnostic (docs/frame_capture.md): the copy runs after the frame's commands AND after any
+                        // control draw, so when a control drew the window holds the control's output. Say which line this
+                        // is: the PS-only control's readback is the coverage axis measured independently of the title PS.
+                        const char* readback_label = ps_control_drew ? "frame dump PS control readback"
+                                                      : control_drew ? "frame dump control readback"
+                                                                     : "render-target readback";
+                        std::fprintf(stderr,
+                                     "[rt] replay: %s [draw %llu target resource 0x%llx image 0x%llx]: %ux%u at the "
+                                     "target's offset of %u,%u of %ux%u, %u-byte texel: mean %llu %llu %llu, non-black "
+                                     "%llu/%llu, peak %llu%s\n",
+                                     readback_label, static_cast<unsigned long long>(capture.draw),
+                                     static_cast<unsigned long long>(capture.resource),
+                                     static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(capture.image)),
+                                     attachment_regions[k].width, attachment_regions[k].height,
+                                     attachment_offsets[k].x, attachment_offsets[k].y, capture.extent.width,
+                                     capture.extent.height, capture_texel,
+                                     static_cast<unsigned long long>(sums[0] / (pixels ? pixels : 1)),
+                                     static_cast<unsigned long long>(sums[1] / (pixels ? pixels : 1)),
+                                     static_cast<unsigned long long>(sums[2] / (pixels ? pixels : 1)),
+                                     static_cast<unsigned long long>(non_black),
+                                     static_cast<unsigned long long>(pixels),
+                                     static_cast<unsigned long long>(peak),
+                                     (ps_control_drew || control_drew)
+                                         ? "; the control drew after the frame's commands and this window is its output"
+                                         : "");
+                        // The write control: the same target, cleared by us to a known colour after the frame's commands.
+                        if (attachment_control_recorded[k]) {
+                        const std::uint8_t* control = bytes + pixels * capture_texel;
+                        std::uint64_t control_sums[3] = {0, 0, 0}, control_non_black = 0, control_peak = 0;
+                        for (std::uint64_t i = 0; i < pixels; ++i) {
+                            const std::uint8_t* texel = control + i * std::size_t(capture_texel);
+                            const unsigned r = texel[0];
+                            const unsigned g = capture_texel > 1 ? texel[1] : 0;
+                            const unsigned b = capture_texel > 2 ? texel[2] : 0;
+                            control_sums[0] += r;
+                            control_sums[1] += g;
+                            control_sums[2] += b;
+                            if (r || g || b) ++control_non_black;
+                            control_peak = std::max<std::uint64_t>(control_peak, std::max(r, std::max(g, b)));
+                        }
+                        std::fprintf(stderr,
+                                     "[rt] replay: write control [draw %llu target resource 0x%llx]: mean %llu %llu "
+                                     "%llu, non-black %llu/%llu, peak %llu\n",
+                                     static_cast<unsigned long long>(capture.draw),
+                                     static_cast<unsigned long long>(capture.resource),
+                                     static_cast<unsigned long long>(control_sums[0] / (pixels ? pixels : 1)),
+                                     static_cast<unsigned long long>(control_sums[1] / (pixels ? pixels : 1)),
+                                     static_cast<unsigned long long>(control_sums[2] / (pixels ? pixels : 1)),
+                                     static_cast<unsigned long long>(control_non_black),
+                                     static_cast<unsigned long long>(pixels),
+                                     static_cast<unsigned long long>(control_peak));
+                        } else {
+                            std::fprintf(stderr,
+                                         "[rt] replay: write control [draw %llu target resource 0x%llx]: skipped, the "
+                                         "image is an armed sampled input\n",
+                                         static_cast<unsigned long long>(capture.draw),
+                                         static_cast<unsigned long long>(capture.resource));
+                        }
+                        base += 2 * attachment_windows[k];
                     }
-                    // Diagnostic (docs/frame_capture.md): the copy runs after the frame's commands AND after any control
-                    // draw, so when a control drew the window holds the control's output. Say which line this is: the
-                    // PS-only control's readback is the coverage axis measured independently of the title pixel shader.
-                    const char* readback_label = ps_control_drew ? "frame dump PS control readback"
-                                                  : control_drew ? "frame dump control readback"
-                                                                 : "render-target readback";
-                    std::fprintf(stderr,
-                                 "[rt] replay: %s: %ux%u at the target's offset of %u,%u of %ux%u, "
-                                 "%u-byte texel: mean %llu %llu %llu, non-black %llu/%llu, peak %llu%s\n",
-                                 readback_label, capture_region.width, capture_region.height, capture_offset.x,
-                                 capture_offset.y, context_.capture_extent_.width, context_.capture_extent_.height,
-                                 capture_texel,
-                                 static_cast<unsigned long long>(sums[0] / (pixels ? pixels : 1)),
-                                 static_cast<unsigned long long>(sums[1] / (pixels ? pixels : 1)),
-                                 static_cast<unsigned long long>(sums[2] / (pixels ? pixels : 1)),
-                                 static_cast<unsigned long long>(non_black),
-                                 static_cast<unsigned long long>(pixels),
-                                 static_cast<unsigned long long>(peak),
-                                 (ps_control_drew || control_drew)
-                                     ? "; the control drew after the frame's commands and this window is its output"
-                                     : "");
-                    // The write control: the same target, cleared by us to a known colour after the frame's commands.
-                    const std::uint8_t* control = bytes + pixels * capture_texel;
-                    std::uint64_t control_sums[3] = {0, 0, 0}, control_non_black = 0, control_peak = 0;
-                    for (std::uint64_t i = 0; i < pixels; ++i) {
-                        const std::uint8_t* texel = control + i * std::size_t(capture_texel);
-                        const unsigned r = texel[0];
-                        const unsigned g = capture_texel > 1 ? texel[1] : 0;
-                        const unsigned b = capture_texel > 2 ? texel[2] : 0;
-                        control_sums[0] += r;
-                        control_sums[1] += g;
-                        control_sums[2] += b;
-                        if (r || g || b) ++control_non_black;
-                        control_peak = std::max<std::uint64_t>(control_peak, std::max(r, std::max(g, b)));
-                    }
-                    std::fprintf(stderr,
-                                 "[rt] replay: write control: mean %llu %llu %llu, non-black %llu/%llu, peak %llu\n",
-                                 static_cast<unsigned long long>(control_sums[0] / (pixels ? pixels : 1)),
-                                 static_cast<unsigned long long>(control_sums[1] / (pixels ? pixels : 1)),
-                                 static_cast<unsigned long long>(control_sums[2] / (pixels ? pixels : 1)),
-                                 static_cast<unsigned long long>(control_non_black),
-                                 static_cast<unsigned long long>(pixels),
-                                 static_cast<unsigned long long>(control_peak));
                     context_.vk.vkUnmapMemory(context_.device(), capture_memory);
                 }
             }
+        }
+        // Diagnostic (docs/frame_capture.md): the id comparison. Each sampled T#'s layer image is compared with every
+        // armed target of the frame (handle and D3D12 resource id), so "the six-image pass samples the intermediate
+        // target, the display buffer or a texture of its own" is a printed identity, not an inference.
+        for (unsigned k = 0; k < samples; ++k) {
+            const ResourceId sampled_resource = k < max_sampled_keys ? context_.sample_captures_[k].resource : 0;
+            bool matched = false;
+            for (unsigned a = 0; a < attachment_count; ++a) {
+                const bool same_image = sample_images[k] != VK_NULL_HANDLE &&
+                                        sample_images[k] == attachment_captures[a].image;
+                const bool same_resource = sampled_resource && sampled_resource == attachment_captures[a].resource;
+                if (!same_image && !same_resource) continue;
+                matched = true;
+                std::fprintf(stderr,
+                             "[rt] replay: colour path id match: sampled image 0x%llx (resource 0x%llx) is draw %llu's "
+                             "target (image 0x%llx, resource 0x%llx, %s)\n",
+                             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(sample_images[k])),
+                             static_cast<unsigned long long>(sampled_resource),
+                             static_cast<unsigned long long>(attachment_captures[a].draw),
+                             static_cast<unsigned long long>(
+                                 reinterpret_cast<std::uintptr_t>(attachment_captures[a].image)),
+                             static_cast<unsigned long long>(attachment_captures[a].resource),
+                             same_image ? "same layer image" : "same D3D12 resource");
+            }
+            if (!matched)
+                std::fprintf(stderr,
+                             "[rt] replay: colour path id match: sampled image 0x%llx (resource 0x%llx) matches no armed "
+                             "frame target\n",
+                             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(sample_images[k])),
+                             static_cast<unsigned long long>(sampled_resource));
         }
         // The sampled-texture windows (docs/frame_capture.md): what each resolved sampled image holds, so "the textures
         // are black" can be told from "the textures are fine and the pixel shader computes black".

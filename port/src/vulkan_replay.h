@@ -1162,11 +1162,13 @@ struct ReplayFunctions {
     std::function<void(std::uint64_t arena_va, std::uint64_t bytes)> pull_title_arena;
     // Diagnostic (docs/page_content.md): read the first draw's render target back after its submission, so a frame
     // that stays black can be told apart from a draw that writes nothing. Optional and bounded to one capture.
-    std::function<void(VkImage image, VkFormat format, VkExtent2D extent)> capture_attachment;
+    std::function<void(VkImage image, VkFormat format, VkExtent2D extent, ResourceId resource,
+                       std::uint64_t draw_index)>
+        capture_attachment;
     // Diagnostic (docs/frame_capture.md): the armed draw's descriptor table, decoded by the shim from the console heap
     // mirror, and a readback of the first sampled image. Both optional; consumed only by the frame dump's sample mode.
     std::function<bool(std::uint64_t table_va, std::uint32_t max_descriptors, SampledTable& out)> sampled_table;
-    std::function<void(VkImage image, VkFormat format, VkExtent2D extent)> capture_sample;
+    std::function<void(VkImage image, VkFormat format, VkExtent2D extent, ResourceId resource)> capture_sample;
     // Diagnostic (docs/frame_capture.md): read up to `bytes` of the title's own memory at `va` (the constants a draw's
     // V# names), in place. False when the range is not committed/readable; `read` returns the bytes actually copied.
     std::function<bool(std::uint64_t va, std::uint32_t bytes, std::uint8_t* out, std::uint32_t& read)> read_title_memory;
@@ -1311,6 +1313,93 @@ inline std::vector<std::uint64_t> descriptor_tables(const Draw& draw, std::uint3
         if (value) out.push_back(value);
     }
     return out;
+}
+
+// The draws the one-shot readback arms at (docs/frame_capture.md): PALMETTO_READBACK_AT_DRAW accepts a comma-separated
+// list (bounded to four), so a submission's draws - the even intermediate pass and the odd six-image pass - can both be
+// measured in one boot. Pure; read once.
+inline const std::vector<unsigned long long>& readback_draws() {
+    static const std::vector<unsigned long long> draws = [] {
+        std::vector<unsigned long long> out;
+        const char* value = std::getenv("PALMETTO_READBACK_AT_DRAW");
+        while (value && *value && out.size() < 4) {
+            char* end = nullptr;
+            const unsigned long long draw = std::strtoull(value, &end, 0);
+            if (end != value) out.push_back(draw);
+            if (!end || *end != ',') break;
+            value = end + 1;
+        }
+        return out;
+    }();
+    return draws;
+}
+inline bool readback_armed_at(std::uint64_t draw) {
+    for (const unsigned long long listed : readback_draws())
+        if (listed == draw) return true;
+    return false;
+}
+inline unsigned long long readback_primary() { return readback_draws().empty() ? 0 : readback_draws().front(); }
+
+// The descriptor-table V#s a draw's s8 table holds at the slot the module reads as matrix A (s8+0) and at the next one
+// (s8+0x40), decoded from the arena. Used by the readback arming line so both draws of the frame can be compared; reads
+// only.
+inline void print_matrix_slot(const ReplayFunctions& vk, std::uint64_t heap_base, std::uint64_t s8, const char* label) {
+    if (!vk.read_device_memory) return;
+    std::uint32_t words[8] = {};
+    std::uint32_t got = 0;
+    if (!vk.read_device_memory(heap_base + (s8 & ~std::uint64_t(3)), sizeof(words),
+                               reinterpret_cast<std::uint8_t*>(words), got) ||
+        got < 4 * sizeof(std::uint32_t)) {
+        std::fprintf(stderr, "[rt] replay: %s: table s8=0x%llx slot 0 is not readable\n", label,
+                     static_cast<unsigned long long>(s8));
+        return;
+    }
+    const gfx10::BufferWords buffer_words{words[0], words[1], words[2], words[3]};
+    gfx10::Buffer buffer{};
+    if (gfx10::decode(buffer_words, buffer)) {
+        std::fprintf(stderr,
+                     "[rt] replay: %s: matrix A slot (s8+0):  %08x %08x %08x %08x -> V# address 0x%llx stride %u "
+                     "records %u format %u\n",
+                     label, words[0], words[1], words[2], words[3],
+                     static_cast<unsigned long long>(buffer.address), buffer.stride, buffer.num_records,
+                     buffer.format);
+        // What the matrix block holds: the pass's constants (a constant-output pixel shader reads only these), so a black
+        // pass can be told from a non-zero one.
+        if (vk.read_device_memory && buffer.address) {
+            const std::uint64_t declared = buffer.stride ? std::uint64_t(buffer.stride) * buffer.num_records
+                                                         : std::uint64_t(buffer.num_records);
+            const std::uint32_t want = static_cast<std::uint32_t>(std::min<std::uint64_t>(declared, 480));
+            std::uint32_t got = 0;
+            std::uint8_t data[480] = {};
+            if (want && vk.read_device_memory(vk.heap_base + buffer.address, want, data, got) && got) {
+                std::uint64_t sum = 0, nonzero = 0, peak = 0;
+                for (std::uint32_t i = 0; i < got; ++i) {
+                    sum += data[i];
+                    if (data[i]) ++nonzero;
+                    peak = std::max<std::uint64_t>(peak, data[i]);
+                }
+                std::fprintf(stderr,
+                             "[rt] replay: %s: matrix A content: read %u of %llu B: mean %llu, non-black %llu/%u, peak "
+                             "%llu; dwords",
+                             label, got, static_cast<unsigned long long>(declared), sum / got, nonzero, got, peak);
+                const std::uint32_t dwords = std::min<std::uint32_t>(got / 4, 24);
+                for (std::uint32_t w = 0; w < dwords; ++w) {
+                    std::uint32_t value = 0;
+                    std::memcpy(&value, data + w * 4, sizeof(value));
+                    std::fprintf(stderr, " %08x", value);
+                }
+                std::fprintf(stderr, "\n");
+            } else {
+                std::fprintf(stderr, "[rt] replay: %s: matrix A content is not readable (%llu B)\n", label,
+                             static_cast<unsigned long long>(declared));
+            }
+        }
+    } else if (!words[0] && !words[1] && !words[2] && !words[3]) {
+        std::fprintf(stderr, "[rt] replay: %s: matrix A slot (s8+0) is empty (all four dwords zero)\n", label);
+    } else {
+        std::fprintf(stderr, "[rt] replay: %s: matrix A slot (s8+0):  %08x %08x %08x %08x (no V# form)\n", label,
+                     words[0], words[1], words[2], words[3]);
+    }
 }
 
 // The vertex path (docs/vertex_path.md): PALMETTO_VERTEX_PATH=1 dumps the armed draw's shader-corpus identity, the input
@@ -2756,10 +2845,6 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
     {
         static std::atomic<unsigned> logged{0};
         static std::atomic<unsigned long long> draws_seen{0};
-        static const unsigned long long readback_at = [] {
-            const char* value = std::getenv("PALMETTO_READBACK_AT_DRAW");
-            return value && *value ? std::strtoull(value, nullptr, 0) : 0ull;
-        }();
         const unsigned long long seen = draws_seen.fetch_add(1, std::memory_order_relaxed);
         const unsigned n = logged.fetch_add(1, std::memory_order_relaxed);
         if (n < 8) {
@@ -2786,20 +2871,32 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                          draw.indexed ? "indexed" : "vertices", draw.count, draw.instances, draw.first,
                          pipeline->has_pixel_stage ? "present" : "absent", pipeline->ps_images, pipeline->vs_loads);
         }
-        // Once (or at the draw PALMETTO_READBACK_AT_DRAW names): this draw's colour target is read back after its
-        // submission (docs/page_content.md), so the frame's own bytes can be compared with what the present blits.
-        if (seen == readback_at && vk.capture_attachment && !p.colors.empty() && p.colors[0].id &&
+        // Once (or at every draw PALMETTO_READBACK_AT_DRAW names - a comma-separated list arms the frame's even and odd
+        // draws together): this draw's colour target is read back after its submission (docs/page_content.md), so the
+        // frame's own bytes can be compared with what the present blits.
+        if (frame_dump::readback_armed_at(seen) && vk.capture_attachment && !p.colors.empty() && p.colors[0].id &&
             p.colors[0].binding.image) {
             const VkFormat captured = pipeline->color_formats[0] != VK_FORMAT_UNDEFINED
                                           ? pipeline->color_formats[0]
                                           : p.colors[0].binding.format;
-            vk.capture_attachment(p.colors[0].binding.image, captured, p.area);
-            std::fprintf(stderr, "[rt] replay: readback armed at draw %llu\n", seen);
+            vk.capture_attachment(p.colors[0].binding.image, captured, p.area, p.colors[0].id, seen);
+            std::fprintf(stderr,
+                         "[rt] replay: readback armed at draw %llu: pipeline 0x%llx target resource 0x%llx image 0x%llx "
+                         "format %d area %ux%u viewport %.1fx%.1f at %.1f,%.1f\n",
+                         seen, static_cast<unsigned long long>(draw.pipeline),
+                         static_cast<unsigned long long>(p.colors[0].id),
+                         static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(p.colors[0].binding.image)),
+                         static_cast<int>(captured), p.area.width, p.area.height,
+                         static_cast<double>(draw.viewport.width), static_cast<double>(draw.viewport.height),
+                         static_cast<double>(draw.viewport.x), static_cast<double>(draw.viewport.y));
+            if (draw.user_data[8])
+                frame_dump::print_matrix_slot(vk, vk.heap_base, draw.user_data[8], "readback target");
         }
-        // Diagnostic (docs/frame_capture.md): the armed draw's sampled textures. Prints the descriptor tables' keys
-        // the shim decodes from the console heap mirror and arms a readback of the first sampled image, so a black
-        // target can be told apart from black sampled content. Bounded; off unless PALMETTO_FRAME_DUMP_SAMPLE is set.
-        if (seen == readback_at && frame_dump::sample_enabled() && vk.sampled_table && vk.capture_sample) {
+        // Diagnostic (docs/frame_capture.md): every armed draw's sampled textures. Prints the descriptor tables' keys
+        // the shim decodes from the console heap mirror and arms a readback of each sampled image, so a black target can
+        // be told apart from black sampled content. Bounded; off unless PALMETTO_FRAME_DUMP_SAMPLE is set.
+        if (frame_dump::readback_armed_at(seen) && frame_dump::sample_enabled() && vk.sampled_table && vk.capture_sample) {
+            std::fprintf(stderr, "[rt] replay: frame dump sample: draw %llu\n", seen);
             for (const std::uint64_t table_va : frame_dump::descriptor_tables(draw, pipeline->table_windows)) {
                 SampledTable table;
                 if (!vk.sampled_table(table_va, 64, table)) continue;
@@ -2873,7 +2970,7 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                                  static_cast<unsigned long long>(key.resource),
                                  key.title_va ? "" : "none (committed, not placed) ",
                                  static_cast<unsigned long long>(key.title_va));
-                    vk.capture_sample(key.image_handle, key.format, key.extent);
+                    vk.capture_sample(key.image_handle, key.format, key.extent, key.resource);
                 }
                 // Every T# that does not resolve is named too: an unresolved key is an input the pixel shader reads with
                 // no layer image behind it, which shows up as an empty input rather than a black texture.
@@ -2890,7 +2987,7 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
         // Diagnostic (docs/frame_capture.md, the colour path): what the armed draw's pixel shader consumes. The image
         // count says whether the shader samples images at all (a constant-output PS reads none); the non-zero push-constant
         // dwords are the only per-draw scalars it can receive (s0..s31). Bounded, reads only.
-        if (seen == readback_at && frame_dump::sample_enabled()) {
+        if (frame_dump::readback_armed_at(seen) && frame_dump::sample_enabled()) {
             unsigned nonzero_constants = 0;
             std::fprintf(stderr, "[rt] replay: colour path: ps %s, %u image sample(s) -> %s; non-zero push constants:",
                          pipeline->has_pixel_stage ? "present" : "absent", pipeline->ps_images,
@@ -3009,7 +3106,7 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
         // resolved, the input layout bound to the Vulkan pipeline, the raw vertex and index bytes the draw reads (through
         // the title-memory hook) and the constants, so the translated vertex shader's inputs can be evaluated off the
         // boot. Off unless PALMETTO_VERTEX_PATH is set; bounded and reads only.
-        if (seen == readback_at && frame_dump::vertex_path_enabled()) {
+        if (frame_dump::readback_armed_at(seen) && frame_dump::vertex_path_enabled()) {
             VertexPathInfo info;
             if (pipeline->describe_vertex_path) pipeline->describe_vertex_path(info);
             std::fprintf(stderr,

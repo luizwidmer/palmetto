@@ -250,6 +250,42 @@ shader that samples T# slot 1), so the measured image can be seen at the display
 a solid-image/debug-module addition in the shim, which is why they are the colour-path increment, not a measurement of
 this one.
 
+### The two-pass frame, measured: the sampled image is the sibling pass's render target
+
+`PALMETTO_READBACK_AT_DRAW` now takes a comma-separated list, so one boot copies several draws' targets and prints each
+with its draw index and resource id. The measurement (all switches on: console feed, vertex-stream descriptor, slot-70
+publish, vertex path, frame dump, sample mode; two frames armed, draws 20000/20001 and 24000/24001 / 28000/28001):
+
+| draw | pipeline (PS shape) | target resource | target readback | sampled T# |
+|---|---|---|---|---|
+| 20000 | 6 image sample(s) | 0x2f71567f9a0 | mean 0 0 0, 0/16384 | image 0x3085d055ad0 -> resource 0x3052d112890 (black at this draw) |
+| 20001 | constant-output (0 images) | 0x3052d112890 | mean 0 0 0, 0/16384 | - |
+| 24000 | 6 image sample(s) | 0x2f71567f9a0 | mean 0 0 0, 0/16384 | image 0x3085d055ad0 (28% non-black by now) |
+| 24001 | constant-output | 0x3085d055ad0 | **mean 14 28 57, non-black 4608/16384, peak 204** | - |
+| 28000 | 6 image sample(s) | 0x15975079a60 (**= present plane 0 resource of PresentX call 2**) | mean 0 0 0, 0/16384 | image 0x16a82045ad0 -> resource 0x166c0795040, **mean 14 28 57, 4608/16384** |
+| 28001 | constant-output (0 images) | 0x166c0795040 | **mean 14 28 57, non-black 4608/16384, peak 204** | - |
+
+The identity comparison is exact: the 6-image pass's sampled T# resolves to the **sibling constant-output pass's 4K
+render target** (same layer image / same D3D12 resource), and the 6-image pass's own target is the **presented plane's
+resource** (`0x15975079a60` = present plane 0 resource of call 2). So the "placed 4K texture nothing writes" from
+`docs/texture_source.md` is not a texture the CPU should have filled: it is a **render target the title's own constant
+pass fills through the GPU**. Nothing about page writes could see it, exactly as suspected.
+
+What the two passes are today: the constant-output pass (pipeline `fspx/lib_ps_00820`) writes a mostly-black frame with
+one blue element - the measured 128x128 origin window is 28% covered (4608/16384) with `mean 14 28 57, peak 204`, i.e. a
+blue shape (the write control is 51/102/204, so the element is that colour at 28% coverage). Its own constants come from
+a 96-byte matrix-A block (V# address 0x86ff20, stride 0, 96 bytes; content read 96 B: mean 17, non-black 9/96, peak 255 -
+sparse, not empty) published for it. The 6-image pass (`fspx/lib_ps_00822`) samples that non-black target yet its own
+target (the presented resource) reads black: of its 6 image-sampling instructions only the sibling target's T# resolves
+(key 1); the other T# (key 5) is unresolved, and slot70's publication log reports 60 refused "texture-shaped
+description (no pinned T# encoding)" - the likely source of the remaining sampled inputs.
+
+So the structural unknown is resolved: **the frame is a constant/background pass plus an upscale pass that samples the
+previous pass's render target, and the display target is the upscale pass's**. The remaining black is the upscale pass's
+composition, whose other sampled inputs are missing/unresolved; the next increment is the texture-shaped T# publication
+(slot70) or the substitution control that binds a known image into the upscale pass's sampled window, then the same
+two-draw readback shows whether the upscale output follows its input.
+
 ## 8. The cull axis and the constants: neither explains the absent coverage
 
 Two boots on the same build close the two cheapest alternatives behind section 6's black window:
