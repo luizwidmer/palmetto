@@ -4910,12 +4910,17 @@ public:
         // Which user-data dwords hold a descriptor table's 64-bit VA: the graphics layout packs every table as two
         // dwords (rt::rootsig::pack). The title's console descriptor-heap VAs and the VAs of its placed buffers overlap
         // in its address space, so the replay rebases a value that is in both by what the root parameter says it is
-        // (docs/page_address_space.md).
+        // (docs/page_address_space.md). The console slot of a table (one 32-bit dword, docs/root_arguments.md) is marked
+        // as well: PALMETTO_GRAPHICS_CONSOLE_ROOT writes the same rebased table VA there.
         if (const RootArgumentLayout* root = root_signature_layout(desc.pRootSignature)) {
             for (const auto& parameter : root->parameters) {
-                if (parameter.type != rt::rootsig::ParamType::Table || parameter.user_offset + 1 >= 32) continue;
-                graphics_.table_windows |= std::uint32_t(1) << parameter.user_offset;
-                graphics_.table_windows |= std::uint32_t(1) << (parameter.user_offset + 1);
+                if (parameter.type != rt::rootsig::ParamType::Table) continue;
+                if (parameter.user_offset + 1 < 32) {
+                    graphics_.table_windows |= std::uint32_t(1) << parameter.user_offset;
+                    graphics_.table_windows |= std::uint32_t(1) << (parameter.user_offset + 1);
+                }
+                if (parameter.console_offset != rt::rootsig::kNoSgpr && parameter.console_offset < 32)
+                    graphics_.table_windows |= std::uint32_t(1) << parameter.console_offset;
             }
         }
         device_.context->add_graphics_pipeline(id(), graphics_);
@@ -7239,6 +7244,19 @@ public:
                 }
             layout.parameters.push_back({parsed.sig.params[i].type, first, parsed.sig.params[i].num_values,
                                          compute.ok ? compute.first_sgpr[i] : rt::rootsig::kNoSgpr});
+        }
+        // The console graphics user-SGPR layout (docs/root_arguments.md). The graphics feed path writes the PC packing
+        // (from s0, two dwords per table) today, but a translated vertex/pixel shader reads each root parameter at its
+        // console slot - base s8, one dword per descriptor table - so it finds zero there. Both layouts are carried so
+        // the feed path can fill the console slots from the same values (PALMETTO_GRAPHICS_CONSOLE_ROOT, diagnostic;
+        // the mesh base s16 is not fed by this path yet).
+        {
+            rt::graphics_pso::ConsoleUserDataPlacement console;
+            const bool placed = rt::graphics_pso::console_graphics_user_data(parsed.sig, false, &console);
+            layout.console_ok = placed;
+            layout.console_base = console.base;
+            for (std::size_t i = 0; i < layout.parameters.size() && i < console.first_sgpr.size(); ++i)
+                layout.parameters[i].console_offset = console.first_sgpr[i];
         }
         register_static_samplers(parsed.sig);
         auto* signature = new RootSignature(

@@ -1158,6 +1158,27 @@ private:
         std::array<std::uint32_t, rt::rootsig::kMaxUserSgprs> data{};
     };
 
+    // PALMETTO_GRAPHICS_CONSOLE_ROOT=1 (diagnostic, docs/root_arguments.md): also fill the console user-SGPR layout
+    // (rt::rootsig::pack_stage from s8, one dword per descriptor table) that a translated vertex/pixel shader actually
+    // reads, in addition to the PC packing from s0 that the port feeds today. Off by default until a boot measures the
+    // difference; read once so the default path imports no call here.
+    bool graphics_console_root_enabled() const {
+        static const bool on = [] {
+            char value[8] = {};
+            return GetEnvironmentVariableA("PALMETTO_GRAPHICS_CONSOLE_ROOT", value, sizeof(value)) > 0 &&
+                   value[0] != '\0' && value[0] != '0';
+        }();
+        return on;
+    }
+
+    // The graphics bind point's console slot for a parameter: kNoSgpr when the PC packing is what is fed or the
+    // signature's console layout was refused (RootArgumentLayout::console_ok).
+    std::uint32_t console_dword(const RootState& state, const RootArgumentLayout::Parameter& p) const {
+        if (is_compute(state) || !state.layout || !state.layout->console_ok || !graphics_console_root_enabled())
+            return rt::rootsig::kNoSgpr;
+        return p.console_offset;
+    }
+
     // D3D12 leaves root arguments undefined after a root-signature change; they start at zero here. Setting the
     // signature that is already bound changes nothing: "existing root signature bindings do not become stale"
     // (D3D12, "Using a Root Signature"), and engines rebind routinely.
@@ -1230,6 +1251,12 @@ private:
         const auto* values = static_cast<const std::uint32_t*>(data);
         const std::uint32_t first = first_dword(state, *p);
         for (UINT i = 0; i < count; ++i) write(state, first + offset + i, values[i]);
+        // The console layout's slot for the same constants (docs/root_arguments.md): a translated VS/PS reads them
+        // there, not at the PC dword.
+        const std::uint32_t console = console_dword(state, *p);
+        if (console != rt::rootsig::kNoSgpr)
+            for (UINT i = 0; i < count; ++i)
+                write(state, console + offset + i, values[i]);
     }
 
     void address(RootState& state, UINT index, std::uint64_t va, rt::rootsig::ParamType type) {
@@ -1245,6 +1272,13 @@ private:
         // In the compute layout a descriptor table is one dword, the 32-bit VA of its first descriptor (the heaps
         // live below 4 GiB); a root view keeps both halves. The graphics layout gives every address two dwords.
         if (!(is_compute(state) && type == rt::rootsig::ParamType::Table)) write(state, first + 1, std::uint32_t(va >> 32));
+        // The console graphics slot (docs/root_arguments.md): a table is one 32-bit heap VA there, a root view keeps
+        // its two dword halves.
+        const std::uint32_t console = console_dword(state, *p);
+        if (console != rt::rootsig::kNoSgpr) {
+            write(state, console, std::uint32_t(va));
+            if (type != rt::rootsig::ParamType::Table) write(state, console + 1, std::uint32_t(va >> 32));
+        }
     }
 
     D3D12_COMMAND_LIST_TYPE type_;

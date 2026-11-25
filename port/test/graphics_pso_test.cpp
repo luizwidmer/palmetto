@@ -18,6 +18,9 @@
 //     bytes for a stage the record does not name, bad attachment lists, a zeroed fixed-function state and a mesh stage
 //     are refused, each with its field named; the fixed-function state is used verbatim (a second, different state
 //     changes the description field for field), so there is no silent default.
+//   - console_graphics_user_data(): the console user-SGPR placement of a root signature (docs/root_arguments.md):
+//     vertex/pixel base s8 with one dword per descriptor table and two per root view, mesh base s16, and a
+//     signature that would spill refused with its parameter named.
 //   - decode_fixed_function_state(): the decoded state record's container passes, but all eight fixed-function fields
 //     refuse by name with the histogram key `state.fixed_function` and the output untouched; an undecoded container
 //     refuses as `state` (docs/state_blob.md).
@@ -1263,6 +1266,61 @@ void test_build_refusals() {
 }
 
 // The input and refusal surface, printed for the next reader.
+// The console graphics user-SGPR layout (docs/root_arguments.md): a translated vertex/pixel shader reads root
+// parameters from the stage base (s8; mesh s16), one dword per descriptor table, not from the PC packing at s0. The
+// helper is a pure placement (rt::rootsig::pack_stage) with the stage chosen by the pipeline's shape; a signature that
+// would spill is refused with the parameter named, never truncated.
+void test_console_graphics_user_data() {
+    using rt::rootsig::ParamType;
+    using rt::rootsig::RootParameter;
+    using rt::rootsig::RootSignature;
+
+    RootSignature signature;
+    RootParameter constants;
+    constants.type = ParamType::Constants;
+    constants.num_values = 2;
+    signature.params.push_back(constants);
+    RootParameter table;
+    table.type = ParamType::Table;
+    table.ranges.resize(3);
+    signature.params.push_back(table);
+    RootParameter view;
+    view.type = ParamType::Descriptor;
+    signature.params.push_back(view);
+
+    pso::ConsoleUserDataPlacement placement;
+    check(pso::console_graphics_user_data(signature, false, &placement), "console layout: the vs/ps signature places");
+    check(placement.ok && placement.base == 8, "console layout: the vertex/pixel base is s8");
+    check(placement.first_sgpr.size() == 3, "console layout: one entry per root parameter");
+    check(placement.first_sgpr[0] == 8, "console layout: the first constants take s8");
+    check(placement.first_sgpr[1] == 10, "console layout: a descriptor table takes one dword at s10");
+    check(placement.first_sgpr[2] == 11, "console layout: a root view takes two dwords at s11");
+
+    pso::ConsoleUserDataPlacement mesh;
+    check(pso::console_graphics_user_data(signature, true, &mesh), "console layout: the same signature places for mesh");
+    check(mesh.base == 16 && mesh.first_sgpr[0] == 16, "console layout: the mesh base is s16");
+
+    // A signature that would run past s31 must be refused by name (the console spills; that layout is not modelled).
+    RootSignature big;
+    RootParameter many;
+    many.type = ParamType::Constants;
+    many.num_values = 28;
+    big.params.push_back(many);
+    big.params.push_back(table);
+    pso::ConsoleUserDataPlacement refused;
+    check(!pso::console_graphics_user_data(big, false, &refused), "console layout: a spilling signature is refused");
+    check(!refused.ok && refused.error.find("parameter") != std::string::npos,
+          "console layout: the refusal names the parameter that does not fit");
+
+    std::printf("graphics_pso_test: console graphics user-data placement (docs/root_arguments.md)\n");
+    std::printf("  %-10s %-6s %s\n", "pipeline", "base", "first user SGPR per parameter");
+    std::printf("  %-10s s%-5u", "vs/ps", placement.base);
+    for (std::uint32_t first : placement.first_sgpr) std::printf(" s%u", first);
+    std::printf("\n  %-10s s%-5u", "mesh", mesh.base);
+    for (std::uint32_t first : mesh.first_sgpr) std::printf(" s%u", first);
+    std::printf("\n");
+}
+
 void print_findings() {
     struct Row {
         const char* item;
@@ -1317,6 +1375,7 @@ int main() {
     test_resolve_native_stage();
     test_pick_entry();
     test_documented_default_state();
+    test_console_graphics_user_data();
     test_fixed_function_state_decode();
     test_fixed_function_probe();
     test_build_success();

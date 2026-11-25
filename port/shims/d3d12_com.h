@@ -386,14 +386,22 @@ std::unique_ptr<WindowPresenter> create_window_presenter(ID3D12Device* device, H
 struct RootArgumentLayout {
     struct Parameter {
         rt::rootsig::ParamType type;
-        std::uint32_t user_offset;     // graphics: first dword; unused for a parameter with no dwords
+        std::uint32_t user_offset;     // graphics: first dword of the PC packing (rt::rootsig::pack, from s0)
         std::uint32_t constant_count;  // constants only
         std::uint32_t compute_offset = rt::rootsig::kNoSgpr;  // compute: first user SGPR
+        // Graphics console layout (docs/root_arguments.md): the parameter's first user SGPR in the translated
+        // shaders' console layout (rt::rootsig::pack_stage, base s8 for vertex/pixel/geometry, s16 for mesh), or
+        // kNoSgpr when that layout refuses the signature. The graphics feed path writes the same arguments here as
+        // well when PALMETTO_GRAPHICS_CONSOLE_ROOT is on, because a translated VS/PS reads its parameter at the console
+        // slot while the PC packing above puts it at a different dword.
+        std::uint32_t console_offset = rt::rootsig::kNoSgpr;
     };
     std::vector<Parameter> parameters;
     std::uint32_t flags = 0;  // D3D12_ROOT_SIGNATURE_FLAGS from the serialized blob
     bool graphics_ok = true;
     bool compute_ok = true;
+    bool console_ok = false;  // every graphics parameter has a console_offset (the console layout placed it whole)
+    std::uint32_t console_base = 0;  // the console layout's stage base (8 vertex/pixel/geometry, 16 mesh)
 };
 
 // For the command list: the argument layout of a root signature from a Vulkan device, and the id it records for a

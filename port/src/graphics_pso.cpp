@@ -167,6 +167,27 @@ FixedFunctionState documented_default_state() {
     return state;
 }
 
+bool console_graphics_user_data(const rt::rootsig::RootSignature& signature, bool mesh_pipeline,
+                                ConsoleUserDataPlacement* out) {
+    if (!out) return false;
+    ConsoleUserDataPlacement placement;
+    placement.stage = mesh_pipeline ? rt::rootsig::Stage::Mesh : rt::rootsig::Stage::Vertex;
+    placement.base = rt::rootsig::stage_base(placement.stage);
+    // The same placement rule the compute bind point measured (D3D-448): root order from the stage base, each
+    // parameter whole; a parameter that does not fit would spill through the console's root-signature spill pointer,
+    // a layout this tree does not model, so the signature is refused with that parameter named.
+    const rt::rootsig::StagePackResult packed = rt::rootsig::pack_stage(signature, placement.stage);
+    if (!packed.ok) {
+        placement.error = packed.error;
+        *out = std::move(placement);
+        return false;
+    }
+    placement.first_sgpr = packed.first_sgpr;
+    placement.ok = true;
+    *out = std::move(placement);
+    return true;
+}
+
 bool decode_fixed_function_state(const rt::graphics_record::State& state, FixedFunctionState* out,
                                  FixedFunctionFieldStatus* fields, std::string* why) {
     if (fields) *fields = FixedFunctionFieldStatus{};

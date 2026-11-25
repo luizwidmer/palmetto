@@ -71,6 +71,9 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
     src/graphics_record.cpp
     src/graphics_pso.cpp
   )
+  # graphics_pso::console_graphics_user_data() places a root signature's parameters in the console user-SGPR layout
+  # (rt::rootsig::pack_stage), so every consumer of this library needs the portable root-signature model.
+  target_link_libraries(palmetto_slot57 PUBLIC palmetto_root_signature)
   target_include_directories(palmetto_slot57 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_compile_definitions(palmetto_slot57 PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(palmetto_slot57 PRIVATE /W4 /permissive- /utf-8)
@@ -217,6 +220,7 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
     add_executable(xs_proxy_mock_test
       test/xs_proxy_mock_test.cpp
       shims/d3d12_xs_device.cpp
+      src/root_signature.cpp
     )
     target_compile_definitions(xs_proxy_mock_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(xs_proxy_mock_test PRIVATE /W4 /permissive- /utf-8 /EHsc)
@@ -516,7 +520,8 @@ if(BUILD_TESTING)
   # builder (src/graphics_pso.h, docs/graphics_pso.md). Synthetic records and a synthetic shader index, no device and no
   # game files. It needs d3d12.h for the D3D12_GRAPHICS_PIPELINE_STATE_DESC it builds, which is why it is Windows-only.
   if(WIN32)
-    add_executable(graphics_pso_test test/graphics_pso_test.cpp src/graphics_pso.cpp src/graphics_record.cpp)
+    add_executable(graphics_pso_test test/graphics_pso_test.cpp src/graphics_pso.cpp
+                   src/graphics_record.cpp src/root_signature.cpp)
     target_include_directories(graphics_pso_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_compile_definitions(graphics_pso_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     if(MSVC)

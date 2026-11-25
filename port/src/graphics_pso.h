@@ -42,6 +42,7 @@
 #include <vector>
 
 #include "graphics_record.h"
+#include "root_signature.h"
 #include "shader_library.h"
 
 namespace rt::graphics_pso {
@@ -114,6 +115,36 @@ struct FixedFunctionState {
 // off, sample count 1 with the full mask. It is a measurement stand-in, not the console's state: passing it is a
 // decision the caller makes and logs (the create_standin_graphics_pipeline defaults are the same set).
 FixedFunctionState documented_default_state();
+
+// ---- Where the graphics bind point's root arguments actually go: the console user-SGPR layout ---------------------
+//
+// A translated shader reads its root arguments from physical user SGPRs, and for a graphics stage the console base is
+// s8 for vertex/pixel/geometry and s16 for mesh (docs/d3d12_vulkan.md section 3.5: `rt::rootsig::pack_stage`, measured
+// for compute, a census hypothesis for the graphics stages). From that base a root signature is laid out in parameter
+// order, each parameter whole: a 32-bit constant one dword per value, a root CBV/SRV/UAV two (its 64-bit VA) and a
+// descriptor table **one** (the 32-bit VA of its first descriptor; the heaps live below 4 GiB).
+//
+// The port feeds the graphics bind point with the *PC* packing instead (`rt::rootsig::pack` from s0, two dwords per
+// table; docs/d3d12_vulkan.md section 3.5 "D3D-448"), so a translated vertex or pixel shader that reads the parameter
+// at its console slot reads zero. This is not a record decode: the slot-57 record carries no root-argument values at
+// all (docs/root_arguments.md), and the one root argument the title does set - the descriptor table it sets before the
+// draw - arrives but at the PC slot. `console_graphics_user_data()` exposes the console slots so the feed path can fill
+// them from the same values it already feeds, which is the A/B the vertex-path measurement needs.
+struct ConsoleUserDataPlacement {
+    bool ok = false;
+    std::string error;  // set when !ok; names the refusing parameter
+    rt::rootsig::Stage stage = rt::rootsig::Stage::Vertex;  // the base this placement used
+    std::uint32_t base = 0;                                 // the stage's first user SGPR
+    // Per parameter, its first console user SGPR (rt::rootsig::kNoSgpr when the signature is refused).
+    std::vector<std::uint32_t> first_sgpr;
+};
+
+// Places `signature`'s parameters in the console user-SGPR layout for a graphics pipeline: mesh base s16 when the
+// pipeline carries a mesh stage, the vertex/pixel/geometry base s8 otherwise. Returns false (with `error` naming the
+// parameter that does not fit) when the signature would spill, so a caller refuses instead of truncating; `out` is
+// otherwise filled with the per-parameter first SGPR. No device and no game file: the tests build the signatures.
+bool console_graphics_user_data(const rt::rootsig::RootSignature& signature, bool mesh_pipeline,
+                                ConsoleUserDataPlacement* out);
 
 // Which of FixedFunctionState's eight fields a decoded state record yielded. The state blob's container decodes
 // (rt::graphics_record::decode_state, docs/state_blob.md) but no measurement of this title's data pins any of its
