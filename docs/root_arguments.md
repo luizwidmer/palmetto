@@ -197,7 +197,58 @@ PS-control stays black after the fetch slots above are shown to hold the descrip
 path is closed and the remaining gap is the colour/sample path (`docs/texture_source.md`).
 
 
-## 7. Limits and tests
+## 7. The fetch-site spec (handoff to the frame-capture encoder)
+
+The translated `lib_vs_00823` module loads **three descriptors** itself, all through `heap_base + (push-constant dword
+& ~3)`, and they are not three copies of the same view. The exact reads and their consumers (disassembled with
+`spirv-dis` from the published module; offsets/opcodes only):
+
+| site | address the module forms | dwords loaded | what the module does with them |
+|---|---|---|---|
+| `s0`/`s1` | `heap_base + (((s1 & 0xFF) << 32) \| (s0 & 0xFFFFFFFC))` | 4 at +0 | **vertex-stream V#** (4-dword gfx10 V#): `base = ((w1 & 0xFFFF) << 32) \| (w0 & ~3)`, `stride = w1[29:16]`, `index = s2 + (gl_VertexIndex - BaseVertex)`, `count = w2`, `OOB = w3[29:28]`, `format = w3[18:12]`, `dst_sel = w3[11:0]`; it then loads the vertex dwords at element `index`, byte offsets 0/4/8 (POSITION), 12 (COLOR, typed) and 16/20 (TEXCOORD) |
+| `s8+0x00` | `heap_base + (s8 & 0xFFFFFFFC)` | 4 at +0 | **matrix-A V#**: `base = ((w1 & 0xFFFF) << 32) \| (w0 & ~3)`, `declared = (w1[29:16] == 0) ? w2 : w2 * w1[29:16]`; the module reads **16 dwords** (a 4x4, 64 bytes) at base+0..60, each word loaded only when `declared >= 4*(k+1)`; **w3 is never read** |
+| `s8+0x40` | `heap_base + (s8 & 0xFFFFFFFC) + 0x40` | 4 at +0 | **matrix-B V#**, same rule and same 16-dword fetch |
+
+The 16 dwords from the two matrix V#s are the operands of the FMA chain that builds `gl_Position` (matrix-A words are
+consumed at `%992..%1062`), and the vertex tags are the other operand, so all three fetches must hold real data for a
+fragment to exist. Two field gates the module applies, both measured from the code:
+
+* the **COLOR** attribute's typed path is gated on `bounds && (w3[18:12] != 0)` of the *vertex-stream* V# - a raw
+  V# (format 0) silently returns zero COLOR (the conversion itself is inlined, so any non-zero format enables it; the
+  exact format value is not pinned by this module);
+* the vertex fetch's bounds test depends on `OOB_SELECT` (`w3[29:28]`): `0 structured_with_offset` needs
+  `index < count` and `offset + 4 <= stride`; `3 raw` compares against `count`; both pass for the measured
+  `index < 170, stride 24` and byte offsets up to 20.
+
+### What the frame-capture encoder must write
+
+* **`s0`/`s1` pair**: the heap-relative address of the 64-byte driver block (only its first 16 bytes are read), holding
+  the vertex-stream V# at block+0:
+  `w0 = uint32(vertex_arena_relative)`, `w1 = ((vertex_arena_relative >> 32) & 0xFFFF) | (stride << 16)` with
+  **bit 31 = 0**, `w2 = view.size / stride` (170 measured), `w3 = identity DST_SEL (0x00000FAC) | format << 12`
+  (format must be non-zero for COLOR) `| OOB_SELECT << 28` (0 or 3 measured passing).
+* **table slot `s8+0x00`**: a **matrix** V# (raw constant buffer), *not* the vertex stream:
+  `w0 = uint32(matrix_arena_relative)`, `w1 = ((matrix_arena_relative >> 32) & 0xFFFF) | (stride << 16)` (stride 0 for a
+  raw buffer, then `w2` is the byte count), `w2 >= 64`, `w3` unused (write 0 or `0x30000FAC`).
+* **table slot `s8+0x40`**: the title's own constants V# (`0x86DC40`, stride 0, `w2 = 0x1E0` = 480 bytes,
+  `w3 = 0x30014FAC`) - leave it untouched.
+
+**Why the earlier vertex-V#-in-slot-0 variant stays black**: the first 64 bytes of the vertex stream are the measured
+vertices (`0,0,0,0xFFFFFFFF, ...`), and the module reads that as matrix A, so the 4th dword is `0xFFFFFFFF` = **NaN** as a
+float; the FMA chain then produces non-finite clip coordinates and nothing rasterizes. Putting the vertex V# in slot 0
+therefore does not fill matrix A, it poisons it.
+
+**Where matrix A really comes from**: the draw's table slot 0 is empty in the title's own console heap (measured: all four
+dwords zero, every boot), while its slot 1 is a T# and its slot 2 the constants V# above. The only producer of 32-byte
+descriptor slots measured in this title is **console device slot 70** (`docs/device_slot70.md`): 14,262 calls in a window,
+destinations zeroed before the call, a 1024-slot 32-byte ring, each record carrying a 128-byte CPU block, 32 elements and
+a format word - i.e. the runtime, not the title, writes those descriptors, and this layer's measured answer there is a
+refusal. So matrix A's source is the slot-70 publish (its 128-byte block is the per-frame transform; the shader reads its
+first 64 bytes), and synthesising slot 0 from the vertex stream cannot be correct. A coverage-only *experiment* (not a
+fix) would point matrix A at the existing 480-byte constants buffer: its first 4x4 is identity-shaped, so if matrix B is
+the screen transform the pair may produce coverage; that is a measurement, not the title's data.
+
+## 8. Limits and tests
 
 * No game data, package addresses, shader bytes or extracted tables: the tables above hold counts, offsets and dword
   positions, and the boot logs quoted are on disk outside the repository (`D:\palmetto-work\boot-rootargs*`).
