@@ -1383,7 +1383,28 @@ inline void note_list_slot(unsigned slot, std::uint64_t a1 = 0, std::uint64_t a2
         std::fprintf(stderr, "[rt] d3d12_xs: list slot %u first call (args 0x%llx 0x%llx 0x%llx 0x%llx)\n", slot,
                      static_cast<unsigned long long>(a1), static_cast<unsigned long long>(a2),
                      static_cast<unsigned long long>(a3), static_cast<unsigned long long>(a4));
+    // Diagnostic (docs/frame_capture.md, the root-argument fallback): the console list slots a title inline writer falls
+    // back to at the user-data limit are 20/24/35/43/45/47. Classify their arguments (shape only, bounded per slot,
+    // opt-in PALMETTO_LIST_SLOT_TRACE), so a root-32-bit-constant-like payload - an (index, count, values pointer) triple
+    // - is recognised if the load window carries one. No values are printed.
+    static const bool trace = [] {
+        char value[8] = {};
+        return GetEnvironmentVariableA("PALMETTO_LIST_SLOT_TRACE", value, sizeof(value)) > 0 && value[0] != '\0' &&
+               value[0] != '0';
+    }();
+    if (!trace) return;
+    if (slot != 20 && slot != 24 && slot != 35 && slot != 43 && slot != 45 && slot != 47) return;
+    static std::atomic<unsigned> logged[kListSlots];
+    const unsigned shown = logged[slot].fetch_add(1, std::memory_order_relaxed);
+    if (shown >= 8) return;
+    const bool constant_like = a1 < 64 && a2 >= 1 && a2 <= 32;
+    std::fprintf(stderr,
+                 "[rt] d3d12_xs: list slot %u fallback call %u: args 0x%llx 0x%llx 0x%llx 0x%llx; %s\n", slot, shown,
+                 static_cast<unsigned long long>(a1), static_cast<unsigned long long>(a2),
+                 static_cast<unsigned long long>(a3), static_cast<unsigned long long>(a4),
+                 constant_like ? "index/count shape (possible root 32-bit constants)" : "other shape");
 }
+
 
 // ---- Console recording-call probe (measurement only; PALMETTO_XS_CLEAR_BARRIER_PROBE=1) --------------------------
 //
@@ -1727,6 +1748,69 @@ void view_shape_probe(unsigned slot, const void* return_address, const std::uint
                      static_cast<unsigned long long>(g_view_shape_calls.load(std::memory_order_relaxed)));
         view_shape_histogram(slot);
     }
+}
+
+// ---- Load-window trace (measurement only; PALMETTO_LOAD_TRACE=<from_s>,<to_s>) -------------------------------------
+//
+// docs/streamed_consumer.md: the title's CPU deserializer reads the first sixteen streamed blocks at ~2.3 s and then
+// stops while the frame loop keeps presenting a black blit. This trace names what the device and the queue/fence proxies
+// are asked inside the loading window, relative to the first traced call: one line per call with its thread, caller and
+// arguments, plus the fence value a GetCompletedValue returns, so the primitive the loading code waits on is measured
+// rather than inferred. `PALMETTO_LOAD_TRACE=1` means 0..15 s; "from,to" narrows it. Bounded (20,000 lines), off by
+// default, changes no call.
+struct LoadTraceWindow {
+    bool on = false;
+    double from = 0.0;
+    double to = 15.0;
+};
+
+const LoadTraceWindow& load_trace_window() {
+    static const LoadTraceWindow window = [] {
+        LoadTraceWindow w;
+        char value[64] = {};
+        if (GetEnvironmentVariableA("PALMETTO_LOAD_TRACE", value, sizeof(value)) == 0 || value[0] == '\0') return w;
+        w.on = true;
+        char* end = nullptr;
+        w.from = std::strtod(value, &end);
+        if (end == value) return w;
+        if (*end == ',') {
+            const double to = std::strtod(end + 1, nullptr);
+            if (to > w.from) w.to = to;
+        }
+        return w;
+    }();
+    return window;
+}
+
+// Seconds since the first traced call: taken on first use, so it starts with the device proxy's first forwarded call.
+double load_trace_seconds() {
+    static const auto started = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+}
+
+std::atomic<std::uint64_t> g_load_trace_lines{0};
+
+void load_trace_note(const char* kind, unsigned slot, const void* caller, const std::uint64_t* words, unsigned count,
+                     std::uint64_t result, bool has_result) {
+    if (!load_trace_window().on) return;
+    const double at = load_trace_seconds();
+    const LoadTraceWindow& window = load_trace_window();
+    if (at < window.from || at >= window.to) return;
+    if (g_load_trace_lines.fetch_add(1, std::memory_order_relaxed) >= 20000) return;
+    char where[64];
+    streamed_blocks::caller_text(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(caller)), where,
+                                 sizeof where);
+    char args[256];
+    int used = 0;
+    for (unsigned i = 0; i < count && static_cast<size_t>(used) < sizeof args - 32; ++i)
+        used += std::snprintf(args + used, sizeof args - static_cast<size_t>(used), " 0x%llx",
+                              static_cast<unsigned long long>(words[i]));
+    if (used < 0) used = 0;
+    if (has_result && static_cast<size_t>(used) < sizeof args - 40)
+        std::snprintf(args + used, sizeof args - static_cast<size_t>(used), " result 0x%llx",
+                      static_cast<unsigned long long>(result));
+    std::fprintf(stderr, "[rt] load trace +%.3fs tid %lu %s slot %u: args%s%s caller %s\n", at,
+                 static_cast<unsigned long>(GetCurrentThreadId()), kind, slot, count ? "" : " (none)", args, where);
 }
 
 bool clear_barrier_probe() {
@@ -2513,6 +2597,13 @@ std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_
                                        : K == ChildKind::fence ? CallerKind::fence
                                                                : CallerKind::allocator;
     if (callers_enabled()) note_caller(caller_kind, Slot, _ReturnAddress(), a1, a2, a3, a4);
+    if constexpr (K == ChildKind::queue || K == ChildKind::fence) {
+        if (load_trace_window().on) {
+            const std::uint64_t load_words[3] = {a1, a2, a3};
+            load_trace_note(K == ChildKind::queue ? "queue" : "fence", Slot, _ReturnAddress(), load_words, 3, 0,
+                            false);
+        }
+    }
     if constexpr (Slot == 0) {
         d3d12_trace::record(child_trace_name<K>(Slot));
         return hr_to_u64(child_query_interface<K>(self, reinterpret_cast<const IID*>(a1),
@@ -2651,6 +2742,11 @@ std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_
         refresh_fence_value(self);
         const std::uint64_t completed = self->value_cell->load(std::memory_order_acquire);
         watch_fence_value(self, a1, completed);
+        if (load_trace_window().on) {
+            const std::uint64_t cell_words[2] = {a1, completed};
+            load_trace_note("fence-cell", Slot, _ReturnAddress(), cell_words, 2,
+                            reinterpret_cast<std::uint64_t>(self->value_cell.get()), true);
+        }
         static std::atomic<bool> logged{false};
         if (!logged.exchange(true, std::memory_order_relaxed))
             std::fprintf(stderr,
@@ -2712,6 +2808,8 @@ std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_
         } else if constexpr (K == ChildKind::fence) {
             if (real_slot == 8) publish_fence_value(self->value_cell, result);
             else if (real_slot == 10) refresh_fence_value(self);
+            if (load_trace_window().on)
+                load_trace_note("fence-result", Slot, _ReturnAddress(), nullptr, 0, result, true);
         }
         return result;
     }
@@ -5518,6 +5616,10 @@ std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64
         const std::uint64_t shape_words[kViewShapeWords] = {a1,  a2,  a3,  a4,  a5,  a6,  a7,
                                                             a8,  a9,  a10, a11, a12, a13, a14};
         view_shape_probe(Slot, _ReturnAddress(), shape_words);
+    }
+    if (load_trace_window().on) {
+        const std::uint64_t load_words[4] = {a1, a2, a3, a4};
+        load_trace_note("device", Slot, _ReturnAddress(), load_words, 4, 0, false);
     }
     if constexpr (Slot == 0) {
         return hr_to_u64(proxy_query_interface(self, reinterpret_cast<const IID*>(a1),

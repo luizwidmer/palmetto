@@ -284,6 +284,33 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### The 1,200 s boot: still black, steady loop, and the fallback list slots
+
+A 1,200 s boot (all fixes on, presenter captures every 300 presented frames, full-target readbacks at four late draws,
+console list fallback-slot trace on) shows the same state as 300 s and 600 s:
+
+* presenter captures (frames 1, 301, 601, 901, 1,201, 1,501, 1,801, 2,101; swapchain 2564x1421) - **every one**
+  `mean 0 0 0, non-black 0/3,643,444, peak 0`;
+* full-target readbacks of the composed 4K target at draws 150,000/180,000/210,000/240,000 - all the 0-image-sample
+  constant pass, each `mean 0 0 0, non-black 0/8,294,400, alpha 0`;
+* population: 2,758,217 calls / 139,264 submissions at 600 s grew to 5,741,116 calls / 299,008 submissions at 1,200 s
+  with the same cadence (~4,096 submissions per ~16 s); submission 229,376 at 908 s and 299,008 at 1,180 s. No new
+  pipeline, module, present content or target content appears; the stationary two-pass blit/clear loop persists.
+
+Console list fallback slots (the inline root-argument writers' vtable fallback at the user-data limit; shape only,
+opt-in `PALMETTO_LIST_SLOT_TRACE`): in the 1,200 s window slots **20, 24 and 47** are called; 35/43/45 never are.
+Measured shapes, repeating:
+* slot 20: `(0x11, 1, 0, 0x43)` - an index/count shape with index 17, count 1 and a value in the fourth argument, and
+  `(4, 0, 0x20d54df0000, 0)` alternating with it;
+* slot 47: `(0, 0x20, 0, 0)` - index 0 with count 32;
+* slot 24: all-zero arguments.
+
+So a root-32-bit-constant-like payload is present on the fallback path during the load window (index/count shapes on
+slots 20 and 47), but no forwarding is implemented: whether the sibling pass's signature declares that constant is
+rootargs' question, and the numbers above are the measured shape to compare against. The title remains in the same
+stationary state at 1,200 s, which points at a loading stall (streamtrace's investigation), not at missing present
+content.
+
 ### 300 s and 600 s: the presented swapchain image never becomes non-black
 
 Two long boots measured the displayed resource directly through the presenter path plus full-target readbacks of the
