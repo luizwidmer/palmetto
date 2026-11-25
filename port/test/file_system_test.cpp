@@ -9,8 +9,10 @@
 
 #include <algorithm>
 #include <clocale>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -182,6 +184,163 @@ bool host_renames_case(const std::filesystem::path& folder) {
     return moved && std::find(names.begin(), names.end(), std::wstring(L"CASE_PROBE.TMP")) != names.end();
 }
 
+// RT-READFILE-NOACCESS: a ReadFile into pages that are committed only on first touch.
+//
+// xmem hands title memory out as views of a reserve-only section: a page becomes accessible when user-mode code
+// first touches it, through the vectored handler that commits it (port/shims/xmem.cpp, physical_page_fault). A
+// kernel-mode copy such as ReadFile raises no such fault, so a read into an untouched page fails with ERROR_NOACCESS
+// (998) while the same bytes in a committed buffer read fine. The file shims' ReadFile reads one byte of every
+// destination page from user mode (which runs the handler) and retries once. These checks build that shape
+// themselves: a reserve-only section, a vectored handler that commits it, and the shim resolved through the registry.
+// No xmem, no game data, no GPU.
+namespace first_touch {
+
+using ReadFileFn = BOOL(WINAPI*)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
+
+char* g_view = nullptr;              // the view the handler commits pages in
+std::size_t g_size = 0;
+char* g_refuse = nullptr;            // one page the handler deliberately leaves uncommitted
+int g_commits = 0;                   // pages the handler committed
+int g_faults = 0;                    // access violations the handler saw
+
+LONG CALLBACK commit_on_touch(EXCEPTION_POINTERS* info) {
+    const EXCEPTION_RECORD* record = info ? info->ExceptionRecord : nullptr;
+    if (!record || record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || record->NumberParameters < 2) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    ++g_faults;
+    auto* page = reinterpret_cast<char*>(record->ExceptionInformation[1] & ~static_cast<uintptr_t>(0xfff));
+    if (!g_view || page < g_view || page >= g_view + g_size || page == g_refuse) return EXCEPTION_CONTINUE_SEARCH;
+    if (!VirtualAlloc(page, 0x1000, MEM_COMMIT, PAGE_READWRITE)) return EXCEPTION_CONTINUE_SEARCH;
+    ++g_commits;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+struct Attempt {
+    BOOL ok = FALSE;
+    DWORD error = 0;
+    DWORD got = 0;
+};
+
+// One ReadFile of `size` bytes at `offset` into `destination`, through the host or the shim, on its own handle.
+Attempt read_at(ReadFileFn read, const std::filesystem::path& file, LONGLONG offset, void* destination, DWORD size) {
+    Attempt attempt;
+    const HANDLE h = ::CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        attempt.error = ::GetLastError();
+        return attempt;
+    }
+    LARGE_INTEGER at{};
+    at.QuadPart = offset;
+    if (::SetFilePointerEx(h, at, nullptr, FILE_BEGIN)) {
+        attempt.ok = read(h, destination, size, &attempt.got, nullptr);
+        if (!attempt.ok) attempt.error = ::GetLastError();
+    } else {
+        attempt.error = ::GetLastError();
+    }
+    ::CloseHandle(h);
+    return attempt;
+}
+
+// A fresh reserve-only view: the storage of a first-touch page, allocated up front and committed per page only by the
+// handler above. Null when the host refuses the section or the view.
+char* reserve_view(std::size_t size, HANDLE* section) {
+    *section = ::CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE | SEC_RESERVE, 0,
+                                    static_cast<DWORD>(size), nullptr);
+    if (!*section) return nullptr;
+    auto* view = static_cast<char*>(::MapViewOfFile(*section, FILE_MAP_WRITE, 0, 0, size));
+    if (!view) {
+        ::CloseHandle(*section);
+        *section = nullptr;
+    }
+    return view;
+}
+
+void run(const std::filesystem::path& folder, ReadFileFn host, ReadFileFn shim) {
+    std::filesystem::create_directories(folder);
+    const std::filesystem::path file = folder / "first_touch.bin";
+    constexpr DWORD kSize = 2 * 0x10000 + 0x1ab;  // several pages, ending inside one
+    std::vector<unsigned char> data(kSize);
+    for (DWORD i = 0; i < kSize; ++i) data[i] = static_cast<unsigned char>((i * 37 + 11) & 0xff);
+    {
+        std::ofstream out(file, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(data.data()), kSize);
+    }
+    if (!std::filesystem::exists(file)) {
+        check(false, "the first-touch fixture file is written");
+        return;
+    }
+
+    constexpr std::size_t kViewSize = 0x40000;
+    HANDLE section = nullptr;
+    g_size = kViewSize;
+    char* const first_view = reserve_view(kViewSize, &section);
+    g_view = first_view;
+    check(first_view != nullptr, "a reserve-only section view stands in for first-touch title memory");
+    if (!first_view) return;
+    void* const handler = ::AddVectoredExceptionHandler(1, &commit_on_touch);
+
+    const auto host_read = read_at(host, file, 0, first_view + 0x700, kSize);
+    check(!host_read.ok && host_read.error == ERROR_NOACCESS,
+          "the host ReadFile into an untouched reserve-only page fails with ERROR_NOACCESS");
+
+    const auto shimmed = read_at(shim, file, 0, first_view + 0x700, kSize);
+    check(shimmed.ok && shimmed.got == kSize && std::memcmp(first_view + 0x700, data.data(), kSize) == 0,
+          "the shimmed ReadFile commits every destination page and reads the whole file");
+    check(g_commits > 0, "the first-touch handler committed the pages the shim touched");
+
+    // An ordinary committed destination behaves exactly as the host does: the repair only runs on the error.
+    std::vector<unsigned char> ordinary(kSize, 0xcc);
+    const auto plain_host = read_at(host, file, 0, ordinary.data(), kSize);
+    check(plain_host.ok && plain_host.got == kSize, "the host ReadFile into committed memory reads the file");
+    std::vector<unsigned char> ordinary_shim(kSize, 0xcc);
+    const auto plain_shim = read_at(shim, file, 0, ordinary_shim.data(), kSize);
+    check(plain_shim.ok && plain_shim.got == kSize && ordinary_shim == data,
+          "the shimmed ReadFile of committed memory returns the same bytes");
+
+    // A page the handler refuses: the touch cannot commit it, so the one retry fails and the shim reports the host's
+    // error instead of retrying forever. The handler must not spin on it.
+    constexpr std::size_t kRefuseSize = 0x30000;
+    HANDLE refused_section = nullptr;
+    g_size = kRefuseSize;
+    char* const refused_view = reserve_view(kRefuseSize, &refused_section);
+    g_view = refused_view;
+    check(refused_view != nullptr, "a second reserve-only view is set up for the refused-page case");
+    const DWORD refuse_size = 0x10000;
+    if (refused_view) {
+        g_refuse = refused_view + 0x8000;
+        const int committing_before = g_commits, faults_before = g_faults;
+        const auto refused = read_at(shim, file, 0, refused_view, refuse_size);
+        const int faults = g_faults - faults_before;
+        check(!refused.ok && refused.error == ERROR_NOACCESS,
+              "a destination page the handler refuses keeps the host error after the one retry");
+        check(faults >= 1 && faults <= static_cast<int>(refuse_size / 0x1000),
+              "the repair touches each destination page at most once and does not loop");
+        check(g_commits - committing_before < static_cast<int>(refuse_size / 0x1000),
+              "a refused page commits nothing and stops nothing else from being touched");
+        g_refuse = nullptr;
+    }
+
+    ::RemoveVectoredExceptionHandler(handler);
+    if (refused_view) ::UnmapViewOfFile(refused_view);
+    if (refused_section) ::CloseHandle(refused_section);
+    ::UnmapViewOfFile(first_view);
+    ::CloseHandle(section);
+    g_view = nullptr;
+    g_size = 0;
+}
+
+}  // namespace first_touch
+
+void check_read_file_first_touch(const std::filesystem::path& folder) {
+    const auto shim = resolve<first_touch::ReadFileFn>("api-ms-win-core-file-l1-1-0.dll", "ReadFile");
+    check(shim != nullptr, "ReadFile is served by the file shims for the api-set the title imports");
+    if (!shim) return;
+    check(resolve<first_touch::ReadFileFn>("kernel32.dll", "ReadFile") == shim,
+          "kernel32's ReadFile is the same shim");
+    first_touch::run(folder, &::ReadFile, shim);
+}
+
 void run_checks(const std::filesystem::path& root);
 
 }  // namespace
@@ -199,6 +358,7 @@ int main() {
     // An exception from one check (std::filesystem throws on a host error) ends the checks, not the run: it is a
     // failure, the folder is still removed and the summary is still printed.
     try {
+        check_read_file_first_touch(root / "first_touch");
         run_checks(root);
     } catch (const std::exception& e) {
         check(false, (std::string("the checks run to the end (stopped by: ") + e.what() + ")").c_str());

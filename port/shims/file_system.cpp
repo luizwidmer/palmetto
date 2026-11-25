@@ -26,6 +26,7 @@
 #include <intrin.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
@@ -721,6 +722,137 @@ void note_open(const char* api, LPCWSTR name, DWORD error, const void* caller) {
     fields += error ? ",\"error\":" + std::to_string(error) : std::string(",\"result\":\"ok\"");
     fields += ",\"caller\":" + rt::startup_trace::quote(rt::startup_trace::where(reinterpret_cast<uint64_t>(caller)));
     rt::startup_trace::event("file_open", fields);
+}
+
+// ---- ReadFile into title memory (RT-READFILE-NOACCESS) --------------------------------------------------------
+//
+// The title's own loader reads package data straight into its working buffers, and xmem hands title pages out as
+// views of a reserve-only section: a page is committed from the vectored handler only when user-mode code touches it
+// (physical_page_fault in xmem.cpp). A kernel-mode copy raises no such fault, so ReadFile into a page nobody has
+// touched yet fails with ERROR_NOACCESS (998). The fork's measured account of the retail reader (public GPL-3.0
+// reference, commit 779f901084, RT-READFILE-NOACCESS) is that every error other than 6, 0x26 and 0x57 is treated as
+// transient and retried after a 1 ms sleep, which makes such a destination a silent stall: the loader goes dormant
+// and the threads sit in ordinary kernel waits.
+//
+// The repair: on ERROR_NOACCESS, read one byte of every 4 KiB page of the destination that is not committed yet from
+// user mode, which raises the access violation xmem's handler commits the page for, then re-issue the read once.
+// Bounded in every direction: ONE retry (never a loop); the page walk stops after kReadTouchPageLimit pages, so a
+// wrong or enormous destination cannot spin here; and a destination whose retry also failed is remembered, so a title
+// that retries the same read forever is answered from memory instead of being walked again. A second failure is
+// returned to the title unchanged with its own error. Measured on our own boot: one caller retries a single
+// 271,044,608-byte read about 660 times a second, so the walk and the memo are what keep this bounded in practice.
+//
+// The failure is logged only when it happens: one relaxed atomic on the error path and nothing at all on the
+// successful path beyond the host call and a branch. The startup-trace event is named by caller and bounded (the
+// first kReadFailureLogLimit failures, then one in every 1024), so a title retrying forever cannot fill the trace and
+// the last count still names the total to within 1024. One stderr line notes the first failure.
+namespace {
+
+constexpr DWORD kReadPageBytes = 0x1000;
+constexpr DWORD kReadTouchPageLimit = 0x40000;  // 262,144 pages = 1 GiB of destination walked per attempt
+constexpr std::uint64_t kReadFailureLogLimit = 256;
+std::atomic<std::uint64_t> g_read_failures{0};
+std::atomic<std::uintptr_t> g_repair_failed_buffer{0};  // a destination whose repair already failed
+std::atomic<DWORD> g_repair_failed_size{0};
+
+std::string read_caller(const void* caller) {
+    return rt::startup_trace::where(reinterpret_cast<uint64_t>(caller));
+}
+
+// Reads one byte of every not-yet-committed page of [buffer, buffer + size) from user mode. xmem's vectored handler
+// commits a page this way; a page that cannot be committed raises an access violation this function swallows, and the
+// retried read reports it. Returns how many pages were touched. No C++ objects in this function: it has __try.
+DWORD touch_read_destination(void* buffer, DWORD size) {
+    DWORD pages = 0;
+    const uintptr_t start = reinterpret_cast<uintptr_t>(buffer);
+    if (size > UINTPTR_MAX - start) return 0;
+    const DWORD total = (size + kReadPageBytes - 1) / kReadPageBytes;
+    const DWORD limit = total < kReadTouchPageLimit ? total : kReadTouchPageLimit;
+    for (DWORD i = 0; i < limit; ++i) {
+        const uintptr_t at = start + static_cast<uintptr_t>(i) * kReadPageBytes;
+        MEMORY_BASIC_INFORMATION info{};
+        if (!::VirtualQuery(reinterpret_cast<const void*>(at), &info, sizeof info)) break;
+        if (info.State == MEM_COMMIT) continue;  // already mapped; the retry reports any protection it cannot write
+        __try {
+            (void)*reinterpret_cast<volatile const unsigned char*>(at);
+            ++pages;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            // No user-mode commit for this page: the retry reports it. The others may still commit.
+        }
+    }
+    return pages;
+}
+
+void note_read_failure(DWORD size, DWORD pages, DWORD bytes_read, bool repaired, const void* caller) {
+    const std::uint64_t count = g_read_failures.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count > kReadFailureLogLimit && (count & 1023) != 0) return;
+    static std::atomic<bool> announced{false};
+    if (!announced.exchange(true, std::memory_order_relaxed))
+        std::fprintf(stderr,
+                     "[rt] fs: ReadFile into uncommitted title memory (ERROR_NOACCESS 998) at %s; touched %lu "
+                     "destination page(s) from user mode and %s (%lu of %lu byte(s) read; logged once per run)\n",
+                     read_caller(caller).c_str(), static_cast<unsigned long>(pages),
+                     repaired ? "the read then succeeded" : "the retry failed too",
+                     static_cast<unsigned long>(bytes_read), static_cast<unsigned long>(size));
+    if (!rt::startup_trace::enabled()) return;
+    rt::startup_trace::event("file_read_noaccess",
+                             "\"api\":\"ReadFile\",\"error\":998,\"size\":" + std::to_string(size) +
+                                 ",\"pages\":" + std::to_string(pages) + ",\"read\":" + std::to_string(bytes_read) +
+                                 ",\"repaired\":" + (repaired ? "true" : "false") + ",\"count\":" +
+                                 std::to_string(count) + ",\"caller\":" + rt::startup_trace::quote(read_caller(caller)));
+}
+
+// Measurement only, behind the existing PALMETTO_FILE_TRACE switch: the first ReadFile of each distinct caller
+// (bounded to 16), so a boot says whether the title's reads go through this shim at all.
+std::atomic<std::uint64_t> g_read_callers[16]{};
+std::atomic<int> g_read_caller_count{0};
+
+void note_read_caller(const void* caller, DWORD size) {
+    if (!rt::startup_trace::enabled()) return;
+    const char* switch_value = std::getenv("PALMETTO_FILE_TRACE");
+    if (!switch_value || *switch_value == '0') return;
+    const std::uint64_t key = reinterpret_cast<std::uint64_t>(caller);
+    for (const auto& slot : g_read_callers)
+        if (slot.load(std::memory_order_relaxed) == key) return;
+    if (g_read_caller_count.fetch_add(1, std::memory_order_relaxed) >= 16) return;
+    for (auto& slot : g_read_callers) {
+        std::uint64_t expected = 0;
+        if (slot.compare_exchange_strong(expected, key, std::memory_order_relaxed)) break;
+    }
+    rt::startup_trace::event("file_read", "\"api\":\"ReadFile\",\"size\":" + std::to_string(size) +
+                                             ",\"caller\":" + rt::startup_trace::quote(read_caller(caller)));
+}
+
+}  // namespace
+
+// BOOL ReadFile(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED). The measured title imports it from
+// api-ms-win-core-file-l1-1-0.dll and calls it through the address table, so the file shims serve it here.
+BOOL WINAPI read_file(HANDLE file, LPVOID buffer, DWORD size, LPDWORD read, LPOVERLAPPED overlapped) {
+    if (::ReadFile(file, buffer, size, read, overlapped)) {
+        note_read_caller(_ReturnAddress(), size);
+        return TRUE;
+    }
+    const DWORD error = ::GetLastError();
+    if (error != ERROR_NOACCESS || !buffer || size == 0) {
+        ::SetLastError(error);
+        return FALSE;
+    }
+    if (g_repair_failed_buffer.load(std::memory_order_relaxed) == reinterpret_cast<std::uintptr_t>(buffer) &&
+        g_repair_failed_size.load(std::memory_order_relaxed) == size) {
+        ::SetLastError(error);  // walked once already and the retry failed: do not walk it again
+        return FALSE;
+    }
+    const DWORD pages = touch_read_destination(buffer, size);
+    if (::ReadFile(file, buffer, size, read, overlapped)) {  // the one and only retry
+        note_read_failure(size, pages, read ? *read : 0, true, _ReturnAddress());
+        return TRUE;
+    }
+    const DWORD retry_error = ::GetLastError();
+    g_repair_failed_size.store(size, std::memory_order_relaxed);
+    g_repair_failed_buffer.store(reinterpret_cast<std::uintptr_t>(buffer), std::memory_order_relaxed);
+    note_read_failure(size, pages, 0, false, _ReturnAddress());
+    ::SetLastError(retry_error);
+    return FALSE;
 }
 
 HANDLE WINAPI create_file_w(LPCWSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES attributes,
@@ -1435,6 +1567,7 @@ using namespace rt::fs;
     {dll, "CreateFileA", reinterpret_cast<void*>(&create_file_a)},                                       \
         {dll, "CreateFileW", reinterpret_cast<void*>(&create_file_w)},                                   \
         {dll, "CreateFile2", reinterpret_cast<void*>(&create_file2)},                                    \
+        {dll, "ReadFile", reinterpret_cast<void*>(&read_file)},                                          \
         {dll, "FindFirstFileA", reinterpret_cast<void*>(&find_first_file_a)},                            \
         {dll, "FindFirstFileW", reinterpret_cast<void*>(&find_first_file_w)},                            \
         {dll, "FindFirstFileExA", reinterpret_cast<void*>(&find_first_file_ex_a)},                       \
