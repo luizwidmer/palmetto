@@ -239,6 +239,11 @@ Measured boots (all ALIVE 150 s, 0 exceptions, 0 failed/refused submissions, no 
 | `boot-spec3` | vertex stream + matrix | s0/s1 = the V#; s8+0 = matrix V# over the constants buffer (0x86dc40 + 480 B, stride 0) | **mean 23 115 172, non-black 11,776/16,384, peak 240** |
 | `boot-spec4` (no PS control) | vertex stream + matrix | same | display target: mean 0 0 0, 0/16384 (write control valid) |
 
+With slot70's real publication supplying matrix A (`PALMETTO_SLOT70_PUBLISH=1`, committed as the slot-70 increment) the
+all-switches plain boot repeats the same measurement on real title data: coverage control non-black (mean 23 115 172,
+11,776/16,384) and display target mean 0 0 0, 0/16384 - so the geometry and matrix-A frontiers are both closed and the
+remaining black is entirely the colour/sample path (`docs/frame_capture.md` section 7, "The colour path, named").
+
 So the **geometry frontier is closed**: with the vertex-stream V# in the s0/s1 driver block and a matrix V# at s8+0, the
 title's own vertex stage and raster state produce coverage - the constant-output pixel shader reads the control's colour
 in 11,776 of the window's 16,384 pixels (the window is 128x128 at the target's origin; the draw's own triangle does not

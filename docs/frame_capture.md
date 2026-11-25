@@ -211,6 +211,45 @@ The keys are printed as the title wrote them: the first slot is empty, the secon
 coverage the six-image pixel shader would sample black: the vertex/geometry path and the sampled content are two
 independent gaps, and neither is a fault of the replay's raster or readback path.
 
+### The colour path, named (all switches on, real title matrix A)
+
+The boot that closes the geometry and matrix work (`PALMETTO_GRAPHICS_CONSOLE_ROOT=1`,
+`PALMETTO_VERTEX_STREAM_DESCRIPTOR=1`, `PALMETTO_SLOT70_PUBLISH=1`, `PALMETTO_VERTEX_PATH=1`,
+`PALMETTO_FRAME_DUMP=1`, `PALMETTO_FRAME_DUMP_SAMPLE=1`, readback at 20001, no PS control) measures the colour path
+directly:
+
+```
+render-target readback: 128x128 at 0,0 of 3840x2160, 4-byte texel: mean 0 0 0, non-black 0/16384, peak 0
+write control: mean 51 102 204, non-black 16384/16384, peak 204
+colour path: ps present, 6 image sample(s) -> the PS reads sampled images (no constant-output path);
+             non-zero push constants: s0=… s1=… s8=… (3 of 32)
+frame dump sample: key 1 T# image 0x… format 37 3840x2160, resource 0x…, title VA 0x…
+frame dump sample: key 5 T# image is unresolved (set 0 holds no layer image for it)
+frame dump sample readback [1/1] image 0x…: 128x128 window, 4-byte texel: mean 0 0 0, non-black 0/16384, peak 0
+```
+
+So exactly which pixel-shader inputs are empty/zero today:
+
+* the one resolved sampled T# (key 1, the 4K R8G8B8A8 placed texture) reads back uniformly black over its whole copied
+  window - the population nothing writes (`docs/texture_source.md`);
+* the other T# (key 5) has **no layer image in set 0 at all**: the shader samples an unresolved input, which the layer
+  reads as empty rather than as a black texture;
+* the PS receives no colour-path scalars: of the 32 push-constant dwords only the two table addresses (`s0`/`s1`) and the
+  console-table address (`s8`) are non-zero, so the PS's blend/factor arithmetic can only use those descriptors and the
+  sampled texels;
+* the PS has no constant-output path (6 image-sampling instructions), so a black display with all sampled input black is
+  the expected arithmetic, not a discarding state.
+
+The two experiments that would separate "texture data is the only gap" from "the PS discards for another reason" are the
+next step and are named here so the mechanism is fixed: (a) a **substitution control** that binds a known-content image
+into the PS's sampled table window - the shim's `write_image_descriptor` is the single place a T# becomes a set-0 layer
+image (`bindless->insert_key` after `image_entries`), so a switch can point the first resolved T# at a small solid debug
+image and the display readback says whether the PS arithmetic passes it through; and (b) a **debug sampling PS** that
+outputs the title's own first sampled T# (reusing the title's vertex stage and descriptor layout with a project pixel
+shader that samples T# slot 1), so the measured image can be seen at the display. Neither has been built yet; both need
+a solid-image/debug-module addition in the shim, which is why they are the colour-path increment, not a measurement of
+this one.
+
 ## 8. The cull axis and the constants: neither explains the absent coverage
 
 Two boots on the same build close the two cheapest alternatives behind section 6's black window:

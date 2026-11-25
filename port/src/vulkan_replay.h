@@ -2875,7 +2875,33 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                                  static_cast<unsigned long long>(key.title_va));
                     vk.capture_sample(key.image_handle, key.format, key.extent);
                 }
+                // Every T# that does not resolve is named too: an unresolved key is an input the pixel shader reads with
+                // no layer image behind it, which shows up as an empty input rather than a black texture.
+                for (std::uint32_t k = 0; k < table.keys; ++k) {
+                    const SampledKey& key = table.key[k];
+                    if (!key.image || key.resolved) continue;
+                    std::fprintf(stderr,
+                                 "[rt] replay: frame dump sample: key %u T# image is unresolved (set 0 holds no layer "
+                                 "image for it)\n",
+                                 k);
+                }
             }
+        }
+        // Diagnostic (docs/frame_capture.md, the colour path): what the armed draw's pixel shader consumes. The image
+        // count says whether the shader samples images at all (a constant-output PS reads none); the non-zero push-constant
+        // dwords are the only per-draw scalars it can receive (s0..s31). Bounded, reads only.
+        if (seen == readback_at && frame_dump::sample_enabled()) {
+            unsigned nonzero_constants = 0;
+            std::fprintf(stderr, "[rt] replay: colour path: ps %s, %u image sample(s) -> %s; non-zero push constants:",
+                         pipeline->has_pixel_stage ? "present" : "absent", pipeline->ps_images,
+                         pipeline->ps_images ? "the PS reads sampled images (no constant-output path)"
+                                             : "constant-output path (no image reads)");
+            for (unsigned w = 0; w < 32; ++w) {
+                if (!draw.user_data[w]) continue;
+                ++nonzero_constants;
+                if (nonzero_constants <= 8) std::fprintf(stderr, " s%u=%08x", w, draw.user_data[w]);
+            }
+            std::fprintf(stderr, "%s (%u of 32)\n", nonzero_constants > 8 ? " ..." : "", nonzero_constants);
         }
         // Diagnostic (docs/vertex_path.md, the geometry fix's opt-in): the translated vertex shader reads the vertex-stream
         // descriptor from the console driver block whose heap-relative address is in its s0/s1 user-data pair, and two more
