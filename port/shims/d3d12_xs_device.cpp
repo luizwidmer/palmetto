@@ -3197,6 +3197,21 @@ constexpr unsigned kSlot70Shapes = 64;
 Slot70ShapeKey g_slot70_shapes[kSlot70Shapes];
 unsigned g_slot70_shape_count = 0;
 std::mutex g_slot70_census_mutex;
+// The texture-shaped publication probe (docs/device_slot70.md section 7): the 60 startup wrapper-site calls carry
+// texture resource descriptions, and the question is whether the title writes a console T# into the destination itself
+// (then the mirror already copies it) or leaves it for the device to write. Bounded: the first 8 distinct destinations
+// are dumped (32-byte descriptor, before) and re-read later in the boot (three times each) so a write that happens after
+// the call is caught. Only descriptor bytes are printed - the record's block is counted, never printed (no game data).
+constexpr unsigned kSlot70TextureProbes = 8;
+struct Slot70TextureProbe {
+    std::atomic<std::uint64_t> dest{0};
+    std::atomic<unsigned> dumps{0};
+    std::atomic<std::uint32_t> last[8];
+};
+Slot70TextureProbe g_slot70_texture_probes[kSlot70TextureProbes];
+std::atomic<unsigned> g_slot70_texture_probe_count{0};
+std::mutex g_slot70_texture_probe_mutex;
+
 std::atomic<std::uint64_t> g_slot70_census_calls{0};
 std::atomic<std::uint64_t> g_slot70_census_non_buffer{0};
 std::atomic<std::uint64_t> g_slot70_census_dest32{0};
@@ -3415,6 +3430,74 @@ void slot70_census_summary(std::uint64_t calls) {
     std::fprintf(stderr, "%s\n", line);
 }
 
+void slot70_texture_probe(const D3D12_RESOURCE_DESC* desc, const std::uint8_t* record, bool record_readable,
+                           std::uint64_t dest, std::uint64_t call) {
+    if (!desc || !((dest & 15) == 0) || !readable_range(reinterpret_cast<const void*>(dest), 32)) return;
+    std::uint32_t before[8] = {};
+    std::memcpy(before, reinterpret_cast<const void*>(dest), sizeof(before));
+    std::uint32_t count = 0, declared = 0, format_word = 0;
+    unsigned block_non_zero = 0;
+    std::uint64_t block = 0;
+    if (record_readable && record) {
+        count = *reinterpret_cast<const std::uint32_t*>(record + 0x18);
+        declared = *reinterpret_cast<const std::uint32_t*>(record + 0x08);
+        format_word = *reinterpret_cast<const std::uint32_t*>(record + 0x30);
+        block = *reinterpret_cast<const std::uint64_t*>(record + 0x28);
+        if (block && readable_range(reinterpret_cast<const void*>(block), 64)) {
+            const auto* words = reinterpret_cast<const std::uint32_t*>(block);
+            for (unsigned i = 0; i < 16; ++i) block_non_zero += words[i] != 0 ? 1u : 0u;
+        }
+    }
+    const std::lock_guard lock(g_slot70_texture_probe_mutex);
+    unsigned at = g_slot70_texture_probe_count.load(std::memory_order_relaxed);
+    bool known = false;
+    for (unsigned i = 0; i < at; ++i)
+        if (g_slot70_texture_probes[i].dest.load(std::memory_order_relaxed) == dest) known = true;
+    if (!known) {
+        if (at >= kSlot70TextureProbes) return;
+        Slot70TextureProbe& entry = g_slot70_texture_probes[at];
+        entry.dest.store(dest, std::memory_order_relaxed);
+        entry.dumps.store(0, std::memory_order_relaxed);
+        for (unsigned i = 0; i < 8; ++i) entry.last[i].store(0, std::memory_order_relaxed);
+        g_slot70_texture_probe_count.store(at + 1, std::memory_order_relaxed);
+    }
+    std::fprintf(stderr,
+                 "[rt] d3d12_xs: slot 70 texture probe: desc dim=%u width=0x%llx height=0x%x format=0x%x mips=0x%x "
+                 "array=0x%x; record count=0x%x declared=0x%x format_word=0x%x block_non_zero=%u/16; dest page=0x%llx "
+                 "off=0x%llx call=%llu; descriptor before: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                 static_cast<unsigned>(desc->Dimension), static_cast<unsigned long long>(desc->Width),
+                 static_cast<unsigned>(desc->Height), static_cast<unsigned>(desc->Format),
+                 static_cast<unsigned>(desc->MipLevels), static_cast<unsigned>(desc->DepthOrArraySize), count, declared,
+                 format_word, block_non_zero, static_cast<unsigned long long>(dest & ~std::uint64_t(0xFFFF)),
+                 static_cast<unsigned long long>(dest & 0xFFFF), static_cast<unsigned long long>(call), before[0],
+                 before[1], before[2], before[3], before[4], before[5], before[6], before[7]);
+}
+
+void slot70_texture_probe_redump(std::uint64_t call) {
+    const std::lock_guard lock(g_slot70_texture_probe_mutex);
+    const unsigned count = g_slot70_texture_probe_count.load(std::memory_order_relaxed);
+    for (unsigned i = 0; i < count; ++i) {
+        Slot70TextureProbe& entry = g_slot70_texture_probes[i];
+        if (entry.dumps.load(std::memory_order_relaxed) >= 3) continue;
+        const std::uint64_t dest = entry.dest.load(std::memory_order_relaxed);
+        if (!dest || !readable_range(reinterpret_cast<const void*>(dest), 32)) continue;
+        std::uint32_t now[8] = {};
+        std::memcpy(now, reinterpret_cast<const void*>(dest), sizeof(now));
+        bool same = true;
+        for (unsigned w = 0; w < 8; ++w) same = same && now[w] == entry.last[w].load(std::memory_order_relaxed);
+        if (same) continue;
+        for (unsigned w = 0; w < 8; ++w) entry.last[w].store(now[w], std::memory_order_relaxed);
+        const unsigned dumps = entry.dumps.fetch_add(1, std::memory_order_relaxed) + 1;
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: slot 70 texture probe: re-dump #%u at call %llu dest page=0x%llx off=0x%llx: %08x "
+                     "%08x %08x %08x %08x %08x %08x %08x\n",
+                     dumps, static_cast<unsigned long long>(call),
+                     static_cast<unsigned long long>(dest & ~std::uint64_t(0xFFFF)),
+                     static_cast<unsigned long long>(dest & 0xFFFF), now[0], now[1], now[2], now[3], now[4], now[5],
+                     now[6], now[7]);
+    }
+}
+
 std::uint64_t proxy_console_slot70(DeviceProxy* self, std::uint64_t caller, std::uint64_t a1, std::uint64_t a2,
                                    std::uint64_t a3, std::uint64_t word4) {
     const std::uint64_t call = g_slot70_calls.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -3479,6 +3562,10 @@ std::uint64_t proxy_console_slot70(DeviceProxy* self, std::uint64_t caller, std:
                                                              : 0));
         }
     }
+    if (probe && desc_readable && resource->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER &&
+        readable_range(reinterpret_cast<const void*>(a2), 0x40))
+        slot70_texture_probe(resource, reinterpret_cast<const std::uint8_t*>(a2), true, a3, call);
+    if (probe && call % 1024 == 0) slot70_texture_probe_redump(call);
     if (slot70_census_enabled() && readable_range(reinterpret_cast<const void*>(a2), 0x40))
         slot70_census_note(resource, desc_readable, reinterpret_cast<const std::uint8_t*>(a2), true, a3, call);
     else if (slot70_census_enabled())

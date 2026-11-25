@@ -273,13 +273,55 @@ texture**: its title pages are never written in the window (framecap's page-writ
 `docs/streamed_consumer.md` and `docs/texture_source.md` reached from the other side, and sampled key 5 needs a layer
 image in set 0 before it can be read at all.
 
-## 7. What is modelled now, and what is not
+## 7. The texture-shaped publications: the title does not write the T#
+
+The 60 startup wrapper-site calls carry texture resource descriptions (dim 2/3/4; section 6). `PALMETTO_SLOT70_PROBE=1`
+now dumps, for the first 8 distinct texture destinations, the destination descriptor's 32 bytes before the call, and
+re-reads those destinations later in the boot (three times each, every 1024 calls), so a write that happens *after* the
+call is caught. Measured in `boot-slot70-texprobe` (150 s, ALIVE, 659,910 D3D12 calls):
+
+| measured | value |
+|---|---|
+| destination of a texture publication | a slot in the **console descriptor heap** (heap base + offset `0x340`/`0x380`/`0x3a0`/`0x3c0`/`0x3e0`/`0x400`/`0x420`/`0x440`, i.e. the heap's slots 26..34), 32-byte aligned |
+| descriptor **before** the call | dword0 only, a 1-based slot index (`0x1b` at offset `0x340`, `0x1d` at `0x380`, `0x1e` at `0x3a0`, ... = slot + 1); dwords 1-7 zero |
+| descriptor **after** the call (re-dump at call 1024, all 8) | **unchanged**: the same single index dword, nothing else ever written |
+| record | declared size `0x1688` and format word `0x0` for every texture shape; block first 64 bytes non-zero for most shapes (16/16 or 1/16 dwords), counted not printed (no game data) |
+
+**Result: the hypothesis is refuted.** The title does not write the console T# into the destination - it only stamps the
+slot's 1-based index into dword 0 and leaves the rest zero, before and after the call. So the console T# encoding is *not*
+observable in the title's memory: slot 70 at this site is the same kind of device-side publication as the matrix one (the
+device is expected to write the descriptor), and what it would write is an encoding this layer has never seen.
+
+**What the upscale pass' inputs actually are, as far as the measurement pins them.** The armed compose draw samples 6
+images; the one that resolves is the 3840x2160 format-37 image over a title VA created through console slot 133
+(`docs/root_arguments.md`'s sibling-pass target), and the sampled table the draw reads is the console heap region at heap
+offset ~0x135efa0 - **not** the heap slots 26..34 that these 60 publications stamp. The publication descriptions also do
+not match the texture resources the title created in the same boot (e.g. publication `dim3 0x100x0x80 fmt 0x3d`,
+`dim3 1x1 fmt 0x1c`, `dim2 0x80x1 fmt 0x41`, `dim3 0x500x0x2d0 fmt 0x43`, `dim3 0x80x0x48 fmt 0x29 mips 7` against created
+textures `1x1 fmt 28`, `3840x2160 fmt 65`, `2048x2048 fmt 87`, `2560x1440 fmt 10`, `1280x720 fmt 42/26`,
+`640x360 fmt 62`, `256x256 fmt 10/26/34`, `64x2 fmt 26`, `127x128 fmt 35`): only formats 0x1c/0x41 and the 1280x720
+dimension appear on both sides, not a single full desc. So the pairing "publication -> the resource it views" is not
+proven, and without it a T# cannot be built honestly: the console T# needs a base VA the call does not carry, and its
+encoding is not written by the title.
+
+This boot's compose axis stayed where the colour-path increment left it: the armed draw had 0 image samples
+(`constant-output path`), display readback mean 0 0 0 / non-black 0/16384, write control 51 102 204 (16,384/16,384); the
+matrix publication was unchanged (12,214 V#s, 0 refused) and the 60 texture records were refused by name (0 T# written).
+
+**Next falsifier.** The publication can be modelled only if the resource each texture publication views is identified:
+the next measurement is to pair every texture publication with the slot-127/133 resource created immediately before it
+(desc match on dimension/width/height/format/mips/array) and, where a pair is proven, create the PC shader-resource view
+on that resource with the layer's own T# encoder at the same destination - the device-side console encoding then does not
+have to be guessed. If no publication can be paired, the sampled T#s come from the title's own T# writes elsewhere and the
+frontier is again the page producer of the placed 4K texture.
+
+## 8. What is modelled now, and what is not
 
 **Modelled:** the call's shape, arity and ABI (three words; third published with `clwb`); both call sites; the argument
 records and destination kinds measured; the measured refusal as the default; an opt-in probe that dumps the arguments,
 records, destination bytes and per-heap destination statistics; the falsified CBV conversion behind its own switch; the
 matrix publication over the record's block behind `PALMETTO_SLOT70_PUBLISH=1`, with the placement/readability/emptiness
-refusals; a bounded shape census (`PALMETTO_SLOT70_CENSUS=1`) that measured the 34-35 shapes above; the named refusal of texture-shaped records (no pinned T# encoding); and a shape test that refuses anything that is not the measured call instead of guessing.
+refusals; a bounded shape census (`PALMETTO_SLOT70_CENSUS=1`) that measured the 34-35 shapes above; the named refusal of texture-shaped records (no pinned T# encoding); the texture-destination probe that measured the title's non-write and the later re-dumps; and a shape test that refuses anything that is not the measured call instead of guessing.
 
 **Not modelled / still open:** the record's other fields are measured but not interpreted (the first word differs between
 the two sites - `0x100000027` at the wrapper site, the destination address at the dominant site - and its writer is not
@@ -287,7 +329,7 @@ explained; the resource description in `arg1` is not used by the publication, an
 publication writes the matrix view; whether the title then copies that descriptor into the table slot its draw names is
 what the measured boot below decides.
 
-## 8. Gates, files and the next falsifier
+## 9. Gates, files and the next falsifier
 
 Gates on the final tree: `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT`;
 `xs_proxy_mock_test` -> `PASS`, whose `check_slot70_console_view` covers the falsified conversion's hand-off, the matrix
@@ -301,7 +343,8 @@ publication; the slot-133 placement registry), `port/test/xs_proxy_mock_test.cpp
 record and `check_slot70_console_view`), this page. Evidence boots under `D:\leonida-work\`: `boot-slot70-probe` (probe,
 140 s, ALIVE), `boot-slot70-cbv` (conversion, stopped at 29.5 s), `boot-slot70-final` (default path, 100 s, ALIVE), and
 `boot-slot70-publish3` (publication + acceptance, 150 s, ALIVE), `boot-slot70-publish2` (publication with the vertex-stream switch off, 150 s, ALIVE) and `boot-slot70-publish` (first publication boot, 150 s, ALIVE). The shape census and colour-path measurements are `boot-slot70-census` (PS control, 150 s, ALIVE) and
-`boot-slot70-census2` (plain + sampled readback, 150 s, ALIVE).
+`boot-slot70-census2` (plain + sampled readback, 150 s, ALIVE). The texture-destination probe is `boot-slot70-texprobe` (150 s, ALIVE): 60 texture-shaped publications,
+their destinations' before/after bytes and the re-dumps.
 
 **Next falsifier.** The publication's acceptance is the PS-control readback changing from black: with the matrix A view
 published, the armed draw's `s8+0` fetch slot must decode as a matrix V# and the solid-pixel control must produce colour.
