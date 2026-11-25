@@ -91,3 +91,64 @@ the runner produced. If the runner rejects an occupied directory, any
 report already there belongs to an earlier run.
 
 You can also invoke `python -I tooling/scripts/run_guest_scene.py` directly.
+
+## Console vtable slot maps with Ghidra
+
+The console D3D12 objects are not in the Windows SDK order, so a slot number in a trace does not
+name a method by itself. The map of what every console object's slots are is
+[console_slots.md](console_slots.md); this section is how to extend it. The tools are in
+`tooling/ghidra/`, and their own page is `tooling/ghidra/README.md`.
+
+Ghidra and a JDK are not bundled. Install Ghidra 11 or newer (12.1.4 PUBLIC was used together with
+JDK 21) and point the environment at them; the scripts read the paths from arguments or from
+these variables:
+
+```powershell
+$env:PALMETTO_GHIDRA_HOME = "<ghidra-install>"   # or GHIDRA_INSTALL_DIR
+$env:JAVA_HOME           = "<jdk>"
+```
+
+The workflow starts from a boot with the runtime's caller probe on
+(`PALMETTO_XS_CALLERS=1`, `PALMETTO_XS_CALLERS_PROFILE=1`). Its stderr log becomes a per-slot
+census of the console calls: the object, the absolute slot, the caller's return address (a title
+RVA; the port maps the title at 0x140000000), the containing function's range from the PE
+exception directory, the first four argument words, and the per-site call count.
+
+```powershell
+python -I tooling/ghidra/slot_census.py "<boot>/stderr.log" --image "<title>.exe" --title-base 0x140000000 --size 0xb06d000 --out census.csv
+```
+
+One command then decompiles the functions behind all those call sites. The first run imports the
+title into a Ghidra project with `-noanalysis` and takes a couple of minutes for a large image; it
+saves the project, so every later run needs seconds to decompile more ranges.
+
+```powershell
+python -I tooling/ghidra/decompile_callers.py --census census.csv --image "<title>.exe" --ghidra "$env:PALMETTO_GHIDRA_HOME" --project "<project-dir>" --out decompiled/
+```
+
+The output directory gets the analyzeHeadless log plus one `.c` file per decompiled function. A
+console call appears in that C as an indirect call through the object's vtable, so the slot is
+immediately visible; the census's measured argument words, not the decompiled call's argument
+list, are the argument shape (the decompiler does not know the console method signatures).
+
+The individual pieces can be used on their own: `rva2func.py` maps any RVA to its containing
+function from the PE exception table, `split_decomp.py` re-splits an old headless log, and
+`DecompileRanges.java` is the Ghidra script the wrapper runs. `--rva` takes call sites directly
+when they are already known, and `--dry-run` prints the exact analyzeHeadless command without
+running it.
+
+The PC method at a slot is in the build's SDK header, including inherited bases, with:
+
+```powershell
+python -I tooling/d3d12_slot_table.py --header "<sdk>/um/d3d12.h" --interface ID3D12GraphicsCommandList
+```
+
+That prints absolute slots, so a console slot and the PC slot at the same index can be compared
+side by side. `--selftest` checks the parser on a synthetic header, `--list` lists the interfaces
+the header declares and `--json` prints the same table for a script.
+
+Limits: the exception table lists the functions the compiler emitted unwind info for, so a leaf
+function with none is skipped; a range must start at a real function start or it decompiles
+garbage; and a whole-image analysis is deliberately out of scope. The census records the run, not
+every possible run: a slot absent from it was simply not called, and a row marked unmodelled in
+[console_slots.md](console_slots.md) is an observation, not an identification.
