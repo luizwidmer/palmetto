@@ -539,6 +539,15 @@ if(BUILD_TESTING)
   add_executable(pipeline_cache_file_test test/pipeline_cache_file_test.cpp)
   add_test(NAME pipeline_cache_file COMMAND pipeline_cache_file_test)
 
+  # The persistent VkPipelineCache file (src/pipeline_cache.h, docs/pipeline_cache.md): header parsing, the Vulkan
+  # compatibility rule, the bounded load and its statuses, and the atomic replace. Pure stdlib, no Vulkan loader.
+  add_executable(pipeline_cache_test test/pipeline_cache_test.cpp)
+  target_include_directories(pipeline_cache_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  if(MSVC)
+    target_compile_options(pipeline_cache_test PRIVATE /W4 /permissive- /utf-8)
+  endif()
+  add_test(NAME pipeline_cache COMMAND pipeline_cache_test)
+
   add_executable(xdxr_build_output_test test/xdxr_build_output_test.cpp)
   add_test(NAME xdxr_build_output COMMAND xdxr_build_output_test)
 

@@ -24,6 +24,7 @@
 #include "../src/vulkan_mesh_limits.h"
 #include "../src/resource_tiling.h"
 #include "../src/cached_pso.h"
+#include "../src/pipeline_cache.h"
 #include "../src/conservative_raster.h"
 #include "../src/resource_detile.h"
 #include "../src/shader_library.h"
@@ -42,10 +43,13 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cctype>
 #include <climits>
+#include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -58,6 +62,7 @@
 #include <unordered_set>
 #include <set>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <cwchar>
 #include <vector>
@@ -202,6 +207,529 @@ VkPipelineCache create_seeded_pipeline_cache(PFN_vkCreatePipelineCache create_ca
         return VK_NULL_HANDLE;
     }
     std::fprintf(stderr, "[rt] d3d12: loaded %zu bytes from pipeline_cache.bin\n", seed.size());
+    return cache;
+}
+
+// ---- opt-in pipeline profile (PALMETTO_PIPELINE_PROFILE=1) ------------------------------------------------
+//
+// Where a boot's pipeline time goes: the layer's own work (shader module and pipeline-layout creation) is timed
+// separately from the driver's compile (vkCreate*Pipelines); the driver's pipeline-creation feedback says whether a
+// pipeline came out of the VkPipelineCache; and four wall-clock windows separate the first burst from late repeats.
+// Off by default: with the switch unset no clock is read and no line is printed, so the default path is unchanged.
+// docs/pipeline_cache.md records the measured profile.
+
+bool pipeline_profile_enabled() {
+    static const bool enabled = [] {
+        char text[4] = {};
+        size_t length = 0;
+        return getenv_s(&length, text, "PALMETTO_PIPELINE_PROFILE") == 0 && length > 1 && text[0] != '0';
+    }();
+    return enabled;
+}
+
+using PipelineClock = std::chrono::steady_clock;
+
+std::uint64_t pipeline_now_us() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(PipelineClock::now().time_since_epoch()).count());
+}
+
+std::uint64_t pipeline_elapsed_us(PipelineClock::time_point started) {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(PipelineClock::now() - started).count());
+}
+
+struct PipelineProfile {
+    // Per kind of pipeline: how many creation calls the title made, how many reached vkCreate*Pipelines, the wall time
+    // of those calls, the driver's own share, the layer's module/layout work, and the four windows by creation time.
+    struct Counters {
+        std::atomic<std::uint64_t> calls{0};
+        std::atomic<std::uint64_t> created{0};
+        std::atomic<std::uint64_t> us{0};
+        std::atomic<std::uint64_t> driver_calls{0};
+        std::atomic<std::uint64_t> driver_us{0};
+        std::atomic<std::uint64_t> module_calls{0};
+        std::atomic<std::uint64_t> module_us{0};
+        std::atomic<std::uint64_t> layout_calls{0};
+        std::atomic<std::uint64_t> layout_us{0};
+        std::atomic<std::uint64_t> window_calls[4] = {};
+        std::atomic<std::uint64_t> window_us[4] = {};
+    };
+    struct SlowEntry {
+        std::uint64_t us = 0;
+        bool graphics = false;
+        std::string label;
+    };
+    std::mutex mutex;  // the slowest list and the report line
+    Counters graphics;
+    Counters compute;
+    // VkPipelineCreationFeedback over every vkCreate*Pipelines call, both kinds: the number the persistent cache is
+    // there to move (0 hits on a cold run, most of the boot's pipelines on a warm one).
+    std::atomic<std::uint64_t> cache_hits{0};
+    std::atomic<std::uint64_t> cache_misses{0};
+    std::atomic<std::uint64_t> cache_unknown{0};
+    std::array<SlowEntry, 5> slowest{};
+    std::atomic<std::uint64_t> slow_floor_us{0};  // the smallest kept time once the list is full, else 0
+    std::atomic<std::int64_t> started_us{0};      // the first creation's start; the windows are relative to it
+    std::atomic<std::int64_t> last_report_us{0};
+};
+
+PipelineProfile& pipeline_profile() {
+    static auto* profile = new PipelineProfile();  // leaked: the process exits with it
+    return *profile;
+}
+
+int pipeline_window(std::uint64_t now_us) {
+    const std::int64_t started = pipeline_profile().started_us.load(std::memory_order_relaxed);
+    const std::uint64_t elapsed = now_us > static_cast<std::uint64_t>(started) ? now_us - started : 0;
+    if (elapsed < 5'000'000) return 0;    // 0-5 s
+    if (elapsed < 30'000'000) return 1;   // 5-30 s
+    if (elapsed < 120'000'000) return 2;  // 30-120 s
+    return 3;                             // later (the late/repeated creations)
+}
+
+void pipeline_profile_report();  // prints the cumulative line and the slowest entries
+
+void pipeline_profile_maybe_report(std::uint64_t now_us) {
+    auto& profile = pipeline_profile();
+    const std::uint64_t calls =
+        profile.graphics.calls.load(std::memory_order_relaxed) + profile.compute.calls.load(std::memory_order_relaxed);
+    // A line at the first few calls, at every power of two up to 4096, then every 8192, and at least every 10 s: a boot
+    // that is killed at its timeout still leaves the last cumulative line behind.
+    const bool landmark = calls == 1 || calls == 16 || calls == 256 || calls == 1024 || calls == 2048 ||
+                          calls == 4096 || (calls >= 8192 && calls % 8192 == 0);
+    const std::int64_t last = profile.last_report_us.load(std::memory_order_relaxed);
+    if (!landmark && now_us < static_cast<std::uint64_t>(last) + 10'000'000) return;
+    pipeline_profile_report();
+}
+
+void ensure_pipeline_maintenance();  // defined after the cache save path, which it also drives
+
+void pipeline_profile_begin(bool graphics) {
+    ensure_pipeline_maintenance();
+    auto& counters = graphics ? pipeline_profile().graphics : pipeline_profile().compute;
+    counters.calls.fetch_add(1, std::memory_order_relaxed);
+}
+
+void pipeline_profile_driver(bool graphics, std::uint64_t us, int cache_state) {
+    auto& profile = pipeline_profile();
+    auto& counters = graphics ? profile.graphics : profile.compute;
+    counters.driver_calls.fetch_add(1, std::memory_order_relaxed);
+    counters.driver_us.fetch_add(us, std::memory_order_relaxed);
+    // cache_state: 0 = the driver created it, 1 = it came from the application cache, -1 = no feedback.
+    if (cache_state == 1)
+        profile.cache_hits.fetch_add(1, std::memory_order_relaxed);
+    else if (cache_state == 0)
+        profile.cache_misses.fetch_add(1, std::memory_order_relaxed);
+    else
+        profile.cache_unknown.fetch_add(1, std::memory_order_relaxed);
+}
+
+void pipeline_profile_module(bool graphics, std::uint64_t us) {
+    auto& counters = graphics ? pipeline_profile().graphics : pipeline_profile().compute;
+    counters.module_calls.fetch_add(1, std::memory_order_relaxed);
+    counters.module_us.fetch_add(us, std::memory_order_relaxed);
+}
+
+void pipeline_profile_layout(bool graphics, std::uint64_t us) {
+    auto& counters = graphics ? pipeline_profile().graphics : pipeline_profile().compute;
+    counters.layout_calls.fetch_add(1, std::memory_order_relaxed);
+    counters.layout_us.fetch_add(us, std::memory_order_relaxed);
+}
+
+void pipeline_profile_created(bool graphics, PipelineClock::time_point started, const std::string& label) {
+    auto& profile = pipeline_profile();
+    auto& counters = graphics ? profile.graphics : profile.compute;
+    const std::uint64_t now_us = pipeline_now_us();
+    const std::uint64_t us = pipeline_elapsed_us(started);
+    std::int64_t started_us = 0;
+    profile.started_us.compare_exchange_strong(started_us, static_cast<std::int64_t>(now_us - us),
+                                               std::memory_order_relaxed);
+    counters.created.fetch_add(1, std::memory_order_relaxed);
+    counters.us.fetch_add(us, std::memory_order_relaxed);
+    const int window = pipeline_window(now_us);
+    counters.window_calls[window].fetch_add(1, std::memory_order_relaxed);
+    counters.window_us[window].fetch_add(us, std::memory_order_relaxed);
+    if (!label.empty() && us > profile.slow_floor_us.load(std::memory_order_relaxed)) {
+        std::lock_guard lock(profile.mutex);
+        auto& list = profile.slowest;
+        std::size_t slot = 0;
+        while (slot < list.size() && list[slot].us != 0) ++slot;
+        if (slot == list.size()) {
+            slot = 0;
+            for (std::size_t i = 1; i < list.size(); ++i)
+                if (list[i].us < list[slot].us) slot = i;
+            if (list[slot].us >= us) return;  // not slow enough after all (another thread got there first)
+        }
+        list[slot] = PipelineProfile::SlowEntry{us, graphics, label};
+        std::uint64_t floor = ~std::uint64_t{0};
+        bool full = true;
+        for (const auto& entry : list) {
+            if (entry.us == 0) full = false;
+            floor = (std::min)(floor, entry.us);
+        }
+        profile.slow_floor_us.store(full ? floor : 0, std::memory_order_relaxed);
+    }
+    pipeline_profile_maybe_report(now_us);
+}
+
+std::string pipeline_profile_label(const char* first, const char* second, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc,
+                                   bool mesh) {
+    char label[256] = {};
+    std::snprintf(label, sizeof(label), "%s=%.48s %s=%.48s ms=%d rt=%04x,%04x,%04x,%04x ds=%04x samples=%u",
+                  mesh ? "ms" : "vs", first ? first : "-", "ps", second ? second : "-", mesh ? 1 : 0,
+                  unsigned(desc.RTVFormats[0]), unsigned(desc.RTVFormats[1]), unsigned(desc.RTVFormats[2]),
+                  unsigned(desc.RTVFormats[3]), unsigned(desc.DSVFormat), unsigned(desc.SampleDesc.Count));
+    return label;
+}
+
+std::string pipeline_profile_label_compute(const char* name, std::size_t bindings) {
+    char label[128] = {};
+    std::snprintf(label, sizeof(label), "cs=%.80s bindings=%zu", name ? name : "-", bindings);
+    return label;
+}
+
+void pipeline_profile_report() {
+    auto& profile = pipeline_profile();
+    std::lock_guard lock(profile.mutex);
+    const std::uint64_t now_us = pipeline_now_us();
+    profile.last_report_us.store(static_cast<std::int64_t>(now_us), std::memory_order_relaxed);
+    const auto ms = [](std::uint64_t us) { return static_cast<double>(us) / 1000.0; };
+    const auto& g = profile.graphics;
+    const auto& c = profile.compute;
+    const std::uint64_t started = static_cast<std::uint64_t>(profile.started_us.load(std::memory_order_relaxed));
+    const double since_first_s = started && now_us > started ? static_cast<double>(now_us - started) / 1e6 : 0.0;
+    std::fprintf(stderr,
+                 "[rt] pipeline: profile at %.1f s: graphics %llu call(s), %llu created, %.1f ms creation; driver %llu "
+                 "compile(s) %.1f ms; modules %llu %.1f ms; layouts %llu %.1f ms\n",
+                 since_first_s, static_cast<unsigned long long>(g.calls.load()),
+                 static_cast<unsigned long long>(g.created.load()), ms(g.us.load()),
+                 static_cast<unsigned long long>(g.driver_calls.load()), ms(g.driver_us.load()),
+                 static_cast<unsigned long long>(g.module_calls.load()), ms(g.module_us.load()),
+                 static_cast<unsigned long long>(g.layout_calls.load()), ms(g.layout_us.load()));
+    std::fprintf(stderr,
+                 "[rt] pipeline: profile: compute %llu call(s), %llu created, %.1f ms creation; driver %llu compile(s) "
+                 "%.1f ms; modules %llu %.1f ms; layouts %llu %.1f ms\n",
+                 static_cast<unsigned long long>(c.calls.load()), static_cast<unsigned long long>(c.created.load()),
+                 ms(c.us.load()), static_cast<unsigned long long>(c.driver_calls.load()), ms(c.driver_us.load()),
+                 static_cast<unsigned long long>(c.module_calls.load()), ms(c.module_us.load()),
+                 static_cast<unsigned long long>(c.layout_calls.load()), ms(c.layout_us.load()));
+    std::fprintf(stderr,
+                 "[rt] pipeline: profile windows (created/us): graphics 0-5 s %llu/%.1f ms, 5-30 s %llu/%.1f ms, "
+                 "30-120 s %llu/%.1f ms, 120+ s %llu/%.1f ms; compute 0-5 s %llu/%.1f ms, 5-30 s %llu/%.1f ms, "
+                 "30-120 s %llu/%.1f ms, 120+ s %llu/%.1f ms\n",
+                 static_cast<unsigned long long>(g.window_calls[0].load()), ms(g.window_us[0].load()),
+                 static_cast<unsigned long long>(g.window_calls[1].load()), ms(g.window_us[1].load()),
+                 static_cast<unsigned long long>(g.window_calls[2].load()), ms(g.window_us[2].load()),
+                 static_cast<unsigned long long>(g.window_calls[3].load()), ms(g.window_us[3].load()),
+                 static_cast<unsigned long long>(c.window_calls[0].load()), ms(c.window_us[0].load()),
+                 static_cast<unsigned long long>(c.window_calls[1].load()), ms(c.window_us[1].load()),
+                 static_cast<unsigned long long>(c.window_calls[2].load()), ms(c.window_us[2].load()),
+                 static_cast<unsigned long long>(c.window_calls[3].load()), ms(c.window_us[3].load()));
+    std::fprintf(stderr,
+                 "[rt] pipeline: profile driver cache feedback: %llu hit(s), %llu miss(es), %llu without feedback\n",
+                 static_cast<unsigned long long>(profile.cache_hits.load()),
+                 static_cast<unsigned long long>(profile.cache_misses.load()),
+                 static_cast<unsigned long long>(profile.cache_unknown.load()));
+    for (std::size_t i = 0; i < profile.slowest.size(); ++i) {
+        const auto& entry = profile.slowest[i];
+        if (entry.us == 0) continue;
+        std::fprintf(stderr, "[rt] pipeline: profile slowest #%zu %s %.1f ms: %s\n", i + 1,
+                     entry.graphics ? "graphics" : "compute", ms(entry.us), entry.label.c_str());
+    }
+}
+
+// ---- persistent pipeline cache (PALMETTO_PIPELINE_CACHE=<file>) ------------------------------------------
+//
+// The device's VkPipelineCache is created with a previous run's vkGetPipelineCacheData blob, and the current blob is
+// written back while the title compiles pipelines and again when the device goes away, so a warm boot does not make the
+// driver compile the same SPIR-V to the same GPU ISA again. Opt-in and off by default; the switch names the file, and
+// every failure (missing, corrupt, another device, over the size bound, a read-only directory) falls back to the path
+// the layer had before (the build stage's seed, or an empty cache) without failing the boot. docs/pipeline_cache.md.
+//
+// Multiple devices: a process may create more than one device; each gets its own VkPipelineCache, so each file is
+// owned by one device (the first to create its cache) and the last writer of a file would otherwise make the other
+// device's cache incompatible. A second device on the same path still loads the file when its header matches (the
+// VkPipelineCacheCreateInfo compatibility rule below) but does not save it; the registry logs that once.
+
+struct PipelineCacheFileConfig {
+    std::filesystem::path path;    // empty: off (today's behaviour)
+    std::size_t max_bytes = 0;
+    bool enabled = false;
+};
+
+const PipelineCacheFileConfig& pipeline_cache_file_config() {
+    static const PipelineCacheFileConfig config = [] {
+        PipelineCacheFileConfig out;
+        char text[4096] = {};
+        size_t length = 0;
+        if (getenv_s(&length, text, sizeof(text), "PALMETTO_PIPELINE_CACHE") != 0) {
+            std::fprintf(stderr,
+                         "[rt] pipeline: PALMETTO_PIPELINE_CACHE is longer than %zu characters: the persistent cache "
+                         "is off\n",
+                         sizeof(text) - 1);
+            return out;
+        }
+        if (length <= 1) return out;
+        out.path = std::filesystem::path(std::u8string(text, text + length - 1));
+        out.enabled = !out.path.empty();
+        // The file is bounded so a driver that grows its cache cannot fill the disk: vkGetPipelineCacheData is asked
+        // for the size first and nothing over the bound is read or written. 512 MiB holds the boot's pipelines on
+        // the measured driver; PALMETTO_PIPELINE_CACHE_MAX_MB raises or lowers it (1 to 16384).
+        constexpr unsigned long kDefaultMaxMb = 512;
+        unsigned long max_mb = kDefaultMaxMb;
+        char size_text[32] = {};
+        size_t size_length = 0;
+        if (getenv_s(&size_length, size_text, sizeof(size_text), "PALMETTO_PIPELINE_CACHE_MAX_MB") == 0 &&
+            size_length > 1) {
+            char* end = nullptr;
+            const unsigned long value = std::strtoul(size_text, &end, 10);
+            if (end == size_text || *end || value < 1 || value > 16384)
+                std::fprintf(stderr,
+                             "[rt] pipeline: PALMETTO_PIPELINE_CACHE_MAX_MB=%s is not a number of MiB from 1 to 16384: "
+                             "using %lu\n",
+                             size_text, kDefaultMaxMb);
+            else
+                max_mb = value;
+        }
+        out.max_bytes = static_cast<std::size_t>(max_mb) << 20;
+        std::fprintf(stderr, "[rt] pipeline: persistent pipeline cache at %ls, bound %lu MiB\n", out.path.wstring().c_str(),
+                     max_mb);
+        return out;
+    }();
+    return config;
+}
+
+palmetto::pipeline_cache::Identity pipeline_cache_identity(const palmetto::cached_pso::Identity& pso) {
+    palmetto::pipeline_cache::Identity identity;
+    identity.vendor = pso.vendor;
+    identity.device = pso.device;
+    std::memcpy(identity.uuid, pso.cache_uuid, sizeof(identity.uuid));
+    return identity;
+}
+
+// The header fields the persistent file is read and written by must be the Vulkan header's (src/pipeline_cache.h has
+// the same 32 bytes without the Vulkan includes the pure test does not need).
+static_assert(sizeof(VkPipelineCacheHeaderVersionOne) == palmetto::pipeline_cache::header_bytes);
+static_assert(offsetof(VkPipelineCacheHeaderVersionOne, headerSize) == 0);
+static_assert(offsetof(VkPipelineCacheHeaderVersionOne, headerVersion) == 4);
+static_assert(offsetof(VkPipelineCacheHeaderVersionOne, vendorID) == 8);
+static_assert(offsetof(VkPipelineCacheHeaderVersionOne, deviceID) == 12);
+static_assert(offsetof(VkPipelineCacheHeaderVersionOne, pipelineCacheUUID) == 16);
+static_assert(VK_PIPELINE_CACHE_HEADER_VERSION_ONE == palmetto::pipeline_cache::header_version_one);
+
+// A live VkPipelineCache whose blob is written to `path`. The owner is shared with the process-wide list the save
+// path walks; `mutex` serialises snapshot/replace against destruction (host access to a VkPipelineCache is not
+// externally synchronised for creation: the cache is created without EXTERNALLY_SYNCHRONIZED_BIT, so the driver
+// serialises concurrent creation; the mutex covers this layer's own vkGetPipelineCacheData and destroy).
+struct PipelineCacheOwner {
+    std::mutex mutex;
+    VkDevice device = VK_NULL_HANDLE;
+    VkPipelineCache cache = VK_NULL_HANDLE;
+    std::filesystem::path path;
+    std::size_t max_bytes = 0;
+    PFN_vkGetPipelineCacheData get_data = nullptr;
+    bool live = true;  // guarded by mutex
+    std::uint64_t writes = 0;
+    std::uint64_t write_failures = 0;
+    std::size_t saved_bytes = 0;
+    PipelineClock::time_point last_save{};
+};
+
+struct PipelineCacheRegistry {
+    std::mutex mutex;
+    std::vector<std::shared_ptr<PipelineCacheOwner>> owners;
+    std::atomic<bool> enabled{false};  // maybe_save's fast path: no owner, no clock read
+    std::atomic<std::int64_t> last_check_us{0};
+};
+
+PipelineCacheRegistry& pipeline_cache_registry() {
+    static auto* registry = new PipelineCacheRegistry();  // leaked: atexit and the device both use it
+    return *registry;
+}
+
+// A snapshot is skipped while the cache has not grown by a MiB, and a check happens at most every 4 s; a full save
+// every 12 s. A boot killed at its timeout keeps the last save, which is the point of the periodic path.
+constexpr std::uint64_t kPipelineCacheCheckIntervalUs = 4'000'000;
+constexpr std::uint64_t kPipelineCacheSaveIntervalUs = 12'000'000;
+constexpr std::size_t kPipelineCacheMinGrowthBytes = 1u << 20;
+
+std::vector<char> snapshot_pipeline_cache(PipelineCacheOwner& owner, const char** why) {
+    // vkGetPipelineCacheData writes a prefix and returns VK_INCOMPLETE when a worker grows the cache between the size
+    // query and the read; retry with headroom, as the pipeline build stage does (test/pipeline_cache_snapshot.h).
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        std::size_t size = 0;
+        if (owner.get_data(owner.device, owner.cache, &size, nullptr) != VK_SUCCESS) {
+            *why = "the driver refused a size query";
+            return {};
+        }
+        if (size < palmetto::pipeline_cache::header_bytes) {
+            *why = "smaller than a cache header";
+            return {};
+        }
+        if (size > owner.max_bytes) {
+            *why = "over the size bound";
+            return {};
+        }
+        std::size_t capacity = size + (size >> (4 - attempt));
+        capacity = (std::min)(capacity, owner.max_bytes);
+        std::vector<char> data(capacity);
+        std::size_t written = capacity;
+        const VkResult result = owner.get_data(owner.device, owner.cache, &written, data.data());
+        if (result == VK_INCOMPLETE) continue;
+        if (result != VK_SUCCESS) {
+            *why = "the driver refused the read";
+            return {};
+        }
+        if (written < palmetto::pipeline_cache::header_bytes || written > capacity) {
+            *why = "an invalid byte count";
+            return {};
+        }
+        data.resize(written);
+        return data;
+    }
+    *why = "it grew while being read on four attempts";
+    return {};
+}
+
+void save_pipeline_cache_owner(const std::shared_ptr<PipelineCacheOwner>& owner, bool final_save) {
+    std::lock_guard lock(owner->mutex);
+    if (!owner->live || !owner->cache || !owner->get_data || owner->path.empty()) return;
+    const auto now = PipelineClock::now();
+    if (!final_save && now - owner->last_save < std::chrono::microseconds(kPipelineCacheSaveIntervalUs)) return;
+    owner->last_save = now;
+    const char* why = "";
+    const std::vector<char> data = snapshot_pipeline_cache(*owner, &why);
+    if (data.empty()) {
+        if (final_save || owner->write_failures < 3) {
+            ++owner->write_failures;
+            std::fprintf(stderr, "[rt] pipeline: could not read the pipeline cache to save it: %s\n", why);
+        }
+        return;
+    }
+    if (!final_save && data.size() < owner->saved_bytes + kPipelineCacheMinGrowthBytes) return;
+    const auto write_started = PipelineClock::now();
+    const std::error_code error =
+        palmetto::pipeline_cache::write_file(owner->path, data.data(), data.size(), owner->max_bytes);
+    const double ms = static_cast<double>(pipeline_elapsed_us(write_started)) / 1000.0;
+    if (error) {
+        if (final_save || owner->write_failures < 3)
+            std::fprintf(stderr, "[rt] pipeline: could not save the pipeline cache to %ls: %s\n",
+                         owner->path.wstring().c_str(), error.message().c_str());
+        ++owner->write_failures;
+        return;
+    }
+    owner->saved_bytes = data.size();
+    ++owner->writes;
+    std::fprintf(stderr, "[rt] pipeline: saved %.1f MiB of pipeline cache to %ls (write %llu, %.1f ms)\n",
+                 static_cast<double>(data.size()) / (1024.0 * 1024.0), owner->path.wstring().c_str(),
+                 static_cast<unsigned long long>(owner->writes), ms);
+}
+
+void save_pipeline_caches(bool final_save) {
+    auto& registry = pipeline_cache_registry();
+    if (!registry.enabled.load(std::memory_order_relaxed)) return;
+    std::lock_guard lock(registry.mutex);
+    for (const auto& owner : registry.owners) save_pipeline_cache_owner(owner, final_save);
+}
+
+// Called after every driver pipeline creation (and from the save path): cheap when the switch is off, and the
+// 4 s/12 s bounds keep the write cost off the creation path.
+void maybe_save_pipeline_caches() {
+    auto& registry = pipeline_cache_registry();
+    if (!registry.enabled.load(std::memory_order_relaxed)) return;
+    const std::int64_t now = static_cast<std::int64_t>(pipeline_now_us());
+    std::int64_t last = registry.last_check_us.load(std::memory_order_relaxed);
+    if (now - last < static_cast<std::int64_t>(kPipelineCacheCheckIntervalUs)) return;
+    if (!registry.last_check_us.compare_exchange_strong(last, now, std::memory_order_relaxed)) return;
+    save_pipeline_caches(false);
+}
+
+// One background tick for the two switches: the profile prints its last cumulative line after the creation burst has
+// stopped (a boot killed at its timeout has no exit hook for a final summary), and the cache saves the pipelines the
+// burst created after its last mid-burst save. Off unless one of the switches is on: the thread is started from the
+// first profile sample or cache registration only. The thread is detached; every object it touches outlives the
+// process (both registries are leaked on purpose), and the device unregisters its cache before destroying it.
+void ensure_pipeline_maintenance() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        std::thread([] {
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::seconds(3));
+                if (pipeline_profile_enabled()) pipeline_profile_maybe_report(pipeline_now_us());
+                maybe_save_pipeline_caches();
+            }
+        }).detach();
+    });
+}
+
+bool register_pipeline_cache(const std::shared_ptr<PipelineCacheOwner>& owner) {
+    ensure_pipeline_maintenance();
+    auto& registry = pipeline_cache_registry();
+    std::lock_guard lock(registry.mutex);
+    // The switch names one process-wide path, so the first device owns the file. A second device (same path, maybe
+    // another GPU identity) still has its own in-memory cache, but saving it would clobber the owner's blob: it is not
+    // registered, logs once and keeps working for the boot.
+    for (const auto& existing : registry.owners) {
+        if (existing->path != owner->path) continue;
+        std::fprintf(stderr,
+                     "[rt] pipeline: %ls is already owned by another device in this process; this device's pipeline "
+                     "cache is not saved\n",
+                     owner->path.wstring().c_str());
+        return false;
+    }
+    registry.owners.push_back(owner);
+    if (!registry.enabled.exchange(true)) {
+        static bool atexit_registered = false;
+        if (!atexit_registered) {
+            atexit_registered = true;
+            std::atexit([] { save_pipeline_caches(true); });
+        }
+    }
+    return true;
+}
+
+void unregister_pipeline_cache(const std::shared_ptr<PipelineCacheOwner>& owner) {
+    save_pipeline_cache_owner(owner, true);  // the final write, while the cache is still usable
+    {
+        std::lock_guard lock(owner->mutex);
+        owner->live = false;
+    }
+    auto& registry = pipeline_cache_registry();
+    std::lock_guard lock(registry.mutex);
+    std::erase(registry.owners, owner);
+    if (registry.owners.empty()) registry.enabled.store(false, std::memory_order_relaxed);
+}
+
+// Creates the VkPipelineCache with the previous run's blob when the file is usable; on every other status the caller
+// falls back to the build stage's seed (create_seeded_pipeline_cache) and then to an empty cache.
+VkPipelineCache create_persistent_pipeline_cache(PFN_vkCreatePipelineCache create_cache, VkDevice device,
+                                                 const palmetto::cached_pso::Identity& pso_identity,
+                                                 const PipelineCacheFileConfig& config) {
+    const palmetto::pipeline_cache::Loaded loaded =
+        palmetto::pipeline_cache::load_file(config.path, config.max_bytes, pipeline_cache_identity(pso_identity));
+    switch (loaded.status) {
+        case palmetto::pipeline_cache::Status::ok:
+            std::fprintf(stderr, "[rt] pipeline: loaded %.1f MiB of pipeline cache from %ls\n",
+                         static_cast<double>(loaded.data.size()) / (1024.0 * 1024.0), config.path.wstring().c_str());
+            break;
+        case palmetto::pipeline_cache::Status::missing:
+            std::fprintf(stderr,
+                         "[rt] pipeline: no pipeline cache at %ls yet; this run seeds and saves the first one\n",
+                         config.path.wstring().c_str());
+            return VK_NULL_HANDLE;  // nothing to seed from, but the caller keeps it as the file to save to
+        default:
+            std::fprintf(stderr, "[rt] pipeline: ignoring %ls: %s\n", config.path.wstring().c_str(),
+                         palmetto::pipeline_cache::status_name(loaded.status));
+            return VK_NULL_HANDLE;
+    }
+    const VkPipelineCacheCreateInfo create{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, nullptr, 0, loaded.data.size(),
+                                           loaded.data.data()};
+    VkPipelineCache cache = VK_NULL_HANDLE;
+    if (create_cache(device, &create, nullptr, &cache) != VK_SUCCESS) {
+        std::fprintf(stderr, "[rt] pipeline: Vulkan declined the saved pipeline cache; starting from the seed\n");
+        return VK_NULL_HANDLE;
+    }
     return cache;
 }
 
@@ -635,22 +1163,62 @@ struct DeviceState {
     // An integrated GPU (VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU): D3D12_FEATURE_ARCHITECTURE answers UMA, the custom
     // heap equivalents are in MEMORY_POOL_L0 and custom heaps in L1 are refused, as the host runtime does there.
     bool uma = false;
+    // VkPipelineCreationFeedback is core in Vulkan 1.3 (PALMETTO_PIPELINE_PROFILE reads it; a pre-1.3 device would
+    // need VK_EXT_pipeline_creation_feedback, which this layer does not enable, so it reports "without feedback").
+    bool pipeline_creation_feedback = false;
     palmetto::cached_pso::Identity pso_identity;  // what GetCachedBlob records and CachedPSO is checked against
     std::once_flag pipeline_cache_once;
     VkPipelineCache pipeline_cache_handle = VK_NULL_HANDLE;
+    // PALMETTO_PIPELINE_CACHE: the file this device's cache blob is saved to; null unless the switch names one.
+    std::shared_ptr<PipelineCacheOwner> pipeline_cache_owner;
 
     VkPipelineCache pipeline_cache() {
         std::call_once(pipeline_cache_once, [this] {
             const auto& vk = context->vk;
             if (!vk.vkCreatePipelineCache || !vk.vkDestroyPipelineCache) return;
-            pipeline_cache_handle = create_seeded_pipeline_cache(vk.vkCreatePipelineCache, info.device, pso_identity);
-            if (pipeline_cache_handle) return;
-            const VkPipelineCacheCreateInfo create{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
-            if (vk.vkCreatePipelineCache(info.device, &create, nullptr, &pipeline_cache_handle) != VK_SUCCESS)
-                pipeline_cache_handle = VK_NULL_HANDLE;
+            const PipelineCacheFileConfig& file = pipeline_cache_file_config();
+            if (!file.enabled) {  // today's path, byte-identical: the build stage's seed, else an empty cache
+                pipeline_cache_handle = create_seeded_pipeline_cache(vk.vkCreatePipelineCache, info.device, pso_identity);
+                if (pipeline_cache_handle) return;
+                const VkPipelineCacheCreateInfo create{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+                if (vk.vkCreatePipelineCache(info.device, &create, nullptr, &pipeline_cache_handle) != VK_SUCCESS)
+                    pipeline_cache_handle = VK_NULL_HANDLE;
+                return;
+            }
+            // Opt-in persistence: the previous run's blob when it is this device's, else the build stage's seed, else
+            // empty. Every failure lands on the same path the layer had before (nothing fails the boot).
+            pipeline_cache_handle = create_persistent_pipeline_cache(vk.vkCreatePipelineCache, info.device, pso_identity, file);
+            if (!pipeline_cache_handle) {
+                pipeline_cache_handle = create_seeded_pipeline_cache(vk.vkCreatePipelineCache, info.device, pso_identity);
+                if (!pipeline_cache_handle) {
+                    const VkPipelineCacheCreateInfo create{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+                    if (vk.vkCreatePipelineCache(info.device, &create, nullptr, &pipeline_cache_handle) != VK_SUCCESS)
+                        pipeline_cache_handle = VK_NULL_HANDLE;
+                }
+            }
+            if (!pipeline_cache_handle) return;
+            // The file is written by this device from now on: its blob in the cache includes everything it accepted.
+            auto owner = std::make_shared<PipelineCacheOwner>();
+            owner->device = info.device;
+            owner->cache = pipeline_cache_handle;
+            owner->path = file.path;
+            owner->max_bytes = file.max_bytes;
+            owner->get_data = vk.vkGetPipelineCacheData;  // a Vulkan 1.0 entry point; null only on a broken loader
+            owner->last_save = PipelineClock::now();
+            // Registered only when this device owns the file: a second device on the same path keeps its cache in
+            // memory but does not save it (the registry logs why).
+            if (owner->get_data && register_pipeline_cache(owner)) pipeline_cache_owner = owner;
         });
         // Without EXTERNALLY_SYNCHRONIZED_BIT the driver synchronizes concurrent pipeline creation using this cache.
         return pipeline_cache_handle;
+    }
+
+    // The device's final write: with a clean exit the current blob is saved here (the periodic path covers a run that
+    // is killed at its timeout). Called before vkDestroyPipelineCache, while the blob is still readable.
+    void close_pipeline_cache() {
+        if (!pipeline_cache_owner) return;
+        unregister_pipeline_cache(pipeline_cache_owner);
+        pipeline_cache_owner.reset();
     }
 
     QueueClock clock;  // what every queue's GetClockCalibration uses
@@ -4360,6 +4928,9 @@ public:
                             const D3D12_SHADER_BYTECODE* as = nullptr, bool standin = false) {
         auto& vk = device_.context->vk;
         const VkDevice dev = device_.info.device;
+        const bool profile = pipeline_profile_enabled();
+        if (profile) pipeline_profile_begin(true);
+        const PipelineClock::time_point profile_started = profile ? PipelineClock::now() : PipelineClock::time_point{};
         const bool mesh = ms && ms->pShaderBytecode && ms->BytecodeLength;
         if (as && as->pShaderBytecode && as->BytecodeLength) {
             log_once("amplification shaders are not supported (the game has none); bytes", int(as->BytecodeLength));
@@ -4747,7 +5318,11 @@ public:
             module_info.codeSize = stage.words.size() * 4;
             module_info.pCode = stage.words.data();
             VkShaderModule module = VK_NULL_HANDLE;
-            if (vk.vkCreateShaderModule(dev, &module_info, nullptr, &module) != VK_SUCCESS) return E_FAIL;
+            const PipelineClock::time_point module_started =
+                profile ? PipelineClock::now() : PipelineClock::time_point{};
+            const VkResult module_result = vk.vkCreateShaderModule(dev, &module_info, nullptr, &module);
+            if (profile) pipeline_profile_module(true, pipeline_elapsed_us(module_started));
+            if (module_result != VK_SUCCESS) return E_FAIL;
             modules_.push_back(module);
             VkPipelineShaderStageCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
             info.stage = stage.bit;
@@ -4762,8 +5337,12 @@ public:
             module_info.codeSize = words.size() * 4;
             module_info.pCode = words.data();
             VkShaderModule module = VK_NULL_HANDLE;
-            if (words.empty() || vk.vkCreateShaderModule(dev, &module_info, nullptr, &module) != VK_SUCCESS)
-                return E_FAIL;
+            const PipelineClock::time_point module_started =
+                profile ? PipelineClock::now() : PipelineClock::time_point{};
+            const VkResult module_result =
+                words.empty() ? VK_ERROR_INITIALIZATION_FAILED : vk.vkCreateShaderModule(dev, &module_info, nullptr, &module);
+            if (profile) pipeline_profile_module(true, pipeline_elapsed_us(module_started));
+            if (module_result != VK_SUCCESS) return E_FAIL;
             modules_.push_back(module);
             VkPipelineShaderStageCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
             info.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -5048,7 +5627,10 @@ public:
             layout_info.pSetLayouts = &set0_layout;
             graphics_.bindless_set = device_.bindless->set();
         }
-        if (vk.vkCreatePipelineLayout(dev, &layout_info, nullptr, &graphics_.layout) != VK_SUCCESS) return E_FAIL;
+        const PipelineClock::time_point layout_started = profile ? PipelineClock::now() : PipelineClock::time_point{};
+        const VkResult layout_result = vk.vkCreatePipelineLayout(dev, &layout_info, nullptr, &graphics_.layout);
+        if (profile) pipeline_profile_layout(true, pipeline_elapsed_us(layout_started));
+        if (layout_result != VK_SUCCESS) return E_FAIL;
 
         // Diagnostic (docs/vertex_path.md): capture the vertex path the shim actually bound - the input layout and the
         // resolved shader modules' corpus identity - for the replay's env-gated dump. Copies only; nothing on the draw
@@ -5135,6 +5717,14 @@ public:
         recipe_.blend = blend;
         graphics_.pipeline = build(0);
         if (!graphics_.pipeline) return E_FAIL;
+        if (profile) {
+            std::string label;
+            if (pipeline_elapsed_us(profile_started) >
+                pipeline_profile().slow_floor_us.load(std::memory_order_relaxed))
+                label = pipeline_profile_label(stages[0].entry ? stages[0].entry->name.c_str() : nullptr,
+                                               stages[2].entry ? stages[2].entry->name.c_str() : nullptr, desc, mesh);
+            pipeline_profile_created(true, profile_started, label);
+        }
         graphics_.variant = [this](std::uint32_t unbound) { return variant(unbound); };
         // Diagnostic (docs/frame_capture.md): the frame dump's PS-only control, the same recipe with another pixel
         // shader. Only read by the env-gated diagnostic; nothing on the normal draw path calls it.
@@ -5170,6 +5760,9 @@ public:
     HRESULT create_compute(const D3D12_COMPUTE_PIPELINE_STATE_DESC& desc) {
         auto& vk = device_.context->vk;
         const VkDevice dev = device_.info.device;
+        const bool profile = pipeline_profile_enabled();
+        if (profile) pipeline_profile_begin(false);
+        const PipelineClock::time_point profile_started = profile ? PipelineClock::now() : PipelineClock::time_point{};
         if (!desc.CS.pShaderBytecode || !desc.CS.BytecodeLength) return E_INVALIDARG;
         if (desc.NodeMask & ~1u) return E_INVALIDARG;
         if (static_cast<UINT>(desc.Flags) & ~kKnownPipelineStateFlags) return E_INVALIDARG;
@@ -5274,7 +5867,10 @@ public:
         VkShaderModuleCreateInfo module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         module_info.codeSize = words.size() * 4;
         module_info.pCode = words.data();
-        if (vk.vkCreateShaderModule(dev, &module_info, nullptr, &module_) != VK_SUCCESS) return E_FAIL;
+        const PipelineClock::time_point module_started = profile ? PipelineClock::now() : PipelineClock::time_point{};
+        const VkResult module_result = vk.vkCreateShaderModule(dev, &module_info, nullptr, &module_);
+        if (profile) pipeline_profile_module(false, pipeline_elapsed_us(module_started));
+        if (module_result != VK_SUCCESS) return E_FAIL;
         const VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(palmetto::ShaderUserData)};
         VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         layout_info.pushConstantRangeCount = 1;
@@ -5286,7 +5882,10 @@ public:
             layout_info.pSetLayouts = &set0_layout;
             pipeline_.bindless_set = device_.bindless->set();
         }
-        if (vk.vkCreatePipelineLayout(dev, &layout_info, nullptr, &pipeline_.layout) != VK_SUCCESS) return E_FAIL;
+        const PipelineClock::time_point layout_started = profile ? PipelineClock::now() : PipelineClock::time_point{};
+        const VkResult layout_result = vk.vkCreatePipelineLayout(dev, &layout_info, nullptr, &pipeline_.layout);
+        if (profile) pipeline_profile_layout(false, pipeline_elapsed_us(layout_started));
+        if (layout_result != VK_SUCCESS) return E_FAIL;
         VkComputePipelineCreateInfo pipeline_info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         pipeline_info.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         pipeline_info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -5295,9 +5894,30 @@ public:
         VkPipelineShaderStageRequiredSubgroupSizeCreateInfo required_size{};
         subgroup_size_for(*entry, required_size, pipeline_info.stage);
         pipeline_info.layout = pipeline_.layout;
-        if (vk.vkCreateComputePipelines(dev, device_.pipeline_cache(), 1, &pipeline_info, nullptr, &pipeline_.pipeline) !=
-            VK_SUCCESS)
-            return E_FAIL;
+        const bool feedback = profile && device_.pipeline_creation_feedback;
+        VkPipelineCreationFeedback pipeline_feedback{};
+        VkPipelineCreationFeedbackCreateInfo feedback_create{
+            VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO, nullptr, &pipeline_feedback, 0, nullptr};
+        if (feedback) pipeline_info.pNext = &feedback_create;
+        const PipelineClock::time_point driver_started = profile ? PipelineClock::now() : PipelineClock::time_point{};
+        const VkResult created = vk.vkCreateComputePipelines(dev, device_.pipeline_cache(), 1, &pipeline_info, nullptr,
+                                                             &pipeline_.pipeline);
+        if (profile) {
+            int cache_state = -1;
+            if (created == VK_SUCCESS && (pipeline_feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT))
+                cache_state = (pipeline_feedback.flags &
+                               VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT) ? 1 : 0;
+            pipeline_profile_driver(false, pipeline_elapsed_us(driver_started), cache_state);
+        }
+        maybe_save_pipeline_caches();
+        if (created != VK_SUCCESS) return E_FAIL;
+        if (profile) {
+            std::string label;
+            if (pipeline_elapsed_us(profile_started) >
+                pipeline_profile().slow_floor_us.load(std::memory_order_relaxed))
+                label = pipeline_profile_label_compute(entry->name.c_str(), entry->binding_count);
+            pipeline_profile_created(false, profile_started, label);
+        }
 
         // The code base: shaders read constant tables embedded in their own program through s_getpc_b64. The
         // translator's code offsets are into the bytes the key hashes (the FSSM blob, or the kind-6 program).
@@ -5436,10 +6056,33 @@ private:
         info.pColorBlendState = &blend;
         info.pDynamicState = &dynamic;
         info.layout = graphics_.layout;
+        // The profile chains VkPipelineCreationFeedback (core in Vulkan 1.3) so a warm run's cache hits are measured,
+        // not assumed. The chain is output-only and built only with the switch on.
+        const bool profile = pipeline_profile_enabled();
+        const bool feedback = profile && device_.pipeline_creation_feedback;
+        VkPipelineCreationFeedback pipeline_feedback{};
+        VkPipelineCreationFeedback stage_feedback[3]{};
+        VkPipelineCreationFeedbackCreateInfo feedback_create{
+            VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO, nullptr, &pipeline_feedback, 0, nullptr};
+        if (feedback) {
+            feedback_create.pNext = info.pNext;
+            feedback_create.pipelineStageCreationFeedbackCount = (std::min)(stage_count, 3u);
+            feedback_create.pPipelineStageCreationFeedbacks = stage_feedback;
+            info.pNext = &feedback_create;
+        }
         VkPipeline pipeline = VK_NULL_HANDLE;
-        if (device_.context->vk.vkCreateGraphicsPipelines(device_.info.device, device_.pipeline_cache(), 1,
-                                                          &info, nullptr, &pipeline) != VK_SUCCESS)
-            return VK_NULL_HANDLE;
+        const PipelineClock::time_point driver_started = profile ? PipelineClock::now() : PipelineClock::time_point{};
+        const VkResult created = device_.context->vk.vkCreateGraphicsPipelines(
+            device_.info.device, device_.pipeline_cache(), 1, &info, nullptr, &pipeline);
+        if (profile) {
+            int cache_state = -1;
+            if (created == VK_SUCCESS && (pipeline_feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT))
+                cache_state = (pipeline_feedback.flags &
+                               VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT) ? 1 : 0;
+            pipeline_profile_driver(true, pipeline_elapsed_us(driver_started), cache_state);
+        }
+        maybe_save_pipeline_caches();
+        if (created != VK_SUCCESS) return VK_NULL_HANDLE;
         return pipeline;
     }
 
@@ -6360,6 +7003,7 @@ public:
                 state_.pso_identity.device = props.deviceID;
                 state_.pso_identity.driver = props.driverVersion;
                 std::memcpy(state_.pso_identity.cache_uuid, props.pipelineCacheUUID, VK_UUID_SIZE);
+                state_.pipeline_creation_feedback = props.apiVersion >= VK_API_VERSION_1_3;
                 if (state_.info.max_push_constants_size == 0) {
                     state_.info.max_push_constants_size = props.limits.maxPushConstantsSize;
                     state_.info.push_constants_need_fallback = (state_.info.max_push_constants_size < 144);
@@ -6824,6 +7468,9 @@ public:
             vk.vkDestroyBuffer(state_.info.device, state_.arena.buffer, nullptr);
             if (state_.arena.memory) vk.vkFreeMemory(state_.info.device, state_.arena.memory, nullptr);
         }
+        // The persistent cache's final write (PALMETTO_PIPELINE_CACHE): before the handle goes, while its blob is
+        // readable. The periodic save already covers a run that is killed at its timeout.
+        state_.close_pipeline_cache();
         if (state_.pipeline_cache_handle)
             state_.context->vk.vkDestroyPipelineCache(state_.info.device, state_.pipeline_cache_handle, nullptr);
         state_.context.reset();
