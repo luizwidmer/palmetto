@@ -1660,21 +1660,51 @@ LIBRARY_BUILD_RECORD = "pipeline_library_build.json"   # written after the publi
 # The extraction's inputs, as FSPX_TOOLS holds its step's: the extracting tools, and the carve that supplies the
 # source containers the translator copies the stages' signatures from.
 LIBRARY_TOOLS = ("shader_library.py", "fspx_unpack.py", "shader_disasm.py", "shader_carve.py")
+# The wanted compute program list is data, not repository content: a file named by PALMETTO_COMPUTE_PROGRAMS, or
+# <work>/compute_programs.json when that is not set (the compute counterpart of GRAPHICS_PROGRAMS_FILE). The title's
+# deserialized compute pipelines ask for a library program by the SHA-256 of its kind-6 bytes, so a measured list of
+# those hashes lets the build extract and translate only the programs the boot asks for instead of the whole compute
+# stage. Without one the step translates the whole stage, as before.
+COMPUTE_PROGRAMS_ENV = "PALMETTO_COMPUTE_PROGRAMS"
+COMPUTE_PROGRAMS_FILE = "compute_programs.json"
+LIBRARY_REFUSALS = "refusals.json"   # per-program refusal reasons, written by rdna2spirv.py --refusals
+LIBRARY_COVERAGE = "coverage.json"   # per-program coverage, written by library_coverage() on every run
 
 
-def library_extraction_settings(package: str, mc_signature: str) -> str:
-    """What <work>/shaders/pipeline_library depends on, as one line: the package, the extracting tools and llvm-mc."""
-    return json.dumps({"package": package, "tools": sources_digest(TOOLS, LIBRARY_TOOLS), "llvm_mc": mc_signature,
-                       "stages": LIBRARY_STAGES}, sort_keys=True)
+def library_extraction_settings(package: str, mc_signature: str, wanted: "str | None" = None) -> str:
+    """What <work>/shaders/pipeline_library depends on, as one line: the package, the extracting tools and llvm-mc,
+    and - only when one selects the programs - the wanted list's digest (another selection extracts another set)."""
+    settings = {"package": package, "tools": sources_digest(TOOLS, LIBRARY_TOOLS), "llvm_mc": mc_signature,
+                "stages": LIBRARY_STAGES}
+    if wanted is not None:
+        settings["wanted"] = wanted
+    return json.dumps(settings, sort_keys=True)
 
 
-def library_settings(package: str, mc_signature: str, emulate: bool, fallbacks: tuple[str, ...]) -> str:
+def library_settings(package: str, mc_signature: str, emulate: bool, fallbacks: tuple[str, ...],
+                     wanted: "str | None" = None) -> str:
     """What the translated pipeline library's modules depend on, as one line: the package, the extracting tools, the
-    translator, llvm-mc, the wave64 mode and the fallback flags."""
-    return json.dumps({"package": package, "tools": sources_digest(TOOLS, LIBRARY_TOOLS),
-                       "translator": translation_sources_digest(), "llvm_mc": mc_signature,
-                       "wave64_emulate": bool(emulate), "fallbacks": list(fallbacks), "stages": LIBRARY_STAGES},
-                      sort_keys=True)
+    translator, llvm-mc, the wave64 mode and the fallback flags, plus the wanted list's digest when one selects."""
+    settings = {"package": package, "tools": sources_digest(TOOLS, LIBRARY_TOOLS),
+                "translator": translation_sources_digest(), "llvm_mc": mc_signature,
+                "wave64_emulate": bool(emulate), "fallbacks": list(fallbacks), "stages": LIBRARY_STAGES}
+    if wanted is not None:
+        settings["wanted"] = wanted
+    return json.dumps(settings, sort_keys=True)
+
+
+def compute_programs_path(work: str) -> str:
+    """Where the wanted compute program list is read from: PALMETTO_COMPUTE_PROGRAMS, else <work>/compute_programs.json."""
+    named = os.environ.get(COMPUTE_PROGRAMS_ENV, "").strip()
+    return os.path.abspath(named) if named else os.path.join(work, COMPUTE_PROGRAMS_FILE)
+
+
+def wanted_list_digest(path: "str | None") -> "str | None":
+    """The wanted list's SHA-256 when the file is there, else None: part of what the extraction depends on, and None
+    (rather than a digest of nothing) keeps a build without a list on the settings it recorded before this option."""
+    if not path or not os.path.isfile(path):
+        return None
+    return file_sha256(path)
 
 
 def library_extraction_programs(extracted: str) -> "list[str] | None":
@@ -1759,6 +1789,89 @@ def library_report(extracted: int, translated: int) -> None:
     log(f"shaders: {translated} of {extracted} pipeline library compute programs translated")
 
 
+def library_refusal_reasons(staged: str) -> "dict[str, str]":
+    """The translator's per-program refusal reasons (name -> reason), or {} when the run did not record them.
+
+    rdna2spirv.py --refusals writes <staged>/refusals.json: the reason each program it could not translate stopped at
+    (tooling/rdna2spirv.py's Unsupported messages). Without it a program is still reported as untranslated, only the
+    reason is not recorded."""
+    try:
+        with open(os.path.join(staged, LIBRARY_REFUSALS), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {name: reason for name, reason in data.items() if isinstance(name, str) and isinstance(reason, str)}
+
+
+def library_published(fspx: "str | None") -> "set[str]":
+    """The entry names the shader corpus the runtime reads actually has a module for, or () when `fspx` is unknown."""
+    if not fspx:
+        return set()
+    try:
+        with open(os.path.join(fspx, "index.json"), encoding="utf-8") as f:
+            index = json.load(f)
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(index, dict):
+        return set()
+    return {name for name in index if os.path.isfile(os.path.join(fspx, name + ".spv"))}
+
+
+def library_coverage(extracted: str, staged: str, fspx: "str | None" = None) -> "dict | None":
+    """What the compute library step covers: every extracted program's status, why the rest did not translate, and a
+    one-line summary; written to <extracted>/coverage.json and printed. None when the extraction has no index.
+
+    The extraction names the programs the title's compute library holds; the staged index says which translated;
+    refusals.json (rdna2spirv.py --refusals) says why the others did not; `fspx` says whether a translated entry is
+    published in the corpus the runtime reads. A wanted-list extraction (wanted.json beside the index) is the title's
+    requested set, so its refused programs are printed one per line: they stay refused by name, and a reader can tell
+    a program with no translation from a program the extraction never found."""
+    names = library_extraction_programs(extracted)
+    if not names:
+        return None
+    translated = set(library_translated(staged) or {})
+    reasons = library_refusal_reasons(staged)
+    published = library_published(fspx) if fspx else set()
+    wanted = os.path.isfile(os.path.join(extracted, "wanted.json"))
+    programs = {}
+    counted = {}
+    for name in names:
+        if name in translated:
+            status, reason = "translated", ""
+        elif name in reasons:
+            status, reason = "refused", reasons[name]
+            counted[reason] = counted.get(reason, 0) + 1
+        else:
+            status, reason = "untranslated", "reason not recorded"
+            counted["reason not recorded"] = counted.get("reason not recorded", 0) + 1
+        programs[name] = {"status": status, "reason": reason, "published": name in published}
+    summary = {"extracted": len(names), "translated": len(translated & set(names)),
+               "untranslated": len(names) - len(translated & set(names)), "published": len(translated & published),
+               "wanted_list": wanted, "reasons": counted}
+    path = os.path.join(extracted, LIBRARY_COVERAGE)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        json.dump({"summary": summary, "programs": programs}, f, indent=0, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    why = ", ".join(f"{reason} x{count}" for reason, count in sorted(counted.items(), key=lambda kv: (-kv[1], kv[0])))
+    log(f"shaders: pipeline library compute coverage: {summary['translated']} of {summary['extracted']} translated, "
+        f"{summary['untranslated']} untranslated" + (f" ({why})" if why else "")
+        + (f"; {summary['published']} published in the shader corpus" if fspx else ""))
+    if wanted:
+        refused = [name for name in names if name in reasons]
+        for name in refused[:40]:
+            log(f"shaders:   refused by name: {name}: {reasons[name]}")
+        if len(refused) > 40:
+            log(f"shaders:   ... {len(refused) - 40} more refused program(s) in {path}")
+        if not refused:
+            log("shaders:   every wanted compute program translated")
+    return {"summary": summary, "programs": programs}
+
+
 def merge_library_corpus(staged: str, fspx: str, owned: "tuple[str, ...]" = ("lib_",)) -> None:
     """Publish the staged pipeline-library entries and modules where the runtime looks them up.
 
@@ -1821,7 +1934,12 @@ def library_shaders(game: str, work: str, mc_signature: str, jobs: int = 1, emul
     The 2,684 compute programs take minutes, so the step runs whole. A run stopped during the extraction starts it
     again; one stopped during the translation keeps the extraction and translates again. Reuse requires the staged
     translation, its modules, the published entries and a matching pipeline_library_build.json (library_settings).
-    Programs the translator cannot translate are reported, never dropped quietly."""
+    Programs the translator cannot translate are reported, never dropped quietly: refusals.json names each one's
+    reason and coverage.json records every program's status (library_coverage()).
+
+    A wanted compute program list (PALMETTO_COMPUTE_PROGRAMS, else <work>/compute_programs.json) makes the step
+    extract and translate only the library programs whose bytes have those SHA-256 hashes - the programs a measured
+    boot asked slot 67 for - instead of the whole compute stage; without one the step behaves as before."""
     arc = os.path.join(game, LIBRARY_ARC)
     extracted = os.path.join(work, "shaders", "pipeline_library")
     staged = os.path.join(work, "shaders", "spirv", "pipeline_library")
@@ -1829,13 +1947,17 @@ def library_shaders(game: str, work: str, mc_signature: str, jobs: int = 1, emul
     carve = os.path.join(work, "shaders", "dxbc")
     translated = os.path.join(staged, "index.json")
     settings_file = os.path.join(staged, LIBRARY_BUILD_RECORD)
+    wanted_path = compute_programs_path(work)
+    wanted = wanted_list_digest(wanted_path)
     if not os.path.isfile(arc):
         log(f"shaders: no {LIBRARY_ARC} in the game folder, so no pipeline library programs to translate")
         drop(translated, settings_file)   # a stale published index must not outlive the package it came from
         return
+    if wanted:
+        log(f"shaders: the wanted compute program list {wanted_path} selects the pipeline library programs")
     package = file_sha256(arc)
-    extraction_settings = library_extraction_settings(package, mc_signature)
-    settings = library_settings(package, mc_signature, emulate, fallbacks)
+    extraction_settings = library_extraction_settings(package, mc_signature, wanted)
+    settings = library_settings(package, mc_signature, emulate, fallbacks, wanted)
     index = library_translation_reusable(staged, settings)
     names = library_extraction_ok(extracted, extraction_settings)
     if index and names:
@@ -1843,6 +1965,7 @@ def library_shaders(game: str, work: str, mc_signature: str, jobs: int = 1, emul
             log("shaders: the pipeline library programs are translated; publishing them into the shader corpus again")
             merge_library_corpus(staged, fspx, owned=LIBRARY_OWNED)
         library_report(len(names), len(index))
+        library_coverage(extracted, staged, fspx)
         return
     log("shaders: extracting and translating the pipeline library's compute programs")
     drop(translated, settings_file)
@@ -1855,23 +1978,30 @@ def library_shaders(game: str, work: str, mc_signature: str, jobs: int = 1, emul
         drop(os.path.join(extracted, LIBRARY_EXTRACTED_RECORD))
         if os.path.isdir(extracted):
             shutil.rmtree(extracted)
-        py("shader_library.py", arc, "--out", extracted, "--stages", LIBRARY_STAGES, "--disasm", "--carve", carve,
-           "--jobs", jobs)
+        # --stages none with a wanted list: the wanted list alone selects the programs, nothing by stage.
+        selection = ("--stages", "none", "--wanted", wanted_path) if wanted else ("--stages", LIBRARY_STAGES)
+        py("shader_library.py", arc, "--out", extracted, *selection, "--disasm", "--carve", carve, "--jobs", jobs)
         names = library_extraction_complete(extracted)
         if not names:
+            if wanted:
+                fail(f"shaders: the wanted compute program extraction in {extracted} is incomplete, or none of the "
+                     "hashes in the wanted list names a library program (see its wanted.json). Run the shaders stage "
+                     "again; the tool output above is why.")
             fail(f"shaders: the pipeline library extraction in {extracted} is incomplete (no readable index.json, or a "
                  "program's sidecars or listing are missing). Run the shaders stage again; the tool output above is why.")
         marker = os.path.join(extracted, LIBRARY_EXTRACTED_RECORD) + ".tmp"
         with open(marker, "w", encoding="utf-8", newline="\n") as f:
             f.write(extraction_settings + "\n")
         os.replace(marker, os.path.join(extracted, LIBRARY_EXTRACTED_RECORD))
-    translate(os.path.join(extracted, "disasm"), staged, jobs, emulate=emulate, fallbacks=fallbacks)
+    translate(os.path.join(extracted, "disasm"), staged, jobs, emulate=emulate, fallbacks=fallbacks,
+              refusals=os.path.join(staged, LIBRARY_REFUSALS))
     index = library_translated(staged)
     if not index:
         fail(f"shaders: rdna2spirv.py wrote no complete pipeline library translation in {staged}. Run the shaders "
              "stage again; the translator's output above names each program it refused")
     library_report(len(names), len(index))
     merge_library_corpus(staged, fspx, owned=LIBRARY_OWNED)
+    library_coverage(extracted, staged, fspx)
     with open(settings_file, "w", encoding="utf-8", newline="\n") as f:
         f.write(settings + "\n")
 
@@ -2356,13 +2486,17 @@ def _stop_procs(procs: list) -> None:
 
 
 def translate(disasm: str, spirv: str, jobs: int, emulate: bool = False,
-              fallbacks: tuple[str, ...] = ()) -> None:
+              fallbacks: tuple[str, ...] = (), refusals: "str | None" = None) -> None:
     """rdna2spirv.py runs on one core: start one --shard per job side by side, then merge their index parts.
 
     A shard publishes shard<i>.json and then index.part<i>.json. Both are needed to reuse it. A run stopped
     part-way, or during the merge, keeps those parts when it resumes with the same --jobs, wave64 mode, fallback
     flags and translator source, and starts only the shards that have none. shaders() drops the plan whenever an
-    earlier step reruns."""
+    earlier step reruns.
+
+    `refusals` names the per-program refusal report the caller wants (rdna2spirv.py --refusals): each shard writes
+    <refusals>.part<i>.json and the merge combines them into <refusals>, so a caller can name the programs the
+    translator refused and why instead of only counting them."""
     os.makedirs(spirv, exist_ok=True)
     plan_path = os.path.join(spirv, SHARD_PLAN)
     plan = {"jobs": jobs, "wave64_emulate": bool(emulate), "fallbacks": list(fallbacks),
@@ -2392,7 +2526,8 @@ def translate(disasm: str, spirv: str, jobs: int, emulate: bool = False,
     extra.extend(fallbacks)
     if todo:
         which = f"0..{jobs - 1}" if len(todo) == jobs else ",".join(str(i) for i in todo)
-        log(f"  rdna2spirv.py {disasm} --out {spirv} --shard {which}/{jobs}" + "".join(" " + e for e in extra))
+        log(f"  rdna2spirv.py {disasm} --out {spirv} --shard {which}/{jobs}" + "".join(" " + e for e in extra)
+            + (f" --refusals {refusals}" if refusals else ""))
     # --no-asm: keep only the .spv modules; the .spvasm text would add ~35 GB for the corpus
     board = palmetto_tui.current_board()
     stage = palmetto_tui.current_stage()
@@ -2402,9 +2537,10 @@ def translate(disasm: str, spirv: str, jobs: int, emulate: bool = False,
     bad = []
     try:
         for i in todo:
+            refusal_args = ["--refusals", f"{refusals}.part{i}.json"] if refusals else []
             procs[i] = subprocess.Popen(
                 [sys.executable, "-I", tool, disasm, "--out", spirv, "--shard", f"{i}/{jobs}",
-                 "--no-asm", *extra], **popen_kw)
+                 "--no-asm", *extra, *refusal_args], **popen_kw)
         if board is not None:
             for i, p in procs.items():
                 t = threading.Thread(target=palmetto_tui.pump_process, args=(p, stage, board), daemon=True)
@@ -2433,7 +2569,7 @@ def translate(disasm: str, spirv: str, jobs: int, emulate: bool = False,
         # An older index describes the corpus from the run before: keeping it would make the next run take the
         # failed translation as finished. The next successful --merge writes it again.
         fail("rdna2spirv.py: " + ", ".join(bad) + "." + drop_index(os.path.join(spirv, "index.json")))
-    py("rdna2spirv.py", disasm, "--out", spirv, "--merge")
+    py("rdna2spirv.py", disasm, "--out", spirv, "--merge", *(["--refusals", refusals] if refusals else []))
     index = os.path.join(spirv, "index.json")
     if os.path.isfile(index):
         # Present but empty or unreadable: the merge published nothing, and the next run would read that as finished.

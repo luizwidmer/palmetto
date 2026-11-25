@@ -330,5 +330,41 @@ class ShardRoundTripTest(unittest.TestCase):
         self.assertFalse((self.out / "index.json").exists())
 
 
+class RefusalReportTest(unittest.TestCase):
+    """--refusals: the per-shader reasons build_port.py's library coverage report reads."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out = Path(self.tmp.name)
+        self.path = str(self.out / "refusals.json")
+
+    def part(self, index, doc):
+        (self.out / f"refusals.json.part{index}.json").write_text(json.dumps(doc), encoding="utf-8")
+
+    def test_merge_combines_the_shard_parts_and_names_each_reason(self):
+        self.part(0, {"lib_cs_00001": "fall-through into undecodable words"})
+        self.part(1, {"lib_cs_00002": "CS work-group-info SGPR use"})
+        self.assertEqual(R.merge_refusal_parts(self.path), 2)
+        self.assertEqual(json.loads(Path(self.path).read_text(encoding="utf-8")),
+                         {"lib_cs_00001": "fall-through into undecodable words",
+                          "lib_cs_00002": "CS work-group-info SGPR use"})
+
+    def test_a_missing_or_unreadable_part_is_skipped_not_invented(self):
+        self.part(0, {"a": "reason a"})
+        (self.out / "refusals.json.part1.json").write_text("{not json", encoding="utf-8")
+        self.assertEqual(R.merge_refusal_parts(self.path), 1)
+        self.assertEqual(json.loads(Path(self.path).read_text(encoding="utf-8")), {"a": "reason a"})
+        self.assertEqual(R.merge_refusal_parts(str(self.out / "none.json")), 0)
+        self.assertEqual(json.loads((self.out / "none.json").read_text(encoding="utf-8")), {})
+
+    def test_writer_is_atomic_and_sorted(self):
+        R.write_refusals(self.path, {"b": "second", "a": "first"})
+        self.assertEqual(Path(self.path).read_text(encoding="utf-8").count("\n") > 0, True)
+        self.assertEqual(json.loads(Path(self.path).read_text(encoding="utf-8")),
+                         {"a": "first", "b": "second"})
+        self.assertFalse(Path(self.path + ".tmp").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

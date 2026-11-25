@@ -18988,6 +18988,39 @@ def _out_inside_input(src, out):
     return target.startswith(root.rstrip(os.sep) + os.sep)
 
 
+def write_refusals(path, reasons):
+    """Write {shader: reason} for the shaders this run could not translate, atomically.
+
+    build_port.py's library step reads it (its LIBRARY_REFUSALS) so a program the translator refuses is named with
+    its reason instead of only counted: the runtime then answers it with its own named refusal."""
+    import glob as _gl, json as _js  # noqa: E401  (local, as the merge helpers above)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        _js.dump({name: reason for name, reason in sorted(reasons.items())}, f, indent=0, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def merge_refusal_parts(path):
+    """Combine the <path>.part<i>.json files translate()'s shard runs write into `path`; returns the name count.
+
+    A part that is missing (a shard kept from a run made without --refusals) is skipped, so the coverage report
+    says that reason was not recorded instead of inventing one."""
+    import glob as _gl, json as _js  # noqa: E401
+    combined = {}
+    for part in sorted(_gl.glob(path + ".part*.json")):
+        try:
+            with open(part, encoding="utf-8") as f:
+                data = _js.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            combined.update({str(name): str(reason) for name, reason in data.items()})
+    write_refusals(path, combined)
+    return len(combined)
+
+
 def main():
     global MAX_SHARED_BYTES, MAX_STRUCTURED_DEPTH
     ap = argparse.ArgumentParser()
@@ -19006,6 +19039,9 @@ def main():
                     help="skip spirv-val after assembly (for running GPU tests without SPIRV-Tools when paired "
                          "with --assembler python)")
     ap.add_argument("--merge", action="store_true", help="merge index.part*.json in --out into index.json and exit")
+    ap.add_argument("--refusals", metavar="PATH",
+                    help="write {shader: reason} for every shader this run did not translate to this JSON file "
+                         "(with --shard each shard writes PATH.part<i>.json and --merge combines them)")
     ap.add_argument("--fssm-dir", default=None,
                     help="optional dir with <name>.fssm sidecars: records fssm_sha256 per shader in the index")
     ap.add_argument("--dispatch-loop", action="store_true",
@@ -19117,6 +19153,8 @@ def main():
         spirv_stubs.generate_for_index(a.out, merged)
         write_index(os.path.join(a.out, "index.json"), merged)
         print(f"merged {len(merged)} entries")
+        if a.refusals:
+            print(f"refusals: {merge_refusal_parts(a.refusals)} shader(s) named with a reason")
         return 0
     single_file = os.path.isfile(a.src) and a.src.endswith(".s")
     if not single_file and not os.path.isdir(a.src):
@@ -19153,6 +19191,7 @@ def main():
     if shard is not None:
         files = files[shard::sn]
     why, ok, valid = Counter(), 0, 0
+    reasons = {}          # shader -> why it did not translate this run (written to --refusals)
     meta = {}
     invalid = set()
     total = len(files)
@@ -19177,14 +19216,17 @@ def main():
             # retire this shader's previous module and index entry on a retry.
             print(f"ERROR: {name}: missing translation input {e.filename}", file=sys.stderr)
             missing_inputs += 1
+            reasons[name] = f"missing translation input {e.filename}"
             drop_stale(name)
             continue
         except Unsupported as e:
             why[str(e)] += 1
+            reasons[name] = str(e)
             drop_stale(name)
             continue
         except (IndexError, KeyError, ValueError) as e:
             why[f"translator error {type(e).__name__}"] += 1
+            reasons[name] = f"translator error {type(e).__name__}"
             drop_stale(name)
             continue
         ok += 1
@@ -19216,7 +19258,9 @@ def main():
                 with open(sa, "w", encoding="utf-8", newline="\n") as f:
                     f.write(asm)
             drop_stale(name)
-            why["INVALID: " + (r.stderr.strip().splitlines() or ["?"])[0][:90]] += 1
+            reason = "INVALID: " + (r.stderr.strip().splitlines() or ["?"])[0][:90]
+            why[reason] += 1
+            reasons[name] = reason
         if a.no_asm and os.path.exists(sa):
             os.remove(sa)
         now = time.time()
@@ -19255,6 +19299,9 @@ def main():
               + (" (tier C is not exact there; see wave64_graphics_reasons in the index)" if W64G_COUNTS["C"] else ""))
     for k, v in why.most_common(25):
         print(f"  {v:6}  {k}")
+    if a.refusals:
+        write_refusals(a.refusals, reasons)
+        print(f"refusals: {len(reasons)} shader(s) named with a reason in {a.refusals}")
     if missing_inputs:
         print(f"{missing_inputs} of {len(files)} selected shaders missing required inputs", file=sys.stderr)
         return 1
