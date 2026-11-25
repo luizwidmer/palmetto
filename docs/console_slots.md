@@ -8,9 +8,8 @@ function does where that is proven, and how strongly it is established.
 The page exists because the console ABI is not the Windows SDK order. A console object's vtable
 is the PC interface order with measured insertions and substitutions, and a slot number alone
 does not name a method. A question like "what is device slot 70?" or "is console list slot 59
-`BeginEvent`?" costs one boot of tracing plus one decompile - the point of
-[tooling/ghidra/README.md](../tooling/ghidra/README.md) - and the answer belongs here, not in a
-commit message.
+`BeginEvent`?" costs one boot of tracing plus one decompile with the local reverse-engineering
+workflow (kept outside this repository) - and the answer belongs here, not in a commit message.
 
 ## 1. How to read this page
 
@@ -57,11 +56,10 @@ The census comes from a boot with the caller probe on
 dump. A caller address inside the title's mapping is a title RVA; a caller outside it (a shipped
 DLL or the runtime's own module) is printed by its raw address and listed here as external.
 
-The decompiles behind the `decompiled` and `both` rows were produced with
-[tooling/ghidra/decompile_callers.py](../tooling/ghidra/decompile_callers.py), which takes the
-census as input, resolves each caller RVA to its containing function through the PE exception
-table, imports the title once with `-noanalysis` and decompiles exactly those functions. The
-workflow is in [docs/dev-tools.md](dev-tools.md#console-vtable-slot-maps-with-ghidra).
+The decompiles behind the `decompiled` and `both` rows were produced with the local
+reverse-engineering workflow (kept outside this repository): it takes the caller census as input,
+resolves each caller RVA to its containing function through the PE exception table, imports the
+title once without analysis and decompiles exactly those functions.
 
 One consequence of the port's list proxy is worth stating: it pins its fake console recording
 cursor at the limit (`ListProxy::pin_cursor_at_limit` in `port/shims/d3d12_xs_device.cpp`), so the
@@ -289,15 +287,13 @@ These are proposals, scoped to a shim file and a slot; no shim file was edited f
 
 ## 11. Extending this page
 
-The next slot question costs one boot and one command:
+The next slot question costs one boot plus one decompile with the local reverse-engineering
+workflow (kept outside this repository):
 
 1. boot with `PALMETTO_XS_CALLERS=1` and `PALMETTO_XS_CALLERS_PROFILE=1` and keep the stderr log;
-2. `python -I tooling/ghidra/slot_census.py <stderr.log> --image <title.exe> --title-base 0x140000000 --size 0xb06d000 --out census.csv`;
-3. `python -I tooling/ghidra/decompile_callers.py --census census.csv --image <title.exe> --ghidra <ghidra-install> --project <project-dir> --out decompiled/`;
-4. read the argument setup in the `.c` file for the caller RVA, and the PC method at the mapped slot from `python -I tooling/d3d12_slot_table.py --header <sdk>/d3d12.h`.
+2. census the log: object, absolute slot, caller RVA, containing function and argument words;
+3. decompile the functions behind those call sites and read the argument setup;
+4. compare the slot with the PC interface order from the build's SDK header.
 
-The complete workflow, the tool options and the limits of `-noanalysis` are in
-[tooling/ghidra/README.md](../tooling/ghidra/README.md) and
-[docs/dev-tools.md](dev-tools.md#console-vtable-slot-maps-with-ghidra). Add the new row to the
-object's table, mark it with the confidence it earned, and, for a fix, put the evidence and the
-risk next to the slot rather than in a commit message.
+Add the new row to the object's table, mark it with the confidence it earned, and, for a fix, put the
+evidence and the risk next to the slot rather than in a commit message.
