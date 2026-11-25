@@ -284,6 +284,37 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### The submit/poll callers around the small batches: DS_ORDER plus the trace names them
+
+Window times are now absolute from process start (a fixed sampler epoch), and one 130 s boot ran the dense thread-stack
+sampler (12.5-20 s, 14 samples) together with `PALMETTO_DSTORAGE_TRACE=1` and `PALMETTO_DS_ORDER=2000`. The stack samples
+again contain **no title-image frames** at those instants (672 sampled stacks; the title threads sit in host waits), but the
+DirectStorage ordering trace names the callers directly:
+
+```
+ds order +0.000s submit #1: 43 entr(ies) 1 status, loader (loader not set) caller host:palmetto.exe+0xedb0e
+ds order +0.000s first poll after a submit: dt 13 us, E_PENDING, polls 0, caller game+0x4f6584a
+ds order +0.013s status index 0 completed: 13199 us after enqueue (grace 2000), polls 211551
+...
+ds order +0.140s status index 0 completed: 118991 us after enqueue ...
+```
+
+Caller histogram from the same trace: polls `game+0x4f6584a` (57 lines), submits `host:palmetto.exe+0xedb0e` plus
+`game+0xe8950`/`game+0xe8943` (8 each), enqueues `game+0x28c9a0e` (8, the known enqueue helper), and one more site
+`game+0x16f7146` (8).
+
+Read with the RIP histogram: the hot title loop `game+0x4f657d3..0x4f65842` and its neighbour `game+0x4f6584a` are the
+**DirectStorage polling loop** (every first-poll-after-submit comes from `game+0x4f6584a`), not the stage manager. The
+batch producer sites are therefore:
+
+1. `game+0xe8950` / `game+0xe8943` - the code that calls Submit on the queue (the post point of each small batch);
+2. `game+0x28c9a0e` - the enqueue helper that fills the batches (already known);
+3. `game+0x4f6584a` - the title poll loop (the stuck wait's site: the final poll against the fresh status array runs here);
+4. `game+0x16f7146` - an unclassified caller seen eight times (worth a decompile with the others).
+
+Caveat for streamtrace: the per-submit loader snapshot printed `(loader not set)` on every line in this boot, so the DS
+ordering trace could not read the loader object at those moments; the callers above are still valid.
+
 ### RIP histogram: the only hot title code is a spin loop near game+0x4f657d3
 
 `PALMETTO_RIP_HIST=5,20;60,90` samples every thread's instruction pointer every 3 ms and keeps the ones inside the title

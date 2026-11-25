@@ -68,6 +68,13 @@ int usage() {
 
 }  // namespace
 
+// The samplers' window times are absolute from this epoch (process start in practice), not from the sampler thread's
+// own start, so a later window cannot drift when an earlier one runs long.
+std::chrono::steady_clock::time_point sampler_epoch() {
+    static const auto at = std::chrono::steady_clock::now();
+    return at;
+}
+
 // ---- Wait-state sampler (PALMETTO_WAIT_SAMPLE) -----------------------------------------------------------------------
 //
 // Diagnostic, off unless the environment variable names comma-separated seconds ("5,10,20,40,60"; "1" means the
@@ -364,7 +371,7 @@ void start_wait_sampler(std::uintptr_t image_base, std::uintptr_t image_size, co
     std::vector<WaitSampleApi> apis;
     resolve_wait_apis(apis);
     std::thread([image_base, image_size, apis, times] {
-        const auto started = std::chrono::steady_clock::now();
+        const auto started = sampler_epoch();
         for (const double at : times) {
             std::this_thread::sleep_until(started + std::chrono::milliseconds(static_cast<long long>(at * 1000.0)));
             char label[32];
@@ -511,7 +518,7 @@ void start_thread_stack_sampler(std::uintptr_t image_base, std::uintptr_t image_
     }
     if (times.empty()) return;
     std::thread([image_base, image_size, times] {
-        const auto started = std::chrono::steady_clock::now();
+        const auto started = sampler_epoch();
         for (const double at : times) {
             std::this_thread::sleep_until(started + std::chrono::milliseconds(static_cast<long long>(at * 1000.0)));
             char label[32];
@@ -709,7 +716,7 @@ void rip_histogram_window(std::uintptr_t image_base, std::uintptr_t image_size, 
     modules.image_base = image_base;
     modules.image_end = image_base + image_size;
     std::map<std::uint64_t, RipHistogramEntry> hist;
-    const auto started = std::chrono::steady_clock::now();
+    const auto started = sampler_epoch();
     std::this_thread::sleep_until(started + std::chrono::milliseconds(static_cast<long long>(begin * 1000.0)));
     const auto stop = started + std::chrono::milliseconds(static_cast<long long>(end * 1000.0));
     while (std::chrono::steady_clock::now() < stop) {
