@@ -284,6 +284,34 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### 300 s and 600 s: the presented swapchain image never becomes non-black
+
+Two long boots measured the displayed resource directly through the presenter path plus full-target readbacks of the
+composed 4K target, all fixes on (console root feed, vertex-stream descriptor, slot-70 publish):
+
+* **Presenter captures** (`PALMETTO_CAPTURE`, the swapchain image copied at present): 6 captures over a 300 s boot
+  (frames 1, 61, 121, 181, 241, 301) and 5 over a 600 s boot (frames 1, 121, 241, 361, 481), each 2564x1421,
+  every one `mean 0 0 0, non-black 0/3,643,444, peak 0`. The presented image is uniformly black for the whole window.
+* **Full-target readbacks of the composed 4K target** at late draws: 300 s boot draws 36,000/44,000/52,000/56,000 and
+  600 s boot draws 80,000/95,000/110,000/120,000, all the same 0-image-sample constant pass (`fspx/lib_ps_00820`,
+  pipeline 0x1d51c49f640 in the 600 s boot), all `mean 0 0 0, non-black 0/8,294,400, alpha 0` - no content anywhere in
+  the target at any sampled frame.
+* **Population over time**: 1,305,811 traced calls / 65,536 submissions at 300 s and 2,758,217 calls / 139,264
+  submissions at 600 s - the submission cadence is steady (~4,096 submissions every ~16 s in both windows), the slot-70
+  publish count grows in step (32,693 then 69,557), and the sampled late draws are the same constant pass. No new
+  pipeline or shader module appeared late in either boot; the only translated modules ever seen on these draws are the
+  four FSPX blit modules (`lib_vs_00820`/`lib_ps_00820` for the constant pass, `lib_vs_00823`/`lib_ps_00822` for the
+  compose pass).
+
+Plainly: **the title has not reached content rendering in 300-600 s**. The frame is a stationary two-pass blit/clear
+loop (constant pass + compose pass, two draws per submission, both writing the same 4K target) that presents a black
+swapchain image; the constant pass's own pixel shader is a zero-image-sample module whose colour comes from a user-data
+block its one-table root signature does not define, so the replay has nothing to feed it. This looks like a
+pre-content/loading state of the title (assets loading, the same pair of passes run at a constant rate with no scene
+draws), not a translation artefact of a content frame. What would advance it: a much longer boot (the loading phase may
+take minutes), or an input/loading gate the harness does not drive (a title screen waiting for a button). Neither is
+cheap enough for this increment; the 600 s boot shows the same state as the 300 s one.
+
 ### Root-data trace: the carrier search for the sibling pixel shader's user data
 
 Instrumentation added (bounded, presence classes and counts only): `PALMETTO_ROOT_DATA_TRACE=1` prints one line per
