@@ -63,6 +63,18 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
   target_compile_definitions(palmetto_root_signature PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(palmetto_root_signature PRIVATE /W4 /permissive- /utf-8)
 
+  # The slot-57 record decoder and the PC graphics-pipeline builder it feeds (docs/graphics_pso.md). They are in a
+  # library of their own because the Xbox-ABI device proxy (shims/d3d12_xs_device.cpp) calls them, and every target
+  # that compiles that shim must link them, whether or not it creates a Vulkan device: palmetto_d3d12_com links this
+  # library PUBLIC, and the GPU-free proxy tests below name it directly.
+  add_library(palmetto_slot57 STATIC
+    src/graphics_record.cpp
+    src/graphics_pso.cpp
+  )
+  target_include_directories(palmetto_slot57 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_compile_definitions(palmetto_slot57 PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(palmetto_slot57 PRIVATE /W4 /permissive- /utf-8)
+
   # Portable contract test: model, packer, canonical codec and RTS0 hypothesis.
   # Needs neither d3d12.lib nor the game; runs on Windows CI like the rest here.
   add_executable(root_signature_test
@@ -169,7 +181,7 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
       shims/d3d12_xs.cpp
       shims/d3d12_xs_device.cpp
     )
-    target_link_libraries(root_sig_test PRIVATE palmetto_d3d12_xs_rootsig ${D3D12_LIBRARY})
+    target_link_libraries(root_sig_test PRIVATE palmetto_d3d12_xs_rootsig palmetto_slot57 ${D3D12_LIBRARY})
     target_compile_definitions(root_sig_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(root_sig_test PRIVATE /W4 /permissive- /utf-8)
     target_link_options(root_sig_test PRIVATE /OPT:NOREF)
@@ -193,7 +205,7 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
         shims/d3d12_xs.cpp
         shims/d3d12_xs_device.cpp
       )
-      target_link_libraries(device_proxy_test PRIVATE palmetto_d3d12_xs_rootsig ${D3D12_LIBRARY} ${DXGI_LIBRARY})
+      target_link_libraries(device_proxy_test PRIVATE palmetto_d3d12_xs_rootsig palmetto_slot57 ${D3D12_LIBRARY} ${DXGI_LIBRARY})
       target_compile_definitions(device_proxy_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
       target_compile_options(device_proxy_test PRIVATE /W4 /permissive- /utf-8)
       target_link_options(device_proxy_test PRIVATE /OPT:NOREF)
@@ -213,13 +225,16 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
   endif()
 
   # xmem shim ABI test: resolves the registered xmem.dll exports itself, so xmem.cpp and registry.cpp are compiled
-  # into this executable instead of reusing palmetto's objects (which would duplicate their symbols).
+  # into this executable instead of reusing palmetto's objects (which would duplicate their symbols). startup_trace.h's
+  # trace open installs its exception handler, which takes a fault-time report through src/crash_unwind.cpp, so a test
+  # that opens a trace compiles that too (it is not in palmetto's objects for the same reason).
   add_executable(xmem_test
     test/xmem_test.cpp
     shims/xmem.cpp
     shims/registry.cpp
+    src/crash_unwind.cpp
   )
-  target_include_directories(xmem_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
+  target_include_directories(xmem_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_compile_definitions(xmem_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(xmem_test PRIVATE /W4 /permissive- /utf-8 $<$<CXX_COMPILER_ID:Clang>:/EHa>)
   target_link_options(xmem_test PRIVATE /OPT:NOREF)
@@ -264,8 +279,9 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
     test/file_system_test.cpp
     shims/file_system.cpp
     shims/registry.cpp
+    src/crash_unwind.cpp
   )
-  target_include_directories(file_system_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
+  target_include_directories(file_system_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_compile_definitions(file_system_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(file_system_test PRIVATE /W4 /permissive- /utf-8)
   target_link_options(file_system_test PRIVATE /OPT:NOREF)
@@ -275,8 +291,9 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
   add_executable(int3_skip_test
     test/int3_skip_test.cpp
     shims/registry.cpp
+    src/crash_unwind.cpp
   )
-  target_include_directories(int3_skip_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
+  target_include_directories(int3_skip_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_compile_definitions(int3_skip_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(int3_skip_test PRIVATE /W4 /permissive- /utf-8)
   target_link_options(int3_skip_test PRIVATE /OPT:NOREF)
@@ -654,7 +671,7 @@ if(BUILD_TESTING)
     target_compile_definitions(pe_loader_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(pe_loader_test PRIVATE /W4 /permissive- /utf-8 /EHsc)
     target_link_options(pe_loader_test PRIVATE /OPT:NOREF)
-    target_link_libraries(pe_loader_test PRIVATE palmetto_d3d12_xs_rootsig psapi)
+    target_link_libraries(pe_loader_test PRIVATE palmetto_d3d12_xs_rootsig palmetto_slot57 psapi)
     add_dependencies(pe_loader_test tiny_dll tiny_exe palmetto_tls_host)
 
     # `palmetto --run` rehearsal: a stand-in game EXE (CRT startup, statics, heap, files, threads) that imports
@@ -795,7 +812,7 @@ if(BUILD_TESTING)
     target_compile_definitions(test_pe_loader_bounds PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(test_pe_loader_bounds PRIVATE /W4 /permissive- /utf-8 /EHsc)
     target_link_options(test_pe_loader_bounds PRIVATE /OPT:NOREF ${PALMETTO_HOST_BASE})
-    target_link_libraries(test_pe_loader_bounds PRIVATE palmetto_d3d12_xs_rootsig psapi)
+    target_link_libraries(test_pe_loader_bounds PRIVATE palmetto_d3d12_xs_rootsig palmetto_slot57 psapi)
     add_dependencies(test_pe_loader_bounds palmetto_tls_host)
     add_test(NAME pe_loader_bounds COMMAND test_pe_loader_bounds)
 
@@ -819,7 +836,7 @@ if(BUILD_TESTING)
     target_compile_definitions(pe_loader_fuzz PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(pe_loader_fuzz PRIVATE /W4 /permissive- /utf-8 /EHsc)
     target_link_options(pe_loader_fuzz PRIVATE /OPT:NOREF ${PALMETTO_HOST_BASE})
-    target_link_libraries(pe_loader_fuzz PRIVATE palmetto_d3d12_xs_rootsig psapi)
+    target_link_libraries(pe_loader_fuzz PRIVATE palmetto_d3d12_xs_rootsig palmetto_slot57 psapi)
     add_dependencies(pe_loader_fuzz palmetto_tls_host)
     if(PALMETTO_LOADER_FUZZ_ASAN)
       target_compile_options(pe_loader_fuzz PRIVATE /fsanitize=address /Zi)
@@ -989,9 +1006,10 @@ if(BUILD_TESTING)
     add_executable(startup_trace_test
       test/startup_trace_test.cpp
       src/pe_loader.cpp
+      src/crash_unwind.cpp
       shims/registry.cpp
     )
-    target_include_directories(startup_trace_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_include_directories(startup_trace_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/shims)
     target_compile_definitions(startup_trace_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
     target_compile_options(startup_trace_test PRIVATE /W4 /permissive- /utf-8 /EHsc)
     target_link_options(startup_trace_test PRIVATE /OPT:NOREF)
@@ -1669,9 +1687,9 @@ if(TARGET Vulkan::Headers)
       COMMENT "Generating D3D12 COM stubs"
       VERBATIM)
     add_library(palmetto_d3d12_com STATIC shims/d3d12_com.cpp shims/d3d12_vulkan_device.cpp shims/d3d12_xs_device.cpp shims/xbox_present.cpp
-                shims/dxgi_com.cpp src/graphics_record.cpp src/graphics_pso.cpp ${PALMETTO_STUBS})   # d3d12_vulkan_device.cpp reads the PC device behind the proxy (#224) and its native graphics-stage branch resolves the slot-57 record through src/graphics_pso.cpp
+                shims/dxgi_com.cpp ${PALMETTO_STUBS})   # d3d12_vulkan_device.cpp reads the PC device behind the proxy (#224) and its native graphics-stage branch resolves the slot-57 record through src/graphics_pso.cpp (palmetto_slot57 below)
     target_include_directories(palmetto_d3d12_com PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
-    target_link_libraries(palmetto_d3d12_com PUBLIC Vulkan::Headers palmetto_root_signature)
+    target_link_libraries(palmetto_d3d12_com PUBLIC Vulkan::Headers palmetto_root_signature palmetto_slot57)
     target_compile_definitions(palmetto_d3d12_com PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     # /bigobj: a Debug build of d3d12_vulkan_device.cpp has more sections than a COFF object holds by default
     # (fatal error C1128), because without optimisation every inline function keeps its own COMDAT.
