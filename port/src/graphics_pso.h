@@ -443,7 +443,7 @@ struct GraphicsPsoInputs {
 // shape, docs/input_layout.md), the fixed-function state from `inputs.defaults`, the attachments from the caller, and
 // NodeMask 0, flags NONE, no cached PSO and no stream output (the console record carries none of those). A mesh stage
 // is refused: a D3D12_GRAPHICS_PIPELINE_STATE_DESC has no mesh-shader field, so a record with slot 2 needs the
-// pipeline-state-stream path instead (docs/graphics_pso.md).
+// pipeline-state-stream path instead (build_mesh_stream() below; docs/mesh_stage.md).
 //
 // The input-element descriptions a built description points at (`InputLayout.pInputElementDescs`) live in storage
 // owned by this backend, not by the caller: the description carries a pointer, not the array. That storage is valid
@@ -453,5 +453,70 @@ struct GraphicsPsoInputs {
 // has the blob's lifetime.
 bool build(const rt::graphics_record::Record& record, const GraphicsPsoInputs& inputs,
            D3D12_GRAPHICS_PIPELINE_STATE_DESC* out, std::string* why);
+
+// ---- The mesh pipeline's description: the pipeline-state-stream form (docs/mesh_stage.md) -------------------------
+//
+// A D3D12_GRAPHICS_PIPELINE_STATE_DESC has no mesh-shader field, so a record whose slot 2 (MS) is used is built through
+// a D3D12_PIPELINE_STATE_STREAM_DESC instead. build_mesh_stream() is the GPU-free creation side of that: it lays out
+// the subobject bytes a PC device's CreatePipelineState parses (port/shims/d3d12_vulkan_device.cpp's
+// parse_pipeline_stream -> PipelineState::create_graphics(desc, &ms)), and calls no device. The stream carries
+//
+//   ROOT_SIGNATURE, MS, PS (when the record has one), RENDER_TARGET_FORMATS, DEPTH_STENCIL_FORMAT, RASTERIZER, BLEND,
+//   DEPTH_STENCIL, SAMPLE_MASK, SAMPLE_DESC, NODE_MASK, FLAGS
+//
+// in the d3dx12.h layout (a type word, the payload at its alignment, each subobject pointer-aligned). There is no VS,
+// GS, HS or DS subobject: D3D12 forbids them beside MS, and the record's slot set has no such slot. There is no
+// INPUT_LAYOUT, PRIMITIVE_TOPOLOGY or IB_STRIP_CUT: D3D12 ignores a mesh pipeline's input-assembly state, and the
+// measured mesh records carry the 80-byte empty input layout (docs/shader_library.md section 2), so a mesh record with
+// elements is refused as an unmeasured shape instead of having its layout silently dropped. The fixed-function state
+// is `inputs.defaults`, exactly as build() writes it.
+//
+// Where a host has no mesh stage (a device without VK_EXT_mesh_shader), the PC device refuses the stream with E_NOTIMPL
+// and its own named log; there is deliberately no VS/PS stand-in for mesh work - a stand-in would silently drop the
+// geometry the record asked for. The named refusals below are for the conversion, not the device.
+struct MeshPipelineStream {
+    // The subobject bytes. desc() points into this buffer, so the stream must outlive the CreatePipelineState call.
+    std::vector<std::uint8_t> bytes;
+    std::size_t subobject_count = 0;
+    std::uint32_t ms_bytes = 0;  // the MS program's bytecode length
+    std::uint32_t ps_bytes = 0;  // the PS program's, or 0 when the record is MS only
+    // The stream description for the device. The buffer owns it; the const_cast only meets the member's void* type.
+    D3D12_PIPELINE_STATE_STREAM_DESC desc() const {
+        D3D12_PIPELINE_STATE_STREAM_DESC stream{};
+        stream.SizeInBytes = bytes.size();
+        stream.pPipelineStateSubobjectStream = const_cast<std::uint8_t*>(bytes.data());
+        return stream;
+    }
+    // A bounded one-line description for the caller's once-per-shape log (at most 160 characters).
+    std::string describe() const;
+};
+
+// A record whose slot 2 (MS) is used -> the pipeline-state-stream description, or false with `why` naming the field
+// that stops it; `out` is untouched on false. The measured shapes are PS+MS and MS only (10,726 + 1,336 of the
+// library's 25,471 graphics records, docs/mesh_stage.md). Refused by name: a record with no mesh stage (the
+// D3D12_GRAPHICS_PIPELINE_STATE_DESC path is build()'s), a vertex and a mesh stage together (D3D12 forbids the pair),
+// the unidentified slot-6 program (no measured stage), a mesh record whose input layout has elements (unmeasured), a
+// missing root signature/PC root signature/attachment list/bad fixed-function state (the same checks as build()), a
+// mesh stage without resolved program bytes, vertex bytes supplied for a mesh pipeline, or PS bytes for a record that
+// has no PS slot.
+bool build_mesh_stream(const rt::graphics_record::Record& record, const GraphicsPsoInputs& inputs,
+                       MeshPipelineStream* out, std::string* why);
+
+// The counters a slot-57 wiring keeps for the mesh/merged-geometry path (docs/mesh_stage.md): records that named a
+// mesh stage, streams built, and conversions refused. Pure data so the tally is testable without a device; the wiring
+// owns one instance and prints summary() once per histogram checkpoint. The merged-geometry half has no runtime path
+// yet (the 195 GS modules are translator-keyed only and no record names a geometry slot), so a program resolved only
+// under stage "gs" is already named by resolve_native_stage's "stage mismatch" refusal; it is not counted here.
+struct MeshStageCounters {
+    std::uint64_t records_with_mesh_stage = 0;  // slot-57-shaped records that named slot 2
+    std::uint64_t streams_built = 0;            // build_mesh_stream() succeeded
+    std::uint64_t refusals = 0;                 // build_mesh_stream() refused (the reason is the caller's log)
+    void note_record() { ++records_with_mesh_stage; }
+    void note_built() { ++streams_built; }
+    void note_refused() { ++refusals; }
+    // A bounded one-line summary for the boot histogram ("mesh stages: records 0, streams 0, refusals 0"), at most
+    // 120 characters.
+    std::string summary() const;
+};
 
 }  // namespace rt::graphics_pso

@@ -133,14 +133,51 @@ struct Record {
     Span input_layout;               // +0x18/+0x20: input-layout blob (decode_input_layout)
     Stage stages[kStageSlotCount];
     std::size_t stage_count = 0;
+    // The measured slot-6 pair (docs/mesh_stage.md): 2 library records name the same program in slot 6 and no stage
+    // blob, and no measurement identifies the stage. decode() accepts that shape and keeps the program as an opaque
+    // span; the converter refuses it by name rather than dropping a program the record named.
+    bool has_unidentified_stage = false;
+    Span unidentified_program;
 };
+
+// The slot-6 pair offset (0xE8), and the measured slot 6 itself: 2 library records, one program, no stage blob.
+inline constexpr int kUnidentifiedStageSlot = 6;
+inline constexpr std::size_t kUnidentifiedProgramPairOffset =
+    kStagePairOffset + kStagePairStride * kUnidentifiedStageSlot;
+
+// ---- The record's measured pipeline shapes (docs/mesh_stage.md) ---------------------------------------------------
+//
+// The library's 25,471 graphics records name one of four stage-set shapes, measured on every record: PS+VS 13,383,
+// VS only 24, PS+MS 10,726 and MS only 1,336, i.e. 12,062 records carry a mesh stage (47.4%). Two more name PS+VS plus
+// the unidentified slot-6 program (one program, no stage blob). The stage set is what the record proves; the programs
+// each slot names are the shader index's job. No measured record names a geometry (GS) slot: slots 3 to 5 are never
+// used, and the 195 translated merged-geometry (GS) programs have no record shape at all (docs/mesh_stage.md).
+enum class RecordShape {
+    kPixelVertex,       // PS + VS: the vertex family, 13,383 measured records
+    kVertex,            // VS only: 24
+    kPixelMesh,         // PS + MS: the mesh family, 10,726
+    kMesh,              // MS only: 1,336
+    kPixelVertexSlot6,  // PS + VS + the unidentified slot-6 program: 2 (one program, no stage blob)
+};
+
+// "ps+vs", "vs", "ps+ms", "ms" or "ps+vs+slot6".
+const char* record_shape_name(RecordShape shape);
+
+// The record's measured shape. A record outside the five measured shapes classifies as kPixelVertex; the converter
+// re-checks the stage combination itself and refuses it by name, so this classification is a description, not a check.
+RecordShape record_shape(const Record& record);
+
+// Whether the record names the mesh stage (slot 2); the counterpart of the converter's vertex/mesh checks.
+bool has_mesh_stage(const Record& record);
 
 // Parses the record's own bytes. `available` must cover kDescriptorValidatedBytes; the record's tail beyond that is
 // ignored. Never dereferences `root_signature`, the blob pointers or the program pointers: the blob decoders take the
 // spans this fills in. Returns false on any inconsistency (short read, a size outside the measured range, a state size
 // in a measured envelope that is neither measured family or that disagrees with the record's programmable stage - the
 // vertex family is 380 + 8*k and the mesh family 464 + 8*k, docs/state_blob.md - a half-set pair, a non-zero unused
-// pair, a non-zero byte where the measurement says zero, zero stages, or vertex and mesh stages together).
+// pair, a non-zero byte where the measurement says zero, zero stages, or vertex and mesh stages together). The one
+// measured non-zero reserved region, the slot-6 program pair of 2 library records (no stage blob; PS+VS+slot6), is
+// accepted and kept as Record::unidentified_program; every other value in the region is still refused.
 bool decode(const void* descriptor, std::size_t available, Record* out);
 
 // ---- The input layout -------------------------------------------------------------------------------------------

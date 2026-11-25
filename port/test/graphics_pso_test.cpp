@@ -18,6 +18,13 @@
 //     bytes for a stage the record does not name, bad attachment lists, a zeroed fixed-function state and a mesh stage
 //     are refused, each with its field named; the fixed-function state is used verbatim (a second, different state
 //     changes the description field for field), so there is no silent default.
+//   - build_mesh_stream(): the pipeline-state-stream description for a record whose slot 2 (MS) is used (docs/mesh_stage.md):
+//     the subobjects (ROOT_SIGNATURE, MS, PS, render-target formats, depth-stencil format, rasterizer, blend,
+//     depth-stencil, sample mask, sample description, node mask, flags) are walked back with the PC device's own layout
+//     rule, no VS/GS/HS/DS or input-assembly subobject is emitted, and the refusals (no mesh stage, vertex+mesh, the
+//     unidentified slot-6 program, an element layout on a mesh record, a vertex-family state, a missing stage/root/
+//     attachment, the bad fixed-function values) are named. The default build() path stays byte-identical.
+//   - MeshStageCounters: the counters the slot-57 wiring keeps for the mesh path and their bounded one-line summary.
 //   - console_graphics_user_data(): the console user-SGPR placement of a root signature (docs/root_arguments.md):
 //     vertex/pixel base s8 with one dword per descriptor table and two per root view, mesh base s16, and a
 //     signature that would spill refused with its parameter named.
@@ -1319,6 +1326,319 @@ void test_build_refusals() {
     check(!pso::build(record, good, nullptr, &why), "build: a null output description is refused");
 }
 
+// ---- The mesh pipeline's stream form (docs/mesh_stage.md) --------------------------------------------------------
+//
+// The test walks a built D3D12_PIPELINE_STATE_STREAM_DESC the way the PC device's parse_pipeline_stream() does - a type
+// word, the payload at the payload's alignment, each subobject pointer-aligned - so a stream that passes here is one
+// CreatePipelineState reads. No device is created.
+struct SubobjectShape {
+    std::size_t alignment = 0;
+    std::size_t size = 0;
+};
+
+SubobjectShape subobject_shape(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type) {
+    switch (type) {
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE:
+            return {alignof(ID3D12RootSignature*), sizeof(ID3D12RootSignature*)};
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
+            return {alignof(D3D12_SHADER_BYTECODE), sizeof(D3D12_SHADER_BYTECODE)};
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS:
+            return {alignof(D3D12_RT_FORMAT_ARRAY), sizeof(D3D12_RT_FORMAT_ARRAY)};
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT:
+            return {alignof(DXGI_FORMAT), sizeof(DXGI_FORMAT)};
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER:
+            return {alignof(D3D12_RASTERIZER_DESC), sizeof(D3D12_RASTERIZER_DESC)};
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND:
+            return {alignof(D3D12_BLEND_DESC), sizeof(D3D12_BLEND_DESC)};
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL:
+            return {alignof(D3D12_DEPTH_STENCIL_DESC), sizeof(D3D12_DEPTH_STENCIL_DESC)};
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK: return {alignof(UINT), sizeof(UINT)};
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC:
+            return {alignof(DXGI_SAMPLE_DESC), sizeof(DXGI_SAMPLE_DESC)};
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK: return {alignof(UINT), sizeof(UINT)};
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS:
+            return {alignof(D3D12_PIPELINE_STATE_FLAGS), sizeof(D3D12_PIPELINE_STATE_FLAGS)};
+        default: return {};
+    }
+}
+
+struct StreamSubobject {
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS;
+    std::size_t payload = 0;
+};
+
+struct StreamView {
+    std::vector<StreamSubobject> subobjects;
+    const std::uint8_t* bytes = nullptr;
+    std::size_t size = 0;
+
+    bool parse(const pso::MeshPipelineStream& stream) {
+        bytes = stream.bytes.data();
+        size = stream.bytes.size();
+        subobjects.clear();
+        std::size_t at = 0;
+        while (at < size) {
+            if (size - at < sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE)) return false;
+            D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type;
+            std::memcpy(&type, bytes + at, sizeof type);
+            const SubobjectShape shape = subobject_shape(type);
+            if (shape.alignment == 0) return false;
+            const std::size_t payload = (at + sizeof(type) + shape.alignment - 1) / shape.alignment * shape.alignment;
+            if (payload > size || size - payload < shape.size) return false;
+            subobjects.push_back({type, payload});
+            at = (payload + shape.size + sizeof(void*) - 1) / sizeof(void*) * sizeof(void*);
+        }
+        return true;
+    }
+    const StreamSubobject* find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type) const {
+        for (const StreamSubobject& subobject : subobjects)
+            if (subobject.type == type) return &subobject;
+        return nullptr;
+    }
+    template<typename T>
+    T read(const StreamSubobject& subobject) const {
+        T value{};
+        std::memcpy(&value, bytes + subobject.payload, sizeof(T));
+        return value;
+    }
+};
+
+void test_build_mesh_stream() {
+    RecordFixture program_fixture = make_record({kStageSlotPs, kStageSlotVs});
+    const Bytes& ps = program_fixture.ps_program;  // a synthetic native program
+    RecordFixture ps_ms_fixture = make_record({kStageSlotPs, kStageSlotMs});
+    const Record& ps_ms = ps_ms_fixture.record;
+    RecordFixture vertex_fixture = make_record({kStageSlotPs, kStageSlotVs});
+    check(ps_ms.stage_count == 2, "mesh stream: a PS+MS record decodes");
+
+    pso::GraphicsPsoInputs inputs = base_inputs(ps.data(), ps.size(), nullptr, 0);
+    inputs.stages[kStageSlotMs] = {ps.data(), ps.size()};
+    const pso::FixedFunctionState defaults = pso::documented_default_state();
+    inputs.defaults = defaults;
+
+    pso::MeshPipelineStream stream;
+    std::string why;
+    check(pso::build_mesh_stream(ps_ms, inputs, &stream, &why),
+          "mesh stream: a PS+MS record builds the pipeline-state-stream description");
+
+    // The stream layout is the d3dx12.h one the PC device's parser reads.
+    StreamView view;
+    check(view.parse(stream), "mesh stream: the bytes parse as d3dx12 subobjects");
+    check(view.size == stream.bytes.size() && stream.desc().SizeInBytes == stream.bytes.size() &&
+              stream.desc().pPipelineStateSubobjectStream == stream.bytes.data(),
+          "mesh stream: desc() describes the owned bytes");
+    check(stream.subobject_count == view.subobjects.size() && stream.subobject_count == 12,
+          "mesh stream: twelve subobjects (root, ms, ps, targets, dsv, raster, blend, depth, mask, sample, node, "
+          "flags)");
+    check(stream.ms_bytes == ps.size() && stream.ps_bytes == ps.size(),
+          "mesh stream: describe()'s MS/PS sizes are the supplied programs'");
+
+    // The stages: MS and PS, no VS/GS/HS/DS subobject (D3D12 forbids them beside MS), no IA state (a mesh PSO has
+    // none; the record's measured layout is the 80-byte empty one).
+    const StreamSubobject* root = view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE);
+    const StreamSubobject* ms = view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS);
+    const StreamSubobject* ps_sub = view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS);
+    check(root && view.read<ID3D12RootSignature*>(*root) == inputs.root_signature,
+          "mesh stream: the root signature subobject is the caller's object");
+    check(ms && view.read<D3D12_SHADER_BYTECODE>(*ms).pShaderBytecode == ps.data() &&
+              view.read<D3D12_SHADER_BYTECODE>(*ms).BytecodeLength == ps.size(),
+          "mesh stream: the MS subobject is the record's slot-2 program");
+    check(ps_sub && view.read<D3D12_SHADER_BYTECODE>(*ps_sub).pShaderBytecode == ps.data(),
+          "mesh stream: the PS subobject is the record's slot-0 program");
+    check(!view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS), "mesh stream: no VS subobject (D3D12 forbids VS beside MS)");
+    check(!view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS) && !view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS) &&
+              !view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS),
+          "mesh stream: no GS/HS/DS subobject");
+    check(!view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT) &&
+              !view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY) &&
+              !view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE),
+          "mesh stream: no input-assembly subobject (D3D12 ignores it for a mesh PSO)");
+
+    // The state: the caller's documented stand-in, field for field, and the neutral node/flags.
+    const StreamSubobject* raster = view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER);
+    const StreamSubobject* blend = view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND);
+    const StreamSubobject* depth = view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL);
+    const StreamSubobject* mask = view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK);
+    const StreamSubobject* sample = view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC);
+    const StreamSubobject* node = view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK);
+    const StreamSubobject* flags = view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS);
+    const D3D12_RASTERIZER_DESC raster_value = raster ? view.read<D3D12_RASTERIZER_DESC>(*raster) : D3D12_RASTERIZER_DESC{};
+    const D3D12_BLEND_DESC blend_value = blend ? view.read<D3D12_BLEND_DESC>(*blend) : D3D12_BLEND_DESC{};
+    const D3D12_DEPTH_STENCIL_DESC depth_value =
+        depth ? view.read<D3D12_DEPTH_STENCIL_DESC>(*depth) : D3D12_DEPTH_STENCIL_DESC{};
+    check(raster && std::memcmp(&raster_value, &defaults.rasterizer, sizeof(D3D12_RASTERIZER_DESC)) == 0,
+          "mesh stream: the rasterizer state is the caller's, verbatim");
+    check(blend && std::memcmp(&blend_value, &defaults.blend, sizeof(D3D12_BLEND_DESC)) == 0,
+          "mesh stream: the blend state is the caller's, verbatim");
+    check(depth && std::memcmp(&depth_value, &defaults.depth_stencil, sizeof(D3D12_DEPTH_STENCIL_DESC)) == 0,
+          "mesh stream: the depth-stencil state is the caller's, verbatim");
+    check(mask && view.read<UINT>(*mask) == defaults.sample_mask, "mesh stream: the sample mask is the caller's");
+    check(sample && view.read<DXGI_SAMPLE_DESC>(*sample).Count == defaults.sample_count &&
+              view.read<DXGI_SAMPLE_DESC>(*sample).Quality == defaults.sample_quality,
+          "mesh stream: the sample description is the caller's");
+    check(node && view.read<UINT>(*node) == 0 && flags && view.read<D3D12_PIPELINE_STATE_FLAGS>(*flags) ==
+                                                           D3D12_PIPELINE_STATE_FLAG_NONE,
+          "mesh stream: node mask 0 and no flags (the console record carries none)");
+
+    // The attachments: the caller's render targets and depth-stencil format.
+    const StreamSubobject* targets = view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS);
+    const StreamSubobject* dsv = view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT);
+    check(targets && view.read<D3D12_RT_FORMAT_ARRAY>(*targets).NumRenderTargets == 1 &&
+              view.read<D3D12_RT_FORMAT_ARRAY>(*targets).RTFormats[0] == inputs.rtv_formats[0],
+          "mesh stream: the render-target formats are the caller's");
+    check(dsv && view.read<DXGI_FORMAT>(*dsv) == inputs.dsv_format,
+          "mesh stream: the depth-stencil format is the caller's");
+
+    // The bounded one-line description the wiring logs once per shape.
+    const std::string described = stream.describe();
+    check(described.size() <= 160 && described.find("mesh stream") != std::string::npos &&
+              described.find(std::to_string(stream.bytes.size())) != std::string::npos,
+          "mesh stream: describe() is a bounded one-line summary");
+
+    // MS only (the second measured mesh shape): no PS subobject, eleven subobjects.
+    RecordFixture ms_only_fixture = make_record({kStageSlotMs});
+    const Record& ms_only = ms_only_fixture.record;
+    pso::GraphicsPsoInputs ms_only_inputs{};
+    ms_only_inputs.root_signature = inputs.root_signature;
+    ms_only_inputs.rtv_formats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    ms_only_inputs.render_target_count = 1;
+    ms_only_inputs.dsv_format = DXGI_FORMAT_UNKNOWN;
+    ms_only_inputs.defaults = defaults;
+    ms_only_inputs.stages[kStageSlotMs] = {ps.data(), ps.size()};
+    pso::MeshPipelineStream ms_only_stream;
+    check(pso::build_mesh_stream(ms_only, ms_only_inputs, &ms_only_stream, &why),
+          "mesh stream: an MS-only record builds");
+    StreamView ms_only_view;
+    check(ms_only_view.parse(ms_only_stream) && ms_only_stream.subobject_count == 11 &&
+              !ms_only_view.find(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS) && ms_only_stream.ps_bytes == 0,
+          "mesh stream: MS only has no PS subobject");
+
+    // The counters the slot-57 wiring keeps for this path.
+    pso::MeshStageCounters counters;
+    counters.note_record();
+    counters.note_built();
+    counters.note_refused();
+    const std::string summary = counters.summary();
+    check(counters.records_with_mesh_stage == 1 && counters.streams_built == 1 && counters.refusals == 1 &&
+              summary.size() <= 120 && summary.find("records 1") != std::string::npos,
+          "mesh stream: MeshStageCounters counts and its summary is bounded");
+
+    // ---- Refusals, each by name; the output stream is untouched on a refusal.
+    {
+        // A vertex-family record does not go through the stream path.
+        pso::MeshPipelineStream untouched;
+        why.clear();
+        check(!pso::build_mesh_stream(vertex_fixture.record, inputs, &untouched, &why) && untouched.bytes.empty(),
+              "mesh stream: a PS+VS record is refused (the description path is build()'s)");
+        check(why.find("record.stages: the record names no mesh stage") != std::string::npos,
+              "mesh stream: the refusal names the missing mesh stage");
+    }
+    {
+        // A caller-built vertex+mesh record (decode() would refuse it) is refused here too.
+        Record both = ps_ms;
+        both.stages[2] = vertex_fixture.record.stages[1];  // the VS stage of the vertex record
+        both.stage_count = 3;
+        why.clear();
+        check(!pso::build_mesh_stream(both, inputs, &stream, &why) &&
+                  why.find("a vertex and a mesh stage together") != std::string::npos,
+              "mesh stream: a vertex and a mesh stage together is refused");
+    }
+    {
+        // The unidentified slot-6 program cannot be carried into a pipeline; it is refused by name, not dropped.
+        Record slot6 = ps_ms;
+        slot6.has_unidentified_stage = true;
+        slot6.unidentified_program = {ps.data(), ps.size()};
+        why.clear();
+        check(!pso::build_mesh_stream(slot6, inputs, &stream, &why) &&
+                  why.find("unidentified slot-6 program") != std::string::npos,
+              "mesh stream: the unidentified slot-6 program is refused by name");
+    }
+    {
+        // The measured mesh records carry the 80-byte empty layout; an element layout is not a measured mesh shape.
+        RecordFixture layout_fixture = make_record({kStageSlotPs, kStageSlotMs}, make_layout_188());
+        why.clear();
+        check(!pso::build_mesh_stream(layout_fixture.record, inputs, &stream, &why) &&
+                  why.find("record.input_layout") != std::string::npos &&
+                  why.find("element(s)") != std::string::npos,
+              "mesh stream: an element layout on a mesh record is refused (unmeasured; D3D12 would ignore it)");
+    }
+    {
+        // A mesh record's state blob is the mesh family (its size names the stage).
+        RecordFixture mesh_fixture = make_record({kStageSlotPs, kStageSlotMs});
+        const Bytes vertex_state = make_state_blob();
+        Record wrong_state = mesh_fixture.record;
+        wrong_state.state = {vertex_state.data(), vertex_state.size()};
+        why.clear();
+        check(!pso::build_mesh_stream(wrong_state, inputs, &stream, &why) &&
+                  why.find("record.state") != std::string::npos &&
+                  why.find("mesh-family") != std::string::npos,
+              "mesh stream: a mesh record with the vertex-family state is refused");
+    }
+    {
+        // The caller's inputs: the root signature, the stage bytecode and the attachment list.
+        RecordFixture mesh_fixture = make_record({kStageSlotPs, kStageSlotMs});
+        Record no_root = mesh_fixture.record;
+        no_root.root_signature = nullptr;
+        why.clear();
+        check(!pso::build_mesh_stream(no_root, inputs, &stream, &why) &&
+                  why.find("record.root_signature") != std::string::npos,
+              "mesh stream: a record without a root signature is refused");
+        pso::GraphicsPsoInputs no_pc_root = inputs;
+        no_pc_root.root_signature = nullptr;
+        why.clear();
+        check(!pso::build_mesh_stream(mesh_fixture.record, no_pc_root, &stream, &why) &&
+                  why.find("pRootSignature") != std::string::npos,
+              "mesh stream: a missing PC root signature is refused");
+        pso::GraphicsPsoInputs no_ms = inputs;
+        no_ms.stages[kStageSlotMs] = {};
+        why.clear();
+        check(!pso::build_mesh_stream(mesh_fixture.record, no_ms, &stream, &why) &&
+                  why.find("stages[2] (ms)") != std::string::npos,
+              "mesh stream: a mesh stage without resolved bytes is refused");
+        pso::GraphicsPsoInputs no_ps = inputs;
+        no_ps.stages[kStageSlotPs] = {};
+        why.clear();
+        check(!pso::build_mesh_stream(mesh_fixture.record, no_ps, &stream, &why) &&
+                  why.find("stages[0] (ps)") != std::string::npos,
+              "mesh stream: a PS stage without resolved bytes is refused");
+        pso::GraphicsPsoInputs vs_bytes = inputs;
+        vs_bytes.stages[kStageSlotVs] = {ps.data(), ps.size()};
+        why.clear();
+        check(!pso::build_mesh_stream(mesh_fixture.record, vs_bytes, &stream, &why) &&
+                  why.find("stages[1] (vs)") != std::string::npos,
+              "mesh stream: vertex bytes supplied for a mesh pipeline are refused");
+        RecordFixture ms_only_fixture2 = make_record({kStageSlotMs});
+        pso::GraphicsPsoInputs stray_ps = inputs;
+        why.clear();
+        check(!pso::build_mesh_stream(ms_only_fixture2.record, stray_ps, &stream, &why) &&
+                  why.find("stages[0] (ps)") != std::string::npos &&
+                  why.find("no pixel stage") != std::string::npos,
+              "mesh stream: PS bytes for an MS-only record are refused");
+        pso::GraphicsPsoInputs too_many = inputs;
+        too_many.render_target_count = D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT + 1;
+        why.clear();
+        check(!pso::build_mesh_stream(mesh_fixture.record, too_many, &stream, &why) &&
+                  why.find("render_target_count") != std::string::npos,
+              "mesh stream: too many render targets is refused");
+        pso::GraphicsPsoInputs unknown_format = inputs;
+        unknown_format.render_target_count = 2;
+        why.clear();
+        check(!pso::build_mesh_stream(mesh_fixture.record, unknown_format, &stream, &why) &&
+                  why.find("rtv_formats[1]") != std::string::npos,
+              "mesh stream: a used render target with no format is refused");
+        pso::GraphicsPsoInputs zeroed = inputs;
+        zeroed.defaults = {};
+        why.clear();
+        check(!pso::build_mesh_stream(mesh_fixture.record, zeroed, &stream, &why) &&
+                  why.find("defaults.sample_count") != std::string::npos,
+              "mesh stream: a zeroed fixed-function state is refused");
+        why.clear();
+        check(!pso::build_mesh_stream(mesh_fixture.record, inputs, nullptr, &why),
+              "mesh stream: a null output stream is refused");
+    }
+}
+
 // The input and refusal surface, printed for the next reader.
 // The console graphics user-SGPR layout (docs/root_arguments.md): a translated vertex/pixel shader reads root
 // parameters from the stage base (s8; mesh s16), one dword per descriptor table, not from the PC packing at s0. The
@@ -1530,7 +1850,9 @@ void print_findings() {
         {"decode_fixed_function_state", "refuses all eight fields: no word is pinned by a measurement (docs/state_blob.md)"},
         {"run_probe", "the behavioural falsifier: 7 of 8 fixed-function fields have a scene whose observation changes"},
         {"kProbeContract[6]", "sample quality is not observable by any defined rendering result; only the container's layout could pin it"},
-        {"mesh record (slot 2)", "refused: D3D12_GRAPHICS_PIPELINE_STATE_DESC has no mesh field"},
+        {"mesh record (slot 2)", "build() refuses it (the D3D12 description has no mesh field); build_mesh_stream() builds the D3D12_PIPELINE_STATE_STREAM_DESC form (docs/mesh_stage.md)"},
+        {"build_mesh_stream", "PS+MS and MS-only records -> stream subobjects (ROOT_SIGNATURE, MS, PS, formats, fixed function); no VS/GS or IA state"},
+        {"MeshStageCounters", "records with a mesh stage, streams built and refusals; summary() is a bounded line for the slot-57 histogram"},
     };
     std::printf("graphics_pso_test: where each D3D12_GRAPHICS_PIPELINE_STATE_DESC field comes from\n");
     std::printf("%-44s %s\n", "field", "source");
@@ -1549,7 +1871,11 @@ void print_findings() {
         {"build", "stages[i] (stage): the record stage has no resolved bytes, or gets bytes it has no slot for"},
         {"build", "render_target_count / rtv_formats[i]: an attachment list D3D12 would refuse"},
         {"build", "defaults.*: the caller's fixed-function state is not a valid value"},
-        {"build", "mesh stage: needs D3D12_PIPELINE_STATE_STREAM_DESC's MS subobject"},
+        {"build", "mesh stage: needs D3D12_PIPELINE_STATE_STREAM_DESC's MS subobject (build_mesh_stream)"},
+        {"build_mesh_stream", "record.stages: no mesh stage / vertex+mesh / the unidentified slot-6 program"},
+        {"build_mesh_stream", "record.state: the record's state is not the measured mesh family"},
+        {"build_mesh_stream", "record.input_layout: a mesh record with an element layout (unmeasured; D3D12 ignores it)"},
+        {"build_mesh_stream", "pRootSignature / record.root_signature / stages[i] / render targets / defaults.*: as build()"},
         {"resolve_native_stage", "no translation / stage mismatch / ambiguous: no single module can be chosen"},
         {"resolve_native_stage", "returns false: the bytes are not a native program (FSSM/stand-in path applies)"},
     };
@@ -1649,6 +1975,7 @@ int main() {
     test_build_ps_only();
     test_build_input_layout();
     test_build_refusals();
+    test_build_mesh_stream();
     test_pipeline_budget();
 
     if (g_failures != 0) {

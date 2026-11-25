@@ -52,3 +52,13 @@ descriptions of the peers' compile strategies: five-star-recomp's separate shade
 XCL's parallel shader compiler, VIctory's ahead-of-time translation with worker threads, and the reference fork's
 pipeline-compile workers (3de22a1904). Those projects are read as evidence of behaviour only; their code is not copied,
 and the implementation in this repository is our own.
+
+### Mesh/merged-geometry stage evidence (reference only)
+
+The mesh-stage readiness slice ([docs/mesh_stage.md](docs/mesh_stage.md)) cross-checked the stage shapes and the merged-geometry
+residual against the public reference fork (GPL-3.0): files 
+untime/shims/d3d12_geometry_views.h,
+
+untime/shims/d3d12_xs_pso_stream.* and the translator work at commits db19bbd34 (Rain156), 273b3bdf9/a626820e
+(Moriz82) and 154e4ec03 (Jan Trencansky), plus the peer ports' published stage tables. No code is copied; the stream
+builder and the recorded shapes are our own measurements.

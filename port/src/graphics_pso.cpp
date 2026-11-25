@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iterator>
 #include <utility>
 
@@ -1119,6 +1120,230 @@ ProbeOutcome run_probe(const FixedFunctionState& state, ProbeScene scene) {
                 quantize(sum[channel] / static_cast<float>(target.sample_count));
     }
     return target.outcome;
+}
+
+// ---- The mesh pipeline's description: the pipeline-state-stream form (docs/mesh_stage.md) -------------------------
+namespace {
+
+std::size_t round_up_to(std::size_t value, std::size_t alignment) {
+    return (value + alignment - 1) / alignment * alignment;
+}
+
+// A bounded line: never more than `limit` characters, so a boot log line is bounded by construction.
+std::string bounded_line(std::string text, std::size_t limit) {
+    if (text.size() > limit) {
+        text.resize(limit - 3);
+        text += "...";
+    }
+    return text;
+}
+
+// The subobject runner of a D3D12_PIPELINE_STATE_STREAM_DESC: a subobject is its type word, its payload at that
+// payload's alignment, and the next subobject starts pointer-aligned - the d3dx12.h layout, which is exactly the rule
+// the PC device's parse_pipeline_stream() (port/shims/d3d12_vulkan_device.cpp) applies. The buffer is zero-filled
+// between subobjects: the parser skips those bytes, they are not payload.
+class SubobjectWriter {
+public:
+    template<typename T>
+    void add(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type, const T& value) {
+        const std::size_t type_at = bytes_.size();
+        const std::size_t payload = round_up_to(type_at + sizeof(type), alignof(T));
+        bytes_.resize(payload + sizeof(T));
+        std::memcpy(bytes_.data() + type_at, &type, sizeof(type));
+        std::memcpy(bytes_.data() + payload, &value, sizeof(T));
+        bytes_.resize(round_up_to(bytes_.size(), alignof(void*)));
+        ++count_;
+    }
+    std::vector<std::uint8_t> take() { return std::move(bytes_); }
+    std::size_t count() const { return count_; }
+
+private:
+    std::vector<std::uint8_t> bytes_;
+    std::size_t count_ = 0;
+};
+
+}  // namespace
+
+std::string MeshPipelineStream::describe() const {
+    char line[200] = {};
+    std::snprintf(line, sizeof line, "mesh stream: %zu subobject(s), %zu B, ms %u B, ps %u B", subobject_count,
+                  bytes.size(), ms_bytes, ps_bytes);
+    return bounded_line(line, 160);
+}
+
+std::string MeshStageCounters::summary() const {
+    char line[160] = {};
+    std::snprintf(line, sizeof line, "mesh stages: records %llu, streams %llu, refusals %llu",
+                  static_cast<unsigned long long>(records_with_mesh_stage),
+                  static_cast<unsigned long long>(streams_built), static_cast<unsigned long long>(refusals));
+    return bounded_line(line, 120);
+}
+
+bool build_mesh_stream(const rt::graphics_record::Record& record, const GraphicsPsoInputs& inputs,
+                       MeshPipelineStream* out, std::string* why) {
+    if (why) why->clear();
+    if (!out) return fail(why, "build_mesh_stream: the output stream is null");
+
+    // ---- The record's shape, checked again rather than trusted (this is a public entry point). A mesh pipeline is
+    // built from a record whose slot 2 is used: the measured shapes are PS+MS and MS only (docs/mesh_stage.md).
+    if (record.stage_count == 0 || record.stage_count > rt::graphics_record::kStageSlotCount)
+        return fail(why, "record.stage_count: the record names " + std::to_string(record.stage_count) +
+                             " stage(s); a graphics pipeline record has 1 to " +
+                             std::to_string(rt::graphics_record::kStageSlotCount));
+    bool used[rt::graphics_record::kStageSlotCount] = {};
+    for (std::size_t i = 0; i < record.stage_count; ++i) {
+        const int slot = record.stages[i].slot;
+        if (slot < 0 || slot >= static_cast<int>(rt::graphics_record::kStageSlotCount))
+            return fail(why, record_stage(i) + "slot " + std::to_string(slot) +
+                                 " is not one of the record's stage slots");
+        if (used[slot]) return fail(why, record_stage(i) + "stage slot " + stage_slot(slot) + " appears twice");
+        used[slot] = true;
+    }
+    const bool vertex = used[rt::graphics_record::kStageSlotVs];
+    const bool mesh = used[rt::graphics_record::kStageSlotMs];
+    const bool pixel = used[rt::graphics_record::kStageSlotPs];
+    if (vertex && mesh)
+        return fail(why, "record.stages: a vertex and a mesh stage together are not a stage combination D3D12 accepts");
+    if (!mesh)
+        return fail(why, "record.stages: the record names no mesh stage; a mesh pipeline needs the record's slot 2 "
+                          "(the stream's MS subobject), and the vertex-family shapes are build()'s "
+                          "D3D12_GRAPHICS_PIPELINE_STATE_DESC path");
+    if (record.has_unidentified_stage)
+        return fail(why, "record.stages: the record names the unidentified slot-6 program (" +
+                             std::to_string(record.unidentified_program.size) +
+                             " B; 2 measured library records, no measured stage), which cannot be carried into a "
+                             "pipeline, so the record is refused instead of dropping the program");
+
+    // ---- The record's blobs. The state is the measured mesh family (its size names the record's programmable stage,
+    // docs/state_blob.md); the input layout is the measured 80-byte empty one (docs/shader_library.md section 2).
+    if (!record.root_signature)
+        return fail(why, "record.root_signature: the record has no root signature at +0x00, so the pipeline's "
+                         "bindings cannot be established");
+    rt::graphics_record::State state;
+    if (!rt::graphics_record::decode_state(record.state, &state))
+        return fail(why, "record.state: the fixed-function state blob is missing or outside its measured envelope "
+                         "(380..520 bytes, a whole number of words), so the record is not the shape this converter "
+                         "knows");
+    if (state.family != rt::graphics_record::StateFamily::kMesh)
+        return fail(why, "record.state: a record with a mesh stage carries the measured mesh-family state record "
+                         "(464 + 8*k bytes, docs/state_blob.md); this one is the vertex family, so its shape is not "
+                         "the measured mesh one");
+    std::vector<rt::graphics_record::Element> elements;
+    if (!rt::graphics_record::decode_input_layout(record.input_layout, &elements))
+        return fail(why, "record.input_layout: the input-layout blob does not decode (its 0x50-byte header, its "
+                         "length-prefixed printable names, its 24-byte attribute blocks and its zero padding do not "
+                         "fill the measured 80..340 bytes; docs/input_layout.md)");
+    if (!elements.empty())
+        return fail(why, "record.input_layout: the measured mesh records carry the 80-byte empty layout, with no "
+                         "elements (docs/shader_library.md section 2); this one has " +
+                             std::to_string(elements.size()) +
+                             " element(s), a shape no mesh record was measured with, and D3D12 ignores a mesh PSO's "
+                             "input layout, so it is refused rather than silently dropped");
+
+    // ---- The caller's inputs, by name. The mesh stage is required; the pixel stage is optional; a vertex stage is
+    // forbidden beside MS (D3D12: a mesh PSO has no vertex stage).
+    if (!inputs.root_signature)
+        return fail(why, "pRootSignature: the caller supplied no PC root signature for the record's root signature");
+    const StageBytecode& ms_code = inputs.stages[rt::graphics_record::kStageSlotMs];
+    const StageBytecode& ps_code = inputs.stages[rt::graphics_record::kStageSlotPs];
+    const StageBytecode& vs_code = inputs.stages[rt::graphics_record::kStageSlotVs];
+    if (ms_code.data == nullptr || ms_code.size == 0)
+        return fail(why, stage_input(rt::graphics_record::kStageSlotMs) +
+                             ": the record names a mesh stage but the caller supplied no resolved program bytes for it");
+    if (pixel && (ps_code.data == nullptr || ps_code.size == 0))
+        return fail(why, stage_input(rt::graphics_record::kStageSlotPs) +
+                             ": the record names a pixel stage but the caller supplied no resolved program bytes for it");
+    if (!pixel && (ps_code.data || ps_code.size))
+        return fail(why, stage_input(rt::graphics_record::kStageSlotPs) + ": the record names no pixel stage, so "
+                                                                          "these program bytes have no stage to go in");
+    if (vs_code.data || vs_code.size)
+        return fail(why, stage_input(rt::graphics_record::kStageSlotVs) +
+                             ": a mesh pipeline has no vertex stage (D3D12 forbids VS beside MS), so these program "
+                             "bytes have no stage to go in");
+    if (inputs.render_target_count > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT)
+        return fail(why, "render_target_count: " + std::to_string(inputs.render_target_count) + " is above D3D12's " +
+                             std::to_string(D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT));
+    for (UINT target = 0; target < D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT; ++target) {
+        const std::string name = "rtv_formats[" + std::to_string(target) + "]";
+        if (target < inputs.render_target_count) {
+            if (inputs.rtv_formats[target] == DXGI_FORMAT_UNKNOWN)
+                return fail(why, name + ": a render target the PSO uses needs a format, not DXGI_FORMAT_UNKNOWN");
+        } else if (inputs.rtv_formats[target] != DXGI_FORMAT_UNKNOWN) {
+            return fail(why, name + ": D3D12 requires the slots at and above NumRenderTargets to be "
+                                    "DXGI_FORMAT_UNKNOWN");
+        }
+    }
+    // The fixed-function fields a mesh pipeline carries are the same API values build() checks; the input-assembly
+    // fields (topology type, index-buffer strip cut) are not part of a mesh pipeline, so they are not checked or
+    // written here (D3D12 ignores them for a PSO with an MS stage).
+    const FixedFunctionState& ff = inputs.defaults;
+    if (ff.sample_count == 0 || ff.sample_count > D3D12_MAX_MULTISAMPLE_SAMPLE_COUNT ||
+        (ff.sample_count & (ff.sample_count - 1u)) != 0)
+        return fail(why, "defaults.sample_count: " + std::to_string(ff.sample_count) +
+                             " is not a power of two from 1 to " +
+                             std::to_string(D3D12_MAX_MULTISAMPLE_SAMPLE_COUNT));
+    if (ff.sample_quality != 0 && ff.sample_quality != DXGI_STANDARD_MULTISAMPLE_QUALITY_PATTERN &&
+        ff.sample_quality != DXGI_CENTER_MULTISAMPLE_QUALITY_PATTERN)
+        return fail(why, "defaults.sample_quality: " + std::to_string(ff.sample_quality) +
+                             " is not 0, the standard or the centre multisample pattern");
+    switch (ff.rasterizer.FillMode) {
+        case D3D12_FILL_MODE_SOLID:
+        case D3D12_FILL_MODE_WIREFRAME: break;
+        default:
+            return fail(why, "defaults.rasterizer.FillMode: " +
+                                 std::to_string(static_cast<int>(ff.rasterizer.FillMode)) + " is not a fill mode");
+    }
+    switch (ff.rasterizer.CullMode) {
+        case D3D12_CULL_MODE_NONE:
+        case D3D12_CULL_MODE_FRONT:
+        case D3D12_CULL_MODE_BACK: break;
+        default:
+            return fail(why, "defaults.rasterizer.CullMode: " +
+                                 std::to_string(static_cast<int>(ff.rasterizer.CullMode)) + " is not a cull mode");
+    }
+    switch (ff.rasterizer.ConservativeRaster) {
+        case D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF:
+        case D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON: break;
+        default:
+            return fail(why, "defaults.rasterizer.ConservativeRaster: " +
+                                 std::to_string(static_cast<int>(ff.rasterizer.ConservativeRaster)) +
+                                 " is not a conservative-rasterization mode");
+    }
+
+    // ---- The stream: every subobject is set here; nothing is left to the runtime's default.
+    SubobjectWriter writer;
+    writer.add(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, inputs.root_signature);
+    const D3D12_SHADER_BYTECODE ms{ms_code.data, ms_code.size};
+    writer.add(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS, ms);
+    D3D12_SHADER_BYTECODE ps{};
+    if (pixel) {
+        ps = {ps_code.data, ps_code.size};
+        writer.add(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS, ps);
+    }
+    D3D12_RT_FORMAT_ARRAY formats{};
+    formats.NumRenderTargets = inputs.render_target_count;
+    for (UINT target = 0; target < D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT; ++target)
+        formats.RTFormats[target] = inputs.rtv_formats[target];
+    writer.add(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS, formats);
+    writer.add(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT, inputs.dsv_format);
+    writer.add(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, ff.rasterizer);
+    writer.add(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, ff.blend);
+    writer.add(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL, ff.depth_stencil);
+    writer.add(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, ff.sample_mask);
+    const DXGI_SAMPLE_DESC sample{ff.sample_count, ff.sample_quality};
+    writer.add(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC, sample);
+    const UINT node_mask = 0;  // the console record carries none; the neutral value, as build() uses
+    writer.add(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK, node_mask);
+    const D3D12_PIPELINE_STATE_FLAGS flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+    writer.add(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS, flags);
+
+    MeshPipelineStream stream;
+    stream.subobject_count = writer.count();
+    stream.bytes = writer.take();
+    stream.ms_bytes = static_cast<std::uint32_t>(ms_code.size);
+    stream.ps_bytes = pixel ? static_cast<std::uint32_t>(ps_code.size) : 0;
+    *out = std::move(stream);
+    return true;
 }
 
 }  // namespace rt::graphics_pso

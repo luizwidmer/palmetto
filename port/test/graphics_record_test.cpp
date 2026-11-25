@@ -279,6 +279,91 @@ void test_empty_input_layout() {
     check(record.input_layout.size == 80, "decode: the mesh layout's size is kept");
 }
 
+// The measured stage-set shapes and the two library records that name the unidentified slot-6 program
+// (docs/mesh_stage.md): the stage set is what the record proves, no record names a geometry (GS) slot, and the slot-6
+// shape is accepted as an opaque unnamed program (so the record is not mistaken for an unknown one) and is refused by
+// name by the converter - never dropped silently.
+void test_measured_shapes() {
+    const Fixture fixture;
+    Record record;
+
+    check(rt::graphics_record::decode(fixture.descriptor.data(), fixture.descriptor.size(), &record),
+          "shapes: the PS+VS record decodes");
+    check(rt::graphics_record::record_shape(record) == rt::graphics_record::RecordShape::kPixelVertex,
+          "shapes: PS+VS classifies as kPixelVertex");
+    check(std::strcmp(rt::graphics_record::record_shape_name(rt::graphics_record::record_shape(record)), "ps+vs") == 0,
+          "shapes: PS+VS is named ps+vs");
+    check(!rt::graphics_record::has_mesh_stage(record), "shapes: a PS+VS record has no mesh stage");
+
+    // PS+MS: the measured mesh shape 10,726 of the library's records carry; the state record is the mesh family.
+    const Bytes mesh_state = make_state_shape(464);
+    Bytes ps_ms = fixture.descriptor;
+    put_span_pair(&ps_ms, 0x08, mesh_state);
+    for (std::size_t at = 0x48; at < 0x68; ++at) ps_ms[at] = 0;  // drop the VS slot
+    put_span_pair(&ps_ms, 0x68, fixture.ps_program);              // slot 2 program
+    put_span_pair(&ps_ms, 0x78, fixture.vs_blob);                 // slot 2 stage blob
+    check(rt::graphics_record::decode(ps_ms.data(), ps_ms.size(), &record), "shapes: a PS+MS record decodes");
+    check(rt::graphics_record::record_shape(record) == rt::graphics_record::RecordShape::kPixelMesh,
+          "shapes: PS+MS classifies as kPixelMesh");
+    check(std::strcmp(rt::graphics_record::record_shape_name(rt::graphics_record::record_shape(record)), "ps+ms") == 0,
+          "shapes: PS+MS is named ps+ms");
+    check(rt::graphics_record::has_mesh_stage(record), "shapes: a PS+MS record has a mesh stage");
+
+    // MS only: the second mesh shape (1,336 records).
+    Bytes ms_only = ps_ms;
+    for (std::size_t at = 0x28; at < 0x48; ++at) ms_only[at] = 0;  // drop the PS slot
+    check(rt::graphics_record::decode(ms_only.data(), ms_only.size(), &record), "shapes: an MS-only record decodes");
+    check(rt::graphics_record::record_shape(record) == rt::graphics_record::RecordShape::kMesh &&
+              record.stage_count == 1,
+          "shapes: MS only classifies as kMesh with one stage");
+
+    // VS only: the second vertex shape (24 records).
+    Bytes vs_only = fixture.descriptor;
+    for (std::size_t at = 0x28; at < 0x48; ++at) vs_only[at] = 0;  // drop the PS slot
+    check(rt::graphics_record::decode(vs_only.data(), vs_only.size(), &record), "shapes: a VS-only record decodes");
+    check(rt::graphics_record::record_shape(record) == rt::graphics_record::RecordShape::kVertex,
+          "shapes: VS only classifies as kVertex");
+
+    // The measured slot-6 shape: 2 library records name the same program in slot 6, with no stage blob, beside PS+VS.
+    Bytes slot6 = fixture.descriptor;
+    put_span_pair(&slot6, rt::graphics_record::kUnidentifiedProgramPairOffset, fixture.vs_program);
+    check(rt::graphics_record::decode(slot6.data(), slot6.size(), &record),
+          "shapes: the measured PS+VS+slot6 record decodes");
+    check(record.has_unidentified_stage && record.unidentified_program.size == fixture.vs_program.size() &&
+              record.unidentified_program.data == fixture.vs_program.data(),
+          "shapes: the slot-6 program is kept as an opaque span");
+    check(record.stage_count == 2, "shapes: the slot-6 program is not one of the record's stages");
+    check(rt::graphics_record::record_shape(record) == rt::graphics_record::RecordShape::kPixelVertexSlot6 &&
+              std::strcmp(rt::graphics_record::record_shape_name(rt::graphics_record::record_shape(record)),
+                          "ps+vs+slot6") == 0,
+          "shapes: PS+VS+slot6 classifies as kPixelVertexSlot6");
+    check(!rt::graphics_record::has_mesh_stage(record), "shapes: the slot-6 shape has no mesh stage");
+    // The measured shape has no stage blob; anything else in the region is still refused.
+    Bytes slot6_blob = slot6;
+    put_span_pair(&slot6_blob, rt::graphics_record::kUnidentifiedProgramPairOffset + 0x10, fixture.vs_blob);
+    check(!rt::graphics_record::decode(slot6_blob.data(), slot6_blob.size(), &record),
+          "shapes: a stage blob beside the slot-6 program is refused (the 2 measured records carry none)");
+    Bytes slot6_partial = slot6;
+    put_u64(&slot6_partial, rt::graphics_record::kUnidentifiedProgramPairOffset + 8, 0);
+    check(!rt::graphics_record::decode(slot6_partial.data(), slot6_partial.size(), &record),
+          "shapes: a slot-6 pointer without its size is refused");
+    Bytes slot6_small = slot6;
+    put_u64(&slot6_small, rt::graphics_record::kUnidentifiedProgramPairOffset + 8, 51);
+    check(!rt::graphics_record::decode(slot6_small.data(), slot6_small.size(), &record),
+          "shapes: a slot-6 program below the measured size range is refused");
+    Bytes slot6_ps_only = slot6;
+    for (std::size_t at = 0x48; at < 0x68; ++at) slot6_ps_only[at] = 0;  // drop the VS slot
+    check(!rt::graphics_record::decode(slot6_ps_only.data(), slot6_ps_only.size(), &record),
+          "shapes: a slot-6 record without the vertex stage is refused (both measured records name PS+VS)");
+    Bytes slot6_ms = slot6;
+    put_span_pair(&slot6_ms, 0x08, mesh_state);
+    for (std::size_t at = 0x48; at < 0x68; ++at) slot6_ms[at] = 0;  // drop the VS slot
+    put_span_pair(&slot6_ms, 0x68, fixture.ps_program);              // slot 2 program
+    put_span_pair(&slot6_ms, 0x78, fixture.vs_blob);                 // slot 2 stage blob
+    check(!rt::graphics_record::decode(slot6_ms.data(), slot6_ms.size(), &record),
+          "shapes: a slot-6 program beside a mesh stage is refused (not a measured stage set)");
+}
+
 void test_state() {
     const Fixture fixture;
     State state;
@@ -741,7 +826,12 @@ void print_findings() {
         {"Record.stages[i].stage_blob", "decoded (span only)",
          "kind-2 blob envelope, contents via decode_stage_blob"},
         {"record +0x88..+0x108", "decoded (must be zero)",
-         "every measured sample is zero to +0x108; a non-zero byte is refused"},
+         "every measured sample is zero to +0x108 except the slot-6 program pair of 2 records; any other non-zero byte "
+         "is refused"},
+        {"Record.has_unidentified_stage", "decoded (opaque span)",
+         "slot 6 of 2 library records: one program, no stage blob; the stage is not identified (docs/mesh_stage.md)"},
+        {"RecordShape", "decoded (stage set)",
+         "PS+VS 13,383 / VS 24 / PS+MS 10,726 / MS 1,336 / PS+VS+slot6 2 (docs/mesh_stage.md)"},
         {"record tail +0x108..", "unknown",
          "unidentified tail; not represented, ignored by decode()"},
         {"State container", "decoded", "the measured state-record container: two size families, stage/common blocks, "
@@ -796,6 +886,7 @@ int main() {
     test_decode_success();
     test_decode_does_not_dereference();
     test_empty_input_layout();
+    test_measured_shapes();
     test_state();
     test_input_layout();
     test_stage_blob();

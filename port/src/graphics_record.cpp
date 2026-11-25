@@ -54,6 +54,34 @@ const char* stage_slot_name(int slot) {
     }
 }
 
+bool has_mesh_stage(const Record& record) {
+    for (std::size_t i = 0; i < record.stage_count && i < kStageSlotCount; ++i)
+        if (record.stages[i].slot == kStageSlotMs) return true;
+    return false;
+}
+
+RecordShape record_shape(const Record& record) {
+    bool ps = false, vs = false;
+    for (std::size_t i = 0; i < record.stage_count && i < kStageSlotCount; ++i) {
+        if (record.stages[i].slot == kStageSlotPs) ps = true;
+        if (record.stages[i].slot == kStageSlotVs) vs = true;
+    }
+    if (has_mesh_stage(record)) return ps ? RecordShape::kPixelMesh : RecordShape::kMesh;
+    if (record.has_unidentified_stage) return RecordShape::kPixelVertexSlot6;
+    return vs ? (ps ? RecordShape::kPixelVertex : RecordShape::kVertex) : RecordShape::kPixelVertex;
+}
+
+const char* record_shape_name(RecordShape shape) {
+    switch (shape) {
+        case RecordShape::kPixelVertex: return "ps+vs";
+        case RecordShape::kVertex: return "vs";
+        case RecordShape::kPixelMesh: return "ps+ms";
+        case RecordShape::kMesh: return "ms";
+        case RecordShape::kPixelVertexSlot6: return "ps+vs+slot6";
+    }
+    return "ps+vs";
+}
+
 const char* state_family_name(StateFamily family) {
     return family == StateFamily::kVertex ? "vertex" : "mesh";
 }
@@ -133,9 +161,28 @@ bool decode(const void* descriptor, std::size_t available, Record* out) {
     if (has_stage(kStageSlotVs) && !state_vertex_family) return false;
     if (has_stage(kStageSlotMs) && !state_mesh_family) return false;
 
-    // Everything after the slot pairs is zero to +0x108 in every measured sample. A non-zero byte there is a shape
-    // this decoder was not measured on; refuse instead of silently ignoring a field we do not know.
-    for (std::size_t at = kStagePairOffset + kStageSlotCount * kStagePairStride; at < kDescriptorValidatedBytes; ++at)
+    // Everything after the three slot pairs is zero to +0x108 in every measured sample, with one measured exception:
+    // the slot-6 program pair of 2 library records (one program, no stage blob; PS+VS+slot6, docs/mesh_stage.md).
+    // Slots 3 to 5 and the slot-6 stage-blob pair are zero in every measured sample, so any other non-zero byte is a
+    // shape this decoder was not measured on and is refused rather than silently ignored.
+    constexpr std::size_t reserved_begin = kStagePairOffset + kStageSlotCount * kStagePairStride;
+    constexpr std::size_t unidentified_blob_pair = kUnidentifiedProgramPairOffset + kProgramToBlobPairOffset;
+    for (std::size_t at = reserved_begin; at < kUnidentifiedProgramPairOffset; ++at)
+        if (bytes[at] != 0) return false;
+    const Pair unidentified = read_pair(bytes, kUnidentifiedProgramPairOffset);
+    if (!pair_is_empty(unidentified)) {
+        // The measured slot-6 shape: a fully set program pair with a size in the measured program range, no stage
+        // blob, and a record that also names the vertex stage (both measured slot-6 records are PS+VS+slot6). The
+        // stage is not identified by any measurement, so it is kept as an opaque span and is not a Stage here; the
+        // converter refuses it by name. A partial pair, a blob, a size outside the range or a slot set the
+        // measurement never shows is refused.
+        if (unidentified.pointer == 0 || unidentified.size == 0) return false;
+        if (!in_range(unidentified.size, kProgramMinBytes, kProgramMaxBytes)) return false;
+        if (!has_stage(kStageSlotVs) || has_stage(kStageSlotMs)) return false;
+        record.has_unidentified_stage = true;
+        record.unidentified_program = span_of(unidentified);
+    }
+    for (std::size_t at = unidentified_blob_pair; at < kDescriptorValidatedBytes; ++at)
         if (bytes[at] != 0) return false;
 
     *out = record;
