@@ -297,3 +297,154 @@ boot-sequence region, the runtime paths ruled out, the wake experiment and the c
 upstream behaviour claim is used on this page, so there is no reference file or commit to credit; the policy of
 [upstream_port.md](upstream_port.md) is followed in the form of "measure first, implement our own, state the limit".
 No git writes were made by this slice.
+
+## 11. Probe results (follow-up): the tracker is the loader job graph; the completion callback and the measured negative
+
+*This section is the follow-up slice's measurement. It keeps the page above intact and appends the facts the first
+probes left open: the tracker's ring and object contents, the waited event's creator, the tracker's internal job
+structure, and the exact function that releases the wait. A negative is the result: the producer is the title's own
+job-graph dispatch, it is never started in our boot, and no runtime call is outstanding that we could answer.*
+
+### 11.1 What ran
+
+| | |
+|---|---|
+| Tree | `D:\leonida` working tree at the same state as section 1, with this slice's only source change: the opt-in `PALMETTO_STAGE2_TRACKER` probe in `port/src/main.cpp` (off by default; the default path starts no thread) |
+| Binaries | probe7 cdb boot: built 16:14:48; probe9/probe10 boots: built 16:27:45 (the same tree plus the tracker probe; `PALMETTO_OK`) |
+| Boots | four 130 s boots under the shared boot lock, one at a time: `boot-probe7` (single cdb session, `!htrace -enable` at ~12 s, execution breakpoint on the wait call site, tracker dump + `!htrace -diff` + `!handle 0 f Event` + all-thread stacks), `boot-probe9` (in-process tracker probe: job lists, job fields, handle census, second sample +3 s), `boot-probe10` (single cdb session at the same breakpoint: tracker header, both job lists, the registered-job hash table and several job objects) and `boot-probe9`'s control state trace |
+| Harness | `tooling/boot_report.py --timeout 130`, captures outside the repository in `D:\leonida-work\stage2c\` |
+| Measure points | execution breakpoint at RVA `0x21B8BDF` (the call into the wait helper `FUN_14258DB70`), i.e. after the factory, the batch body and the job dispatch and before the first wait; in-process probe polling from 4 s and sampling again 3 s later |
+
+The boot's own state word moved exactly as before: `init 2` at 16.5 s / 18.0 s / 24.8 s across the three measured
+boots, `loading 1` two seconds later, machine `current 2 / next 2` to the kill, `ALIVE 130.3 s`, 0 exceptions.
+
+| boot | verdict | d3d12 calls | stage | tracker moment |
+|---|---|---|---|---|
+| `boot-probe7` (cdb) | ALIVE 130.3 s | 240,721 | 2 at 24.8 s | breakpoint hit at ~37 s; all dumps below taken there |
+| `boot-probe9` (in-process) | ALIVE 130.3 s | 280,121 | 2 at 18.0 s | tracker armed and waited at 19.5 s; second sample at 22.5 s |
+| `boot-probe10` (cdb) | ALIVE 130.3 s | 280,732 | 2 at 16.5 s | breakpoint hit ~30 s; job objects dumped there |
+
+### 11.2 The tracker at the wait (cdb, probe7 and probe10)
+
+The tracked object is the same class in both boots (vtable RVA `0x6186300`). At the breakpoint the layout is:
+
+| field | value | meaning (proved by the decompiles in 11.4/11.5) |
+|---|---|---|
+| `+0x000` | vtable `image+0x6186300` | the batch/job-graph class |
+| `+0x03C` / `+0x040` | dword, array pointer | count/array of job **definitions**: 249 at the wait (one entry per registered job chain) |
+| `+0x048` / `+0x050` | **1** / event handle | second pending/event pair, armed by the body and consumed by the drain (`FUN_145098940`), not by the waited event |
+| `+0x088` / `+0x090` | array pointer / `0x0073` + a flag word | dispatch list of 115 definition entries (the same first object as the `+0x040` list; the two lists are two views) |
+| `+0x0B0` | `0xAC407EB2` (and `0xF8` beside it) | the graph identifier the factory passes to the base constructor; the body's `+0xB0 != 0` branch tests it |
+| `+0x0F8` | pointer back to the tracker | self reference |
+| `+0x588` | pointer to a 16-entry ring; indices/capacity `0/0/0/16` | ring of 16 waiter records of `0xA8` bytes; **all zero at the wait** - no waiter record is ever queued here before the wait |
+| `+0x5A0` | the tracked sub-object (pending `+0x68`, event `+0x70`) | see 11.4 |
+| `+0x5F0` / `+0x600` | `image+0x21B8F00` / `image+0x4380` (stub) | callback slots |
+| `+0x608` / `+0x610` | **1** (pre-wait; `0x80000001` inside the wait) / event handle | the pending dword and event from section 2.2 |
+| `+0x618` | context object pointer | the group tracker handed to the completion emitters (11.3) |
+| `+0x620` | pointer back to the tracker | used as the emitter target |
+| `+0x628` / `+0x62C` / `+0x630` | `0x80` / **`0x46` (70)** / array pointer | **registered-job hash table**: capacity 128, 70 entries of `{id dword, job pointer qword}` (decompile in 11.4) |
+
+The context object at `+0x618` (cdb header dump): field 0 points at the tracker's `+0x5A0` group; `+0x50` is
+`image+0x21C3B60`, `+0x58` is `image+0x1167B0` (a one-word copy thunk), `+0x68` is `image+0x4EAA040`, `+0x80` is the
+tracker itself; flags at `+0xD8` were `0x00200000` (in-process boot) and `0xFF000100` (cdb boot), i.e. the emitter's
+`0x200000`/`0x400` tests depend on which flags the context carries. The ring is empty because the only waiter (the
+entry thread) has not yet inserted its record when the wait begins.
+
+### 11.3 The waited event's creator, measured from one session
+
+`boot-probe7` enabled `!htrace` at ~12 s and listed the event handle the tracker created. The log attributes the
+event's creation to the **title entry thread** - thread `0x8b20` of that boot, whose `~*k` stack is the boot sequence
+(`0x21B8BDF` <- `0x21B8A75` <- `0x81B2E8` <- the pump, the same chain as section 2.1). There is no second creation or
+duplicate of that handle in the trace.
+
+The same dump listed **1084 Event handles in the process** and `!handle 0 f Event` reports `HandleCount 2` for
+essentially every one of them - auto-reset and manual-reset, set and waiting, including handles the title closed
+later. So `HandleCount 2` is the shape this process has for **its event objects in general**, not a second holder
+specific to the tracker's event. The earlier "a second holder exists" reading of section 2.3/3 is therefore not
+supported as a tracker-specific fact; the context-emitter account in 11.4 explains the same object without a duplicate.
+This also retires the two producer candidates of section 5.2 (a host component holding a duplicate): no duplicate was
+measured.
+
+### 11.4 The completion path: exactly one callback releases the wait
+
+The sub-object at `tracker+0x5A0` is the job group the wait is about: `+0x68` pending dword (tracker+0x608), `+0x70`
+event (tracker+0x610), `+0x78` the context object (tracker+0x618), `+0x80` the tracker (tracker+0x620). The context's
+`+0x50` slot is the only function that releases it (targeted Ghidra decompile, RVA `0x21C3B60`):
+
+```c
+// image+0x21C3B60, the callback stored at ctx+0x50
+int job_group_complete(void **owner) {
+  group = *owner;                                  // tracker+0x5A0
+  LOCK(); old = *(int *)(group + 0x68);            // tracker+0x608
+          *(int *)(group + 0x68) = old - 1; UNLOCK();
+  if (old == 0x80000001) signal_event(*(HANDLE *)(group + 0x70));   // tracker+0x610
+  return 0;
+}
+```
+
+The wait helper `FUN_14258DB70` turns the armed `1` into `0x80000001` with a locked add before waiting (section 2.2),
+so this callback is the **single** step the wait needs: one invocation after the graph's work has been done. The wake
+experiment's bare `SetEvent` provided the signal without that invocation's work, which is why the boot then faulted
+while consuming a result object the jobs never filled (section 4).
+
+The producer is therefore the title's **job-graph execution**: the batch's registered loader jobs must run to
+completion; the last completion path calls this callback once per finished job chain, and the one that drops the
+pending dword from `0x80000001` signals the event.
+
+### 11.5 What the graph is, and the measured missing dependency
+
+The factory `FUN_145BF0B10` creates the tracker and then calls `FUN_145B41260`, which runs a long list of small
+registration functions (`FUN_145B416E0`, `FUN_145B41730`, ... `FUN_145B47A50`: one per loader stage). Each builds a
+job descriptor on its stack - a work function pointer (e.g. `image+0x377CCA0`), two default completion slots
+(`image+0x4380`), and a 32-bit job id - registers it with `FUN_141C86590(desc, id, 0)`, and `FUN_141B8E670` inserts the
+resulting job object into the tracker's hash table at `+0x628/+0x630`, keyed by the job's id at `+0xDC`. The stored job
+objects (cdb `boot-probe10`, hash-table entries and both lists) have work function pointers at `+0x50`, the executor
+`image+0x4EAA040` at `+0x68` (it calls the generic job runner `FUN_140063CD0(job, job+0xC, job+0xB)`), the owning
+tracker at `+0x80`, and the job id at `+0xDC`. So the tracker is the **loader's registered job graph**: 70 jobs in the
+table, 249/115 definition entries in the two lists.
+
+At the breakpoint (after the body's dispatch, before the wait) the 70 registered job objects are **queued but not
+started**: their state byte `+0xE0` is 0 and their scheduling counter `+0xF0` is 2 (the value `FUN_14509B890` writes
+when it queues a job), and the two job-definition lists still hold entries with `+0xF0 = 0`. The in-process boot
+samples the same structures 3 s apart while the wait holds: nothing changes - not one job moves to its running state,
+no job completes, and the pending dword stays `0x80000001`. The frame thread keeps presenting and the D3D12 trace keeps
+running (280k calls), so this is not a frozen process: the graph simply never gets picked up by the title's job
+workers.
+
+**The exact missing dependency is title-side job dispatch, not a shim answer.** Every platform path that could hold a
+job is ruled out by measurement: all 4,199 DirectStorage requests completed `S_OK` (section 5), zero
+`EnqueueSetEvent` and zero D3D12 `SetEventOnCompletion`/`SetEventOnMultipleFenceCompletion` calls occur in the trace,
+no runtime thread waits on the tracker event (the waiter is the title entry thread), and no duplicate of the event
+exists (11.3). The jobs sit in the title's own queue; the next dispatch step that should hand them to a worker is the
+same loader-side indirect dispatch whose chain docs/streamed_consumer.md section 6b/6c measures dead-ending after the
+pipeline precompile (the loader object is never armed again; no further read batch is posted). Our runtime cannot
+honestly complete this graph from its side: the result object the post-wait emitters consume must be filled by the
+jobs, and a bare completion signal was measured to fault (section 4). That is the measured negative, and it moves the
+frontier from "which shim must signal the event" to "which title-side dispatch starts the graph".
+
+### 11.6 The next falsifiable measurement
+
+One boot with `PALMETTO_WATCH_GLOBAL` on the tracker's pending dword `0x9844898+0x608` (or the in-process probe
+sampling every 100 ms instead of at +3 s) would date the last write of the pending dword. The decisive next probe is
+on the job side, not the shim side: sample the registered jobs' `+0xF0`/`+0xE0` in the first 200 ms around the body's
+dispatch and read the scheduler's global work queue (`_DAT_14764A8E8`) depth at the same moment, to separate "the batch
+queued its jobs but the scheduler never submits them" from "the scheduler submits them and the workers never pick them
+up". Either answer names the title-side owner of the missing step; neither is a call our runtime currently answers.
+
+### 11.7 Tests and gates (this section)
+
+| gate | result |
+|---|---|
+| `_setup\build_gta6rt.cmd` | `PALMETTO_OK` (binary built 16:27:45 with the opt-in tracker probe) |
+| `_setup\build_tests.cmd` | `TESTS_BUILT` (no test target changed; the probe is a diagnostic switch on the default path) |
+| default path | `PALMETTO_STAGE2_TRACKER` unset: no probe thread is started and no extra read is performed; the three control boots in 11.1 are the same default boot behaviour (stage 2, ALIVE 130 s) |
+| docs checks | `tests/test_docs_env_vars.py` sees the new `PALMETTO_STAGE2_TRACKER` name because this page is untracked until the lead commits it, as in section 9 |
+
+### 11.8 Attribution and limits (this section)
+
+Same attribution and policy as section 10; no upstream code or behaviour claim is used here either. Limits: the job
+dispatch step is bounded by the two measured boots (one cdb breakpoint, one in-process pair of samples); the hash
+table's first 48/70 buckets were read, not all 70 job objects; the second sample is 3 s after the first, so a job that
+started and finished inside those 3 s would be missed - the definitions' unchanged state makes that unlikely but it is
+not excluded. No game data: RVAs, field offsets, counts, handles and outcomes only; no job names, ids or package
+contents.

@@ -1765,6 +1765,246 @@ void start_stage2_wake_probe(std::uintptr_t image_base, std::uintptr_t image_siz
     }).detach();
 }
 
+// ---- Stage-2 tracker probe (PALMETTO_STAGE2_TRACKER) ----------------------------------------------------------------
+// The stage-2 wait is armed by the batch body FUN_1421B8B20 on the tracker the boot sequence creates (global RVA
+// 0x9844898). This probe measures the batch's own job list, which the factory FUN_145BF0B10 fills after construction
+// (count dword at +0x3C and pointer array at +0x40; a record array of 4-dword records with count at +0x62C and pointer
+// at +0x630) and the job fields the scheduler reads (state byte +0xE0, class masks +0xE1/+0xE2/+0xE4, dependency
+// callback +0xE8, pending counter +0xF0, completion byte +0x74). It also counts the handles in THIS process that refer
+// to the same kernel event object as the waited event at +0x610, so the "HandleCount 2" shape is measured instead of
+// inferred from a debugger view. Every read is bounds-checked against the mapped title image / committed pages.
+// Off when the switch is unset; the default path starts no thread for it.
+constexpr std::uint32_t kTitleStage2TrackerJobLists[3][2] = {
+    {0x3C, 0x40},  // batch job list: dword count, qword array pointer
+    {0x0C, 0x10},  // second job list: dword count, qword array pointer
+    {0x90, 0x88},  // dispatch list: u16 count at +0x90, qword array pointer at +0x88
+};
+
+struct Stage2HandleEntry {
+    void* object;
+    std::uint64_t process_id;
+    std::uint64_t handle;
+    std::uint32_t granted_access;
+    std::uint16_t creator_backtrace;
+    std::uint16_t object_type;
+    std::uint32_t handle_attributes;
+    std::uint32_t reserved;
+};
+struct Stage2HandleTable {
+    std::uint64_t count;
+    std::uint64_t reserved;
+    Stage2HandleEntry entries[1];
+};
+struct Stage2ObjectBasicInformation {
+    std::uint32_t granted_access;
+    std::uint32_t handle_count;
+    std::uint32_t pointer_count;
+    std::uint32_t reserved[10];
+};
+using Stage2NtQuerySystemInformation = LONG(NTAPI*)(ULONG, PVOID, ULONG, PULONG);
+using Stage2NtQueryObject = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+std::uint64_t stage2_read_qword(std::uintptr_t address) {
+    std::uint64_t value = 0;
+    if (title_address_readable(address)) std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+    return value;
+}
+
+std::uint32_t stage2_read_u32(std::uintptr_t address) {
+    std::uint32_t value = 0;
+    if (title_address_readable(address)) std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+    return value;
+}
+
+std::uint16_t stage2_read_u16(std::uintptr_t address) {
+    std::uint16_t value = 0;
+    if (title_address_readable(address)) std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+    return value;
+}
+
+std::uint8_t stage2_read_u8(std::uintptr_t address) {
+    std::uint8_t value = 0;
+    if (title_address_readable(address)) std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+    return value;
+}
+
+// Renders a qword as "image+0xRVA" when it points into the title image, else as a raw pointer.
+std::string stage2_pointer_text(std::uintptr_t image_base, std::uintptr_t image_size, std::uint64_t value) {
+    char text[48];
+    if (value >= image_base && value < image_base + image_size) {
+        std::snprintf(text, sizeof text, "image+0x%llx", static_cast<unsigned long long>(value - image_base));
+    } else {
+        std::snprintf(text, sizeof text, "0x%llx", static_cast<unsigned long long>(value));
+    }
+    return text;
+}
+
+void start_stage2_tracker_probe(std::uintptr_t image_base, std::uintptr_t image_size, double at_seconds) {
+    std::thread([image_base, image_size, at_seconds] {
+        const auto started = sampler_epoch();
+        auto elapsed = [&] {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        };
+        std::this_thread::sleep_until(started + std::chrono::milliseconds(static_cast<long long>(at_seconds * 1000.0)));
+        std::uintptr_t tracker = 0;
+        std::uint32_t armed = 0;
+        std::uintptr_t event = 0;
+        bool found = false;
+        for (int poll = 0; poll < 1200; ++poll) {
+            tracker = 0;
+            armed = 0;
+            event = 0;
+            if (title_read_pointer_at(image_base + kTitleStage2TrackerRva, tracker) && tracker != 0 &&
+                (tracker & 7) == 0) {
+                armed = stage2_read_u32(tracker + 0x608);
+                title_read_pointer_at(tracker + 0x610, event);
+                if (armed != 0 || event != 0) {
+                    found = true;
+                    break;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        std::fprintf(stderr, "[rt] stage2 tracker at %.1f s: tracker 0x%llx armed 0x%x event 0x%llx\n", elapsed(),
+                     static_cast<unsigned long long>(tracker), armed, static_cast<unsigned long long>(event));
+        if (!found) {
+            std::fprintf(stderr, "[rt] stage2 tracker: no tracker within 120 s of the named time\n");
+            return;
+        }
+        std::fprintf(stderr,
+                     "[rt] stage2 tracker head: vtbl %s armed 0x%x event 0x%llx ring 0x%llx idx/cap %u/%u/%u/%u\n",
+                     stage2_pointer_text(image_base, image_size, stage2_read_qword(tracker)).c_str(),
+                     stage2_read_u32(tracker + 0x608), static_cast<unsigned long long>(event),
+                     static_cast<unsigned long long>(stage2_read_qword(tracker + 0x588)),
+                     stage2_read_u16(tracker + 0x598), stage2_read_u16(tracker + 0x59A),
+                     stage2_read_u16(tracker + 0x59C), stage2_read_u16(tracker + 0x59E));
+        const std::uintptr_t context = stage2_read_qword(tracker + 0x618);
+        std::fprintf(stderr,
+                     "[rt] stage2 tracker tail: ctx 0x%llx self %s callbacks %s %s ctx+0x50 %s ctx+0x58 %s "
+                     "ctx+0x68 %s ctx+0x80 %s ctx+0xD8 0x%x records %u/0x%llx\n",
+                     static_cast<unsigned long long>(context),
+                     stage2_pointer_text(image_base, image_size, stage2_read_qword(tracker + 0x620)).c_str(),
+                     stage2_pointer_text(image_base, image_size, stage2_read_qword(tracker + 0x5F0)).c_str(),
+                     stage2_pointer_text(image_base, image_size, stage2_read_qword(tracker + 0x600)).c_str(),
+                     stage2_pointer_text(image_base, image_size, stage2_read_qword(context + 0x50)).c_str(),
+                     stage2_pointer_text(image_base, image_size, stage2_read_qword(context + 0x58)).c_str(),
+                     stage2_pointer_text(image_base, image_size, stage2_read_qword(context + 0x68)).c_str(),
+                     stage2_pointer_text(image_base, image_size, stage2_read_qword(context + 0x80)).c_str(),
+                     stage2_read_u32(context + 0xD8), stage2_read_u32(tracker + 0x62C),
+                     static_cast<unsigned long long>(stage2_read_qword(tracker + 0x630)));
+        // Dump each job list: the job object's own words (resolved to RVAs where they are image pointers) and the
+        // scheduler-visible fields. Compact one line per job so a boot's stderr stays readable.
+        auto dump_jobs = [&](const char* label) {
+            for (int list = 0; list < 3; ++list) {
+                const std::uint32_t count_offset = kTitleStage2TrackerJobLists[list][0];
+                const std::uint32_t array_offset = kTitleStage2TrackerJobLists[list][1];
+                const std::uint32_t count =
+                    (list == 2) ? stage2_read_u16(tracker + count_offset) : stage2_read_u32(tracker + count_offset);
+                const std::uintptr_t array = stage2_read_qword(tracker + array_offset);
+                std::fprintf(stderr, "[rt] stage2 %s list %d: count %u array 0x%llx\n", label, list, count,
+                             static_cast<unsigned long long>(array));
+                if (count == 0 || count > 200 || !title_address_readable(array)) continue;
+                const std::uint32_t shown = std::min<std::uint32_t>(count, 96);
+                for (std::uint32_t i = 0; i < shown; ++i) {
+                    const std::uintptr_t job = stage2_read_qword(array + static_cast<std::uintptr_t>(i) * 8);
+                    if (job == 0 || !title_address_readable(job)) continue;
+                    std::fprintf(stderr,
+                                 "[rt] stage2 %s job %u ptr 0x%llx q0 %s q8 %s q10 %s q18 %s | state %u e1 0x%x "
+                                 "e2 0x%x e4 0x%x e8 %s f0 %d f7 %u | f70 %u f72 %u f74 %u c8 %u e0 0x%x\n",
+                                 label, i, static_cast<unsigned long long>(job),
+                                 stage2_pointer_text(image_base, image_size, stage2_read_qword(job)).c_str(),
+                                 stage2_pointer_text(image_base, image_size, stage2_read_qword(job + 8)).c_str(),
+                                 stage2_pointer_text(image_base, image_size, stage2_read_qword(job + 0x10)).c_str(),
+                                 stage2_pointer_text(image_base, image_size, stage2_read_qword(job + 0x18)).c_str(),
+                                 stage2_read_u8(job + 0xE0), stage2_read_u8(job + 0xE1),
+                                 stage2_read_u8(job + 0xE2), stage2_read_u16(job + 0xE4),
+                                 stage2_pointer_text(image_base, image_size, stage2_read_qword(job + 0xE8)).c_str(),
+                                 static_cast<int>(stage2_read_u32(job + 0xF0)), stage2_read_u8(job + 0xF7),
+                                 stage2_read_u16(job + 0x70), stage2_read_u8(job + 0x72), stage2_read_u8(job + 0x74),
+                                 stage2_read_u8(job + 0xC8), stage2_read_u8(job + 0xE0));
+                }
+            }
+        };
+        dump_jobs("first");
+        // The record array at +0x630: 4-dword records the builder writes a dword in; print the first 48.
+        const std::uintptr_t records = stage2_read_qword(tracker + 0x630);
+        const std::uint32_t record_count = stage2_read_u32(tracker + 0x62C);
+        if (records != 0 && title_address_readable(records) && record_count <= 200) {
+            std::string text;
+            for (std::uint32_t i = 0; i < std::min<std::uint32_t>(record_count, 48); ++i) {
+                const std::uintptr_t record = records + static_cast<std::uintptr_t>(i) * 16;
+                char one[80];
+                std::snprintf(one, sizeof one, " %u:%08x/%08x/%08x/%08x", i, stage2_read_u32(record),
+                              stage2_read_u32(record + 4), stage2_read_u32(record + 8), stage2_read_u32(record + 12));
+                text += one;
+            }
+            std::fprintf(stderr, "[rt] stage2 records%s\n", text.c_str());
+        }
+        // Handle census: which handles in this process refer to the same kernel event object as +0x610.
+        if (event != 0) {
+            HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+            auto query_system =
+                reinterpret_cast<Stage2NtQuerySystemInformation>(ntdll ? GetProcAddress(ntdll, "NtQuerySystemInformation")
+                                                                      : nullptr);
+            if (query_system) {
+                std::vector<unsigned char> buffer(1u << 22);
+                ULONG needed = 0;
+                LONG status = query_system(64, buffer.data(), static_cast<ULONG>(buffer.size()), &needed);
+                if (status != 0 && needed > buffer.size() && needed < (64u << 20)) {
+                    buffer.resize(needed + 0x1000);
+                    status = query_system(64, buffer.data(), static_cast<ULONG>(buffer.size()), &needed);
+                }
+                if (status == 0) {
+                    auto* table = reinterpret_cast<Stage2HandleTable*>(buffer.data());
+                    const std::uint64_t pid = GetCurrentProcessId();
+                    void* object = nullptr;
+                    for (std::uint64_t i = 0; i < table->count; ++i) {
+                        const Stage2HandleEntry& entry = table->entries[i];
+                        if (entry.process_id == pid && entry.handle == event) {
+                            object = entry.object;
+                            break;
+                        }
+                    }
+                    unsigned same_here = 0, same_all = 0;
+                    std::string details;
+                    if (object != nullptr) {
+                        for (std::uint64_t i = 0; i < table->count; ++i) {
+                            const Stage2HandleEntry& entry = table->entries[i];
+                            if (entry.object != object) continue;
+                            ++same_all;
+                            if (entry.process_id != pid) continue;
+                            ++same_here;
+                            char one[64];
+                            std::snprintf(one, sizeof one, " 0x%llx/access0x%x",
+                                          static_cast<unsigned long long>(entry.handle), entry.granted_access);
+                            details += one;
+                        }
+                    }
+                    std::fprintf(stderr, "[rt] stage2 event object %p: %u handle(s) in this process, %u system-wide%s\n",
+                                 object, same_here, same_all, details.c_str());
+                } else {
+                    std::fprintf(stderr, "[rt] stage2 event object: NtQuerySystemInformation status 0x%lx\n", status);
+                }
+            }
+            auto query_object = reinterpret_cast<Stage2NtQueryObject>(
+                ntdll ? GetProcAddress(ntdll, "NtQueryObject") : nullptr);
+            if (query_object) {
+                Stage2ObjectBasicInformation info{};
+                ULONG length = 0;
+                const LONG status = query_object(reinterpret_cast<HANDLE>(event), 0, &info, sizeof info, &length);
+                std::fprintf(stderr,
+                             "[rt] stage2 event basic info: status 0x%lx length %lu granted 0x%x handles %u "
+                             "pointers %u\n",
+                             status, length, info.granted_access, info.handle_count, info.pointer_count);
+            }
+        }
+        // Second sample 3 s later: did any job state or the batch counter move while the wait is parked?
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        std::fprintf(stderr, "[rt] stage2 tracker +3 s: armed 0x%x\n", stage2_read_u32(tracker + 0x608));
+        dump_jobs("plus3s");
+    }).detach();
+}
+
 // Starts the sampler thread named by PALMETTO_STATE_TRACE ("<interval>[,<seconds>]"; "1" means 2 s to process end).
 // Detached: it ends with the process. Off when the variable is unset, so the default path is unchanged.
 void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_size, const char* spec) {
@@ -2257,6 +2497,15 @@ int wmain(int argc, wchar_t** argv) {
             if (at_seconds > 0.0)
                 start_stage2_wake_probe(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size,
                                         at_seconds);
+        }
+        // PALMETTO_STAGE2_TRACKER=<seconds>: dump the armed stage-2 tracker's job lists, job fields, context and the
+        // process's handles to the waited event, then sample again 3 s later (diagnostic; see the tracker probe above).
+        // Off when unset.
+        if (const char* spec = std::getenv("PALMETTO_STAGE2_TRACKER"); spec && *spec) {
+            const double at_seconds = std::strtod(spec, nullptr);
+            if (at_seconds >= 0.0)
+                start_stage2_tracker_probe(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size,
+                                           at_seconds);
         }
         // PALMETTO_LOADER_HOOK=1: inline entry detours on the loader begin/end/re-init, with per-call records
         // (diagnostic; see the loader entry detours above). Off by default.
