@@ -384,7 +384,7 @@ struct ThreadStackSample {
     DWORD tid = 0;
     std::uint64_t rip = 0, rsp = 0, start = 0;
     unsigned count = 0;
-    std::uint64_t stack[32] = {};
+    std::uint64_t stack[64] = {};
 };
 
 // Like scan_stack_words, but walks up to `pages` committed pages above rsp and keeps up to `cap` code-range words - the
@@ -468,7 +468,7 @@ void thread_stacks_sample_once(std::uintptr_t image_base, std::uintptr_t image_s
                 if (query_thread(thread, 9 /*ThreadQuerySetWin32StartAddress*/, &start, sizeof(start), nullptr) >= 0)
                     sample.start = (std::uint64_t)(std::uintptr_t)start;
             }
-            sample.count = scan_stack_words_deep(sample.rsp, sample.stack, 32, modules, 8);
+            sample.count = scan_stack_words_deep(sample.rsp, sample.stack, 64, modules, 32);
         }
         ResumeThread(thread);
         CloseHandle(thread);

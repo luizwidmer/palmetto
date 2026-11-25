@@ -284,6 +284,32 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### Guest-stack sampling: the title runs natively, and one title frame appears
+
+The port has no emulator thread state to read for a guest RSP: `host_cpu.h` is only a host CPU-feature preflight, the
+loader maps the title image, redirects module TLS and runs the EXE's entry point **natively on a game thread**
+(`main.cpp` header), and the title's own threads run natively too. So the native stack *is* the guest stack; what
+matters is how deep and when it is sampled. The sampler was deepened (32 committed pages, 64 frames) and run twice:
+`PALMETTO_THREAD_STACKS=2.5,5,7.5,10,15,20` (49-71 threads, 44-64 distinct stacks per sample) and a dense
+`5,6,...,15` run (527 sampled stack records).
+
+Result across both boots: **exactly one title-image frame appears in any sampled stack**:
+`game_scarlett_master.exe+0x4f657d3`, at 7.5 s in one boot and 6.0 s in the other, on a thread whose remaining frames are
+host (`palmetto.exe`, `ucrtbase.dll`, `KERNEL32.DLL`, `ntdll.dll`) - a title-to-host boundary frame from the load-stage
+bootstrap, not the stage dispatcher. No frame near the loader object global `[[game+0x79F6D70]]` and none of streamtrace's
+job frames (`0x221AD35`, `0x51D235D`, `0x9387D3`, `0x374F244`) occurred in any stack: every other sampled stack is
+host/system frames, because at the sampled instants the title's job threads sit inside host waits and the dispatcher is
+not executing.
+
+Ranked RVA candidates: **(1) `game+0x4f657d3`** - the only title RVA any stack capture showed, a load-window title-to-host
+boundary frame, worth decompiling to identify which title subsystem owns it. Nothing else is evidenced; interval sampling
+is the wrong instrument for a dispatcher that runs briefly.
+
+Named next method (direct): watch the loader's armed byte `[[game+0x79F6D70] + 0x78]` and, on each transition, capture
+the current thread's title stack immediately - the code that writes the transition is on the stack at that instant, so
+its RVA is the dispatcher. That is a natural extension of the existing `PALMETTO_WATCH_GLOBAL` mechanism plus the stack
+walker added here, and it does not depend on sampling luck.
+
 ### Full thread-stack sampler (PALMETTO_THREAD_STACKS): no title-side frames on native stacks
 
 `PALMETTO_THREAD_STACKS=<seconds,...>` (new, opt-in; `port/src/main.cpp`) suspends every other thread at each named time,
