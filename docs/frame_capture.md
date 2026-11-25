@@ -284,6 +284,40 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### Hardware-watchpoint control: debug registers work; the loader fields are never written after the burst
+
+The loader write watch was paired with a control watchpoint on a port-owned slot written every 50 ms (DR2, same
+thread-arming loop, the same handler). One 130 s boot (`boot-control1`, ALIVE, 0 exceptions):
+
+```
+control at 3 s: 0 hardware watchpoint event(s)
+loader watch: armed on object 0x1CE81D1F780, byte +0x78, dword +0x64; initial 0x0 / 0x0
+control: hardware watchpoint fired (1) ... (3)
+control at 15 s: 194 hardware watchpoint event(s)
+control at 60 s: 1366 hardware watchpoint event(s)
+```
+
+So **debug registers are honoured in this host**: the control watchpoint fires continuously. The loader fields at
+object+0x78 and +0x64 produced **no transition record at all** after the watch armed (~3 s, when the loader global first
+became non-zero; the object existed with both fields zero). A later re-arm of the loading job would have been captured;
+none happened through the 130 s window.
+
+Plain conclusion: **nothing writes the loader's armed byte after the burst, so the dispatcher never reaches the loader
+again** - the gate is upstream in the stage manager, exactly as streamtrace's stack walk suggested. This is the explicit
+negative that closes the watch method: the hardware watchpoint is proven live by the control, and the loader fields are
+genuinely unmodified.
+
+Caveat stated: the watch armed at ~3 s when the loader global became non-zero, so the *initial* arming and the ~1.75 s
+drop may precede the arm; those are already measured by streamtrace. What this boot adds is that no later write occurs
+either.
+
+For the REA/Ghidra decompile: the loader global is `game+0x79F6D70` (a pointer to a host-heap object whose first word carries
+the "dsms" magic), and the fields are +0x78 (armed byte) and +0x64 (in-flight dword). The page-guard variant was not needed:
+with the control proving the watch mechanism live, its only possible outcome was the same negative (and it would add
+per-access exception noise on the object's page). Next evidence: xrefs on the global and decompilation of the stage
+manager's state word that should re-arm it, plus `game+0x4f657d3` (the one load-stage title frame the stack sampler
+found).
+
 ### Loader write watch (hardware data watchpoints): armed, but no transition captured
 
 `PALMETTO_LOADER_WATCH=1` resolves the loader object `[[game+0x79F6D70]]` before the entry point runs, arms hardware

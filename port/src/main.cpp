@@ -533,16 +533,39 @@ struct LoaderWatch {
     std::atomic<std::uint32_t> armed_last{0xFFFFFFFFu};
     std::atomic<std::uint32_t> inflight_last{0xFFFFFFFFu};
     std::atomic<unsigned> records{0};
+    std::atomic<unsigned> control_events{0};
+    std::atomic<bool> control_changed{false};
 };
+
+// The hardware-watchpoint control: a port-owned slot a dedicated thread writes every 50 ms. If a data breakpoint on it
+// never fires, debug registers are not honoured in this environment, so a silent loader watch is a method failure,
+// not a measurement. Aligned and volatile only for the control; contains no title data.
+alignas(8) volatile std::uint64_t loader_watch_control = 0;
 
 LoaderWatch& loader_watch() {
     static LoaderWatch watch;
     return watch;
 }
 
+// The control writer and its report: a port-owned slot written every 50 ms, so a hardware watchpoint on it firing tells
+// us debug registers are honoured here; silence tells us the loader-watch negative was a method failure.
+void start_loader_watch_control() {
+    std::thread([] {
+        for (;;) {
+            ++loader_watch_control;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }).detach();
+    std::thread([] {
+        for (const double at : {3.0, 15.0, 60.0, 120.0}) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<long long>(at * 1000.0) - 0));
+            std::fprintf(stderr, "[rt] loader watch control at %.0f s: %u hardware watchpoint event(s)\n", at,
+                         loader_watch().control_events.load(std::memory_order_relaxed));
+        }
+    }).detach();
+}
+
 std::uintptr_t loader_watch_image_base = 0, loader_watch_image_size = 0;
-
-
 // Title-image frames only, from the faulting thread's stack at the moment of the store. LoaderWatch values are atomics
 // only; the walker is the same fault-tolerant page scan the samplers use. Called from the VEH, so it prints directly.
 void loader_watch_record(const CONTEXT& context, const char* field, std::uint32_t old_value, std::uint32_t new_value,
@@ -569,6 +592,12 @@ LONG CALLBACK loader_watch_exception(EXCEPTION_POINTERS* info) {
     if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
     LoaderWatch& watch = loader_watch();
     if (!watch.ready.load(std::memory_order_relaxed)) return EXCEPTION_CONTINUE_SEARCH;
+    if ((info->ContextRecord->Dr6 & 0x4u) != 0) {  // DR2: the control slot
+        LoaderWatch& watch = loader_watch();
+        const unsigned events = watch.control_events.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (events <= 3) std::fprintf(stderr, "[rt] loader watch control: hardware watchpoint fired (%u)\n", events);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     const std::uintptr_t armed = watch.armed_address.load(std::memory_order_relaxed);
     const std::uintptr_t inflight = watch.inflight_address.load(std::memory_order_relaxed);
     if (!armed && !inflight) return EXCEPTION_CONTINUE_SEARCH;
@@ -600,6 +629,7 @@ LONG CALLBACK loader_watch_exception(EXCEPTION_POINTERS* info) {
 void start_loader_watch(std::uintptr_t image_base, std::size_t image_size, std::uint64_t loader_global_rva) {
     loader_watch_image_base = image_base;
     loader_watch_image_size = image_size;
+    start_loader_watch_control();
     AddVectoredExceptionHandler(1, loader_watch_exception);
     std::thread([image_base, loader_global_rva] {
         const auto* global = reinterpret_cast<const std::uint64_t*>(image_base + loader_global_rva);
@@ -644,9 +674,10 @@ void start_loader_watch(std::uintptr_t image_base, std::size_t image_size, std::
                             if (GetThreadContext(thread, &context)) {
                                 context.Dr0 = armed;
                                 context.Dr1 = inflight;
+                                context.Dr2 = reinterpret_cast<std::uintptr_t>(&loader_watch_control);
                                 context.Dr6 = 0;
                                 // L0 = 1, RW0 = 01 (write), LEN0 = 00 (1 byte); L1 = 1, RW1 = 01, LEN1 = 11 (4 bytes).
-                                context.Dr7 = 0x1u | (0x1u << 2) | (0x1u << 16) | (0x1u << 20) | (0x3u << 22);
+                                context.Dr7 = 0x1u | (0x1u << 2) | (0x1u << 4) | (0x1u << 16) | (0x1u << 20) | (0x3u << 22) | (0x1u << 24) | (0x3u << 26);
                                 SetThreadContext(thread, &context);
                                 configured.insert(entry.th32ThreadID);
                             }
