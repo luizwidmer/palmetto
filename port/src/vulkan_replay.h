@@ -832,6 +832,19 @@ struct VertexPathInfo {
         std::uint32_t divisor = 0;
     } binding[16];
     std::uint32_t binding_count = 0;
+    // The pipeline's root signature parameter table (docs/vertex_path.md): which push-constant dwords each root
+    // parameter owns, so a dword's provenance can be printed. `type` is rt::rootsig::ParamType as an integer
+    // (0 constants, 1 root descriptor, 2 descriptor table); `dwords` is the number of user-data dwords it occupies.
+    struct RootParameter {
+        std::uint32_t type = 0;
+        std::uint32_t user_offset = 0;
+        std::uint32_t dwords = 0;
+        std::uint32_t constant_count = 0;
+    } parameter[16];
+    std::uint32_t parameter_count = 0;
+    // Set by the slot-57 record path when it supplies the draw's root arguments itself (rootargs increment): the dump
+    // then tags a root-argument dword as coming from the record's block instead of the title's recorded API calls.
+    std::uint32_t record_root_arguments = 0;
 };
 
 // The bytes one vertex attribute of `format` takes, or 0 for a format the layer does not bind as a vertex input. Pure
@@ -925,6 +938,47 @@ inline BlitTransform blit_transform(const std::uint32_t* s) {
 }
 inline bool blit_transform_degenerate(const BlitTransform& transform) {
     return transform.x == 0 && transform.y == 0 && transform.z == 0 && transform.w == 0;
+}
+
+// Where one of a draw's 32 push-constant dwords comes from (docs/vertex_path.md): the pipeline's root signature says
+// which dwords a descriptor table occupies, which are a root constant or root descriptor (supplied by the draw's root
+// arguments), and which no parameter covers. `loose` is a nonzero dword no parameter explains (the title wrote it into
+// the recorded user data directly, or a decode wrote it without a layout entry). Pure; pinned by frame_dump_test.
+inline constexpr std::uint32_t kPushConstantUnset = 0;
+inline constexpr std::uint32_t kPushConstantTable = 1;
+inline constexpr std::uint32_t kPushConstantRootArgument = 2;
+inline constexpr std::uint32_t kPushConstantLoose = 3;
+struct PushConstantProvenance {
+    std::uint32_t kind = kPushConstantUnset;
+    std::uint32_t parameter = UINT32_MAX;  // index into VertexPathInfo::parameter, or UINT32_MAX
+};
+inline PushConstantProvenance push_constant_provenance(const std::uint32_t* user_data, std::uint32_t table_windows,
+                                                       const VertexPathInfo& info, std::uint32_t index) {
+    PushConstantProvenance out;
+    if (!user_data || index >= 32) return out;
+    for (std::uint32_t p = 0; p < info.parameter_count && p < std::size(info.parameter); ++p) {
+        const VertexPathInfo::RootParameter& parameter = info.parameter[p];
+        if (!parameter.dwords) continue;
+        if (index < parameter.user_offset || index >= parameter.user_offset + parameter.dwords) continue;
+        out.parameter = p;
+        out.kind = parameter.type == 2 ? kPushConstantTable : kPushConstantRootArgument;
+        return out;
+    }
+    if ((table_windows >> index) & 1u) {
+        out.kind = kPushConstantTable;  // the pipeline's mask names a table window the parameter table did not
+        return out;
+    }
+    if (user_data[index]) out.kind = kPushConstantLoose;
+    return out;
+}
+// The dump's one-word name for a provenance kind.
+inline const char* push_constant_provenance_name(std::uint32_t kind) {
+    switch (kind) {
+    case kPushConstantTable: return "table";
+    case kPushConstantRootArgument: return "root";
+    case kPushConstantLoose: return "loose";
+    default: return "unset";
+    }
 }
 
 // A host read of a small CPU-written input either succeeds, names no VA, or names GPU-written memory. The last is a
@@ -2815,6 +2869,34 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                          blit_transform_degenerate(transform)
                              ? "degenerate: every vertex at (0,0,0,0), nothing rasterizes"
                              : "non-degenerate");
+            // Where each of the 32 push-constant dwords comes from: the pipeline's root signature parameter table, the
+            // replay's table-window mask, and the dword's own value. The acceptance inputs are the four dwords the FSPX
+            // blit vertex shader uses as its clip-position transform (docs/vertex_path.md section 4).
+            std::fprintf(stderr, "[rt] replay: vertex path: root parameters: %u%s", info.parameter_count,
+                         info.record_root_arguments ? " (the record path supplies the root arguments)" : "");
+            for (std::uint32_t p = 0; p < info.parameter_count && p < std::size(info.parameter); ++p) {
+                const VertexPathInfo::RootParameter& parameter = info.parameter[p];
+                std::fprintf(stderr, "\n  p%u type %u at s%u dwords %u constants %u", p, parameter.type,
+                             parameter.user_offset, parameter.dwords, parameter.constant_count);
+            }
+            std::fprintf(stderr, "\n[rt] replay: vertex path: push-constant provenance");
+            for (std::uint32_t i = 0; i < 32; ++i) {
+                const PushConstantProvenance provenance =
+                    push_constant_provenance(draw.user_data.data(), pipeline->table_windows, info, i);
+                std::fprintf(stderr, "%s  s%u %s", (i % 4) == 0 ? "\n " : "", i,
+                             push_constant_provenance_name(provenance.kind));
+                if (provenance.parameter != UINT32_MAX) std::fprintf(stderr, "(p%u)", provenance.parameter);
+            }
+            {
+                const std::uint32_t acceptance[] = {8, 9, 10, 28};
+                std::fprintf(stderr, "\n[rt] replay: vertex path: acceptance inputs");
+                for (const std::uint32_t i : acceptance) {
+                    const PushConstantProvenance provenance =
+                        push_constant_provenance(draw.user_data.data(), pipeline->table_windows, info, i);
+                    std::fprintf(stderr, " s%u %s", i, push_constant_provenance_name(provenance.kind));
+                }
+            }
+            std::fprintf(stderr, "\n");
             if (vk.read_title_memory) {
                 unsigned shown = 0;
                 for (unsigned i = 0; i + 1 < 32 && shown < 8; ++i) {

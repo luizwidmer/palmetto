@@ -4819,8 +4819,28 @@ public:
             const std::string dir = library ? library->directory().string() : std::string();
             const std::string vs_name = stages[0].entry ? stages[0].entry->name : std::string();
             const std::string ps_name = stages[2].entry ? stages[2].entry->name : std::string();
+            // The root signature parameter table (docs/vertex_path.md): which push-constant dwords each root parameter
+            // owns. Read-only; the dump uses it to say where each dword came from.
+            std::vector<palmetto::VertexPathInfo::RootParameter> layout_parameters;
+            if (const RootArgumentLayout* root_layout = root_signature_layout(desc.pRootSignature)) {
+                if (root_layout->graphics_ok) {
+                    for (const RootArgumentLayout::Parameter& parameter : root_layout->parameters) {
+                        palmetto::VertexPathInfo::RootParameter entry{};
+                        entry.type = std::uint32_t(parameter.type);
+                        entry.user_offset = parameter.user_offset;
+                        entry.dwords = parameter.type == rt::rootsig::ParamType::Constants
+                                           ? parameter.constant_count
+                                           : (parameter.type == rt::rootsig::ParamType::Table ||
+                                                      parameter.type == rt::rootsig::ParamType::Descriptor
+                                                  ? 2u
+                                                  : 0u);
+                        entry.constant_count = parameter.constant_count;
+                        layout_parameters.push_back(entry);
+                    }
+                }
+            }
             graphics_.describe_vertex_path = [layout_attributes, layout_bindings, layout_divisors, dir, vs_name,
-                                              ps_name](palmetto::VertexPathInfo& out) {
+                                              ps_name, layout_parameters](palmetto::VertexPathInfo& out) {
                 out = palmetto::VertexPathInfo{};
                 const auto copy = [](char* destination, std::size_t capacity, const std::string& source) {
                     if (capacity) std::snprintf(destination, capacity, "%s", source.c_str());
@@ -4850,6 +4870,10 @@ public:
                 for (const auto& d : layout_divisors)
                     for (std::uint32_t i = 0; i < out.binding_count; ++i)
                         if (out.binding[i].binding == d.binding) out.binding[i].divisor = d.divisor;
+                for (const auto& parameter : layout_parameters) {
+                    if (out.parameter_count >= std::size(out.parameter)) break;
+                    out.parameter[out.parameter_count++] = parameter;
+                }
             };
         }
         // Kept for variants: a draw that leaves a slot unbound needs this pipeline with that format undefined.

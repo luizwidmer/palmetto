@@ -21,13 +21,21 @@ reads only, and off by default:
   view's format and size;
 - the descriptor-table keys the draw names (the existing probe) and every non-image V#'s decoded address, declared size
   and byte statistics/dwords;
-- the 144-byte push-constant block the shaders receive: `s0..s31` and `heap_base`/`code_base`; and
+- the 144-byte push-constant block the shaders receive: `s0..s31` and `heap_base`/`code_base`;
+- the pipeline's root-signature parameter table (each parameter's type, first user-data dword, dword count and constant
+  count) and **per-push-constant-dword provenance**: `table` (a descriptor-table window), `root` (a root constant or root
+  descriptor the draw's root arguments fill), `loose` (nonzero but no parameter covers it) or `unset`, with the owning
+  parameter index;
+- an `acceptance inputs` line naming the provenance of the four scalars the FSPX blit vertex shader uses (`s8`, `s9`,
+  `s10`, `s28`), so the boot after the root-argument decode states their source directly; and
 - the clip-position transform the measured FSPX vertex shader applies (see section 4) with an explicit `degenerate`
   verdict.
 
 Pure helpers added to `port/src/vulkan_replay.h` and pinned by `port/test/frame_dump_test.cpp`:
-`vertex_format_bytes`, `vertex_layout_problems`, `blit_transform`, `blit_transform_degenerate` (format sizes, layout
-overruns, and the four-scalar transform with its degenerate check).
+`vertex_format_bytes`, `vertex_layout_problems`, `blit_transform`, `blit_transform_degenerate`,
+`push_constant_provenance` and `push_constant_provenance_name` (format sizes, layout overruns, the four-scalar
+transform with its degenerate check, and the dword provenance from the root-signature table plus the replay's table
+mask).
 
 ## 2. The armed draw, measured
 
@@ -90,6 +98,22 @@ The draw's recorded user data holds only the descriptor-table VA in `s0`/`s1`; `
 Multiplying the fetched register by zero gives `(0, 0, 0, 0)` for every vertex (`w = 0`; if the fetched register were a
 NaN the product is NaN, still not rasterizable): a degenerate triangle at the origin, clipped away, **no fragments**.
 
+The dump now also prints where every push-constant dword comes from, and names the four acceptance inputs. In the
+measured boot the provenance line reads (parameter table: one descriptor table at `s0..s1`, nothing else):
+
+```
+vertex path: root parameters: 1
+  p0 type 2 at s0 dwords 2 constants 0
+vertex path: push-constant provenance
+  s0 table(p0)  s1 table(p0)  s2 unset  s3 unset  ...  s8 unset ... s28 unset ...
+vertex path: acceptance inputs s8 unset s9 unset s10 unset s28 unset
+```
+
+That is the acceptance gate for the root-argument decode: after the fix, the same boot must print the four scalars with
+their provenance (`root` or, once the record path supplies them, the record block) and the transform line must say
+`non-degenerate`. A dword the record decode fills without a root-signature parameter covering it prints `loose`, which
+tells the decode's parameters and the recorded arguments disagree.
+
 This explains every earlier measurement consistently: the PS-only control (title VS recipe + a project constant-output
 PS) is black because the title VS emits nothing to rasterize; forcing culling off cannot help a degenerate triangle; the
 same target read back with a project full-screen triangle draws fine (raster and readback are proven); and the sampled
@@ -116,9 +140,12 @@ receives zero.
 **Smallest next fix**: decode the record's root-argument/root-constant block (or synthesize the root constants for the
 PC-object root signature) and write those dwords into the draw's user data before the replay emits it — in the slot-57
 record path (`port/shims/d3d12_xs_device.cpp` and the root-signature decode it uses), which is outside this increment's
-files. Acceptance test: the `PALMETTO_VERTEX_PATH=1` boot prints `clip-position scalars x ... y ... z ... w ... ->
-non-degenerate` with a nonzero `w`, and the PS-only control / display-target readback changes from black. The readback
-must not be claimed changed until it is measured.
+files. The record path can mark `VertexPathInfo::record_root_arguments` (read through the shim's `describe_vertex_path`)
+so the dump attributes the dwords to the record block instead of the title's own recorded calls. Acceptance test: the
+`PALMETTO_VERTEX_PATH=1` boot prints `clip-position scalars x ... y ... z ... w ... -> non-degenerate` with a nonzero
+`w`, and the `acceptance inputs` line shows `s8`, `s9`, `s10` and `s28` with a provenance (not `unset`). The PS-only
+control / display-target readback must be measured to change from black; the readback must not be claimed changed until
+it is measured.
 
 **Next falsifier**: with the record's root arguments decoded, re-run the same boot; if the scalars become non-zero and
 the display readback still stays black, the vertex path is then closed and the remaining gap is the sample/colour path

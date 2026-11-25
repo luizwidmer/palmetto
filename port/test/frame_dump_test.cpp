@@ -174,6 +174,31 @@ int main() {
     const BlitTransform transform = blit_transform(scalars);
     expect(transform.y == 3.0f && transform.z == -1.0f, "s10 is y and s9 is z");
 
+    // Push-constant provenance (docs/vertex_path.md): the root signature parameter table plus the replay's table mask
+    // say where each of the 32 dwords comes from.
+    VertexPathInfo root;
+    root.parameter_count = 2;
+    root.parameter[0] = VertexPathInfo::RootParameter{2, 0, 2, 0};  // descriptor table at s0..s1
+    root.parameter[1] = VertexPathInfo::RootParameter{0, 8, 4, 4};  // 4 root constants at s8..s11
+    std::uint32_t user_data[32] = {};
+    user_data[0] = 0x1234;
+    user_data[1] = 0x5678;
+    user_data[8] = 0x3f800000;
+    PushConstantProvenance provenance = push_constant_provenance(user_data, 0x3u, root, 0);
+    expect(provenance.kind == kPushConstantTable && provenance.parameter == 0, "s0 is the table parameter");
+    expect(push_constant_provenance(user_data, 0x3u, root, 1).kind == kPushConstantTable, "s1 is the table pair");
+    provenance = push_constant_provenance(user_data, 0x3u, root, 8);
+    expect(provenance.kind == kPushConstantRootArgument && provenance.parameter == 1, "s8 is a root constant");
+    expect(push_constant_provenance(user_data, 0x3u, root, 2).kind == kPushConstantUnset, "s2 is unset");
+    expect(push_constant_provenance(user_data, 0x3u, root, 5).kind == kPushConstantUnset, "s5 is unset");
+    user_data[30] = 1;
+    expect(push_constant_provenance(user_data, 0x3u, root, 30).kind == kPushConstantLoose,
+           "a nonzero dword no parameter covers is loose");
+    expect(std::strcmp(push_constant_provenance_name(kPushConstantTable), "table") == 0, "provenance names are the dump's");
+    VertexPathInfo bare;
+    expect(push_constant_provenance(user_data, 0x3u, bare, 0).kind == kPushConstantTable,
+           "the replay's table mask alone marks a table window");
+
     if (failures) return 1;
     std::printf("frame_dump_test: command kinds, ordered writers and table windows exact\n");
     return 0;
