@@ -920,6 +920,14 @@ struct TileRange {
     std::uint64_t count;
 };
 
+// Diagnostic (docs/frame_capture.md): one sampled-texture readback armed for a submission - a resolved sampled T#'s
+// layer image, copied in GENERAL layout both ways after the submission.
+struct SampleCapture {
+    VkImage image = VK_NULL_HANDLE;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    VkExtent2D extent{};
+};
+
 // Per device: what the queues share. Resources are registered by their stable ID (the COM resource pointer).
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -1628,12 +1636,14 @@ public:
         frame_dump_ps_control_pipeline_ = std::move(control);
         return true;
     }
-    // Diagnostic (docs/frame_capture.md): arm the sampled-texture readback's one-shot copy of `image`.
+    // Diagnostic (docs/frame_capture.md): arm one of the sampled-texture readbacks (the armed draw's resolved sampled
+    // images, up to max_sampled_keys). Copies only; the title's textures are never modified.
     void arm_sample_capture(VkImage image, VkFormat format, VkExtent2D extent) {
-        sample_image_ = image;
-        sample_format_ = format;
-        sample_extent_ = extent;
-        sample_armed_.store(true, std::memory_order_relaxed);
+        if (sample_capture_count_ >= max_sampled_keys || image == VK_NULL_HANDLE) return;
+        SampleCapture& capture = sample_captures_[sample_capture_count_++];
+        capture.image = image;
+        capture.format = format;
+        capture.extent = extent;
     }
     // A title-placed texture's page import (docs/texture_import.md): the device registers this, and every queue calls
     // it before recording a submission, so the image holds the title's bytes before anything can sample it.
@@ -2098,10 +2108,10 @@ private:
     // The PS-only control (docs/frame_capture.md): the armed title pipeline with fs_solid as its pixel shader, and the
     // sampled-texture readback's one-shot arm. Both diagnostic only.
     GraphicsPipeline frame_dump_ps_control_pipeline_;
-    VkImage sample_image_ = VK_NULL_HANDLE;
-    VkFormat sample_format_ = VK_FORMAT_UNDEFINED;
-    VkExtent2D sample_extent_{};
-    std::atomic<bool> sample_armed_{false};
+    // The sampled-texture readbacks (docs/frame_capture.md): up to max_sampled_keys one-shot copies, armed per resolved
+    // sampled T# while the armed submission is prepared and consumed in that same submission.
+    SampleCapture sample_captures_[max_sampled_keys];
+    unsigned sample_capture_count_ = 0;
     std::unordered_map<ResourceId, std::shared_ptr<SparseResource>> sparse_resources_;
     std::unordered_map<std::uintptr_t, ComputePipeline> pipelines_;
     std::unordered_map<std::uintptr_t, GraphicsPipeline> graphics_pipelines_;
@@ -3299,39 +3309,48 @@ private:
                 }
             }
         }
-        // Diagnostic (docs/frame_capture.md): the sampled-texture readback. Copies a 128x128 window of the first
+        // Diagnostic (docs/frame_capture.md): the sampled-texture readbacks. Copies a 128x128 window of every resolved
         // sampled image into host memory after the submission, in GENERAL layout both ways (set 0 reads every image in
-        // GENERAL). No write control: this is the title's texture and the diagnostic must not modify it.
-        VkBuffer sample_buffer = VK_NULL_HANDLE;
-        VkDeviceMemory sample_memory = VK_NULL_HANDLE;
-        VkExtent2D sample_region{};
-        unsigned sample_texel = 0;
-        const bool sample = context_.sample_armed_.exchange(false) &&
-                            context_.sample_image_ != VK_NULL_HANDLE && context_.vk.vkCmdCopyImageToBuffer;
-        if (sample) {
-            switch (context_.sample_format_) {
-            case VK_FORMAT_R16G16B16A16_UNORM:
-            case VK_FORMAT_R16G16B16A16_SFLOAT: sample_texel = 8; break;
-            case VK_FORMAT_R32G32B32A32_SFLOAT: sample_texel = 16; break;
-            case VK_FORMAT_R32G32_UINT:
-            case VK_FORMAT_R32G32_SINT:
-            case VK_FORMAT_R32G32_SFLOAT: sample_texel = 8; break;
-            default: sample_texel = 4; break;
-            }
-            sample_region.width = std::min(128u, std::max(1u, context_.sample_extent_.width));
-            sample_region.height = std::min(128u, std::max(1u, context_.sample_extent_.height));
-            VkBufferCreateInfo sample_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-            sample_info.size = VkDeviceSize(sample_region.width) * sample_region.height * sample_texel;
-            sample_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            if (context_.vk.vkCreateBuffer(context_.device(), &sample_info, nullptr, &sample_buffer) == VK_SUCCESS) {
+        // GENERAL). No write control: these are the title's textures and the diagnostic must not modify them.
+        VkBuffer sample_buffers[max_sampled_keys] = {};
+        VkDeviceMemory sample_memories[max_sampled_keys] = {};
+        VkImage sample_images[max_sampled_keys] = {};
+        VkExtent2D sample_regions[max_sampled_keys] = {};
+        unsigned sample_texels[max_sampled_keys] = {};
+        unsigned samples = 0;
+        if (context_.vk.vkCmdCopyImageToBuffer) {
+            const unsigned armed = std::min(context_.sample_capture_count_, max_sampled_keys);
+            context_.sample_capture_count_ = 0;
+            for (unsigned k = 0; k < armed && samples < max_sampled_keys; ++k) {
+                const SampleCapture& capture = context_.sample_captures_[k];
+                if (capture.image == VK_NULL_HANDLE) continue;
+                unsigned texel = 4;
+                switch (capture.format) {
+                case VK_FORMAT_R16G16B16A16_UNORM:
+                case VK_FORMAT_R16G16B16A16_SFLOAT: texel = 8; break;
+                case VK_FORMAT_R32G32B32A32_SFLOAT: texel = 16; break;
+                case VK_FORMAT_R32G32_UINT:
+                case VK_FORMAT_R32G32_SINT:
+                case VK_FORMAT_R32G32_SFLOAT: texel = 8; break;
+                default: texel = 4; break;
+                }
+                const VkExtent2D region{std::min(128u, std::max(1u, capture.extent.width)),
+                                        std::min(128u, std::max(1u, capture.extent.height))};
+                VkBuffer buffer = VK_NULL_HANDLE;
+                VkDeviceMemory memory = VK_NULL_HANDLE;
+                VkBufferCreateInfo sample_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+                sample_info.size = VkDeviceSize(region.width) * region.height * texel;
+                sample_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                if (context_.vk.vkCreateBuffer(context_.device(), &sample_info, nullptr, &buffer) != VK_SUCCESS)
+                    continue;
                 VkMemoryRequirements requirements{};
-                context_.vk.vkGetBufferMemoryRequirements(context_.device(), sample_buffer, &requirements);
-                const auto& memory = context_.occlusion_resolve_memory_;
-                std::uint32_t type = memory.memoryTypeCount;
-                for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
+                context_.vk.vkGetBufferMemoryRequirements(context_.device(), buffer, &requirements);
+                const auto& memory_properties = context_.occlusion_resolve_memory_;
+                std::uint32_t type = memory_properties.memoryTypeCount;
+                for (std::uint32_t i = 0; i < memory_properties.memoryTypeCount; ++i) {
                     if (!(requirements.memoryTypeBits & (1u << i))) continue;
-                    const VkMemoryPropertyFlags flags = memory.memoryTypes[i].propertyFlags;
-                    if (type == memory.memoryTypeCount) type = i;
+                    const VkMemoryPropertyFlags flags = memory_properties.memoryTypes[i].propertyFlags;
+                    if (type == memory_properties.memoryTypeCount) type = i;
                     if ((flags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
                         (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
                         type = i;
@@ -3341,39 +3360,44 @@ private:
                 VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
                 allocation.allocationSize = requirements.size;
                 allocation.memoryTypeIndex = type;
-                if (type < memory.memoryTypeCount &&
-                    context_.vk.vkAllocateMemory(context_.device(), &allocation, nullptr, &sample_memory) ==
-                        VK_SUCCESS &&
-                    context_.vk.vkBindBufferMemory(context_.device(), sample_buffer, sample_memory, 0) == VK_SUCCESS) {
-                    VkImageMemoryBarrier to{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-                    to.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-                    to.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-                    to.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    to.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    to.image = context_.sample_image_;
-                    to.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-                    to.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
-                    to.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                    context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to);
-                    VkBufferImageCopy region{};
-                    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                    region.imageExtent = {sample_region.width, sample_region.height, 1};
-                    context_.vk.vkCmdCopyImageToBuffer(command_buffer, context_.sample_image_,
-                                                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sample_buffer, 1, &region);
-                    to.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-                    to.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-                    to.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                    to.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
-                    context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                                     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1,
-                                                     &to);
-                } else {
-                    context_.vk.vkDestroyBuffer(context_.device(), sample_buffer, nullptr);
-                    sample_buffer = VK_NULL_HANDLE;
-                    if (sample_memory) context_.vk.vkFreeMemory(context_.device(), sample_memory, nullptr);
-                    sample_memory = VK_NULL_HANDLE;
+                const bool usable =
+                    type < memory_properties.memoryTypeCount &&
+                    context_.vk.vkAllocateMemory(context_.device(), &allocation, nullptr, &memory) == VK_SUCCESS &&
+                    context_.vk.vkBindBufferMemory(context_.device(), buffer, memory, 0) == VK_SUCCESS;
+                if (!usable) {
+                    context_.vk.vkDestroyBuffer(context_.device(), buffer, nullptr);
+                    if (memory) context_.vk.vkFreeMemory(context_.device(), memory, nullptr);
+                    continue;
                 }
+                VkImageMemoryBarrier to{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                to.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+                to.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                to.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                to.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                to.image = capture.image;
+                to.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                to.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
+                to.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to);
+                VkBufferImageCopy copy{};
+                copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                copy.imageExtent = {region.width, region.height, 1};
+                context_.vk.vkCmdCopyImageToBuffer(command_buffer, capture.image,
+                                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &copy);
+                to.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                to.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                to.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                to.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
+                context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                                 &to);
+                sample_buffers[samples] = buffer;
+                sample_memories[samples] = memory;
+                sample_images[samples] = capture.image;
+                sample_regions[samples] = region;
+                sample_texels[samples] = texel;
+                ++samples;
             }
         }
         const bool ended = context_.vk.vkEndCommandBuffer(command_buffer) == VK_SUCCESS;
@@ -3487,44 +3511,50 @@ private:
                 }
             }
         }
-        // The sampled-texture window (docs/frame_capture.md): what the first sampled image holds, so "the textures are
-        // black" can be told from "the textures are fine and the pixel shader computes black".
-        if (sample && sample_memory && submitted) {
-            if (context_.vk.vkQueueWaitIdle(queue_) == VK_SUCCESS) {
+        // The sampled-texture windows (docs/frame_capture.md): what each resolved sampled image holds, so "the textures
+        // are black" can be told from "the textures are fine and the pixel shader computes black".
+        if (submitted) {
+            for (unsigned k = 0; k < samples; ++k) {
+                if (sample_memories[k] == VK_NULL_HANDLE) continue;
+                if (context_.vk.vkQueueWaitIdle(queue_) != VK_SUCCESS) break;
                 void* mapped = nullptr;
-                if (context_.vk.vkMapMemory(context_.device(), sample_memory, 0, VK_WHOLE_SIZE, 0, &mapped) ==
-                    VK_SUCCESS) {
-                    const auto* bytes = static_cast<const std::uint8_t*>(mapped);
-                    const std::uint64_t pixels = std::uint64_t(sample_region.width) * sample_region.height;
-                    std::uint64_t sums[3] = {0, 0, 0}, non_black = 0, peak = 0;
-                    for (std::uint64_t i = 0; i < pixels; ++i) {
-                        const std::uint8_t* texel = bytes + i * std::size_t(sample_texel);
-                        const unsigned r = texel[0];
-                        const unsigned g = sample_texel > 1 ? texel[1] : 0;
-                        const unsigned b = sample_texel > 2 ? texel[2] : 0;
-                        sums[0] += r;
-                        sums[1] += g;
-                        sums[2] += b;
-                        if (r || g || b) ++non_black;
-                        peak = std::max<std::uint64_t>(peak, std::max(r, std::max(g, b)));
-                    }
-                    std::fprintf(stderr,
-                                 "[rt] replay: frame dump sample readback: %ux%u of a %ux%u image, %u-byte texel: "
-                                 "mean %llu %llu %llu, non-black %llu/%llu, peak %llu\n",
-                                 sample_region.width, sample_region.height, context_.sample_extent_.width,
-                                 context_.sample_extent_.height, sample_texel,
-                                 static_cast<unsigned long long>(sums[0] / (pixels ? pixels : 1)),
-                                 static_cast<unsigned long long>(sums[1] / (pixels ? pixels : 1)),
-                                 static_cast<unsigned long long>(sums[2] / (pixels ? pixels : 1)),
-                                 static_cast<unsigned long long>(non_black),
-                                 static_cast<unsigned long long>(pixels),
-                                 static_cast<unsigned long long>(peak));
-                    context_.vk.vkUnmapMemory(context_.device(), sample_memory);
+                if (context_.vk.vkMapMemory(context_.device(), sample_memories[k], 0, VK_WHOLE_SIZE, 0, &mapped) !=
+                    VK_SUCCESS)
+                    continue;
+                const auto* bytes = static_cast<const std::uint8_t*>(mapped);
+                const std::uint64_t pixels = std::uint64_t(sample_regions[k].width) * sample_regions[k].height;
+                const unsigned texel_bytes = sample_texels[k];
+                std::uint64_t sums[3] = {0, 0, 0}, non_black = 0, peak = 0;
+                for (std::uint64_t i = 0; i < pixels; ++i) {
+                    const std::uint8_t* texel = bytes + i * std::size_t(texel_bytes);
+                    const unsigned r = texel[0];
+                    const unsigned g = texel_bytes > 1 ? texel[1] : 0;
+                    const unsigned b = texel_bytes > 2 ? texel[2] : 0;
+                    sums[0] += r;
+                    sums[1] += g;
+                    sums[2] += b;
+                    if (r || g || b) ++non_black;
+                    peak = std::max<std::uint64_t>(peak, std::max(r, std::max(g, b)));
                 }
+                std::fprintf(stderr,
+                             "[rt] replay: frame dump sample readback [%u/%u] image 0x%llx: %ux%u window, %u-byte "
+                             "texel: mean %llu %llu %llu, non-black %llu/%llu, peak %llu\n",
+                             k + 1, samples,
+                             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(sample_images[k])),
+                             sample_regions[k].width, sample_regions[k].height, texel_bytes,
+                             static_cast<unsigned long long>(sums[0] / (pixels ? pixels : 1)),
+                             static_cast<unsigned long long>(sums[1] / (pixels ? pixels : 1)),
+                             static_cast<unsigned long long>(sums[2] / (pixels ? pixels : 1)),
+                             static_cast<unsigned long long>(non_black),
+                             static_cast<unsigned long long>(pixels),
+                             static_cast<unsigned long long>(peak));
+                context_.vk.vkUnmapMemory(context_.device(), sample_memories[k]);
             }
         }
-        if (sample_buffer) context_.vk.vkDestroyBuffer(context_.device(), sample_buffer, nullptr);
-        if (sample_memory) context_.vk.vkFreeMemory(context_.device(), sample_memory, nullptr);
+        for (unsigned k = 0; k < samples; ++k) {
+            if (sample_buffers[k]) context_.vk.vkDestroyBuffer(context_.device(), sample_buffers[k], nullptr);
+            if (sample_memories[k]) context_.vk.vkFreeMemory(context_.device(), sample_memories[k], nullptr);
+        }
         if (capture_buffer) context_.vk.vkDestroyBuffer(context_.device(), capture_buffer, nullptr);
         if (capture_memory) context_.vk.vkFreeMemory(context_.device(), capture_memory, nullptr);
         tracker_lock.unlock();

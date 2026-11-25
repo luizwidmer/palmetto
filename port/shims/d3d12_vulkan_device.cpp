@@ -1122,11 +1122,14 @@ struct DeviceState {
         VkImageView sampled;
         VkImageView storage;  // the same range without a component mapping, for the storage bindings; or null
         std::uint64_t address;
-        // Diagnostic (docs/frame_capture.md): the layer image, its format and its top-mip extent, so the frame dump's
-        // sampled-texture readback can copy what a T# names. Nothing on the draw path reads these.
+        // Diagnostic (docs/frame_capture.md): the layer image, its format, its top-mip extent, the D3D12 resource behind
+        // it and the title VA that resource was placed at (0: an ordinary committed resource). The frame dump's
+        // sampled-texture readback and its mapping chain read these; nothing on the draw path does.
         VkImage image = VK_NULL_HANDLE;
         VkFormat format = VK_FORMAT_UNDEFINED;
         VkExtent2D extent{};
+        palmetto::ResourceId resource = 0;
+        std::uint64_t title_va = 0;
     };
     std::unique_ptr<palmetto::BindlessSet> bindless;
     std::mutex descriptor_mutex;  // the set and the containers below
@@ -1208,7 +1211,8 @@ struct DeviceState {
     // shorter. False when set 0 cannot show the image; the descriptor then finds the fallback at index 0.
     bool bind_image(const palmetto::gfx10::ImageWords& words, const palmetto::gfx10::Image& image, VkImage vk_image,
                     VkFormat image_format, VkImageAspectFlags aspects, bool storage,
-                    bool allow_channel_cast = false, VkFormat uint_backed = VK_FORMAT_UNDEFINED) {
+                    bool allow_channel_cast = false, VkFormat uint_backed = VK_FORMAT_UNDEFINED,
+                    palmetto::ResourceId resource = 0, std::uint64_t title_va = 0) {
         namespace g = palmetto::gfx10;
         std::lock_guard lock(descriptor_mutex);
         if (!bindless) return false;
@@ -1297,6 +1301,8 @@ struct DeviceState {
         entry.image = vk_image;
         entry.format = image_format;
         entry.extent = {image.width, image.height};
+        entry.resource = resource;
+        entry.title_va = title_va;
         if (vk.vkCreateImageView(info.device, &view_info, nullptr, &entry.sampled) != VK_SUCCESS) return false;
         palmetto::StorageViews views{};
         if (storage) {
@@ -1357,9 +1363,10 @@ struct DeviceState {
 
     // Diagnostic (docs/frame_capture.md): one descriptor table of the draw the frame dump armed, read from the console
     // heap mirror the way console_pull_table reads it. Copies up to `palmetto::max_sampled_keys` slot keys out (a T# is
-    // 8 dwords; a V# or S# occupies the first 4 and is flagged as not an image) and resolves the first T# to the layer
-    // image set 0 holds for it, so the frame dump can copy that image and say whether the sampled content is black.
-    // Reads only: nothing is pulled, bound or recorded, and a miss just leaves image null.
+    // 8 dwords; a V# or S# occupies the first 4 and is flagged as not an image) and resolves every T# set 0 holds a
+    // layer image for, with that image's D3D12 resource and the title VA it was placed at (docs/frame_capture.md, the
+    // texture-source mapping chain), so the frame dump can copy each sampled image and say whether its content is black.
+    // Reads only: nothing is pulled, bound or recorded, and a miss just leaves the key unresolved.
     bool sampled_table(std::uint64_t table_va, std::uint32_t max_descriptors, palmetto::SampledTable& out) {
         if (!context || !table_va || !arena.mapped) return false;
         std::uint64_t mirror = 0, available = 0;
@@ -1376,17 +1383,19 @@ struct DeviceState {
             const palmetto::gfx10::ImageWords descriptor{words[0], words[1], words[2], words[3],
                                                          words[4], words[5], words[6], words[7]};
             const bool image = palmetto::gfx10::is_image(descriptor);
-            if (out.keys < palmetto::max_sampled_keys) {
-                palmetto::SampledKey& key = out.key[out.keys++];
-                std::memcpy(key.words, words, sizeof(key.words));
-                key.image = image;
-            }
-            if (!image || out.image) continue;
+            if (out.keys >= palmetto::max_sampled_keys) continue;
+            palmetto::SampledKey& key = out.key[out.keys++];
+            std::memcpy(key.words, words, sizeof(key.words));
+            key.image = image;
+            if (!image) continue;
             const auto entry = image_entries.find(palmetto::make_tsharp_key(descriptor.data()));
-            if (entry == image_entries.end()) continue;
-            out.image = entry->second.image;
-            out.format = entry->second.format;
-            out.extent = entry->second.extent;
+            if (entry == image_entries.end() || !entry->second.image) continue;
+            key.resolved = true;
+            key.image_handle = entry->second.image;
+            key.format = entry->second.format;
+            key.extent = entry->second.extent;
+            key.resource = entry->second.resource;
+            key.title_va = entry->second.title_va;
         }
         return true;
     }
@@ -2273,6 +2282,9 @@ public:
     }
 
     palmetto::ResourceId id() const { return resource_id(this); }
+    // The title VA a placed texture was placed at (device slot 133), or 0 for an ordinary committed resource
+    // (docs/frame_capture.md, the texture-source mapping chain).
+    std::uint64_t placed_pages() const { return placed_pages_; }
     VkImage image() const { return image_; }
     bool sparse_image() const { return sparse_image_; }
     VkBuffer buffer() const { return buffer_; }
@@ -2351,16 +2363,27 @@ public:
         const std::uint64_t sub_bytes = r.row_bytes * r.rows * r.slices;
         if (!sub_bytes || sub_bytes > kPlacedImportCap || r.row_bytes > UINT32_MAX || r.row_bytes * r.rows > UINT32_MAX) {
             placed_skipped_ = true;
-            log_once("a title-placed texture larger than the measured texture-computer fill is not imported "
-                     "(bytes)",
-                     int(std::min<std::uint64_t>(sub_bytes, INT_MAX)));
+            // Diagnostic (docs/texture_source.md): which placed texture a decision was made for, so a sampled T# can be
+            // followed to its resource and the reason its pages were not imported. Bounded to eight of each decision.
+            static std::atomic<unsigned> too_large{0};
+            if (too_large.fetch_add(1, std::memory_order_relaxed) < 8)
+                std::fprintf(stderr,
+                             "[rt] d3d12: placed texture import: resource 0x%llx at title VA 0x%llx is larger than the "
+                             "measured texture-computer fill (%llu B); left as the committed stand-in\n",
+                             static_cast<unsigned long long>(id()),
+                             static_cast<unsigned long long>(placed_pages_),
+                             static_cast<unsigned long long>(sub_bytes));
             return false;
         }
         if (++placed_attempts_ > kMaxAttempts) {
             placed_skipped_ = true;
-            log_once("a title-placed texture's pages never held texture-computer bytes; it is left as the ordinary "
-                     "committed stand-in (attempts)",
-                     int(kMaxAttempts));
+            static std::atomic<unsigned> gave_up{0};
+            if (gave_up.fetch_add(1, std::memory_order_relaxed) < 8)
+                std::fprintf(stderr,
+                             "[rt] d3d12: placed texture import: resource 0x%llx at title VA 0x%llx: pages never held "
+                             "texture-computer bytes after %u attempt(s); left as the committed stand-in\n",
+                             static_cast<unsigned long long>(id()),
+                             static_cast<unsigned long long>(placed_pages_), kMaxAttempts);
             return false;
         }
         // The pages must be committed and readable: an unfilled texture's pages can still be uncommitted, and reading
@@ -2382,14 +2405,32 @@ public:
             const std::uint64_t look = std::min<std::uint64_t>(sub_bytes, 4096);
             bool any = false;
             for (std::uint64_t i = 0; i < look && !any; ++i) any = head[i] != 0;
-            if (!any) return true;
+            if (!any) {
+                if (!placed_wait_logged_) {
+                    placed_wait_logged_ = true;
+                    static std::atomic<unsigned> waiting{0};
+                    if (waiting.fetch_add(1, std::memory_order_relaxed) < 12)
+                        std::fprintf(stderr,
+                                     "[rt] d3d12: placed texture import: resource 0x%llx at title VA 0x%llx: the "
+                                     "pages' head is all zero, waiting for the texture-computer fill\n",
+                                     static_cast<unsigned long long>(id()),
+                                     static_cast<unsigned long long>(placed_pages_));
+                }
+                return true;
+            }
         }
         // cpu_copy's pack takes a tightly row-major source: row pitch = one row of texels, slice pitch = one slice.
         const void* pages = reinterpret_cast<const void*>(static_cast<std::uintptr_t>(placed_pages_));
         if (FAILED(cpu_copy(true, 0, nullptr, const_cast<void*>(pages), static_cast<UINT>(r.row_bytes),
                             static_cast<UINT>(r.row_bytes * r.rows), true))) {
             placed_skipped_ = true;
-            log_once("a title-placed texture's pages could not be imported; the image is left as its stand-in", 0);
+            static std::atomic<unsigned> unreadable{0};
+            if (unreadable.fetch_add(1, std::memory_order_relaxed) < 8)
+                std::fprintf(stderr,
+                             "[rt] d3d12: placed texture import: resource 0x%llx at title VA 0x%llx: the pages could "
+                             "not be imported; left as the committed stand-in\n",
+                             static_cast<unsigned long long>(id()),
+                             static_cast<unsigned long long>(placed_pages_));
             return false;
         }
         placed_imported_ = true;
@@ -2398,8 +2439,10 @@ public:
         static std::atomic<unsigned> logged{0};
         if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
             std::fprintf(stderr,
-                         "[rt] d3d12: placed texture import: subresource 0, %llu B from the title's pages into a "
-                         "%ux%u image%s\n",
+                         "[rt] d3d12: placed texture import: resource 0x%llx at title VA 0x%llx: subresource 0, %llu B "
+                         "from the title's pages into a %ux%u image%s\n",
+                         static_cast<unsigned long long>(id()),
+                         static_cast<unsigned long long>(placed_pages_),
                          static_cast<unsigned long long>(sub_bytes), r.box.right, r.box.bottom,
                          subresources > 1 ? " (more than one subresource: the rest is not imported yet)" : "");
         return false;
@@ -3197,6 +3240,7 @@ private:
     unsigned placed_attempts_ = 0;  // bounded retries while the title's fill has not run yet
     bool placed_imported_ = false;
     bool placed_skipped_ = false;
+    bool placed_wait_logged_ = false;  // docs/texture_source.md: the all-zero-head wait is logged once per texture
 };
 
 // Drains the title-placed textures whose pages are ready to import. Called by the queue before it records a
@@ -9432,7 +9476,7 @@ private:
         const palmetto::gfx10::ImageWords words = palmetto::gfx10::encode(image);
         const bool registered = state_.bind_image(words, image, resource.image(), resource.format(),
                                                   resource.aspects(), storage, resource.has_view_format_list(),
-                                                  resource.uint_backed());
+                                                  resource.uint_backed(), resource.id(), resource.placed_pages());
         if (registered && resource.sparse_image()) state_.context->note_shader_image(resource.id());
         if (palmetto::gfx10::multisampled(image.type) && !registered) return;
         std::memcpy(reinterpret_cast<void*>(destination.ptr), words.data(), sizeof(words));

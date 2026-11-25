@@ -871,15 +871,20 @@ inline constexpr std::uint32_t max_sampled_keys = 8;
 struct SampledKey {
     std::uint32_t words[8]{};  // the slot's 8-dword key, as the title wrote it into the table
     bool image = false;        // a T# (gfx10::is_image): a texture, not a V# or S#
+    // Resolved by the shim when set 0 holds a layer image for this T#: that image, the D3D12 resource behind it, and the
+    // title VA the resource was placed at. title_va 0 means no title-VA alias: an ordinary committed resource, which no
+    // title page write can reach (docs/frame_capture.md, the texture-source mapping chain).
+    bool resolved = false;
+    VkImage image_handle = VK_NULL_HANDLE;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    VkExtent2D extent{};
+    ResourceId resource = 0;
+    std::uint64_t title_va = 0;
 };
 struct SampledTable {
     std::uint32_t slots = 0;  // slots the table holds (bounded by the caller's max_descriptors)
     std::uint32_t keys = 0;   // entries copied into key[]
     SampledKey key[max_sampled_keys];
-    // The layer image of the first T# set 0 resolves, for the readback; 0 when none.
-    VkImage image = VK_NULL_HANDLE;
-    VkFormat format = VK_FORMAT_UNDEFINED;
-    VkExtent2D extent{};
 };
 
 struct ReplayFunctions {
@@ -2475,13 +2480,22 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                         break;
                     }
                 }
-                if (!table.image) continue;
-                std::fprintf(stderr,
-                             "[rt] replay: frame dump sample: first T# image 0x%llx format %d %ux%u; readback armed\n",
-                             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(table.image)),
-                             static_cast<int>(table.format), table.extent.width, table.extent.height);
-                vk.capture_sample(table.image, table.format, table.extent);
-                break;
+                // The mapping chain (docs/frame_capture.md): T# key -> layer image -> D3D12 resource -> the title VA the
+                // resource was placed at (0: an ordinary committed resource no title page write can reach). Then a
+                // readback of each resolved sampled image, so "the sampled content is empty" is measured per texture.
+                for (std::uint32_t k = 0; k < table.keys; ++k) {
+                    const SampledKey& key = table.key[k];
+                    if (!key.resolved) continue;
+                    std::fprintf(stderr,
+                                 "[rt] replay: frame dump sample: key %u T# image 0x%llx format %d %ux%u, resource "
+                                 "0x%llx, title VA %s0x%llx\n",
+                                 k, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(key.image_handle)),
+                                 static_cast<int>(key.format), key.extent.width, key.extent.height,
+                                 static_cast<unsigned long long>(key.resource),
+                                 key.title_va ? "" : "none (committed, not placed) ",
+                                 static_cast<unsigned long long>(key.title_va));
+                    vk.capture_sample(key.image_handle, key.format, key.extent);
+                }
             }
         }
     }
