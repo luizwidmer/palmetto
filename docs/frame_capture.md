@@ -284,6 +284,37 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### RIP histogram: the only hot title code is a spin loop near game+0x4f657d3
+
+`PALMETTO_RIP_HIST=5,20;60,90` samples every thread's instruction pointer every 3 ms and keeps the ones inside the title
+image. One 130 s boot (`boot-riphist1`, ALIVE, 0 exceptions) gives the first histogram window:
+
+```
+rip histogram 1 (5-20s): 29 title-image sample(s), 5 title site(s)
+game+0x4f657f1  hits 20  tid 55236
+game+0x4f657da  hits  3  tid 55236
+game+0x4f65842  hits  3  tid 55236
+game+0x4f657d3  hits  2  tid 55236
+game+0xf9ff73   hits  1  tid 55236
+```
+
+Read as a statement: the title image executes **29 sampled instructions in 15 s of wall clock** (3 ms interval, all
+threads) - the title is almost never running title code; the few that appear are one thread (tid 55236) and four of the
+five sites lie in a tight region `game+0x4f657d3..0x4f65842` (69% of the samples at `game+0x4f657f1`). That is a title-side
+**spin loop**, and it is the same region as the single load-stage frame the stack sampler found earlier
+(`game+0x4f657d3`): the stuck loading loop is here. The fifth site, `game+0xf9ff73`, is a single sample.
+
+Stacks: the top-site stack lines came out empty - the spin site sits at the top of its thread's stack with no
+title-image return address above it (its caller is host-side), so the walker has nothing to add; the loop's identity has
+to come from decompilation of the region, not from its caller.
+
+Second window: the sampler measured its second window from the end of the first (60 s after 20 s), so the 60-90 s window
+would have run at 80-100 s; its output is absent from this boot and the loop therefore needs the window timing fixed
+(or the second window run in a separate boot). Stated plainly rather than reported as a measurement.
+
+Decompile targets (prime first): `game+0x4f657d3`, `game+0x4f657da`, `game+0x4f657f1`, `game+0x4f65842` - the spin loop's
+body and its exit condition; then `game+0xf9ff73` if the loop turns out to be a helper.
+
 ### Console list fallback slots: caller sites and the payload pointer
 
 A 130 s boot with the existing caller probe and the fallback-slot trace (`PALMETTO_XS_CALLERS=1`,

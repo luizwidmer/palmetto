@@ -692,6 +692,120 @@ void start_loader_watch(std::uintptr_t image_base, std::size_t image_size, std::
     }).detach();
 }
 
+// ---- RIP histogram (PALMETTO_RIP_HIST) ---------------------------------------------------------------------------------
+// Diagnostic, off unless the variable names sample windows ("5,20" or "5,20;60,90": start,end seconds). In each window the
+// sampler enumerates every other thread every 3 ms, suspends it, reads the instruction pointer and keeps the ones inside
+// the title image; it then prints the top 40 title RVAs with hit counts and the threads they appeared on, and one stack
+// (title frames only) for the top five. RVAs/counts only; no title data.
+struct RipHistogramEntry {
+    std::uint64_t hits = 0;
+    std::set<DWORD> tids;
+    std::string stack;  // title-image frames, captured once at first sight (bounded depth)
+};
+
+void rip_histogram_window(std::uintptr_t image_base, std::uintptr_t image_size, double begin, double end,
+                          const char* label) {
+    WaitSampleModules modules;
+    modules.image_base = image_base;
+    modules.image_end = image_base + image_size;
+    std::map<std::uint64_t, RipHistogramEntry> hist;
+    const auto started = std::chrono::steady_clock::now();
+    std::this_thread::sleep_until(started + std::chrono::milliseconds(static_cast<long long>(begin * 1000.0)));
+    const auto stop = started + std::chrono::milliseconds(static_cast<long long>(end * 1000.0));
+    while (std::chrono::steady_clock::now() < stop) {
+        std::vector<DWORD> tids;
+        {
+            const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if (snapshot != INVALID_HANDLE_VALUE) {
+                THREADENTRY32 entry{};
+                entry.dwSize = sizeof(entry);
+                const DWORD pid = GetCurrentProcessId();
+                const DWORD self = GetCurrentThreadId();
+                if (Thread32First(snapshot, &entry))
+                    do {
+                        if (entry.th32OwnerProcessID == pid && entry.th32ThreadID != self && tids.size() < 256)
+                            tids.push_back(entry.th32ThreadID);
+                    } while (Thread32Next(snapshot, &entry));
+                CloseHandle(snapshot);
+            }
+        }
+        for (const DWORD tid : tids) {
+            const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, tid);
+            if (!thread) continue;
+            if (SuspendThread(thread) == (DWORD)-1) {
+                CloseHandle(thread);
+                continue;
+            }
+            CONTEXT context{};
+            context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+            if (GetThreadContext(thread, &context) && context.Rip >= image_base &&
+                context.Rip < image_base + image_size) {
+                const std::uint64_t rva = context.Rip - image_base;
+                RipHistogramEntry& entry = hist[rva];
+                ++entry.hits;
+                if (entry.tids.size() < 16) entry.tids.insert(tid);
+                if (entry.stack.empty()) {
+                    std::uint64_t frames[16] = {};
+                    const unsigned found = scan_stack_words_deep(context.Rsp, frames, 16, modules, 32);
+                    for (unsigned i = 0; i < found && i < 12; ++i)
+                        entry.stack += " " + rt::shims::module_offset(frames[i]);
+                }
+            }
+            ResumeThread(thread);
+            CloseHandle(thread);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    std::vector<std::pair<std::uint64_t, RipHistogramEntry*>> rows;
+    std::uint64_t total = 0;
+    for (auto& [rva, entry] : hist) {
+        rows.emplace_back(rva, &entry);
+        total += entry.hits;
+    }
+    std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.second->hits > b.second->hits; });
+    std::fprintf(stderr, "[rt] rip histogram %s: %llu title-image sample(s), %zu title site(s)\n", label,
+                 static_cast<unsigned long long>(total), rows.size());
+    const std::size_t shown = std::min<std::size_t>(rows.size(), 40);
+    for (std::size_t i = 0; i < shown; ++i) {
+        std::string tids;
+        unsigned n = 0;
+        for (const DWORD tid : rows[i].second->tids) {
+            if (n++ == 8) break;
+            tids += (tids.empty() ? "" : ",") + std::to_string(tid);
+        }
+        std::fprintf(stderr, "[rt] rip histogram %s: game+0x%llx hits %llu tid %s\n", label,
+                     static_cast<unsigned long long>(rows[i].first),
+                     static_cast<unsigned long long>(rows[i].second->hits), tids.c_str());
+    }
+    for (std::size_t i = 0; i < std::min<std::size_t>(rows.size(), 5); ++i)
+        std::fprintf(stderr, "[rt] rip histogram %s stack: game+0x%llx:%s\n", label,
+                     static_cast<unsigned long long>(rows[i].first), rows[i].second->stack.c_str());
+}
+
+// Starts the histogram windows named by PALMETTO_RIP_HIST ("start,end" or "start,end;start,end"). Detached.
+void start_rip_histogram(std::uintptr_t image_base, std::uintptr_t image_size, const char* spec) {
+    std::vector<std::pair<double, double>> windows;
+    for (const char* at = spec; at && *at;) {
+        char* end = nullptr;
+        const double begin = std::strtod(at, &end);
+        if (end == at) break;
+        double finish = begin + 15.0;
+        if (*end == ',') finish = std::strtod(end + 1, &end);
+        if (begin > 0.0 && finish > begin && finish < 3600.0) windows.emplace_back(begin, finish);
+        at = *end == ';' ? end + 1 : end;
+        if (*end == '\0') break;
+    }
+    if (windows.empty()) return;
+    std::thread([image_base, image_size, windows] {
+        unsigned index = 0;
+        for (const auto& window : windows) {
+            char label[48];
+            std::snprintf(label, sizeof label, "%u (%.0f-%.0fs)", ++index, window.first, window.second);
+            rip_histogram_window(image_base, image_size, window.first, window.second, label);
+        }
+    }).detach();
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1044,6 +1158,10 @@ int wmain(int argc, wchar_t** argv) {
         // the wait-state sampler above). Off when unset.
         if (const char* spec = std::getenv("PALMETTO_WAIT_SAMPLE"); spec && *spec)
             start_wait_sampler(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, spec);
+        // PALMETTO_RIP_HIST=<start,end[;start,end]>: title-RIP histogram windows (diagnostic; see the RIP histogram
+        // above). Off when unset.
+        if (const char* spec = std::getenv("PALMETTO_RIP_HIST"); spec && *spec)
+            start_rip_histogram(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, spec);
         // PALMETTO_THREAD_STACKS=<seconds,...>: capture every thread's full title-side stack (diagnostic; see the
         // full thread-stack sampler above). Off when unset.
         if (const char* spec = std::getenv("PALMETTO_THREAD_STACKS"); spec && *spec)
