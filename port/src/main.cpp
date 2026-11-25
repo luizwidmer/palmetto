@@ -374,6 +374,153 @@ void start_wait_sampler(std::uintptr_t image_base, std::uintptr_t image_size, co
     }).detach();
 }
 
+// ---- Full thread-stack sampler (PALMETTO_THREAD_STACKS) ---------------------------------------------------------------
+// Diagnostic, off unless the environment variable names comma-separated seconds ("2.5,5,7.5,10,15,20"). At each time it
+// suspends every other thread of the process, captures the instruction pointer, the thread's start address and the
+// code-range words of its stack (bounded to eight pages and 32 frames), then prints one line per DISTINCT stack with the
+// threads that share it. Unlike PALMETTO_WAIT_SAMPLE this does not filter to threads inside a named wait, so a title-side
+// dispatcher that is never blocked in a wait API appears too. RVAs only; no game data.
+struct ThreadStackSample {
+    DWORD tid = 0;
+    std::uint64_t rip = 0, rsp = 0, start = 0;
+    unsigned count = 0;
+    std::uint64_t stack[32] = {};
+};
+
+// Like scan_stack_words, but walks up to `pages` committed pages above rsp and keeps up to `cap` code-range words - the
+// call chain a one-page scanner would cut off. Bounded and fault-tolerant the same way.
+unsigned scan_stack_words_deep(std::uint64_t rsp, std::uint64_t* out, unsigned cap, const WaitSampleModules& modules,
+                               unsigned pages) {
+    unsigned found = 0;
+    const std::uint64_t page = 0x1000;
+    const std::uint64_t first = rsp & ~(page - 1);
+    for (unsigned p = 0; p < pages; ++p) {
+        const std::uint64_t at = first + std::uint64_t(p) * page;
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery((const void*)(std::uintptr_t)at, &info, sizeof(info)) != sizeof(info)) continue;
+        if (info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD))) continue;
+        __try {
+            const auto* words = reinterpret_cast<const std::uint64_t*>((std::uintptr_t)at);
+            for (unsigned i = 0; i < page / 8 && found < cap; ++i) {
+                const std::uint64_t value = words[i];
+                if ((std::uintptr_t)value < rsp) continue;
+                if (modules.in_code((std::uintptr_t)value)) out[found++] = value;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return found;
+        }
+    }
+    return found;
+}
+
+void thread_stacks_sample_once(std::uintptr_t image_base, std::uintptr_t image_size, const char* at_seconds) {
+    WaitSampleModules modules;
+    modules.image_base = image_base;
+    modules.image_end = image_base + image_size;
+    {
+        const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+        if (snapshot != INVALID_HANDLE_VALUE) {
+            MODULEENTRY32W entry{};
+            entry.dwSize = sizeof(entry);
+            if (Module32FirstW(snapshot, &entry))
+                do {
+                    modules.ranges.emplace_back((std::uintptr_t)entry.modBaseAddr,
+                                                (std::uintptr_t)entry.modBaseAddr + entry.modBaseSize);
+                } while (Module32NextW(snapshot, &entry));
+            CloseHandle(snapshot);
+        }
+    }
+    std::vector<DWORD> tids;
+    {
+        const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) return;
+        THREADENTRY32 entry{};
+        entry.dwSize = sizeof(entry);
+        const DWORD pid = GetCurrentProcessId();
+        const DWORD self = GetCurrentThreadId();
+        if (Thread32First(snapshot, &entry))
+            do {
+                if (entry.th32OwnerProcessID == pid && entry.th32ThreadID != self && tids.size() < 256)
+                    tids.push_back(entry.th32ThreadID);
+            } while (Thread32Next(snapshot, &entry));
+        CloseHandle(snapshot);
+    }
+    static NtQueryInformationThreadFn query_thread = reinterpret_cast<NtQueryInformationThreadFn>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
+    std::vector<ThreadStackSample> samples;
+    samples.reserve(tids.size());  // allocated before any thread is suspended
+    for (const DWORD tid : tids) {
+        const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+        if (!thread) continue;
+        if (SuspendThread(thread) == (DWORD)-1) {
+            CloseHandle(thread);
+            continue;
+        }
+        CONTEXT context{};
+        context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        ThreadStackSample sample;
+        sample.tid = tid;
+        if (GetThreadContext(thread, &context)) {
+            sample.rip = context.Rip;
+            sample.rsp = context.Rsp;
+            if (query_thread) {
+                void* start = nullptr;
+                if (query_thread(thread, 9 /*ThreadQuerySetWin32StartAddress*/, &start, sizeof(start), nullptr) >= 0)
+                    sample.start = (std::uint64_t)(std::uintptr_t)start;
+            }
+            sample.count = scan_stack_words_deep(sample.rsp, sample.stack, 32, modules, 8);
+        }
+        ResumeThread(thread);
+        CloseHandle(thread);
+        if (sample.rip) samples.push_back(sample);
+    }
+    // Everything below runs with every thread resumed: module_offset() takes the registry lock.
+    std::map<std::string, std::pair<unsigned, std::string>> distinct;  // stack signature -> threads
+    for (const ThreadStackSample& sample : samples) {
+        std::string signature = rt::shims::module_offset(sample.rip);
+        for (unsigned i = 0; i < sample.count; ++i) signature += " " + rt::shims::module_offset(sample.stack[i]);
+        auto& slot = distinct[signature];
+        ++slot.first;
+        if (slot.first <= 8) slot.second += (slot.second.empty() ? "" : ",") + std::to_string(sample.tid);
+    }
+    std::fprintf(stderr, "[rt] thread stacks at %s s: %zu thread(s), %zu distinct stack(s)\n", at_seconds,
+                 samples.size(), distinct.size());
+    unsigned shown = 0;
+    for (const auto& [signature, slot] : distinct) {
+        if (shown++ == 48) {
+            std::fprintf(stderr, "[rt] thread stacks at %s s: %u more distinct stack(s) not shown\n", at_seconds,
+                         static_cast<unsigned>(distinct.size() - shown + 1));
+            break;
+        }
+        std::string detail = "[rt] thread stacks at " + std::string(at_seconds) + " s: " + std::to_string(slot.first) +
+                             "x tid " + slot.second + "\n    " + signature;
+        std::fprintf(stderr, "%s\n", detail.c_str());
+    }
+}
+
+// Starts the full-stack sampler thread when PALMETTO_THREAD_STACKS names sample times. Detached: it ends with the process.
+void start_thread_stack_sampler(std::uintptr_t image_base, std::uintptr_t image_size, const char* spec) {
+    std::vector<double> times;
+    for (const char* at = spec; at && *at;) {
+        char* end = nullptr;
+        const double value = std::strtod(at, &end);
+        if (end == at) break;
+        if (value > 0.0 && value < 3600.0) times.push_back(value);
+        at = *end == ',' ? end + 1 : end;
+        if (*end == '\0') break;
+    }
+    if (times.empty()) return;
+    std::thread([image_base, image_size, times] {
+        const auto started = std::chrono::steady_clock::now();
+        for (const double at : times) {
+            std::this_thread::sleep_until(started + std::chrono::milliseconds(static_cast<long long>(at * 1000.0)));
+            char label[32];
+            std::snprintf(label, sizeof label, "%.1f", at);
+            thread_stacks_sample_once(image_base, image_size, label);
+        }
+    }).detach();
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -726,6 +873,10 @@ int wmain(int argc, wchar_t** argv) {
         // the wait-state sampler above). Off when unset.
         if (const char* spec = std::getenv("PALMETTO_WAIT_SAMPLE"); spec && *spec)
             start_wait_sampler(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, spec);
+        // PALMETTO_THREAD_STACKS=<seconds,...>: capture every thread's full title-side stack (diagnostic; see the
+        // full thread-stack sampler above). Off when unset.
+        if (const char* spec = std::getenv("PALMETTO_THREAD_STACKS"); spec && *spec)
+            start_thread_stack_sampler(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, spec);
         std::printf("running %s\n", main_module.name.c_str());
         std::fflush(stdout);
         // PALMETTO_WATCH_GLOBAL=<hex rva> logs every change of a mapped image's 8-byte global with the millisecond it

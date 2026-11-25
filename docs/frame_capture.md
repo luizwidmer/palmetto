@@ -284,6 +284,26 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### Full thread-stack sampler (PALMETTO_THREAD_STACKS): no title-side frames on native stacks
+
+`PALMETTO_THREAD_STACKS=<seconds,...>` (new, opt-in; `port/src/main.cpp`) suspends every other thread at each named time,
+captures RIP, the thread start address and the code-range words of its stack (8 pages, 32 frames), and prints one line per
+distinct stack with the threads that share it. Unlike `PALMETTO_WAIT_SAMPLE` it does not filter to threads inside a named
+wait, so a dispatcher that is never blocked in a wait API would appear.
+
+One 130 s boot at 2.5/5/7.5/10/15/20 s (boot-stacks1, ALIVE 130 s, 0 exceptions): 49-71 threads and 44-64 distinct
+stacks per sample. The stacks are populated - but with **host-side frames only**: ntdll/KERNELBASE/dbghelp/
+gameinputredist/nvoglv64/D3D12Core, the port's own `palmetto.exe` and its `palmetto_tls_host_*` thunks, and Windows
+worker threads. **No frame in the title image appears at any sampled time** (no `image+`/`game+` RVA in any stack), so
+this method does not see the loader job or the stage dispatcher: the title's code runs on the emulated CPU threads, whose
+guest stack pointer is not the native RSP the sampler reads (the native stack holds the host trampolines), and the loader
+job was not executing on any native stack at those instants anyway.
+
+Named next step: walk the *guest* stack for each emulated title thread (the emulator's per-thread stack pointer, i.e. what
+streamtrace's loader-chain walk already does for the one job thread) and filter/annotate by thread role; the native-stack
+sampler should stay as the host-side counterpart. That is where the dispatcher RVA will come from - this boot gives no RVA
+candidate from native stacks.
+
 ### The 1,200 s boot: still black, steady loop, and the fallback list slots
 
 A 1,200 s boot (all fixes on, presenter captures every 300 presented frames, full-target readbacks at four late draws,
