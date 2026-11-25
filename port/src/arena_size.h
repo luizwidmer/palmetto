@@ -1,10 +1,16 @@
 #pragma once
 
 // The size of the GPU address arena (docs/d3d12_vulkan.md section 3.3): one VkBuffer bound to one VkDeviceMemory
-// allocation. PALMETTO_ARENA_MB asks for a size (default 256 MiB, 16..4095 MiB: every console VA must fit 32 bits);
+// allocation. PALMETTO_ARENA_MB asks for a size (default 1024 MiB, 16..4095 MiB: every console VA must fit 32 bits);
 // the device then caps it, since the buffer may be no larger than maxBufferSize (Vulkan 1.3 / VK_KHR_maintenance4)
 // and the allocation, which can be larger than the buffer, no larger than maxMemoryAllocationSize (Vulkan 1.1 /
 // VK_KHR_maintenance3). Vulkan guarantees at least 1 GiB for both; the RX 6800 (AMD 26.11.2) reports 2 GiB for both.
+//
+// The default was 256 MiB, a guess (docs/d3d12_vulkan.md's D3D-55 open question). The deferred-compile slice measured
+// it insufficient once the loader's stage runs (docs/deferred_compile.md sections 5 and 9): the boot's placed-buffer
+// stand-ins and resources reached a 501.8 MiB peak, the 256 MiB arena filled, and the next placed-resource creation
+// was answered E_OUTOFMEMORY, which the title turned into a null dereference. 1024 MiB is the measured peak plus
+// margin; PALMETTO_ARENA_MB still sets the size explicitly.
 //
 // The decision is a pure function of the variable's text and the two limits, so it is tested without a GPU
 // (arena_size_test). It depends only on the Vulkan headers.
@@ -18,7 +24,9 @@
 namespace palmetto {
 
 constexpr VkDeviceSize kArenaMiB = VkDeviceSize(1) << 20;
-constexpr VkDeviceSize kArenaDefaultMiB = 256;
+// Measured, not a guess: the deferred-compile boot's peak end was 501.8 MiB (docs/deferred_compile.md section 9);
+// 256 MiB left the arena full and a placed-resource creation was refused. 1024 MiB is that peak plus margin.
+constexpr VkDeviceSize kArenaDefaultMiB = 1024;
 constexpr VkDeviceSize kArenaMinMiB = 16;
 constexpr VkDeviceSize kArenaMaxMiB = 4095;
 

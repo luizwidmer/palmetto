@@ -8670,9 +8670,11 @@ public:
         return true;
     }
 
-    // PALMETTO_ARENA_MB sets its size (default 256, at most 4095, and no more than the device's maxBufferSize and
-    // maxMemoryAllocationSize allow: src/arena_size.h): it holds every default-heap buffer, shader-visible
-    // descriptor heap and shader program. M0-M3 keep it host-visible (section 3.3, memory type policy).
+    // PALMETTO_ARENA_MB sets its size (measured default 1024 MiB, at most 4095, and no more than the device's
+    // maxBufferSize and maxMemoryAllocationSize allow: src/arena_size.h). The old 256 MiB default was a guess; the
+    // deferred-compile boot measured a 501.8 MiB peak and a full arena answering E_OUTOFMEMORY once the loader's
+    // stage ran (docs/deferred_compile.md section 9). It holds every default-heap buffer, shader-visible descriptor
+    // heap and shader program. M0-M3 keep it host-visible (section 3.3, memory type policy).
     bool create_arena() {
         auto& vk = state_.context->vk;
         if (!vk.vkGetBufferDeviceAddress) return false;

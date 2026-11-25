@@ -22,9 +22,10 @@ constexpr VkDeviceSize GiB = 1024 * MiB;
 
 int request_without_limits() {
     const ArenaLimits none{};
-    // Unset (or empty): the default; otherwise clamped to 16..4095 MiB; text that is no number reads as 0, so 16.
-    CHECK(decide_arena_size(nullptr, none).bytes == 256 * MiB);
-    CHECK(decide_arena_size("", none).bytes == 256 * MiB);
+    // Unset (or empty): the measured default (docs/deferred_compile.md: a 501.8 MiB peak filled the old 256 MiB
+    // guess, so the default is 1024 MiB); otherwise clamped to 16..4095 MiB; text that is no number reads as 0, so 16.
+    CHECK(decide_arena_size(nullptr, none).bytes == 1024 * MiB);
+    CHECK(decide_arena_size("", none).bytes == 1024 * MiB);
     CHECK(decide_arena_size("1024", none).bytes == 1024 * MiB);
     CHECK(decide_arena_size("1", none).bytes == 16 * MiB);
     CHECK(decide_arena_size("0", none).bytes == 16 * MiB);

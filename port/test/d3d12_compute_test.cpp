@@ -469,7 +469,7 @@ int main() {
         // The GPU address arena is no larger than the device's maxBufferSize and maxMemoryAllocationSize
         // (src/arena_size.h), whatever PALMETTO_ARENA_MB asks for: with PALMETTO_ARENA_MB=3000 on a GPU that reports
         // 2 GiB (RX 6800), a run under PALMETTO_VK_VALIDATION=1 has no vkAllocateMemory error. A device that reports
-        // a 32 MiB maxMemoryAllocationSize (simulated) gets at most 32 MiB from the default 256, and a buffer past
+        // a 32 MiB maxMemoryAllocationSize (simulated) gets at most 32 MiB from the default, and a buffer past
         // that is refused.
         {
             VkPhysicalDeviceMaintenance4Properties m4{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_PROPERTIES};

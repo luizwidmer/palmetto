@@ -773,7 +773,7 @@ The compute path, end to end:
   refusing anything that would spill. `pack_stage()` lays them out in the console layout of one stage (section 3.5,
   D3D-448); the compute bind point uses it.
 - **GPU address arena** (section 3.3, when the device has `bufferDeviceAddress`): one host-visible,
-  device-addressable buffer, 256 MiB by default (`PALMETTO_ARENA_MB`, at most 4095 MiB, so every VA fits 32-bit
+  device-addressable buffer, 1024 MiB by default (measured: a 501.8 MiB peak once the loader stage runs) (`PALMETTO_ARENA_MB`, at most 4095 MiB, so every VA fits 32-bit
   table pointers).
   - It is also no larger than the device's `maxBufferSize` (Vulkan 1.3) and, counting the buffer's memory
     requirement, `maxMemoryAllocationSize` (Vulkan 1.1), whichever is smaller (`port/src/arena_size.h`). When a

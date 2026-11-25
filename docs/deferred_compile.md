@@ -348,3 +348,193 @@ ubiquitarianism/leonida (https://github.com/ubiquitarianism/leonida), commits `3
 `ed94fbef9` (pipeline compile workers and compile checkpoints). No code from any of them was copied; the implementation,
 its tests and this page are this project's own. The upstream projects remain the copyright of their contributors and
 their licenses continue to apply to their own trees.
+
+## 9. Attribution and fix: the stop after the task pool is unblocked (follow-up)
+
+**Status: measured, attributed, and fixed in our structure; the boot then advances to a new wall.** The null at
+`game+0x6EB759` is not the deferred compile's semantics and no pipeline handle or recording-context side effect is
+missing: our console device's slot-133 handler answered the title's 128 KiB placed-buffer creation with
+`E_OUTOFMEMORY` because the GPU address arena's 256 MiB default was full. The factory that builds the resource
+returned null, the title cached it and dereferenced it. The arena default is now the measured need (1024 MiB), and
+with it the `0x6EB759` stop does not occur: the title's own **loading word advances 1 -> 2 and the session word
+0 -> 1 for the first time in any measured boot** (`docs/stage2_blocker.md` sections 11-15 never saw either), before a
+new title-side null at `game+0x146F23D`. The off-thread compile stays as it is: it is the change that lets the
+loader's stage run at all. The next stop is recorded in section 9.7 for a separate slice.
+
+### 9.1 What ran
+
+| | |
+|---|---|
+| Tree | the shared working tree after `375a9b14c` (the deferred-compile commit), with other slices' in-flight files present; the networking slice's commit `8b61b96ba` landed between the boots, and each boot's binary hash is in the Binaries row |
+| Binaries | the shared tree rebuilt between boots; the measured builds are `31F6FC99...7F249F` (poke boot), `8C7AAC75...3C4B01` (plain 130 s, cdb and arena-probe arms) and `41F31C38...4A4288` (the fix build, 300 s boot) |
+| Boots | five boots under the boot lock, one at a time: `boot-poke1` (in-process register probe, 130 s), `boot-plain1` (plain reproduction, 130 s), `boot-cdb1` (one debugger session, 130 s), `boot-arena4095` (`PALMETTO_ARENA_MB=4095` and `PALMETTO_ARENA_LOG=1`, 130 s), `boot-defer300` (after the fix, 300 s) |
+| Harness | `tooling/boot_report.py`, timeout 130 or 300 s, captures outside the repository under `D:\leonida-work\postdefer\` |
+| Environment | `PALMETTO_SHADERS`, `PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`, `PALMETTO_STATE_TRACE=2,130` (300 in the last boot), `PALMETTO_STAGE2_READY=20`, `PALMETTO_PIPELINE_CALL_STATS=5`, and the deferred arm `PALMETTO_PIPELINE_DEFER_COMPILE=1 PALMETTO_PIPELINE_COMPILE_BOUND=4096 PALMETTO_PIPELINE_COMPILE_WORKERS=4` |
+| In-process probes | `PALMETTO_POKE_LOG=6DCE7,6DD8B,6DE0B,6DE1F` (registers and read windows at four title sites, no debugger), `PALMETTO_DUMP_REGS=1`, `PALMETTO_FAULT_MEM=1` (the crash report carries the faulting registers and the memory around them) |
+
+### 9.2 The null source, decompiled
+
+The crash stack is the one section 5.1 records; the job that runs is the stage job whose work function is the
+10-byte thunk `game+0x3750CE0` (section 13's ready ids are the same stage batch). Top-down:
+
+| # | RVA | size | what it does |
+|---|---|---|---|
+| 1 | `0x3750CE0` | 0x10 | calls `0x593BD40` and returns 1 (the job's work function) |
+| 2 | `0x593BD40` | 0x1C | calls `0x593BD60`; when that returns false it **tail-jumps to `0x1EB9FD0`**, the loading-stage body |
+| 3 | `0x1EB9FD0` | 0x851 | the stage body; calls the resource-registry init `0x5B03CB0` and returns at `0x1EBA80B` |
+| 4 | `0x5B03CB0` | 0x4F4 | registry init: named registrations through `0x8E8930` (hashes `0x964deeb7`, `0x9237d37a`, `0xd00e950b`, ...) and the renderer's first buffers. Three buffers come from `0x141D47DA0` plus the view builder `0x6EB740`; then the resource factory `0x6EBAA0(0x8000,4,1,0,0x90,0,0x27,0)` is called at **`0x5B03EBC`** and its result is passed to `0x6EB740` at **`0x5B03EE0`** (the fault) |
+| 5 | `0x6EBAA0` | 0x142 | resource factory: allocates the engine record (`0x52A40A0`), fills its description (`0x320090`), calls `0x6DC20` for the GPU resource; on failure frees the record and returns **null** |
+| 6 | `0x6DC20` | 0x23E | allocates the title-side memory (`0x142474690`: `0x8000 * 4 = 0x20000` bytes, 16-byte aligned), builds a 0x30-byte **buffer** description (Dimension 1, Width `0x20000`, Height/Depth/Mips 1, Format 0, SampleDesc 1, Xbox flag word `0x20004` read as PC flags 0x4) and calls **console device slot 133** at `0x6DD85` through `[device+0x428]` with (va, desc, state `0xFFFFFFFF`, 0, riid, out) |
+| 7 | `0x6DC20` failure | - | a negative HRESULT at the slot call takes the branch at `0x6DD96` to `0x6DE0B` and the shared null tail `0x6DE1F`, so the function returns 0 and `0x6EBAA0` returns null |
+| 8 | `0x6EB740` | 0x170 | the view builder the null is passed to: `test byte [rbx+0x10],4` is its first use of the object, and `rbx` is the null, so the read is of address `0x10`. The null check above it (`0x6EB750`) jumps to an `int3` at `0x6EB888` - the title's own assert, stepped over by `PALMETTO_SKIP_INT3` - and the code then jumps back to the dereference, which is why this stop is a read of `0x10` and not the assert |
+
+So the null object is the engine resource wrapper that `0x6EBAA0` returns, and the only way that function returns
+null after its allocation succeeded is `0x6DC20`'s resource creation failing.
+
+### 9.3 The producer, measured with the in-process register probe
+
+`boot-poke1` (binary `31F6FC99...`, deferred arm, pokes on the title's own code; the crash report fired at trace
+53.3 s at the same RVA):
+
+| poke site (RVA) | what the registers say there | hits | the failing creation's values |
+|---|---|---|---|
+| `0x6DCE7` | immediately after `0x6DC20`'s engine-memory allocation (`rax` = the allocation) | 32 | allocation **non-null**; record `+8 = 0x8000`, `+0xC = 4`, `+0xE = 0x90`, `+0x10 = 0x1385` |
+| `0x6DD8B` | immediately after the console slot-133 call (`rax` = HRESULT) | 3 | first two `S_OK`; the third **`0x8007000E`** (`E_OUTOFMEMORY`) with the same record |
+| `0x6DE0B` | the slot-failure branch, taken only when the HRESULT is negative | 1 | `rax = 0x8007000E` |
+| `0x6DE1F` | the shared failure tail | 1 | - |
+
+The same boot's stderr has the reason:
+
+```text
+[rt] d3d12: GPU address arena full (raise PALMETTO_ARENA_MB); buffer size in KiB: 128
+```
+
+`0x8007000E` is our slot-133 handler's answer, and the line says why: a 128 KiB placed buffer whose **host import was
+unavailable** (the documented stand-in path of [docs/replay_resolution.md](replay_resolution.md) section 5 needs an
+arena range for its ordinary-buffer stand-in) could not reserve its range, because the 256 MiB arena was full. The
+title therefore received a null resource and dereferenced it. Crash-report registers at the fault on that build:
+`rcx`, `rbx`, `rdi`, `r8` and `rax` are all 0, `rdx` equals `rsi` and is the caller's descriptor local, `rbp` is
+`0x1ff`, and the stack is section 5.1's.
+
+### 9.4 Causality: the arena size, measured
+
+`boot-plain1` reproduces the stop on the shared tree's later binary (trace 123.5 s, wall 139.0 s, 147,272 D3D12
+calls) with the same arena-full line. Raising only `PALMETTO_ARENA_MB` to 4095 on the same binary
+(`boot-arena4095`) removes it and measures the need:
+
+| measurement | default arena (`boot-plain1`) | `PALMETTO_ARENA_MB=4095` (`boot-arena4095`) |
+|---|---:|---:|
+| verdict | STOP `game+0x6EB759` reading `0x10` at trace 123.5 s | STOP `game+0x146F23D` reading `0x30` at trace 107.2 s |
+| `GPU address arena full` lines | 1 (the 128 KiB buffer) | **0** |
+| arena allocations / peak end / refusals | not logged | 2,963 / **0x1F5D8C10 = 501.8 MiB** / **0** |
+| loading word / session word | loading 1 / session 0 up to the stop | **loading 2 / session 1 at 106.0 s**, the first change of either in any measured boot |
+| machine word (current / next) | 2 / 2 | 2 / 2, so the stage-3 request at `0x81B2EF` is still not written |
+
+The arena peak is the measured need at the furthest point this slice reaches: **501.8 MiB** against the old
+256 MiB default. That is the whole causal chain: the deferred compile lets the stage finish (section 5), the stage
+creates placed-buffer stand-ins (section 9.2), the 256 MiB arena fills (this section), and the next creation is
+refused.
+
+### 9.5 The fix
+
+- `port/src/arena_size.h`: `kArenaDefaultMiB` changes from 256 to **1024** (the measured 501.8 MiB peak plus
+  margin), with the measurement in the comment. The 16..4095 MiB clamp, the device-limit caps and
+  `PALMETTO_ARENA_MB` are unchanged, so the entry remains one branch of a pure function.
+- `port/test/arena_size_test.cpp`: the unset and empty expectation is 1024; the synthetic-limit checks are
+  unchanged, and the rebuilt test prints its line and exits 0.
+- `port/shims/d3d12_vulkan_device.cpp`: the `create_arena` comment now states the measured default and why (no
+  behaviour code changed); `port/test/d3d12_compute_test.cpp`: one comment counted the default as 256.
+- `port/src/deferred_compile.h` and the off-thread design are **not** changed: the queue, the workers, the bound and
+  the submit-side wait are exactly section 3. No synchronous fallback was reintroduced, and the eager path is
+  unchanged.
+- **Growth policy:** the arena is one VkBuffer whose device address is the shader heap base (section 3.3), so it
+  cannot grow in place; a dynamic policy would need a second segment plus a relocation/rebase design for every live
+  range - a separate architectural slice, not a size knob. The measured need (501.8 MiB) is well inside the
+  documented 4095 MiB clamp, so the honest fix for this slice is the measured fixed default, and a boot that advances
+  past `0x146F23D` is the measurement that would justify more.
+
+### 9.6 The 300 s boot after the fix
+
+One boot, `boot-defer300`, binary `41F31C387B37D8A75B18B367821FA3942BDD47B216F3E1008944DBBEF04A4288` (the fix
+build), timeout 300 s, the deferred switch (4 workers, bound 4096) and the stage-2 probe. It stops at 79.0 s wall
+(trace 61.6 s) on the new wall, not the old one:
+
+| measurement | `boot-defer300` |
+|---|---:|
+| verdict / exceptions | STOP `game+0x146F23D` reading `0x30` at trace 61.6 s, wall 79.0 s; the `0x6EB759` stop is **gone** |
+| D3D12 calls | 168,348 (trace max #183,476) |
+| loading word / session word | init 2 at 18.0 s; **loading 1 to 2 and session 0 to 1 at 60.0 s** |
+| machine word (current / next) | 2 / 2 at 73.9 s and 76.5 s; the stage-3 request at `0x81B2EF` is not written |
+| stage-2 probe `wait` (+20.0 s) | pending `0x7b` (123), one ready bit (id 152) |
+| stage-2 probe `steady` (+26.2 s) | pending `0x19` (25), **0 ready bits**, aggregate cleared: job 109's poll returned (section 5's A/B shows the same 124 to 25 step) |
+| deferred submitted / built / failed / fallback / submit waits | 2,742 / 315 / 0 / 0 / 0 |
+| deferred pending at the stop | 2,427 of 4,096; build time 4,384.6 ms, max single 162.1 ms, 4 workers |
+| pipeline calls / driver calls | graphics 55,051 / 2; compute 4,825 / 315, all on the compile workers; driver compute time 4,378.8 ms, max single 162.0 ms |
+| driver threads / creation threads / max driver calls in flight | 5 / 14 / 4 |
+| submissions / presents / captures | `submission 4096 at 31.5 s`; 2,984 `PresentX` calls; one capture frame (2564x1421, mean rgb 0.00 0.00 0.00) |
+| arena allocations / peak end / refusals | 2,960 / **501.8 MiB** / **0** (no arena-full line) |
+
+The measured contract of section 5 survives (no title thread makes a compute driver call; the loader's stage
+completes and the stage-2 holder's poll returns), and the boot now gets past the wall section 5.3 named: the loading
+and session words move, and the machine word still stays 2 / 2 because the boot ends on the new null first.
+
+### 9.7 The moved stop, recorded for a separate slice
+
+- **Site:** `game+0x146F23D`, read of `0x30`, trace 61.6 s. Stack:
+  `0x146F23D <- 0xF7DE8E <- 0xF7C8C1 <- 0xCC1F00 <- 0x570009B <- 0xCBA84A <- 0x56FDC26 <- 0x63E78` (job runner)
+  `<- 0x4EAA05A` (item executor) `<- 0x221C29C` (worker loop) - the same task-pool path, no layer frame.
+- **Null source (decompiled):** `0x146F230(param_1, ...)` first reads `[param_1+0x30]`; at the fault `param_1`
+  (`rcx`) is 0 and `rbx`, `r12`, `rdi` are also 0, while `r13` is `image+0x849C100`. Its call sites are in
+  `0xF7D7C0`, which walks a global table at `image+0x849C0E0` (entry stride `0x10`) and passes an entry's `+0x8`
+  object pointer into the call; the entry itself is non-null, so the new null is **a registry entry whose `+0x8`
+  resource object was never filled**.
+- **Measured correlation at the end of the same boot:** the last three D3D12 calls before the fault are three
+  `Xbox CreatePlacedResourceX (device slot 133) failed` (#183474 to #183476), directly after
+  `slot 25 refused description ... dimension 3 format 118 flags 0x800002 layout 0x0 1024x1024x1 mips 1 samples 1`
+  and `CreateCommittedResource refused (resource flag combination), dimension 3`. The likely producer is therefore
+  the same class as this section's: a console description our PC validation refuses (a dimension-3 texture carrying
+  an Xbox flag word that masks to the PC depth-stencil flag), so the title again gets a null resource it does not
+  check.
+- **Not arena-related:** zero arena refusals, the peak is 501.8 MiB of the new 1024 MiB default, and the null is a
+  title object field, not an allocation answer.
+- **Next falsifier:** one boot with the register probe on the slot-133 failure path and on `0x146F230`'s entry
+  (`rcx == 0`) to prove the three refused creations are the same object as the null registry field, then pin the
+  console meaning of the `0x800002` flag word on a dimension-3 resource; if the console accepts it, the fix is to
+  drop the PC-invalid flag combination in the slot-133 translation instead of refusing, as the proxy already does
+  for other Xbox bits. If it cannot be pinned, the measured negative stands with the exact field and RVAs.
+
+### 9.8 Limits
+
+- **One boot per arm.** The 256 MiB arm's stop moved from trace 53.3 s to 123.5 s across two boots under the shared
+  machine's varying load; stage timings are not stable (one boot has shown a single compile taking 67 s).
+- **The debugger session is a measured negative.** `boot-cdb1` attached one session at +38 s with second-chance AV
+  filters; the boot stayed ALIVE for 130.3 s and no AV was caught, with only 100,540 D3D12 calls against 147,272 in
+  the unattached 130 s boot, so the debugger's per-exception overhead changed the timing enough that the stop did
+  not occur inside the window. The fault evidence this page relies on is the **in-process** crash report (registers
+  and fault memory) and the in-process poke log, which need no debugger. One `.echo` line of the command file also
+  contained a `;` and was split by the command parser, which affected only that echo.
+- **The poke boot ran on an earlier build of the same tree** (`31F6FC99...`) than the plain reproduction and the fix
+  arms; the stop reproduced on both builds. The shared tree rebuilt between boots (another slice's in-flight shim
+  file), so the binary hash is given per boot.
+- **The new stop's producer link is a correlation at the end of one boot** (three failed slot-133 creations directly
+  before the fault), not a traced cause; section 9.7 names the trace that would settle it.
+- **The arena peak is this slice's furthest point**, not the whole boot's: a boot that advances past `0x146F23D` may
+  need more than 501.8 MiB, and the device-release report line names the size such a boot needs.
+- No game data: RVAs, field offsets, hashes, counts and outcomes only; the one capture is a black frame with mean
+  rgb 0.00 0.00 0.00.
+
+### 9.9 Tests and gates (this section)
+
+| gate | result |
+|---|---|
+| `_setup\build_gta6rt.cmd` | `PALMETTO_OK` on the fix build (SHA-256 `41F31C38...`, the binary booted by 9.6) |
+| `_setup\build_tests.cmd` | `TESTS_BUILT` |
+| fix test | `arena_size_test` rebuilt with the new expectation: `arena_size: request clamp, each device limit, unknown limits, allocation overhead and the floor`, exit 0 |
+| test subset (`port/build`) | `frame_dump_test`, `unimplemented_policy_test` (98 checks), `xbox_present_test`, `xs_proxy_mock_test`, `graphics_record_test` (180), `graphics_pso_test` (312), `buffer_va_index_test`, `dstorage_test` (224), `xapu_chad_test` (87), `deferred_compile_test` (18) and `arena_size_test` all exit 0 |
+| docs checks (`tests/test_docs_*.py`, with the session's `GIT_CONFIG_*` variables cleared) | eleven pass; `test_docs_env_vars` reports `PALMETTO_ROOT_PACK_MEASURE` read at `port/shims/d3d12_com.cpp:93`, another slice's file in flight in the shared tree - the variable is named in that slice's untracked `docs/root_packing.md`, so the check passes once the lead commits it; none of this slice's variables is missing |
+| default path | with the deferred switch unset the boot is section 5's eager path; the arena default is the only plain-path change, and it is the subject of this section |
+
+### 9.10 Attribution (this section)
+
+Same attribution as section 8: this follow-up was implemented from this project's own measurements. No upstream code
+or behaviour claim is used, and no git writes were made by this slice.
