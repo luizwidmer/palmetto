@@ -99,6 +99,7 @@ extern "C" void palmetto_register_fence_value_watcher(void* fn) {
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -1264,6 +1265,11 @@ struct ChildProxy {
     // the new callback with the previous context, which is documented and read by nothing in the runtime.
     std::atomic<std::uintptr_t> console_callback{0};
     std::atomic<std::uintptr_t> console_callback_context{0};
+    // Allocators only: the once-per-proxy lifecycle the invocation model uses. The title re-registers on its reused
+    // allocators once per presented frame, so the first registration on a proxy is the point the runtime would set the
+    // allocator's recording memory up; later registrations only replace the pair (docs/allocator_slot9.md).
+    std::atomic<bool> console_callback_claimed{false};
+    std::atomic<bool> console_callback_invoked{false};
 };
 
 // ---- Console fence slot 12 (docs/fence_slot12.md) ----
@@ -1397,19 +1403,202 @@ void note_child_slot(unsigned slot) {
     }
 }
 
+// ---- Allocator slot 9: the recorded callback's invocation (docs/allocator_slot9.md) ------------------------------
+//
+// The measured callback game+0x555DF10 reads three of its seven arguments: arg3, the recording pool's memory class
+// (passed on as edx to game+0x4D9F450 through game+0x4D9F400), arg4, the size (2^arg4 when arg4 < 16, else the explicit
+// byte count), and arg6, the recording context (the context the registration named). It allocates a block from the
+// pool at context+0x12780, frees the block at context+0x12798 if one is there and stores the new block at
+// context+0x12798. The title itself takes 8 bytes of class 0x18 from that pool (game+0x18845E) immediately before it
+// registers, so class 0x18 is a measured class for this pool; the size is the only unmeasured input, and the model
+// asks for one console recording chunk. Off by default (PALMETTO_XS_ALLOCATOR_CALLBACK=1 turns it on) because the
+// console's invocation condition is not measured and the title never reads the block back; the probe
+// (PALMETTO_XS_ALLOCATOR_CALLBACK_PROBE=<seconds>) invokes the pair once after that second so one boot can show what
+// the callback does with measured arguments.
+namespace allocator_callback_invocation {
+
+struct Counts {
+    std::atomic<std::uint64_t> registrations{0}, first_registrations{0}, invocations{0}, refusals{0};
+};
+
+Counts& counts() {
+    static Counts counts;
+    return counts;
+}
+
+std::atomic<int> g_mode{-2};  // -2: the environment switch; 0/1: a test's explicit choice
+
+bool env_flag(const char* name) {
+    char value[8] = {};
+    return GetEnvironmentVariableA(name, value, sizeof(value)) > 0 && value[0] != '\0' && value[0] != '0';
+}
+
+bool callback_env_enabled() {
+    static const bool on = env_flag("PALMETTO_XS_ALLOCATOR_CALLBACK");
+    return on;
+}
+
+bool callback_trace_enabled() {
+    static const bool on = env_flag("PALMETTO_XS_ALLOCATOR_CALLBACK_TRACE");
+    return on;
+}
+
+// The model's arguments: class 0x18 is the class the title's own recording-pool allocation uses (game+0x18845E);
+// the size is one console recording chunk, and the two environment variables exist so a probe can move them without
+// a rebuild (they are measurement inputs, not a contract).
+std::uint64_t invocation_size() {
+    static const std::uint64_t size = [] {
+        char value[32] = {};
+        if (GetEnvironmentVariableA("PALMETTO_XS_ALLOCATOR_CALLBACK_SIZE", value, sizeof(value)) > 0 && value[0]) {
+            const std::uint64_t parsed = std::strtoull(value, nullptr, 0);
+            if (parsed) return parsed;
+        }
+        return std::uint64_t{0x10000};
+    }();
+    return size;
+}
+
+std::uint64_t invocation_class() {
+    static const std::uint64_t value = [] {
+        char text[32] = {};
+        if (GetEnvironmentVariableA("PALMETTO_XS_ALLOCATOR_CALLBACK_CLASS", text, sizeof(text)) > 0 && text[0])
+            return std::strtoull(text, nullptr, 0);
+        return std::uint64_t{0x18};
+    }();
+    return value;
+}
+
+// The probe's one shot: seconds after the first registration call, or 0 when it is off.
+std::uint64_t probe_after_seconds() {
+    static const std::uint64_t seconds = [] {
+        char text[32] = {};
+        if (GetEnvironmentVariableA("PALMETTO_XS_ALLOCATOR_CALLBACK_PROBE", text, sizeof(text)) > 0 && text[0])
+            return std::strtoull(text, nullptr, 0);
+        return std::uint64_t{0};
+    }();
+    return seconds;
+}
+
+std::atomic<std::uint64_t> probe_fired{0};
+
+bool read_own(std::uint64_t address, void* out, std::size_t bytes) {
+    if (!address) return false;
+    SIZE_T done = 0;
+    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), out, bytes, &done) == TRUE &&
+           done == bytes;
+}
+
+bool callback_active() {
+    if (callback_trace_enabled() || probe_after_seconds()) return true;
+    const int mode = g_mode.load(std::memory_order_relaxed);
+    return mode == 1 || (mode == -2 && callback_env_enabled());
+}
+
+void log_line(std::atomic<unsigned>& lines, const char* format, ...) {
+    if (lines.fetch_add(1, std::memory_order_relaxed) >= 8) return;
+    va_list args;
+    va_start(args, format);
+    std::vfprintf(stderr, format, args);
+    va_end(args);
+}
+
+// Calls the registered pair once and reports what it did to the context. The function reads only integers, so the
+// same layout is used for the call on every architecture the title image runs on (Win64 x64).
+void invoke(std::uint64_t callback, std::uint64_t context, const char* why) {
+    Counts& c = counts();
+    if (!callback || !context) {
+        c.refusals.fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<unsigned> lines{0};
+        log_line(lines,
+                 "[rt] d3d12_xs: allocator callback invocation (%s) refused: callback 0x%llx context 0x%llx; a pair "
+                 "without both words is not a registration\n",
+                 why, static_cast<unsigned long long>(callback), static_cast<unsigned long long>(context));
+        return;
+    }
+    std::uint64_t before = 0;
+    const bool context_readable = read_own(context + 0x12798, &before, sizeof(before));
+    if (!context_readable) {
+        c.refusals.fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<unsigned> lines{0};
+        log_line(lines,
+                 "[rt] d3d12_xs: allocator callback invocation (%s) refused: the context 0x%llx is not readable at "
+                 "+0x12798; the model will not call title code on an unverified context\n",
+                 why, static_cast<unsigned long long>(context));
+        return;
+    }
+    using Callback = std::uint64_t(WINAPI*)(std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
+                                            std::uint64_t, std::uint64_t, std::uint64_t);
+    const auto fn = reinterpret_cast<Callback>(static_cast<std::uintptr_t>(callback));
+    const std::uint64_t block = fn(0, 0, 0, invocation_class(), invocation_size(), 0, context);
+    std::uint64_t after = 0;
+    const bool after_readable = read_own(context + 0x12798, &after, sizeof(after));
+    c.invocations.fetch_add(1, std::memory_order_relaxed);
+    static std::atomic<unsigned> lines{0};
+    log_line(lines,
+             "[rt] d3d12_xs: allocator callback invoked (%s): block 0x%llx, context+0x12798 0x%llx -> 0x%llx (class "
+             "0x%llx size 0x%llx)\n",
+             why, static_cast<unsigned long long>(block), static_cast<unsigned long long>(before),
+             static_cast<unsigned long long>(after_readable ? after : 0),
+             static_cast<unsigned long long>(invocation_class()),
+             static_cast<unsigned long long>(invocation_size()));
+    if (!block) {
+        c.refusals.fetch_add(1, std::memory_order_relaxed);
+        log_line(lines,
+                 "[rt] d3d12_xs: allocator callback invocation (%s) returned no memory: refused by name, the "
+                 "recording context gets nothing\n",
+                 why);
+    }
+}
+
+}  // namespace allocator_callback_invocation
+
 // Console allocator slot 9 (docs/allocator_slot9.md): record the pair the title just registered. This title registers on
 // the allocator it is about to use, once per presented frame (tens of thousands over a long boot), so only the first call
-// is logged; with XS_TRACE every call gets the usual per-slot line from note_child_slot.
+// is logged; with XS_TRACE every call gets the usual per-slot line from note_child_slot. The first registration on a
+// proxy is the model's invocation point (docs/allocator_slot9.md's addendum): the pair is called once there, behind the
+// opt-in switch (or once at the probe's second), and later registrations only replace the pair.
 void record_console_allocator_callback(ChildProxy* self, std::uint64_t callback, std::uint64_t context) {
+    using namespace allocator_callback_invocation;
     self->console_callback_context.store(static_cast<std::uintptr_t>(context), std::memory_order_relaxed);
     self->console_callback.store(static_cast<std::uintptr_t>(callback), std::memory_order_release);
+    Counts& c = counts();
+    c.registrations.fetch_add(1, std::memory_order_relaxed);
+    const bool active_model = callback_active();
+    if (active_model) {
+        bool expected = false;
+        if (self->console_callback_claimed.compare_exchange_strong(expected, true, std::memory_order_relaxed))
+            c.first_registrations.fetch_add(1, std::memory_order_relaxed);
+        if (callback_trace_enabled()) {
+            static std::atomic<unsigned> lines{0};
+            log_line(lines,
+                     "[rt] d3d12_xs: allocator slot 9 registration: callback 0x%llx context 0x%llx (registrations "
+                     "%llu)\n",
+                     static_cast<unsigned long long>(callback), static_cast<unsigned long long>(context),
+                     static_cast<unsigned long long>(c.registrations.load(std::memory_order_relaxed)));
+        }
+        const std::uint64_t probe_seconds = probe_after_seconds();
+        if (probe_seconds) {
+            static const std::uint64_t started = GetTickCount64();
+            if (!probe_fired.load(std::memory_order_relaxed) &&
+                GetTickCount64() - started >= probe_seconds * 1000 &&
+                !probe_fired.exchange(1, std::memory_order_relaxed))
+                invoke(callback, context, "probe");
+        } else if (allocator_callback_invocation_enabled()) {
+            bool first_invocation = false;
+            if (self->console_callback_invoked.compare_exchange_strong(first_invocation, true,
+                                                                      std::memory_order_relaxed))
+                invoke(callback, context, "first registration on the allocator");
+        }
+    }
     static std::atomic<bool> logged{false};
     if (!logged.exchange(true, std::memory_order_relaxed))
         std::fprintf(stderr,
-                     "[rt] d3d12_xs: allocator slot %u (SetAllocatorCallbackX) recorded callback 0x%llx context 0x%llx; "
-                     "recorded on the proxy and never invoked (this line once)\n",
+                     "[rt] d3d12_xs: allocator slot %u (SetAllocatorCallbackX) recorded callback 0x%llx context "
+                     "0x%llx%s\n",
                      kConsoleAllocatorCallbackSlot, static_cast<unsigned long long>(callback),
-                     static_cast<unsigned long long>(context));
+                     static_cast<unsigned long long>(context),
+                     active_model || callback_env_enabled() ? " (invocation model on: see PALMETTO_XS_ALLOCATOR_CALLBACK)"
+                                                   : " (recorded on the proxy; never invoked)");
 }
 
 // The counters reset_device_proxy_stats clears for one kind: per-slot hits, first-call and beyond-table flags, and
@@ -1672,6 +1861,267 @@ inline void note_list_slot(unsigned slot, std::uint64_t a1 = 0, std::uint64_t a2
                  static_cast<unsigned long long>(a3), static_cast<unsigned long long>(a4),
                  constant_like ? "index/count shape (possible root 32-bit constants)" : "other shape");
 }
+
+// ---- Console list slots 70/71/72/74 (docs/bottom_of_pipe.md): counters and the measured model -------------------
+//
+// The measured shapes and their call sites are in d3d12_xs_device.h. Two switches, both off by default:
+//   PALMETTO_XS_CONSOLE_LIST_EXTRAS=1  the model: slot 70 forwards the depth bounds, slots 71/72 write the measured
+//                                      value into the mapped title destination at record time, slot 74 is evaluated.
+//   PALMETTO_XS_CONSOLE_LIST_TRACE=1   measurement only: the decoded shapes are logged (bounded) and no call changes.
+// The default path still answers slots 71/72/74 with 0 and slot 70 through the float entry (which, with the switch
+// off, counts and returns without forwarding). A boot that runs to its timeout has no shutdown summary, so the
+// counters are also printed every 16384 extra calls: that is the boot's reported table.
+namespace console_list_extras {
+
+struct Counts {
+    std::atomic<std::uint64_t> slot70_calls{0}, slot70_forwarded{0};
+    std::atomic<std::uint64_t> slot71_calls{0}, slot71_writes{0}, slot71_refused{0};
+    std::atomic<std::uint64_t> slot72_calls{0}, slot72_writes{0}, slot72_timestamps{0}, slot72_refused{0};
+    std::atomic<std::uint64_t> slot74_calls{0}, slot74_met{0}, slot74_unmet{0}, slot74_unreadable{0},
+        slot74_refused{0};
+};
+
+Counts& counts() {
+    static Counts counts;
+    return counts;
+}
+
+bool env_flag(const char* name) {
+    char value[8] = {};
+    return GetEnvironmentVariableA(name, value, sizeof(value)) > 0 && value[0] != '\0' && value[0] != '0';
+}
+
+// -2: not resolved yet, -1: the environment switch, 0/1: a test's explicit choice.
+std::atomic<int> g_mode{-2};
+
+bool env_enabled() {
+    static const bool on = env_flag("PALMETTO_XS_CONSOLE_LIST_EXTRAS");
+    return on;
+}
+
+bool trace_enabled() {
+    static const bool on = env_flag("PALMETTO_XS_CONSOLE_LIST_TRACE");
+    return on;
+}
+
+void print_summary();
+
+// True while a shape is decoded or written: the counters and the periodic summary are only paid then.
+bool active() {
+    const int mode = g_mode.load(std::memory_order_relaxed);
+    const bool on = mode == 1 || (mode == -2 && env_enabled());
+    if (!on && !trace_enabled()) return false;
+    static const bool summary_registered = [] {
+        // The boot is killed by the harness's timeout, so atexit is a best-effort extra; the periodic line is the
+        // measurement.
+        std::atexit(&print_summary);
+        return true;
+    }();
+    (void)summary_registered;
+    return true;
+}
+
+void maybe_print_summary() {
+    static std::atomic<std::uint64_t> events{0};
+    const std::uint64_t n = events.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n == 1 || n % 16384 == 0) print_summary();
+}
+
+void print_summary() {
+    const Counts& c = counts();
+    std::fprintf(stderr,
+                 "[rt] d3d12_xs: console list extras: slot70 calls %llu forwarded %llu | slot71 calls %llu writes "
+                 "%llu refused %llu | slot72 calls %llu writes %llu timestamps %llu refused %llu | slot74 calls %llu "
+                 "met %llu unmet %llu unreadable %llu refused %llu\n",
+                 static_cast<unsigned long long>(c.slot70_calls.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.slot70_forwarded.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.slot71_calls.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.slot71_writes.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.slot71_refused.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.slot72_calls.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.slot72_writes.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.slot72_timestamps.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.slot72_refused.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.slot74_calls.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.slot74_met.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.slot74_unmet.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.slot74_unreadable.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.slot74_refused.load(std::memory_order_relaxed)));
+}
+
+// A bounded diagnostic line per shape: the first eight calls and then one in every 4096, which is how a steady
+// state after the loading window is seen without filling the log.
+void trace_shape(const char* what, std::atomic<std::uint64_t>& call, const char* format, ...) {
+    if (!trace_enabled()) return;
+    const std::uint64_t n = call.load(std::memory_order_relaxed);
+    if (n > 8 && n % 4096 != 0) return;
+    char line[512];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    std::fprintf(stderr, "[rt] d3d12_xs: console list %s call %llu: %s\n", what,
+                 static_cast<unsigned long long>(n), line);
+}
+
+// The mapped title address is CPU-visible process memory in this layer, so the model reads and writes it through the
+// kernel: a page the title unmapped or reserved reports failure instead of faulting the recording thread.
+bool read_own(std::uint64_t address, void* out, std::size_t bytes) {
+    if (!address) return false;
+    SIZE_T done = 0;
+    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), out, bytes, &done) == TRUE &&
+           done == bytes;
+}
+
+bool write_own(std::uint64_t address, const void* data, std::size_t bytes) {
+    if (!address) return false;
+    SIZE_T done = 0;
+    return WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(address), data, bytes, &done) == TRUE &&
+           done == bytes;
+}
+
+void refuse(const char* slot, const char* why, std::uint64_t address, std::uint64_t a, std::uint64_t b,
+            std::uint64_t c) {
+    static std::atomic<unsigned> lines{0};
+    if (lines.fetch_add(1, std::memory_order_relaxed) >= 8) return;
+    std::fprintf(stderr,
+                 "[rt] d3d12_xs: console list %s refused: %s (address 0x%llx, args 0x%llx 0x%llx 0x%llx)\n", slot, why,
+                 static_cast<unsigned long long>(address), static_cast<unsigned long long>(a),
+                 static_cast<unsigned long long>(b), static_cast<unsigned long long>(c));
+}
+
+// The console's 100 MHz clock from the CPU's at record time (the measured alternative the console offers for a
+// bottom-of-pipe write's value: flags 1 or 2 ask for a timestamp, docs/bottom-of-pipe in the page's references).
+std::uint64_t console_clock_now() {
+    static const std::uint64_t frequency = [] {
+        LARGE_INTEGER value{};
+        QueryPerformanceFrequency(&value);
+        return value.QuadPart > 0 ? static_cast<std::uint64_t>(value.QuadPart) : 1;
+    }();
+    LARGE_INTEGER counter{};
+    QueryPerformanceCounter(&counter);
+    return static_cast<std::uint64_t>(counter.QuadPart) * 100'000'000ull / frequency;
+}
+
+// List slot 71, Write32BitValueBottomOfPipeX(address, dword, flush, flags), measured (address, dword, 0, 0).
+void write32_bottom_of_pipe(std::uint64_t address, std::uint64_t value, std::uint64_t flush, std::uint64_t flags,
+                            std::uint64_t caller) {
+    if (!active()) return;
+    Counts& c = counts();
+    c.slot71_calls.fetch_add(1, std::memory_order_relaxed);
+    if (trace_enabled()) {
+        char where[64];
+        streamed_blocks::caller_text(caller, where, sizeof(where));
+        trace_shape("slot 71 (Write32BitValueBottomOfPipeX)", c.slot71_calls,
+                    "address 0x%llx value 0x%llx flush 0x%llx flags 0x%llx (caller %s)",
+                    static_cast<unsigned long long>(address), static_cast<unsigned long long>(value),
+                    static_cast<unsigned long long>(flush), static_cast<unsigned long long>(flags), where);
+    }
+    if (!console_list_extras_enabled()) return;
+    // The console arguments are dwords: the title writes only the low half of the stack slot, so the upper 32 bits of
+    // a4 are caller residue (measured 0xaf00000000 at the slot-71 site). Compare the argument, not the residue.
+    const std::uint32_t console_flags = static_cast<std::uint32_t>(flags);
+    if (!address || (address & 3) || flush != 0 || console_flags != 0) {
+        c.slot71_refused.fetch_add(1, std::memory_order_relaxed);
+        refuse("slot 71", "shape not decoded (needs a 4-byte-aligned address, flush 0, flags 0)", address, value,
+               flush, flags);
+        return;
+    }
+    const auto word = static_cast<std::uint32_t>(value);
+    if (!write_own(address, &word, sizeof(word))) {
+        c.slot71_refused.fetch_add(1, std::memory_order_relaxed);
+        refuse("slot 71", "the destination is not writable title memory", address, value, flush, flags);
+        return;
+    }
+    c.slot71_writes.fetch_add(1, std::memory_order_relaxed);
+    maybe_print_summary();
+}
+
+// List slot 72, Write64BitValueBottomOfPipeX(address, qword, flush, flags), measured (address, 0, 0, 1): flags 1/2
+// ask for a timestamp instead of the value.
+void write64_bottom_of_pipe(std::uint64_t address, std::uint64_t value, std::uint64_t flush, std::uint64_t flags,
+                            std::uint64_t caller) {
+    if (!active()) return;
+    Counts& c = counts();
+    c.slot72_calls.fetch_add(1, std::memory_order_relaxed);
+    if (trace_enabled()) {
+        char where[64];
+        streamed_blocks::caller_text(caller, where, sizeof(where));
+        trace_shape("slot 72 (Write64BitValueBottomOfPipeX)", c.slot72_calls,
+                    "address 0x%llx value 0x%llx flush 0x%llx flags 0x%llx (caller %s)",
+                    static_cast<unsigned long long>(address), static_cast<unsigned long long>(value),
+                    static_cast<unsigned long long>(flush), static_cast<unsigned long long>(flags), where);
+    }
+    if (!console_list_extras_enabled()) return;
+    const std::uint32_t console_flags = static_cast<std::uint32_t>(flags);  // the caller's upper half is residue
+    if (!address || (address & 7) || flush != 0 || (console_flags & ~std::uint32_t{3})) {
+        c.slot72_refused.fetch_add(1, std::memory_order_relaxed);
+        refuse("slot 72", "shape not decoded (needs an 8-byte-aligned address, flush 0, flags 0/1/2)", address, value,
+               flush, flags);
+        return;
+    }
+    std::uint64_t written = value;
+    if (console_flags & 3) {
+        written = console_clock_now();
+        c.slot72_timestamps.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (!write_own(address, &written, sizeof(written))) {
+        c.slot72_refused.fetch_add(1, std::memory_order_relaxed);
+        refuse("slot 72", "the destination is not writable title memory", address, value, flush, flags);
+        return;
+    }
+    c.slot72_writes.fetch_add(1, std::memory_order_relaxed);
+    maybe_print_summary();
+}
+
+// List slot 74, Wait64BitValueX(address, comparison, qword, flags), measured (address, 7, qword, 1): comparison 7 is
+// GREATER_EQUAL and all 64 bits are compared. The model reads the cell at record time and counts whether it already
+// holds: when a bottom-of-pipe write of this list named the address, that write has been made (the model writes at
+// record time), so the recorded order meets it; a cell our memory map cannot read is refused by name; a cell that does
+// not hold yet is the measured unmet case, whose consumer would be the queue hold the replay layer does not carry.
+void memory_wait64(std::uint64_t address, std::uint64_t comparison, std::uint64_t value, std::uint64_t flags,
+                   std::uint64_t caller) {
+    if (!active()) return;
+    Counts& c = counts();
+    c.slot74_calls.fetch_add(1, std::memory_order_relaxed);
+    if (trace_enabled()) {
+        char where[64];
+        streamed_blocks::caller_text(caller, where, sizeof(where));
+        trace_shape("slot 74 (Wait64BitValueX)", c.slot74_calls,
+                    "address 0x%llx comparison 0x%llx value 0x%llx flags 0x%llx (caller %s)",
+                    static_cast<unsigned long long>(address), static_cast<unsigned long long>(comparison),
+                    static_cast<unsigned long long>(value), static_cast<unsigned long long>(flags), where);
+    }
+    if (!console_list_extras_enabled()) return;
+    const std::uint32_t console_flags = static_cast<std::uint32_t>(flags);  // the caller's upper half is residue
+    if (!address || comparison != 7 || console_flags != 1) {
+        c.slot74_refused.fetch_add(1, std::memory_order_relaxed);
+        refuse("slot 74", "shape not decoded (needs comparison 7 GREATER_EQUAL and flags 1)", address, comparison,
+               value, flags);
+        return;
+    }
+    std::uint64_t current = 0;
+    if (!read_own(address, &current, sizeof(current))) {
+        c.slot74_unreadable.fetch_add(1, std::memory_order_relaxed);
+        refuse("slot 74", "the waited cell is not readable title memory", address, comparison, value, flags);
+        return;
+    }
+    if (current >= value) {
+        c.slot74_met.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        const std::uint64_t unmet = c.slot74_unmet.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (unmet <= 8)
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: console list slot 74 memory wait not met at record time: cell 0x%llx holds "
+                         "0x%llx, wants >= 0x%llx (unmet %llu); the queue hold for a cross-list producer is not "
+                         "carried in this shim (docs/bottom_of_pipe.md)\n",
+                         static_cast<unsigned long long>(address), static_cast<unsigned long long>(current),
+                         static_cast<unsigned long long>(value), static_cast<unsigned long long>(unmet));
+    }
+    maybe_print_summary();
+}
+
+}  // namespace console_list_extras
 
 
 // ---- Console recording-call probe (measurement only; PALMETTO_XS_CLEAR_BARRIER_PROBE=1) --------------------------
@@ -2734,6 +3184,26 @@ std::uint64_t WINAPI list_slot(ListProxy* self, std::uint64_t a1, std::uint64_t 
         }
         return hr_to_u64(proxy_query_interface(self->device, reinterpret_cast<const IID*>(a1),
                                                reinterpret_cast<void**>(a2)));
+    } else if constexpr (Slot == 71) {
+        // Console Write32BitValueBottomOfPipeX (docs/bottom_of_pipe.md): (address, dword, flush, flags), measured
+        // (address, dword, 0, 0) at game+0x4ED46AA.
+        note_list_slot(Slot, a1, a2, a3, a4);
+        console_list_extras::write32_bottom_of_pipe(a1, a2, a3, a4,
+                                                    reinterpret_cast<std::uint64_t>(_ReturnAddress()));
+        return 0;
+    } else if constexpr (Slot == 72) {
+        // Console Write64BitValueBottomOfPipeX: (address, qword, flush, flags), measured (address, 0, 0, 1) at
+        // game+0x2482B37, flags 1/2 asking for a timestamp.
+        note_list_slot(Slot, a1, a2, a3, a4);
+        console_list_extras::write64_bottom_of_pipe(a1, a2, a3, a4,
+                                                    reinterpret_cast<std::uint64_t>(_ReturnAddress()));
+        return 0;
+    } else if constexpr (Slot == 74) {
+        // Console Wait64BitValueX: (address, comparison, qword, flags), measured (address, 7, qword, 1) at
+        // game+0x2484B12; comparison 7 is GREATER_EQUAL.
+        note_list_slot(Slot, a1, a2, a3, a4);
+        console_list_extras::memory_wait64(a1, a2, a3, a4, reinterpret_cast<std::uint64_t>(_ReturnAddress()));
+        return 0;
     } else {
         note_list_slot(Slot, a1, a2, a3, a4);
         // PALMETTO_XS_LIST_MUTE=32[,34...] (measurement): answer those console slots with 0 instead of forwarding
@@ -2941,10 +3411,53 @@ void fill_list_vtable(void** vtable, std::index_sequence<I...>) {
     ((vtable[I] = reinterpret_cast<void*>(&list_slot<static_cast<unsigned>(I)>)), ...);
 }
 
+// Console list slot 70 is PC slot 62 OMSetDepthBounds (docs/bottom_of_pipe.md): the two floats are in XMM1/XMM2, which
+// the integer thunk cannot carry, so this entry declares them and the compiler reads the same registers the title's
+// call wrote. With the model on it forwards to the real list's PC slot 62; with it off it counts and returns, which is
+// the proxy's previous visible behaviour for a void console slot.
+std::uint64_t WINAPI list_slot_om_set_depth_bounds(ListProxy* self, float minimum, float maximum) {
+    note_list_slot(kConsoleOmSetDepthBounds);
+    if (callers_enabled()) note_caller(CallerKind::list, kConsoleOmSetDepthBounds, _ReturnAddress(), 0, 0, 0, 0);
+    if (console_list_extras::active()) {
+        auto& c = console_list_extras::counts();
+        c.slot70_calls.fetch_add(1, std::memory_order_relaxed);
+        if (console_list_extras::trace_enabled()) {
+            static std::atomic<unsigned> lines{0};
+            const unsigned n = lines.fetch_add(1, std::memory_order_relaxed);
+            if (n < 8 || n % 4096 == 0) {
+                char where[64];
+                streamed_blocks::caller_text(reinterpret_cast<std::uint64_t>(_ReturnAddress()), where, sizeof(where));
+                std::fprintf(stderr,
+                             "[rt] d3d12_xs: console list slot 70 (OMSetDepthBounds) call %u: min %f max %f "
+                             "(caller %s)\n",
+                             n, static_cast<double>(minimum), static_cast<double>(maximum), where);
+            }
+        }
+        if (console_list_extras_enabled()) {
+            auto** const real_vtable = *reinterpret_cast<void***>(self->real);
+            if (kPcOmSetDepthBounds < self->pc_slot_count) {
+                using Fn = void(WINAPI*)(void*, float, float);
+                reinterpret_cast<Fn>(real_vtable[kPcOmSetDepthBounds])(self->real, minimum, maximum);
+                c.slot70_forwarded.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                static std::atomic<unsigned> lines{0};
+                if (lines.fetch_add(1, std::memory_order_relaxed) < 8)
+                    std::fprintf(stderr,
+                                 "[rt] d3d12_xs: console list slot 70 (OMSetDepthBounds) refused: the real list has "
+                                 "only %u slots, PC slot %u is past it\n",
+                                 self->pc_slot_count, kPcOmSetDepthBounds);
+            }
+        }
+        console_list_extras::maybe_print_summary();
+    }
+    return 0;
+}
+
 void** get_list_vtable() {
     static void** vtable = [] {
         static void* storage[kListSlots];
         fill_list_vtable(storage, std::make_index_sequence<kListSlots>{});
+        storage[kConsoleOmSetDepthBounds] = reinterpret_cast<void*>(&list_slot_om_set_depth_bounds);
         return storage;
     }();
     return vtable;
@@ -6905,6 +7418,54 @@ AllocatorCallback allocator_proxy_callback(const void* allocator) {
     record.callback = proxy->console_callback.load(std::memory_order_acquire);
     if (record.callback) record.context = proxy->console_callback_context.load(std::memory_order_acquire);
     return record;
+}
+
+ConsoleListExtraCounts console_list_extra_counts() {
+    const auto& c = console_list_extras::counts();
+    ConsoleListExtraCounts out;
+    out.slot70_calls = c.slot70_calls.load(std::memory_order_relaxed);
+    out.slot70_forwarded = c.slot70_forwarded.load(std::memory_order_relaxed);
+    out.slot71_calls = c.slot71_calls.load(std::memory_order_relaxed);
+    out.slot71_writes = c.slot71_writes.load(std::memory_order_relaxed);
+    out.slot71_refused = c.slot71_refused.load(std::memory_order_relaxed);
+    out.slot72_calls = c.slot72_calls.load(std::memory_order_relaxed);
+    out.slot72_writes = c.slot72_writes.load(std::memory_order_relaxed);
+    out.slot72_timestamps = c.slot72_timestamps.load(std::memory_order_relaxed);
+    out.slot72_refused = c.slot72_refused.load(std::memory_order_relaxed);
+    out.slot74_calls = c.slot74_calls.load(std::memory_order_relaxed);
+    out.slot74_met = c.slot74_met.load(std::memory_order_relaxed);
+    out.slot74_unmet = c.slot74_unmet.load(std::memory_order_relaxed);
+    out.slot74_unreadable = c.slot74_unreadable.load(std::memory_order_relaxed);
+    out.slot74_refused = c.slot74_refused.load(std::memory_order_relaxed);
+    return out;
+}
+
+void set_console_list_extras_enabled(int mode) {
+    console_list_extras::g_mode.store(mode == 0 || mode == 1 ? mode : -2, std::memory_order_relaxed);
+}
+
+bool console_list_extras_enabled() {
+    const int mode = console_list_extras::g_mode.load(std::memory_order_relaxed);
+    return mode == 1 || (mode == -2 && console_list_extras::env_enabled());
+}
+
+AllocatorCallbackCounts allocator_callback_counts() {
+    const auto& c = allocator_callback_invocation::counts();
+    AllocatorCallbackCounts out;
+    out.registrations = c.registrations.load(std::memory_order_relaxed);
+    out.first_registrations = c.first_registrations.load(std::memory_order_relaxed);
+    out.invocations = c.invocations.load(std::memory_order_relaxed);
+    out.refusals = c.refusals.load(std::memory_order_relaxed);
+    return out;
+}
+
+void set_allocator_callback_invocation_enabled(int mode) {
+    allocator_callback_invocation::g_mode.store(mode == 0 || mode == 1 ? mode : -2, std::memory_order_relaxed);
+}
+
+bool allocator_callback_invocation_enabled() {
+    const int mode = allocator_callback_invocation::g_mode.load(std::memory_order_relaxed);
+    return mode == 1 || (mode == -2 && allocator_callback_invocation::callback_env_enabled());
 }
 
 unsigned long command_object_proxy_ref_count(const void* object) {

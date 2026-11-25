@@ -218,6 +218,63 @@ AllocatorCallback allocator_proxy_callback(const void* allocator);
 std::uint64_t allocator_slot_hits(unsigned slot);
 bool allocator_slot_first_call_seen(unsigned slot);
 std::uint64_t allocator_table_overruns();
+// ---- Console list slots 70/71/72/74: OMSetDepthBounds, the bottom-of-pipe writes and the 64-bit memory wait ------
+//
+// docs/bottom_of_pipe.md. Measured on this title (RVAs relative to the image base):
+//   * console list slot 70 is PC slot 62 OMSetDepthBounds. The only call site is game+0x33390 (return 0x33396) in
+//     the recorder game+0x32520..0x33CB5: the list is in RCX and the two floats are in XMM1/XMM2, after a two-float
+//     compare and store of the same pair. The generic integer thunk cannot carry the floats, so the proxy's table
+//     entry at 70 is a float-shaped function that forwards to the real vtable's PC slot 62.
+//   * slot 71 = Write32BitValueBottomOfPipeX(address, dword, flush, flags); measured (address, dword, 0, 0) at
+//     game+0x4ED46AA. Its caller game+0x4ED4670 computes the address with game+0x4ED46D0: base[0x75DF268] +
+//     frame_counter*72 + index*4 (18 dwords a frame, one per parallel record), read from a field at [owner+0x1F9C4].
+//   * slot 72 = Write64BitValueBottomOfPipeX(address, qword, flush, flags); measured (address, 0, 0, 1) at
+//     game+0x2482B37: the address is record->+0x58 + index*8 and flags 1 (also 2 on the console) asks for a
+//     timestamp instead of the value, written when the list is recorded.
+//   * slot 74 = Wait64BitValueX(address, comparison, qword, flags); measured (address, 7, qword, 1) at game+0x2484B12.
+//     Comparison 7 is GREATER_EQUAL and the 64 bits are compared; the called record's cell is written on the GPU. The
+//     console holds the queue until the cell holds.
+//
+// The model behind PALMETTO_XS_CONSOLE_LIST_EXTRAS=1 (off by default): slot 70 forwards to PC slot 62, slots 71/72
+// write the measured value into the mapped title address at record time (the destination is CPU-visible process
+// memory here; the marker-out GPU form would need a replay command, see the page's limits), and slot 74 evaluates the
+// cell (met/unmet; a cell the mapped title memory does not let us read is refused by name). Every shape outside the
+// measured one is refused by name and counted. PALMETTO_XS_CONSOLE_LIST_TRACE=1 logs the measured shapes without
+// changing a call. Counters are per-process and exposed for the tests and the boot's summary line.
+inline constexpr unsigned kConsoleOmSetDepthBounds = 70;
+inline constexpr unsigned kPcOmSetDepthBounds = 62;
+struct ConsoleListExtraCounts {
+    std::uint64_t slot70_calls = 0, slot70_forwarded = 0;
+    std::uint64_t slot71_calls = 0, slot71_writes = 0, slot71_refused = 0;
+    std::uint64_t slot72_calls = 0, slot72_writes = 0, slot72_timestamps = 0, slot72_refused = 0;
+    std::uint64_t slot74_calls = 0, slot74_met = 0, slot74_unmet = 0, slot74_unreadable = 0, slot74_refused = 0;
+};
+ConsoleListExtraCounts console_list_extra_counts();
+// 1: on, 0: off, -1: the PALMETTO_XS_CONSOLE_LIST_EXTRAS environment switch (the default). Tests use this to exercise
+// both arms in one process; nothing in the runtime sets it.
+void set_console_list_extras_enabled(int mode);
+bool console_list_extras_enabled();
+
+// ---- Allocator slot 9: invoking the registered callback ----------------------------------------------------------
+//
+// docs/allocator_slot9.md. The registered callback game+0x555DF10 reads: argument 4, the size (2^arg4 when arg4 < 16,
+// else explicit bytes), argument 3, the recording pool's memory class (passed on as edx), and argument 6, the
+// recording context (the registration's context); it allocates a block from the pool at context+0x12780, frees the
+// previous block at context+0x12798 and stores the new one there. The title itself allocates from that pool with
+// class 0x18 (game+0x18845E), and a static scan shows context+0x12798 is read only by the callback and the callback
+// pointer is referenced only at the registration site, so the console runtime is the only invoker. With
+// PALMETTO_XS_ALLOCATOR_CALLBACK=1 (off by default) the proxy invokes the pair once per allocator proxy, on its first
+// registration, with (0, 0, 0, class 0x18, size 0x10000, 0, context) and logs the returned block and the cell; a null
+// return, an unreadable context or a context that already carries a block is refused by name. The invocation is a
+// parity step: no measured title code reads the block back.
+struct AllocatorCallbackCounts {
+    std::uint64_t registrations = 0, first_registrations = 0, invocations = 0, refusals = 0;
+};
+AllocatorCallbackCounts allocator_callback_counts();
+// 1: on, 0: off, -1: the PALMETTO_XS_ALLOCATOR_CALLBACK environment switch (the default). Tests use this.
+void set_allocator_callback_invocation_enabled(int mode);
+bool allocator_callback_invocation_enabled();
+
 // Command list proxies created by device slot 73 (CreateCommandListX):
 bool is_command_list_proxy(const void* list);
 ID3D12GraphicsCommandList* command_list_proxy_real_list(const void* list);

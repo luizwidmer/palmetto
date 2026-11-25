@@ -187,3 +187,93 @@ files `runtime/shims/d3d12_xs_device.cpp`, `runtime/shims/d3d12_xs_device.h`, `r
 and `runtime/test/xs_proxy_mock_test.cpp`, commit `e29e989980` by DevilNine. No code from that project was copied; the
 full notice is in [NOTICE.md](../NOTICE.md). The upstream project remains the copyright of its contributors under
 GPL-3.0.
+
+## 9. Addendum (2026-11-25): invoking the callback
+
+*This section appends this tree's measurement of the callback's own body and the invocation the slice now performs. It
+keeps sections 1-8 intact: section 6's first limit ("the callback is never invoked") is answered here, and the rest of
+that limit list still stands.*
+
+### 9.1 What the callback's body reads
+
+A linear disassembly of `game+0x555DF10..0x555DF6B` (the function the registration names) reads exactly three of its
+seven argument words; the console runtime's own calling convention on x64 puts the first four words in RCX/RDX/R8/R9 and
+the next three on the caller's stack, so the body's accesses decode as:
+
+| the callback reads | what it does with it |
+|---|---|
+| argument 3 (R9) | the recording pool's memory class: passed as `edx` through `game+0x4D9F400` -> `game+0x4D9F450(context+0x12780, class, size)` |
+| argument 4 (stack word 0) | the size: `2^size` when `size < 16`, otherwise the explicit byte count (a shift with a `cmovae` bound) |
+| argument 6 (stack word 2) | the recording context: the base of the pool object; the block is stored at `context+0x12798` and the block already there is freed first through `game+0x4DA9F50` |
+
+The other four arguments are never read by the body. The registration itself (`game+0x188501`) passes only
+`(callback, context)`, so the console's invocation supplies the class and the size. Two static scans bound who could
+invoke it: the callback address is referenced by exactly one instruction in the image (the `lea` at `game+0x1884EE`,
+inside the registration caller `game+0x188430`), and `context+0x12798` is read by only the callback's own body. The
+title therefore never calls the callback itself and never reads the block back; the console runtime was the only
+invoker.
+
+The same caller gives the class a measured value: immediately before it registers, `game+0x188430` allocates 8 bytes
+from the same pool with class `0x18` (`game+0x18845E`: `edx = 0x18`, `r8d = 8`), so `0x18` is a class the title's own
+recording pool accepts. The size is the one input with no measurement; the model uses one console recording chunk,
+`0x10000`.
+
+### 9.2 What is implemented and how it is switched
+
+In `port/shims/d3d12_xs_device.cpp` and `.h`, off by default:
+
+- the allocator proxy keeps a per-proxy claim flag; the **first registration on a proxy** is the model's invocation
+  point, because that is where a console runtime would set the allocator's recording memory up. Later registrations on
+  the same proxy only replace the pair, as before;
+- with the switch on, the pair is invoked with the measured argument shape
+  `(0, 0, 0, class 0x18, size 0x10000, 0, context)`: the context is read at `+0x12798` through the kernel before the
+  call (an unreadable context is refused before any title code runs), and the returned block plus the cell before and
+  after are logged;
+- a null return, an unreadable context or a pair missing either word is **refused by name** and counted; the block is
+  never freed by the runtime (the title owns its pool) and nothing reads it back (section 9.1);
+- the switch is `PALMETTO_XS_ALLOCATOR_CALLBACK=1`; `PALMETTO_XS_ALLOCATOR_CALLBACK_TRACE=1` logs the registrations,
+  `PALMETTO_XS_ALLOCATOR_CALLBACK_PROBE=<seconds>` invokes the pair once after that second as a one-shot measurement
+  (bounded log), and the model's two chosen inputs can be moved for a probe with
+  `PALMETTO_XS_ALLOCATOR_CALLBACK_SIZE` and `PALMETTO_XS_ALLOCATOR_CALLBACK_CLASS`. The counters are
+  `allocator_callback_counts()`: registrations, first registrations, invocations, refusals;
+- the companion change to the console command list (its slots 70/71/72/74) is the slice page
+  [bottom_of_pipe.md](bottom_of_pipe.md); its two switches are `PALMETTO_XS_CONSOLE_LIST_EXTRAS` and
+  `PALMETTO_XS_CONSOLE_LIST_TRACE` and its count summary is in that page.
+
+### 9.3 Measurement and gates
+
+The probe boot and the model arm are the boot pair of [bottom_of_pipe.md](bottom_of_pipe.md) section 5; this section
+records the allocator-specific numbers there rather than a second pair. The probe arm ran with
+`PALMETTO_XS_ALLOCATOR_CALLBACK_TRACE=1` and `PALMETTO_XS_ALLOCATOR_CALLBACK_PROBE=30`; its trace showed the callback
+`0x14555DF10` and the same recording context on every logged registration, and the probe did not fire (the one-shot's
+firing condition was fixed after that arm, so the arm is the registration measurement, not the invocation one). The
+model arm ran with `PALMETTO_XS_ALLOCATOR_CALLBACK=1` and no probe: the pair is invoked once per allocator proxy on its
+first registration. The bounded log records the first eight invocations, all successful:
+
+| logged invocation | returned block | `context+0x12798` before -> after | class / size |
+|---:|---|---|---|
+| 1 | `0x1BB75400000` | `0` -> `0x1BB75400000` | `0x18` / `0x10000` |
+| 2 | `0x1BB75420000` | `0` -> `0x1BB75420000` | `0x18` / `0x10000` |
+| 3 | `0x1BB75440000` | `0` -> `0x1BB75440000` | `0x18` / `0x10000` |
+| 4 | `0x1BB75460000` | `0` -> `0x1BB75460000` | `0x18` / `0x10000` |
+| 5 | `0x1BB75480000` | `0` -> `0x1BB75480000` | `0x18` / `0x10000` |
+| 6 | `0x1BB754A0000` | `0` -> `0x1BB754A0000` | `0x18` / `0x10000` |
+
+The pool rounds the 64 KiB request to an `0x20000` stride; every invocation returned a block, wrote it into the cell
+and freed the one the context already held (the "before" cell is `0` for the first eight allocations recorded, i.e.
+each is a fresh context for the log's first entries). No null return and no refusal occurred, the boot stayed
+`ALIVE 130.4 s` with 0 exceptions and 0 refused submissions, and the stage-2 state and job graph are the negative
+recorded on the slice page. The exact total invocation count is the `invocations` field of
+`allocator_callback_counts()`; the log's `0x0 -> block` entries above are the bounded first eight, and the earlier
+census's allocator population (about 440 proxies a boot) bounds what the rest would be.
+
+`port/test/xs_proxy_mock_test.cpp` adds `check_allocator_callback_invocation`: a synthetic callback proves the
+invocation happens once per allocator proxy with `(class 0x18, size 0x10000, context)`, later registrations only
+replace the pair, a null return and an unreadable context are refused by name, and the off arm invokes nothing.
+
+### 9.4 Attribution
+
+Same policy and attribution as section 8: our own measurement of the image and boots; the reference fork's recorded
+answer (never invoked) is the cross-check of section 4's "the callback itself" row, and no reference code was used.
+The invocation semantics are this repository's model, with the limits of [bottom_of_pipe.md](bottom_of_pipe.md)
+section 6.

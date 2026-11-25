@@ -201,6 +201,11 @@ struct Mock {
     std::uint64_t srv_dest;
     std::uint64_t srv_resource;
     unsigned srv_calls;
+    // PC command-list slot 62 (OMSetDepthBounds): the floats the proxy's float-shaped console slot-70 entry forwarded
+    // (docs/bottom_of_pipe.md). The generic integer thunk cannot carry them, so the test reads them here.
+    unsigned depth_bounds_calls;
+    float depth_bounds_min;
+    float depth_bounds_max;
 };
 
 Mock g_pool[256];
@@ -609,6 +614,16 @@ void fill_mock_vtable(void** vtable, std::index_sequence<I...>) {
     ((vtable[I] = reinterpret_cast<void*>(&mock_slot<static_cast<unsigned>(I)>)), ...);
 }
 
+// PC ID3D12GraphicsCommandList1::OMSetDepthBounds (slot 62): the proxy's console slot-70 float-shaped entry forwards
+// its two XMM words here (docs/bottom_of_pipe.md). This table entry replaces the generic thunk for slot 62, which no
+// other mock check uses.
+void WINAPI mock_om_set_depth_bounds(Mock* self, float minimum, float maximum) {
+    ++self->calls[62];
+    ++self->depth_bounds_calls;
+    self->depth_bounds_min = minimum;
+    self->depth_bounds_max = maximum;
+}
+
 void** mock_vtable() {
     static void* table[kMockSlots];
     static const bool filled = [] {
@@ -620,6 +635,7 @@ void** mock_vtable() {
         table[27] = reinterpret_cast<void*>(&mock_create_committed_resource);  // PC CreateCommittedResource
         table[41] = reinterpret_cast<void*>(&mock_create_command_signature);  // PC CreateCommandSignature
         table[18] = reinterpret_cast<void*>(&mock_slot18);  // GetDesc for a queue, CreateShaderResourceView for a device
+        table[62] = reinterpret_cast<void*>(&mock_om_set_depth_bounds);  // PC OMSetDepthBounds (console list 70's target)
         return true;
     }();
     (void)filled;
@@ -2287,7 +2303,78 @@ int check_console_command_list() {
     raw(list_proxy, 52, word(&emptied_view), word(clear_colour), 0, 0);
     EXPECT(real_list->calls[48] == clears_before + 1);
 
+    // ---- Console list slots 70/71/72/74 (docs/bottom_of_pipe.md) ------------------------------------------------
+    //
+    // Slot 70 is PC slot 62 OMSetDepthBounds with its two floats in XMM1/XMM2: the proxy's float-shaped entry can only
+    // forward them with the model on. Slot 71/72 are the measured bottom-of-pipe writes (32 and 64 bits at the title
+    // address) and slot 74 is the 64-bit memory wait (comparison 7, GREATER_EQUAL, 64 bits compared).
+    {
+        using DepthBounds = void(WINAPI*)(void*, float, float);
+        auto** const proxy_vtable = *reinterpret_cast<void***>(list7_proxy);
+        const xs::ConsoleListExtraCounts before = xs::console_list_extra_counts();
+
+        // The off arm: the console call answers 0, forwards nothing and is not counted by the model.
+        xs::set_console_list_extras_enabled(0);
+        reinterpret_cast<DepthBounds>(proxy_vtable[70])(list7_proxy, 0.25f, 0.75f);
+        EXPECT(real_list7->calls[62] == 0);
+        EXPECT(xs::console_list_extra_counts().slot70_calls == before.slot70_calls);
+
+        // The on arm: the same floats reach the real list's PC slot 62 OMSetDepthBounds.
+        xs::set_console_list_extras_enabled(1);
+        reinterpret_cast<DepthBounds>(proxy_vtable[70])(list7_proxy, 0.25f, 0.75f);
+        EXPECT(real_list7->calls[62] == 1);
+        EXPECT(real_list7->depth_bounds_calls == 1);
+        EXPECT(real_list7->depth_bounds_min == 0.25f && real_list7->depth_bounds_max == 0.75f);
+        EXPECT(xs::console_list_extra_counts().slot70_calls == before.slot70_calls + 1);
+        EXPECT(xs::console_list_extra_counts().slot70_forwarded == before.slot70_forwarded + 1);
+
+        // Slot 71, Write32BitValueBottomOfPipeX (address, dword, 0, 0): the dword lands in the mapped destination.
+        std::uint32_t cell32 = 0;
+        const xs::ConsoleListExtraCounts before71 = xs::console_list_extra_counts();
+        raw(list7_proxy, 71, word(&cell32), 0xABCD1234ull, 0, 0);
+        EXPECT(cell32 == 0xABCD1234u);
+        EXPECT(xs::console_list_extra_counts().slot71_calls == before71.slot71_calls + 1);
+        EXPECT(xs::console_list_extra_counts().slot71_writes == before71.slot71_writes + 1);
+        // A shape outside the measured one (flags 4) is refused by name and writes nothing.
+        cell32 = 0;
+        raw(list7_proxy, 71, word(&cell32), 0x55, 0, 4);
+        EXPECT(cell32 == 0);
+        EXPECT(xs::console_list_extra_counts().slot71_refused == before71.slot71_refused + 1);
+
+        // Slot 72, Write64BitValueBottomOfPipeX (address, qword, 0, 0): all 64 bits are written; flags 1 asks for the
+        // console's 100 MHz clock instead of the argument value.
+        std::uint64_t cell64 = 0;
+        const xs::ConsoleListExtraCounts before72 = xs::console_list_extra_counts();
+        raw(list7_proxy, 72, word(&cell64), 0x1122334455667788ull, 0, 0);
+        EXPECT(cell64 == 0x1122334455667788ull);
+        EXPECT(xs::console_list_extra_counts().slot72_writes == before72.slot72_writes + 1);
+        EXPECT(xs::console_list_extra_counts().slot72_timestamps == before72.slot72_timestamps);
+        cell64 = 0;
+        raw(list7_proxy, 72, word(&cell64), 0, 0, 1);
+        EXPECT(cell64 != 0);
+        EXPECT(xs::console_list_extra_counts().slot72_timestamps == before72.slot72_timestamps + 1);
+        // A 64-bit write at an address that is only 4-byte aligned is refused by name.
+        cell64 = 0;
+        raw(list7_proxy, 72, word(&cell64) + 4, 0x77, 0, 0);
+        EXPECT(cell64 == 0);
+        EXPECT(xs::console_list_extra_counts().slot72_refused == before72.slot72_refused + 1);
+
+        // Slot 74, Wait64BitValueX (address, comparison 7, qword, flags 1): met, unmet, unreadable and refused.
+        std::uint64_t waited = 5;
+        const xs::ConsoleListExtraCounts before74 = xs::console_list_extra_counts();
+        raw(list7_proxy, 74, word(&waited), 7, 3, 1);
+        EXPECT(xs::console_list_extra_counts().slot74_met == before74.slot74_met + 1);
+        raw(list7_proxy, 74, word(&waited), 7, 9, 1);
+        EXPECT(xs::console_list_extra_counts().slot74_unmet == before74.slot74_unmet + 1);
+        raw(list7_proxy, 74, 0x10, 7, 9, 1);  // the null page is not readable title memory
+        EXPECT(xs::console_list_extra_counts().slot74_unreadable == before74.slot74_unreadable + 1);
+        raw(list7_proxy, 74, word(&waited), 3, 9, 1);  // comparison 3 is not measured
+        EXPECT(xs::console_list_extra_counts().slot74_refused == before74.slot74_refused + 1);
+
+        xs::set_console_list_extras_enabled(-1);  // back to the environment switch (off) for anything that follows
+    }
     EXPECT(release(list7_proxy) == 0 && real_list7->refs == 0);
+
 
     // Clean up
     EXPECT(release(list_proxy) == 0 && real_list->refs == 0);
@@ -2915,6 +3002,94 @@ int check_slot70_console_view() {
     return 0;
 }
 
+// ---- Allocator slot 9's callback invocation (docs/allocator_slot9.md) -------------------------------------------
+//
+// The model invokes the registered (callback, context) pair once per allocator proxy, on its first registration, with
+// the callback's measured argument shape: arg3 = the recording pool's class, arg4 = the size, arg6 = the context. The
+// synthetic callback below proves the invocation, the arguments, the once-per-proxy rule and the two refusals.
+struct AllocatorCallbackProbe {
+    unsigned calls = 0;
+    std::uint64_t a3 = 0;
+    std::uint64_t a4 = 0;
+    std::uint64_t a6 = 0;
+    std::uint64_t block = 0;
+};
+AllocatorCallbackProbe g_allocator_callback_probe;
+
+std::uint64_t WINAPI test_allocator_callback(std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t a3,
+                                             std::uint64_t a4, std::uint64_t, std::uint64_t a6) {
+    ++g_allocator_callback_probe.calls;
+    g_allocator_callback_probe.a3 = a3;
+    g_allocator_callback_probe.a4 = a4;
+    g_allocator_callback_probe.a6 = a6;
+    return g_allocator_callback_probe.block;
+}
+
+int check_allocator_callback_invocation() {
+    Mock* mock_device = nullptr;
+    void* device = make_device(mock_device, 11, true);
+    EXPECT(device != nullptr);
+    const IID alloc_iid = __uuidof(ID3D12CommandAllocator);
+    // The callback stores its block at context+0x12798, and the model reads that cell through the kernel before and
+    // after the call: the context has to be readable process memory.
+    static std::uint8_t context[0x12800] = {};
+    static std::uint64_t block_storage = 0;
+    g_allocator_callback_probe = AllocatorCallbackProbe{};
+    g_allocator_callback_probe.block = word(&block_storage);
+
+    xs::set_allocator_callback_invocation_enabled(1);
+    const xs::AllocatorCallbackCounts before = xs::allocator_callback_counts();
+
+    void* allocator_a = nullptr;
+    EXPECT(hr_of(raw(device, 9, 0, word(&alloc_iid), word(&allocator_a))) == S_OK);
+    EXPECT(xs::is_allocator_proxy(allocator_a));
+    // The first registration on a fresh allocator proxy invokes the pair once, with the measured shape.
+    raw(allocator_a, 9, word(&test_allocator_callback), word(context), 0, 0);
+    EXPECT(g_allocator_callback_probe.calls == 1);
+    EXPECT(g_allocator_callback_probe.a3 == 0x18);      // the class the title's own pool allocation uses
+    EXPECT(g_allocator_callback_probe.a4 == 0x10000);   // one console recording chunk
+    EXPECT(g_allocator_callback_probe.a6 == word(context));
+    // Later registrations on the same proxy only replace the pair.
+    raw(allocator_a, 9, word(&test_allocator_callback), word(context), 0, 0);
+    EXPECT(g_allocator_callback_probe.calls == 1);
+    const xs::AllocatorCallbackCounts after = xs::allocator_callback_counts();
+    EXPECT(after.registrations == before.registrations + 2);
+    EXPECT(after.first_registrations == before.first_registrations + 1);
+    EXPECT(after.invocations == before.invocations + 1);
+
+    // A callback that returns no memory is refused by name.
+    g_allocator_callback_probe.block = 0;
+    void* allocator_b = nullptr;
+    EXPECT(hr_of(raw(device, 9, 0, word(&alloc_iid), word(&allocator_b))) == S_OK);
+    raw(allocator_b, 9, word(&test_allocator_callback), word(context), 0, 0);
+    EXPECT(g_allocator_callback_probe.calls == 2);
+    EXPECT(xs::allocator_callback_counts().refusals == after.refusals + 1);
+
+    // A context the model cannot read is refused before title code is called.
+    g_allocator_callback_probe.calls = 0;
+    void* allocator_c = nullptr;
+    EXPECT(hr_of(raw(device, 9, 0, word(&alloc_iid), word(&allocator_c))) == S_OK);
+    raw(allocator_c, 9, word(&test_allocator_callback), 0x10, 0, 0);
+    EXPECT(g_allocator_callback_probe.calls == 0);
+    EXPECT(xs::allocator_callback_counts().refusals == after.refusals + 2);
+
+    // The off arm: a fresh proxy records the pair and invokes nothing.
+    xs::set_allocator_callback_invocation_enabled(0);
+    void* allocator_d = nullptr;
+    EXPECT(hr_of(raw(device, 9, 0, word(&alloc_iid), word(&allocator_d))) == S_OK);
+    raw(allocator_d, 9, word(&test_allocator_callback), word(context), 0, 0);
+    EXPECT(g_allocator_callback_probe.calls == 0);
+    xs::set_allocator_callback_invocation_enabled(-1);
+
+    EXPECT(release(allocator_d) == 0 && release(allocator_c) == 0 && release(allocator_b) == 0 &&
+           release(allocator_a) == 0);
+    EXPECT(release(device) == 0 && mock_device->refs == 0);
+    std::printf("%s: allocator slot 9's callback is invoked once per allocator with the measured class/size/context "
+                "arguments, a null return and an unreadable context are refused, and the off arm invokes nothing\n",
+                g_label);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     no_dialogs();
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -2938,7 +3113,7 @@ int main(int argc, char** argv) {
     if (check_tail(true) || check_queue_console_slots() || check_queue_copy_page_mappings() || check_levels() ||
         check_fence1() || check_create_failures() || check_open_shared() || check_alloc_failures() ||
         check_allocators() || check_xbox_slots() || check_slot74_and_slot25_standin() ||
-        check_console_command_list() || check_slot57_graphics_record() ||
+        check_console_command_list() || check_allocator_callback_invocation() || check_slot57_graphics_record() ||
         check_slot55_derived_pipeline_state() || check_console_command_signature() || check_slot70_console_view())
         return 1;
     std::printf("xs_proxy_mock_test: PASS (%d allocations refused on purpose)\n", g_failed_news);
