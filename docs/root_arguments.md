@@ -256,8 +256,90 @@ the screen transform the pair may produce coverage; that is a measurement, not t
   shape the decoder refuses (0 today) would be a different shape and its tail would need a fresh measurement.
 * `PALMETTO_GRAPHICS_CONSOLE_ROOT` is diagnostic and off by default; the default path was booted ALIVE 150.1 s with the
   same numbers as before this increment.
-* Gates: `build_gta6rt.cmd` -> `PALMETTO_OK`; `build_tests.cmd` -> `TESTS_BUILT`; `graphics_pso_test` -> 227 checks
-  passed (12 new this task: 10 placement + 2 encoding); `graphics_record_test` unchanged.
-* Boots: control `boot-rootargs-control` (150 s, ALIVE), console feed `boot-console3`, `boot-console5/6` (PS control)
-  and the final binary's `boot-console7-final` (150 s, ALIVE), all outside the repository; the 25 s root-signature
-  measurement boots are `boot-rootargs6` and `boot-rootargs4/5`.
+* Gates: `build_gta6rt.cmd` -> `PALMETTO_OK`; `build_tests.cmd` -> `TESTS_BUILT`; `graphics_pso_test` -> 242 checks
+  passed (27 new across this task's increments: 10 placement, 2 encoding, 15 signature classification);
+  `graphics_record_test` unchanged.
+* Boots: control `boot-rootargs-control` (150 s, ALIVE), console feed `boot-console3`, `boot-console5/6` (PS control),
+  the final binary's `boot-console7-final` (150 s, ALIVE) and the signature-classification boot `boot-sigclass1`
+  (150 s, ALIVE, `PALMETTO_SIG_CLASS=1`), all outside the repository; the 25 s root-signature measurement boots are
+  `boot-rootargs6` and `boot-rootargs4/5`.
+
+## 9. Where the pixel stage's user-data SGPRs come from (carrier answer)
+
+The sibling pass's black was traced to its pixel stage's push-constant user data. This section answers where those
+dwords are *supposed* to come from, from the pipeline-state side and the title's own call sites; the answer is a
+**measured negative**.
+
+**The native read set is two dwords, not thirty-two.** The published program metadata
+(`<shader dir>/pipeline_graphics/index.json`, the project's own `user_sgpr_reads`) for `fspx/lib_ps_00820` is
+exactly `s8 ptr32_lo` and `s9 const32` (`lib_ps_00822`, the compose pass, has the same pair). The translated module
+copies all 32 dwords of push-constant member 0 into a private array because the translator's push block is a fixed 144
+bytes; that copy is not evidence that the native program reads 32 dwords. So the sibling PS's colour constant can only be
+`s9` - the dword after the descriptor-table pointer at the console pixel base `s8` - and `s0..s7`/`s10..s31` are
+not read by it at all.
+
+**No pipeline-state carrier exists in the measured title.**
+
+* **Console device slot 55 (CreateDerivedPipelineStateX).** The patch histogram is complete by construction: every
+  part word is pushed before the dispatch, an unknown part is refused `E_NOTIMPL` with a named line, and the summary's
+  "refused before the call" counts it. Measured boots: parts `0` and `2` only, 0 unknown parts, 0 refusals. The
+  console table's parts 0-3 are fixed-function state; there is no user-data part.
+* **The slot-57 record.** Every byte below `+0x108` is validated: the root-signature pointer, the state/layout pairs,
+  eight stage-slot pairs (slot 0/1/2 are program+stage-blob pairs with the measured size envelopes; slots 3..7 must be
+  zero), and `+0x88..+0x108` must be zero. All 10,241 records of a boot decode with 0 refusals, so there is no
+  validated-but-unused field to carry a UDX array; the only unvalidated area is the tail beyond `+0x108` (previously
+  measured as adjacent memory, and the library record's own 40 undecoded bytes are five hash fields, not values).
+* **The creation API shape.** The title calls four pipeline-creation surfaces: slot 57 (record), slot 55
+  (base+count+patches), slots 62/67 (compute desc/record), and slot 86. Slot 60 is never called. Only slot **86**
+  (`CreatePipelineStateX`) takes a stream: measured at `game+0x2479A87` it receives a
+  `D3D12_PIPELINE_STATE_STREAM_DESC { SizeInBytes = 0x2B0, pPipelineStateSubobjectStream = <stack block> }`, and the
+  stream builder at `game+0x86F090` zeroes exactly 0x2B0 bytes and writes only standard PC subobject types - 1 VS,
+  2 PS, 3 DS, 4 HS, 5 GS, 8 BLEND, 9 SAMPLE_MASK, 10 RASTERIZER, 21 DEPTH_STENCIL1, 17 SAMPLE_DESC, 12 INPUT_LAYOUT,
+  14 PRIMITIVE_TOPOLOGY, 15 RENDER_TARGET_FORMATS, 16 DEPTH_STENCIL_FORMAT (root signature implicit type 0 at +0). No
+  console-only/user-data subobject is written. So the title never passes a user-data array at pipeline creation.
+
+**The one unmodelled root-argument path, and why it is still negative here.** The title image (not just the console
+DLLs) has inline command-buffer writers: `tooling/inline_scan.py` finds 110 command-list inline-write sites, 110
+limit-checked / 0 unchecked, 12 of them against the root-argument limit `+0x30`, with root-argument-shaped header
+dwords (`0xc000b600`, `0xc000b800`) and vtable fallback slots at console list slots 35, 43, 45, 47, 24 and 20. The
+command-list proxy already pins its cursor at the limit so such writers fall back to the vtable, and the boot's console
+list-slot first calls were measured with their arguments: slot 34 `(0, 0x19, 0x19)`, slot 36 `(0, <title VA>,
+<stack ptr>, <hash>)`, slot 47 `(0, <stack ptr>, 0, 0)`, slot 48 `(0, 1, <title VA>, 0x43)`. None of those has a
+32-dword block + count shape, and the traced stream has 0 calls to every root-constant/root-view setter (48,003
+`SetGraphicsRootSignature`, 32,002 `SetGraphicsRootDescriptorTable`, 0 for the eight constant/view setters). So the
+inline path does not carry the sibling pass's user data in the measured boot either.
+
+**Conclusion.** The sibling pixel stage's only user-data read is `s9`. If its pipeline's root signature declares a
+32-bit constant parameter after the descriptor table, `s9` is a root constant the title must set - and the only
+setter that could do it without appearing in the trace is an inline/console-only root-argument call, which the measured
+boot does not exercise. If the signature declares the table only (the frame-capture instrumentation reports one
+parameter for the pipeline it traced), then `s9` is *beyond the signature span* and is driver-defined on the console:
+the layer has no recorded source for it. The decisive next check is therefore small: read the sibling pipeline's
+root-signature parameter list from the slot-57 record it was built from; a constant parameter makes the missing value a
+root constant (and names the setter slot to instrument), no constant parameter closes the question as driver-defined.
+
+**Measured: both pass signatures are table-only.** PALMETTO_SIG_CLASS=1 (a gated one-line classification in
+create_graphics, port/shims/d3d12_vulkan_device.cpp) classifies the pipeline's root signature at creation from the
+placed parameters, and a 150 s boot (oot-sigclass1, ALIVE 150.1 s, no exception) printed exactly one shape for each
+pass:
+
+`
+signature class fspx/lib_vs_00821+fspx/lib_ps_00820: 1 parameter(s): [type 2 (descriptor table), 0 constant value(s),
+    console slot s8, 1 dword(s)] -> descriptor table at parameter 0 and NO 32-bit constant after it
+signature class fspx/lib_vs_00823+fspx/lib_ps_00822: 1 parameter(s): [type 2 (descriptor table), 0 constant value(s),
+    console slot s8, 1 dword(s)] -> descriptor table at parameter 0 and NO 32-bit constant after it
+`
+
+So the sibling PS's s9 is **beyond the signature span**: the console pixel base is s8, the only parameter is a
+descriptor table taking ONE dword at s8, and there is no constant parameter after it. On the console that dword is
+driver-defined, and this layer has no recorded source for it. The console-list setter instrumentation in item 2 of the
+handoff therefore does **not** apply: there is no setter slot whose value could be the constant, because no root
+signature declares it. The forwarding idea is dead - do not forward member-0 dwords or synthesise s9; the sibling
+pixel shader's member-0 reads beyond the signature span are not title data.
+
+**Implication for the colour frontier.** The constant pass's colour cannot be recovered from root arguments, pipeline
+state, the derived patches, the creation stream or the inline list writes; either the shipped console's driver leaves
+that SGPR to whatever the compiled program expects (a USER_SGPR-count/serialized-state question, not an API one), or the
+sibling pass is a utility/flag pass rather than the frame's content pass. The next measurement is therefore not another
+user-data carrier: it is the frame-capture scan of the draws that actually write the PRESENT plane resource across
+frames (keyed by the present resource id), as the frame-capture owner's 300-600 s scan does.

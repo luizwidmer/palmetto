@@ -1327,6 +1327,76 @@ void test_console_graphics_user_data() {
     const pso::ConsoleTableValue too_big = pso::console_table_value(0x1'0000'0000ull);
     check(!too_big.fits && too_big.dword == 0,
           "console table value: a value that does not fit the slot's one dword is refused, not truncated");
+
+    // Signature classification (docs/root_arguments.md section 9): the sibling pass's pixel stage reads s8+s9, so the
+    // question is whether the signature declares a 32-bit constant AFTER the descriptor table (console s9) or is
+    // table-only (s9 beyond the signature span).
+    using rt::rootsig::ParamType;
+    RootSignature table_only;
+    RootParameter only_table;
+    only_table.type = ParamType::Table;
+    table_only.params.push_back(only_table);
+    pso::ConsoleSignatureClass classified;
+    check(pso::classify_console_signature(table_only, false, &classified), "classify: table-only signature places");
+    check(classified.table_index == 0 && classified.constant_after_table < 0,
+          "classify: a table-only signature has no constant after the table");
+
+    RootSignature table_constant;
+    table_constant.params.push_back(only_table);
+    RootParameter one_constant;
+    one_constant.type = ParamType::Constants;
+    one_constant.num_values = 1;
+    table_constant.params.push_back(one_constant);
+    check(pso::classify_console_signature(table_constant, false, &classified),
+          "classify: table+constant signature places");
+    check(classified.table_index == 0 && classified.constant_after_table == 1,
+          "classify: the constant parameter is found after the table");
+    check(classified.constant_after_table_slot == 9 && classified.constant_after_table_dwords == 1,
+          "classify: that constant is console s9, one dword");
+
+    RootSignature constant_before_table;
+    constant_before_table.params.push_back(one_constant);
+    constant_before_table.params.push_back(only_table);
+    check(pso::classify_console_signature(constant_before_table, false, &classified),
+          "classify: constant-before-table signature places");
+    check(classified.constant_after_table < 0, "classify: a constant BEFORE the table is not counted");
+
+    RootSignature two_tables_constant;
+    two_tables_constant.params.push_back(only_table);
+    two_tables_constant.params.push_back(only_table);
+    RootParameter three_constants;
+    three_constants.type = ParamType::Constants;
+    three_constants.num_values = 3;
+    two_tables_constant.params.push_back(three_constants);
+    check(pso::classify_console_signature(two_tables_constant, false, &classified),
+          "classify: two tables+constant signature places");
+    check(classified.constant_after_table == 2 && classified.constant_after_table_slot == 10 &&
+              classified.constant_after_table_dwords == 3,
+          "classify: after two one-dword tables the constant starts at s10 with three dwords");
+
+    RootSignature table_view;
+    table_view.params.push_back(only_table);
+    RootParameter view_parameter;
+    view_parameter.type = ParamType::Descriptor;
+    table_view.params.push_back(view_parameter);
+    check(pso::classify_console_signature(table_view, false, &classified),
+          "classify: table+root-view signature places");
+    check(classified.constant_after_table < 0, "classify: a root view after the table is not a constant");
+
+    check(pso::classify_console_signature(table_constant, true, &classified),
+          "classify: the same signature places for a mesh pipeline");
+    check(classified.constant_after_table_slot == 17,
+          "classify: for mesh the constant after the s16 table is console s17");
+
+    RootSignature spilling;
+    RootParameter many_constants;
+    many_constants.type = ParamType::Constants;
+    many_constants.num_values = 28;
+    spilling.params.push_back(many_constants);
+    spilling.params.push_back(only_table);
+    check(!pso::classify_console_signature(spilling, false, &classified),
+          "classify: a signature the console layout refuses returns false");
+    check(!classified.ok && !classified.error.empty(), "classify: the refusal names the parameter");
 }
 
 void print_findings() {

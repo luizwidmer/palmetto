@@ -200,6 +200,52 @@ ConsoleTableValue console_table_value(std::uint64_t arena_relative_va) {
     return value;
 }
 
+void classify_console_parameters(std::span<const ConsoleParameter> parameters, ConsoleSignatureClass* out) {
+    if (!out) return;
+    ConsoleSignatureClass result;
+    result.parameters.assign(parameters.begin(), parameters.end());
+    for (std::size_t i = 0; i < parameters.size(); ++i) {
+        if (result.table_index < 0 && parameters[i].type == rt::rootsig::ParamType::Table) result.table_index = int(i);
+        if (result.table_index >= 0 && int(i) > result.table_index &&
+            parameters[i].type == rt::rootsig::ParamType::Constants) {
+            result.constant_after_table = int(i);
+            result.constant_after_table_slot = parameters[i].first_sgpr;
+            result.constant_after_table_dwords = parameters[i].dwords;
+            break;
+        }
+    }
+    result.ok = true;
+    *out = std::move(result);
+}
+
+bool classify_console_signature(const rt::rootsig::RootSignature& signature, bool mesh_pipeline,
+                                ConsoleSignatureClass* out) {
+    if (!out) return false;
+    ConsoleUserDataPlacement placement;
+    const bool placed = console_graphics_user_data(signature, mesh_pipeline, &placement);
+    std::vector<ConsoleParameter> parameters;
+    parameters.reserve(signature.params.size());
+    for (std::size_t i = 0; i < signature.params.size(); ++i) {
+        const rt::rootsig::RootParameter& parameter = signature.params[i];
+        ConsoleParameter entry;
+        entry.type = parameter.type;
+        entry.values = parameter.type == rt::rootsig::ParamType::Constants ? parameter.num_values : 0;
+        entry.dwords = rt::rootsig::stage_dwords(parameter.type, parameter.num_values);
+        entry.first_sgpr = placed && i < placement.first_sgpr.size() ? placement.first_sgpr[i]
+                                                                    : rt::rootsig::kNoSgpr;
+        parameters.push_back(entry);
+    }
+    if (!placed) {
+        ConsoleSignatureClass refused;
+        refused.error = placement.error;
+        refused.parameters = std::move(parameters);
+        *out = std::move(refused);
+        return false;
+    }
+    classify_console_parameters(parameters, out);
+    return true;
+}
+
 bool decode_fixed_function_state(const rt::graphics_record::State& state, FixedFunctionState* out,
                                  FixedFunctionFieldStatus* fields, std::string* why) {
     if (fields) *fields = FixedFunctionFieldStatus{};

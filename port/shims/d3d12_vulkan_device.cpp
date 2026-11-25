@@ -4625,6 +4625,75 @@ public:
                 return E_NOTIMPL;
             }
         }
+        // Diagnostic (PALMETTO_SIG_CLASS=1, docs/root_arguments.md section 9): classify the root signature's console
+        // parameter layout for the two pass pixel stages whose published read set is s8+s9 - the sibling pass
+        // (fspx/lib_ps_00820) and the compose pass (fspx/lib_ps_00822). The question this answers without a boot-time
+        // guess: is s9 a declared 32-bit constant parameter after the descriptor table, or is it beyond the signature
+        // span (driver-defined on the console)? Types, console slots and dword counts only; one line per pipeline
+        // shape.
+        if ([] {
+                static const bool on = [] {
+                    char value[8] = {};
+                    return GetEnvironmentVariableA("PALMETTO_SIG_CLASS", value, sizeof(value)) > 0 && value[0] != '\0' &&
+                           value[0] != '0';
+                }();
+                return on;
+            }()) {
+            for (const Stage& stage : stages) {
+                if (!stage.entry) continue;
+                if (stage.entry->name.find("lib_ps_00820") == std::string::npos &&
+                    stage.entry->name.find("lib_ps_00822") == std::string::npos)
+                    continue;
+                std::string pipeline;
+                for (const Stage& other : stages) {
+                    if (!other.entry) continue;
+                    if (!pipeline.empty()) pipeline += "+";
+                    pipeline += other.entry->name;
+                }
+                std::vector<rt::graphics_pso::ConsoleParameter> parameters;
+                if (const RootArgumentLayout* root = root_signature_layout(desc.pRootSignature)) {
+                    for (const auto& placed : root->parameters) {
+                        rt::graphics_pso::ConsoleParameter entry;
+                        entry.type = placed.type;
+                        entry.values = placed.constant_count;
+                        entry.first_sgpr = placed.console_offset;
+                        entry.dwords = rt::rootsig::stage_dwords(placed.type, placed.constant_count);
+                        parameters.push_back(entry);
+                    }
+                }
+                std::string shape = pipeline;
+                for (const auto& entry : parameters)
+                    shape += " " + std::to_string(int(entry.type)) + "@+" + std::to_string(entry.first_sgpr) + "x" +
+                             std::to_string(entry.dwords);
+                static std::mutex class_mutex;
+                static std::set<std::string> printed;
+                {
+                    const std::lock_guard lock(class_mutex);
+                    if (!printed.insert(shape).second) continue;
+                }
+                rt::graphics_pso::ConsoleSignatureClass classified;
+                rt::graphics_pso::classify_console_parameters(parameters, &classified);
+                std::fprintf(stderr, "[rt] d3d12: signature class %s: %zu parameter(s):", pipeline.c_str(),
+                             parameters.size());
+                for (const auto& entry : parameters)
+                    std::fprintf(stderr, " [type %d, %u constant value(s), console slot s%d, %u dword(s)]",
+                                 int(entry.type), entry.values,
+                                 entry.first_sgpr == rt::rootsig::kNoSgpr ? -1 : int(entry.first_sgpr), entry.dwords);
+                if (classified.constant_after_table >= 0)
+                    std::fprintf(stderr,
+                                 " -> a 32-bit constant AFTER the descriptor table: parameter %d at console s%u, "
+                                 "%u dword(s)\n",
+                                 classified.constant_after_table, classified.constant_after_table_slot,
+                                 classified.constant_after_table_dwords);
+                else if (classified.table_index >= 0)
+                    std::fprintf(stderr,
+                                 " -> descriptor table at parameter %d and NO 32-bit constant after it (table-only after "
+                                 "the table)\n",
+                                 classified.table_index);
+                else
+                    std::fprintf(stderr, " -> no descriptor table parameter\n");
+            }
+        }
         // --f16-interp-fallback (SHADER-378): align/synthesize VS decoded f16 halves for this (VS, PS) pair before
         // creating the shader modules so colliding PS and high-param producers link within MoltenVK's 30 locations.
         // stages[] is {vs, gs, ps} since geometry shaders joined graphics PSOs (#2109): the PS is stages[2], and with a

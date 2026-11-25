@@ -156,6 +156,44 @@ struct ConsoleTableValue {
 };
 ConsoleTableValue console_table_value(std::uint64_t arena_relative_va);
 
+// ---- Classifying a pipeline's root-signature parameters in the console layout ---------------------------------
+//
+// The sibling pass's black was traced to its pixel stage's user data, and the published program metadata narrows what
+// that stage can read: `fspx/lib_ps_00820` reads exactly `s8` (a 32-bit pointer) and `s9` (a 32-bit constant), and the
+// compose `fspx/lib_ps_00822` reads the same pair (docs/root_arguments.md section 9). On the console pixel base `s8`, a
+// descriptor table takes ONE dword, so the dword after a table parameter is `s9` - the constant only if the root
+// signature declares a 32-bit constant parameter *after* the table. This classification answers that question from the
+// signature alone, without a boot: it lists every parameter (type, console first SGPR, console dword width) and finds
+// the first 32-bit-constant parameter that follows a descriptor table.
+//
+// The two overloads exist because the pipeline path carries different models: the pure signature model
+// (`rt::rootsig::RootSignature`) is available when the signature is created and in the tests, while the pipeline
+// objects carry the already-placed parameters (`RootArgumentLayout`); both reduce to `ConsoleParameter`.
+struct ConsoleParameter {
+    rt::rootsig::ParamType type = rt::rootsig::ParamType::Constants;
+    std::uint32_t values = 0;   // Constants: number of 32-bit values; other types: unused (0)
+    std::uint32_t first_sgpr = rt::rootsig::kNoSgpr;  // console user SGPR, kNoSgpr when the layout refused it
+    std::uint32_t dwords = 0;   // console width: a constant one dword per value, a root view two, a table one
+};
+
+struct ConsoleSignatureClass {
+    bool ok = false;
+    std::string error;                     // set when the console layout refuses the signature (spill)
+    std::vector<ConsoleParameter> parameters;
+    int table_index = -1;                  // index of the first descriptor-table parameter, -1 when none
+    int constant_after_table = -1;         // first 32-bit-constant parameter after the first table, -1 when none
+    std::uint32_t constant_after_table_slot = rt::rootsig::kNoSgpr;     // its console user SGPR (the sibling's s9)
+    std::uint32_t constant_after_table_dwords = 0;
+};
+
+// Classifies already-placed parameters. `parameters` are in root-signature order.
+void classify_console_parameters(std::span<const ConsoleParameter> parameters, ConsoleSignatureClass* out);
+
+// Places `signature` in the console graphics layout (mesh base s16 when `mesh_pipeline`, else the vertex/pixel base
+// s8) and classifies the result. False, with `error` set, when the console layout refuses the signature.
+bool classify_console_signature(const rt::rootsig::RootSignature& signature, bool mesh_pipeline,
+                                ConsoleSignatureClass* out);
+
 // Which of FixedFunctionState's eight fields a decoded state record yielded. The state blob's container decodes
 // (rt::graphics_record::decode_state, docs/state_blob.md) but no measurement of this title's data pins any of its
 // words to a fixed-function field, so every member is false today; the struct exists so the refusal is per field and
