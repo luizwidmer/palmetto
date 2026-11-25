@@ -331,7 +331,8 @@ These switches are opt-in and off by default unless stated; `PALMETTO_SHADERS`, 
 | `PALMETTO_VK_VALIDATION` | Runtime diagnostic switch; opt-in and off by default. |
 | `PALMETTO_VULKAN_DEVICE` | Runtime diagnostic switch; opt-in and off by default. |
 | `PALMETTO_VULKAN_LOADER` | Runtime diagnostic switch; opt-in and off by default. |
-| `PALMETTO_WAIT_SAMPLE` | Samples the title's wait states on a timer. |
+| `PALMETTO_WAIT_SAMPLE` | Samples the title's wait states on a timer: per thread the wait API, handle or wait-on-address key, object type and state, the timeout, and the caller's short stack. |
+| `PALMETTO_WAIT_TRACE` | Names every host wait a title thread enters - API, caller site, object, timeout, outcome - matches set/wake calls against those objects, and dumps the aggregate wait sites, object correlation and still-outstanding waits at the named times (docs/wait_forensics.md). |
 | `PALMETTO_WATCH_GLOBAL` | Watches a title global and reports writes. |
 | `PALMETTO_WATCH_RVA_WRITE` | Runtime diagnostic switch; opt-in and off by default. |
 | `PALMETTO_XBOX_PRESENT_HOOK_ONLY` | Keeps the PresentX hook without presenting. |

@@ -39,6 +39,7 @@
 #include "host_cpu.h"
 #include "mods.h"
 #include "pe_loader.h"
+#include "wait_trace.h"
 #include "../shims/d3d12_trace.h"
 #include "../shims/d3d12_xs_device.h"
 #include "../shims/file_system.h"
@@ -202,6 +203,13 @@ void wait_object_type(HANDLE handle, char* out, std::size_t cap) {    out[0] = '
     if (bytes > 0) out[bytes] = '\0';
 }
 
+struct WaitThreadSample {
+    DWORD tid = 0;
+    std::uint64_t rip = 0, rsp = 0, rcx = 0, rdx = 0, r8 = 0, r9 = 0, start = 0;
+    unsigned stack_count = 0;
+    std::uint64_t stack[8] = {};
+};
+
 // Reads up to `cap` handles from an array the wait call names. No C++ objects, so __try is legal; a bad pointer just
 // yields no handles.
 unsigned read_wait_handles(std::uint64_t pointer, HANDLE* out, unsigned cap) {
@@ -219,12 +227,64 @@ unsigned read_wait_handles(std::uint64_t pointer, HANDLE* out, unsigned cap) {
     return found;
 }
 
-struct WaitThreadSample {
-    DWORD tid = 0;
-    std::uint64_t rip = 0, rsp = 0, rcx = 0, rdx = 0, r8 = 0, r9 = 0, start = 0;
-    unsigned stack_count = 0;
-    std::uint64_t stack[8] = {};
-};
+// One 64-bit word of the suspended thread's memory (a stack slot or a pointer argument). Page-checked, so a stale
+// stack pointer is a skipped read, not a fault.
+bool read_thread_word(std::uint64_t address, std::uint64_t& value) {
+    if (!address) return false;
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery((const void*)(std::uintptr_t)address, &info, sizeof(info)) != sizeof(info)) return false;
+    if (info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+    __try {
+        value = *reinterpret_cast<const std::uint64_t*>((std::uintptr_t)address);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+// Formats a relative NT timeout (100 ns units, negative) as milliseconds, an absolute one as "abs", a null pointer as
+// "INF". Returns nullptr when the API does not carry one in a register this sampler can name.
+const char* wait_timeout_text(const char* api, const WaitThreadSample& sample) {
+    if (!api) return nullptr;
+    static char buffer[32];
+    auto from_large_integer = [](std::uint64_t pointer) -> const char* {
+        if (!pointer) return "INF";
+        std::uint64_t value = 0;
+        if (!read_thread_word(pointer, value)) return "?";
+        const auto amount = static_cast<long long>(value);
+        if (amount < 0) {
+            std::snprintf(buffer, sizeof buffer, "%lld", -amount / 10000);
+            return buffer;
+        }
+        return "abs";
+    };
+    if (std::strstr(api, "NtWaitForSingleObject") || std::strstr(api, "NtWaitForAlertByThreadId") ||
+        std::strstr(api, "NtDelayExecution"))
+        return from_large_integer(sample.rdx);
+    if (std::strstr(api, "NtWaitForMultipleObjects")) {
+        std::uint64_t pointer = 0;  // the fifth argument sits at [rsp + 0x28] in the syscall stub
+        if (!read_thread_word(sample.rsp + 0x28, pointer)) return "?";
+        return from_large_integer(pointer);
+    }
+    unsigned long long ms = 0;
+    bool found = true;
+    if (std::strstr(api, "WaitForMultipleObjects"))
+        ms = sample.r9;
+    else if (std::strstr(api, "WaitForSingleObject") || std::strstr(api, "NtWaitForSingleObject"))
+        ms = sample.rdx;
+    else if (std::strstr(api, "SleepConditionVariableSRW"))
+        ms = sample.r8;
+    else if (std::strstr(api, "SleepEx") || std::strstr(api, "Sleep"))
+        ms = sample.rcx;
+    else if (std::strstr(api, "WaitOnAddress"))
+        ms = sample.r9;
+    else
+        found = false;
+    if (!found) return nullptr;
+    if ((ms & 0xFFFFFFFFull) == 0xFFFFFFFFull) return "INF";
+    std::snprintf(buffer, sizeof buffer, "%llu", ms & 0xFFFFFFFFull);
+    return buffer;
+}
 
 void wait_state_sample_once(std::uintptr_t image_base, std::uintptr_t image_size,
                             const std::vector<WaitSampleApi>& apis, const char* at_seconds) {
@@ -302,12 +362,22 @@ void wait_state_sample_once(std::uintptr_t image_base, std::uintptr_t image_size
         const char* api = wait_api_name(apis.data(), (unsigned)apis.size(), sample.rip);
         const bool interesting = api != nullptr || (sample.rip >= modules.image_base && sample.rip < modules.image_end);
         if (!interesting) continue;
-        if (++waiting > 24) continue;
+        if (++waiting > 96) continue;  // bounded: the histogram above already names every site
         char type[64] = {};
         if (api && wait_takes_handle(api) && !std::strstr(api, "WaitForMultipleObjects"))
             wait_object_type((HANDLE)(std::uintptr_t)sample.rcx, type, sizeof(type));
         detail += "\n  tid " + std::to_string(sample.tid) + " rip " + site;
         if (api) detail += std::string(" wait ") + api;
+        // The timeout the sampled call passes (registers survive in the ntdll stub), the address a wait-on-address wait
+        // keys on, and the object's current state - so one sample says whether the wait is unbounded and what it is
+        // waiting for, not just where it is blocked.
+        const char* timeout = wait_timeout_text(api, sample);
+        if (timeout) detail += std::string(" timeout ") + timeout;
+        if (api && std::strstr(api, "NtWaitForAlertByThreadId")) {
+            char key[32];
+            std::snprintf(key, sizeof key, " key 0x%llx", (unsigned long long)sample.rcx);
+            detail += key;
+        }
         if (api && std::strstr(api, "WaitForMultipleObjects")) {
             char count[32];
             std::snprintf(count, sizeof count, " on %llu object(s)", (unsigned long long)sample.rcx);
@@ -329,6 +399,9 @@ void wait_state_sample_once(std::uintptr_t image_base, std::uintptr_t image_size
             std::snprintf(handle, sizeof handle, "0x%llx", (unsigned long long)sample.rcx);
             detail += std::string(" handle ") + handle;
             if (type[0]) detail += std::string(" (") + type + ")";
+            char state[64] = {};
+            palmetto::wait_trace::object_state_text((HANDLE)(std::uintptr_t)sample.rcx, type, state, sizeof(state));
+            if (state[0]) detail += std::string(" state ") + state;
         }
         char start[48];
         std::snprintf(start, sizeof start, " start %s", rt::shims::module_offset(sample.start).c_str());
@@ -1776,6 +1849,11 @@ int wmain(int argc, wchar_t** argv) {
         // the wait-state sampler above). Off when unset.
         if (const char* spec = std::getenv("PALMETTO_WAIT_SAMPLE"); spec && *spec)
             start_wait_sampler(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, spec);
+        // PALMETTO_WAIT_TRACE=<seconds,...>: name every host wait the title reaches - API, caller site, object, timeout,
+        // outcome - and dump the aggregates, the per-object set correlation and the still-outstanding waits at the given
+        // times (diagnostic; see wait_trace.h). Off when unset.
+        if (const char* spec = std::getenv("PALMETTO_WAIT_TRACE"); spec && *spec)
+            palmetto::wait_trace::start(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, spec);
         // PALMETTO_RIP_HIST=<start,end[;start,end]>: title-RIP histogram windows (diagnostic; see the RIP histogram
         // above). Off when unset.
         if (const char* spec = std::getenv("PALMETTO_RIP_HIST"); spec && *spec)
