@@ -34,6 +34,7 @@
 #include <windows.h>
 
 #include <SDL3/SDL.h>
+#include <intrin.h>
 
 #include <algorithm>
 #include <atomic>
@@ -44,11 +45,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "../src/fake_input.h"
 #include "gameinput.h"
 #include "gameinput_abi.h"
 #include "shims.h"
@@ -189,6 +192,48 @@ rt::gameinput::Config read_config() {
     return c;
 }
 
+// ---- read-path trace (PALMETTO_INPUT_TRACE) ---------------------------------------------------------------------
+//
+// Which input API does the title poll, and from where? With PALMETTO_INPUT_TRACE set, every input entry point logs
+// its first call and then every tenth-power call (1, 10, 100, ...), with the caller as module+RVA and the call's
+// result. `module_offset` resolves a mapped title image, so a line names the title's code.
+//
+// The budget is O(log calls) per entry point, so a title polling every frame cannot flood the log; every line also
+// carries the ordinal, so the poll rate is readable from the last two lines. Off by default.
+bool read_trace_enabled() {
+    static const bool on = [] {
+        const std::string t = env("PALMETTO_INPUT_TRACE");
+        return !t.empty() && t != "0" && t != "off";
+    }();
+    return on;
+}
+
+// `detail` is what the call asked for (for a reading call, the GameInputKind); 0 where it has none.
+void trace_read(const char* entry, void* caller, long long result, unsigned detail = 0) {
+    if (!read_trace_enabled()) return;
+    static std::mutex mu;
+    static std::map<const char*, uint64_t> counts;  // keyed by the string literal's address: one counter per entry
+    uint64_t n;
+    {
+        std::lock_guard lock(mu);
+        n = ++counts[entry];
+        if (n != 1) {
+            uint64_t p = 10;
+            while (p < n) p *= 10;
+            if (p != n) return;
+        }
+    }
+    const std::string where = rt::shims::module_offset(reinterpret_cast<uint64_t>(caller));
+    if (detail)
+        std::fprintf(stderr, "[rt] gameinput: read trace: %s #%llu from %s -> 0x%llx (kind 0x%x)\n", entry,
+                     static_cast<unsigned long long>(n), where.c_str(),
+                     static_cast<unsigned long long>(static_cast<uint64_t>(result)), detail);
+    else
+        std::fprintf(stderr, "[rt] gameinput: read trace: %s #%llu from %s -> 0x%llx\n", entry,
+                     static_cast<unsigned long long>(n), where.c_str(),
+                     static_cast<unsigned long long>(static_cast<uint64_t>(result)));
+}
+
 // ---- objects ----------------------------------------------------------------------------------------------------
 
 class Device;
@@ -241,7 +286,10 @@ public:
 
     uint32_t STDMETHODCALLTYPE GetInputKind() override {
         // A reading of a pad without sensors carries no motion, and one without a raw report no raw report.
-        return kBaseKinds | (s_.has_motion ? GameInputKindMotion : 0u) | (s_.has_raw ? GameInputKindRawDeviceReport : 0u);
+        const uint32_t kind =
+            kBaseKinds | (s_.has_motion ? GameInputKindMotion : 0u) | (s_.has_raw ? GameInputKindRawDeviceReport : 0u);
+        trace_read("IGameInputReading::GetInputKind", _ReturnAddress(), static_cast<long long>(kind));
+        return kind;
     }
     uint64_t STDMETHODCALLTYPE GetSequenceNumber(uint32_t) override { return seq_; }
     uint64_t STDMETHODCALLTYPE GetTimestamp() override { return ts_; }
@@ -274,12 +322,14 @@ public:
     bool STDMETHODCALLTYPE GetArcadeStickState(void*) override { return false; }
     bool STDMETHODCALLTYPE GetFlightStickState(void*) override { return false; }
     bool STDMETHODCALLTYPE GetGamepadState(GameInputGamepadState* state) override {
+        trace_read("IGameInputReading::GetGamepadState", _ReturnAddress(), state ? 1 : 0);
         if (!state) return false;
         *state = s_.gamepad;
         return true;
     }
     bool STDMETHODCALLTYPE GetRacingWheelState(void*) override { return false; }
     bool STDMETHODCALLTYPE GetUiNavigationState(GameInputUiNavigationState* state) override {
+        trace_read("IGameInputReading::GetUiNavigationState", _ReturnAddress(), state ? 1 : 0);
         if (!state) return false;
         state->buttons = s_.ui;
         return true;
@@ -1900,6 +1950,104 @@ void update_keyboard_pad() {
     SDL_SetJoystickVirtualAxis(g_keyboard.js, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, fire ? 32767 : -32768);
 }
 
+// ---- synthetic input (PALMETTO_FAKE_INPUT) ----------------------------------------------------------------------
+//
+// The loading-gate experiment (docs/input_gate.md): the title is stuck in a loading state, and one hypothesis is that
+// it waits for a button. With PALMETTO_FAKE_INPUT=<seconds> the shim attaches one extra SDL virtual gamepad - the
+// title needs a device to read at all - and holds that pad's A button (the conventional accept/start button) for a
+// short burst after <seconds>, a few times. The schedule is palmetto::FakeInputSchedule (src/fake_input.h).
+//
+// Default OFF: no pad, no timers, nothing changes. The pad stays attached after the last press, so an armed-far-off
+// control run and a press run differ only in the press itself.
+struct FakePad {
+    SDL_JoystickID id = 0;
+    SDL_Joystick* js = nullptr;
+    bool failed = false;              // attaching failed once; not retried every 2 ms
+    uint64_t start_us = 0;            // the poll clock when the pad attached: the schedule's zero
+    std::optional<unsigned> pressed;  // the press being held; nullopt when the button is up
+    bool finished = false;            // the last press has been released
+};
+
+FakePad g_fake;
+
+std::optional<palmetto::FakeInputSchedule> read_fake_input_config() {
+    char buf[64];
+    const DWORD n = GetEnvironmentVariableA("PALMETTO_FAKE_INPUT", buf, sizeof buf);
+    const char* text = (n > 0 && n < sizeof buf) ? buf : nullptr;
+    std::optional<palmetto::FakeInputSchedule> schedule = palmetto::FakeInputSchedule::parse(text);
+    if (!schedule) {
+        if (text && *text)
+            std::fprintf(stderr, "[rt] gameinput: PALMETTO_FAKE_INPUT=%s is not a delay in seconds, synthetic input off\n",
+                         text);
+        return schedule;
+    }
+    std::fprintf(stderr,
+                 "[rt] gameinput: PALMETTO_FAKE_INPUT=%s: synthetic pad A pressed for %llu ms, %.3f s after the pad "
+                 "attaches, %u press(es) every %llu ms\n",
+                 text, static_cast<unsigned long long>(schedule->burst_us() / 1000),
+                 static_cast<double>(schedule->press_at_us()) / 1e6, schedule->presses(),
+                 static_cast<unsigned long long>(schedule->interval_us() / 1000));
+    return schedule;
+}
+
+const std::optional<palmetto::FakeInputSchedule>& fake_input_config() {
+    static const std::optional<palmetto::FakeInputSchedule> schedule = read_fake_input_config();
+    return schedule;
+}
+
+bool attach_fake_pad() {
+    SDL_VirtualJoystickDesc d;
+    SDL_INIT_INTERFACE(&d);
+    d.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+    d.naxes = SDL_GAMEPAD_AXIS_COUNT;
+    d.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+    d.button_mask = (1u << SDL_GAMEPAD_BUTTON_COUNT) - 1;
+    d.axis_mask = (1u << SDL_GAMEPAD_AXIS_COUNT) - 1;
+    d.name = "Synthetic pad (Palmetto FAKE_INPUT)";
+    g_fake.id = SDL_AttachVirtualJoystick(&d);
+    g_fake.js = g_fake.id ? SDL_OpenJoystick(g_fake.id) : nullptr;
+    if (!g_fake.js) {
+        std::fprintf(stderr, "[rt] gameinput: cannot attach the synthetic pad: %s\n", SDL_GetError());
+        if (g_fake.id) SDL_DetachVirtualJoystick(g_fake.id);
+        g_fake.id = 0;
+        g_fake.failed = true;
+        return false;
+    }
+    g_fake.start_us = now_us();
+    std::fprintf(stderr, "[rt] gameinput: synthetic pad attached (PALMETTO_FAKE_INPUT), A released\n");
+    return true;
+}
+
+// Before SDL_UpdateGamepads, so the button set here is in this poll's reading, as for the keyboard pad.
+void update_fake_pad() {
+    const std::optional<palmetto::FakeInputSchedule>& schedule = fake_input_config();
+    if (!schedule) return;
+    if (!g_fake.js && (g_fake.failed || !attach_fake_pad())) return;
+    if (g_fake.finished) return;
+    // The sticks rest at 0 and the triggers are released (-32768 in SDL's full range), so the only input this pad
+    // ever reports is the one button the schedule holds.
+    SDL_SetJoystickVirtualAxis(g_fake.js, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, -32768);
+    SDL_SetJoystickVirtualAxis(g_fake.js, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, -32768);
+    const uint64_t elapsed = now_us() - g_fake.start_us;
+    const std::optional<unsigned> press = schedule->press_at(elapsed);
+    if (press != g_fake.pressed) {
+        g_fake.pressed = press;
+        SDL_SetJoystickVirtualButton(g_fake.js, SDL_GAMEPAD_BUTTON_SOUTH, press.has_value());
+        if (press)
+            std::fprintf(stderr, "[rt] gameinput: synthetic A pressed (press %u of %u, %.3f s after the pad attached)\n",
+                         *press + 1, schedule->presses(), static_cast<double>(elapsed) / 1e6);
+        else
+            std::fprintf(stderr, "[rt] gameinput: synthetic A released (%.3f s after the pad attached)\n",
+                         static_cast<double>(elapsed) / 1e6);
+    }
+    if (schedule->finished_at(elapsed)) {
+        g_fake.finished = true;
+        std::fprintf(stderr,
+                     "[rt] gameinput: synthetic input finished (%u press(es)); the synthetic pad stays attached\n",
+                     schedule->presses());
+    }
+}
+
 bool init_sdl() {
     State& s = g();
     if (s.sdl_ready) return true;
@@ -1931,6 +2079,7 @@ void poll_once() {
     if (!init_sdl()) return;
     apply_prompt_config();
     update_keyboard_pad();
+    update_fake_pad();
     SDL_UpdateGamepads();
     const uint64_t now = now_us();
 
@@ -2294,7 +2443,11 @@ public:
         return r;
     }
     // Runs the queued callbacks on the caller's thread within the quota (see deliver_within).
-    bool STDMETHODCALLTYPE Dispatch(uint64_t quotaInMicroseconds) override { return deliver_within(quotaInMicroseconds); }
+    bool STDMETHODCALLTYPE Dispatch(uint64_t quotaInMicroseconds) override {
+        const bool ran = deliver_within(quotaInMicroseconds);
+        trace_read("IGameInputDispatcher::Dispatch", _ReturnAddress(), ran ? 1 : 0);
+        return ran;
+    }
     HRESULT STDMETHODCALLTYPE OpenWaitHandle(HANDLE* handle) override {
         if (!handle) return E_POINTER;
         *handle = nullptr;
@@ -2377,47 +2530,28 @@ public:
     ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
     ULONG STDMETHODCALLTYPE Release() override { return release_floor(refs_); }  // a process-wide singleton
 
-    uint64_t STDMETHODCALLTYPE GetCurrentTimestamp() override { return now_us(); }
+    uint64_t STDMETHODCALLTYPE GetCurrentTimestamp() override {
+        trace_read("IGameInput::GetCurrentTimestamp", _ReturnAddress(), 0);
+        return now_us();
+    }
 
     HRESULT STDMETHODCALLTYPE GetCurrentReading(uint32_t kind, IGameInputDevice* device, IGameInputReading** out) override {
-        if (!out) return E_POINTER;
-        *out = nullptr;
-        if (kind != GameInputKindUnknown && !(kind & kSupportedKinds)) return GAMEINPUT_E_READING_NOT_FOUND;
-        std::lock_guard lock(g().mu);
-        Reading* best = nullptr;
-        if (device) {
-            Device* d = as_device(device);
-            if (d->info.deviceFamily == GameInputFamilyAggregate) {
-                if (kind != GameInputKindUnknown && !(kind & d->info.supportedInput))
-                    return GAMEINPUT_E_READING_NOT_FOUND;
-                const uint32_t effective_kind = (kind != GameInputKindUnknown) ? (kind & d->info.supportedInput) : d->info.supportedInput;
-                for (Device* cd : g().connected) {
-                    if (!(effective_kind & cd->info.supportedInput)) continue;
-                    if (Reading* r = cd->latest(); r && (!best || r->GetTimestamp() >= best->GetTimestamp())) best = r;
-                }
-            } else {
-                if (d->status == GameInputDeviceNoStatus) return GAMEINPUT_E_DEVICE_DISCONNECTED;
-                if (kind != GameInputKindUnknown && !(kind & d->info.supportedInput))
-                    return GAMEINPUT_E_READING_NOT_FOUND;  // the device does not do this kind (motion on a plain pad)
-                best = d->latest();
-            }
-        } else {
-            for (Device* d : g().connected)  // the most recent reading from any gamepad
-                if (Reading* r = d->latest(); r && (!best || r->GetTimestamp() >= best->GetTimestamp())) best = r;
-        }
-        if (!best) return GAMEINPUT_E_READING_NOT_FOUND;
-        best->AddRef();
-        *out = best;
-        return S_OK;
+        const HRESULT hr = current_reading(kind, device, out);
+        trace_read("IGameInput::GetCurrentReading", _ReturnAddress(), hr, kind);
+        return hr;
     }
 
     HRESULT STDMETHODCALLTYPE GetNextReading(IGameInputReading* ref, uint32_t kind, IGameInputDevice* device,
                                              IGameInputReading** out) override {
-        return find_reading(ref, kind, device, out, true);
+        const HRESULT hr = find_reading(ref, kind, device, out, true);
+        trace_read("IGameInput::GetNextReading", _ReturnAddress(), hr, kind);
+        return hr;
     }
     HRESULT STDMETHODCALLTYPE GetPreviousReading(IGameInputReading* ref, uint32_t kind, IGameInputDevice* device,
                                                  IGameInputReading** out) override {
-        return find_reading(ref, kind, device, out, false);
+        const HRESULT hr = find_reading(ref, kind, device, out, false);
+        trace_read("IGameInput::GetPreviousReading", _ReturnAddress(), hr, kind);
+        return hr;
     }
     // E_NOTIMPL is GameInput v0's own answer: Microsoft's reference page says the method "was never implemented in
     // v0" and returns E_NOTIMPL, and v1 removed it. A history lookup here would give a title what no GameInput does.
@@ -2429,6 +2563,7 @@ public:
 
     HRESULT STDMETHODCALLTYPE RegisterReadingCallback(IGameInputDevice* device, uint32_t kind, float, void* context,
                                                       GameInputReadingCallback fn, GameInputCallbackToken* token) override {
+        trace_read("IGameInput::RegisterReadingCallback", _ReturnAddress(), fn ? 1 : 0, kind);
         if (token) *token = kInvalidCallbackToken;
         if (!fn) return E_INVALIDARG;
         if (device && as_device(device)->info.deviceFamily == GameInputFamilyAggregate) return E_NOTIMPL;
@@ -2438,6 +2573,7 @@ public:
     HRESULT STDMETHODCALLTYPE RegisterDeviceCallback(IGameInputDevice* device, uint32_t kind, uint32_t status_filter,
                                                      GameInputEnumerationKind enumeration, void* context,
                                                      GameInputDeviceCallback fn, GameInputCallbackToken* token) override {
+        trace_read("IGameInput::RegisterDeviceCallback", _ReturnAddress(), fn ? 1 : 0, kind);
         if (token) *token = kInvalidCallbackToken;
         if (!fn) return E_INVALIDARG;
         if (device && as_device(device)->info.deviceFamily == GameInputFamilyAggregate) return E_NOTIMPL;
@@ -2477,11 +2613,13 @@ public:
 
     HRESULT STDMETHODCALLTYPE RegisterGuideButtonCallback(IGameInputDevice* device, void* context,
                                                           GameInputGuideButtonCallback fn, GameInputCallbackToken* token) override {
+        trace_read("IGameInput::RegisterGuideButtonCallback", _ReturnAddress(), fn ? 1 : 0);
         return add({0, CbType::Guide, as_device(device), 0, 0, context, reinterpret_cast<void*>(fn), true}, token);
     }
     // Gamepads have no keyboard layout; the callback is accepted and never runs.
     HRESULT STDMETHODCALLTYPE RegisterKeyboardLayoutCallback(IGameInputDevice* device, void* context,
                                                              GameInputKeyboardLayoutCallback fn, GameInputCallbackToken* token) override {
+        trace_read("IGameInput::RegisterKeyboardLayoutCallback", _ReturnAddress(), fn ? 1 : 0);
         return add({0, CbType::KeyboardLayout, as_device(device), 0, 0, context, reinterpret_cast<void*>(fn), true}, token);
     }
 
@@ -2509,11 +2647,13 @@ public:
     }
 
     HRESULT STDMETHODCALLTYPE CreateDispatcher(IGameInputDispatcher** out) override {
+        trace_read("IGameInput::CreateDispatcher", _ReturnAddress(), out ? 1 : 0);
         if (!out) return E_POINTER;
         *out = new Dispatcher;
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE CreateAggregateDevice(uint32_t kind, IGameInputDevice** out) override {
+        trace_read("IGameInput::CreateAggregateDevice", _ReturnAddress(), out ? 1 : 0, kind);
         if (!out) return E_POINTER;
         *out = nullptr;
         if (kind == GameInputKindUnknown) return E_INVALIDARG;
@@ -2571,9 +2711,43 @@ public:
     HRESULT STDMETHODCALLTYPE FindDeviceFromPlatformString(LPCWSTR, IGameInputDevice** out) override { return not_found(out); }
     HRESULT STDMETHODCALLTYPE EnableOemDeviceSupport(uint16_t, uint16_t, uint8_t, uint8_t) override { return S_OK; }
     // Input keeps arriving in the background: the runtime has no focus model yet.
-    void STDMETHODCALLTYPE SetFocusPolicy(uint32_t) override {}
+    void STDMETHODCALLTYPE SetFocusPolicy(uint32_t) override { trace_read("IGameInput::SetFocusPolicy", _ReturnAddress(), 0); }
 
 private:
+    // The body of GetCurrentReading, kept separate so the trace line above logs its real result. Early returns on
+    // purpose: a disconnected device has its own HRESULT that the "no reading" path must not overwrite.
+    HRESULT current_reading(uint32_t kind, IGameInputDevice* device, IGameInputReading** out) {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (kind != GameInputKindUnknown && !(kind & kSupportedKinds)) return GAMEINPUT_E_READING_NOT_FOUND;
+        std::lock_guard lock(g().mu);
+        Reading* best = nullptr;
+        if (device) {
+            Device* d = as_device(device);
+            if (d->info.deviceFamily == GameInputFamilyAggregate) {
+                if (kind != GameInputKindUnknown && !(kind & d->info.supportedInput))
+                    return GAMEINPUT_E_READING_NOT_FOUND;
+                const uint32_t effective_kind = (kind != GameInputKindUnknown) ? (kind & d->info.supportedInput) : d->info.supportedInput;
+                for (Device* cd : g().connected) {
+                    if (!(effective_kind & cd->info.supportedInput)) continue;
+                    if (Reading* r = cd->latest(); r && (!best || r->GetTimestamp() >= best->GetTimestamp())) best = r;
+                }
+            } else {
+                if (d->status == GameInputDeviceNoStatus) return GAMEINPUT_E_DEVICE_DISCONNECTED;
+                if (kind != GameInputKindUnknown && !(kind & d->info.supportedInput))
+                    return GAMEINPUT_E_READING_NOT_FOUND;  // the device does not do this kind (motion on a plain pad)
+                best = d->latest();
+            }
+        } else {
+            for (Device* d : g().connected)  // the most recent reading from any gamepad
+                if (Reading* r = d->latest(); r && (!best || r->GetTimestamp() >= best->GetTimestamp())) best = r;
+        }
+        if (!best) return GAMEINPUT_E_READING_NOT_FOUND;
+        best->AddRef();
+        *out = best;
+        return S_OK;
+    }
+
     static HRESULT not_found(IGameInputDevice** out) {
         if (out) *out = nullptr;
         return GAMEINPUT_E_DEVICE_NOT_FOUND;
@@ -2597,11 +2771,16 @@ GameInput& instance() {
 
 // HRESULT GameInputCreate(IGameInput** gameInput). One instance per process; each call adds a reference.
 HRESULT WINAPI GameInputCreate(IGameInput** out) {
-    if (!out) return E_POINTER;
+    void* const caller = _ReturnAddress();
+    if (!out) {
+        trace_read("GameInputCreate", caller, E_POINTER);
+        return E_POINTER;
+    }
     ensure_started();
     GameInput& gi = instance();
     gi.AddRef();
     *out = &gi;
+    trace_read("GameInputCreate", caller, S_OK);
     return S_OK;
 }
 
@@ -2727,4 +2906,9 @@ void set_hid_backend(const HidBackend* backend) { g_hid = backend ? backend : &k
 SHIM_TABLE(gameinput,
     {"gameinput.dll", "GameInputCreate", reinterpret_cast<void*>(&GameInputCreate)},
     {"xgameruntime.dll", "GameInputCreate", reinterpret_cast<void*>(&GameInputCreate)},
+    // The Xbox build imports GameInputCreate from GameInput.dll by ordinal (measured on the package image: one
+    // import, GameInput.dll!#1), and the PC GameInput.dll exports GameInputCreate at ordinal 1. The loader resolves an
+    // ordinal import as "#1" through this same table, so without this entry the import binds to the host's GameInput
+    // runtime and none of the shim above is used.
+    {"gameinput.dll", "#1", reinterpret_cast<void*>(&GameInputCreate)},
 );

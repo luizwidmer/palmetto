@@ -1,7 +1,9 @@
 // ActiveInputTracker (src/active_input.h) on synthetic samples with its own clock: what counts as deliberate input
 // (edges only, thresholds, baselines), the minimum time between changes, several devices of one family, a device that
-// goes and comes back, and a forced family. No SDL, no controller, no GPU.
+// goes and comes back, and a forced family. Also the PALMETTO_FAKE_INPUT schedule (src/fake_input.h): when the shim's
+// synthetic pad holds its A button, and when the schedule is over. No SDL, no controller, no GPU.
 #include "../src/active_input.h"
+#include "../src/fake_input.h"
 
 #include <cstdio>
 #include <iterator>
@@ -208,6 +210,68 @@ int test_names() {
     return 0;
 }
 
+// ---- PALMETTO_FAKE_INPUT: the synthetic press schedule (src/fake_input.h) ----------------------------------------
+
+int test_fake_input_parse() {
+    // Unset or empty is off; the value is the delay before the first press in seconds.
+    EXPECT(!FakeInputSchedule::parse(nullptr).has_value());
+    EXPECT(!FakeInputSchedule::parse("").has_value());
+    EXPECT(FakeInputSchedule::parse("0").has_value() && FakeInputSchedule::parse("0")->press_at_us() == 0);
+    EXPECT(FakeInputSchedule::parse("30")->press_at_us() == 30 * 1000 * 1000);
+    EXPECT(FakeInputSchedule::parse("30.5")->press_at_us() == 30 * 1000 * 1000 + 500 * 1000);
+    // Anything that is not a finite non-negative number of seconds is refused, so a typo never becomes a press.
+    for (const char* bad : {"abc", "-1", "-0.5", "30s", "1e", "inf", "nan", "0x10", "1,5", "30 40"})
+        EXPECT(!FakeInputSchedule::parse(bad).has_value());
+    // Defaults: six 150 ms presses 2 s apart, the first at the delay.
+    const FakeInputSchedule s = *FakeInputSchedule::parse("5");
+    EXPECT(s.burst_us() == FakeInputSchedule::kDefaultBurstUs);
+    EXPECT(s.interval_us() == FakeInputSchedule::kDefaultIntervalUs);
+    EXPECT(s.presses() == FakeInputSchedule::kDefaultPresses);
+    return 0;
+}
+
+int test_fake_input_press_windows() {
+    constexpr std::uint64_t sec = 1000 * 1000;
+    const FakeInputSchedule s(30 * sec);  // first press at 30 s, 150 ms each, six of them 2 s apart
+
+    // Waiting for the first press: the button is up and the schedule is not over.
+    EXPECT(!s.pressed_at(0));
+    EXPECT(!s.pressed_at(30 * sec - 1));
+    EXPECT(!s.finished_at(0));
+    // The press window is [start, start + burst): the first sample at the start reads pressed, the first sample at
+    // the end does not.
+    EXPECT(s.pressed_at(30 * sec));
+    EXPECT(s.press_at(30 * sec) == 0u);
+    EXPECT(s.pressed_at(30 * sec + FakeInputSchedule::kDefaultBurstUs - 1));
+    EXPECT(!s.pressed_at(30 * sec + FakeInputSchedule::kDefaultBurstUs));
+    // Released between two presses, pressed again when the next one starts a poll later.
+    EXPECT(!s.pressed_at(30 * sec + 1 * sec));
+    EXPECT(s.pressed_at(32 * sec) && s.press_at(32 * sec) == 1u);
+    // The last press starts at 30 s + 5 * 2 s and ends 150 ms later.
+    EXPECT(s.pressed_at(40 * sec + 100 * 1000));
+    EXPECT(s.press_at(40 * sec) == 5u);
+    EXPECT(!s.pressed_at(40 * sec + FakeInputSchedule::kDefaultBurstUs));
+    EXPECT(s.ends_at_us() == 40 * sec + FakeInputSchedule::kDefaultBurstUs);
+    EXPECT(!s.finished_at(s.ends_at_us() - 1));
+    EXPECT(s.finished_at(s.ends_at_us()));
+    EXPECT(!s.pressed_at(s.ends_at_us() + 60 * sec));
+
+    // A zero delay presses at once (a schedule clock that starts at the pad's attach).
+    EXPECT(FakeInputSchedule(0).pressed_at(0));
+    // A short burst and interval on a custom schedule: press 0 at 0, press 1 at 1000 us; 500 us is between them.
+    const FakeInputSchedule fast(0, 100, 1000, 2);
+    EXPECT(fast.pressed_at(0) && fast.press_at(0) == 0u);
+    EXPECT(!fast.pressed_at(500));
+    EXPECT(fast.pressed_at(1000) && fast.press_at(1000) == 1u);
+    EXPECT(!fast.pressed_at(1100));
+    EXPECT(fast.finished_at(1100));
+    // A schedule with no presses never holds the button and is over immediately.
+    const FakeInputSchedule none(0, 100, 1000, 0);
+    EXPECT(!none.pressed_at(0) && !none.pressed_at(5000));
+    EXPECT(none.finished_at(0) && none.ends_at_us() == 0);
+    return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -223,6 +287,8 @@ int main() {
         {"reconnect", test_reconnect},
         {"forced family", test_forced},
         {"names", test_names},
+        {"fake input parse", test_fake_input_parse},
+        {"fake input press windows", test_fake_input_press_windows},
     };
     int failures = 0;
     for (const Case& c : cases) {
