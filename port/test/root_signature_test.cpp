@@ -424,7 +424,8 @@ int main() {
         check(empty.ok && empty.first_sgpr.empty() && empty.end_sgpr == 4, "pack_stage: empty signature");
     }
 
-    // pack_stage refuses a spill instead of truncating: compute has 28 SGPRs above s4, mesh 16 above s16.
+    // pack_stage refuses a graphics spill by name; the compute spill itself is modelled (see the measured signature
+    // below): compute has 28 SGPRs above s4, mesh 16 above s16.
     {
         RootSignature exact;
         exact.params = {consts(28)};
@@ -432,13 +433,19 @@ int main() {
         RootSignature over;
         over.params = {consts(27), view()};  // the view would need s31..s32
         const StagePackResult r = pack_stage(over, Stage::Compute);
-        check(!r.ok && r.first_sgpr.empty() && r.error.find("root parameter 1") != std::string::npos &&
-                  r.error.find("spill") != std::string::npos,
-              "pack_stage: a parameter that does not fit whole is refused and named");
+        check(r.ok && r.first_sgpr.size() == 2 && r.first_sgpr[1] == kNoSgpr && r.spill_dword[1] == 0 &&
+                  r.spill_dwords == 2,
+              "pack_stage: a compute parameter that does not fit whole is spilled and marked, not truncated");
+        const StagePackResult rp = pack_stage(over, Stage::Pixel);
+        check(!rp.ok && rp.error.find("root parameter 0") != std::string::npos &&
+                  rp.error.find("not modelled for a graphics stage") != std::string::npos,
+              "pack_stage: a graphics stage refuses a spill by name");
         RootSignature fits_old;
         fits_old.params = {consts(30)};  // fits pack()'s 32 from s0, not 28 from s4
-        check(pack(fits_old).ok && !pack_stage(fits_old, Stage::Compute).ok,
-              "pack_stage: compute budget is 28, not 32");
+        const StagePackResult fits_old_cs = pack_stage(fits_old, Stage::Compute);
+        check(pack(fits_old).ok && fits_old_cs.ok && fits_old_cs.first_sgpr[0] == kNoSgpr &&
+                  fits_old_cs.spill_dwords == 30,
+              "pack_stage: compute's inline budget is 28; a 30-dword constant parameter is spilled whole");
         RootSignature tables;
         tables.params.assign(20, table());  // one dword each: compute s4..s23; pack() needs 40
         check(pack_stage(tables, Stage::Compute).ok && !pack(tables).ok,
@@ -462,6 +469,153 @@ int main() {
         RootSignature many;
         many.params.assign(65, table());
         check(!pack_stage(many, Stage::Compute).ok, "pack_stage: more than 64 parameters rejected");
+    }
+
+    // pack_stage spills for compute: the console packs the trailing parameters behind s[0:1] (docs/d3d12_vulkan.md
+    // section 3.5). The measured boot creates exactly one such signature ("root parameter 8 does not fit in the user
+    // SGPRs from s4"), so the model must mark the spill by name instead of refusing or truncating, and a graphics
+    // stage must still refuse it (its spill pointer is unmeasured).
+    {
+        RootSignature spilling;
+        spilling.params = {consts(27), view()};  // the view would need s31..s32
+        const StagePackResult c = pack_stage(spilling, Stage::Compute);
+        check(c.ok, "pack_stage: compute places a signature whose tail spills");
+        check(c.first_sgpr.size() == 2 && c.first_sgpr[0] == 4 && c.first_sgpr[1] == kNoSgpr,
+              "pack_stage: the inline parameter keeps s4 and the spilled one has no SGPR");
+        check(c.spill_dword.size() == 2 && c.spill_dword[0] == kNoSpill && c.spill_dword[1] == 0,
+              "pack_stage: the spilled parameter starts the s[0:1] array at dword 0");
+        check(c.end_sgpr == 31 && c.spill_dwords == 2, "pack_stage: inline end s31, two spilled dwords");
+        const StagePackResult px = pack_stage(spilling, Stage::Pixel);
+        check(!px.ok && px.error.find("root parameter 0") != std::string::npos &&
+                  px.error.find("not modelled for a graphics stage") != std::string::npos,
+              "pack_stage: a graphics stage refuses the same spill by name");
+        // Every later parameter follows into the array, packed one dword per table and two per root view.
+        RootSignature mixed;
+        mixed.params = {consts(26), consts(2), table(), view(), table()};
+        const StagePackResult m = pack_stage(mixed, Stage::Compute);
+        check(m.ok && m.first_sgpr == std::vector<uint32_t>({4, 30, kNoSgpr, kNoSgpr, kNoSgpr}) &&
+                  m.spill_dword == std::vector<uint32_t>({kNoSpill, kNoSpill, 0, 1, 3}) && m.spill_dwords == 4 &&
+                  m.end_sgpr == 32,
+              "pack_stage: the spill array is packed 1 dword per table and 2 per root view, in order");
+        check(m.d3d12_cost == 26 + 2 + 1 + 2 + 1, "pack_stage: the spill does not change the D3D12 cost");
+        // The spill is bounded by the 64-dword D3D12 cost, so it can never overflow the 32-dword model.
+        RootSignature every;
+        every.params.assign(60, table());
+        every.params.push_back(view());
+        every.params.push_back(view());
+        every.params.push_back(view());  // cost 60 + 2 + 2 + 2 = 66
+        const StagePackResult e = pack_stage(every, Stage::Compute);
+        check(!e.ok && e.error.find("64-dword") != std::string::npos,
+              "pack_stage: a spill past the D3D12 cost limit is refused");
+        RootSignature unknown;
+        RootParameter bad;
+        bad.type = static_cast<ParamType>(0xffffffffu);
+        bad.num_values = 1;
+        unknown.params = {bad};
+        check(!pack_stage(unknown, Stage::Compute).ok, "pack_stage: an unknown parameter type is refused");
+    }
+
+    // Directly indexed descriptor heaps: the compiled console ABI appends the bound heap bases after the explicit root
+    // arguments (the CBV/SRV/UAV heap first, then the sampler heap). The flags' public D3D12 values select them; the
+    // Xbox type bits in the high byte are recorded and never select a packing (docs/root_packing.md).
+    {
+        using rt::rootsig::kFlagAllowInputAssemblerLayout;
+        using rt::rootsig::kFlagCbvSrvUavHeapDirectlyIndexed;
+        using rt::rootsig::kFlagMaskXboxTypeBits;
+        using rt::rootsig::kFlagSamplerHeapDirectlyIndexed;
+
+        // The measured frame's two signatures: a table-only one (flags 0x1) and a root-view one (flags 0). In the
+        // console layout a table takes one dword and a root view two, so the argument ends the heap bases follow are
+        // s9 and s10.
+        RootSignature table_only;
+        table_only.params = {table()};
+        const StagePackResult table_px = pack_stage(table_only, Stage::Pixel);
+        const auto table_heaps = direct_heap_slots(table_px, kFlagCbvSrvUavHeapDirectlyIndexed);
+        check(table_px.ok && table_px.end_sgpr == 9 && table_heaps.ok && table_heaps.arguments_end == 9 &&
+                  table_heaps.resource_sgpr == 9 && table_heaps.sampler_sgpr == kNoSgpr && table_heaps.heap_dwords == 1,
+              "direct heaps: the measured table-only pixel signature puts the resource heap base at s9");
+
+        RootSignature view_only;
+        view_only.params = {view()};
+        const StagePackResult view_px = pack_stage(view_only, Stage::Pixel);
+        const auto view_heaps = direct_heap_slots(view_px, kFlagCbvSrvUavHeapDirectlyIndexed | kFlagSamplerHeapDirectlyIndexed);
+        check(view_px.ok && view_px.end_sgpr == 10 && view_heaps.ok && view_heaps.resource_sgpr == 10 &&
+                  view_heaps.sampler_sgpr == 11 && view_heaps.heap_dwords == 2,
+              "direct heaps: the measured root-view pixel signature puts resource at s10 and sampler at s11");
+
+        // Compute: the measured FidelityFX shape (two tables, four root CBVs) ends at s14; the heaps follow there.
+        RootSignature fsr;
+        fsr.params = {table(), table(), view(), view(), view(), view()};
+        const StagePackResult fsr_cs = pack_stage(fsr, Stage::Compute);
+        const auto fsr_heaps = direct_heap_slots(fsr_cs, kFlagCbvSrvUavHeapDirectlyIndexed);
+        check(fsr_cs.ok && fsr_cs.end_sgpr == 14 && fsr_heaps.ok && fsr_heaps.resource_sgpr == 14,
+              "direct heaps: compute resource heap base follows the explicit arguments at s14");
+        const auto fsr_both = direct_heap_slots(fsr_cs, kFlagCbvSrvUavHeapDirectlyIndexed | kFlagSamplerHeapDirectlyIndexed);
+        check(fsr_both.ok && fsr_both.sampler_sgpr == 15,
+              "direct heaps: compute sampler heap base follows the resource one at s15");
+
+        // No heap flag: a successful no-op whatever the argument end, and the flag state is only recorded.
+        const auto none = direct_heap_slots(table_px, kFlagAllowInputAssemblerLayout | 0x03000000u);
+        check(none.ok && none.heap_dwords == 0 && none.resource_sgpr == kNoSgpr && none.sampler_sgpr == kNoSgpr &&
+                  none.pc_flags == kFlagAllowInputAssemblerLayout && none.xbox_type_bits == 0x03000000u,
+              "direct heaps: without a heap flag the plan is a no-op and the Xbox type bits are recorded");
+
+        // The flag state parsed from a serialized blob: the model keeps the low heap flags and the Xbox high byte.
+        RootSignature flagged = table_only;
+        flagged.flags = 0x03000000u | kFlagAllowInputAssemblerLayout | kFlagCbvSrvUavHeapDirectlyIndexed |
+                        kFlagSamplerHeapDirectlyIndexed;
+        std::vector<uint8_t> payload;
+        put_u32(payload, 2);  // version 1.1
+        put_u32(payload, 1);  // one parameter
+        put_u32(payload, 24);  // parameter table
+        put_u32(payload, 0);
+        put_u32(payload, 0);
+        put_u32(payload, flagged.flags);
+        put_u32(payload, 0);   // descriptor table
+        put_u32(payload, 0);   // all stages
+        put_u32(payload, 36);  // table payload
+        put_u32(payload, 0);   // no ranges
+        put_u32(payload, 0);
+        const DecodeResult decoded = parse_rts0(payload.data(), payload.size());
+        check(decoded.ok && decoded.sig.flags == flagged.flags,
+              "direct heaps: the RTS0 flag state (heap bits and Xbox type bits) survives the parse");
+        const StagePackResult decoded_px = pack_stage(decoded.sig, Stage::Pixel);
+        const auto decoded_heaps = direct_heap_slots(decoded_px, decoded.sig.flags);
+        check(decoded_px.ok && decoded_heaps.ok && decoded_heaps.resource_sgpr == 9 && decoded_heaps.sampler_sgpr == 10 &&
+                  decoded_heaps.xbox_type_bits == 0x03000000u,
+              "direct heaps: the parsed flag state selects the measured packing");
+
+        // Named refusals: unknown PC flag bits, an unplaced or spilled layout, and no room before s32.
+        const auto unknown = direct_heap_slots(table_px, kFlagCbvSrvUavHeapDirectlyIndexed | 0x400u);
+        check(!unknown.ok && unknown.error.find("outside the modelled D3D12 set") != std::string::npos,
+              "direct heaps: an unmodelled PC flag bit is refused by name");
+        const auto unplaced = direct_heap_slots(kFlagCbvSrvUavHeapDirectlyIndexed, kNoSgpr, false);
+        check(!unplaced.ok && unplaced.error.find("does not place the explicit root arguments") != std::string::npos,
+              "direct heaps: no measured heap-base slot without a placed layout");
+        const auto spilled = direct_heap_slots(kFlagCbvSrvUavHeapDirectlyIndexed, kNoSgpr, true);
+        check(!spilled.ok && spilled.error.find("spill into the s[0:1] array") != std::string::npos,
+              "direct heaps: a spilled layout refuses the heap-base dword by name");
+        const auto no_room = direct_heap_slots(kFlagCbvSrvUavHeapDirectlyIndexed | kFlagSamplerHeapDirectlyIndexed, 31,
+                                               false);
+        check(!no_room.ok && no_room.resource_sgpr == 31 && no_room.error.find("sampler heap-base dword") !=
+                                                                     std::string::npos,
+              "direct heaps: the sampler heap base past s31 is refused by name");
+        const auto full = direct_heap_slots(kFlagCbvSrvUavHeapDirectlyIndexed, 32, false);
+        check(!full.ok && full.error.find("no user-data dword left") != std::string::npos,
+              "direct heaps: no heap base after a layout that fills s0..s31");
+        // The graphics bind point keeps the PC packing in the same block; a heap dword on a PC-packed dword is refused.
+        const auto collision = direct_heap_slots(kFlagCbvSrvUavHeapDirectlyIndexed, 9, false, 1u << 9);
+        check(!collision.ok && collision.error.find("lands on an occupied user-data dword") != std::string::npos,
+              "direct heaps: a heap dword on a PC-packed dword is refused by name");
+        const auto clear = direct_heap_slots(kFlagCbvSrvUavHeapDirectlyIndexed, 9, false, (1u << 9) - 1u);
+        check(clear.ok && clear.resource_sgpr == 9,
+              "direct heaps: a heap dword above the PC-packed span is fed");
+        RootSignature spill_tail;
+        spill_tail.params = {consts(27), view()};
+        const auto spill_overload =
+            direct_heap_slots(pack_stage(spill_tail, Stage::Compute), kFlagCbvSrvUavHeapDirectlyIndexed);
+        check(!spill_overload.ok && spill_overload.error.find("heap-base dword") != std::string::npos,
+              "direct heaps: a computed layout with a spill refuses the heap base by name");
     }
 
     if (g_failures != 0) std::printf("%d FAILURES\n", g_failures);

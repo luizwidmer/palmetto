@@ -14,6 +14,7 @@
 #include <bit>
 #include <condition_variable>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <cstdio>
@@ -80,6 +81,114 @@ void note_once(const char* what) {
     std::lock_guard lock(mutex);
     if (seen.insert(what).second) std::fprintf(stderr, "[rt] d3d12: %s\n", what);
 }
+
+// Measurement for the root-packing slice (docs/root_packing.md): the root-signature and heap shapes the title creates,
+// what a draw or dispatch would carry for a directly indexed heap, and the layer's current answer. Off by default
+// (PALMETTO_ROOT_PACK_MEASURE=1), counts and shape keys only (no title VAs or values), bounded, and flushed
+// periodically because the boot harness kills the process at the timeout.
+namespace root_pack {
+bool enabled() {
+    static const bool on = [] {
+        char value[8] = {};
+        return GetEnvironmentVariableA("PALMETTO_ROOT_PACK_MEASURE", value, sizeof(value)) > 0 && value[0] != '\0' &&
+               value[0] != '0';
+    }();
+    return on;
+}
+
+struct Tally {
+    std::mutex mutex;
+    std::map<std::string, unsigned> shapes;       // distinct signature shape -> times a list bound it
+    std::map<std::string, unsigned> outcomes;     // direct-indexed draw/dispatch outcome -> count
+    unsigned binds = 0;
+    unsigned draws = 0;
+    unsigned dispatches = 0;
+    unsigned direct_draws = 0;
+    unsigned direct_dispatches = 0;
+};
+
+Tally& tally() {
+    static Tally t;
+    return t;
+}
+
+void flush_locked(const Tally& t) {
+    std::fprintf(stderr,
+                 "[rt] d3d12: root pack measure: binds %u, draws %u (direct-indexed flags %u), dispatches %u "
+                 "(direct-indexed flags %u), distinct signature shapes %zu\n",
+                 t.binds, t.draws, t.direct_draws, t.dispatches, t.direct_dispatches, t.shapes.size());
+    for (const auto& [shape, count] : t.shapes)
+        std::fprintf(stderr, "[rt] d3d12: root pack measure: shape x%u %s\n", count, shape.c_str());
+    for (const auto& [outcome, count] : t.outcomes)
+        std::fprintf(stderr, "[rt] d3d12: root pack measure: direct-indexed command x%u %s\n", count, outcome.c_str());
+}
+
+// One line per distinct signature shape (bounded: the first 64 shapes), so a shape that only appears late is still
+// countable in the periodic summary.
+void note_signature(const RootArgumentLayout& layout) {
+    if (!enabled()) return;
+    char head[96] = {};
+    std::snprintf(head, sizeof(head), "params=%zu flags=0x%08x graphics_ok=%d compute_ok=%d console_ok=%d base=%u",
+                  layout.parameters.size(), layout.flags, layout.graphics_ok ? 1 : 0, layout.compute_ok ? 1 : 0,
+                  layout.console_ok ? 1 : 0, layout.console_base);
+    std::string key = head;
+    for (const RootArgumentLayout::Parameter& p : layout.parameters) {
+        char part[80] = {};
+        std::snprintf(part, sizeof(part), " p(type=%u,values=%u,pc=%d,console=%d,compute=%d)", unsigned(p.type),
+                      p.constant_count, p.user_offset == rt::rootsig::kNoSgpr ? -1 : int(p.user_offset),
+                      p.console_offset == rt::rootsig::kNoSgpr ? -1 : int(p.console_offset),
+                      p.compute_offset == rt::rootsig::kNoSgpr ? -1 : int(p.compute_offset));
+        key += part;
+    }
+    Tally& t = tally();
+    std::lock_guard lock(t.mutex);
+    ++t.binds;
+    unsigned& seen = t.shapes[key];
+    ++seen;
+    if (t.shapes.size() <= 64 && seen == 1)
+        std::fprintf(stderr, "[rt] d3d12: root pack measure: signature shape %s\n", key.c_str());
+}
+
+// What the layer does with a direct-indexed signature: the modeled placement (rt::rootsig::direct_heap_slots) and the
+// bound heaps at the command, so a boot can say whether the mechanism was exercised and what it fed.
+void note_direct_command(bool compute, const RootArgumentLayout& layout, const rt::rootsig::DirectHeapSlots& plan,
+                         bool resource_heap, bool sampler_heap) {
+    if (!enabled()) return;
+    const bool resource = (layout.flags & rt::rootsig::kFlagCbvSrvUavHeapDirectlyIndexed) != 0;
+    const bool sampler = (layout.flags & rt::rootsig::kFlagSamplerHeapDirectlyIndexed) != 0;
+    char text[224] = {};
+    std::snprintf(text, sizeof(text),
+                  "%s: resource_flag=%d sampler_flag=%d heap_dwords=%u plan=%s resource_slot=%d sampler_slot=%d "
+                  "resource_heap_bound=%d sampler_heap_bound=%d",
+                  compute ? "compute" : "graphics", resource ? 1 : 0, sampler ? 1 : 0, plan.heap_dwords,
+                  plan.ok ? "ok" : plan.error.c_str(),
+                  plan.resource_sgpr == rt::rootsig::kNoSgpr ? -1 : int(plan.resource_sgpr),
+                  plan.sampler_sgpr == rt::rootsig::kNoSgpr ? -1 : int(plan.sampler_sgpr), resource_heap ? 1 : 0,
+                  sampler_heap ? 1 : 0);
+    Tally& t = tally();
+    std::lock_guard lock(t.mutex);
+    if (compute) {
+        ++t.dispatches;
+        ++t.direct_dispatches;
+    } else {
+        ++t.draws;
+        ++t.direct_draws;
+    }
+    ++t.outcomes[text];
+    if ((t.draws + t.dispatches) % 4096 == 0) flush_locked(t);
+}
+
+void note_plain_command(bool compute) {
+    if (!enabled()) return;
+    Tally& t = tally();
+    std::lock_guard lock(t.mutex);
+    if (compute)
+        ++t.dispatches;
+    else
+        ++t.draws;
+    if ((t.draws + t.dispatches) % 8192 == 0) flush_locked(t);
+}
+}  // namespace root_pack
 
 const char* name(palmetto::ReplayResult result) {
     switch (result) {
@@ -1167,6 +1276,10 @@ private:
         bool written_since_bind = false;
         unsigned rebinds = 0;         // signature rebinds that reset data since the last write
         unsigned cleared_dwords = 0;  // non-zero dwords dropped by those resets
+        // The directly indexed heap dwords this signature's flags append after the explicit root arguments
+        // (rt::rootsig::direct_heap_slots), computed on the signature's bind. ok == false names why no heap base is fed;
+        // with neither heap flag set the plan is ok with heap_dwords == 0.
+        rt::rootsig::DirectHeapSlots direct_heaps;
     };
 
     // PALMETTO_GRAPHICS_CONSOLE_ROOT=1 enables the console user-SGPR feed (docs/root_arguments.md,
@@ -1250,6 +1363,7 @@ private:
         state.data = {};
         state.written_since_bind = false;
         state.console_feed = false;
+        if (layout) root_pack::note_signature(*layout);
         // The console user-SGPR feed's safety for this signature (docs/vertex_constant_feed.md): both layouts share the
         // one 32-dword block, so the console layout is filled only when no console dword lands on a PC-packed dword. A
         // skipped feed leaves every argument at the previous answer and names why once.
@@ -1273,6 +1387,38 @@ private:
                 state.console_feed = rt::graphics_pso::console_feed_plan(parameters, &plan);
                 if (!state.console_feed) note_console_skip(plan.why.c_str());
             }
+        }
+        // Directly indexed heaps (docs/root_packing.md): the console ABI appends the base of each heap the signature
+        // flags as directly indexed after the explicit root arguments. The placement is a property of the signature, so
+        // it is modelled once here; the values are sampled from the bound heaps at each command (user_data). A
+        // signature without the flags gets an ok plan with no dwords. A refusal is named once, bounded, and leaves the
+        // recorded arguments as they are.
+        if (layout) {
+            const bool compute = is_compute(state);
+            bool spilled_layout = false;
+            std::uint32_t arguments_end = rt::rootsig::kNoSgpr;
+            std::uint32_t occupied = 0;  // user-data dwords another packing in the same block writes
+            if (compute) {
+                for (const RootArgumentLayout::Parameter& p : layout->parameters)
+                    if (p.compute_offset == rt::rootsig::kNoSgpr) spilled_layout = true;
+                arguments_end = compute_arguments_end(*layout);
+            } else {
+                spilled_layout = !layout->console_ok;  // pack_stage(Pixel) refused: the graphics console layout spills
+                arguments_end = graphics_arguments_end(*layout);
+                // The graphics bind point keeps the PC packing from s0 (D3D-448) in the same 32-dword block, so a heap
+                // dword that lands on a PC-packed argument would overwrite a value another stage reads there.
+                for (const RootArgumentLayout::Parameter& p : layout->parameters) {
+                    if (p.user_offset == rt::rootsig::kNoSgpr) continue;
+                    const std::uint32_t dwords = pc_dwords(p.type, p.constant_count);
+                    for (std::uint32_t d = 0; d < dwords && p.user_offset + d < rt::rootsig::kMaxUserSgprs; ++d)
+                        occupied |= 1u << (p.user_offset + d);
+                }
+            }
+            state.direct_heaps = rt::rootsig::direct_heap_slots(layout->flags, arguments_end, spilled_layout, occupied);
+            if (!state.direct_heaps.ok && (layout->flags & rt::rootsig::kDirectHeapFlags))
+                note_direct_heap_skip(compute, "signature",
+                                      state.direct_heaps.error.empty() ? "the packing is not modelled"
+                                                                       : state.direct_heaps.error.c_str());
         }
         // CreateRootSignature accepted it for the other bind point only (its log line says why).
         if (layout && !(is_compute(state) ? layout->compute_ok : layout->graphics_ok)) {
@@ -1345,13 +1491,89 @@ private:
         return &state.layout->parameters[index];
     }
 
-    // Dwords beyond the 32 user registers are what the console spills to memory; that layout is still open.
+    // Dwords beyond the 32 user registers are what the console spills to memory; that layout is still open. A spill
+    // array that is not written must never reach here with kNoSgpr + offset (it would wrap into s0), so the call sites
+    // check the parameter's first dword first.
     void write(RootState& state, std::uint32_t dword, std::uint32_t value) {
         if (dword < rt::rootsig::kMaxUserSgprs) {
             state.data[dword] = value;
             state.written_since_bind = true;
         } else
-            stub("root arguments beyond 32 user-data dwords (spill not modelled)");
+            stub("root arguments beyond 32 user-data dwords (spill array not written)");
+    }
+
+    // A parameter the console places in the s[0:1] spill array behind the stage base (a compute signature past s31,
+    // rt::rootsig::pack_stage): its value is not stored because the array's pointer is not modelled. Named once; the
+    // draw or dispatch still records the inline arguments rather than a guessed spill pointer.
+    static void spilled() {
+        note_once("root arguments in the spill array behind s[0:1] are not stored (the array's pointer is not modelled)");
+    }
+
+    // The console value of a bound descriptor heap's base: the same one-dword arena-relative encoding a console
+    // descriptor-table slot gets (rt::graphics_pso::console_table_value), because a directly indexed shader forms
+    // heap_base + the slot exactly like the table pointer the frame's modules form. All-or-nothing: a base the layer
+    // cannot express refuses the whole direct-heap feed, named once, and never writes a partial console ABI.
+    bool heap_base_dword(bool compute, std::uint64_t base, std::uint32_t& out, const char* which) {
+        if (!base) {
+            note_direct_heap_skip(compute, which, "no heap is bound on the list");
+            return false;
+        }
+        std::uint64_t arena = 0;
+        if (!rebase_console_va(attached_device(), base, arena, true)) {
+            note_direct_heap_skip(compute, which, "the bound heap base is not a resolvable console descriptor VA");
+            return false;
+        }
+        const rt::graphics_pso::ConsoleTableValue encoded = rt::graphics_pso::console_table_value(arena);
+        if (!encoded.fits) {
+            note_direct_heap_skip(compute, which, "the bound heap base does not fit the one-dword console slot");
+            return false;
+        }
+        out = encoded.dword;
+        return true;
+    }
+
+    // One bounded line per distinct reason a directly indexed heap base is not fed.
+    static void note_direct_heap_skip(bool compute, const char* which, const char* why) {
+        static std::mutex mutex;
+        static std::set<std::string> printed;
+        const std::string key = std::string(compute ? "compute " : "graphics ") + which + ": " + why;
+        const std::lock_guard lock(mutex);
+        if (printed.size() >= 8 || !printed.insert(key).second) return;
+        std::fprintf(stderr, "[rt] d3d12: direct heap base not fed: %s; the explicit root arguments keep their "
+                             "recorded values\n",
+                     key.c_str());
+    }
+
+    // The user-data block a draw or dispatch records: the recorded root arguments plus the directly indexed heap bases
+    // the signature's flags ask for (rt::rootsig::direct_heap_slots), sampled from the heaps bound at this command.
+    std::array<std::uint32_t, rt::rootsig::kMaxUserSgprs> user_data(RootState& state, bool compute) {
+        std::array<std::uint32_t, rt::rootsig::kMaxUserSgprs> data = state.data;
+        if (!state.layout || !(state.layout->flags & rt::rootsig::kDirectHeapFlags)) return data;
+        if (!state.direct_heaps.ok) return data;  // the bind point named why this packing is not fed
+        const bool resource = (state.layout->flags & rt::rootsig::kFlagCbvSrvUavHeapDirectlyIndexed) != 0;
+        const bool sampler = (state.layout->flags & rt::rootsig::kFlagSamplerHeapDirectlyIndexed) != 0;
+        std::uint32_t resource_value = 0;
+        std::uint32_t sampler_value = 0;
+        if (resource && !heap_base_dword(compute, cbv_srv_uav_base_, resource_value, "CBV/SRV/UAV heap"))
+            return data;
+        if (sampler && !heap_base_dword(compute, sampler_base_, sampler_value, "sampler heap")) return data;
+        if (resource) data[state.direct_heaps.resource_sgpr] = resource_value;
+        if (sampler) data[state.direct_heaps.sampler_sgpr] = sampler_value;
+        static std::atomic<bool> graphics_logged{false};
+        static std::atomic<bool> compute_logged{false};
+        std::atomic<bool>& logged = compute ? compute_logged : graphics_logged;
+        if (!logged.exchange(true, std::memory_order_relaxed)) {
+            std::fprintf(stderr,
+                         "[rt] d3d12: %s direct heaps: resource heap 0x%08x at s%d, sampler heap 0x%08x at s%d, after "
+                         "%u explicit dwords from s%u\n",
+                         compute ? "compute" : "graphics", resource ? resource_value : 0,
+                         resource ? int(state.direct_heaps.resource_sgpr) : -1, sampler ? sampler_value : 0,
+                         sampler ? int(state.direct_heaps.sampler_sgpr) : -1, state.direct_heaps.arguments_end -
+                         (compute ? rt::rootsig::stage_base(rt::rootsig::Stage::Compute)
+                                  : state.layout->console_base),
+                         compute ? 4u : state.layout->console_base);
+        }
+        return data;
     }
 
     // One line each way for the console-layout feed (docs/root_arguments.md): the first value it placed (with the
@@ -1393,6 +1615,7 @@ private:
         if ((count && !data) || std::uint64_t(offset) + count > p->constant_count) return check(false);
         const auto* values = static_cast<const std::uint32_t*>(data);
         const std::uint32_t first = first_dword(state, *p);
+        if (first == rt::rootsig::kNoSgpr) return spilled();  // the s[0:1] spill array is not written
         for (UINT i = 0; i < count; ++i) write(state, first + offset + i, values[i]);
         // The console layout's slot for the same constants (docs/root_arguments.md): a translated VS/PS reads them
         // there, not at the PC dword.
@@ -1411,6 +1634,7 @@ private:
         const RootArgumentLayout::Parameter* p = parameter(state, index, type);
         if (!p) return;
         const std::uint32_t first = first_dword(state, *p);
+        if (first == rt::rootsig::kNoSgpr) return spilled();  // the s[0:1] spill array is not written
         write(state, first, std::uint32_t(va));
         // In the compute layout a descriptor table is one dword, the 32-bit VA of its first descriptor (the heaps
         // live below 4 GiB); a root view keeps both halves. The graphics layout gives every address two dwords.
@@ -1536,20 +1760,37 @@ private:
         if ((cbv && cbv != cbv_srv_uav_heap_) || (smp && smp != sampler_heap_)) check(false);
     }
 
-    void note_direct_heap_indexing(const RootArgumentLayout* layout) const {
-        if (!layout) return;
-        if (layout->flags & D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED) {
-            if (!cbv_srv_uav_heap_)
-                note_once("draw/dispatch uses CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED with no CBV/SRV/UAV heap bound");
-            else
-                note_once("CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED heap base tracked on list (SGPR slot open, section 3.4)");
+    // The first user-data dword after the explicit root arguments at each bind point, from the layout the device built
+    // (docs/root_arguments.md): the graphics console layout from its base (s8 for vertex/pixel/geometry; the mesh base
+    // s16 is not fed by this path), the compute console layout from s4. kNoSgpr: the layout does not place the
+    // signature, or a parameter falls into the s[0:1] spill array that is not written.
+    static std::uint32_t graphics_arguments_end(const RootArgumentLayout& layout) {
+        if (!layout.console_ok) return rt::rootsig::kNoSgpr;
+        std::uint32_t end = layout.console_base;
+        for (const RootArgumentLayout::Parameter& p : layout.parameters)
+            if (p.console_offset != rt::rootsig::kNoSgpr)
+                end = std::max(end, p.console_offset + rt::rootsig::stage_dwords(p.type, p.constant_count));
+        return end;
+    }
+    static std::uint32_t compute_arguments_end(const RootArgumentLayout& layout) {
+        if (!layout.compute_ok) return rt::rootsig::kNoSgpr;
+        std::uint32_t end = rt::rootsig::stage_base(rt::rootsig::Stage::Compute);
+        for (const RootArgumentLayout::Parameter& p : layout.parameters) {
+            if (p.compute_offset == rt::rootsig::kNoSgpr) return rt::rootsig::kNoSgpr;  // the s[0:1] spill array
+            end = std::max(end, p.compute_offset + rt::rootsig::stage_dwords(p.type, p.constant_count));
         }
-        if (layout->flags & D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED) {
-            if (!sampler_heap_)
-                note_once("draw/dispatch uses SAMPLER_HEAP_DIRECTLY_INDEXED with no sampler heap bound");
-            else
-                note_once("SAMPLER_HEAP_DIRECTLY_INDEXED heap base tracked on list (SGPR slot open, section 3.4)");
-        }
+        return end;
+    }
+
+    // A compute signature past the 32-dword budget is placed by rt::rootsig::pack_stage with its trailing parameters in
+    // the s[0:1] spill array behind the stage base. The layer writes the inline arguments but not that array - its
+    // pointer in s[0:1] is not modelled - so a dispatch that needs it is refused by name rather than launched with
+    // missing arguments.
+    static bool compute_layout_spills(const RootState& state) {
+        if (!state.layout) return false;
+        for (const RootArgumentLayout::Parameter& p : state.layout->parameters)
+            if (p.compute_offset == rt::rootsig::kNoSgpr) return true;
+        return false;
     }
 
     void reset_state(ID3D12PipelineState* state) {
@@ -1588,8 +1829,18 @@ private:
 
     void record_dispatch(UINT x, UINT y, UINT z) {
         if (!compute_pipeline_ || !compute_.layout) return check(false);
-        note_direct_heap_indexing(compute_.layout);
-        check(list_.dispatch({compute_pipeline_, compute_.data, x, y, z}));
+        if (compute_layout_spills(compute_)) {
+            stub("Dispatch(compute root signature whose arguments spill behind s[0:1])");
+            return check(false);
+        }
+        if (root_pack::enabled()) {
+            if (compute_.layout->flags & rt::rootsig::kDirectHeapFlags)
+                root_pack::note_direct_command(true, *compute_.layout, compute_.direct_heaps,
+                                               cbv_srv_uav_base_ != 0, sampler_base_ != 0);
+            else
+                root_pack::note_plain_command(true);
+        }
+        check(list_.dispatch({compute_pipeline_, user_data(compute_, true), x, y, z}));
     }
 
     // The views block a draw records. Rebuilt only when the render targets or the bound vertex buffers change.
@@ -1608,14 +1859,20 @@ private:
     // A draw needs a graphics pipeline, a graphics root signature and a topology.
     void record_draw(bool indexed, UINT count, UINT instances, UINT first, INT base_vertex, UINT first_instance) {
         if (!graphics_pipeline_ || !graphics_.layout || !topology_) return check(false);
-        note_direct_heap_indexing(graphics_.layout);
+        if (root_pack::enabled()) {
+            if (graphics_.layout->flags & rt::rootsig::kDirectHeapFlags)
+                root_pack::note_direct_command(false, *graphics_.layout, graphics_.direct_heaps,
+                                               cbv_srv_uav_base_ != 0, sampler_base_ != 0);
+            else
+                root_pack::note_plain_command(false);
+        }
         trace_root_data("draw");
         // No viewport (never set, or unbound with RSSetViewports(0)) or an empty one: D3D12 rasterizes nothing,
         // and Vulkan forbids a 0x0 viewport, so the draw is not recorded.
         if (!(viewport_.width > 0) || !(viewport_.height > 0)) return;
-        palmetto::Draw draw{graphics_pipeline_, graphics_.data, draw_views(), depth_, index_, topology_, viewport_,
-                           scissor_, blend_factor_, front_stencil_ref_, back_stencil_ref_, indexed, count, instances,
-                           first, base_vertex, first_instance};
+        palmetto::Draw draw{graphics_pipeline_, user_data(graphics_, false), draw_views(), depth_, index_, topology_,
+                           viewport_, scissor_, blend_factor_, front_stencil_ref_, back_stencil_ref_, indexed, count,
+                           instances, first, base_vertex, first_instance};
         check(list_.draw(std::move(draw)));
     }
 };

@@ -1,6 +1,7 @@
 // Portable root-signature packer, see root_signature.h.
 #include "root_signature.h"
 
+#include <cstdio>
 #include <cstring>
 
 namespace rt::rootsig {
@@ -59,10 +60,18 @@ StagePackResult pack_stage(const RootSignature& sig, Stage stage) {
     }
     uint64_t cost = 0;  // 64-bit, as in pack()
     uint64_t next = out.base;
+    uint64_t spill_next = 0;
+    bool spilling = false;
     std::vector<uint32_t> first;
+    std::vector<uint32_t> spill;
     first.reserve(sig.params.size());
+    spill.reserve(sig.params.size());
     for (size_t i = 0; i < sig.params.size(); ++i) {
         const RootParameter& p = sig.params[i];
+        if (p.type != ParamType::Constants && p.type != ParamType::Descriptor && p.type != ParamType::Table) {
+            out.error = "unknown root parameter type";
+            return out;
+        }
         if (p.type == ParamType::Constants && p.num_values == 0) {
             out.error = "root constant parameter needs at least 1 dword";
             return out;
@@ -73,21 +82,113 @@ StagePackResult pack_stage(const RootSignature& sig, Stage stage) {
             return out;
         }
         const uint64_t dwords = stage_dwords(p.type, p.num_values);
-        if (next + dwords > kMaxUserSgprs) {
-            // The console moves this parameter and every later one to the spill array behind s[0:1]; that array's
-            // layout is not modelled here, so refuse rather than drop arguments.
+        if (!spilling && next + dwords <= kMaxUserSgprs) {
+            first.push_back(static_cast<uint32_t>(next));
+            spill.push_back(kNoSpill);
+            next += dwords;
+        } else if (stage == Stage::Compute) {
+            // The console packs this parameter and every later one contiguously into the spill array behind s[0:1]
+            // (docs/d3d12_vulkan.md section 3.5); the array itself is not written here, but its shape is modelled so a
+            // caller can name the spill instead of truncating. The total stays bounded by the 64-dword D3D12 cost.
+            spilling = true;
+            first.push_back(kNoSgpr);
+            spill.push_back(static_cast<uint32_t>(spill_next));
+            spill_next += dwords;
+        } else {
             out.error = "root parameter " + std::to_string(i) + " does not fit in the user SGPRs from s" +
-                        std::to_string(out.base) + " (spill array not modelled)";
+                        std::to_string(out.base) + " (the spill array behind s[0:1] is not modelled for a graphics "
+                        "stage)";
             return out;
         }
-        first.push_back(static_cast<uint32_t>(next));
-        next += dwords;
     }
     out.first_sgpr = std::move(first);
+    out.spill_dword = std::move(spill);
     out.end_sgpr = static_cast<uint32_t>(next);
+    out.spill_dwords = static_cast<uint32_t>(spill_next);
     out.d3d12_cost = static_cast<uint32_t>(cost);
     out.ok = true;
     return out;
+}
+
+DirectHeapSlots direct_heap_slots(uint32_t flags, uint32_t arguments_end, bool spilled, uint32_t occupied_mask) {
+    DirectHeapSlots out;
+    out.pc_flags = flags & kFlagMaskPcMeaning;
+    out.xbox_type_bits = flags & kFlagMaskXboxTypeBits;
+    constexpr uint32_t kKnownPcFlags = kFlagAllowInputAssemblerLayout | kFlagDenyVertexShaderRootAccess |
+                                       kFlagDenyHullShaderRootAccess | kFlagDenyDomainShaderRootAccess |
+                                       kFlagDenyGeometryShaderRootAccess | kFlagDenyPixelShaderRootAccess |
+                                       kFlagDenyAmplificationShaderRootAccess | kFlagDenyMeshShaderRootAccess |
+                                       kDirectHeapFlags;
+    if (const uint32_t unknown = out.pc_flags & ~kKnownPcFlags) {
+        char text[128] = {};
+        std::snprintf(text, sizeof(text),
+                      "root signature carries PC flag bits outside the modelled D3D12 set (0x%08x); the directly indexed "
+                      "heap packing is not modelled",
+                      unknown);
+        out.error = text;
+        return out;
+    }
+    const bool resource = (out.pc_flags & kFlagCbvSrvUavHeapDirectlyIndexed) != 0;
+    const bool sampler = (out.pc_flags & kFlagSamplerHeapDirectlyIndexed) != 0;
+    if (!resource && !sampler) {
+        out.ok = true;  // no heap dword is appended; the flags say nothing about the arguments
+        return out;
+    }
+    if (arguments_end == kNoSgpr) {
+        out.error = spilled ? "the explicit root arguments spill into the s[0:1] array behind the stage base; the "
+                              "heap-base dword that follows them is not modelled"
+                            : "the stage layout does not place the explicit root arguments; there is no measured "
+                              "heap-base dword after them";
+        return out;
+    }
+    if (arguments_end >= kMaxUserSgprs) {
+        out.error = "the explicit root arguments already end at s" + std::to_string(arguments_end) +
+                    "; there is no user-data dword left for a directly indexed heap base";
+        return out;
+    }
+    uint32_t next = arguments_end;
+    out.arguments_end = arguments_end;
+    if (resource) {
+        out.resource_sgpr = next;
+        ++next;
+    }
+    if (sampler) {
+        if (next >= kMaxUserSgprs) {
+            out.error = "the CBV/SRV/UAV heap-base dword takes the last user-data dword (s" +
+                        std::to_string(out.resource_sgpr) +
+                        "); the sampler heap-base dword that follows it does not fit";
+            return out;
+        }
+        out.sampler_sgpr = next;
+        ++next;
+    }
+    // A heap dword may not land on a dword another packing in the same 32-dword block writes (the graphics bind point
+    // keeps the PC packing from s0 until per-stage user-data windows exist; a collision would overwrite an argument a
+    // translated PC-layout stage reads).
+    for (uint32_t d = arguments_end; d < next; ++d) {
+        if (d < 32 && (occupied_mask & (1u << d))) {
+            out.error = "the directly indexed heap-base dword at s" + std::to_string(d) +
+                        " lands on an occupied user-data dword of the other packing; the feed is not modelled for "
+                        "this signature";
+            return out;
+        }
+    }
+    out.heap_dwords = next - arguments_end;
+    out.ok = true;
+    return out;
+}
+
+DirectHeapSlots direct_heap_slots(const StagePackResult& layout, uint32_t flags) {
+    if (!layout.ok) {
+        DirectHeapSlots out;
+        out.pc_flags = flags & kFlagMaskPcMeaning;
+        out.xbox_type_bits = flags & kFlagMaskXboxTypeBits;
+        out.error = "the stage layout refuses the signature: " + layout.error;
+        return out;
+    }
+    // A spilled layout has no inline end: the console's heap-base dword would follow the spilled parameters, which are
+    // in the array this model does not write, so the overload refuses it with the spilled reason.
+    return direct_heap_slots(flags, layout.spill_dwords != 0 ? kNoSgpr : layout.end_sgpr, layout.spill_dwords != 0);
 }
 
 namespace {

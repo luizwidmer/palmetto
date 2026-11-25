@@ -129,10 +129,17 @@ constexpr uint32_t kMaxD3d12Cost = 64;
 //     in this layout equals the program's RSRC2 USER_SGPR count in 29 of 29, and the programs read the tables and
 //     root CBVs at exactly these SGPRs (tooling/rootsig_census.py --disasm). The game's compute census agrees (lowest
 //     pointer s4, one-dword tables).
-//   - vertex/pixel/geometry s8 and mesh s16: a hypothesis from the corpus census only (lowest pointer SGPR per stage);
-//     no signature confirms them, and visibility is not modelled (every parameter takes its place in every stage).
+//   - vertex/pixel/geometry s8: measured in this tree's own boot. The vertex-path dump ([root_arguments.md]) decodes
+//     the armed frame draw's user data with a descriptor table at s8 and one dword per table, and
+//     [vertex_constant_feed.md] reads the translated lib_vs_00823/lib_ps_00822 modules forming their table address as
+//     heap_base + (s8 & ~3). Mesh s16 is still the corpus census only (lowest pointer SGPR per stage); visibility is not
+//     modelled (every parameter takes its place in every stage), which the measured frame's table-only signatures agree
+//     with (one D3D12_SHADER_VISIBILITY_ALL parameter).
 // A parameter that does not fit goes to the console's spill array behind s[0:1] (compute, section 7) together with
-// every parameter after it; that array is not modelled, so such a signature is refused, never truncated.
+// every parameter after it. The array's dwords are counted here (spill_dword / spill_dwords) with the console's packed
+// shape - one dword per 32-bit constant, two per root CBV/SRV/UAV, one per descriptor table, no alignment padding -
+// because the array itself is not written: a shader that reads it needs the spill pointer, which is not modelled. The
+// graphics stages (vertex/pixel/geometry s8, mesh s16) still refuse a spill: their spill-pointer SGPR is unmeasured.
 enum class Stage : uint32_t { Vertex = 0, Pixel = 1, Geometry = 2, Compute = 3, Mesh = 4 };
 
 [[nodiscard]] constexpr uint32_t stage_base(Stage stage) noexcept {
@@ -163,24 +170,79 @@ enum class Stage : uint32_t { Vertex = 0, Pixel = 1, Geometry = 2, Compute = 3, 
 }
 
 constexpr uint32_t kNoSgpr = 0xFFFFFFFFu;
+constexpr uint32_t kNoSpill = 0xFFFFFFFFu;
 
 struct StagePackResult {
     bool ok = false;
-    std::string error;            // set when !ok; names the refusing parameter
+    std::string error;                 // set when !ok; names the refusing parameter
     Stage stage = Stage::Compute;
-    uint32_t base = 0;            // stage_base(stage)
-    std::vector<uint32_t> first_sgpr;  // per parameter: its first user SGPR (kNoSgpr when the signature is refused)
-    uint32_t end_sgpr = 0;        // one past the last SGPR used: the RSRC2 USER_SGPR count the layout implies
-    uint32_t d3d12_cost = 0;      // cost against the 64-dword D3D12 limit
+    uint32_t base = 0;                 // stage_base(stage)
+    std::vector<uint32_t> first_sgpr;  // per parameter: its first user SGPR (kNoSgpr when spilled or refused)
+    std::vector<uint32_t> spill_dword; // per parameter: its dword offset in the s[0:1] spill array (kNoSpill when inline)
+    uint32_t end_sgpr = 0;             // one past the last inline SGPR used: the RSRC2 USER_SGPR count the layout implies
+    uint32_t spill_dwords = 0;         // total dwords packed after the inline arguments (0 when nothing spills)
+    uint32_t d3d12_cost = 0;           // cost against the 64-dword D3D12 limit
 };
 
-// Lays the parameters out for `stage` in the console layout. Fails like pack() on more than 64 parameters, a
-// constant parameter of 0 values or the 64-dword cost limit, and on any parameter that would spill.
+// Lays the parameters out for `stage` in the console layout. Fails like pack() on more than 64 parameters, an unknown
+// parameter type, a constant parameter of 0 values or the 64-dword cost limit. Compute packs any trailing parameters
+// from the first one that does not fit whole into spill_dword; a graphics stage refuses any spill by name.
 [[nodiscard]] StagePackResult pack_stage(const RootSignature& sig, Stage stage);
 
+// ---- Directly indexed descriptor heaps --------------------------------------------------------------------------
+//
+// A root signature with D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED and/or
+// ..._SAMPLER_HEAP_DIRECTLY_INDEXED lets a shader index the bound heap directly (ResourceDescriptorHeap /
+// SamplerDescriptorHeap). The compiled console ABI appends the base of each such heap to the user data after the
+// explicit root arguments, in this order: the CBV/SRV/UAV heap's 32-bit base, then the sampler heap's. The descriptor
+// stride is compiled into the shader; no dword carries it. That contract is public D3D12 behaviour plus the reference
+// implementation (docs/root_packing.md, cross-checked there); this tree's measured boot creates no signature with either
+// flag, so the placement is a pure model with named refusals, fed by the bind points only when a signature carries the
+// flags.
+//
+// Flag values are the public D3D12 D3D12_ROOT_SIGNATURE_FLAGS bits. The Xbox build also sets type bits in the high byte
+// (measured 0x03000000, docs/d3d12_vulkan.md section 3.5); their meaning is unknown and they never select a packing, so
+// they are recorded on the result instead of being refused.
+constexpr uint32_t kFlagAllowInputAssemblerLayout = 0x1;
+constexpr uint32_t kFlagDenyVertexShaderRootAccess = 0x2;
+constexpr uint32_t kFlagDenyHullShaderRootAccess = 0x4;
+constexpr uint32_t kFlagDenyDomainShaderRootAccess = 0x8;
+constexpr uint32_t kFlagDenyGeometryShaderRootAccess = 0x10;
+constexpr uint32_t kFlagDenyPixelShaderRootAccess = 0x20;
+constexpr uint32_t kFlagDenyAmplificationShaderRootAccess = 0x40;
+constexpr uint32_t kFlagDenyMeshShaderRootAccess = 0x80;
+constexpr uint32_t kFlagCbvSrvUavHeapDirectlyIndexed = 0x100;
+constexpr uint32_t kFlagSamplerHeapDirectlyIndexed = 0x200;
+constexpr uint32_t kFlagMaskPcMeaning = 0xFFFF;           // the D3D12 flags field
+constexpr uint32_t kFlagMaskXboxTypeBits = 0xFF000000;    // the Xbox type byte (meaning unknown)
+
+constexpr uint32_t kDirectHeapFlags = kFlagCbvSrvUavHeapDirectlyIndexed | kFlagSamplerHeapDirectlyIndexed;
+
+struct DirectHeapSlots {
+    bool ok = false;
+    std::string error;                 // set when !ok; names the refused packing
+    uint32_t arguments_end = kNoSgpr;  // first user-data dword after the explicit root arguments
+    uint32_t resource_sgpr = kNoSgpr;  // first dword of a CBV/SRV/UAV heap base
+    uint32_t sampler_sgpr = kNoSgpr;   // first dword of a sampler heap base
+    uint32_t heap_dwords = 0;          // dwords the flags append after the arguments (0: no direct heap)
+    uint32_t pc_flags = 0;             // flags & kFlagMaskPcMeaning
+    uint32_t xbox_type_bits = 0;       // flags & kFlagMaskXboxTypeBits (recorded, never acted on)
+};
+
+// Places the directly indexed heaps for `flags` after `arguments_end` (one dword past the explicit root arguments; the
+// graphics console base is s8, compute s4). Refuses by name: PC-meaning flag bits outside the D3D12 set, an unplaced
+// layout (arguments_end == kNoSgpr) while a heap flag is set, a spilled layout (`spilled`), a heap dword that lands on
+// an occupied dword (`occupied_mask`, bit d set when some other packing writes dword d: the graphics bind point keeps
+// the PC packing from s0, so the heap dwords must not overwrite a PC-packed argument), or no room before s32. With
+// neither heap flag set it succeeds with heap_dwords == 0 and ignores the other arguments.
+[[nodiscard]] DirectHeapSlots direct_heap_slots(uint32_t flags, uint32_t arguments_end, bool spilled,
+                                                uint32_t occupied_mask = 0);
+
+// The same over a stage packing: a refused layout or a spilled one is refused with its reason.
+[[nodiscard]] DirectHeapSlots direct_heap_slots(const StagePackResult& layout, uint32_t flags);
+
 // D3D12 cost of one parameter against the 64-dword limit.
-[[nodiscard]] constexpr uint32_t param_cost(ParamType type, uint32_t num_values) noexcept {
-    switch (type) {
+[[nodiscard]] constexpr uint32_t param_cost(ParamType type, uint32_t num_values) noexcept {    switch (type) {
         case ParamType::Constants:
             return num_values;
         case ParamType::Descriptor:
