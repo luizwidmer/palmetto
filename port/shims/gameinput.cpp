@@ -31,6 +31,11 @@
 //
 // ASSUMPTION: the console executable is not available, so the DLL it imports GameInputCreate from is unknown. The PC
 // API lives in gameinput.dll; on console the GDK links it through xgameruntime. Both names are registered.
+//
+// Without SDL3 the build cannot use any of the SDL backend below. PALMETTO_GAMEINPUT_SDL (set by port/CMakeLists.txt
+// only when SDL3 is found) selects this source; without it the file is the always-built no-SDL backend in
+// gameinput_nosdl.h: XInput pads plus a keyboard/mouse pad and a scripted first-run press schedule, docs/input_backend.md.
+#if defined(PALMETTO_GAMEINPUT_SDL)
 #include <windows.h>
 
 #include <SDL3/SDL.h>
@@ -2912,3 +2917,9 @@ SHIM_TABLE(gameinput,
     // runtime and none of the shim above is used.
     {"gameinput.dll", "#1", reinterpret_cast<void*>(&GameInputCreate)},
 );
+
+#else  // !PALMETTO_GAMEINPUT_SDL: the always-built backend (docs/input_backend.md).
+
+#include "gameinput_nosdl.h"
+
+#endif  // PALMETTO_GAMEINPUT_SDL

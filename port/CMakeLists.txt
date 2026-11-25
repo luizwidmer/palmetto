@@ -457,14 +457,15 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
   target_link_options(xgameruntime_offline_test PRIVATE /OPT:NOREF)
   target_link_libraries(xgameruntime_offline_test PRIVATE palmetto_xtaskqueue)
 
-  # GameInput shim on SDL3 (zlib licence): any controller SDL supports, DualSense trigger effects and lightbar.
-  # Nothing is downloaded unless asked. The shim is built when SDL3 is available:
+  # GameInput shim: SDL3 backend when SDL3 is available (any controller SDL supports, DualSense trigger effects and
+  # lightbar), otherwise the always-built no-SDL backend (XInput pads plus a keyboard/mouse pad and a scripted first-run
+  # press schedule, docs/input_backend.md). Both are shims/gameinput.cpp: PALMETTO_GAMEINPUT_SDL selects the source
+  # inside it. Nothing is downloaded unless asked; the SDL3 search is:
   #   - an installed SDL3 3.2+ that find_package finds (SDL3_DIR / CMAKE_PREFIX_PATH), or
   #   - -DPALMETTO_SDL3_FETCH=ON: download the pinned release below once at configure time (hash-checked) and build it
   #     static, or -DFETCHCONTENT_SOURCE_DIR_SDL3=<extracted SDL3-3.4.20> to build that copy without downloading.
-  # Otherwise, or with -DPALMETTO_SDL3=OFF, palmetto is built without the shim and the loader binds GameInputCreate to the
-  # host's GameInput.dll or the unimplemented thunk as before. docs/gameinput.md has the details.
-  option(PALMETTO_SDL3 "Build the GameInput shim when SDL3 is available" ON)
+  # docs/gameinput.md and docs/input_backend.md have the details.
+  option(PALMETTO_SDL3 "Build the SDL3 GameInput backend when SDL3 is available" ON)
   option(PALMETTO_SDL3_FETCH "Download the pinned SDL3 release if no installed SDL3 is found" OFF)
   if(PALMETTO_SDL3)
     find_package(SDL3 3.2 CONFIG QUIET COMPONENTS SDL3-static NO_SYSTEM_ENVIRONMENT_PATH)
@@ -490,6 +491,7 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
   endif()
   if(PALMETTO_SDL3 AND TARGET SDL3::SDL3-static)
     target_sources(palmetto PRIVATE shims/gameinput.cpp)
+    target_compile_definitions(palmetto PRIVATE PALMETTO_GAMEINPUT_SDL)
     target_link_libraries(palmetto PRIVATE SDL3::SDL3-static)
 
     # GameInput through the shim registry on SDL virtual joysticks: no controller, no game data.
@@ -498,19 +500,32 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
     add_executable(gameinput_probe test/gameinput_probe.cpp shims/gameinput.cpp shims/registry.cpp)
     foreach(_gi gameinput_test gameinput_probe)
       target_include_directories(${_gi} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
-      target_compile_definitions(${_gi} PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+      target_compile_definitions(${_gi} PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX PALMETTO_GAMEINPUT_SDL)
       target_compile_options(${_gi} PRIVATE /W4 /permissive- /utf-8)
       target_link_options(${_gi} PRIVATE /OPT:NOREF)
       target_link_libraries(${_gi} PRIVATE SDL3::SDL3-static)
     endforeach()
   else()
+    # No SDL3: the same file builds the always-built no-SDL backend (docs/input_backend.md). It needs no dependency
+    # and is the default path on a machine without SDL3, so the loading-loop input question is measurable there.
+    target_sources(palmetto PRIVATE shims/gameinput.cpp)
     if(PALMETTO_SDL3)
-      message(STATUS "GameInput shim not built: no installed SDL3 found. Set SDL3_DIR, or pass -DPALMETTO_SDL3_FETCH=ON "
-                     "to download the pinned SDL3 release (see docs/gameinput.md)")
+      message(STATUS "GameInput shim: no installed SDL3 found, building the always-built XInput + keyboard backend "
+                     "(docs/input_backend.md). Set SDL3_DIR, or pass -DPALMETTO_SDL3_FETCH=ON, to build the SDL3 "
+                     "backend instead (docs/gameinput.md)")
     else()
-      message(STATUS "GameInput shim not built (PALMETTO_SDL3=OFF)")
+      message(STATUS "GameInput shim: PALMETTO_SDL3=OFF, building the always-built XInput + keyboard backend "
+                     "(docs/input_backend.md)")
     endif()
   endif()
+
+  # The no-SDL backend's tests: a fake XInput source, no controller, no game data. Built whatever SDL3 says, because
+  # the backend itself is always built (gameinput.cpp's no-SDL branch).
+  add_executable(gameinput_nosdl_test test/gameinput_nosdl_test.cpp shims/registry.cpp)
+  target_include_directories(gameinput_nosdl_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
+  target_compile_definitions(gameinput_nosdl_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(gameinput_nosdl_test PRIVATE /W4 /permissive- /utf-8)
+  target_link_options(gameinput_nosdl_test PRIVATE /OPT:NOREF)
 
 elseif(NOT WIN32)
   message(STATUS "palmetto requires Windows; only Vulkan tools are available on Linux")
@@ -1305,9 +1320,12 @@ if(BUILD_TESTING)
   if(WIN32 AND TARGET gameinput_test)
     add_test(NAME gameinput COMMAND gameinput_test)
   elseif(TARGET palmetto)
-    # Built without SDL3: listed as "Not Run (Disabled)" so it is visible that the shim was not tested.
+    # Built without SDL3: the SDL backend is not built; gameinput_nosdl below covers the always-built backend.
     add_test(NAME gameinput COMMAND ${CMAKE_COMMAND} -E echo "built without SDL3")
     set_tests_properties(gameinput PROPERTIES DISABLED TRUE)
+  endif()
+  if(WIN32 AND TARGET gameinput_nosdl_test)
+    add_test(NAME gameinput_nosdl COMMAND gameinput_nosdl_test)
   endif()
   if(WIN32 AND TARGET palmetto AND TARGET tiny_game)
     if(TARGET tiny_argv_default_a AND NOT CMAKE_CROSSCOMPILING)
