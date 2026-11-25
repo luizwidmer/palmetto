@@ -17,7 +17,7 @@ and its producer.
 | | |
 |---|---|
 | Tree | `D:\leonida` at working tree after `66b33d782` (the `dstorage` page-resolver commit) with other slices' uncommitted files present; `port/src/main.cpp` carries the two opt-in probes this page describes (state trace, stage-2 wake probe) |
-| Boots | four 130 s boots under `_setup\boot_lock.ps1`, one at a time: `boot-probe2` (wait/thread-stack samplers + two cdb dumps), `boot-probe3` (DirectStorage trace + two cdb dumps), `boot-probe4` (one-signal wake experiment) and `boot-probe5` (control of the same binary, no wake). A fifth script, `boot-probe6` (timing-robust wake + in-process stack samples), is built but did not get the boot lock inside this page's window |
+| Boots | four 130 s boots under `_setup\boot_lock.ps1`, one at a time: `boot-probe2` (wait/thread-stack samplers + two cdb dumps), `boot-probe3` (DirectStorage trace + two cdb dumps), `boot-probe4` (one-signal wake experiment) and `boot-probe5` (control of the same binary, no wake). A fifth script, `boot-probe6` (timing-robust wake + in-process stack samples), is built but did not get the boot lock inside this page's window; the follow-up slice's four boots (`boot-probe7`/`9`/`10`) are in section 11.1 |
 | Harness | `tooling/boot_report.py --timeout 130`, captures outside the repository in `D:\leonida-work\stage2b\` |
 | Debugger | `cdb -p <pid> -c "~*k; dq <tracker global>; dq <object fields>; !handle 0 f Event; .detach; q"` at 45 s and 100 s (2-9 s per attach) |
 | Samplers | `PALMETTO_WAIT_SAMPLE=30,60,90,120`, `PALMETTO_THREAD_STACKS=30,60,90,120`, `PALMETTO_STATE_TRACE=2,130`, `PALMETTO_LOADER_HOOK=1`, `PALMETTO_DSTORAGE_TRACE=1` (one boot), and the new opt-in `PALMETTO_STAGE2_WAKE` (wake boots only) |
@@ -114,10 +114,12 @@ The wait sampler names the same object in the same boot at every sample:
 `tid 51560 ... wait NtWaitForSingleObject timeout INF handle 0x1d34 (Event) state Event not-set`,
 `start host:palmetto.exe+0x2AD140` (`rt::process::game_thread`). The 30/60/90/120 s samples all show it.
 
-The **HandleCount of 2** is the one shape that is not explained by the title alone: the title does not import
-`DuplicateHandle` or any `NtDuplicateObject`/`NtSetEvent` path, so the second reference to this event belongs to some
-in-process component that received the handle. The 45 s and 100 s counts are identical, so that second holder is
-stable while the title waits.
+The **HandleCount of 2** looked, to this first slice, like a second reference held by some in-process component: the
+title does not import `DuplicateHandle` or any `NtDuplicateObject`/`NtSetEvent` path, and the 45 s and 100 s counts
+are identical. **That reading is retired by the follow-up measurement (section 11.3):** one cdb session lists 1,084
+Event handles in this process and `!handle` reports `HandleCount 2` for essentially all of them, and `!htrace`
+attributes this event's creation to the title entry thread with no duplicate. The count is this process's shape for
+events, not a tracker-specific holder; no duplicate producer exists.
 
 ## 3. The decompiled region
 
@@ -155,8 +157,9 @@ Static scans that bound the producer question:
 | image import list | one `GameInput.dll!#1` (`GameInputCreate`), `CreateEventA`/`CreateEventW`/`SetEvent`/`WaitForSingleObject`, no `DuplicateHandle`, no ntdll event/handle imports |
 
 So the event is created by the title, never signalled by title code, and not signalled by the two runtime paths that
-could take a title event handle in this boot. The HandleCount 2 says a second holder exists, but its identity is the
-next measurement (section 8), not a claim of this page.
+could take a title event handle in this boot. The HandleCount 2 was read here as a second holder; the follow-up
+measurement retires that reading (section 11.3: the count is this process's shape for essentially every event, and
+`!htrace` shows the title entry thread as the only creator).
 
 ## 4. The wake experiment: the wait is causal, a bare signal is not the fix
 
@@ -203,8 +206,9 @@ The title's own code cannot be the setter of `tracker+0x610` in a way the static
 the tracker's constructor, read only by the wait helper and the destructor, and no function that calls the image's
 `SetEvent` wrapper loads that field. The two measured runtime paths that can take a title event handle either were not
 called (`EnqueueSetEvent`, `SetEventOnCompletion`) or are not in the boot (GameInput shim is not compiled; the host
-GameInput runtime has its own dispatcher handles). Yet the HandleCount 2 says a second handle, hence a producer that
-physically holds the event, exists at 45 s and still at 100 s.
+GameInput runtime has its own dispatcher handles). The first slice read the event's `HandleCount 2` as a second holder;
+the follow-up measurement retires that reading (section 11.3: the count is this process's shape for essentially every
+event, no duplicate exists).
 
 The tracker's shape says what the producer must deliver: it is created and destroyed inside one function, its body
 `FUN_1421B8B20` arms **one** pending operation (`+0x608: 0 -> 1`) and hands `+0x618` an object whose `+0xD8` flags the
@@ -212,19 +216,18 @@ post-wait emitter `FUN_1421B9230` reads, and `FUN_1421B8BD0` drains the 16-entry
 is therefore the asynchronous owner of that pending operation, and it must (a) fill/complete the object at `+0x618`
 and (b) signal the event. Both effects were absent in every measured boot; the wake experiment supplied only (b).
 
-Two producers fit the measured shape and are the named falsifiers for the next slice:
+Two producers fit the measured shape and were the named falsifiers for the next slice - the follow-up measurement
+decided between them:
 
-1. **A title worker/job thread** (a streaming/loader job batch): the boot's own loader entry detours run 452
-   begin/end records and **stop after ~26 s**; the boot media wait-loop has already exited and is not the gate. If
-   this is the producer, the first signal needed is the job-completion that sets the tracker event *and* fills
-   `+0x618`; the measurement is the tracker's ring entries (the 16 x 0xA8 array at `+0x588`) before the wait, which
-   this page has not dumped yet.
-2. **An in-process host component** holding the second handle (HandleCount 2): the only runtime paths in this tree
-   that duplicate a caller-provided event are the DirectStorage `EnqueueSetEvent` and the D3D12 fence
-   `SetEventOnCompletion`/`SetEventOnMultipleFenceCompletion` waiters; the first was not called in the traced boot and
-   the second has no trace line, so a third path (or a path behind a vtable slot the trace does not name) would have
-   to be the holder. Naming the handle's creator stack (`!htrace -enable` before 22 s, `!htrace -diff` after the wait,
-   one boot) separates the two.
+1. **A title worker/job thread** (a streaming/loader job batch): **confirmed, and named exactly** by section 11.5 - the
+   tracker is the loader's registered job graph (70 jobs in its hash table at `+0x628/+0x630`), the jobs are queued but
+   never started (`+0xF0 = 2` queued, `+0xE0 = 0` not started, unchanged 3 s later), and the single completion callback
+   `image+0x21C3B60` decrements the pending dword and signals the event (section 11.4). The ring dump below was run by
+   the follow-up: it is empty (no waiter record) before the wait (section 11.2). The first signal needed is the
+   job-completion that drops `0x80000001` *after the jobs have filled the result object at `+0x618`*.
+2. **An in-process host component** holding the second handle: **retired** by section 11.3 - no duplicate exists, and
+   `!htrace` attributes the event's creation to the title entry thread. The DirectStorage and D3D12 fence paths measured
+   as not called remain not called.
 
 ## 6. Boot numbers
 
@@ -244,21 +247,26 @@ The stage-2 transition time varies with the machine's boot-to-boot behaviour and
 - **One machine, one overlay, one title build.** The trees booted here are the working tree with other slices'
   uncommitted files present; the binary's SHA is given per boot. The boot timing is not stable (section 6), and the
   samplers and debugger attaches perturb it: the D3D12 counts range 211k-241k across these boots.
-- **The tracker's ring was not dumped.** The 40 s cdb read of `boot-probe5` found the global still zero because that
-  boot reached stage 2 at 44 s; the 16-entry ring at `+0x588` and the object at `+0x618` are therefore known only by
-  their construction and by the emitters' use, not by their contents.
+- **The tracker's ring was not dumped in this slice.** The 40 s cdb read of `boot-probe5` found the global still zero
+  because that boot reached stage 2 at 44 s; the 16-entry ring at `+0x588` and the object at `+0x618` are therefore
+  known here only by their construction and by the emitters' use, not by their contents. **The follow-up dumped both
+  (section 11.2): the ring is empty at the wait and `+0x618` is the job-group context object.**
 - **The wake experiment changes the boot.** It supplies only the signal; the 41 s fault is the title's reaction to
   incomplete state and is not evidence about the title's healthy path beyond what section 4 states. The fatal exit
   code is `0xC0000005`, but the crash reporter records only the first exception, so the 41 s first-chance and the
   55.1 s exit are not proven to be the same site.
 - **The debugger attaches pause the process** (2-9 s), so counters sampled around them are lower than the steady
   state; the two dumps are a thread/handle snapshot, not part of the steady state.
-- **`HandleCount 2` is a measurement, not an attribution.** It says a second reference to the event object exists; it
-  does not say which component holds it.
+- **`HandleCount 2` was read as an attribution in this slice and is not one.** Section 11.3 measured the same count for
+  essentially every event in the process and found no duplicate, so the second-holder reading is retired; the remaining
+  limits of the follow-up are in section 11.8.
 - No game data: this page contains RVAs, field offsets, handle values, counters, timings and Win32/HRESULT codes only -
   no package path, executable bytes, extracted table or shader data.
 
 ## 8. The next falsifiable measurement
+
+**The follow-up slice ran items 1 and 2 below and answered them (sections 11.2 and 11.3); the next measurement is now
+11.6.** The list is kept as the first slice's falsifier record.
 
 1. **Dump the tracker before the wait** (one 130 s boot, control, `cdb` at 60 s with stage 2 already reached):
    `dq <global>`, `dq <tracker>+0x400 L 60`, `dq poi(<tracker>+0x588) L 64`, `dq poi(<tracker>+0x618) L 64`. The ring
@@ -269,18 +277,21 @@ The stage-2 transition time varies with the machine's boot-to-boot behaviour and
    after the wait, or `!handle` plus the thread that created it. Prediction if the second handle is a host runtime
    duplicate: the create stack is in the shim/host module that received the handle; a title-side `CreateEventA` with
    `HandleCount 1` would refute the duplicate account.
-3. **Only then** the fix: route the measured producer. If the pending work is a title job that our runtime is supposed
-   to start/serve, the fix is in that shim (with the completion *and* the result object, not just `SetEvent`); if the
-   producer is title-side content work that our tree cannot supply, the page must say which first signal (the object at
-   `+0x618` completed) the title is waiting for.
+3. **Only then** the fix: route the measured producer. The follow-up reads the producer as **title-side job dispatch**
+   (section 11.5: the tracker is the loader's job graph, its 70 jobs are queued and never started), so our runtime
+   cannot honestly complete it from its side; the result object the post-wait emitters consume must be filled by the
+   jobs, and a bare `SetEvent` was measured to fault (section 4). If a later measurement finds a runtime call in that
+   dispatch chain, the fix is in that shim (completion *and* result, not just the event).
 
-`port/src/main.cpp` carries both opt-in diagnostics used here - `PALMETTO_STATE_TRACE` (from the state-machine slice)
-and `PALMETTO_STAGE2_WAKE` (this slice); the default path starts neither thread.
+`port/src/main.cpp` carries the opt-in diagnostics used across both slices - `PALMETTO_STATE_TRACE` (from the
+state-machine slice), `PALMETTO_STAGE2_WAKE` (this slice, the one-signal experiment) and `PALMETTO_STAGE2_TRACKER`
+(the follow-up slice's job-list sampler); the default path starts none of them.
 
 ## 9. Tests and gates
 
-This is a measurement slice: the only runtime change is the opt-in `PALMETTO_STAGE2_WAKE` diagnostic in
-`port/src/main.cpp` (unset, it starts no thread and the default path is unchanged), plus this page.
+This is a measurement slice: this slice's runtime change is the opt-in `PALMETTO_STAGE2_WAKE` diagnostic in
+`port/src/main.cpp` (unset, it starts no thread and the default path is unchanged), plus this page. The follow-up
+slice adds the opt-in `PALMETTO_STAGE2_TRACKER` diagnostic in the same file (its gates are in section 11.7).
 
 | gate | result |
 |---|---|
