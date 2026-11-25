@@ -284,6 +284,42 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### Sibling pass first: coverage works, its own PS output is the gap
+
+The sibling constant pass is the draw that writes the 4K target the compose pass samples. Arming it alone
+(boot-sibling2, draw 28001 this boot) gives its identity and its control at full resolution:
+
+```
+readback armed at draw 28001: pipeline 0x1869f058650 target resource 0x18639e57870 image 0x18603115ad0 format 37 3840x2160
+colour path: ps present, 0 image sample(s) -> constant-output path; push constants s0=9bd5ef00 s1=00000178 s8=0cf6ef00
+vertex path: pipeline 0x1869f058650 vs "fspx/lib_vs_00821" ps "fspx/lib_ps_00820"; layout problems 0x0
+vertex path: vb0 va 0x1789bd5ef30 size 4080 stride 24; resolved buffer ..., stride-at-draw 24
+vertex path:   v0 bf800000 3f800000 ...   v1 bf800000 bf800000 ...   v2 3f800000 bf800000 ...
+matrix A slot (s8+0): 0166ff20 00000000 00000060 30014fac -> V# address 0x166ff20 stride 0 records 96 format 20
+matrix A content: read 96 of 96 B: mean 18, non-black 9/96, peak 255; dwords ... 00000000 ffffffff 0000ffff b2392200
+PS control readback [draw 28001]: 3840x2160: mean 16 80 120, non-black 4,147,200/8,294,400, peak 240, alpha mean 127
+full-target tile map: half-screen lower-left triangle (64800, then 129600 + 64800 per row)
+```
+
+Read as a statement:
+
+* the sibling pass's geometry is a full-screen NDC triangle in its vertex buffer (v0 -1,1 / v1 -1,-1 / v2 1,-1,
+  stride 24) fetched through the console vertex-stream descriptor fix (vb0 va 0x1789bd5ef30), viewport 3840x2160;
+* with fs_solid substituted for its own pixel shader, the sibling target **does** receive content over the same
+  half-screen triangle the compose pass covers - so the sibling pass's rasterisation, target binding, viewport and
+  vertex path all work;
+* with its own pixel shader (`fspx/lib_ps_00820`, a constant-output module with zero image samples and no kill) the same
+  target reads uniformly black at full resolution, so the gap is inside the sibling pass's own PS output, not its coverage;
+* the concrete matrix-A difference: the compose pass's s8 slot 0 is a V# over a 5,768-byte block holding an identity 4x4
+  matrix, while the sibling pass's s8 slot 0 is a V# over a **96-byte block whose content is flags, not a matrix**
+  (`ffffffff 0000ffff b2392200`, 9 of 96 bytes non-black). Coverage still works from the NDC vertex buffer, so this is
+  not the raster gap; it is the next data-path difference to close (the sibling pipeline's matrix A publication).
+
+Next concrete step: trace the sibling PS's output chain offline (`fspx/lib_ps_00820`, `%820/%822/%826` built from packed
+half stores fed by its private slots) to its exact source - a vertex colour attribute (all-zero in the sibling vertex
+buffer) or a root/push constant the shim feeds as zero - and dump the sibling's full vertex attribute set. That names the
+input the sibling pass is missing before any further substitution experiment.
+
 ### Full-target readback: the display target is uniformly black, and the passes cover a half-screen triangle
 
 `PALMETTO_READBACK_FULL=1` copies the **whole** armed target (3840x2160, 8,294,400 pixels: one copy, no write control)
