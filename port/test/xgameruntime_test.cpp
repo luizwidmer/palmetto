@@ -25,6 +25,12 @@
 #include "persistent_store.h"
 #include "shims.h"
 
+namespace rt::shims {
+// Test seam implemented in xgameruntime.cpp (docs/networking_gate.md): forces the connectivity hint's level and cost,
+// -1 follows PALMETTO_NETWORK_HINT, and returns the level the hint answered before the call.
+int xgameruntime_set_network_hint(int level, int cost);
+}  // namespace rt::shims
+
 namespace {
 
 int g_checks = 0;
@@ -513,6 +519,26 @@ void check_run_time_load() {
         check(reinterpret_cast<GetHint>(slot(n, 15))(n, &hint) == S_OK && hint.level == 1 && hint.cost == 0 &&
                   hint.initialized && !hint.approaching && !hint.over && !hint.roaming,
               "slot 15 (XNetworkingGetConnectivityHint): initialized, no connectivity");
+        // The networking-poll slice (docs/networking_gate.md): the title polls slot 15 ~120 times/s for a whole boot and
+        // reads two fields of this 16-byte structure - level at 0 ("has internet" when level - 3 < 2, game+0xF9D80) and
+        // networkInitialized at 0xC (the start-up wait, game+0x18E7260). The measured offline answer is level None and
+        // the stack initialized, so the title takes its offline paths; the seam drives the other level in one process.
+        check(hint.iana == 0, "slot 15: interface type 0, like the rest of the measured offline hint");
+        check((hint.level - 3u) >= 2u, "slot 15: the title's has-internet test (level - 3 < 2) is false offline");
+        const int previous_level = rt::shims::xgameruntime_set_network_hint(3, 1);
+        Hint forced{};
+        const HRESULT forced_hr = reinterpret_cast<GetHint>(slot(n, 15))(n, &forced);
+        check(previous_level == 1 && forced_hr == S_OK && forced.level == 3 && forced.cost == 1 && forced.initialized,
+              "slot 15 under the internet experiment arm: InternetAccess/Unrestricted, still initialized");
+        check((forced.level - 3u) < 2u, "slot 15: the same has-internet test is true on the internet arm");
+        rt::shims::xgameruntime_set_network_hint(0, 0);
+        Hint unknown{};
+        check(reinterpret_cast<GetHint>(slot(n, 15))(n, &unknown) == S_OK && unknown.level == 0 && unknown.initialized,
+              "slot 15 with level Unknown forced: S_OK and an initialized stack");
+        rt::shims::xgameruntime_set_network_hint(-1, -1);
+        Hint restored{};
+        check(reinterpret_cast<GetHint>(slot(n, 15))(n, &restored) == S_OK && restored.level == 1 && restored.cost == 0,
+              "slot 15: clearing the seam restores the measured offline answer");
         XAsyncBlock block{};
         using SecurityAsync = HRESULT(STDMETHODCALLTYPE*)(void*, const wchar_t*, XAsyncBlock*);
         using ResultSize = HRESULT(STDMETHODCALLTYPE*)(void*, XAsyncBlock*, size_t*);

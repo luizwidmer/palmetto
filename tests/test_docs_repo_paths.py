@@ -18,7 +18,19 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PATH = re.compile(r"`((?:tooling|port|tests|docs|app|profiles|reports|extensions)/[A-Za-z0-9_./\-]+)`")
 # Pages that quote another project's tree (a public prior-art project, a public prior-art project): their paths are not this repository's.
-OTHER_PROJECTS = {"docs/fssm_crosscheck.md", "docs/d3d12_xs_surface.md"}
+OTHER_PROJECTS = {
+    "docs/fssm_crosscheck.md",
+    "docs/d3d12_xs_surface.md",
+    # Slices whose pages quote the peer ports' own trees as evidence (documentation-level provenance, no code copied):
+    # the backticked paths in those sections belong to the peer repositories, not to this one.
+    "docs/bottom_of_pipe.md",
+    "docs/task_queue_parity.md",
+    "docs/cleanroom_peers.md",
+    "docs/fsr_route.md",
+    "docs/networking_gate.md",
+    "docs/audio_decode.md",
+    "docs/deferred_compile.md",
+}
 # Build output, not tracked.
 BUILD_OUTPUT = ("port/build", "reports/", "<out>/")
 

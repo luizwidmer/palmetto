@@ -465,10 +465,45 @@ HRESULT STDMETHODCALLTYPE net_security_result(void*, XAsyncBlock* async, size_t,
     return XAsyncGetStatus(async, false);
 }
 HRESULT STDMETHODCALLTYPE net_verify_certificate(void*, void*, const void*) { return kNoNetwork; }
+
+// The connectivity hint's level and cost, for the networking-poll slice (docs/networking_gate.md). Default and
+// measured-correct for an offline console: the stack is initialized and nothing is reachable, so the level is None (1)
+// and the cost Unknown (0). PALMETTO_NETWORK_HINT is an experiment arm, never a console answer: "internet" reports
+// InternetAccess (3) with Unrestricted cost (1), the only states a caller can tell apart (the title reads level 3/4 for
+// "has internet" - game+0xF9D80 - and network_initialized for its start-up wait - game+0x18E7260). Off by default; the
+// environment is read once, on the first hint call.
+std::atomic<int> g_network_hint_level{-1};   // test seam: -1 follows the environment, 0-4 force
+std::atomic<int> g_network_hint_cost{-1};
+
+uint32_t environment_network_hint_level() {
+    static const uint32_t level = [] {
+        char value[32] = {};
+        const DWORD n = GetEnvironmentVariableA("PALMETTO_NETWORK_HINT", value, sizeof value);
+        if (n == 0 || n >= sizeof value) return 1u;   // unset: the measured offline answer, None
+        if (_stricmp(value, "internet") == 0) return 3u;
+        if (_stricmp(value, "local") == 0) return 2u;
+        if (_stricmp(value, "unknown") == 0) return 0u;
+        return 1u;   // "none", and anything unrecognised, stay on the offline answer
+    }();
+    return level;
+}
+uint32_t network_hint_level() {
+    const int forced = g_network_hint_level.load();
+    return forced >= 0 ? static_cast<uint32_t>(forced) : environment_network_hint_level();
+}
+// Unrestricted only where the level says something is reachable; the console offline answer leaves it Unknown.
+uint32_t network_hint_cost(uint32_t level) {
+    const int forced = g_network_hint_cost.load();
+    if (forced >= 0) return static_cast<uint32_t>(forced);
+    return level >= 2 ? 1u : 0u;
+}
+
 HRESULT STDMETHODCALLTYPE net_connectivity_hint(void*, ConnectivityHint* hint) {
     if (!hint) return E_POINTER;
     *hint = {};
-    hint->connectivity_level = 1;   // None: the stack is up, nothing is reachable
+    const uint32_t level = network_hint_level();
+    hint->connectivity_level = level;
+    hint->connectivity_cost = network_hint_cost(level);
     hint->network_initialized = true;
     return S_OK;
 }
@@ -562,28 +597,110 @@ bool STDMETHODCALLTYPE net_unregister(void*, XTaskQueueRegistrationToken token, 
 }
 HRESULT STDMETHODCALLTYPE net_not_implemented(void*) { return E_NOTIMPL; }
 
+// What PALMETTO_USER_TRACE adds for this class: QueryApiImpl's existing line shows that a thread asks for
+// XNetworkingImpl continuously, but not which of the 18 methods it runs (docs/task_queue_parity.md section 3 names
+// that as the next falsifier). The wrapper below prints the slot, the method name, the calling thread, the caller RVA
+// and up to five scalar arguments on entry and the answer on return, bounded per slot the way the threading trace is
+// (first eight calls, then the tenth, hundredth, ...), so a poll cannot flood the log. Off by default: with the switch
+// unset the wrapper only calls platform_trace_enabled() (a cached environment read) before forwarding.
+const char* networking_slot_name(int slot) {
+    switch (slot) {
+        case 3: return "XNetworkingQueryPreferredLocalUdpMultiplayerPort";
+        case 4: return "XNetworkingQueryPreferredLocalUdpMultiplayerPortAsync";
+        case 5: return "XNetworkingQueryPreferredLocalUdpMultiplayerPortAsyncResult";
+        case 6: return "XNetworkingRegisterPreferredLocalUdpMultiplayerPortChanged";
+        case 7: return "XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged";
+        case 8: return "XNetworkingQuerySecurityInformationForUrlAsync";
+        case 9: return "XNetworkingQuerySecurityInformationForUrlAsyncResultSize";
+        case 10: return "XNetworkingQuerySecurityInformationForUrlAsyncResult";
+        case 11: return "XNetworkingQuerySecurityInformationForUrlUtf16Async";
+        case 12: return "XNetworkingQuerySecurityInformationForUrlUtf16AsyncResultSize";
+        case 13: return "XNetworkingQuerySecurityInformationForUrlUtf16AsyncResult";
+        case 14: return "XNetworkingVerifyServerCertificate";
+        case 15: return "XNetworkingGetConnectivityHint";
+        case 16: return "XNetworkingRegisterConnectivityHintChanged";
+        case 17: return "XNetworkingUnregisterConnectivityHintChanged";
+        case 18: return "XNetworkingQueryConfigurationSetting";
+        case 19: return "XNetworkingSetConfigurationSetting";
+        case 20: return "XNetworkingQueryStatistics";
+        default: return "private";
+    }
+}
+
+template <int Slot, class... A> bool networking_trace_enter(void* caller, const A&... a) {
+    if (!rt::shims::platform_trace_enabled()) return false;
+    const std::uint64_t n = rt::shims::platform_trace_tick(0x4E4554534C4F5400ull + Slot);   // "NETSLOT"
+    if (!n) return false;
+    std::uint64_t words[5] = {};
+    std::size_t count = 0;
+    const auto take = [&](const auto& value) {
+        if (count < 5) words[count] = threading_trace_word(value);
+        ++count;
+    };
+    (take(a), ...);
+    const std::string where = rt::shims::module_offset(reinterpret_cast<std::uint64_t>(caller));
+    std::fprintf(stderr,
+                 "[rt] user trace: +%.2fs XNetworkingImpl slot %d %s tid %lu a0 0x%llx a1 0x%llx a2 0x%llx "
+                 "a3 0x%llx a4 0x%llx from %s #%llu\n",
+                 rt::shims::platform_trace_seconds(), Slot, networking_slot_name(Slot),
+                 static_cast<unsigned long>(GetCurrentThreadId()), static_cast<unsigned long long>(words[0]),
+                 static_cast<unsigned long long>(words[1]), static_cast<unsigned long long>(words[2]),
+                 static_cast<unsigned long long>(words[3]), static_cast<unsigned long long>(words[4]), where.c_str(),
+                 static_cast<unsigned long long>(n));
+    return true;
+}
+
+void networking_trace_exit(int slot, std::uint64_t value, bool has_value) {
+    if (has_value)
+        std::fprintf(stderr, "[rt] user trace: +%.2fs XNetworkingImpl slot %d %s returned 0x%llx tid %lu\n",
+                     rt::shims::platform_trace_seconds(), slot, networking_slot_name(slot),
+                     static_cast<unsigned long long>(value), static_cast<unsigned long>(GetCurrentThreadId()));
+    else
+        std::fprintf(stderr, "[rt] user trace: +%.2fs XNetworkingImpl slot %d %s returned (void) tid %lu\n",
+                     rt::shims::platform_trace_seconds(), slot, networking_slot_name(slot),
+                     static_cast<unsigned long>(GetCurrentThreadId()));
+}
+
+// Every networking slot takes `this` first (the file's own functions do), so one wrapper covers the vtable.
+template <int Slot, auto F, class T = decltype(F)> struct NetMethod;
+template <int Slot, auto F, class R, class... A> struct NetMethod<Slot, F, R (*)(void*, A...)> {
+    static R STDMETHODCALLTYPE call(void* self, A... a) {
+        const bool traced = networking_trace_enter<Slot>(_ReturnAddress(), a...);
+        if constexpr (std::is_void_v<R>) {
+            F(self, a...);
+            if (traced) networking_trace_exit(Slot, 0, false);
+        } else {
+            const R result = F(self, a...);
+            if (traced) networking_trace_exit(Slot, threading_trace_word(result), true);
+            return result;
+        }
+    }
+};
+
 #define NM(fn) reinterpret_cast<const void*>(&fn)
+#define NS(slot, fn) reinterpret_cast<const void*>(&NetMethod<slot, &fn>::call)
 const void* const kNetworkingVtable[] = {
     NM(object_query_interface), NM(object_add_ref), NM(object_release),
-    NM(net_query_port),            // 3  XNetworkingQueryPreferredLocalUdpMultiplayerPort
-    NM(net_query_port_async),      // 4  ...Async
-    NM(net_query_port_result),     // 5  ...AsyncResult
-    NM(net_register<PortChangedCallback>),  // 6  XNetworkingRegisterPreferredLocalUdpMultiplayerPortChanged
-    NM(net_unregister),            // 7  XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged
-    NM(net_security_async),        // 8  XNetworkingQuerySecurityInformationForUrlAsync
-    NM(net_security_result_size),  // 9  ...AsyncResultSize
-    NM(net_security_result),       // 10 ...AsyncResult
-    NM(net_security_async),        // 11 XNetworkingQuerySecurityInformationForUrlUtf16Async (XCurl)
-    NM(net_security_result_size),  // 12 ...Utf16AsyncResultSize (XCurl)
-    NM(net_security_result),       // 13 ...Utf16AsyncResult (XCurl)
-    NM(net_verify_certificate),    // 14 XNetworkingVerifyServerCertificate (XCurl)
-    NM(net_connectivity_hint),     // 15 XNetworkingGetConnectivityHint (XCurl)
-    NM(net_register<HintChangedCallback>),  // 16 XNetworkingRegisterConnectivityHintChanged (XCurl)
-    NM(net_unregister),            // 17 XNetworkingUnregisterConnectivityHintChanged (XCurl)
-    NM(net_not_implemented),       // 18 XNetworkingQueryConfigurationSetting (IXNetworkingImpl2)
-    NM(net_not_implemented),       // 19 XNetworkingSetConfigurationSetting
-    NM(net_not_implemented),       // 20 XNetworkingQueryStatistics
+    NS(3, net_query_port),            // 3  XNetworkingQueryPreferredLocalUdpMultiplayerPort
+    NS(4, net_query_port_async),      // 4  ...Async
+    NS(5, net_query_port_result),     // 5  ...AsyncResult
+    NS(6, net_register<PortChangedCallback>),  // 6  XNetworkingRegisterPreferredLocalUdpMultiplayerPortChanged
+    NS(7, net_unregister),            // 7  XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged
+    NS(8, net_security_async),        // 8  XNetworkingQuerySecurityInformationForUrlAsync
+    NS(9, net_security_result_size),  // 9  ...AsyncResultSize
+    NS(10, net_security_result),      // 10 ...AsyncResult
+    NS(11, net_security_async),       // 11 XNetworkingQuerySecurityInformationForUrlUtf16Async (XCurl)
+    NS(12, net_security_result_size), // 12 ...Utf16AsyncResultSize (XCurl)
+    NS(13, net_security_result),      // 13 ...Utf16AsyncResult (XCurl)
+    NS(14, net_verify_certificate),   // 14 XNetworkingVerifyServerCertificate (XCurl)
+    NS(15, net_connectivity_hint),    // 15 XNetworkingGetConnectivityHint (XCurl)
+    NS(16, net_register<HintChangedCallback>),  // 16 XNetworkingRegisterConnectivityHintChanged (XCurl)
+    NS(17, net_unregister),           // 17 XNetworkingUnregisterConnectivityHintChanged (XCurl)
+    NS(18, net_not_implemented),      // 18 XNetworkingQueryConfigurationSetting (IXNetworkingImpl2)
+    NS(19, net_not_implemented),      // 19 XNetworkingSetConfigurationSetting
+    NS(20, net_not_implemented),      // 20 XNetworkingQueryStatistics
 };
+#undef NS
 #undef NM
 static_assert(std::size(kNetworkingVtable) == 21, "IUnknown + IXNetworkingImpl's 15 + IXNetworkingImpl2's 3");
 
@@ -2127,6 +2244,17 @@ void xgameruntime_offline_profile_forget() {
 bool xgameruntime_set_persistent_profile(bool on) {
     const bool previous = persistent_profile_enabled();
     g_profile_override.store(on ? 1 : 0);
+    return previous;
+}
+
+// Test seam for PALMETTO_NETWORK_HINT (docs/networking_gate.md): forces the connectivity hint's level and cost and
+// returns the level the hint would have answered before the call. `-1` in either argument follows the environment; so
+// `xgameruntime_set_network_hint(-1, -1)` restores the measured offline default in one process.
+int xgameruntime_set_network_hint(int level, int cost) {
+    const int previous = static_cast<int>(network_hint_level());
+    const int clamped_level = level < 0 || level > 4 ? -1 : level;
+    g_network_hint_level.store(clamped_level);
+    g_network_hint_cost.store(cost < 0 || cost > 3 ? -1 : cost);
     return previous;
 }
 
