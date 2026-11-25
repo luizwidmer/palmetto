@@ -171,6 +171,13 @@ struct Mock {
     D3D12_BARRIER_GROUP barrier_groups[4];
     D3D12_GLOBAL_BARRIER barrier_globals[8];
     D3D12_TEXTURE_BARRIER barrier_textures[8];
+    // Device slot 17 (PC CreateConstantBufferView): what the proxy's console slot-70 conversion handed the host, copied
+    // at call time, the destination it wrote and how many times it was reached. The real layer writes a 32-byte
+    // descriptor at the destination; the mock writes a recognisable mark there, so the test can prove that the write
+    // landed in the title's descriptor slot and not somewhere else.
+    D3D12_CONSTANT_BUFFER_VIEW_DESC cbv_desc;
+    std::uint64_t cbv_dest;
+    unsigned cbv_calls;
 };
 
 Mock g_pool[256];
@@ -286,6 +293,19 @@ std::uint64_t mock_call(Mock* m, unsigned slot, const std::uint64_t* words) {
                 return static_cast<std::uint32_t>(mock_create(m, Kind::queue, a2, a3));
             case 9: return static_cast<std::uint32_t>(mock_create(m, Kind::allocator, a2, a3));  // CreateCmdAllocator
             case 14: return static_cast<std::uint32_t>(mock_create(m, Kind::heap, a2, a3));       // CreateDescriptorHeap
+            case 17: {  // CreateConstantBufferView(desc, destination): the console slot-70 conversion's PC target
+                ++m->cbv_calls;
+                m->cbv_dest = a2;
+                if (a1) m->cbv_desc = *reinterpret_cast<const D3D12_CONSTANT_BUFFER_VIEW_DESC*>(a1);
+                if (a2) {
+                    // The real layer writes kDescriptorSize = 32 bytes of a V# at the destination; this is the mock's
+                    // own stand-in, non-zero in every word, so a write to a different slot cannot match it.
+                    const std::uint32_t mark[8] = {0x17u, m->cbv_desc.SizeInBytes, 0x1717u, 0x17171717u,
+                                                   0x17171717u, 0x17171717u, 0x17171717u, 0x17171717u};
+                    std::memcpy(reinterpret_cast<void*>(a2), mark, sizeof(mark));
+                }
+                return static_cast<std::uint64_t>(static_cast<std::uint32_t>(S_OK));
+            }
             case 75: return static_cast<std::uint32_t>(mock_create(m, Kind::queue, a3, a4));   // CreateCommandQueue1
             case 36: return static_cast<std::uint32_t>(mock_create(m, Kind::fence, a3, a4));   // CreateFence
             case 32:                                                                          // OpenSharedHandle
@@ -2147,6 +2167,72 @@ int check_slot55_derived_pipeline_state() {
     return 0;
 }
 
+// ---- 13. Console slot 70: the measured constant-buffer view publication (docs/device_slot70.md) ----
+//
+// Measured shape: (arg1 = D3D12_RESOURCE_DESC* of a BUFFER, arg2 = a record that starts with
+// D3D12_CONSTANT_BUFFER_VIEW_DESC's BufferLocation/SizeInBytes, arg3 = a 32-byte-aligned console descriptor slot that
+// holds zeros before the call), followed by a cache-line writeback of arg3. The default answer is the measured refusal
+// (E_NOTIMPL, the title does not test it); PALMETTO_SLOT70_CBV=1 converts it to the PC device's own
+// CreateConstantBufferView. The switches are read once, on the first slot-70 call, so the default refusal is exercised
+// by the --env-slots-invalid run (which the runner starts with no slot-70 switch set) and this function runs with the
+// conversion switch set by main for the process's whole run.
+int check_slot70_console_view() {
+    Mock* mock = nullptr;
+    void* device = make_device(mock, 11, true);
+    EXPECT(device);
+    xs::reset_device_proxy_stats();
+
+    // The measured argument contents: a 128-byte BUFFER description, the view's console GPU address and byte size (the
+    // boot's qword 0x100000027 and u32 0x1688), and a fresh 32-byte descriptor slot.
+    D3D12_RESOURCE_DESC resource{};
+    resource.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    resource.Width = 0x80;
+    resource.Height = 1;
+    resource.DepthOrArraySize = 1;
+    resource.MipLevels = 1;
+    D3D12_CONSTANT_BUFFER_VIEW_DESC view{};
+    view.BufferLocation = 0x100000027;
+    view.SizeInBytes = 0x1688;
+    alignas(32) std::uint32_t destination[8] = {};
+
+    // 1. The PC CreateConstantBufferView gets exactly the measured view description and the title's destination, its
+    //    descriptor write lands in that slot, and the console slot is still not forwarded by number.
+    {
+        const unsigned before = mock->cbv_calls;
+        EXPECT(hr_of(raw(device, 70, word(&resource), word(&view), word(destination))) == S_OK);
+        EXPECT(mock->cbv_calls == before + 1 && mock->calls[70] == 0);
+        EXPECT(mock->cbv_dest == word(destination));
+        EXPECT(mock->cbv_desc.BufferLocation == 0x100000027 && mock->cbv_desc.SizeInBytes == 0x1688);
+        EXPECT(destination[0] == 0x17u && destination[1] == 0x1688u && destination[2] == 0x1717u);
+        EXPECT(xs::device_slot_hits(70) == 1);
+    }
+
+    // 2. A call outside the measured shape is refused, not written: a null view address, a destination that is not
+    //    32-byte aligned, and a description that is not a buffer description. These are the cases where a guess would
+    //    write a descriptor over the title's memory.
+    {
+        const unsigned before = mock->cbv_calls;
+        D3D12_CONSTANT_BUFFER_VIEW_DESC null_view{};
+        EXPECT(hr_of(raw(device, 70, word(&resource), word(&null_view), word(destination))) == E_NOTIMPL);
+        EXPECT(mock->cbv_calls == before);
+        auto* unaligned = reinterpret_cast<std::uint32_t*>(reinterpret_cast<std::uint8_t*>(destination) + 4);
+        EXPECT(hr_of(raw(device, 70, word(&resource), word(&view), word(unaligned))) == E_NOTIMPL);
+        EXPECT(mock->cbv_calls == before);
+        D3D12_RESOURCE_DESC texture{};
+        texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        texture.Width = 0x80;
+        EXPECT(hr_of(raw(device, 70, word(&texture), word(&view), word(destination))) == E_NOTIMPL);
+        EXPECT(mock->cbv_calls == before);
+    }
+
+    EXPECT(release(device) == 0 && mock->refs == 0);
+    std::printf("%s: console slot 70 routes the measured constant-buffer view publication (arg1 buffer description, "
+                "arg2 view record, arg3 console descriptor slot) through the PC CreateConstantBufferView with the "
+                "measured view description and the title's 32-byte descriptor slot, and still refuses a call outside "
+                "the measured shape (null view, unaligned destination, non-buffer description)\n", g_label);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     no_dialogs();
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -2160,10 +2246,14 @@ int main(int argc, char** argv) {
         return run_fault_mode(argv[1]);
     }
     if (argc != 1) return 2;
+    // Console slot 70's measurement switches are read once, so the conversion case has to be on before this process's
+    // first slot-70 call (check_slot70_console_view below). The default refusal is the --env-slots-invalid run, which
+    // the runner starts with no slot-70 switch set.
+    EXPECT(::SetEnvironmentVariableA("PALMETTO_SLOT70_CBV", "1") != FALSE);
     if (check_tail(true) || check_queue_console_slots() || check_levels() || check_fence1() ||
         check_create_failures() || check_open_shared() || check_alloc_failures() || check_allocators() ||
         check_xbox_slots() || check_console_command_list() || check_slot57_graphics_record() ||
-        check_slot55_derived_pipeline_state())
+        check_slot55_derived_pipeline_state() || check_slot70_console_view())
         return 1;
     std::printf("xs_proxy_mock_test: PASS (%d allocations refused on purpose)\n", g_failed_news);
     return 0;

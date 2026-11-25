@@ -3078,6 +3078,235 @@ static bool readable_range(const void* ptr, std::size_t bytes) {
     return true;
 }
 
+// ---- Console device 70: a descriptor publication into a descriptor slot, and the measurement of it ------------------
+//
+// The console device vtable is the PC one only up to slot 43; from 44 on it is the console's own extension table (the
+// slot-55 comment below), so slot 70 is a console extension and not PC CreatePlacedResource1 - which is why forwarding it
+// by number crashed (docs/boot_audit.md section 5). docs/device_slot70.md carries the full evidence; the measured facts:
+//
+//   * call shape. Wrapper game+0x4ECC800 (function 0x4ECC800..0x4ECC830): `push rsi; sub rsp,0x20; rsi=r8; r8=rdx;
+//     rdx=rcx; rcx=<device global>; r9=rsi; call [rax+0x230]` - three arguments after the device - then
+//     `mov rcx,rsi; xor edx,edx; jmp 0x4ECC830`, the cache-line writeback (`clwb` over
+//     [align_down(arg3,64), arg3+global)), i.e. the title publishes its third argument and flushes its cache lines.
+//     The dominant site game+0x4D9F363 (inside function game+0x4D9F200..0x4D9F3B2, return address game+0x4D9F369,
+//     13,568 calls in a 130.2 s boot) calls the slot directly with the same three-argument shape. The fifth word the
+//     thunk receives at the wrapper site is the wrapper's saved rsi (`push rsi`), i.e. not an argument: the call's
+//     argument vector is three words.
+//   * argument contents (measured in the boot, both sites): arg1 is a D3D12_RESOURCE_DESC of a BUFFER over the block
+//     the caller just filled (Dimension 1, Width 0x80 at the dominant site and 0xAE00000 at the wrapper site);
+//     arg3 is a 32-byte-aligned descriptor slot - a console descriptor heap (0x...220) at the wrapper site, a host
+//     descriptor slot of an ordinary shader-visible heap at the dominant site - and it holds zeros before the call at
+//     12,214 of the first 12,288 calls. arg2 is a 0x40-byte record whose measured fields at the dominant site are:
+//     +0x00 the destination address (equal to arg3), +0x08 0x1688, +0x18 the element count (0x20 for the 128-byte
+//     block), +0x28 the CPU block the caller filled, +0x30 the block's format word. At the wrapper site +0x00 is the
+//     fixed word 0x100000027 instead, so the record's first word is not a constant view address.
+//
+// The naive conversion - the PC device's CreateConstantBufferView over (arg2, arg3) - was measured and is falsified: it
+// writes a V# whose base is the record's first word, which at the dominant site is the destination descriptor itself,
+// so the replay refuses the next submissions ("ExecuteCommandLists failed: unsupported; nothing was submitted"), present
+// fails, and the title crashes 29.5 s into the boot (docs/device_slot70.md section 5). The conversion is therefore left
+// behind the off-by-default switch as a measurement instrument, not as a mode this tree enables.
+//
+// The default answer is the measured refusal (E_NOTIMPL, which the title does not test), written inline by the caller so
+// the default path is unchanged. PALMETTO_SLOT70_PROBE=1 dumps the two records, the destination before/after and the
+// per-heap-page/offset statistics; PALMETTO_SLOT70_CBV=1 adds the falsified conversion. Both are read once and off by
+// default; a call outside the measured shape is refused by name.
+bool slot70_enabled(const char* name) {
+    char value[8] = {};
+    const DWORD length = GetEnvironmentVariableA(name, value, sizeof(value));
+    return length > 0 && value[0] != '\0' && value[0] != '0';
+}
+
+// The measurement switches are read once, on the first slot-70 call. Two reasons: a boot sets them before the title
+// starts, and the default path must not import a call on the slot-70 path (the tree measured its boot with this branch
+// answering inline; an extra call there was measured to change the boot's timing, docs/device_slot70.md section 6), and
+// the GPU-free test sets the conversion before its first slot-70 call. `measurement_enabled` is one cached boolean, so
+// with neither switch set the default answer costs no call at all.
+bool slot70_measurement_enabled() {
+    static const bool on = [] {
+        return slot70_enabled("PALMETTO_SLOT70_PROBE") || slot70_enabled("PALMETTO_SLOT70_CBV");
+    }();
+    return on;
+}
+bool slot70_probe_enabled() {
+    static const bool on = slot70_enabled("PALMETTO_SLOT70_PROBE");
+    return on;
+}
+bool slot70_cbv_enabled() {
+    static const bool on = slot70_enabled("PALMETTO_SLOT70_CBV");
+    return on;
+}
+
+constexpr unsigned kSlot70Sites = 4;
+constexpr unsigned kSlot70DestPages = 8;
+std::atomic<std::uint64_t> g_slot70_calls{0};
+std::atomic<std::uint64_t> g_slot70_site_caller[kSlot70Sites];
+std::atomic<std::uint64_t> g_slot70_site_hits[kSlot70Sites];
+std::atomic<std::uint64_t> g_slot70_dest_page[kSlot70DestPages];
+std::atomic<std::uint64_t> g_slot70_dest_page_hits[kSlot70DestPages];
+std::atomic<std::uint64_t> g_slot70_dest_min{0};
+std::atomic<std::uint64_t> g_slot70_dest_max{0};
+std::atomic<std::uint64_t> g_slot70_dest_zero{0};   // destinations that held zeros before the call
+std::atomic<std::uint64_t> g_slot70_published{0};   // conversions that reached the PC CreateConstantBufferView
+std::atomic<bool> g_slot70_shape_logged{false};
+
+// A destination's heap page and offset within it: a console descriptor heap is a 64 KiB-aligned console address, so
+// the page is what the heap was created at and the offset is descriptor_size * index.
+void slot70_note_dest(std::uint64_t dest, bool zero_before) {
+    const std::uint64_t page = dest & ~std::uint64_t(0xFFFF);
+    const std::uint64_t offset = dest & 0xFFFF;
+    for (unsigned i = 0; i < kSlot70DestPages; ++i) {
+        const std::uint64_t known = g_slot70_dest_page[i].load(std::memory_order_relaxed);
+        if (known == page) {
+            g_slot70_dest_page_hits[i].fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
+        if (known != 0) continue;
+        std::uint64_t expected = 0;
+        if (g_slot70_dest_page[i].compare_exchange_strong(expected, page, std::memory_order_relaxed))
+            g_slot70_dest_page_hits[i].fetch_add(1, std::memory_order_relaxed);
+        break;
+    }
+    std::uint64_t low = g_slot70_dest_min.load(std::memory_order_relaxed);
+    while (offset < low && !g_slot70_dest_min.compare_exchange_weak(low, offset, std::memory_order_relaxed)) {}
+    std::uint64_t high = g_slot70_dest_max.load(std::memory_order_relaxed);
+    while (offset > high && !g_slot70_dest_max.compare_exchange_weak(high, offset, std::memory_order_relaxed)) {}
+    if (zero_before) g_slot70_dest_zero.fetch_add(1, std::memory_order_relaxed);
+}
+
+void slot70_dump(const char* what, std::uint64_t pointer, unsigned bytes) {
+    if (!pointer || !bytes || !readable_range(reinterpret_cast<const void*>(pointer), bytes)) {
+        std::fprintf(stderr, "[rt] d3d12_xs: slot 70 probe: %s at 0x%llx is not readable\n", what,
+                     static_cast<unsigned long long>(pointer));
+        return;
+    }
+    const auto* words = reinterpret_cast<const std::uint32_t*>(pointer);
+    char line[512];
+    int at = std::snprintf(line, sizeof line, "[rt] d3d12_xs: slot 70 probe: %s 0x%llx:", what,
+                           static_cast<unsigned long long>(pointer));
+    for (unsigned i = 0; i < bytes / 4 && at > 0 && static_cast<std::size_t>(at) < sizeof line - 16; ++i)
+        at += std::snprintf(line + at, sizeof line - static_cast<std::size_t>(at), " %08x", words[i]);
+    std::fprintf(stderr, "%s\n", line);
+}
+
+void slot70_summary(std::uint64_t calls) {
+    char pages[512];
+    int at = std::snprintf(pages, sizeof pages, "[rt] d3d12_xs: slot 70: %llu call(s); destination heap page(s):",
+                           static_cast<unsigned long long>(calls));
+    for (unsigned i = 0; i < kSlot70DestPages && at > 0 && static_cast<std::size_t>(at) < sizeof pages - 64; ++i) {
+        const std::uint64_t page = g_slot70_dest_page[i].load(std::memory_order_relaxed);
+        if (!page) continue;
+        at += std::snprintf(pages + at, sizeof pages - static_cast<std::size_t>(at), " 0x%llx +%llu", 
+                            static_cast<unsigned long long>(page),
+                            static_cast<unsigned long long>(g_slot70_dest_page_hits[i].load(std::memory_order_relaxed)));
+    }
+    std::fprintf(stderr, "%s\n", pages);
+    std::fprintf(stderr,
+                 "[rt] d3d12_xs: slot 70: destination offsets 0x%llx..0x%llx, %llu call(s) left the destination zeroed, "
+                 "%llu published\n",
+                 static_cast<unsigned long long>(g_slot70_dest_min.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(g_slot70_dest_max.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(g_slot70_dest_zero.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(g_slot70_published.load(std::memory_order_relaxed)));
+}
+
+std::uint64_t proxy_console_slot70(DeviceProxy* self, std::uint64_t caller, std::uint64_t a1, std::uint64_t a2,
+                                   std::uint64_t a3, std::uint64_t word4) {
+    const std::uint64_t call = g_slot70_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    const bool probe = slot70_probe_enabled();
+    // The first four distinct call sites: a fixed array, no allocation on this path.
+    bool new_site = false;
+    for (unsigned i = 0; i < kSlot70Sites; ++i) {
+        const std::uint64_t known = g_slot70_site_caller[i].load(std::memory_order_relaxed);
+        if (known == caller) {
+            g_slot70_site_hits[i].fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
+        if (known != 0) continue;
+        std::uint64_t expected = 0;
+        if (g_slot70_site_caller[i].compare_exchange_strong(expected, caller, std::memory_order_relaxed)) {
+            new_site = true;
+            g_slot70_site_hits[i].fetch_add(1, std::memory_order_relaxed);
+        }
+        break;
+    }
+    const auto* resource = reinterpret_cast<const D3D12_RESOURCE_DESC*>(a1);
+    const auto* view = reinterpret_cast<const D3D12_CONSTANT_BUFFER_VIEW_DESC*>(a2);
+    const bool view_readable = readable_range(reinterpret_cast<const void*>(a2), sizeof(D3D12_CONSTANT_BUFFER_VIEW_DESC));
+    const bool desc_readable = readable_range(reinterpret_cast<const void*>(a1), sizeof(D3D12_RESOURCE_DESC));
+    // The destination is a 32-byte-aligned slot in memory this process can write.
+    const bool dest_readable = (a3 & 31) == 0 && readable_range(reinterpret_cast<const void*>(a3), 32);
+    std::uint32_t before[8] = {};
+    bool dest_zero = false;
+    if (dest_readable) {
+        std::memcpy(before, reinterpret_cast<const void*>(a3), sizeof(before));
+        dest_zero = before[0] == 0 && before[1] == 0 && before[2] == 0 && before[3] == 0;
+    }
+    slot70_note_dest(a3, dest_zero);
+    if (probe && (new_site || call == 1 || call % 2048 == 0)) {
+        char where[64];
+        streamed_blocks::caller_text(caller, where, sizeof where);
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: slot 70 probe: call %llu caller %s args 0x%llx 0x%llx 0x%llx 0x%llx "
+                     "dest page=0x%llx off=0x%llx zero=%d\n",
+                     static_cast<unsigned long long>(call), where, static_cast<unsigned long long>(a1),
+                     static_cast<unsigned long long>(a2), static_cast<unsigned long long>(a3),
+                     static_cast<unsigned long long>(word4),
+                     static_cast<unsigned long long>(a3 & ~std::uint64_t(0xFFFF)),
+                     static_cast<unsigned long long>(a3 & 0xFFFF), dest_zero ? 1 : 0);
+        if (new_site || call == 1) {
+            // 0x80 bytes of each record: the first 56 are the D3D12_RESOURCE_DESC the console passes, and the rest is
+            // dumped so a field the PC structure does not name cannot be missed.
+            slot70_dump("arg1 record", a1, 0x80);
+            slot70_dump("arg2 record", a2, 0x40);
+            slot70_dump("destination before", a3, 32);
+            // The stack word the title passed past the four register homes next to what the record itself holds. At the
+            // wrapper site the fifth word is the wrapper's saved rsi (the wrapper's own push), which is how the
+            // argument/stack split was established.
+            std::fprintf(stderr, "[rt] d3d12_xs: slot 70 probe: fifth word 0x%llx, record first word 0x%llx\n",
+                         static_cast<unsigned long long>(word4),
+                         static_cast<unsigned long long>(view_readable
+                                                             ? *reinterpret_cast<const std::uint64_t*>(
+                                                                   reinterpret_cast<const void*>(a2))
+                                                             : 0));
+        }
+    }
+    if (call % 4096 == 0) slot70_summary(call);
+
+    // The measured shape: a readable buffer description, a readable view record with a nonzero address and size, and a
+    // 32-byte-aligned writable destination slot. Anything else is not this call and is refused rather than guessed.
+    const bool buffer_desc = desc_readable && resource->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && resource->Width;
+    const bool shaped = buffer_desc && view_readable && view->BufferLocation && view->SizeInBytes && dest_readable;
+    if (slot70_cbv_enabled() && shaped) {
+        // PC CreateConstantBufferView returns void; it writes the descriptor at the destination (or leaves it zeroed for
+        // a null description), so there is no host HRESULT to forward.
+        self->real->CreateConstantBufferView(view, D3D12_CPU_DESCRIPTOR_HANDLE{static_cast<SIZE_T>(a3)});
+        g_slot70_published.fetch_add(1, std::memory_order_relaxed);
+        if (probe && (new_site || call == 1 || call % 2048 == 0)) {
+            std::fprintf(stderr, "[rt] d3d12_xs: slot 70 probe: published CBV location 0x%llx size 0x%llx\n",
+                         static_cast<unsigned long long>(view->BufferLocation),
+                         static_cast<unsigned long long>(view->SizeInBytes));
+            slot70_dump("destination after", a3, 32);
+        }
+        return hr_to_u64(S_OK);
+    }
+    if (slot70_cbv_enabled() && !shaped && !g_slot70_shape_logged.exchange(true, std::memory_order_relaxed)) {
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: slot 70: the call does not have the measured shape (arg1 buffer description=%d, "
+                     "arg2 view readable=%d, arg3 aligned/writable slot=%d); refusing instead of writing a "
+                     "descriptor\n",
+                     buffer_desc ? 1 : 0, view_readable ? 1 : 0, dest_readable ? 1 : 0);
+    }
+    // The title does not test this HRESULT, so its destination descriptors stay as they were.
+    if (trace_enabled())
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: device slot 70 called with 3 arguments (0x%llx, 0x%llx, 0x%llx); the console "
+                     "shape is not the PC CreatePlacedResource1 one, refusing\n",
+                     static_cast<unsigned long long>(a1), static_cast<unsigned long long>(a2),
+                     static_cast<unsigned long long>(a3));
+    return hr_to_u64(E_NOTIMPL);
+}
+
 // ---- Console device slot 55: CreateDerivedPipelineStateX ------------------------------------------------------------
 //
 // The console device vtable is the PC one only up to slot 43; from 44 on it is the console's own extension table, so a
@@ -4721,12 +4950,13 @@ std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64
         return 0;
     } else if constexpr (Slot == 70) {
         note_slot(70);
-        // Measured from the title's own call site (a small thunk that loads the device from a global and then does
-        // `mov rdx, rcx; mov r8, rdx; mov r9, r8; call [rax+0x230]`): the console calls this slot with THREE arguments,
-        // not the seven PC CreatePlacedResource1 takes. Forwarding it by number therefore handed that method the
-        // leftovers of four unrelated registers as its description, state, clear, riid and out pointers, and its first
-        // write went to an address inside the title's own image. Until the three-argument shape is identified, refuse
-        // this slot instead of calling a method with the wrong arity.
+        // Console extension (docs/device_slot70.md): the measured answer is the refusal below, written inline so the
+        // default path - the one the boot was measured on - is unchanged and imports no call here. The measurement
+        // switches (PALMETTO_SLOT70_PROBE=1, PALMETTO_SLOT70_CBV=1, read once) are what call into
+        // proxy_console_slot70, which dumps the arguments and, with the conversion on, answers with the PC
+        // CreateConstantBufferView.
+        if (slot70_measurement_enabled())
+            return proxy_console_slot70(self, reinterpret_cast<std::uint64_t>(_ReturnAddress()), a1, a2, a3, a4);
         if (trace_enabled())
             std::fprintf(stderr,
                          "[rt] d3d12_xs: device slot 70 called with 3 arguments (0x%llx, 0x%llx, 0x%llx); the console "
