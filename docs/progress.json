@@ -1,6 +1,6 @@
 {
   "updated": "2026-11-24",
-  "commit": "HEAD",
+  "commit": "c9653e371",
   "intro": "Measured on one machine (Windows 11, Intel 13900K, RTX 4090) against the author's own retail console package. Every row below is an outcome the project produces, not a plan.",
   "stages": [
     {
@@ -16,12 +16,12 @@
     {
       "stage": "Console D3D12 on Vulkan",
       "state": "done",
-      "evidence": "device, queues, fences, allocators, heaps, command lists, the queue slot shift, the fence value address, the list lifecycle, the clear/barrier conversions, the display surfaces (console slot 127), the derived-pipeline extension (console slot 55) and the title's page VAs rebased into one arena are measured and mapped"
+      "evidence": "device, queues, fences, allocators, heaps, command lists, the queue slot shift, the fence value address, the list lifecycle, the clear/barrier conversions, the display surfaces (console slot 127), the derived-pipeline extension (console slot 55) and the title's page VAs rebased into one arena are measured and mapped; the largest unmodelled console entry point left is device slot 70 (13,568 calls per boot, a CBV-shaped publication refused by name)"
     },
     {
       "stage": "Console DirectStorage",
       "state": "done",
-      "evidence": "4,096 requests / 256 MiB decompressed at 131-144 MiB/s with every status entry S_OK; packed and swizzled reads refuse rather than guess"
+      "evidence": "4,096 requests / 256 MiB decompressed at 131-144 MiB/s with every status entry S_OK; the blocks are read by a title CPU deserializer and never named to the device in the measured window; packed and swizzled reads refuse rather than guess"
     },
     {
       "stage": "Boot chain",
@@ -49,9 +49,19 @@
       "evidence": "presents into the title's own adopted window: the adoption boot has exactly one visible top-level window in the process and 8,625 present calls with 0 failed; the earlier 300 s run presents 33,275 frames with 0 failed"
     },
     {
+      "stage": "Texture layout (XG)",
+      "state": "done",
+      "evidence": "the slot-2 resource-layout record (0x1B40 bytes) is decoded and the linear layout is the default: 44 suggests / 24 computers, 2 records filled exactly, 65 copies / 34,044 B, alive with no exception, device loss or TDR; slot 10's tiling structures are decoded but it still refuses by name because the window creates no 64 KiB-tiled resource"
+    },
+    {
+      "stage": "Full build",
+      "state": "done",
+      "evidence": "a full configure+build of the tree is green (237 of 237 targets, a second run prints up to date) and the gate scripts stay PALMETTO_OK / TESTS_BUILT; three known test failures are documented with their unblocks (docs/testing.md)"
+    },
+    {
       "stage": "Frame content",
       "state": "in progress",
-      "evidence": "the presented 4K image is the frame's own draw target and is proven writable (a control draw reads back its exact colour), but reads back uniformly black: the frame's record is clean (clear first, draw last, no copy or resolve), fixed-function stand-ins and culling are falsified, the title's vertex/geometry path produces no fragments even unculled, and the sampled textures are empty (docs/frame_capture.md)"
+      "evidence": "the presented 4K image is the frame's own draw target and is proven writable (a control draw reads back its exact colour), but reads back uniformly black: the frame's record is clean (clear first, draw last, no copy or resolve), fixed-function stand-ins and culling are falsified, the title's vertex/geometry path produces no fragments even unculled, and the sampled 4K placed texture's own pages are never written (0 of 129,792 scanned bytes over 150 s; the import had nothing to copy). The fixed-function state record's 8 fields cannot be pinned by a behavioural probe (docs/frame_capture.md, docs/texture_source.md, docs/state_blob.md)"
     }
   ],
   "counts": [
@@ -78,19 +88,31 @@
     {
       "what": "Presented frame content",
       "value": "uniformly black in the presented resource; the target is proven writable and correctly bound"
+    },
+    {
+      "what": "Sampled texture data",
+      "value": "the sampled 4K placed texture's pages are never written (0 of 129,792 scanned bytes over 150 s)"
+    },
+    {
+      "what": "Streamed blocks",
+      "value": "4,096 requests / 256 MiB decompressed; read by a title CPU deserializer and never named to the device in the window"
+    },
+    {
+      "what": "Full build",
+      "value": "237 of 237 targets green; gates PALMETTO_OK / TESTS_BUILT"
     }
   ],
   "frontier": {
     "stop": "no stop - the title boots past 300 s, executes its draws and presents into its own window; the presented frame still reads back uniformly black",
-    "summary": "the title boots past 300 s with no exception, executes its draws with 0 refused submissions and presents into the title's own adopted window. The presented 4K resource is the frame's own draw target and is proven writable, but the title's draw leaves it black: the frame's record is clean (clear first, draw last, no copy or resolve), the cull hypothesis and the fixed-function stand-ins are falsified, the title's vertex/geometry path produces no fragments even unculled, and the sampled textures are empty.",
+    "summary": "the title boots past 300 s with no exception, executes its draws with 0 refused submissions and presents into the title's own adopted window; a full configure and build of the tree is green (237 of 237 targets). The presented 4K resource is the frame's own draw target and is proven writable, but the title's draw leaves it black: the frame's record is clean (clear first, draw last, no copy or resolve), the cull hypothesis and the fixed-function stand-ins are falsified, the title's vertex/geometry path produces no fragments even unculled, and the sampled 4K placed texture's pages are never written. The XG layout slot-2 record is decoded and the linear layout is the default, the streamed 256 MiB are consumed by a title CPU deserializer and never named to the device, and the fixed-function state's 8 fields cannot be pinned by behaviour.",
     "detail_doc": "docs/frame_capture.md"
   },
   "next": [
-    "dump the positions the translated vertex shader writes and the bytes its input layout reads for a real draw (the cull axis is closed)",
-    "sample the other texture descriptors and a window away from the origin, to separate an empty image from an empty address",
-    "name the consumer of the streamed blocks and where the title's CPU-built texture memory is named by a GPU resource",
-    "decode the XG layout slots 2 and 10 by behaviour, and pin fixed-function state fields only where a probe supports them",
-    "repair the full configure and build so the remaining test targets compile and run"
+    "dump the translated vertex shader's outputs and the vertex bytes its input layout reads for a real draw, to find where coverage dies (the geometry path)",
+    "find the title-side producer that should write the sampled 4K placed texture, or the device-side producer a console-addressed texture of that population was meant to come from",
+    "decode console device slot 70 (13,568 calls per boot, a CBV-shaped publication refused by name), the largest unmodelled console entry point left",
+    "pin fixed-function state only from the serialized-layout source or a driver trace; the behavioural probe cannot tell any of the 8 fields apart",
+    "find a title path that creates a 64 KiB-tiled resource, so the slot-10 tile list can be filled honestly"
   ],
   "links": [
     {
@@ -102,8 +124,12 @@
       "where": "docs/frame_capture.md"
     },
     {
-      "what": "the presentation window",
-      "where": "docs/window.md"
+      "what": "the streamed-block consumer",
+      "where": "docs/streamed_consumer.md"
+    },
+    {
+      "what": "the sampled texture's data source",
+      "where": "docs/texture_source.md"
     },
     {
       "what": "incoming reports and tracked findings",

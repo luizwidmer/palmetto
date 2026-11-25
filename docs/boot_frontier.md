@@ -793,9 +793,92 @@ what the translated vertex shader reads and where it writes. A second, independe
 first sampled texture resolves to a real 4K image whose 128x128 window reads black, so even with coverage that pass
 would sample nothing ([frame_capture.md](frame_capture.md) sections 6-8).
 
+## Frontier 2026-11-24 (full build green: every target compiles and links)
+
+A full `cmake --build` used to fail on pre-existing broken test targets, so a whole class of tests silently never
+compiled. The repairs are in: the console descriptor-heap test's local `Ref<>` API and its expectations, the m2-formats
+MSVC internal compiler error (not reproduced after the repairs), and the proxy/loader tests that never linked
+(`root_sig_test`, `device_proxy_test`, the PE-loader tests) plus the trace tests that compile `crash_unwind`. The
+imported-heap constructor also registers its heap in the device's heap registry now, so `CreatePlacedResource` on an
+`OpenExistingHeapFromAddress` heap reaches the address branch and answers the documented `E_NOTIMPL` instead of the
+"not a runtime heap" `E_INVALIDARG`. Full build: **237 of 237 steps** (a second run prints "no work to do"), gates
+unchanged `PALMETTO_OK` / `TESTS_BUILT`, and the three remaining known failures are documented with their unblocks
+(`d3d12_fence_timing_test` crash, two `root_sig_test` checks, one `device_proxy_test` check):
+[testing.md](testing.md) ("The full Windows build"), commits `8d36a4136` and `6a42fb445`.
+
+
+## Frontier 2026-11-24 (XG: slot 2 decoded, the linear layout is the default, slot 10 refused with its reason)
+
+The texture-layout family's two refused calls are decoded from the executable's own code. Slot 2 is
+`GetResourceLayout` with a **0x1B40-byte** record, not the 0x6C8 the earlier page assumed: a 0x18-byte header plus four
+0x6C8-byte planes (each 0x38 + 15 mips of 0x70). The offsets the title reads are pinned from both call sites, and the
+two records it asks for (2048x2048 and 1024x1024 single-level R8) are filled exactly with every non-field byte zeroed.
+The linear layout is now the **default** answer, refusing by name any description it cannot lay out honestly. Measured
+A/B: 15/8 suggests/creations and 0 copies in the old refusal arm versus 44/24, **2 filled records** and 65 copies /
+34,044 B in the default arm; both alive 150.2 s with 0 exception, device loss or TDR, and the frame stays black (the
+content frontier is separate). Slot 10 is `GetResourceTiling` (seven arguments, 12-byte subresource entries): its
+structures are decoded but it still refuses by name, because a tile list only exists for a 64 KiB-tiled resource and the
+measured window creates none - filling tile indices would be a fabrication:
+[texture_layout.md](texture_layout.md) sections 2-4, commit `d718a50ed`.
+
+
+## Frontier 2026-11-24 (the streamed blocks: consumer named, and nothing on the GPU names them)
+
+Three 130 s boots answer the DirectStorage question. All 4,096 decompressed 64 KiB blocks / 256 MiB land in ordinary
+process-heap addresses; a title CPU deserializer (`game+0x248F680`, reached as `[obj+0x18]` through the job wrapper
+`game+0x4F65820`) reads the first batch's blocks at ~2.3 s. No device call names any of the 4,096 ranges: 0
+streamed-range hits in the 14 argument words over **13,629 calls** (13,568 of them console slot 70), and 0 inside every
+argument-pointed structure. The linear-layout A/B's "block address handed to console view creation" reading is
+withdrawn: those words were saved-register and caller-stack carry-over, not arguments - the only block pointers near
+these calls sit in the caller's own frame structures (five slot-19 calls, blocks #44/#45). The streamed bytes die in
+CPU deserialization, so the "do the streamed bytes reach a texture" hypothesis is closed:
+[streamed_consumer.md](streamed_consumer.md) sections 3-6, commit `c21a312ca`.
+
+
+## Frontier 2026-11-24 (the sampled 4K placed texture's pages are never written)
+
+The sampled T# resolves to a placed 4K RGBA8 texture (3840x2160, 33,177,600 B, title VA logged by the descriptor
+probe), and a page-writer watch over 150 s reads **0 non-zero bytes of 129,792 scanned** - every one of the span's 507
+64 KiB pages, 256 bytes of each page head, all zero at samples 1, 64, 128, 192, 256 and 320; the other three >=16 MiB
+placed spans likewise never change. The placed-texture import with its cap lifted to 64 MiB decides on exactly that
+resource, finds an all-zero head, waits out its 512-attempt budget and gives up: it would have copied the sampled
+texture and had nothing to copy. So the black sample is "the page fill never happened", not "a fill landed elsewhere";
+the XG fill writes only the 32 KB atlas and 1x1 defaults. The next named place is the **title-side producer that is
+supposed to write this resource** (or the device-side producer a console-addressed texture of that population was meant
+to come from): [texture_source.md](texture_source.md) section 6, commit `c9653e371`.
+
+
+## Frontier 2026-11-24 (fixed-function state: the behavioural probe contract, and 0 of 8 fields pinnable)
+
+A deterministic, GPU-free behavioural probe contract now exists: seven minimal scenes (opposite windings, two depth
+layers, overlapping blend layers, a triangle list, an indexed strip with a cut sentinel, a partial-sample cover, an
+out-of-range depth layer) rendered through a 4x4 RGBA8 target with per-sample depth, standard sample positions, blend,
+cull, depth clip, strip-cut assembly and a resolve, plus a contract table saying which scene decides which field group,
+and each scene's contrasting value whose observation differs. Measured against the title's 5,680 distinct state records,
+every field group keeps several candidate places (of 95 aligned words / 380 bytes / 760 nibbles), fill mode takes the
+enum as a unit nowhere, sample quality changes no defined observation, the sample-mask domain is fully open, and
+attachments have no candidate place in the decoded container - while the title's own draws supply no observation
+because they produce no fragments. So **0 of 8 fields are pinned**: the decoder keeps refusing by name and the
+documented stand-in stays. Only a serialized-layout source or a driver trace could pin a field now:
+[state_blob.md](state_blob.md) section 9, commit `56f0de563`.
+
+
+## Frontier 2026-11-24 (console device slot 70: the largest unmodelled entry point)
+
+Slot 70 is called **13,568 times per boot**, the largest unmodelled console device entry point left: three arguments,
+the second a CBV-shaped struct, the third a console descriptor destination, each followed by a CPU cache-line
+writeback; it is refused by name, so a console-addressed descriptor/view created through it is dropped. It is not on
+the streamed path (no block address appears in its words or pointed-to structures across the 13,629 monitored calls),
+but it is the only remaining place a console-addressed view could be lost. The proxy forwards it to PC
+`CreatePlacedResource1` with a non-heap first argument - argument order correct, semantics wrong. Decoding its two stack
+structs and the engine object at `+0x1FA38` is the next device-side increment:
+[streamed_consumer.md](streamed_consumer.md) sections 5/7-8, [boot_audit.md](boot_audit.md) section 5.
+
 Where the boot stands now: it runs its own frame loop for the whole timeout, builds every pipeline it asks for,
-executes its draws (17,674-27,935 per 150 s, 0 refused submissions) and presents into the title's own window - and the
-presented frame is still black. The frontier is frame content (O18: the title's vertex/geometry path produces no
-fragments), with the empty sampled content behind it (O19); the streamed-block consumer (O20) and the XG layout slots
-(O21) are the measured ways content could arrive, and the fixed-function state blob (O15) is fidelity work that refuses
-nothing today. The open rows and their evidence are in [issues.md](issues.md).
+executes its draws (17,674-27,935 per 150 s, 0 refused submissions), presents into the title's own window, and the full
+configure+build is green (237/237) - and the presented frame is still black. The frame-content frontier is the geometry
+path, which produces no fragments even unculled (O22: framecap is dumping the translated vertex shader's output to find
+where coverage dies), with the never-written sampled 4K texture behind it (O19: its producer is the next named place).
+The streamed blocks are closed as an upload lead (O20 named a CPU deserializer); console slot 70 (O23) and XG slot 10
+(O21) are the remaining unmodelled console entry points, and the fixed-function state cannot be pinned by behaviour
+(O15). The open rows and their evidence are in [issues.md](issues.md).
