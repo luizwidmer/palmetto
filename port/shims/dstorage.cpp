@@ -142,6 +142,126 @@ const char* size_band(uint32_t bytes) {
     return "over 32 MiB";
 }
 
+// ---- Load-window trace (measurement only; PALMETTO_DS_LOAD_TRACE=<from_s>,<to_s>) -----------------------------------
+//
+// docs/streamed_consumer.md: the title's CPU deserializer reads the first sixteen streamed blocks at ~2.3 s and then
+// stops. This trace answers what the loader asks DirectStorage next: every status-array poll (index and value, with the
+// polling caller as module+RVA), every queue call (enqueue, submit, query) and a 1 s heartbeat that keeps counting
+// after the window. The window argument is seconds since the first traced DirectStorage call; `PALMETTO_DS_LOAD_TRACE=1`
+// means 0..15 s. Bounded (2,000 window lines, 20 heartbeat lines), off by default, changes no call.
+
+struct DsLoadWindow {
+    bool on = false;
+    double from = 0.0;
+    double to = 15.0;
+};
+
+const DsLoadWindow& ds_load_window() {
+    static const DsLoadWindow window = [] {
+        DsLoadWindow w;
+        char value[64] = {};
+        if (GetEnvironmentVariableA("PALMETTO_DS_LOAD_TRACE", value, sizeof(value)) == 0 || value[0] == '\0') return w;
+        w.on = true;
+        char* end = nullptr;
+        w.from = std::strtod(value, &end);
+        if (end == value) return w;  // "1" and anything unparsable keep 0..15
+        if (*end == ',') {
+            const double to = std::strtod(end + 1, nullptr);
+            if (to > w.from) w.to = to;
+        }
+        if (w.from != 0.0) w.on = true;
+        return w;
+    }();
+    return window;
+}
+
+// Seconds since the first traced DirectStorage call (the start is taken on first use, before the title's streaming).
+double ds_load_seconds() {
+    static const auto started = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+}
+
+struct DsLoadCounters {
+    std::atomic<std::uint64_t> window_lines{0};
+    std::atomic<std::uint64_t> requests_enqueued{0};
+    std::atomic<std::uint64_t> requests_done{0};
+    std::atomic<std::uint64_t> submits{0};
+    std::atomic<std::uint64_t> status_polls{0};
+    std::atomic<std::uint64_t> pending_polls{0};
+    std::atomic<std::uint64_t> queries{0};
+    std::atomic<std::uint64_t> stat_requests{0};
+    std::atomic<std::uint64_t> last_poll_index{~std::uint32_t(0)};
+    std::atomic<std::uint64_t> last_poll_value{0};
+    std::atomic<std::uint64_t> last_poll_caller{0};
+    std::atomic<std::uint64_t> max_queue_depth{0};
+};
+DsLoadCounters g_ds_load;
+
+bool ds_load_visible() { return ds_load_window().on; }
+
+// Prints one window line when `what` happens inside [from, to). `caller` is the title return address; `detail` is
+// already formatted (counts/values only).
+void ds_load_note(const char* what, const std::string& detail, void* caller) {
+    if (!ds_load_visible()) return;
+    const double at = ds_load_seconds();
+    const DsLoadWindow& window = ds_load_window();
+    if (at < window.from || at >= window.to) return;
+    if (g_ds_load.window_lines.fetch_add(1, std::memory_order_relaxed) >= 2000) return;
+    std::lock_guard lock(log_mutex());
+    std::fprintf(stderr, "[rt] ds load +%.3fs tid %lu %s: %s caller %s\n", at,
+                 static_cast<unsigned long>(GetCurrentThreadId()), what, detail.c_str(),
+                 rt::shims::module_offset((std::uint64_t)(std::uintptr_t)caller).c_str());
+}
+
+// One late line (outside the window) for a rare event: the loader still enqueuing or polling after the window. Bounded
+// to 64 lines, so a title that polls a status array every frame cannot flood the log; the heartbeat counted the polls.
+std::atomic<std::uint64_t> g_ds_late_lines{0};
+
+void ds_load_note_late(const char* what, const std::string& detail, void* caller) {
+    if (!ds_load_visible()) return;
+    if (g_ds_late_lines.fetch_add(1, std::memory_order_relaxed) >= 64) return;
+    const double at = ds_load_seconds();
+    std::lock_guard lock(log_mutex());
+    std::fprintf(stderr, "[rt] ds load late +%.1fs tid %lu %s: %s caller %s\n", at,
+                 static_cast<unsigned long>(GetCurrentThreadId()), what, detail.c_str(),
+                 rt::shims::module_offset((std::uint64_t)(std::uintptr_t)caller).c_str());
+}
+
+// The heartbeat thread: one line per second for the first 20 s, cumulative counters and the last status poll. It starts
+// on the first status array or queue the title creates; a boot without the switch starts no thread.
+void ds_load_heartbeat_start() {
+    static std::atomic<bool> started{false};
+    if (!ds_load_visible() || started.exchange(true, std::memory_order_relaxed)) return;
+    static const auto zero = ds_load_seconds();
+    std::thread([] {
+        for (unsigned second = 1; second <= 20; ++second) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            const double at = ds_load_seconds();
+            std::uint64_t poll_index = g_ds_load.last_poll_index.load(std::memory_order_relaxed);
+            std::uint64_t poll_caller = g_ds_load.last_poll_caller.load(std::memory_order_relaxed);
+            std::string caller =
+                poll_caller ? rt::shims::module_offset(poll_caller) : std::string("(none, never polled)");
+            std::lock_guard lock(log_mutex());
+            std::fprintf(stderr,
+                         "[rt] ds load heartbeat +%.1fs: requests enqueued %llu, done %llu, submits %llu, status polls "
+                         "%llu (pending %llu; last index %s value 0x%llx caller %s), queries %llu, stats %llu, max "
+                         "queue depth %llu\n",
+                         at, static_cast<unsigned long long>(g_ds_load.requests_enqueued.load()),
+                         static_cast<unsigned long long>(g_ds_load.requests_done.load()),
+                         static_cast<unsigned long long>(g_ds_load.submits.load()),
+                         static_cast<unsigned long long>(g_ds_load.status_polls.load()),
+                         static_cast<unsigned long long>(g_ds_load.pending_polls.load()),
+                         poll_index == ~std::uint32_t(0) ? "none" : std::to_string(poll_index).c_str(),
+                         static_cast<unsigned long long>(g_ds_load.last_poll_value.load()), caller.c_str(),
+                         static_cast<unsigned long long>(g_ds_load.queries.load()),
+                         static_cast<unsigned long long>(g_ds_load.stat_requests.load()),
+                         static_cast<unsigned long long>(g_ds_load.max_queue_depth.load()));
+        }
+        (void)zero;
+    }).detach();
+}
+
+
 // ---- Streamed-block consumer diagnostics (measurement only; PALMETTO_STREAM_CONSUMER=1) ---------------------------
 //
 // docs/streamed_consumer.md. The title streams ~256 MiB as 64 KiB decompressed blocks into ordinary process-heap
@@ -155,9 +275,9 @@ const char* size_band(uint32_t bytes) {
 //     handler that prints the accessing code (title RVA, host-runtime RVA or neither) and the title frames on its stack,
 //     then clears the guard. A host-runtime first touch is a shim read - the XG texture-computer copy is the one this
 //     measurement is looking for. The handler does not change the access, allocate or read the block, so the boot runs as
-//     without the switch. Everything is bounded (32 tracked destinations, 32 guard slots, 24 fault lines, fixed lines) and
-//     off by default; with the switch unset no guard, handler or range is created and every function here returns on one
-//     cached boolean.
+//     without the switch. Everything is bounded (72 tracked destinations, 96 guard slots, 128 fault lines, fixed lines)
+//     and off by default; with the switch unset no guard, handler or range is created and every function here returns on
+//     one cached boolean.
 
 bool stream_consumer_enabled() {
     static const bool on = [] {
@@ -243,7 +363,10 @@ struct TrackedDestination {
     unsigned arms = 0;
     bool written_again = false;
 };
-constexpr unsigned kTrackedDestinations = 32;
+// The load-stall increment (docs/streamed_consumer.md): the first 64 destinations are guarded so the exact block at
+// which the consumer stops is measured, not bracketed; eight later destinations (every 512th request) keep the
+// whole-stream sample.
+constexpr unsigned kTrackedDestinations = 72;
 
 // A destination's interior pages under PAGE_GUARD. The fault handler runs on whichever thread touched them, so these
 // fields are atomic; the handler clears `armed` before it resumes the access.
@@ -255,7 +378,7 @@ struct GuardedBlock {
     std::atomic<unsigned> faults{0};
     std::atomic<bool> armed{false};
 };
-constexpr unsigned kGuardSlots = 32;
+constexpr unsigned kGuardSlots = 96;
 GuardedBlock g_guards[kGuardSlots];
 std::atomic<unsigned> g_fault_lines{0};
 
@@ -312,7 +435,7 @@ LONG CALLBACK stream_guard_handler(EXCEPTION_POINTERS* info) {
         guard.armed.store(false, std::memory_order_release);
         if (!first) return EXCEPTION_CONTINUE_EXECUTION;
         guard.faults.fetch_add(1, std::memory_order_relaxed);
-        if (g_fault_lines.fetch_add(1, std::memory_order_relaxed) < 24) {
+        if (g_fault_lines.fetch_add(1, std::memory_order_relaxed) < 128) {
             char where[80];
             std::uintptr_t rva = 0;
             if (title_rva(rip, rva))
@@ -322,9 +445,10 @@ LONG CALLBACK stream_guard_handler(EXCEPTION_POINTERS* info) {
                               static_cast<unsigned long long>(rva));
             else
                 std::snprintf(where, sizeof where, "0x%llx (neither image)", static_cast<unsigned long long>(rip));
-            std::fprintf(stderr, "[rt] dstorage guard: streamed block #%u first %s at its +0x%llx by %s\n", tracked,
-                         access == 1 ? "write" : access == 8 ? "execute" : "read",
-                         static_cast<unsigned long long>(address > block ? address - block : 0), where);
+            std::fprintf(stderr, "[rt] dstorage guard: streamed block #%u first %s at its +0x%llx by %s (tid %lu)\n",
+                         tracked, access == 1 ? "write" : access == 8 ? "execute" : "read",
+                         static_cast<unsigned long long>(address > block ? address - block : 0), where,
+                         static_cast<unsigned long>(GetCurrentThreadId()));
             print_title_stack(rsp);
         }
         return EXCEPTION_CONTINUE_EXECUTION;
@@ -415,11 +539,9 @@ void stream_note_completed(void* destination, size_t bytes, void* caller) {
             tracked = &g_tracked[i];
             break;
         }
-    // 32 tracked blocks: the first sixteen requests, then one destination every 256th request, so the guard samples the
-    // whole 256 MiB stream instead of its first resource (the consumer chain of docs/streamed_consumer.md is one batch;
-    // the first sixteen also say whether the consumer handles a second resource in that batch, and a host-code first
-    // touch would be the XG fill path reading a block).
-    if (!tracked && g_tracked_count < kTrackedDestinations && (requests <= 16 || requests % 256 == 0)) {
+    // The load-stall increment: the first 64 requests are tracked one by one, so the exact block at which the consumer
+    // stops is measured rather than bracketed between 16 and 256; every 512th request then samples the whole stream.
+    if (!tracked && g_tracked_count < kTrackedDestinations && (requests <= 64 || requests % 512 == 0)) {
         tracked = &g_tracked[g_tracked_count];
         const unsigned index = g_tracked_count++;
         tracked->base = base;
@@ -676,8 +798,32 @@ public:
     // IsComplete is GetHResult(index) != E_PENDING (the reference says so); an index past the array is not pending.
     bool STDMETHODCALLTYPE IsComplete(UINT32 index) override { return GetHResult(index) != E_PENDING; }
     HRESULT STDMETHODCALLTYPE GetHResult(UINT32 index) override {
-        if (index >= capacity_) return E_DSTORAGE_INDEX_BOUND;
-        return entries_[index].load(std::memory_order_acquire);
+        const HRESULT hr = index >= capacity_ ? E_DSTORAGE_INDEX_BOUND : entries_[index].load(std::memory_order_acquire);
+        if (ds_load_visible()) {
+            void* const caller = _ReturnAddress();
+            const std::uint64_t polls = g_ds_load.status_polls.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (hr == E_PENDING) g_ds_load.pending_polls.fetch_add(1, std::memory_order_relaxed);
+            g_ds_load.last_poll_index.store(index, std::memory_order_relaxed);
+            g_ds_load.last_poll_value.store(static_cast<std::uint32_t>(hr), std::memory_order_relaxed);
+            g_ds_load.last_poll_caller.store(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(caller)),
+                                             std::memory_order_relaxed);
+            if (polls <= 2000 || polls % 512 == 0) {
+                char detail[128];
+                std::snprintf(detail, sizeof detail, "status poll #%llu index %u value %s (capacity %u)",
+                              static_cast<unsigned long long>(polls), index,
+                              hr == E_PENDING ? "E_PENDING" : hr_text(hr).c_str(), capacity_);
+                ds_load_note("poll", detail, caller);
+            }
+            if (ds_load_seconds() >= ds_load_window().to && (polls <= 2032 || polls % 8192 == 0)) {
+                char detail[128];
+                std::snprintf(detail, sizeof detail,
+                              "status poll #%llu index %u value %s after the load window", 
+                              static_cast<unsigned long long>(polls), index,
+                              hr == E_PENDING ? "E_PENDING" : hr_text(hr).c_str());
+                ds_load_note_late("late-poll", detail, caller);
+            }
+        }
+        return hr;
     }
 
     uint32_t capacity() const { return capacity_; }
@@ -880,6 +1026,7 @@ public:
     // Separate from the constructor so a failure to start the thread can be reported.
     bool start() {
         if (!error_event_) return false;
+        ds_load_heartbeat_start();  // no thread without PALMETTO_DS_LOAD_TRACE
         try {
             worker_ = std::thread([this] { run(); });
         } catch (...) {
@@ -940,6 +1087,21 @@ public:
                           static_cast<unsigned long long>(options::bcpack(o)),
                           static_cast<unsigned long long>(options::swizzle(o)), hr_text(e.enqueue_error).c_str());
             storage_trace_site_at("request", b, _ReturnAddress());
+        }
+        if (ds_load_visible() && request) {
+            const std::uint64_t n = g_ds_load.requests_enqueued.fetch_add(1, std::memory_order_relaxed) + 1;
+            const bool in_window = n <= 3 || n % 1024 == 0;
+            const bool late = n > 4096;  // beyond the initial 4,096-request burst
+            if (in_window || late) {
+                const uint64_t o = request->Options.AsUINT64;
+                char detail[160];
+                std::snprintf(detail, sizeof detail, "enqueue request #%llu source=%s src=%u dst=%u zlib=%d",
+                              static_cast<unsigned long long>(n),
+                              options::source_type(o) == DSTORAGE_REQUEST_SOURCE_FILE ? "file" : "memory",
+                              request->SourceSize, request->DestinationSize, options::zlib(o) ? 1 : 0);
+                if (in_window) ds_load_note("enqueue", detail, _ReturnAddress());
+                if (late) ds_load_note_late("late-enqueue", detail, _ReturnAddress());
+            }
         }
         enqueue(std::move(e));
     }
@@ -1023,6 +1185,15 @@ public:
                 std::snprintf(b, sizeof b, "submit: %zu entr(ies), %zu submitted before", entries_.size(), submitted_);
                 storage_trace_site_at("submit", b, _ReturnAddress());
             }
+            if (ds_load_visible()) {
+                const std::uint64_t n = g_ds_load.submits.fetch_add(1, std::memory_order_relaxed) + 1;
+                char detail[96];
+                std::snprintf(detail, sizeof detail, "submit #%llu: %zu entr(ies), %zu submitted before",
+                              static_cast<unsigned long long>(n), entries_.size(), submitted_);
+                ds_load_note("submit", detail, _ReturnAddress());
+                if (ds_load_seconds() >= ds_load_window().to && entries_.size() <= 8)
+                    ds_load_note_late("late-submit", detail, _ReturnAddress());
+            }
         }
         std::lock_guard lock(mutex_);
         submit_locked();
@@ -1100,6 +1271,14 @@ public:
         const size_t unsubmitted = entries_.size() - submitted_;
         info->RequestCountUntilAutoSubmit =
             auto_submit() ? static_cast<UINT16>(half() > unsubmitted ? half() - unsubmitted : 0) : 0;
+        if (ds_load_visible()) {
+            g_ds_load.queries.fetch_add(1, std::memory_order_relaxed);
+            char detail[128];
+            std::snprintf(detail, sizeof detail, "query1: empty slots %u, request count until auto submit %u",
+                          static_cast<unsigned>(info->EmptySlotCount),
+                          static_cast<unsigned>(info->RequestCountUntilAutoSubmit));
+            ds_load_note("query", detail, _ReturnAddress());
+        }
     }
 
 private:
@@ -1216,6 +1395,7 @@ private:
                         stream_note_completed(e.request.Destination, e.request.DestinationSize, e.caller);
                 }
                 if (e.file && e.file_counted) e.file->finish_pending();
+                if (ds_load_visible()) g_ds_load.requests_done.fetch_add(1, std::memory_order_relaxed);
                 if (FAILED(hr) && SUCCEEDED(since_notify_)) since_notify_ = hr;
                 break;
             case Entry::Type::Status:
@@ -1542,6 +1722,12 @@ public:
         auto* a = new (std::nothrow) StatusArray(capacity, std::move(entries));
         if (!a) return E_OUTOFMEMORY;
         *ppv = static_cast<IDStorageStatusArrayX*>(a);
+        if (ds_load_visible()) {
+            ds_load_heartbeat_start();
+            char detail[96];
+            std::snprintf(detail, sizeof detail, "create status array capacity %u", capacity);
+            ds_load_note("status-array", detail, _ReturnAddress());
+        }
         return S_OK;
     }
 
@@ -1571,6 +1757,29 @@ public:
         }
         std::lock_guard lock(stats().mutex);
         *out = stats().s;
+        if (ds_load_visible()) {
+            g_ds_load.stat_requests.fetch_add(1, std::memory_order_relaxed);
+            const DSTORAGE_PRIORITY_STATS* priorities[4] = {&out->LowPriorityStats, &out->NormalPriorityStats,
+                                                             &out->HighPriorityStats, &out->RealtimePriorityStats};
+            std::uint64_t requests = 0, source = 0, destination = 0, statuses = 0, fences = 0, pending = 0;
+            for (const DSTORAGE_PRIORITY_STATS* p : priorities) {
+                requests += p->TotalRequestCount;
+                source += p->TotalRequestSourceByteCount;
+                destination += p->TotalRequestDestinationByteCount;
+                statuses += p->TotalStatusCount;
+                fences += p->TotalFenceCount;
+                pending += p->PendingRequestCount;
+            }
+            char detail[224];
+            std::snprintf(detail, sizeof detail,
+                          "get stats: requests %llu (source %llu, destination %llu), status %llu, fence %llu, "
+                          "pending %llu, open files %u, errors %u",
+                          static_cast<unsigned long long>(requests), static_cast<unsigned long long>(source),
+                          static_cast<unsigned long long>(destination), static_cast<unsigned long long>(statuses),
+                          static_cast<unsigned long long>(fences), static_cast<unsigned long long>(pending),
+                          out->CurrentOpenFileCount, out->ErrorCount);
+            ds_load_note("stats", detail, _ReturnAddress());
+        }
     }
 
 private:
