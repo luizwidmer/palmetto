@@ -25,7 +25,7 @@ import zipfile
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPT = os.path.join(ROOT, "tooling", "tooling/scripts", "check_no_game_data.py")
+SCRIPT = os.path.join(ROOT, "tooling", "scripts", "check_no_game_data.py")
 
 
 def pe_header(e_lfanew=0x80):
@@ -288,7 +288,11 @@ class CheckNoGameData(unittest.TestCase):
         # the other files are still scanned; a real match wins over the unreadable one
         rc, out, err = self.run_with_unreadable(locked, [locked, sibling, clean])
         self.assertEqual(rc, 1, out + err)
-        self.assertEqual(out.splitlines(), [f"{os.path.relpath(sibling)}: DDS texture"], out)
+        try:
+            shown = os.path.relpath(sibling)
+        except ValueError:  # Windows: the checkout and the temp folder are on different drives
+            shown = sibling
+        self.assertEqual(out.splitlines(), [f"{shown}: DDS texture"], out)
         self.assertIn("cannot read", err)
         self.assertIn("1 file(s) start like game data", err)
         self.assertNotIn("Traceback", err)

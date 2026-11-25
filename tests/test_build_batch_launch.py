@@ -28,7 +28,7 @@ FOLDERS = ("plain", "a & b", "a&b", "x^y", "sp (x)", "東京 & co")
 
 def launch_arguments(script):
     """The -ArgumentList expression of the script's one `$p = Start-Process cmd.exe` line."""
-    found = LAUNCH.findall((ROOT / "tooling" / "tooling/scripts" / script).read_text(encoding="utf-8-sig"))
+    found = LAUNCH.findall((ROOT / "tooling" / "scripts" / script).read_text(encoding="utf-8-sig"))
     if len(found) != 1:
         raise AssertionError(f"{script}: expected one `$p = Start-Process cmd.exe -ArgumentList ...` line, found "
                              f"{len(found)}; update tests/test_build_batch_launch.py together with the script")

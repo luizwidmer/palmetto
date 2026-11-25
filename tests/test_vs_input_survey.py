@@ -71,14 +71,14 @@ def test_vs_input_survey():
 
         with open(os.path.join(dx, "disasm", "a_vs.s"), "a", encoding="utf-8") as f:
             f.write("\texp prim v0, off, off, off done\n")
-        out = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "tooling/scripts", "vs_input_survey.py"), dx],
+        out = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "scripts", "vs_input_survey.py"), dx],
                              capture_output=True, text=True)
         check(out.returncode == 0 and "exp prim 1" in out.stdout and "NGG markers present" in out.stdout,
               "a primitive export flips the verdict away from legacy")
         check("a_vs" not in out.stdout and "c_vs" not in out.stdout, "the summary prints counts, not shader names")
 
     # bad inputs and outputs: one error line, exit 2, no traceback, and index.json is never overwritten
-    tool = os.path.join(ROOT, "tooling", "tooling/scripts", "vs_input_survey.py")
+    tool = os.path.join(ROOT, "tooling", "scripts", "vs_input_survey.py")
 
     def cli(*args):
         return subprocess.run([sys.executable, "-I", tool, *args], capture_output=True, text=True)

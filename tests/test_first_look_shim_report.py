@@ -26,7 +26,7 @@ class FirstLookShimReportTest(unittest.TestCase):
             for name in ("tooling/scripts/first_look.ps1", "tooling/pe_inspect.py", "tooling/gdk_runtime_calls.py",
                          "tooling/gdk_runtime_classes.json", "tooling/find_hash_lookup.py", "tooling/exe_checklist.py",
                          "tooling/report_paths.py"):
-                (root / name).parent.mkdir(exist_ok=True)
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source / name, root / name)
             loader = root / "port/build/palmetto.exe"
             loader.parent.mkdir(parents=True)

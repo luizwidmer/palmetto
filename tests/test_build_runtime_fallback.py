@@ -14,12 +14,12 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT / "tooling" / "tooling/scripts"), str(ROOT / "port" / "test" / "shaders"), str(ROOT / "tooling")]
+sys.path[:0] = [str(ROOT / "tooling" / "scripts"), str(ROOT / "port" / "test" / "shaders"), str(ROOT / "tooling")]
 import check  # noqa: E402
 import image_fuzz  # noqa: E402
 import run_gpu_tests  # noqa: E402
 
-SCRIPT = ROOT / "tooling" / "tooling/scripts" / "build_runtime.ps1"
+SCRIPT = ROOT / "tooling" / "scripts" / "build_runtime.ps1"
 
 
 def fallback_body(text: str) -> str:
@@ -41,7 +41,7 @@ class FallbackBuildsTheHarnesses(unittest.TestCase):
         """A harness run_gpu_tests.py or check.py starts by name, but the fallback did not build, fails its test
         with "could not start" (ps_ssharp: vk_sampler_test.exe, WinError 2)."""
         named = set()
-        for path in (ROOT / "tooling" / "tooling/scripts" / "run_gpu_tests.py", ROOT / "port" / "test" / "shaders" / "check.py"):
+        for path in (ROOT / "tooling" / "scripts" / "run_gpu_tests.py", ROOT / "port" / "test" / "shaders" / "check.py"):
             named |= set(re.findall(r'"(vk_[a-z0-9_]+)"', path.read_text(encoding="utf-8")))
         harnesses = {n for n in named if (ROOT / "port" / "test" / f"{n}.cpp").is_file()}
         self.assertIn("vk_sampler_test", harnesses)

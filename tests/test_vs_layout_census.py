@@ -177,7 +177,7 @@ class TestSurvey(unittest.TestCase):
 
     def test_cli_json(self):
         out = os.path.join(self._tmp.name, "out.json")
-        result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "tooling/scripts", "vs_layout_census.py"),
+        result = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "scripts", "vs_layout_census.py"),
                                  self.dx, "--json", out],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

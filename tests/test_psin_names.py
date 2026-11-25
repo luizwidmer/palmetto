@@ -225,9 +225,13 @@ class TestCli(unittest.TestCase):
                 f.write("prop_crate_01\n")
 
             folded_names = os.path.join(tmp, "NAMES.TXT")
-            with (mock.patch.object(report_paths, "path_key", side_effect=str),
+            # same_report_path resolves each path once and calls the private helpers; simulate a POSIX folding
+            # volume (realpath keeps the spelling, the name key cannot fold it) so the volume probe decides.
+            probe = mock.Mock(return_value=True)
+            with (mock.patch.object(report_paths, "_resolved_key", mock.Mock(side_effect=lambda path: path)),
+                  mock.patch.object(report_paths, "_same_resolved_name", probe),
                   mock.patch.object(report_paths.os.path, "samefile", side_effect=OSError("not same")),
-                  mock.patch.object(report_paths, "same_name_on_folding_volume", return_value=True) as probe,
+                  mock.patch.object(report_paths.os.path, "realpath", side_effect=lambda path: path),
                   mock.patch.object(sys, "argv", ["psin_names.py", src, "--names", names, "--refs", folded_names])):
                 with self.assertRaises(SystemExit) as cm:
                     N.main()

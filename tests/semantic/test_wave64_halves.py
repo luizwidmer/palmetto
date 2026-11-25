@@ -1259,7 +1259,7 @@ _SWIZZLE_OFFSETS = {
 
 
 def _load_ps_w64_lines(name):
-    asm_path = os.path.join(os.path.dirname(HERE), "..", "runtime", "test", "shaders", f"{name}.asm")
+    asm_path = os.path.join(os.path.dirname(HERE), "..", "port", "test", "shaders", f"{name}.asm")
     out = []
     with open(asm_path, encoding="utf-8") as f:
         for raw in f:

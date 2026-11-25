@@ -19,7 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tooling/scripts"))
 import check_apt_key  # noqa: E402
 
-SCRIPT = os.path.join(ROOT, "tooling", "tooling/scripts", "check_apt_key.py")
+SCRIPT = os.path.join(ROOT, "tooling", "scripts", "check_apt_key.py")
 WINEHQ = "D43F640145369C51D786DDEA76F1A20FF987672F"
 LLVM = "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421"
 

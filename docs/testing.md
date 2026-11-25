@@ -82,12 +82,15 @@ for a translation unit that compiles alone.
 
 The local gates are two scripts kept with the machine's build setup, outside the tree. The runtime gate builds
 `palmetto` and must end with `PALMETTO_OK`; the test gate builds `d3d12_fence_timing_test`, `frame_dump_test`,
-`xs_proxy_mock_test`, `unimplemented_policy_test`, `graphics_record_test`, `graphics_pso_test`, `xbox_present_test`
-and `buffer_va_index_test` and must end with `TESTS_BUILT`. Seven of those eight must pass; the exception is the known
-crash below. The gates do not build everything, so run the full build as well before calling a change green.
+`xs_proxy_mock_test`, `unimplemented_policy_test`, `graphics_record_test`, `graphics_pso_test`, `xbox_present_test`,
+`buffer_va_index_test`, `dstorage_test` and `xapu_chad_test` and must end with `TESTS_BUILT`. Nine of those ten must
+pass; the exception is the known crash below. The gates do not build everything, so run the full build as well before
+calling a change green.
 
 Known failures in this tree, measured on 2026-11-24 (they were latent because the targets named at the end of this
-section never linked before):
+section never linked before). Re-checked on 2026-11-25 in a rebuilt tree: all three still fail exactly these checks,
+and `device_proxy_trace` (the same test with the trace switch on) fails the same `device_proxy_test` check, so a ctest
+run that includes it reports two device-proxy failures rather than one:
 
 - `d3d12_fence_timing_test` exits with `0xC0000005`, a pre-existing crash that is quarantined: the test gate builds it,
   but it is excluded from a `ctest` pass check (it stays registered, so a full `ctest` run reports it failed). Unblock:

@@ -1,10 +1,14 @@
 # XMem: how the retail executable calls it (RT-5)
 
 `game.exe` imports 12 functions from `xmem.dll` (`docs/runtime_imports.md`, "The retail executable").
-Seven have no shim yet. This page records, from the file alone, how the executable calls them: how many call sites each
-has and the constant arguments those sites pass. Nothing was run: `tooling/import_call_sites.py` finds the call sites, and
-the instructions that load the argument registers before each call were read by hand. No code or data of the executable
-is quoted, only the constants a call passes and the counts. Measured at `main` `1cc6e3c1`, SHA-256
+Seven had no shim when this page was measured; all seven are served now by
+[`port/shims/xmem.cpp`](../port/shims/xmem.cpp), and the dry run reports no unimplemented `xmem.dll` import. The shipped
+answers and their measured argument shapes are in the `xmem.dll` notes of
+[runtime_imports.md](runtime_imports.md#the-retail-executable-rt-5). This page records, from the file alone, how the
+executable calls them: how many call sites each has and the constant arguments those sites pass. Nothing was run:
+`tooling/import_call_sites.py` finds the call sites, and the instructions that load the argument registers before each call
+were read by hand. No code or data of the executable is quoted, only the constants a call passes and the counts. Measured
+at `main` `1cc6e3c1`, SHA-256
 `e95020b2fa4a721db3df59fdecf75621730ac559d8835252f6c3b658d5a08993`.
 
 ```powershell
@@ -50,10 +54,12 @@ The 23 sites pass these constants (`allocation_type`, `attributes`, `protect`; t
 | `0x20406000` | `0x27` | `0x1004`, `0x1404`, `0x8404`, `0x2404`, `0x2004` | 5 (one each) |
 | `0x42000` | `0x7` | `0x1` | 1 |
 
-Every `attributes` value is nonzero, and `port/shims/xmem.cpp` returns `ERROR_NOT_SUPPORTED` for a nonzero value
-("until their host mapping is known"), so none of the 23 calls succeeds there. Past that check the shim would also
-refuse the calls with `allocation_type` `0x20003000` (5 sites: the 2 MiB page mode) and those with bits it does not
-know: `0x4000` in `0x20406000` (5 sites) and `0x40000` in `0x42000` (1 site).
+Every `attributes` value is nonzero. When this page was measured `port/shims/xmem.cpp` returned `ERROR_NOT_SUPPORTED` for
+a nonzero attribute word ("until their host mapping is known"), so none of the 23 calls succeeded there. The shim now accepts
+the word (recording each distinct value as an `xmem_attributes` event) and serves the commit, placeholder and large-page
+types above through `VirtualAlloc2`/`MapViewOfFile3`; the `xmem.dll` notes in
+[runtime_imports.md](runtime_imports.md#the-retail-executable-rt-5) give what is served and what a host without the
+placeholder APIs answers (`ERROR_NOT_SUPPORTED`). What the attribute bits mean is still **unmeasured**.
 
 The `protect` values are not Win32 protections alone. The Windows SDK's `winnt.h` defines the graphics page protections
 the high bits match: `PAGE_GRAPHICS_NOACCESS` `0x800`, `_READONLY` `0x1000`, `_READWRITE` `0x2000`, `_EXECUTE_READ`
@@ -81,13 +87,12 @@ those two facts. The meaning of `flags`, and whether the page numbers in `pageAr
 are **unmeasured**.
 
 The sequence in the first function that calls them is: `XMemAllocatePhysicalPages`, then `XMemVirtualAlloc` of a range
-with `0x20402000` and attributes `0x23`, then `XMemMapPhysicalPages` of those pages at that range. So the physical-page calls depend on the
-attribute check above: until `XMemVirtualAlloc` accepts these attribute words, the map calls are never reached from
-there.
+with `0x20402000` and attributes `0x23`, then `XMemMapPhysicalPages` of those pages at that range. The map calls are
+reached from there once `XMemVirtualAlloc` accepts the attribute word, which the shim now does (the page mode is served
+as a placeholder, see [runtime_imports.md](runtime_imports.md#the-retail-executable-rt-5)).
 
-The host's own AWE functions need `SeLockMemoryPrivilege`, which an ordinary user does not hold, so a shim would
-emulate the pool (a pagefile-backed section of 64 KiB pages, with views placed at the reserved range) instead of
-forwarding. That is a design note, not a measurement.
+The host's own AWE functions need `SeLockMemoryPrivilege`, which an ordinary user does not hold, so the shim emulates the
+pool instead of forwarding: a pagefile-backed section of 64 KiB pages, with views placed at the reserved range.
 
 ## The other imports
 

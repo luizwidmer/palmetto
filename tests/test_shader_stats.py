@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPT = os.path.join(ROOT, "tooling", "tooling/scripts", "shader_stats.py")
+SCRIPT = os.path.join(ROOT, "tooling", "scripts", "shader_stats.py")
 
 # ps_flat's listing as llvm-mc prints it: 8 instructions, highest VGPR v5.
 PS_FLAT = """; ps_flat  code 0x0..0x0 (synthetic), gfx1013, 0 invalid words

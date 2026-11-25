@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "tooling" / "conformance" / "native" / "tooling/scripts" / "run.ps1"
+SCRIPT = Path(__file__).resolve().parents[1] / "tooling" / "conformance" / "native" / "scripts" / "run.ps1"
 STAND_IN = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "where.exe"
 
 
@@ -24,9 +24,9 @@ class RunScriptTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
         native = self.base / "tooling" / "conformance" / "native"
-        (native / "tooling/scripts").mkdir(parents=True)
-        shutil.copy(SCRIPT, native / "tooling/scripts" / "run.ps1")
-        self.script = native / "tooling/scripts" / "run.ps1"
+        (native / "scripts").mkdir(parents=True)
+        shutil.copy(SCRIPT, native / "scripts" / "run.ps1")
+        self.script = native / "scripts" / "run.ps1"
         self.exe = native / "build" / "Release" / "conform_native.exe"
 
     def build(self):

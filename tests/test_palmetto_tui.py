@@ -150,7 +150,7 @@ class RestoreConsoleTest(unittest.TestCase):
 
 class BuildRuntimeCaptureTest(unittest.TestCase):
     def test_script_no_longer_shares_the_parent_console(self):
-        path = os.path.join(ROOT, "tooling", "tooling/scripts", "build_runtime.ps1")
+        path = os.path.join(ROOT, "tooling", "scripts", "build_runtime.ps1")
         with open(path, encoding="utf-8") as f:
             text = f.read()
         # The old Start-Process line shared the console; the new one must hide + redirect.

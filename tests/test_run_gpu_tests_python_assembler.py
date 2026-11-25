@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tooling" / "tooling/scripts"))
+sys.path.insert(0, str(ROOT / "tooling" / "scripts"))
 sys.path.insert(0, str(ROOT / "tooling"))
 
 import rdna2spirv

@@ -165,19 +165,27 @@ policy "other" (none is counted as returning an `HRESULT`), and they come from s
 
 The game executable imports two functions from `xg_xs.dll`, the console's texture layout library:
 `XGSuggestSwizzleMode` (2 call sites, in the helper that fills a texture description) and `XGCreateTextureComputer`
-(4 call sites, which use slots 1, 2, 8 and 10 of the returned object's vtable). The runtime has no model of the console
-resource layout, so `port/shims/xg_xs.cpp` computes none: both return `E_NOTIMPL` and write no layout. Two of the
-four `XGCreateTextureComputer` callers ignore the HRESULT and call through the object at once, so the shim still stores
-a static object in the out pointer; its slot 1 (read as `Release`) does nothing, and every other slot up to 31 logs its
-index and caller once and returns `E_NOTIMPL` without writing its arguments. The call shapes and the reasoning are at
-the top of the file; `xg_xs_test` covers them. Textures whose layout the game asks for are therefore not laid out yet.
-The table above was measured before this shim and still lists these two as unimplemented; they are served now.
+(4 call sites, which use slots 1, 2, 8 and 10 of the returned object's vtable). `port/shims/xg_xs.cpp` now answers
+both for the port's ordinary row-major committed images: the suggestion returns `S_OK` with the explicit linear mode,
+a computer is created for a description whose layout can be filled honestly, slot 2 fills its 0x1B40-byte
+`GetResourceLayout` record, and slot 8 copies the title's linear data. Slot 10 (`GetResourceTiling`) is refused by
+name because the runtime creates no 64 KiB-tiled resource. The call shapes, the record fields and the A/B boot (two
+records filled, 65 copies / 34,044 B, frame still black) are in [texture_layout.md](texture_layout.md); `xg_xs_test`
+covers both arms. The table above was measured before this shim and still lists these two as unimplemented; they are
+served now.
 
-Only two of these DLLs have a shim in the repository (`xmem.dll` and `d3d12_xs.dll`), and they are not complete:
-they hold 8 of the 30 unimplemented imports. The other 22 are in five DLLs (`xg_xs.dll`, `XCRDAPI.dll`, `chad.dll`,
-`xapu.dll`, `AcpHal.dll`) with no shim at all.
+When the table was measured only two of these DLLs had a shim (`xmem.dll` and `d3d12_xs.dll`). Every one of the seven
+is served now, so the same dry run on this tree reports 0 unimplemented imports from the executable:
 
-The seven `xmem.dll` imports are served now (see the `xmem.dll` notes above), so the same dry run lists 23.
+- `xmem.dll` (7) - `port/shims/xmem.cpp`; the notes above give the measured argument shapes and answers.
+- `d3d12_xs.dll` (1) - `port/shims/d3d12_xs.cpp`, which registers `D3D12ConfigureVirtualMemoryX` beside the rest of
+  the console device table.
+- `xg_xs.dll` (2) - `port/shims/xg_xs.cpp`; [texture_layout.md](texture_layout.md).
+- `XCRDAPI.dll` (1) - `port/shims/dstorage.cpp` registers `DStorageGetFactory` for `xcrdapi.dll`, `dstorage_xs.dll`
+  and `dstorage.dll`; the request path is measured in [directstorage_advanced.md](directstorage_advanced.md).
+- `chad.dll` (5) and `xapu.dll` (5) - `port/shims/xapu_chad.cpp`; the measured shapes, what each answer drops and the
+  A/B boot are in [audio_shims.md](audio_shims.md).
+- `AcpHal.dll` (9) - `port/shims/acphal.cpp`; `acphal_test` covers the answers.
 
 `--init` on the same files also exits 0 with nothing on stderr. Its `--trace` file has 15 lines: the four package DLLs'
 `DllMain(DLL_PROCESS_ATTACH)` each return 1, the executable's two TLS callbacks run at process attach (reason 1) and

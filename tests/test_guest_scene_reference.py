@@ -2,6 +2,7 @@
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -74,7 +75,7 @@ class GuestSceneReferenceTest(unittest.TestCase):
                     self.assertEqual(summary["error"], "full: exit code 7")
                     self.assertEqual(summary["runs"]["full"]["outcome"], "exited")
                     self.assertEqual(summary["runs"]["full"]["returncode"], 7)
-                    self.assertIn(str(report).encode(encoding, "backslashreplace"), result.stdout)
+                    self.assertIn(os.path.realpath(report).encode(encoding, "backslashreplace"), result.stdout)
                     self.assertIn(diagnostic.encode(encoding, "backslashreplace"), result.stderr)
                     self.assertNotIn(b"UnicodeEncodeError", result.stderr)
 
@@ -117,7 +118,7 @@ class GuestSceneReferenceTest(unittest.TestCase):
             self.assertEqual(record, report["runs"]["full"])
             self.assertEqual(record["outcome"], "launch_failed")
             self.assertIsNone(record["returncode"])
-            self.assertEqual(record["cmd"][0], str(bad_loader))
+            self.assertEqual(record["cmd"][0], os.path.realpath(bad_loader))
             if sys.platform != "win32":
                 self.assertEqual(record["cmd"][1:3], ["-a", "path with spaces/wine"])
             self.assertTrue(record["launch_error"])

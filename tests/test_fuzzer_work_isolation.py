@@ -69,8 +69,8 @@ class FuzzerWorkIsolation(unittest.TestCase):
                     self.assertTrue((run / (program.name + ".asm")).is_file())
                     self.assertTrue((run / "spirv" / "index.json").is_file())
                 self.assertNotEqual(runs[0], runs[1])
-                self.assertTrue(any(str(runs[0]) in out for out in outputs))
-                self.assertTrue(any(str(runs[1]) in out for out in outputs))
+                self.assertTrue(any(str(runs[0].resolve()) in out for out in outputs))
+                self.assertTrue(any(str(runs[1].resolve()) in out for out in outputs))
 
     def test_failed_translation_reports_retained_output_and_creates_parent(self):
         for module, extra in ((lds_fuzz, []), (valu_fuzz, ["--family", "f16"])):
@@ -85,7 +85,7 @@ class FuzzerWorkIsolation(unittest.TestCase):
                 runs = list(parent.iterdir())
                 self.assertEqual(len(runs), 1)
                 self.assertTrue(runs[0].is_dir())
-                self.assertIn(str(runs[0]), output.getvalue())
+                self.assertIn(str(runs[0].resolve()), output.getvalue())
                 self.assertIn("synthetic failure", output.getvalue())
 
     def test_existing_file_as_work_reports_one_error(self):

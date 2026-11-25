@@ -20,7 +20,7 @@ class FirstLookPathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp, "checkout [1]")
             for folder in ("tooling/scripts", "tooling", "port/build/Release"):
-                (repo / folder).mkdir(parents=True)
+                (repo / folder).mkdir(parents=True, exist_ok=True)
             for relative in ("tooling/scripts/first_look.ps1", "tooling/pe_inspect.py", "tooling/gdk_runtime_calls.py",
                              "tooling/gdk_runtime_classes.json", "tooling/find_hash_lookup.py", "tooling/exe_checklist.py",
                              "tooling/report_paths.py"):

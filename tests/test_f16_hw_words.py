@@ -183,7 +183,7 @@ def test_header_and_checkers_hold_the_hardware_words(name):
     header = re.search(r"^; Expected mrt0 bits: (.*)$", source(name), re.M).group(1)
     assert tuple(int(x, 0) for x in header.split(",")) == HARDWARE[name]
     assert check.PIXEL_BITS[name] == HARDWARE[name]
-    with open(os.path.join(ROOT, "tooling", "tooling/scripts", "run_gpu_tests.py"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "tooling", "scripts", "run_gpu_tests.py"), encoding="utf-8") as f:
         m = re.search(rf'"{name}": \(([^)]*)\)', f.read())
     assert m and tuple(int(x, 0) for x in m.group(1).split(",")) == HARDWARE[name]
 

@@ -78,7 +78,7 @@ class ScriptsAndViewer(unittest.TestCase):
             disasm = os.path.join(tmp, "disasm-" + MARK)
             os.makedirs(disasm)
             report = os.path.join(tmp, "rep-" + MARK + ".json")
-            audit = os.path.join(ROOT, "tooling", "tooling/scripts", "audit_shader4_regs.py")
+            audit = os.path.join(ROOT, "tooling", "scripts", "audit_shader4_regs.py")
             r = subprocess.run(PYTHON + [audit, disasm, "--json", report],
                                capture_output=True, cwd=ROOT, timeout=300)
             err = r.stderr.decode("utf-8", "replace")

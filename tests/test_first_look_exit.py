@@ -19,9 +19,9 @@ class FirstLookExitTest(unittest.TestCase):
             root = Path(directory)
             scripts = root / "tooling/scripts"
             tools = root / "tooling"
-            build = root / "runtime" / "build"
+            build = root / "port" / "build"
             for folder in (scripts, tools, build):
-                folder.mkdir(parents=True)
+                folder.mkdir(parents=True, exist_ok=True)
             wrapper = Path(shutil.copyfile(SCRIPT, scripts / SCRIPT.name))
             (tools / "pe_inspect.py").write_text(
                 "from pathlib import Path\n"
@@ -51,7 +51,7 @@ class FirstLookExitTest(unittest.TestCase):
                 'New-Item -ItemType File -Force "$PSScriptRoot/../port/build/palmetto_tls_host.dll" | Out-Null\n'
                 'Set-Content "$PSScriptRoot/built.txt" built\n', encoding="utf-8", newline="\n",
             )
-            source = root / "runtime" / "src" / "loader.cpp"
+            source = root / "port" / "src" / "loader.cpp"
             source.parent.mkdir()
             source.touch()
             marker = scripts / "built.txt"

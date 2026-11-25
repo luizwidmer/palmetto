@@ -23,11 +23,13 @@ from unittest.mock import Mock, patch
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOL = os.path.join(ROOT, "tooling", "manifest_verifier.py")
 
-# Add root directory to sys.path so manifest_verifier can be imported directly
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+# Add tooling/ to sys.path so manifest_verifier can be imported directly (the tree keeps the Python tools there,
+# next to the repository root; -I puts neither on the path).
+TOOLING = os.path.join(ROOT, "tooling")
+if TOOLING not in sys.path:
+    sys.path.insert(0, TOOLING)
 
-import tools.manifest_verifier as mv
+import manifest_verifier as mv  # noqa: E402
 
 SYNTHETIC_SIZES = {
     "alpha.bin": 256 * 1024,
@@ -335,7 +337,7 @@ class TestManifestVerifier(unittest.TestCase):
             return
             yield  # pragma: no cover
 
-        with patch("tools.manifest_verifier.os.walk", side_effect=failing_walk):
+        with patch("manifest_verifier.os.walk", side_effect=failing_walk):
             with self.assertRaises(PermissionError):
                 list(mv.walk(self.game_dir))
             with self.assertRaises(PermissionError):

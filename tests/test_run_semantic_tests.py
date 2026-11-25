@@ -39,7 +39,7 @@ def run(*argv):
 
 
 def cli(*argv):
-    return subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "tooling/scripts", "run_semantic_tests.py"), *argv],
+    return subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tooling", "scripts", "run_semantic_tests.py"), *argv],
                           capture_output=True, text=True, timeout=15)
 
 

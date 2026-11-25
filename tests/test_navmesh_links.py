@@ -11,11 +11,12 @@ import unittest
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+TOOLING = os.path.join(ROOT, "tooling")
+if TOOLING not in sys.path:
+    sys.path.insert(0, TOOLING)
 
-from tools import navmesh_decode as nd
-from tools import navmesh_links as nl
+import navmesh_decode as nd  # noqa: E402
+import navmesh_links as nl  # noqa: E402
 
 TOOL = os.path.join(ROOT, "tooling", "navmesh_links.py")
 BASE = nd.BASE

@@ -232,7 +232,8 @@ class Main(unittest.TestCase):
             rc, text = self.run_main(src, "--out", out, "--stages", "cs,vs")
             self.assertEqual(rc, 0)
             self.assertEqual(sorted(os.listdir(os.path.join(out, "fspx"))),
-                             ["lib_cs_00003.code", "lib_cs_00003.json", "lib_vs_00001.code", "lib_vs_00001.json"])
+                             ["lib_cs_00003.code", "lib_cs_00003.json", "lib_cs_00003.state",
+                              "lib_vs_00001.code", "lib_vs_00001.json"])
 
     def test_carve_names_sources_and_copies_containers(self):
         with tempfile.TemporaryDirectory() as tmp:

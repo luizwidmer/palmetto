@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "tooling" / "tooling/scripts" / "first_look.ps1"
+SCRIPT = ROOT / "tooling" / "scripts" / "first_look.ps1"
 PE_INSPECT_STUB = (
     "from pathlib import Path\n"
     "import sys\n"
@@ -60,7 +60,7 @@ class FirstLookRebuildTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for folder in ("tooling/scripts", "tooling", "port/build", "port/src"):
-                (root / folder).mkdir(parents=True)
+                (root / folder).mkdir(parents=True, exist_ok=True)
             shutil.copyfile(SCRIPT, root / "tooling/scripts" / SCRIPT.name)
             (root / "tooling/scripts" / "build_runtime.ps1").write_text(BUILD_STUB, encoding="utf-8")
             (root / "tooling" / "pe_inspect.py").write_text(PE_INSPECT_STUB, encoding="utf-8", newline="\n")
@@ -69,10 +69,10 @@ class FirstLookRebuildTest(unittest.TestCase):
             (root / "tooling" / "exe_checklist.py").write_text(EXE_CHECKLIST_STUB, encoding="utf-8", newline="\n")
             (root / "fixture.exe").write_bytes(b"MZ")
             (root / "loader.cmd").write_text("@echo off\necho %*\nexit /b 0\n", encoding="ascii")
-            loader = root / "runtime" / "build" / "palmetto.exe"
+            loader = root / "port" / "build" / "palmetto.exe"
             if cache is not None:
                 (loader.parent / "CMakeCache.txt").write_text(cache, encoding="utf-8")
-            source = root / "runtime" / "src" / "pe_loader.cpp"
+            source = root / "port" / "src" / "pe_loader.cpp"
             tls = loader.with_name("palmetto_tls_host.dll")
             loader.write_bytes(b"")
             tls.touch()

@@ -121,11 +121,20 @@ def test_json_report_refuses_to_overwrite_index(tmp_path, capsys, output_kind):
         output = tmp_path / "INDEX.JSON"
 
     probe = mock.Mock(return_value=True)
-    ctx = (mock.patch.multiple(report_paths, path_key=mock.Mock(side_effect=str),
-                               same_name_on_folding_volume=probe)
-           if output_kind == "folding-volume-case" else contextlib.nullcontext())
-    with ctx, (mock.patch.object(os.path, "samefile", side_effect=OSError("not same"))
-               if output_kind == "folding-volume-case" else contextlib.nullcontext()):
+    if output_kind == "folding-volume-case":
+        # Simulate a volume whose names differ only by case, the way a POSIX mount sees it: realpath keeps the
+        # spelling it was given, and the name key cannot fold it. same_report_path resolves each path once and then
+        # consults the private helpers, so the volume probe is _same_resolved_name (the public
+        # same_name_on_folding_volume wrapper would resolve both paths a second time).
+        stacks = [mock.patch.multiple(report_paths, _resolved_key=mock.Mock(side_effect=lambda path: path),
+                                      _same_resolved_name=probe),
+                  mock.patch.object(os.path, "samefile", side_effect=OSError("not same")),
+                  mock.patch.object(os.path, "realpath", side_effect=lambda path: path)]
+    else:
+        stacks = []
+    with contextlib.ExitStack() as stack:
+        for entered in stacks:
+            stack.enter_context(entered)
         with pytest.raises(SystemExit) as exc:
             usc.main([str(index), "--json", str(output)])
     if output_kind == "folding-volume-case":

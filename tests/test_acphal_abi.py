@@ -16,7 +16,7 @@ class TestAcpHalAbi(unittest.TestCase):
         self.acphal_test = os.path.join(ROOT, "port", "test", "acphal_test.cpp")
         self.registry_cpp = os.path.join(ROOT, "port", "shims", "registry.cpp")
         self.cmakelists = os.path.join(ROOT, "port", "CMakeLists.txt")
-        self.build_ps1 = os.path.join(ROOT, "tooling", "tooling/scripts", "build_runtime.ps1")
+        self.build_ps1 = os.path.join(ROOT, "tooling", "scripts", "build_runtime.ps1")
 
     def test_all_nine_acphal_exports_defined(self):
         """acphal.dll must export all 9 functions imported by the retail binary (PR #6885, docs/retail_boot_frame_loop.md)."""

@@ -96,7 +96,7 @@ def test_dpp_controls_translate_and_validate(case, make_shader):
     assert "OpGroupNonUniformShuffle" in spvasm
 
 
-@pytest.mark.parametrize("extensions", [[], ["row_share:20"], ["row_shl:0"], ["row_shl:1", "row_shr:2"]])
+@pytest.mark.parametrize("mods", [[], ["row_share:20"], ["row_shl:0"], ["row_shl:1", "row_shr:2"]])
 def test_dpp_bad_control_is_rejected(mods):
     """A missing, out-of-range or duplicate DPP control must fail instead of guessing."""
     gen = rdna2spirv.Gen("ps")

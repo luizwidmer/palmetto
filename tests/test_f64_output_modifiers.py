@@ -88,7 +88,7 @@ class F64OutputModifiersTest(unittest.TestCase):
         a, b = 0.75, 0.5
         want = tuple(words(v)[1] for v in (mods(a + b, 2.0), mods(a + b, clamp=True),
                                            mods(a + b, 0.5, True), mods(a - b, 4.0)))
-        asm = (TEST_DIR.parent / "runtime" / "test" / "shaders" / "ps_f64_mods.asm").read_text(encoding="utf-8")
+        asm = (TEST_DIR.parent / "port" / "test" / "shaders" / "ps_f64_mods.asm").read_text(encoding="utf-8")
         line = re.search(r"Expected mrt0 bits: (.*)", asm).group(1)
         self.assertEqual(tuple(int(w, 16) for w in line.split(", ")), want)
 

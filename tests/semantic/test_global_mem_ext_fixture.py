@@ -64,7 +64,7 @@ class GlobalMemExtFixture(unittest.TestCase):
                 self.assertEqual(mem.get(4 * k), want)
 
     def test_gpu_runners_expect_the_same_words(self):
-        for rel in (("port", "test", "shaders", "check.py"), ("tooling", "tooling/scripts", "run_gpu_tests.py")):
+        for rel in (("port", "test", "shaders", "check.py"), ("tooling", "scripts", "run_gpu_tests.py")):
             with open(os.path.join(ROOT, *rel), encoding="utf-8") as f:
                 text = f.read()
             m = re.search(r'"cs_global_mem_ext"[,:]\s*(?:"40",\s*)?\[([^\]]*)\]', text)

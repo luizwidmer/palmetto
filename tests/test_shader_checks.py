@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runtime" / "test" / "shaders"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "port" / "test" / "shaders"))
 import check
 
 
@@ -59,7 +59,7 @@ def cvt_answer(env, wrong_for=None):
 
 class Wave64Checks(unittest.TestCase):
     def run_checks(self, wavemask, ballot, *, missing_ballot=False, emulated=False, fmt=(0, GOOD_FMT)):
-        def harness(_tool, shader, *args, env=None):
+        def harness(_tool, shader, *args, env=None, **_kwargs):
             name = Path(shader).stem
             if name == "cs_fmt_1010102":
                 self.assertEqual(args, ("1", "dump"))
@@ -267,7 +267,7 @@ class FloatToIntSweep(unittest.TestCase):
     def sweep(self, wrong_for=None):
         sent = []
 
-        def harness(_tool, shader, *_args, env=None):
+        def harness(_tool, shader, *_args, env=None, **_kwargs):
             self.assertEqual(Path(shader).stem, "cs_cvt_f32_sat")
             sent.append(int(env["VKC_SGPRS"], 0))
             return cvt_answer(env, wrong_for)
@@ -290,7 +290,7 @@ class FloatToIntSweep(unittest.TestCase):
         # and the sweep reported it as "16 of 16 inputs wrong, first 0x00000000: SKIP (...)", a failure.
         calls = []
 
-        def harness(_tool, _shader, *_args, env=None):
+        def harness(_tool, _shader, *_args, env=None, **_kwargs):
             calls.append(env.get("VKC_SUBGROUP_SIZE"))
             return 1, "compute subgroup size: 32 not available\n"
 
@@ -346,7 +346,7 @@ class PixelDeviceLimits(unittest.TestCase):
     """pixel_test with a fake harness: the device's limits decide SKIP instead of a failure."""
 
     def run_pixel(self, name, code, out, data=b""):
-        def harness(_tool, _vs, _fs, raw, env=None):
+        def harness(_tool, _vs, _fs, raw, env=None, **_kwargs):
             if data:
                 Path(raw).write_bytes(data)
             return code, out
@@ -447,7 +447,7 @@ class PixelDeviceLimits(unittest.TestCase):
 
     def test_wide_pixel_skip_reads_the_line_vk_harness_prints(self):
         # Keeps the check and the harness in step: the format string is read from vk_harness.cpp, not written here.
-        harness = Path(__file__).resolve().parents[1] / "runtime" / "test" / "vk_harness.cpp"
+        harness = Path(__file__).resolve().parents[1] / "port" / "test" / "vk_harness.cpp"
         source = harness.read_text(encoding="utf-8")
         formats = re.findall(r'"(fragment subgroup size: %u[^"]*)\\n"', source)
         self.assertEqual(sorted(formats), ["fragment subgroup size: %u", "fragment subgroup size: %u not available"])
@@ -538,7 +538,7 @@ class SeededPixelTests(unittest.TestCase):
     def run_pixel_test(self, words, code=0, out=""):
         seen = {}
 
-        def harness(_tool, _vs, _fs, raw, env=None):
+        def harness(_tool, _vs, _fs, raw, env=None, **_kwargs):
             seen["env"] = env
             if not code:
                 Path(raw).write_bytes(struct.pack("<4I", *words) * (64 * 64))
@@ -731,7 +731,7 @@ class GetLodChecks(unittest.TestCase):
         """get_lod_test with a fake vk_texture_test that writes frames[S# word 1]; returns (result, calls)."""
         calls = []
 
-        def harness(_tool, _vs, _fs, raw, *args, env=None):
+        def harness(_tool, _vs, _fs, raw, *args, env=None, **_kwargs):
             calls.append(args)
             if not code:
                 Path(raw).write_bytes(frames[args[2]])

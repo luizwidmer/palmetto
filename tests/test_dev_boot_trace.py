@@ -9,7 +9,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CLI = ROOT / "tooling" / "tooling/scripts" / "dev.py"
+CLI = ROOT / "tooling" / "scripts" / "dev.py"
 PRODUCER = ROOT / "tooling" / "boot_trace.py"
 
 

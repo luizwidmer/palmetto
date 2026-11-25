@@ -1,13 +1,23 @@
 # The audio coprocessor, texture layout and DirectStorage imports: how the retail executable calls them (RT-5)
 
-`palmetto --dry-run` leaves 30 of `game.exe`'s imports unimplemented
-(the section on the retail executable in `docs/runtime_imports.md`, #6715). Eight are `xmem.dll` and `d3d12_xs.dll` and are
-in [`xmem_exe_calls.md`](xmem_exe_calls.md). The other 22 are the audio coprocessor (`AcpHal.dll`, `xapu.dll`,
+`palmetto --dry-run` left 30 of `game.exe`'s imports unimplemented when this page was measured
+(the section on the retail executable in `docs/runtime_imports.md`, #6715). Eight are `xmem.dll` and `d3d12_xs.dll` and
+are in [`xmem_exe_calls.md`](xmem_exe_calls.md). The other 22 are the audio coprocessor (`AcpHal.dll`, `xapu.dll`,
 `chad.dll`: 19), the texture layout library (`xg_xs.dll`: 2) and DirectStorage (`XCRDAPI.dll`: 1). No public
 documentation of the audio functions exists, so this page records, from the file alone, how the executable calls them:
 how many call sites each has, the constants those sites pass, and how each site uses the result. Nothing was run, and no
 code or data of the executable is quoted. Measured at `main` `1cc6e3c1` with `tooling/import_call_sites.py`; the argument
 registers before each call were read by hand.
+
+**Served now.** All 22 are bound today, so the dry run reports 0 unimplemented imports from the executable: the nine
+`AcpHal.dll` calls by [`port/shims/acphal.cpp`](../port/shims/acphal.cpp), the ten `xapu.dll`/`chad.dll` calls by
+[`port/shims/xapu_chad.cpp`](../port/shims/xapu_chad.cpp), the two `xg_xs.dll` calls by
+[`port/shims/xg_xs.cpp`](../port/shims/xg_xs.cpp) and `DStorageGetFactory` by
+[`port/shims/dstorage.cpp`](../port/shims/dstorage.cpp). The list is in
+[runtime_imports.md](runtime_imports.md#the-retail-executable-rt-5); the measured semantics and the A/B boot are in
+[audio_shims.md](audio_shims.md) (the connects return real handles, every command is accepted and dropped, and nothing
+advances), [texture_layout.md](texture_layout.md) and [directstorage_advanced.md](directstorage_advanced.md). The call
+sites, constants and result uses below still stand.
 
 ```powershell
 python -I tooling/import_call_sites.py game.exe --dll AcpHal.dll --dll xapu.dll --dll chad.dll `
@@ -69,11 +79,16 @@ Four of the calls above have a branch for a negative result: `AcpHalCreate`, `Ac
 `ApuCreateHeap` and `XApuDequeueResult`. An unimplemented import under `PALMETTO_UNIMPLEMENTED=log` returns 0, so a caller
 that tests for a negative result sees success with its outputs unset; under `fail` only imports `classify_import`
 knows to return an `HRESULT` get `E_NOTIMPL`, and none of these four is on that list (it names only functions the public
-documentation describes). So today neither mode makes the executable take its own failure path for the audio hardware.
-Whether the title survives that path, or needs the coprocessor, is **unmeasured**: it takes a run to find out, and the
-first run reported in #6603 stops earlier, in `D3D12ConfigureVirtualMemoryX`.
+documentation describes). So at measurement time neither mode made the executable take its own failure path for the audio
+hardware. That question is settled by the shims now, not by the failure path: they answer success, the boot's audio bring-up
+requires it (it panics on a failed `XApuConnect`), and the A/B boot in [audio_shims.md](audio_shims.md) section 5 measures
+that the title survives, the connects return real handles and the commands are accepted and dropped without advancing the
+loading state, the pipeline population or the frame.
 
 ## What this does not show
 
 Nothing here says that the boot reaches these calls, in what order, or what the commands and results carry. A site is code
 that can call; the first trace (`--trace`, `unimplemented_call` events) is the signal for which of them run.
+[audio_shims.md](audio_shims.md) section 1 now records what a 130 s boot reaches: the two connects and the APU result poll,
+while the four `XApuEnqueueCommand` sites, `XDspActivate`, `XDspSubmitCommand`, `XApuDequeueResult` and every disconnect
+are reached by no baseline trace.

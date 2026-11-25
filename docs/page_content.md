@@ -217,6 +217,14 @@ no uploads - reads as a title still waiting for its streaming/texture path rathe
 texture-layout/texture-computer area and the DirectStorage/zlib streaming path are the measured next places to look,
 not the GPU composite.
 
+**Superseded for the XG part.** After this page was measured, [texture_layout.md](texture_layout.md) decoded the two
+console texture-layout calls (`d718a50ed`): slot 2 is `GetResourceLayout` and its record is filled, the linear layout is
+the default answer, and a 150 s boot now records **44** `XGSuggestSwizzleMode` and **24** `XGCreateTextureComputer` calls,
+two filled layout records and 65 linear subresource copies / 34,044 B. The texture computer therefore no longer returns
+`E_NOTIMPL` for the measured descriptions - it refuses by name only the descriptions it cannot lay out honestly, and
+slot 10 (`GetResourceTiling`) still refuses. The page pulls and the black-frame measurements above are from the earlier
+commits and stand as measurements of those commits; the frame stays black in the linear arm too.
+
 ## 9. What was added, and what still refuses
 
 Added: the page pull (`console_pull_pages`/`console_pull_table` in `port/shims/d3d12_vulkan_device.cpp`, the

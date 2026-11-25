@@ -41,7 +41,7 @@ def header_words(name):
 
 def runner_words(name):
     """The tuple tooling/scripts/run_gpu_tests.py expects for `name` (its table is local to run_suite, so read the source)."""
-    with open(os.path.join(ROOT, "tooling", "tooling/scripts", "run_gpu_tests.py"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "tooling", "scripts", "run_gpu_tests.py"), encoding="utf-8") as f:
         m = re.search(r'"%s": \(([^)]*)\)' % re.escape(name), f.read())
     return tuple(int(x, 16) for x in m.group(1).split(",")) if m else None
 

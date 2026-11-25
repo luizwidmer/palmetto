@@ -165,7 +165,7 @@ class MissingLlvmMcTest(unittest.TestCase):
         for name in ("vk_compute_test", "vk_store_test", "vk_harness"):   # run_gpu_tests.py only checks they exist
             open(os.path.join(build, name + (".exe" if os.name == "nt" else "")), "wb").close()
         tools = {
-            "run_gpu_tests.py": [os.path.join(ROOT, "tooling", "tooling/scripts", "run_gpu_tests.py"), "--build", build],
+            "run_gpu_tests.py": [os.path.join(ROOT, "tooling", "scripts", "run_gpu_tests.py"), "--build", build],
             "valu_fuzz.py": [os.path.join(ROOT, "tooling", "valu_fuzz.py"), "--family", "f16", "--programs", "1",
                              "--build", build],
             "lds_fuzz.py": [os.path.join(ROOT, "tooling", "lds_fuzz.py"), "--programs", "1", "--build", build],
