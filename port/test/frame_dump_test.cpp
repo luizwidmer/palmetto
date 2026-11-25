@@ -233,6 +233,25 @@ int main() {
                decoded_matrix.stride == 0 && decoded_matrix.num_records == 480,
            "the matrix V# is a raw buffer over the matrix bytes");
 
+    // The measured feed's decision (docs/vertex_constant_feed.md): which draws take the synthesised driver block. A draw
+    // whose pipeline has a vertex-input slot 0, a slot-0 view with a stride, and a descriptor table pair at s0/s1 (the
+    // dwords the feed replaces) takes it; every refusal keeps the recorded s0/s1 pair and has a named reason.
+    const auto feeds = [](bool mesh, std::uint32_t slots, bool view, std::uint32_t stride, std::uint64_t size, bool s0) {
+        return frame_dump::driver_block_decision(mesh, slots, view, stride, size, s0).feed;
+    };
+    expect(feeds(false, 1u, true, 24, 4080, true), "the measured draw takes the driver block");
+    expect(!feeds(true, 1u, true, 24, 4080, true), "a mesh pipeline has no input assembly");
+    expect(!feeds(false, 0u, true, 24, 4080, true), "a pipeline whose layout uses no slot 0 does not");
+    expect(!feeds(false, 1u, false, 24, 4080, true), "a draw with no slot-0 view does not");
+    expect(!feeds(false, 1u, true, 0, 4080, true), "a stride-0 slot-0 view does not");
+    expect(!feeds(false, 1u, true, 24, 0, true), "a slot-0 view shorter than one record does not");
+    expect(!feeds(false, 1u, true, 24, 4080, false),
+           "a draw whose root signature puts no table pair at s0/s1 does not (keeps s0/s1)");
+    expect(std::strlen(frame_dump::driver_block_decision(false, 0u, true, 24, 4080, true).why) != 0,
+           "a refused feed names its reason");
+    expect(std::strlen(frame_dump::driver_block_decision(false, 1u, true, 24, 4080, true).why) == 0,
+           "a taken feed has no reason text");
+
     if (failures) return 1;
     std::printf("frame_dump_test: command kinds, ordered writers and table windows exact\n");
     return 0;

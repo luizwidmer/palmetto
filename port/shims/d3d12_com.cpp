@@ -1158,6 +1158,9 @@ private:
     struct RootState {
         const RootArgumentLayout* layout = nullptr;
         std::array<std::uint32_t, rt::rootsig::kMaxUserSgprs> data{};
+        // The console user-SGPR layout can be fed beside the PC packing for this bound signature (the plan was safe:
+        // no console dword lands on a PC-packed dword). False leaves every argument at its previous answer.
+        bool console_feed = false;
         // Diagnostic (docs/root_arguments.md): where the recorded user-data dwords came from, so a draw whose translated
         // pixel shader reads a zero block can be told apart from one whose arguments were never written, or whose
         // arguments were written and then cleared by a later root-signature rebind.
@@ -1166,25 +1169,49 @@ private:
         unsigned cleared_dwords = 0;  // non-zero dwords dropped by those resets
     };
 
-    // PALMETTO_GRAPHICS_CONSOLE_ROOT=1 (diagnostic, docs/root_arguments.md): also fill the console user-SGPR layout
-    // (rt::rootsig::pack_stage from s8, one dword per descriptor table) that a translated vertex/pixel shader actually
-    // reads, in addition to the PC packing from s0 that the port feeds today. Off by default until a boot measures the
-    // difference; read once so the default path imports no call here.
+    // PALMETTO_GRAPHICS_CONSOLE_ROOT=1 enables the console user-SGPR feed (docs/root_arguments.md,
+    // docs/vertex_constant_feed.md): the console layout (rt::rootsig::pack_stage from the graphics stage base s8, one
+    // dword per descriptor table) is written in addition to the PC packing from s0, because a translated vertex/pixel
+    // stage reads its root arguments at the console slots. Off by default: the measured A/B (docs/vertex_constant_feed.md
+    // section 5) shows it is safe on its own but does not move the frame, and the vertex feed that needs it as its
+    // counterpart still stalls the boot when both are on. It is skipped, by name, for a signature whose PC packing
+    // reaches the console base - both layouts share the one 32-dword block, so the second feed would overwrite a dword
+    // another shader reads at its PC slot.
     bool graphics_console_root_enabled() const {
         static const bool on = [] {
             char value[8] = {};
             return GetEnvironmentVariableA("PALMETTO_GRAPHICS_CONSOLE_ROOT", value, sizeof(value)) > 0 &&
-                   value[0] != '\0' && value[0] != '0';
+                   value[0] != '\0' && value[0] != '0' && value[0] != 'n';
         }();
         return on;
     }
 
-    // The graphics bind point's console slot for a parameter: kNoSgpr when the PC packing is what is fed or the
-    // signature's console layout was refused (RootArgumentLayout::console_ok).
+    // The PC packing's dword width for one parameter (rt::rootsig::pack from s0): constants take their value count, a
+    // descriptor table and a root descriptor take the 64-bit pair.
+    static std::uint32_t pc_dwords(rt::rootsig::ParamType type, std::uint32_t constant_count) {
+        return type == rt::rootsig::ParamType::Constants ? constant_count : 2u;
+    }
+
+    // The graphics bind point's console slot for a parameter: kNoSgpr when the console layout is not fed at this bind
+    // point, was refused for this signature, or would overlap the PC packing (RootState::console_feed).
     std::uint32_t console_dword(const RootState& state, const RootArgumentLayout::Parameter& p) const {
-        if (is_compute(state) || !state.layout || !state.layout->console_ok || !graphics_console_root_enabled())
+        if (is_compute(state) || !state.layout || !state.console_feed || !graphics_console_root_enabled())
             return rt::rootsig::kNoSgpr;
         return p.console_offset;
+    }
+
+    // One line per distinct reason the console user-SGPR feed is not filled (bounded), so a signature the dual feed
+    // cannot serve is named instead of being silently left at the previous answer.
+    void note_console_skip(const char* why) {
+        if (!why || !*why) return;
+        static std::mutex mutex;
+        static std::set<std::string> printed;
+        const std::lock_guard lock(mutex);
+        if (printed.size() >= 8 || !printed.insert(why).second) return;
+        std::fprintf(stderr,
+                     "[rt] d3d12: graphics console root: not fed for this signature: %s; its dwords stay at the "
+                     "PC-packed/previous values\n",
+                     why);
     }
 
     // D3D12 leaves root arguments undefined after a root-signature change; they start at zero here. Setting the
@@ -1222,6 +1249,31 @@ private:
         state.layout = layout;
         state.data = {};
         state.written_since_bind = false;
+        state.console_feed = false;
+        // The console user-SGPR feed's safety for this signature (docs/vertex_constant_feed.md): both layouts share the
+        // one 32-dword block, so the console layout is filled only when no console dword lands on a PC-packed dword. A
+        // skipped feed leaves every argument at the previous answer and names why once.
+        if (!is_compute(state) && layout && graphics_console_root_enabled()) {
+            if (!layout->console_ok) {
+                note_console_skip("the console layout refuses the signature (rt::rootsig::pack_stage placed no "
+                                  "parameter)");
+            } else {
+                std::vector<rt::graphics_pso::ConsoleFeedParameter> parameters;
+                parameters.reserve(layout->parameters.size());
+                for (const RootArgumentLayout::Parameter& p : layout->parameters) {
+                    if (p.user_offset == rt::rootsig::kNoSgpr) continue;  // not packed at the graphics bind point
+                    rt::graphics_pso::ConsoleFeedParameter entry;
+                    entry.pc_first = p.user_offset;
+                    entry.pc_dwords = pc_dwords(p.type, p.constant_count);
+                    entry.console_first = p.console_offset;
+                    entry.console_dwords = rt::rootsig::stage_dwords(p.type, p.constant_count);
+                    parameters.push_back(entry);
+                }
+                rt::graphics_pso::ConsoleFeedPlan plan;
+                state.console_feed = rt::graphics_pso::console_feed_plan(parameters, &plan);
+                if (!state.console_feed) note_console_skip(plan.why.c_str());
+            }
+        }
         // CreateRootSignature accepted it for the other bind point only (its log line says why).
         if (layout && !(is_compute(state) ? layout->compute_ok : layout->graphics_ok)) {
             stub(is_compute(state) ? "SetComputeRootSignature(signature that does not fit the compute layout)"

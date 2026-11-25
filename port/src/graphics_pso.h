@@ -194,6 +194,33 @@ void classify_console_parameters(std::span<const ConsoleParameter> parameters, C
 bool classify_console_signature(const rt::rootsig::RootSignature& signature, bool mesh_pipeline,
                                 ConsoleSignatureClass* out);
 
+// ---- Whether the console layout can be fed beside the PC packing --------------------------------------------------
+//
+// The port feeds a graphics draw's 32 user-data dwords with the PC packing (rt::rootsig::pack from s0, two dwords per
+// table) and, on the measured graphics path, also with the console layout (rt::rootsig::pack_stage from the stage base
+// s8, one dword per table) that a translated vertex/pixel shader reads (docs/root_arguments.md,
+// docs/vertex_constant_feed.md). Both layouts share one 32-dword block, so on a signature whose PC packing reaches the
+// console base the console feed would overwrite a dword a shader reads at its PC slot. This plan answers that from the
+// two placements alone: every console parameter placeable inside the 32 dwords, and no console dword inside a
+// PC-packed parameter's dword range. A refused plan is logged with `why` and leaves every dword at the previous
+// answer - it is never a silent partial feed. Pure.
+struct ConsoleFeedParameter {
+    std::uint32_t pc_first = 0;                           // first dword of the parameter's PC packing (pack, from s0)
+    std::uint32_t pc_dwords = 0;                          // dwords that packing gives it (2 table/root view, NumValues)
+    std::uint32_t console_first = rt::rootsig::kNoSgpr;   // first user SGPR in the console layout, kNoSgpr when unplaced
+    std::uint32_t console_dwords = 0;
+};
+
+struct ConsoleFeedPlan {
+    bool feed = false;
+    std::string why;  // set when !feed: the parameter whose placement makes the dual feed unsafe (bounded text)
+};
+
+// Fills `out` with whether the console layout can be fed beside the PC packing for these parameters. Returns
+// `out->feed`; false with `out->why` naming the first parameter that spills past the 32 dwords or whose console dwords
+// overlap a PC parameter's dwords.
+bool console_feed_plan(std::span<const ConsoleFeedParameter> parameters, ConsoleFeedPlan* out);
+
 // Which of FixedFunctionState's eight fields a decoded state record yielded. The state blob's container decodes
 // (rt::graphics_record::decode_state, docs/state_blob.md) but no measurement of this title's data pins any of its
 // words to a fixed-function field, so every member is false today; the struct exists so the refusal is per field and

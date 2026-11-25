@@ -246,6 +246,42 @@ bool classify_console_signature(const rt::rootsig::RootSignature& signature, boo
     return true;
 }
 
+bool console_feed_plan(std::span<const ConsoleFeedParameter> parameters, ConsoleFeedPlan* out) {
+    if (!out) return false;
+    ConsoleFeedPlan plan;
+    // The two feeds are written into one block, so a console dword may not land on a dword the PC packing gives a
+    // parameter: another shader reads that dword at its PC slot. Console offsets that were never placed (kNoSgpr) are
+    // skipped, and a signature with no console placement feeds nothing and is trivially safe.
+    plan.feed = true;
+    for (std::size_t i = 0; i < parameters.size(); ++i) {
+        const ConsoleFeedParameter& p = parameters[i];
+        if (p.console_first == rt::rootsig::kNoSgpr || !p.console_dwords) continue;
+        const std::uint64_t console_end = std::uint64_t(p.console_first) + p.console_dwords;
+        if (console_end > rt::rootsig::kMaxUserSgprs) {
+            plan.feed = false;
+            plan.why = "parameter " + std::to_string(i) + " would spill past the " +
+                       std::to_string(rt::rootsig::kMaxUserSgprs) + " user-data dwords";
+            *out = std::move(plan);
+            return false;
+        }
+        for (std::size_t j = 0; j < parameters.size(); ++j) {
+            const ConsoleFeedParameter& q = parameters[j];
+            if (!q.pc_dwords) continue;
+            const std::uint64_t pc_begin = q.pc_first;
+            const std::uint64_t pc_end = pc_begin + q.pc_dwords;
+            if (std::uint64_t(p.console_first) >= pc_end || pc_begin >= console_end) continue;
+            plan.feed = false;
+            plan.why = "parameter " + std::to_string(i) + "'s console slot s" + std::to_string(p.console_first) +
+                       " overlaps parameter " + std::to_string(j) + "'s PC dword(s) from s" +
+                       std::to_string(pc_begin);
+            *out = std::move(plan);
+            return false;
+        }
+    }
+    *out = std::move(plan);
+    return out->feed;
+}
+
 bool decode_fixed_function_state(const rt::graphics_record::State& state, FixedFunctionState* out,
                                  FixedFunctionFieldStatus* fields, std::string* why) {
     if (fields) *fields = FixedFunctionFieldStatus{};

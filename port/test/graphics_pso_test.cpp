@@ -32,6 +32,7 @@
 // It prints the input and refusal tables so the boundary is visible without reading the header.
 
 #include "../src/graphics_pso.h"
+#include "../src/pipeline_budget.h"  // docs/memory_growth.md: the live-pipeline cap policy
 #include "test_temp_dir.h"
 
 #include <array>
@@ -1399,6 +1400,66 @@ void test_console_graphics_user_data() {
     check(!classified.ok && !classified.error.empty(), "classify: the refusal names the parameter");
 }
 
+// The dual-feed safety plan (docs/vertex_constant_feed.md): the console layout and the PC packing share the one
+// 32-dword block, so the console feed is filled only when no console dword lands on a PC-packed dword. A refused plan
+// names the parameter that makes it unsafe and leaves every dword at the previous answer.
+void test_console_feed_plan() {
+    using rt::rootsig::kNoSgpr;
+    const auto parameter = [](std::uint32_t pc_first, std::uint32_t pc_dwords, std::uint32_t console_first,
+                              std::uint32_t console_dwords) {
+        pso::ConsoleFeedParameter p;
+        p.pc_first = pc_first;
+        p.pc_dwords = pc_dwords;
+        p.console_first = console_first;
+        p.console_dwords = console_dwords;
+        return p;
+    };
+
+    // The measured frame's signature: one descriptor table, PC s0/s1, console s8 (one dword). The two feeds do not
+    // intersect, so the console slot is filled beside the PC pair.
+    {
+        const pso::ConsoleFeedParameter measured[] = {parameter(0, 2, 8, 1)};
+        pso::ConsoleFeedPlan plan;
+        check(pso::console_feed_plan(measured, &plan) && plan.feed && plan.why.empty(),
+              "feed plan: a table at PC s0/s1 and console s8 is safe");
+    }
+    // Two tables: PC s0..s3, console s8/s9: still disjoint.
+    {
+        const pso::ConsoleFeedParameter two_tables[] = {parameter(0, 2, 8, 1), parameter(2, 2, 9, 1)};
+        pso::ConsoleFeedPlan plan;
+        check(pso::console_feed_plan(two_tables, &plan) && plan.feed,
+              "feed plan: two tables at PC s0..s3 and console s8/s9 are safe");
+    }
+    // Eight constants then a table: the PC packing already reaches s8/s9, so the console constants at s8.. would
+    // overwrite dwords a shader reads at its PC slots. The plan refuses and names a parameter.
+    {
+        const pso::ConsoleFeedParameter overlap[] = {parameter(0, 8, 8, 8), parameter(8, 2, 16, 1)};
+        pso::ConsoleFeedPlan plan;
+        check(!pso::console_feed_plan(overlap, &plan) && !plan.feed,
+              "feed plan: an overlap with the PC packing is refused");
+        check(plan.why.find("parameter") != std::string::npos,
+              "feed plan: the overlap refusal names the parameters involved");
+    }
+    // A console placement past the 32-dword block is refused even with no PC parameter under it.
+    {
+        const pso::ConsoleFeedParameter spill[] = {parameter(0, 2, 28, 8)};
+        pso::ConsoleFeedPlan plan;
+        check(!pso::console_feed_plan(spill, &plan) && !plan.feed,
+              "feed plan: a console placement past s31 is refused");
+        check(plan.why.find("spill") != std::string::npos, "feed plan: the spill refusal says it would spill");
+    }
+    // A signature whose console layout placed nothing feeds nothing and is safe; so is an empty list.
+    {
+        const pso::ConsoleFeedParameter unplaced[] = {parameter(0, 2, kNoSgpr, 0)};
+        pso::ConsoleFeedPlan plan;
+        check(pso::console_feed_plan(unplaced, &plan) && plan.feed,
+              "feed plan: a signature with no console placement feeds nothing and is safe");
+        check(pso::console_feed_plan({}, &plan) && plan.feed, "feed plan: an empty parameter list is safe");
+    }
+    std::printf("graphics_pso_test: console feed plan (docs/vertex_constant_feed.md)\n");
+    std::printf("  one table at PC s0/s1 + console s8: safe; 8 constants + table: overlaps, refused by name\n");
+}
+
 void print_findings() {
     struct Row {
         const char* item;
@@ -1445,6 +1506,79 @@ void print_findings() {
     std::printf("\n");
 }
 
+// The live-pipeline budget's pure policy (port/src/pipeline_budget.h, docs/memory_growth.md): a hard cap, LRU order,
+// the grace that keeps a just-bound pipeline from being released under an unsubmitted recording, and the counters.
+void test_pipeline_budget() {
+    using palmetto::PipelineBudget;
+    // 1. The cap holds: ten inserts into a cap of four leave four live and six evicted, and every id is seen.
+    {
+        PipelineBudget budget(4, 1);
+        std::vector<std::uint64_t> evicted;
+        for (std::uint64_t id = 1; id <= 10; ++id) {
+            const std::uint64_t victim = budget.touch(id);
+            if (victim) evicted.push_back(victim);
+        }
+        check(budget.live() == 4, "pipeline budget: a cap of four keeps four live pipelines");
+        check(budget.built() == 10, "pipeline budget: ten builds are counted");
+        check(budget.evicted() == 6, "pipeline budget: six pipelines are evicted");
+        check(evicted.size() == 6 && evicted.front() == 1 && evicted.back() == 6,
+              "pipeline budget: eviction is least-recently-used first");
+    }
+    // 2. A touch moves a pipeline to most-recently-used: the next eviction takes the one after it.
+    {
+        PipelineBudget budget(4, 1);
+        budget.touch(1);
+        budget.touch(2);
+        budget.touch(3);
+        budget.touch(4);
+        budget.touch(1);  // 1 is now the newest
+        const std::uint64_t victim = budget.touch(5);
+        check(victim == 2, "pipeline budget: a re-touch makes a pipeline the newest, so the eviction takes 2");
+        check(budget.least_recently_used() == 3, "pipeline budget: the least recently used id is 3 after the eviction");
+    }
+    // 3. A duplicate touch counts once.
+    {
+        PipelineBudget budget(2, 1);
+        budget.touch(7);
+        budget.touch(7);
+        check(budget.live() == 1 && budget.built() == 1, "pipeline budget: a duplicate touch changes no counter");
+    }
+    // 4. The grace defers eviction: none is taken while the live count is inside cap + grace, and a growth past that
+    //    starts evicting the oldest instead of the just-bound ones.
+    {
+        PipelineBudget quiet(2, 8);
+        std::uint64_t evicted = 0;
+        for (std::uint64_t id = 1; id <= 6; ++id) evicted += quiet.touch(id) ? 1u : 0u;
+        check(evicted == 0 && quiet.live() == 6,
+              "pipeline budget: a grace above the growth keeps every just-bound pipeline live");
+        PipelineBudget loud(2, 3);
+        for (std::uint64_t id = 1; id <= 6; ++id) loud.touch(id);
+        check(loud.evicted() != 0 && loud.live() <= loud.grace() + 1,
+              "pipeline budget: the live count stays inside grace plus one, and eviction resumes past it");
+    }
+    // 5. remove() forgets a released pipeline without counting an eviction, and an unknown id is a no-op.
+    {
+        PipelineBudget budget(4, 1);
+        budget.touch(1);
+        budget.touch(2);
+        budget.touch(3);
+        budget.remove(2);
+        budget.remove(99);
+        check(budget.live() == 2 && budget.evicted() == 0, "pipeline budget: remove() forgets without an eviction");
+        budget.touch(4);
+        budget.touch(5);  // cap 4: four live, nothing evicted yet
+        check(budget.live() == 4 && budget.least_recently_used() == 1,
+              "pipeline budget: remove() keeps the LRU order consistent");
+        check(budget.touch(6) == 1, "pipeline budget: the next birth evicts the oldest after a remove()");
+    }
+    // 6. A cap of zero disables the budget (the A/B's old path).
+    {
+        PipelineBudget budget(0, 1);
+        check(budget.touch(1) == 0 && budget.live() == 0 && budget.built() == 0,
+              "pipeline budget: a cap of zero leaves the budget off");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1454,12 +1588,14 @@ int main() {
     test_pick_entry();
     test_documented_default_state();
     test_console_graphics_user_data();
+    test_console_feed_plan();
     test_fixed_function_state_decode();
     test_fixed_function_probe();
     test_build_success();
     test_build_ps_only();
     test_build_input_layout();
     test_build_refusals();
+    test_pipeline_budget();
 
     if (g_failures != 0) {
         std::fprintf(stderr, "%d failure(s) of %d check(s)\n", g_failures, g_checks);
