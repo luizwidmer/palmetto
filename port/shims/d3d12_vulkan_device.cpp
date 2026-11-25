@@ -38,6 +38,7 @@
 #include "../src/vulkan13_features.h"
 #include "../src/pipeline_budget.h"  // docs/memory_growth.md: the live-pipeline cap and its LRU
 #include "../src/deferred_compile.h"  // docs/deferred_compile.md: off-thread compute-pipeline compilation
+#include "../src/console_texture.h"  // the console's depth-stencil + unordered-access translation (docs/3d_textures.md)
 
 #include <chrono>
 #include <vulkan/vulkan_win32.h>
@@ -74,6 +75,12 @@
 
 namespace rt::d3d12 {
 namespace {
+
+// The format-family helpers and the console depth-stencil + unordered-access translation are shared with the GPU-free
+// tests (port/src/console_texture.h); they stay unqualified at their call sites here.
+using palmetto::console_depth_uav_translated;
+using palmetto::depth_stencil_family;
+using palmetto::format_family;
 
 // Every descriptor slot is this many bytes; an RTV or DSV slot holds a palmetto::TargetView. The console's own
 // increments are open question 4 in docs/d3d12_vulkan.md; the application reads them from the device, as it must.
@@ -2982,43 +2989,6 @@ HRESULT castable_view_formats(const Format& format, UINT32 count, const DXGI_FOR
 // returns the same HRESULTs. Each rule was measured against the host runtime by d3d12_vulkan_device_test
 // (compare_invalid_arguments, D3D-49); the texture size, mip, sample-count and alignment rules are in
 // GetResourceAllocationInfo's allocation(), which CreateCommittedResource also applies.
-
-// The typeless format a DXGI format can be cast within, or the format itself when it has no such family.
-DXGI_FORMAT format_family(DXGI_FORMAT format) {
-    const int f = int(format);
-    const auto in = [f](int first, int last) { return f >= first && f <= last; };
-    if (in(1, 4)) return DXGI_FORMAT_R32G32B32A32_TYPELESS;
-    if (in(5, 8)) return DXGI_FORMAT_R32G32B32_TYPELESS;
-    if (in(9, 14)) return DXGI_FORMAT_R16G16B16A16_TYPELESS;
-    if (in(15, 18)) return DXGI_FORMAT_R32G32_TYPELESS;
-    if (in(19, 22)) return DXGI_FORMAT_R32G8X24_TYPELESS;
-    if (in(23, 25)) return DXGI_FORMAT_R10G10B10A2_TYPELESS;
-    if (in(27, 32)) return DXGI_FORMAT_R8G8B8A8_TYPELESS;
-    if (in(33, 38)) return DXGI_FORMAT_R16G16_TYPELESS;
-    if (in(39, 43)) return DXGI_FORMAT_R32_TYPELESS;
-    if (in(44, 47)) return DXGI_FORMAT_R24G8_TYPELESS;
-    if (in(48, 52)) return DXGI_FORMAT_R8G8_TYPELESS;
-    if (in(53, 59)) return DXGI_FORMAT_R16_TYPELESS;
-    if (in(60, 64)) return DXGI_FORMAT_R8_TYPELESS;
-    if (in(70, 72)) return DXGI_FORMAT_BC1_TYPELESS;
-    if (in(73, 75)) return DXGI_FORMAT_BC2_TYPELESS;
-    if (in(76, 78)) return DXGI_FORMAT_BC3_TYPELESS;
-    if (in(79, 81)) return DXGI_FORMAT_BC4_TYPELESS;
-    if (in(82, 84)) return DXGI_FORMAT_BC5_TYPELESS;
-    if (f == 87 || in(90, 91)) return DXGI_FORMAT_B8G8R8A8_TYPELESS;
-    if (f == 88 || in(92, 93)) return DXGI_FORMAT_B8G8R8X8_TYPELESS;
-    if (in(94, 96)) return DXGI_FORMAT_BC6H_TYPELESS;
-    if (in(97, 99)) return DXGI_FORMAT_BC7_TYPELESS;
-    return format;
-}
-
-// ALLOW_DEPTH_STENCIL: the host accepts every format of a family with a depth member (R32_FLOAT and R16_FLOAT
-// included) and nothing else.
-bool depth_stencil_family(DXGI_FORMAT format) {
-    const DXGI_FORMAT family = format_family(format);
-    return family == DXGI_FORMAT_R32_TYPELESS || family == DXGI_FORMAT_R16_TYPELESS ||
-           family == DXGI_FORMAT_R24G8_TYPELESS || family == DXGI_FORMAT_R32G8X24_TYPELESS;
-}
 
 // ALLOW_RENDER_TARGET: the host refuses the families below and accepts the rest, D32_FLOAT, D16_UNORM,
 // R9G9B9E5_SHAREDEXP and NV12 among them. R32G32B32 is the driver's answer (refused by both AMD drivers measured,
@@ -10594,14 +10564,18 @@ public:
             // addresses the XG texture computer's fill writes (PALMETTO_XG_TRACE), to see whether the title's texture
             // bytes land in a placed resource's pages at all.
             {
+                // The dimension is D3D12_RESOURCE_DIMENSION (3 = TEXTURE2D), not a texture's 3D-ness; the logged
+                // description is the one the proxy already translated (console-only flag bits masked out, layout
+                // replaced), which is what this device validates.
                 static std::atomic<unsigned> logged{0};
-                if (logged.fetch_add(1, std::memory_order_relaxed) < 16)
+                if (logged.fetch_add(1, std::memory_order_relaxed) < 64)
                     std::fprintf(stderr,
                                  "[rt] d3d12: placed texture: address 0x%llx %ux%ux%u format %d dimension %d mips %u "
-                                 "layers %u\n",
+                                 "layers %u flags 0x%x samples %u layout 0x%x\n",
                                  static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(address)),
                                  desc.Width, desc.Height, desc.DepthOrArraySize, int(desc.Format), int(desc.Dimension),
-                                 desc.MipLevels, desc.DepthOrArraySize);
+                                 desc.MipLevels, desc.DepthOrArraySize, static_cast<unsigned>(desc.Flags),
+                                 desc.SampleDesc.Count, static_cast<unsigned>(desc.Layout));
             }
             // A texture is not placed on the title's pages yet: it gets an ordinary committed DEFAULT texture of the
             // same description, as slot 76 gives one, so the title has its resource instead of asserting (found in
@@ -10614,12 +10588,38 @@ public:
             // the title still gets its texture. The image itself starts undefined either way: the first command that
             // uses it moves it to that command's layout (vulkan_replay.h, initialize), as for every texture here.
             const D3D12_HEAP_PROPERTIES fallback{D3D12_HEAP_TYPE_DEFAULT};
-            const D3D12_RESOURCE_STATES initial = state_for_barrier_layout(layout);
-            HRESULT hr = create_committed_validated(nullptr, &fallback, D3D12_HEAP_FLAG_NONE, &desc, initial, nullptr,
-                                                    0, nullptr, riid, out, true);
+            D3D12_RESOURCE_STATES initial = state_for_barrier_layout(layout);
+            // The console's depth-stencil + unordered-access pair is created as its depth-stencil texture here, with a
+            // named line for the missing unordered-access half; every other description is created exactly as asked.
+            D3D12_RESOURCE_DESC host_desc = desc;
+            if (console_depth_uav_translated(host_desc)) {
+                log_once("a console depth-stencil texture that also allows unordered access is created as its "
+                         "depth-stencil resource; unordered-access views of it stay refused (the layer cannot make a "
+                         "storage view of a depth format); flags",
+                         int(desc.Flags));
+                // The dropped half can also be the creation state (a barrier layout of UNORDERED_ACCESS): the host
+                // resource has no unordered access, so it starts COMMON and the first use moves it, as every image
+                // here does. This keeps the creation a single attempt instead of a refused one and a retry.
+                if (UINT(initial) & UINT(D3D12_RESOURCE_STATE_UNORDERED_ACCESS)) initial = D3D12_RESOURCE_STATE_COMMON;
+            }
+            HRESULT hr = create_committed_validated(nullptr, &fallback, D3D12_HEAP_FLAG_NONE, &host_desc, initial,
+                                                    nullptr, 0, nullptr, riid, out, true);
             if (FAILED(hr) && initial != D3D12_RESOURCE_STATE_COMMON)
-                hr = create_committed_validated(nullptr, &fallback, D3D12_HEAP_FLAG_NONE, &desc,
+                hr = create_committed_validated(nullptr, &fallback, D3D12_HEAP_FLAG_NONE, &host_desc,
                                                 D3D12_RESOURCE_STATE_COMMON, nullptr, 0, nullptr, riid, out, true);
+            if (FAILED(hr)) {
+                // The same bounded record for a description this device cannot create: the refusal reason is printed
+                // once by create_committed_validated, so this line ties the shape to that answer.
+                static std::atomic<unsigned> failed{0};
+                if (failed.fetch_add(1, std::memory_order_relaxed) < 32)
+                    std::fprintf(stderr,
+                                 "[rt] d3d12: placed texture refused: %ux%ux%u format %d dimension %d mips %u "
+                                 "layers %u flags 0x%x samples %u layout 0x%x hresult 0x%08x\n",
+                                 desc.Width, desc.Height, desc.DepthOrArraySize, int(desc.Format), int(desc.Dimension),
+                                 desc.MipLevels, desc.DepthOrArraySize, static_cast<unsigned>(desc.Flags),
+                                 desc.SampleDesc.Count, static_cast<unsigned>(desc.Layout),
+                                 static_cast<unsigned>(hr));
+            }
             // Opt-in (docs/texture_import.md): the title writes its texture bytes into the pages at `address` (in the
             // measured linear mode a row-major CPU copy per subresource), so import them into this image before the
             // first submission that can sample it. Queued here, drained by the queue hook, so the title's writes are

@@ -30,6 +30,10 @@
 #include "../src/graphics_record.cpp"
 #include "../src/graphics_pso.cpp"
 
+// The console's depth-stencil + unordered-access pair (docs/3d_textures.md): the Vulkan-backed device translates it
+// on the console's placed-creation path, and the shared helper lives in the layer (port/src), not in this executable.
+#include "../src/console_texture.h"
+
 #include <d3d12.h>
 #include <windows.h>
 
@@ -3090,6 +3094,75 @@ int check_allocator_callback_invocation() {
     return 0;
 }
 
+int check_console_texture_translation() {
+    // The measured shape of the console's depth-stencil + unordered-access pair: a 2D R16_TYPELESS texture with
+    // ALLOW_DEPTH_STENCIL | ALLOW_UNORDERED_ACCESS and the array-layer counts the loading stage asked for.
+    const auto measured = [](UINT16 layers) {
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = desc.Height = 768;
+        desc.DepthOrArraySize = layers;
+        desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_R16_TYPELESS;
+        desc.SampleDesc.Count = 1;
+        desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL |
+                                                       D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        return desc;
+    };
+    constexpr auto both = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    for (const UINT16 layers : {UINT16(6), UINT16(1), UINT16(3)}) {
+        D3D12_RESOURCE_DESC desc = measured(layers);
+        EXPECT(palmetto::console_depth_uav_translated(desc));
+        EXPECT(desc.Flags == D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+        EXPECT(desc.DepthOrArraySize == layers && desc.Format == DXGI_FORMAT_R16_TYPELESS &&
+               desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.MipLevels == 1);  // everything else as asked
+    }
+    // The other depth-stencil families translate the same way: the rule is the family, not only the measured format.
+    for (const DXGI_FORMAT format : {DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_R32G8X24_TYPELESS,
+                                     DXGI_FORMAT_D32_FLOAT_S8X24_UINT, DXGI_FORMAT_R24G8_TYPELESS,
+                                     DXGI_FORMAT_D24_UNORM_S8_UINT}) {
+        D3D12_RESOURCE_DESC desc = measured(1);
+        desc.Format = format;
+        EXPECT(palmetto::console_depth_uav_translated(desc));
+        EXPECT(desc.Flags == D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    }
+    // Genuinely invalid combinations stay exactly as they were, so the device's own named refusals still fire for them.
+    {
+        D3D12_RESOURCE_DESC desc = measured(1);
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;  // no unordered access: nothing to translate
+        EXPECT(!palmetto::console_depth_uav_translated(desc));
+        EXPECT(desc.Flags == D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    }
+    {
+        D3D12_RESOURCE_DESC desc = measured(1);
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;  // unordered access alone: nothing to translate
+        EXPECT(!palmetto::console_depth_uav_translated(desc));
+        EXPECT(desc.Flags == D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    }
+    {
+        D3D12_RESOURCE_DESC desc = measured(1);
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;  // depth-stencil on a colour texture is refused, not translated
+        EXPECT(!palmetto::console_depth_uav_translated(desc));
+        EXPECT(desc.Flags == both);
+    }
+    {
+        D3D12_RESOURCE_DESC desc = measured(1);
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;  // a buffer never carries the console pair
+        EXPECT(!palmetto::console_depth_uav_translated(desc));
+        EXPECT(desc.Flags == both);
+    }
+    // The family helper itself, shared with the device's validation.
+    EXPECT(palmetto::format_family(DXGI_FORMAT_R16_TYPELESS) == DXGI_FORMAT_R16_TYPELESS);
+    EXPECT(palmetto::format_family(DXGI_FORMAT_R8G8B8A8_UNORM) == DXGI_FORMAT_R8G8B8A8_TYPELESS);
+    EXPECT(palmetto::depth_stencil_family(DXGI_FORMAT_R16_TYPELESS));
+    EXPECT(!palmetto::depth_stencil_family(DXGI_FORMAT_R8G8B8A8_UNORM));
+    std::printf("%s: the console's depth-stencil + unordered-access pair is translated to the depth-stencil resource "
+                "for the measured R16_TYPELESS 6/1/3-layer shapes and the other depth families, while a colour "
+                "texture, a buffer and either flag alone stay unchanged\n",
+                g_label);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     no_dialogs();
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -3114,7 +3187,8 @@ int main(int argc, char** argv) {
         check_fence1() || check_create_failures() || check_open_shared() || check_alloc_failures() ||
         check_allocators() || check_xbox_slots() || check_slot74_and_slot25_standin() ||
         check_console_command_list() || check_allocator_callback_invocation() || check_slot57_graphics_record() ||
-        check_slot55_derived_pipeline_state() || check_console_command_signature() || check_slot70_console_view())
+        check_slot55_derived_pipeline_state() || check_console_command_signature() ||
+        check_console_texture_translation() || check_slot70_console_view())
         return 1;
     std::printf("xs_proxy_mock_test: PASS (%d allocations refused on purpose)\n", g_failed_news);
     return 0;
