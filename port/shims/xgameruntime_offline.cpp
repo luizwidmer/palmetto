@@ -18,17 +18,22 @@
 //   XUserDeviceImpl     every device belongs to the offline user; associations and audio endpoints never change, so
 //                       their change registrations are kept until unregistered and never called back; the user has
 //                       no audio endpoint of its own; finding a controller shows no UI (as on desktop).
-//   XAccessibilityImpl  high contrast is Off, closed captions can't be configured, no voice is installed (enumerating
-//                       calls back zero times), XSpeechSynthesizerCreate fails (E_FAIL) with a null handle, the other
-//                       speech calls refuse the handle they were never given (E_INVALIDARG), speech-to-text display
-//                       calls fail (E_FAIL).
+//   XAccessibilityImpl  high contrast is Off, closed captions can't be configured. The default answer has no voice
+//                       installed (enumerating calls back zero times), XSpeechSynthesizerCreate fails (E_FAIL) with a
+//                       null handle, the other speech calls refuse the handle they were never given (E_INVALIDARG).
+//                       PALMETTO_SILENT_SPEECH=1 answers the speech surface with one silent voice instead: a
+//                       synthesizer handle, a valid empty WAVE stream and the calls that drive them (see the section
+//                       below and docs/first_run_path.md). Speech-to-text display calls fail (E_FAIL).
 //   XLauncherImpl       XLaunchUri and the display timeout deferral calls fail (E_FAIL); nothing is launched.
 //
 // Slots whose signature the public pages don't give answer with a value that is safe whichever way the caller reads
 // it: see `client_not_connected` (XGameStreaming) and `offline_failure`.
 #include <windows.h>
 
+#include <intrin.h>
+
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -40,6 +45,8 @@
 #include <XAsync.h>
 #include <XAsyncProvider.h>
 #include <XTaskQueue.h>
+
+#include "platform_trace.h"
 
 namespace rt::shims {
 void* xgameruntime_user_new_handle();   // xgameruntime_user.cpp
@@ -604,38 +611,284 @@ HRESULT STDMETHODCALLTYPE accessibility_high_contrast(void*, uint32_t* mode) {
 // 4: HRESULT XClosedCaptionSetEnabled(bool enabled): there are no captions to show; accepted and dropped.
 HRESULT STDMETHODCALLTYPE accessibility_captions_set_enabled(void*, bool) { return S_OK; }
 
-// 8: HRESULT XSpeechSynthesizerEnumerateInstalledVoices(callback, void* context): no voice is installed, so the
-// callback runs zero times. ASSUMPTION: the argument order (GDK reference), only the count (2) was measured.
-HRESULT STDMETHODCALLTYPE speech_enumerate_voices(void*, void* callback, void*) {
-    return callback ? S_OK : E_INVALIDARG;
+// ---- the speech surface (XSpeechSynthesizer.h, Microsoft GDK reference) ----
+//
+// The retail executable links these XAccessibilityImpl slots (tooling/gdk_runtime_calls.py: 8-13, 15, 16 and 21 are
+// referenced, 14 is not), and the argument counts its thunks pass after `this` are 2, 1, 1, 1, 2, 3, 2, 4 and 3: the
+// documented parameter list of each call.
+//    8  XSpeechSynthesizerEnumerateInstalledVoices(void* context, callback)
+//    9  XSpeechSynthesizerCreate(XSpeechSynthesizerHandle* synthesizer)
+//   10  XSpeechSynthesizerCloseHandle(XSpeechSynthesizerHandle)
+//   11  XSpeechSynthesizerSetDefaultVoice(XSpeechSynthesizerHandle)
+//   12  XSpeechSynthesizerSetCustomVoice(XSpeechSynthesizerHandle, const char* voiceId)
+//   13  XSpeechSynthesizerCreateStreamFromText(XSpeechSynthesizerHandle, const char* text, stream*)
+//   14  XSpeechSynthesizerCloseStreamHandle(XSpeechSynthesizerStreamHandle)
+//   15  XSpeechSynthesizerGetStreamDataSize(XSpeechSynthesizerStreamHandle, size_t* size)
+//   16  XSpeechSynthesizerGetStreamData(XSpeechSynthesizerStreamHandle, size_t bufferSize, void* buffer,
+//                                       size_t* bufferUsed)
+//   21  XSpeechSynthesizerCreateStreamFromSsml(XSpeechSynthesizerHandle, const char* ssml, stream*)
+// The boot calls one of them: slot 9, once, at +23.74 s and +25.35 s in the two 130 s boots measured for
+// docs/first_run_path.md. The default answer refuses it with E_FAIL and a null handle (docs/runtime_imports.md,
+// "Accessibility and speech").
+//
+// PALMETTO_SILENT_SPEECH=1 (docs/first_run_path.md): Microsoft's pages list Windows as a supported platform, so a host
+// answers these calls, but this runtime has no voice to synthesize with. The opt-in answer is one silent voice and a
+// stream that is a valid WAVE container with no sample data, so a title that narrates plays silence and goes on. Off by
+// default: unset, the lines, answers and handles are the ones measured before this slice.
+
+// PALMETTO_SILENT_SPEECH, read per call: the speech surface is not polled (the boot calls one slot once), and a test
+// flips the variable between calls. "0" and "off" keep the default; any other non-empty value turns the silent voice on.
+bool silent_speech_enabled() {
+    char value[8] = {};
+    const DWORD n = GetEnvironmentVariableA("PALMETTO_SILENT_SPEECH", value, sizeof value);
+    return n > 0 && n < sizeof value && std::strcmp(value, "0") != 0 && _stricmp(value, "off") != 0;
 }
 
-// 9: HRESULT XSpeechSynthesizerCreate(XSpeechSynthesizerHandle* handle): no synthesizer offline.
-HRESULT STDMETHODCALLTYPE speech_create(void* self, void** handle) {
-    if (handle) *handle = nullptr;
-    return offline_failure<kAccessibilityName, 9>(self);
+// A caller-supplied output pointer is only written after this proves the range committed and writable, the same rule
+// as xgameruntime.cpp's writable_range: these slots receive console-ABI pointers, and writing one the caller did not
+// map would be corruption, not an offline answer.
+bool writable_range(const void* pointer, size_t size) {
+    if (!pointer || size == 0) return false;
+    const auto page_writable = [](const void* address) {
+        MEMORY_BASIC_INFORMATION page{};
+        if (VirtualQuery(address, &page, sizeof page) != sizeof page) return false;
+        constexpr DWORD kProtected = PAGE_NOACCESS | PAGE_GUARD;
+        constexpr DWORD kWrite = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        return page.State == MEM_COMMIT && (page.Protect & kProtected) == 0 && (page.Protect & kWrite) != 0;
+    };
+    return page_writable(pointer) && page_writable(static_cast<const unsigned char*>(pointer) + size - 1);
 }
 
-// 10-12, 14: a synthesizer or stream handle is the first argument, and none was ever handed out: E_INVALIDARG.
-HRESULT STDMETHODCALLTYPE speech_bad_handle(void*) { return E_INVALIDARG; }
-
-// 13, 21: HRESULT XSpeechSynthesizerCreateStreamFromText/Ssml(synthesizer, const char* text,
-//                                                             XSpeechSynthesizerStreamHandle* stream)
-HRESULT STDMETHODCALLTYPE speech_create_stream(void*, void*, const char*, void** stream) {
-    if (stream) *stream = nullptr;
-    return E_INVALIDARG;
+bool readable_byte(const void* pointer) {
+    MEMORY_BASIC_INFORMATION page{};
+    return pointer && VirtualQuery(pointer, &page, sizeof page) == sizeof page && page.State == MEM_COMMIT &&
+           (page.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
 }
 
-// 15: HRESULT XSpeechSynthesizerGetStreamDataSize(stream, size_t* size)
-HRESULT STDMETHODCALLTYPE speech_stream_size(void*, void*, size_t* size) {
-    if (size) *size = 0;
-    return E_INVALIDARG;
+bool callable_pointer(const void* pointer) {
+    MEMORY_BASIC_INFORMATION page{};
+    if (!readable_byte(pointer) || VirtualQuery(pointer, &page, sizeof page) != sizeof page) return false;
+    constexpr DWORD kExecute = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    return (page.Protect & kExecute) != 0;
 }
 
-// 16: HRESULT XSpeechSynthesizerGetStreamData(stream, size_t size, void* buffer, size_t* used)
-HRESULT STDMETHODCALLTYPE speech_stream_data(void*, void*, size_t, void*, size_t* used) {
-    if (used) *used = 0;
-    return E_INVALIDARG;
+// Length of a NUL-terminated caller string, reading only committed pages, stopping at `cap`: a text or voice id the
+// caller points at is measured (a length, never the content) but never dereferenced past what VirtualQuery proved.
+size_t readable_string_length(const char* text, size_t cap) {
+    size_t done = 0;
+    while (text && done < cap) {
+        MEMORY_BASIC_INFORMATION page{};
+        if (VirtualQuery(text + done, &page, sizeof page) != sizeof page || page.State != MEM_COMMIT ||
+            (page.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0)
+            return done;
+        const auto begin = reinterpret_cast<std::uintptr_t>(page.BaseAddress);
+        const auto at = reinterpret_cast<std::uintptr_t>(text + done);
+        if (at < begin || at >= begin + page.RegionSize) return done;
+        const size_t room = static_cast<size_t>(begin + page.RegionSize - at);
+        const size_t count = room < cap - done ? room : cap - done;
+        const void* zero = std::memchr(text + done, '\0', count);
+        if (zero) return done + static_cast<size_t>(static_cast<const char*>(zero) - (text + done));
+        done += count;
+    }
+    return done;
+}
+
+// XSpeechSynthesizerVoiceInformation (XSpeechSynthesizer.h, the GDK reference's member order and 40-byte x64 layout).
+// The gender is XSpeechSynthesizerVoiceGender, a uint32_t enum: Female = 0, Male = 1.
+struct SpeechVoiceInformation {
+    const char* description;
+    const char* display_name;
+    std::uint32_t gender;
+    const char* voice_id;
+    const char* language;
+};
+static_assert(offsetof(SpeechVoiceInformation, voice_id) == 24 && sizeof(SpeechVoiceInformation) == 40,
+              "XSpeechSynthesizerVoiceInformation, as the title's callback reads it");
+using InstalledVoicesCallback = bool(CALLBACK*)(const SpeechVoiceInformation*, void*);
+
+// The one voice the silent answer installs. The strings are the runtime's own (no game data); the id is what the
+// title compares against when it selects a voice.
+constexpr char kSilentVoiceId[] = "palmetto-silent";
+constexpr SpeechVoiceInformation kSilentVoice = {"Palmetto silent voice (en-US)", "Palmetto silent voice", 0,
+                                                 kSilentVoiceId, "en-US"};
+
+// The two handles: addresses of process-lifetime objects, so the title passes back exactly what it was given. One of
+// each is enough offline: every stream is the same silent WAVE, so two open streams would behave alike anyway.
+struct SilentSpeechHandle {
+    std::uint32_t magic;
+};
+SilentSpeechHandle g_silent_synthesizer{0x53594e54};   // 'SYNT'
+SilentSpeechHandle g_silent_stream{0x5354524d};        // 'STRM'
+bool is_silent_synthesizer(const void* handle) { return handle == &g_silent_synthesizer; }
+bool is_silent_stream(const void* handle) { return handle == &g_silent_stream; }
+
+// A valid 44-byte RIFF/WAVE container for 16 kHz, 16-bit mono PCM with no sample data. GetStreamData's page returns
+// the audio in the WAVE container (`audio/wav`); a title that narrates plays this and goes on. The bytes are the WAVE
+// format's, not a game's.
+constexpr unsigned char kSilentWave[] = {
+    'R',  'I',  'F',  'F',  0x24, 0x00, 0x00, 0x00, 'W',  'A',  'V',  'E',  // RIFF, 36 bytes after this field
+    'f',  'm',  't',  ' ',  0x10, 0x00, 0x00, 0x00,                          // fmt , 16-byte format block
+    0x01, 0x00, 0x01, 0x00, 0x80, 0x3e, 0x00, 0x00,                          // PCM, 1 channel, 16000 Hz
+    0x00, 0x7d, 0x00, 0x00, 0x02, 0x00, 0x10, 0x00,                          // 32000 B/s, align 2, 16-bit
+    'd',  'a',  't',  'a',  0x00, 0x00, 0x00, 0x00,                          // data, no samples
+};
+static_assert(sizeof kSilentWave == 44, "the WAVE header and its empty data chunk");
+
+// One trace line per call under PALMETTO_USER_TRACE (platform_trace.h), with the answered HRESULT: the switch-on boot
+// shows whether the title goes past the create and which speech call it makes next.
+void trace_speech(const char* what, HRESULT hr, void* caller) {
+    rt::shims::platform_trace(what, caller, static_cast<std::uint64_t>(hr));
+}
+
+// 8: HRESULT XSpeechSynthesizerEnumerateInstalledVoices(void* context, callback). The default has no voice installed,
+// so the callback runs zero times; with the silent voice it runs once and its bool return stops the enumeration.
+HRESULT STDMETHODCALLTYPE speech_enumerate_voices(void*, void* context, InstalledVoicesCallback callback) {
+    if (!callable_pointer(reinterpret_cast<const void*>(callback))) {
+        trace_speech("XSpeechSynthesizerEnumerateInstalledVoices", E_INVALIDARG, _ReturnAddress());
+        return E_INVALIDARG;
+    }
+    if (silent_speech_enabled()) callback(&kSilentVoice, context);
+    trace_speech("XSpeechSynthesizerEnumerateInstalledVoices", S_OK, _ReturnAddress());
+    return S_OK;
+}
+
+// 9: HRESULT XSpeechSynthesizerCreate(XSpeechSynthesizerHandle* synthesizer). The default refuses with E_FAIL; the
+// silent answer hands out the synthesizer handle.
+HRESULT STDMETHODCALLTYPE speech_create(void* self, void** synthesizer) {
+    const bool writable = synthesizer && writable_range(synthesizer, sizeof *synthesizer);
+    if (!silent_speech_enabled()) {
+        if (writable) *synthesizer = nullptr;
+        const HRESULT hr = offline_failure<kAccessibilityName, 9>(self);
+        trace_speech("XSpeechSynthesizerCreate", hr, _ReturnAddress());
+        return hr;
+    }
+    if (!synthesizer) {
+        trace_speech("XSpeechSynthesizerCreate", E_POINTER, _ReturnAddress());
+        return E_POINTER;
+    }
+    if (!writable) {
+        trace_speech("XSpeechSynthesizerCreate", E_POINTER, _ReturnAddress());
+        return E_POINTER;
+    }
+    *synthesizer = &g_silent_synthesizer;
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true))
+        std::fprintf(stderr, "[rt] xgameruntime: speech synthesis is silent offline: one silent voice, empty WAVE "
+                             "streams (PALMETTO_SILENT_SPEECH=1)\n");
+    trace_speech("XSpeechSynthesizerCreate", S_OK, _ReturnAddress());
+    return S_OK;
+}
+
+// 10: HRESULT XSpeechSynthesizerCloseHandle(XSpeechSynthesizerHandle)
+HRESULT STDMETHODCALLTYPE speech_close_synth(void*, void* synthesizer) {
+    const HRESULT hr = is_silent_synthesizer(synthesizer) ? S_OK : E_INVALIDARG;
+    trace_speech("XSpeechSynthesizerCloseHandle", hr, _ReturnAddress());
+    return hr;
+}
+
+// 11: HRESULT XSpeechSynthesizerSetDefaultVoice(XSpeechSynthesizerHandle)
+HRESULT STDMETHODCALLTYPE speech_set_default_voice(void*, void* synthesizer) {
+    const HRESULT hr = is_silent_synthesizer(synthesizer) ? S_OK : E_INVALIDARG;
+    trace_speech("XSpeechSynthesizerSetDefaultVoice", hr, _ReturnAddress());
+    return hr;
+}
+
+// 12: HRESULT XSpeechSynthesizerSetCustomVoice(XSpeechSynthesizerHandle, const char* voiceId): only the enumerated
+// voice exists, so any other id is refused.
+HRESULT STDMETHODCALLTYPE speech_set_custom_voice(void*, void* synthesizer, const char* voice_id) {
+    HRESULT hr = E_INVALIDARG;
+    if (is_silent_synthesizer(synthesizer) && voice_id) {
+        const size_t length = readable_string_length(voice_id, sizeof kSilentVoiceId);
+        if (length == sizeof kSilentVoiceId - 1 && std::memcmp(voice_id, kSilentVoiceId, length) == 0) hr = S_OK;
+    }
+    trace_speech("XSpeechSynthesizerSetCustomVoice", hr, _ReturnAddress());
+    return hr;
+}
+
+// The shared body of 13 and 21: the synthesizer handle, a text/SSML string and the stream out pointer. With the silent
+// voice the stream is handed out; the text's length is logged once (the content is never read into a log).
+HRESULT create_silent_stream(void* synthesizer, const char* text, void** stream, const char* what) {
+    if (!stream) {
+        trace_speech(what, E_POINTER, _ReturnAddress());
+        return E_POINTER;
+    }
+    const bool writable = writable_range(stream, sizeof *stream);
+    if (writable) *stream = nullptr;
+    if (!is_silent_synthesizer(synthesizer) || !text || !readable_byte(text)) {
+        trace_speech(what, E_INVALIDARG, _ReturnAddress());
+        return E_INVALIDARG;
+    }
+    if (!writable) {
+        trace_speech(what, E_POINTER, _ReturnAddress());
+        return E_POINTER;
+    }
+    *stream = &g_silent_stream;
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true)) {
+        const size_t length = readable_string_length(text, 4096);
+        std::fprintf(stderr, "[rt] xgameruntime: silent speech: a %zu-byte text stream, %zu bytes of WAVE\n", length,
+                     sizeof kSilentWave);
+    }
+    trace_speech(what, S_OK, _ReturnAddress());
+    return S_OK;
+}
+
+// 13: HRESULT XSpeechSynthesizerCreateStreamFromText(synthesizer, const char* text, stream*)
+HRESULT STDMETHODCALLTYPE speech_create_stream_from_text(void*, void* synthesizer, const char* text, void** stream) {
+    return create_silent_stream(synthesizer, text, stream, "XSpeechSynthesizerCreateStreamFromText");
+}
+
+// 21: HRESULT XSpeechSynthesizerCreateStreamFromSsml(synthesizer, const char* ssml, stream*)
+HRESULT STDMETHODCALLTYPE speech_create_stream_from_ssml(void*, void* synthesizer, const char* ssml, void** stream) {
+    return create_silent_stream(synthesizer, ssml, stream, "XSpeechSynthesizerCreateStreamFromSsml");
+}
+
+// 14: HRESULT XSpeechSynthesizerCloseStreamHandle(XSpeechSynthesizerStreamHandle)
+HRESULT STDMETHODCALLTYPE speech_close_stream(void*, void* stream) {
+    const HRESULT hr = is_silent_stream(stream) ? S_OK : E_INVALIDARG;
+    trace_speech("XSpeechSynthesizerCloseStreamHandle", hr, _ReturnAddress());
+    return hr;
+}
+
+// 15: HRESULT XSpeechSynthesizerGetStreamDataSize(XSpeechSynthesizerStreamHandle, size_t* size)
+HRESULT STDMETHODCALLTYPE speech_stream_size(void*, void* stream, size_t* size) {
+    const bool writable = size && writable_range(size, sizeof *size);
+    HRESULT hr = E_INVALIDARG;
+    if (is_silent_stream(stream)) {
+        if (writable) {
+            *size = sizeof kSilentWave;
+            hr = S_OK;
+        } else {
+            hr = E_POINTER;
+        }
+    } else if (writable) {
+        *size = 0;
+    }
+    trace_speech("XSpeechSynthesizerGetStreamDataSize", hr, _ReturnAddress());
+    return hr;
+}
+
+// 16: HRESULT XSpeechSynthesizerGetStreamData(XSpeechSynthesizerStreamHandle, size_t bufferSize, void* buffer,
+//                                              size_t* bufferUsed). The published error for an invalid stream is
+// HRESULT_FROM_WIN32(ERROR_NOT_FOUND); the offline answer keeps this file's E_INVALIDARG convention instead.
+HRESULT STDMETHODCALLTYPE speech_stream_data(void*, void* stream, size_t buffer_size, void* buffer,
+                                             size_t* buffer_used) {
+    const bool used_writable = buffer_used && writable_range(buffer_used, sizeof *buffer_used);
+    if (used_writable) *buffer_used = 0;
+    HRESULT hr = E_INVALIDARG;
+    if (is_silent_stream(stream)) {
+        if (!buffer || !writable_range(buffer, sizeof kSilentWave)) {
+            hr = E_POINTER;
+        } else if (buffer_size < sizeof kSilentWave) {
+            hr = HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+        } else {
+            std::memcpy(buffer, kSilentWave, sizeof kSilentWave);
+            if (used_writable) *buffer_used = sizeof kSilentWave;
+            hr = S_OK;
+        }
+    }
+    trace_speech("XSpeechSynthesizerGetStreamData", hr, _ReturnAddress());
+    return hr;
 }
 
 // The slots with no offline counterpart whose arguments the layout doesn't give: the caption properties (3) and
@@ -654,18 +907,18 @@ const void* const kAccessibilityVtable[] = {
     FN(accessibility_offline<7>),            // 7  XSpeechToTextSendString
     FN(speech_enumerate_voices),             // 8  XSpeechSynthesizerEnumerateInstalledVoices
     FN(speech_create),                       // 9  XSpeechSynthesizerCreate
-    FN(speech_bad_handle),                   // 10 XSpeechSynthesizerCloseHandle
-    FN(speech_bad_handle),                   // 11 XSpeechSynthesizerSetDefaultVoice
-    FN(speech_bad_handle),                   // 12 XSpeechSynthesizerSetCustomVoice
-    FN(speech_create_stream),                // 13 XSpeechSynthesizerCreateStreamFromText
-    FN(speech_bad_handle),                   // 14 XSpeechSynthesizerCloseStreamHandle
+    FN(speech_close_synth),                  // 10 XSpeechSynthesizerCloseHandle
+    FN(speech_set_default_voice),            // 11 XSpeechSynthesizerSetDefaultVoice
+    FN(speech_set_custom_voice),             // 12 XSpeechSynthesizerSetCustomVoice
+    FN(speech_create_stream_from_text),      // 13 XSpeechSynthesizerCreateStreamFromText
+    FN(speech_close_stream),                 // 14 XSpeechSynthesizerCloseStreamHandle
     FN(speech_stream_size),                  // 15 XSpeechSynthesizerGetStreamDataSize
     FN(speech_stream_data),                  // 16 XSpeechSynthesizerGetStreamData
     FN(accessibility_offline<17>),           // 17 XSpeechToTextBeginHypothesisString
     FN(accessibility_offline<18>),           // 18 XSpeechToTextUpdateHypothesisString
     FN(accessibility_offline<19>),           // 19 XSpeechToTextFinalizeHypothesisString
     FN(accessibility_offline<20>),           // 20 XSpeechToTextCancelHypothesisString
-    FN(speech_create_stream),                // 21 XSpeechSynthesizerCreateStreamFromSsml
+    FN(speech_create_stream_from_ssml),      // 21 XSpeechSynthesizerCreateStreamFromSsml
 };
 static_assert(std::size(kAccessibilityVtable) == 22, "IUnknown + IXAccessibilityImpl's 19 methods");
 ClassObject g_accessibility_object{kAccessibilityVtable};
