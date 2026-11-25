@@ -1,32 +1,39 @@
-# Console texture layout (XG): what the title does with the answers, and whether the refusal gates its uploads
+# Console texture layout (XG): the two refused calls decoded, and the linear layout as the default
 
-**Status: measured increment.** The frame's last open lead was the console texture-layout family (`xg_xs.dll`:
-`XGSuggestSwizzleMode`, `XGCreateTextureComputer` and its methods), which refuses with `E_NOTIMPL`. This page records
-what the title's call sites do, what it does when the family answers, what was implemented and what is still refused,
-and the measured result: **answering the family unlocks a real title-side upload path (65 subresource copies, 34,044 B
-in 150 s, where the refusal boot made 8 no-op calls), but the frame stays black** because the runtime's stand-in for a
-title-placed texture is an ordinary committed image that does not read the title's pages.
+**Status: measured increment, default flipped.** The frame's last open lead was the console texture-layout family
+(`xg_xs.dll`: `XGSuggestSwizzleMode`, `XGCreateTextureComputer` and its methods), which refused with `E_NOTIMPL`.
+The previous page recorded that answering it unlocks a real title-side upload path (65 subresource copies, 34,044 B
+in 150 s) but that slots 2 and 10 still refused, so the linear answer stayed an opt-in measurement switch and the
+default kept the layout cache closed. This page decodes the two calls from the executable's own code, corrects the
+record size the previous page reported, fills the record the title reads, and measures the linear layout as the
+default:
 
-Counts, RVAs, format codes and the project's own wording only; no package bytes, paths or extracted tables.
+- the slot-2 record is **0x1B40 bytes** (a header and four 0x6C8-byte planes), not 0x6C8 - 0x6C8 is one plane;
+- slot 2 is `GetResourceLayout`. The default now fills the whole record with the description's linear layout; the
+  title's layout cache consumes it instead of an uninitialised stack record, and the 150 s boot stays alive;
+- slot 10 is `GetResourceTiling` (D3D12's seven-argument shape); its structures are decoded, but a tile list only
+  exists for a 64 KiB-tiled resource and the runtime creates none, so it still refuses by name and writes nothing;
+- the upload path is unchanged: the same 65 copies / 34,044 B as the opt-in linear run, the same per-frame command
+  shape, 0 exceptions and 0 device-lost in both arms, and the frame stays black (the content frontier is separate:
+  the runtime's stand-in for a title-placed texture is an ordinary committed image that does not read the title's
+  pages).
+
+Counts, RVAs, format codes, structure offsets and the project's own wording only; no package bytes, paths or
+extracted tables.
 
 ## 1. The measured surface
 
 The retail executable imports two functions from `xg_xs.dll`. Both call-site sets were re-read statically and then
-counted at run time through the shim (`PALMETTO_XG_TRACE=1`):
+counted at run time through the shim (`PALMETTO_XG_TRACE=1`, `PALMETTO_XG_DUMP=1` for the record dumps):
 
-| Entry / method | Call sites (game RVAs) | Measured calls, 150 s refusal boot |
-|---|---|---:|
-| `XGSuggestSwizzleMode(desc, 0, uint32_t* mode)` | `0x4ECCCA2`, `0xC4B3CE` | **15** |
-| `XGCreateTextureComputer(const desc*, computer** out)` | `0x16F7141`, `0x344235`, `0x979C75`, `0x5121A5E` | **8** |
-| computer slot 1 (read as Release) | 3 sites | not counted (uninstrumented in the A/B) |
-| computer slot 2 (one out pointer, large structure) | `0x979C9F`, `0x5121A84` | **0** |
-| computer slot 8 (six arguments, loop over subresources) | `0x16F71FB` | **8** |
-| computer slot 10 (seven arguments) | `0x344283` | **0** |
-
-The three `E_NOTIMPL` lines a boot prints are `warn_once` lines, one per entry point by design - they are **not** a
-count of calls. The same boot reaches the family 15 / 8 / 8 times, and the linear boot below reaches it 44 / 24 / 65
-times. The probe is therefore not a one-time startup question: the title asks again for every CPU-built texture it
-makes over the whole window.
+| Entry / method | Call sites (game RVAs) | 150 s refusal arm | 150 s linear arm (default) |
+|---|---|---:|---:|
+| `XGSuggestSwizzleMode(desc, 0, uint32_t* mode)` | `0x4ECCCA2`, `0xC4B3CE` | **15** | **44** |
+| `XGCreateTextureComputer(const desc*, computer** out)` | `0x16F7141`, `0x344235`, `0x979C75`, `0x5121A5E` | **8** | **24** |
+| computer slot 1 (read as Release) | 3 sites | not counted (uninstrumented in the A/B) | not counted |
+| computer slot 2 (`GetResourceLayout`, one out pointer) | `0x979C9F`, `0x5121A84` | **0** | **2, filled** |
+| computer slot 8 (`CopyIntoSubresource`, six arguments) | `0x16F71FB` | **8, all `E_NOTIMPL`** | **65, all `S_OK` (34,044 B)** |
+| computer slot 10 (`GetResourceTiling`, seven arguments) | `0x344283` | **0** | **0** |
 
 The reached path is the title's placed-resource fill function (`game+0x193DE10`), through the per-subresource copy
 loop at `game+0x16F7100`:
@@ -36,92 +43,202 @@ loop at `game+0x16F7100`:
    unknown format byte (`0xFF`) the helper calls `XGSuggestSwizzleMode(desc, 0, &desc[0x2C])` and passes the result up;
 2. `XGCreateTextureComputer` is called with that description (from `game+0x16F7100`, which does **not** check the
    HRESULT - the two callers that do check, `game+0x979C40` and `game+0x5121980`, are the slot-2/layout-cache
-   paths and are not reached while the family refuses);
+   paths);
 3. for every subresource the title calls slot 8 once: measured arguments are `(destination resource address, 0,
    subresource index, linear source for that subresource, bytes per row, subresource bytes)`, e.g. a 256x128 8-bit
    description gives `arg5 = 0x100` (256 B/row) and `arg6 = 0x8000` (32,768 B), and the 1x1 4-byte descriptions give
-   `arg5 = arg6 = 4`. The HRESULT of slot 8 is not read.
+   `arg5 = arg6 = 4`. The HRESULT of slot 8 is not read;
+4. only when `XGCreateTextureComputer` answered `S_OK` do the two checking callers continue into the layout-cache
+   path and reach slot 2 (`0x5121980` calls it and copies one plane out of the record).
 
-So the copy the refusal suppresses is a **CPU copy into the title's own page memory** (the destination addresses are
-title page addresses; the source is a linear buffer, in the 1x1 cases a stack buffer). It is not a D3D12 copy: the
-measured window has zero `CopyBufferRegion`/`CopyTextureRegion`/`CopyResource`/`CopyTiles`/`ResolveSubresource`
-commands and zero compute dispatches in both boots. `docs/page_content.md` section 7 measured the same absence.
+The measured descriptions are one-level, one-slice textures: the 256x128 R8_UNORM image (format 61), 1x1
+R8G8B8A8_UNORM (format 28) and 1x1 32-bit formats (28 / 30 / 41). The two slot-2 descriptions are 2048x2048 and
+1024x1024 R8 (see section 2.1).
 
-## 2. The A/B: what answering the family changes
+## 2. The two refused calls, decoded
 
-Two clean 150 s boots, same tree, same package, harness only (`tooling/boot_report.py`), standard environment
+### 2.1 Slot 2 is `GetResourceLayout`: a 0x1B40-byte record, not 0x6C8
+
+The previous page reported a 0x6C8-byte stack record. Reading the two callers' stack frames settles it:
+
+- `game+0x979C40` reserves `0x1B98` bytes (`mov eax, 0x1b98; call __chkstk; sub rsp, rax`) and passes `rsp+0x58`
+  to slot 2: exactly 0x1B40 bytes remain to the top of the frame;
+- `game+0x5121980` reserves `0x1BA0` bytes and passes `rsp+0x60`: again exactly 0x1B40 bytes;
+- the same function then copies **one plane** out of that record:
+  `memcpy(dst, rsp+0x60+0x18+arg*0x6C8, 0x6C8)` (`game+0x5121A9D..0x5121AA9`), and its cached map nodes store the
+  same 0x6C8. So 0x6C8 is one plane of the record: `0x1B40 = 0x18 + 4 * 0x6C8`, and a plane is
+  `0x38 + 15 * 0x70`.
+
+`XG_RESOURCE_LAYOUT` (0x1B40 bytes), offsets the executable reads marked:
+
+| Offset | Size | Field | Read by |
+|---|---:|---|---|
+| `0x00` | u64 | `SizeBytes` | (not read in the measured window) |
+| `0x08` | u64 | `BaseAlignmentBytes` | (not read in the measured window) |
+| `0x10` | u32 | `MipLevels` | (not read in the measured window) |
+| `0x14` | u32 | `PlaneCount` | (the dump and tests use it; no measured title read) |
+| `0x18` | 4 x `0x6C8` | `planes[]` | plane `k` at `0x18 + k*0x6C8` |
+| `0x1B38` | u32 | `Dimension` (D3D12_RESOURCE_DIMENSION) | (not read in the measured window) |
+
+Plane (0x6C8 bytes):
+
+| Offset | Size | Field | Read by |
+|---|---:|---|---|
+| `0x00` | u32 | usage (1 colour, 2 CMASK, 4 HTILE, 5/6 depth/stencil, 7/8 depth/stencil of a depth buffer) | (not measured) |
+| `0x08` | u64 | plane size | (not measured) |
+| `0x10` | u64 | slice size | `game+0x5121690` (`0x5121854`), `game+0x555E9E0` |
+| `0x20` | u64 | base alignment | (not measured) |
+| `0x28` | u32 | bytes per element | (not measured) |
+| `0x2C` | u32 | first mip in the tail | (not measured) |
+| `0x30` | u32 | mips in the tail | (not measured) |
+| `0x38` | 15 x `0x70` | mip levels | mip `i` at `0x38 + i*0x70` |
+
+Mip level (0x70 bytes):
+
+| Offset | Size | Field | Read by |
+|---|---:|---|---|
+| `0x00` | u64 | level size (one slice) | `game+0x979C40` (record+0x50), `game+0x5121690` (`0x512186F`), `game+0x555E9E0` |
+| `0x08` | u64 | offset from the plane base | `game+0x5121690` (`0x512186A`), `game+0x555E9E0` |
+| `0x10` | u64 | level slice size | `game+0x979C40` (record+0x60), `game+0x5121690` (`0x5121874`), `game+0x555E9E0` |
+| `0x18` | u32 | pitch in pixels | (not measured) |
+| `0x1C` | u32 | pitch in bytes | `game+0x979C40` (record+0x6C), `game+0x5121690` (`0x5121879`), `game+0x555E9E0` |
+| `0x20` | u32 | level alignment | (not measured) |
+| `0x24` / `0x28` / `0x2C` | u32 | padded width / height / slices | (not measured) |
+| `0x30` / `0x34` | u32 | width / height in elements | (not measured) |
+| `0x38` / `0x3C` | u32 | width / height in pixels | (not measured) |
+| `0x40` | u32 | depth-or-slices | (not measured) |
+| `0x44` | u32 | samples | (not measured) |
+| `0x48` | u32 | swizzle mode (0 is linear) | (not measured) |
+| `0x60` | u32 | block depth (1 for the 2D layouts) | (not measured) |
+| `0x64` | u32 | in-mip-tail flag | (not measured) |
+
+The record base the callers pass is what makes the arithmetic consistent: `game+0x979C40` reads
+`record + 0x50 + i*0x70`, `record + 0x60 + i*0x70` and `record + 0x6C + i*0x70` for mip `i`, which is plane 0's mip
+`i` (`0x18 + 0x38 = 0x50`) and its size @+0, slice size @+0x10 and pitch bytes @+0x1C. `game+0x5121690` and
+`game+0x555E9E0` read the cached plane's slice size @+0x10 and, per level, size @+0, offset @+8, slice size @+0x10
+and pitch bytes @+0x1C. No other code reads the record (the cache map is only referenced by the fill function and
+its own map init/teardown).
+
+Provenance of the table: the **offsets and the fields the title consumes** are pinned locally by those reads (and by
+the record sizes the two stack frames reserve); the field **names** follow the GDK's public description of
+`XG_RESOURCE_LAYOUT` (size, base alignment, mip count, planes, and a plane as mip levels) and the linear allocation
+rule (256-byte rows) is the one the project's GFX10 tiling already documents for the neighbouring swizzled modes
+(`port/src/gfx10_tiling.h`). No console tiling is inferred anywhere here.
+
+The boot dumps the two records the title asks for (both from caller `game+0x5121A87`, i.e. the slot-2 call inside
+`game+0x5121980`):
+
+| Record | `SizeBytes` | `MipLevels` | `PlaneCount` | `Dimension` | plane 0 | mip 0 |
+|---|---:|---:|---:|---:|---|---|
+| 2048x2048, one level, R8 | `0x400000` | 1 | 1 | 3 (TEXTURE2D) | usage 1, size `0x400000`, slice `0x400000`, bpe 1 | offset 0, size `0x400000`, pitch 2048 px / 2048 B, padded 2048x2048, 1 slice, 1 sample, mode 0 |
+| 1024x1024, one level, R8 | `0x100000` | 1 | 1 | 3 | usage 1, size `0x100000`, slice `0x100000`, bpe 1 | offset 0, size `0x100000`, pitch 1024 px / 1024 B, padded 1024x1024, 1 slice, 1 sample, mode 0 |
+
+Both records are internally consistent (`pitch_bytes * height == size`) and the boot with them filled stays alive
+(section 4). The values are the linear layout the description names (`0x100 | 0`, the mode the title's own
+description helper writes), not a console tiling.
+
+### 2.2 Slot 10 is `GetResourceTiling`: seven arguments, a 12-byte tiling list
+
+The caller at `game+0x3441F0` reserves `0x168` bytes, builds a description and a computer, then calls slot 10 with
+the D3D12 `GetResourceTiling` shape:
+
+| Argument | Measured value | Meaning |
+|---|---|---|
+| `rdx` | `rsp+0x38` (u32, initialised to 0) | total tiles of the resource, out |
+| `r8` | `rsp+0x58` (0x10 bytes zeroed) | packed-mip desc, out: `u8 NumStandardMips`, `u8 NumPackedMips`, `u16 NumTilesForPackedMips`, `u32 StartTileIndexInOverallResource` |
+| `r9` | `rsp+0x48` (0x10 bytes zeroed) | standard tile shape, out: `u32 WidthInTexels`, `u32 HeightInTexels`, `u32 DepthInTexels` |
+| `[rsp+0x20]` | `rsp+0x3c` (initialised to `0x10` = 16) | subresource-tiling count, in/out |
+| `[rsp+0x28]` | 0 | first subresource tiling index |
+| `[rsp+0x30]` | `rsp+0xa0` | subresource tiling list, out: 16 entries of **12 bytes** (16 * 12 = 0xC0 B, inside the frame) |
+
+After the call the caller reads `byte[rsp+0x58]` and `byte[rsp+0x59]` (standard and packed mip counts), then walks
+the list at `rsp+0xa0` in 12-byte steps and reads `dword @0`, `word @4` and `word @8` of each entry. Those are the
+Xbox `XG_SUBRESOURCE_TILING` fields of the D3D12 shape: `WidthInTiles` u32 @0, `HeightInTiles` u16 @4,
+`DepthInTiles` u16 @6, `StartTileIndexInOverallResource` u32 @8; the caller packs width/height/low tile index into
+its own 32-bit word and adds `WidthInTiles * HeightInTiles` per standard mip.
+
+A tile list exists only for a 64 KiB-tiled resource. The measured window creates none: slot 10 is called **0 times**
+in both arms, the runtime creates no reserved/tiled resource, and a 64 KiB tile layout is not modelled
+(`port/src/gfx10_tiling.h` covers two swizzled modes of one 2D level, without mips or tile indices). Filling a tile
+list would therefore be fabricated, so it stays refused by name and writes nothing. What would pin it: a title path
+that creates a tiled/reserved resource and asks `GetResourceTiling` for it (none in the measured window), or an
+oracle comparison against the retail `xg_xs` library on 64 KiB-tiled descriptions.
+
+## 3. What the shim does now, and what it refuses
+
+**Default (`PALMETTO_XG_LAYOUT` unset or `linear`)** is the linear answer for a backend whose textures are ordinary
+row-major committed images:
+
+- `XGSuggestSwizzleMode` returns `S_OK` and writes **`0x100`**, the explicit linear layout the title's own
+  description helper writes (`0x2C = 0x100 | mode`, mode 0 = linear). A console swizzle mode would make the title
+  upload console-tiled bytes the GPU reads wrongly.
+- `XGCreateTextureComputer` returns `S_OK` **only for a description whose whole layout can be written honestly**: a
+  one-level, one-slice 1D/2D texture, `SampleDesc.Count == 1`, no `ALLOW_RENDER_TARGET` / `ALLOW_DEPTH_STENCIL`
+  flag, a format with a whole-byte single-plane element (8/16/32/64/128-bit and the BCn formats), and the layout
+  field `0x100`. It always stores a computer in `*out`, because two measured callers use it without checking the
+  HRESULT; the two checking callers (the layout cache) take their failure path on the named refusal, which is what
+  keeps an unwritten record out of that cache.
+- Slot 2 (`GetResourceLayout`) fills the whole **0x1B40** record from the description the computer was created with:
+  header size / alignment / mip count / plane count / dimension, one plane (usage 1 colour, size, slice size,
+  alignment, bytes per element, no mip tail) and its one mip level (size, offset 0, slice size, pitch in pixels and
+  bytes, padded extent, element extent, pixel extent, depth-or-slices, samples, swizzle mode 0, block depth). Rows
+  are padded to 256 bytes (the linear rule this runtime serves) and every byte of the record that is not one of
+  those fields is zeroed, so no stack bytes survive. A description that cannot be laid out refuses by name and
+  writes nothing.
+- Slot 8 (`CopyIntoSubresource`) is unchanged from the measured linear answer: it copies the linear subresource at
+  the offset its row-major source names, capped to what a resource of the recorded description can hold, both
+  ranges checked committed and accessible. The upload path measured below is unchanged by the record fill.
+- Everything else is refused by name: a buffer / 3D description, more than one mip level, more than one array
+  slice, MSAA, a render-target or depth-stencil resource (its CMASK / HTILE metadata plane is not modelled), a
+  planar or unknown format, and any layout field other than the explicit linear `0x100`. Slot 10 always refuses
+  (section 2.2).
+
+**`PALMETTO_XG_LAYOUT=refuse`** is the previous shim, bit for bit (the A/B baseline): both exports `E_NOTIMPL`, the
+mode field untouched, the computer still stored, every slot returns `E_NOTIMPL` and writes nothing.
+
+Implementation: `port/shims/xg_xs.cpp`. The record offsets, the exact fill (guard bytes past 0x1B40 untouched, all
+unwritten fields zeroed), the two measured descriptions, the linear pitch/size arithmetic and the named refusals are
+pinned by `port/test/xg_xs_test.cpp` (86 checks in the default mode, 16 in refuse mode).
+
+## 4. The A/B: the linear layout as the default
+
+Two 150 s boots, same tree, same package, harness only (`tooling/boot_report.py`), standard environment
 (`PALMETTO_SHADERS=<shaders-dir>`, `PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`,
-`PALMETTO_SEED_GLOBAL=75DF268:D8`), `PALMETTO_XG_TRACE=1` on both. Boot 2 also has capture on
-(`PALMETTO_CAPTURE`) and the one-shot target readback (`PALMETTO_READBACK_AT_DRAW=1`).
+`PALMETTO_SEED_GLOBAL=75DF268:D8`), `PALMETTO_XG_TRACE=1` and `PALMETTO_READBACK_AT_DRAW=1` on both, the only
+difference the layout switch. Boot 2 (the default) also has `PALMETTO_XG_DUMP=1`, which only logs the first 8
+descriptions and records and does not change the title's calls; boot 1 is the opt-out.
 
-| | boot 1: family refuses (default) | boot 2: `PALMETTO_XG_LAYOUT=linear` |
+| | boot 1: `PALMETTO_XG_LAYOUT=refuse` | boot 2: default (linear) |
 |---|---:|---:|
 | Run | ALIVE 150.2 s, 0 exceptions, 0 device-lost | ALIVE 150.2 s, 0 exceptions, 0 device-lost |
+| D3D12 trace calls | 652,414 | 514,354 |
 | `XGSuggestSwizzleMode` calls | 15 | **44** |
-| `XGCreateTextureComputer` calls | 8 | **24** |
-| computer slot 2 calls | 0 | **2** (caller `game+0x5121A87`) |
-| computer slot 8 calls | 8, all `E_NOTIMPL` (0 B written) | **65, all `S_OK` (34,044 B copied)** |
+| `XGCreateTextureComputer` calls | 8 | **24** (the upload loop ignores the HRESULT; the layout-cache callers take the named refusal) |
+| computer slot 2 calls | 0 | **2, filled** (2048x2048 and 1024x1024 R8, table above) |
+| computer slot 8 calls | 8, all `E_NOTIMPL` (0 B) | **65, all `S_OK` (34,044 B copied)** |
+| computer slot 10 calls | 0 | 0 |
 | copies / dispatches / upload-memory allocations (trace) | 0 / 0 / 0 | 0 / 0 / 0 |
-| committed resources / placed creations / SRVs | 7 / 32 / 38 | 7 / 30 / 37 |
-| `DrawInstanced` / presents | 32,848 / 16,424 | 29,116 / 14,559 |
-| `ExecuteCommandLists` failed / refused | 0 / 0 | 0 / 0 |
+| placed creations / committed resources / SRVs / UAVs | 32 / 7 / 39 / 22 | 32 / 7 / 39 / 22 |
+| `DrawInstanced` / `PresentX` / `ExecuteCommandLists` ok | 31,631 / 15,816 / 31,632 | 24,400 / 12,200 / 24,402 |
 | draw's target readback | mean 0 0 0, non-black 0/16,384 | mean 0 0 0, non-black 0/16,384 |
-| readback write control | mean 51 102 204, 16,384/16,384 | mean 51 102 204, 16,384/16,384 |
-| captured presented frames | (capture off; the baseline is black 24/24) | **mean 0.0000/255, non-black 0/24** |
 
-The frame counts differ only because boot 2 has capture on (every 30th presented frame is copied to host memory and
-written to disk), which slows the loop; the per-frame shape is unchanged.
+The upload path is identical to the previous page's opt-in linear run: **65 copies, 34,044 B**, the 256x128 R8
+image (32,768 B) and the 1x1 defaults (4 B each). The resource population and the per-frame command shape are
+identical in the two arms: **2 draws and 2 submissions per presented frame** in both (24,400 draws / 12,200 presents
+and 31,631 / 15,816), one `ClearRenderTargetView` and one `SetPipelineState` per draw. The absolute frame count of a
+150 s boot varies with the machine load the boot runs under (other agents' builds run on the same host), so the
+frame totals are not compared across arms; the per-frame shape and the creation counts are. No device-lost, no
+exception, no GPU fault in either arm.
 
-What the answers unlocked, read from the copy contents (counts only, bytes not quoted):
+What answering the family changes is exactly what the previous page measured: the title's CPU-built textures reach
+its own pages. What filling slot 2 changes on top of that is that the layout cache now consumes a written linear
+record instead of an uninitialised stack record, which is why the default no longer has to keep the cache path
+closed.
 
-- one **256x128, 1-mip** description with a real 32,768-byte 8-bit image as its source (non-uniform content - a font
-  or UI atlas, not a solid colour);
-- seven (and in boot 2 more) **1x1, 4-byte** descriptions whose source is a single 4-byte word, measured
-  `0xFFFFFFFF` / `0x00FFFFFF` - the title's white default texture, built on the stack and copied into its page.
+## 5. Why the frame is still black, and what this rules out
 
-So the refusal does gate the upload of these CPU-built textures: with the family refusing, slot 8 is a no-op and the
-title does not fall back to any other upload (no GPU copy, no upload-memory allocation, no second probe). What the
-title does with each answer:
-
-| Answer | What the title does with it |
-|---|---|
-| `XGSuggestSwizzleMode` = `E_NOTIMPL`, mode field untouched (stays 0) | The helper returns the HRESULT up; the reached caller does not branch on it. The description keeps mode 0 and is passed to `XGCreateTextureComputer`. |
-| `XGSuggestSwizzleMode` = `S_OK`, `0x100` | Same call site, no branch; mode `0x100` reaches the computer description. 29 more suggest calls happen over the window because more description helpers now run. |
-| `XGCreateTextureComputer` = `E_NOTIMPL`, `*out` set | The upload loop ignores the HRESULT and calls slot 8 through the object; the two checking callers take their clean failure path (so their layout-cache paths stay closed). |
-| `XGCreateTextureComputer` = `S_OK` | The upload loop is unchanged; the two checking callers now continue into the layout-cache path and reach slot 2 (2 calls measured). |
-| slot 8 `= E_NOTIMPL` | No bytes are written, no fallback, no error surfaced. |
-| slot 8 `= S_OK` (linear copy) | The title continues to its next subresource/texture; the destination pages receive the row-major source bytes (34,044 B measured). |
-| slot 2 `= E_NOTIMPL` | The caller (`game+0x5121980`) does not read the HRESULT and copies the uninitialised record it passed in as the layout - see section 4. |
-
-## 3. What is implemented, and what still refuses
-
-Default (`PALMETTO_XG_LAYOUT` unset or `refuse`) is bit-identical to the previous shim: both exports refuse with
-`E_NOTIMPL`, `XGSuggestSwizzleMode` writes nothing, `XGCreateTextureComputer` still stores a computer (two measured
-callers use it without checking), and every computer slot writes nothing.
-
-`PALMETTO_XG_LAYOUT=linear` (measured here) serves what the backend can actually represent - ordinary row-major
-images:
-
-- `XGSuggestSwizzleMode` returns `S_OK` and writes **`0x100`**, the value the title's own description helper writes for
-  a known texture whose mode byte is 0. The mode is only an input to the computer description; a console swizzle mode
-  would make the title lay out console-tiled bytes the GPU reads wrongly, which this runtime cannot serve.
-- `XGCreateTextureComputer` returns `S_OK` and a computer that keeps a copy of the description.
-- Slot 8 (`CopyIntoSubresource`) copies the linear subresource: the destination subresource sits at the offset the
-  title's own row-major source names (`source - first source address of that computer`), and the copy length is the
-  measured `arg6`, capped by the largest a subresource of that description can be (16 bytes per texel x dimensions),
-  with both ranges checked committed and accessible first. Long copies are not run outside a committed range.
-- **Slot 2 (`GetResourceLayout`) and slot 10 (the tile list) still refuse by name.** Their structures are not
-  modelled, and fabricating a console layout is forbidden by the project's "refuse rather than guess" rule. The
-  measured 150 s window does not need slot 2 to answer (it is only reached when `XGCreateTextureComputer` answers
-  `S_OK`, and then only through the layout cache), so the linear answer is complete for the upload measurement.
-
-Implementation: `port/shims/xg_xs.cpp`; the call shapes, both modes and the copy bounds are pinned by
-`port/test/xg_xs_test.cpp` (17 checks in the default mode, 21 with `PALMETTO_XG_LAYOUT=linear`).
-
-## 4. Why the frame is still black, and what this rules out
-
-The 34,044 bytes the title now copies with the linear answer land **in the title's own pages**, and the runtime does
-not read them for a texture. Device slot 133 (`CreatePlacedResourceX`) for a placed **texture** says so itself:
+The 34,044 bytes the title copies land **in the title's own pages**, and the runtime does not read them for a
+texture. Device slot 133 (`CreatePlacedResourceX`) for a placed **texture** says so itself:
 
 ```
 [rt] d3d12: a title-placed texture (device slot 133) is an ordinary committed texture, not the title's pages; dimension 3
@@ -129,51 +246,62 @@ not read them for a texture. Device slot 133 (`CreatePlacedResourceX`) for a pla
 
 (`port/shims/d3d12_vulkan_device.cpp`, `create_at_host_address`: a texture gets an ordinary committed image on its
 own `VkDeviceMemory`, and the title's writes at its page address do not reach it - only placed **buffers** get the
-console-VA alias, and that alias rebases the VA for descriptors, it does not import the pages either). So a layout
+console-VA alias, and that alias rebases the VA for descriptors, it does not import the pages either). A layout
 answer can only become pixels once the runtime makes a placed texture read the title's pages - the same page-import
-problem `docs/page_content.md` recorded for buffers, one resource class further.
+problem `docs/page_content.md` recorded for buffers, one resource class further. `docs/texture_source.md` measured
+that frontier separately: with the placement import opted in (`PALMETTO_TEXTURE_IMPORT=1`) every sampled image still
+reads black, and the sampled 4K texture is a different population from the CPU-built textures this family serves.
 
-That also rules XG out as the black frame's gate in the measured window:
+So this increment rules XG out as the black frame's gate in the measured window: the family's uploads are small
+CPU-built textures (one 256x128 atlas-like image and 1x1 defaults, 34 kB total), the resource population is
+unchanged by the answers, no GPU copy or compute dispatch appears, and the readback is black in both arms (mean 0,
+0/16,384). The layout records the title now caches describe its own pages, not the committed stand-in.
 
-- the family's uploads are small CPU-built textures (one 256x128 atlas-like image and 1x1 defaults, 34 kB total), not
-  the streamed world textures. The 30-32 placed-resource creations and 7 committed resources per boot are unchanged by
-  the answers, and no GPU copy or compute dispatch appears, so the sampled images still get no content from here;
-- the frame's black is unchanged in both boots (target readback mean 0, capture 0/24), with the readback instrument
-  proven by a write control in the same boot (51/102/204);
-- the streaming side (DirectStorage: one zlib request then nothing, no upload-memory allocation) is a different lead
-  and is being measured separately; answering XG is measurably not what unblocks it.
+## 6. What remains unpinned, and what measurement would pin it
 
-One caveat on the `S_OK` answer: with `XGCreateTextureComputer` answering `S_OK`, the title's layout-cache caller
-(`game+0x5121980`) does not check slot 2's HRESULT and treats the (unwritten) stack record as a layout. That is why the
-linear mode is an opt-in measurement switch, not the default, and why filling slot 2 is part of the next increment.
-The default boot keeps the layout-cache path closed, exactly as measured before this page.
+- **Slot 10's tile list.** The structures are decoded (section 2.2) but not served: no measured resource is tiled
+  and the runtime creates no tiled resource, so tile width/height/depth and `StartTileIndexInOverallResource` would
+  be fabricated. Pinned by a title path that creates a 64 KiB-tiled (reserved) resource and calls
+  `GetResourceTiling`, or by an oracle comparison against the retail `xg_xs` library on 64 KiB-tiled descriptions.
+  Both are outside the current window (slot 10 is called 0 times) and the runtime has no such resources.
+- **Layout records for more complex resources.** The fill serves the measured case only: one mip level, one array
+  slice, 1D/2D, colour, one plane. Multi-level and multi-slice records would need the linear mip ordering and the
+  per-slice offsets, and render-target / depth-stencil resources their CMASK / HTILE metadata planes (a second
+  plane with its own usage code, size and alignment); 3D and MSAA need further rules. The window's slot-2
+  descriptions are one-level one-slice R8, so those cases are refused at `XGCreateTextureComputer` with the field
+  named and the layout cache takes its failure path instead of consuming a record. Pinned by a measured title path
+  that creates such a resource and asks for its layout, or by the console library's own answers for those
+  descriptions.
+- **The 256-byte row padding of the linear layout.** The record's pitch/size arithmetic pads rows to 256 bytes (the
+  D3D12 linear layout this backend serves, `PALMETTO_XG_LAYOUT=linear`). Both records the title actually reads have
+  widths that are multiples of 256 bytes (2048 B and 1024 B rows), so the observed records do not exercise the
+  padding rule; the 1x1 upload textures that would are never asked for their layout in the window (their caller does
+  not check the create and never reaches slot 2). Pinned for the read records by their own values; a padded-row case
+  would be pinned by a measured layout-cache read of a texture narrower than 256 bytes per row, or by the console
+  library's answer for that description.
 
-## 5. Reproduce
+`docs/texture_import.md` still lists slots 2 and 10 as "refused / unmodelled"; the slot-2 part is superseded by this
+page (slot 10 is still refused, now by name with its structures decoded).
+
+## 7. Reproduce
 
 ```
-# refusal baseline (default) - writes nothing, frame stays black
+# default: the linear layout (slot 2 filled, slot 8 copies, slot 10 refused)
 python -I tooling\\boot_report.py --exe port\\build\\palmetto.exe --image <title> --game-dir <package>
     --overlay <overlay-dir> --timeout 150 --out <out-dir>
     --env PALMETTO_SHADERS=<shaders-dir> --env PALMETTO_D3D12=vulkan
     --env PALMETTO_SKIP_INT3=1 --env PALMETTO_SEED_GLOBAL=75DF268:D8 --env PALMETTO_XG_TRACE=1
+    --env PALMETTO_XG_DUMP=1 --env PALMETTO_READBACK_AT_DRAW=1
 
-# linear answers (the A/B above)
-... --env PALMETTO_XG_LAYOUT=linear --env PALMETTO_CAPTURE=<capture-dir> --env PALMETTO_READBACK_AT_DRAW=1
+# the refusal arm of the A/B
+... --env PALMETTO_XG_LAYOUT=refuse
 ```
 
-The counters (`[rt] xg_xs counters (...)`) and the first calls with their description words and slot-8 arguments are
-what the table above reads; the capture frames are measured with `ppm_brightness.py`.
+`PALMETTO_XG_DUMP=1` adds, bounded to the first 8 calls of each entry, the description words and the filled layout
+record (header, plane, mip) to the trace, so one boot shows the shapes above. The counters
+(`[rt] xg_xs counters (...)`) and the slot-8 arguments are what the tables read; `PALMETTO_XG_TRACE=1` alone gives
+the first calls without the record dump.
 
-## 6. Next increment
-
-1. **Make a title-placed texture read the title's pages.** The linear answer already produces correct row-major bytes
-   in those pages; the backend needs to import them (or copy them into the stand-in image before the texture is
-   sampled), for the placed-texture class, the way `alias_console_va` handles buffers. This is the increment that
-   would turn the 34,044 bytes the title writes into visible content - and it is in
-   `port/shims/d3d12_vulkan_device.cpp`, outside this page's write scope.
-2. **Slot 2 (`GetResourceLayout`) and slot 10.** Only then can `XGCreateTextureComputer` answer `S_OK` without the
-   layout cache consuming an uninitialised record. The structure shapes are known from the call sites (slot 2: one out
-   pointer to a 0x6C8-byte record; slot 10: seven arguments, a count and a 12-byte-entry list) but their fields are not
-   decoded, so both refuse by name today.
-3. **Re-run the streaming measurement with the linear answers in**: if the streamer's wait state is what gates the
-   world textures, XG answering will not change it, and the two leads can be closed independently.
+Tests: `cmake --build port\\build --target xg_xs_test` then `port\\build\\xg_xs_test.exe` (86 checks, 0 failures;
+`PALMETTO_XG_LAYOUT=refuse` runs the same binary with 16 checks, 0 failures). The other test targets and the palmetto
+build gate are unchanged.
