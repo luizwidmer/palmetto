@@ -113,6 +113,91 @@ extern "C" void palmetto_register_fence_value_watcher(void* fn) {
 #include <utility>
 #include <vector>
 
+// ---- Streamed DirectStorage block ranges (measurement only) -------------------------------------------------------
+//
+// docs/streamed_consumer.md. dstorage.cpp (the same executable) reports every block it has just decompressed into a
+// title address through palmetto_stream_block_completed. The Xbox-ABI device proxy below is the only layer between the
+// title and the PC device, so a consumer's GPU-side step would show up here first: a heap created from the block's
+// address, a placed resource at it, or any other device call whose argument is a pointer into it. With the shim's
+// PALMETTO_STREAM_CONSUMER unset the registry stays empty and every check is two relaxed atomic loads; with it set, a
+// match prints (bounded) and each instrumented slot prints its first call. Nothing here changes behaviour.
+//
+// The title image base is published once by dstorage.cpp (from its enqueue caller) so a caller's return address can be
+// printed as game+RVA without a module lookup - this file is also linked into GPU-free test binaries that have no shim
+// registry.
+namespace streamed_blocks {
+
+constexpr unsigned kRanges = 8192;
+
+struct Range {
+    std::atomic<std::uint64_t> va{0};
+    std::atomic<std::uint64_t> bytes{0};
+};
+
+Range g_ranges[kRanges];
+std::atomic<unsigned> g_count{0};
+std::atomic<std::uint64_t> g_min{~std::uint64_t(0)};
+std::atomic<std::uint64_t> g_max{0};
+std::atomic<std::uint64_t> g_title_base{0};
+std::atomic<unsigned> g_match_lines{0};
+
+bool active() { return g_count.load(std::memory_order_relaxed) != 0; }
+
+void set_title_base(std::uint64_t base) { g_title_base.store(base, std::memory_order_relaxed); }
+
+void add(void* va, std::size_t bytes) {
+    if (!va || bytes == 0) return;
+    const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(va));
+    const unsigned index = g_count.fetch_add(1, std::memory_order_relaxed);
+    if (index < kRanges) {
+        g_ranges[index].va.store(address, std::memory_order_relaxed);
+        g_ranges[index].bytes.store(bytes, std::memory_order_relaxed);
+    }
+    std::uint64_t previous_min = g_min.load(std::memory_order_relaxed);
+    while (address < previous_min &&
+           !g_min.compare_exchange_weak(previous_min, address, std::memory_order_relaxed)) {
+    }
+    const std::uint64_t end = address + bytes;
+    std::uint64_t previous_max = g_max.load(std::memory_order_relaxed);
+    while (end > previous_max &&
+           !g_max.compare_exchange_weak(previous_max, end, std::memory_order_relaxed)) {
+    }
+}
+
+// Index of the first recorded block that intersects [address, address+bytes), or -1. The min/max prefilter rejects every
+// ordinary pointer (and null) before the table is walked, so a boot with the switch on pays two atomic loads per call.
+int find(std::uint64_t address, std::uint64_t bytes) {
+    if (address == 0 || bytes == 0) return -1;
+    const std::uint64_t min = g_min.load(std::memory_order_relaxed);
+    const std::uint64_t max = g_max.load(std::memory_order_relaxed);
+    if (max <= min || address >= max || address + bytes <= min) return -1;
+    const unsigned count = std::min(g_count.load(std::memory_order_relaxed), kRanges);
+    for (unsigned i = 0; i < count; ++i) {
+        const std::uint64_t va = g_ranges[i].va.load(std::memory_order_relaxed);
+        const std::uint64_t length = g_ranges[i].bytes.load(std::memory_order_relaxed);
+        if (length == 0 || va == 0) continue;
+        if (address < va + length && va < address + bytes) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+// A caller's return address as "game+0x..." when it lies in the title image's 256 MiB window, else the raw address.
+void caller_text(std::uint64_t caller, char* out, std::size_t capacity) {
+    const std::uint64_t base = g_title_base.load(std::memory_order_relaxed);
+    if (caller && base && caller >= base && caller - base < 0x10000000ull)
+        std::snprintf(out, capacity, "game+0x%llx", static_cast<unsigned long long>(caller - base));
+    else
+        std::snprintf(out, capacity, "0x%llx (not the title image)", static_cast<unsigned long long>(caller));
+}
+
+}  // namespace streamed_blocks
+
+extern "C" void palmetto_stream_block_completed(void* va, std::size_t bytes) {
+    streamed_blocks::add(va, bytes);
+}
+
+extern "C" void palmetto_stream_set_title_base(std::uint64_t base) { streamed_blocks::set_title_base(base); }
+
 namespace rt::d3d12_xs {
 namespace {
 
@@ -1296,6 +1381,111 @@ inline void note_list_slot(unsigned slot, std::uint64_t a1 = 0, std::uint64_t a2
 // No call is changed: each hook prints and returns, and no control flow depends on the probe.
 static bool readable_range(const void* pointer, std::size_t bytes);  // defined below, for the dumps
 
+// ---- Streamed-block correlation on the device and command-list proxies (measurement only) -------------------------
+//
+// Filled by dstorage.cpp (the streamed_blocks registry above). Two questions are answered here, one line each and no
+// behaviour change:
+//   * does a title device or command-list call ever name a streamed block? Every first six argument words are tested
+//     against the recorded ranges; a match names the slot, the argument position, the block and the caller (game+RVA).
+//     This covers a heap created from the block's address, a placed resource at it, and any entry point whose number this
+//     proxy has not identified yet (an unknown console slot still matches if it passes the address).
+//   * do the entry points a consumer's GPU-side step would use get called at all? The first call of each relevant device
+//     slot and copy-family command-list slot prints its arguments and the title caller, so a negative answer ("no copy
+//     call, no heap/placed resource over the range") is measured on this side too, not inferred from the replay's count.
+const char* consumer_slot_name(unsigned slot) {
+    switch (slot) {
+        case 8: return "CreateCommandQueue";
+        case 12: return "CreateCommandList";
+        case 27: return "CreateCommittedResource (PC slot)";
+        case 28: return "CreateHeap (PC slot)";
+        case 29: return "CreatePlacedResource (PC slot)";
+        case 48: return "console CreateCommandQueueX (PC OpenExistingHeapFromAddress is shadowed here)";
+        case 49: return "OpenExistingHeapFromFileMapping (PC slot)";
+        case 53: return "CreateCommittedResource1 (PC slot)";
+        case 54: return "CreateHeap1 (PC slot)";
+        case 69: return "CreateCommittedResource2 (PC slot)";
+        case 70: return "console slot 70 (PC CreatePlacedResource1 shape does not fit)";
+        case 73: return "console CreateCommandListX";
+        case 75: return "CreateCommandQueue1";
+        case 76: return "console resource creation";
+        case 77: return "CreatePlacedResource2 (PC slot)";
+        case 127: return "console committed resource with a barrier layout";
+        case 133: return "console CreatePlacedResourceX";
+        default: return "device";
+    }
+}
+
+void stream_note_match(const char* kind, unsigned slot, unsigned argument, std::uint64_t word, std::uint64_t caller) {
+    const int block = streamed_blocks::find(word, 1);
+    if (block < 0) return;
+    if (streamed_blocks::g_match_lines.fetch_add(1, std::memory_order_relaxed) >= 32) return;
+    char where[64];
+    streamed_blocks::caller_text(caller, where, sizeof where);
+    std::fprintf(stderr,
+                 "[rt] d3d12_xs: STREAM CONSUMER: %s slot %u argument %u = 0x%llx names streamed block #%d (caller "
+                 "%s)\n",
+                 kind, slot, argument, static_cast<unsigned long long>(word), block, where);
+}
+
+void stream_note_device_call(unsigned slot, const void* return_address, std::uint64_t a1, std::uint64_t a2,
+                             std::uint64_t a3, std::uint64_t a4, std::uint64_t a5, std::uint64_t a6) {
+    if (!streamed_blocks::active() || slot >= kMaxSlots) return;
+    const std::uint64_t caller = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(return_address));
+    const std::uint64_t words[6] = {a1, a2, a3, a4, a5, a6};
+    for (unsigned i = 0; i < 6; ++i) stream_note_match("device", slot, i + 1, words[i], caller);
+    switch (slot) {
+        case 8: case 12: case 27: case 28: case 29: case 48: case 49: case 53: case 54: case 69: case 70: case 73:
+        case 75: case 76: case 77: case 127: case 133: break;
+        default: return;
+    }
+    static std::atomic<bool> seen[kMaxSlots];
+    bool expected = false;
+    if (!seen[slot].compare_exchange_strong(expected, true, std::memory_order_relaxed)) return;
+    char where[64];
+    streamed_blocks::caller_text(caller, where, sizeof where);
+    char type[48] = "";
+    if ((slot == 8 || slot == 48 || slot == 75) && readable_range(reinterpret_cast<const void*>(a1), 4)) {
+        const unsigned command_type = *reinterpret_cast<const std::uint32_t*>(a1);
+        std::snprintf(type, sizeof type, " command type %u%s", command_type, command_type == 3 ? " (COPY)" : "");
+    } else if (slot == 12) {
+        const auto command_type = static_cast<unsigned>(a2);
+        std::snprintf(type, sizeof type, " command type %u%s", command_type, command_type == 3 ? " (COPY)" : "");
+    } else if (slot == 73 && readable_range(reinterpret_cast<const void*>(a1), 4)) {
+        const unsigned command_type = *reinterpret_cast<const std::uint32_t*>(a1);
+        std::snprintf(type, sizeof type, " command type %u%s", command_type, command_type == 3 ? " (COPY)" : "");
+    }
+    std::fprintf(stderr,
+                 "[rt] d3d12_xs: stream consumer: device slot %u (%s) first call: args 0x%llx 0x%llx 0x%llx 0x%llx%s "
+                 "(caller %s)\n",
+                 slot, consumer_slot_name(slot), static_cast<unsigned long long>(a1),
+                 static_cast<unsigned long long>(a2), static_cast<unsigned long long>(a3),
+                 static_cast<unsigned long long>(a4), type, where);
+}
+
+void stream_note_list_call(unsigned console_slot, unsigned pc_slot, const void* return_address, std::uint64_t a1,
+                           std::uint64_t a2, std::uint64_t a3, std::uint64_t a4, std::uint64_t a5, std::uint64_t a6) {
+    if (!streamed_blocks::active() || console_slot >= kListSlots) return;
+    // Copy-family console slots (the PC order the console keeps before its extras): 15 CopyBufferRegion, 16
+    // CopyTextureRegion, 17 CopyResource, 18 CopyTiles, 19 ResolveSubresource; the console's CopyTextureRegionX at 85 and
+    // the enhanced-barrier group at 146 (a barrier that names resources). First call per slot, then the argument match.
+    const bool interesting = (console_slot >= 15 && console_slot <= 19) || console_slot == 85 || console_slot == 146;
+    if (!interesting) return;
+    const std::uint64_t caller = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(return_address));
+    const std::uint64_t words[6] = {a1, a2, a3, a4, a5, a6};
+    for (unsigned i = 0; i < 6; ++i) stream_note_match("list", console_slot, i + 1, words[i], caller);
+    static std::atomic<bool> seen[kListSlots];
+    bool expected = false;
+    if (!seen[console_slot].compare_exchange_strong(expected, true, std::memory_order_relaxed)) return;
+    char where[64];
+    streamed_blocks::caller_text(caller, where, sizeof where);
+    std::fprintf(stderr,
+                 "[rt] d3d12_xs: stream consumer: console list slot %u -> PC slot %u first call: args 0x%llx 0x%llx "
+                 "0x%llx 0x%llx 0x%llx 0x%llx (caller %s)\n",
+                 console_slot, pc_slot, static_cast<unsigned long long>(a1), static_cast<unsigned long long>(a2),
+                 static_cast<unsigned long long>(a3), static_cast<unsigned long long>(a4),
+                 static_cast<unsigned long long>(a5), static_cast<unsigned long long>(a6), where);
+}
+
 bool clear_barrier_probe() {
     static const bool on = [] {
         char value[8] = {};
@@ -1779,6 +1969,8 @@ std::uint64_t WINAPI list_slot(ListProxy* self, std::uint64_t a1, std::uint64_t 
                                std::uint64_t a8, std::uint64_t a9, std::uint64_t a10, std::uint64_t a11,
                                std::uint64_t a12, std::uint64_t a13, std::uint64_t a14) {
     if (callers_enabled()) note_caller(CallerKind::list, Slot, _ReturnAddress(), a1, a2, a3, a4);
+    if (streamed_blocks::active())
+        stream_note_list_call(Slot, console_to_pc_list_slot(Slot), _ReturnAddress(), a1, a2, a3, a4, a5, a6);
     if constexpr (Slot == 0) {
         return hr_to_u64(list_query_interface(self, reinterpret_cast<const IID*>(a1),
                                               reinterpret_cast<void**>(a2)));
@@ -4125,6 +4317,7 @@ std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64
                                 std::uint64_t a8, std::uint64_t a9, std::uint64_t a10, std::uint64_t a11,
                                 std::uint64_t a12, std::uint64_t a13, std::uint64_t a14) {
     if (callers_enabled()) note_caller(CallerKind::device, Slot, _ReturnAddress(), a1, a2, a3, a4);
+    if (streamed_blocks::active()) stream_note_device_call(Slot, _ReturnAddress(), a1, a2, a3, a4, a5, a6);
     if constexpr (Slot == 0) {
         return hr_to_u64(proxy_query_interface(self, reinterpret_cast<const IID*>(a1),
                                                reinterpret_cast<void**>(a2)));

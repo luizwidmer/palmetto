@@ -40,6 +40,12 @@
 
 using namespace dsx;
 
+// Defined in d3d12_xs_device.cpp (linked into the same executable): append a completed destination block to the device
+// proxy's range registry, and publish the title image base so its traces print game+RVA callers. Never called when
+// PALMETTO_STREAM_CONSUMER is off.
+extern "C" void palmetto_stream_block_completed(void* va, size_t bytes);
+extern "C" void palmetto_stream_set_title_base(std::uint64_t base);
+
 namespace {
 
 // ---- Logging ------------------------------------------------------------------------------------------------------
@@ -134,6 +140,304 @@ const char* size_band(uint32_t bytes) {
     if (bytes <= (8u << 20)) return "over 1 MiB, up to 8 MiB";
     if (bytes <= kMax4kPageDestinationSize) return "over 8 MiB, up to 32 MiB";
     return "over 32 MiB";
+}
+
+// ---- Streamed-block consumer diagnostics (measurement only; PALMETTO_STREAM_CONSUMER=1) ---------------------------
+//
+// docs/streamed_consumer.md. The title streams ~256 MiB as 64 KiB decompressed blocks into ordinary process-heap
+// addresses, and over a 300 s boot no device entry point names those ranges, so the consumer is either title CPU code
+// or nothing. With PALMETTO_STREAM_CONSUMER=1 this file (the queue worker owns all of it):
+//   * reports every completed destination to the device proxy (d3d12_xs_device.cpp, same executable): any device call
+//     whose argument points into one of those ranges is printed there - that is the GPU-side naming, if it happens;
+//   * prints the first bytes' content class for the first blocks (a label only, never a byte value);
+//   * puts PAGE_GUARD on the pages wholly inside the first few distinct destinations: the first access after the
+//     worker's write faults into a small vectored handler that prints the title-side reader (faulting RIP as game+RVA,
+//     then the title frames on its stack) and clears the guard. The handler does not change the access, allocate or
+//     read the block, so the boot runs as without the switch. Everything is bounded (8 tracked destinations, 32 guard
+//     slots, 16 fault lines, fixed lines) and off by default; with the switch unset no guard, handler or range is
+//     created and every function here returns on one cached boolean.
+
+bool stream_consumer_enabled() {
+    static const bool on = [] {
+        char value[8] = {};
+        size_t length = 0;
+        return getenv_s(&length, value, "PALMETTO_STREAM_CONSUMER") == 0 && length > 1 && value[0] != '0' &&
+               value[0] != 'n';
+    }();
+    return on;
+}
+
+// The title image base, captured once from the DirectStorage enqueue caller. The guard handler must never look a module
+// up (the registry's lookup takes a lock, which a fault handler must not), so it subtracts this base instead.
+std::atomic<std::uint64_t> g_title_image_base{0};
+
+// "game+0x..." for an address in the title image (a generous 192 MiB window over a 176 MiB image), else false.
+bool title_rva(std::uintptr_t address, std::uintptr_t& rva) {
+    const std::uint64_t base = g_title_image_base.load(std::memory_order_relaxed);
+    if (!base || address < base || address - base >= 0x0C000000ull) return false;
+    rva = static_cast<std::uintptr_t>(address - base);
+    return true;
+}
+
+// The first bytes' content class as a label. A match names a standard container tag (a format identification, not its
+// contents); otherwise the label is a byte statistic. No byte value is ever printed.
+const char* classify_block(const void* data, size_t bytes) {
+    const auto* b = static_cast<const uint8_t*>(data);
+    if (!b || bytes == 0) return "empty";
+    const size_t n = bytes < 256 ? bytes : 256;
+    static constexpr struct {
+        char magic[4];
+        const char* label;
+    } kMagics[] = {
+        {{'R', 'S', 'C', '8'}, "RSC8 console resource container"},
+        {{'R', 'S', 'C', '7'}, "RSC7 console resource container"},
+        {{'A', 'D', 'A', 'T'}, "ADAT audio bank"},
+        {{'R', 'I', 'F', 'F'}, "RIFF container"},
+        {{'W', 'A', 'V', 'E'}, "WAVE audio"},
+        {{'D', 'D', 'S', ' '}, "DDS texture"},
+        {{'R', 'B', 'F', '0'}, "RBF0 animation blob"},
+    };
+    if (n >= 4)
+        for (const auto& m : kMagics)
+            if (std::memcmp(b, m.magic, 4) == 0) return m.label;
+    if (n >= 2 && b[0] == 0x78 && (b[1] == 0x9c || b[1] == 0x01 || b[1] == 0xda))
+        return "still-compressed zlib stream";
+    size_t nonzero = 0, printable = 0;
+    size_t distinct = 0;
+    bool seen[256] = {};
+    for (size_t i = 0; i < n; ++i) {
+        if (b[i]) ++nonzero;
+        if (b[i] >= 0x20 && b[i] < 0x7f) ++printable;
+        if (!seen[b[i]]) {
+            seen[b[i]] = true;
+            ++distinct;
+        }
+    }
+    if (nonzero == 0) return "all-zero";
+    if (printable * 20 >= n * 19) return "mostly printable text";
+    if (n >= 64 && std::memcmp(b, b + 16, 16) == 0) return "16-byte repeating pattern";
+    if (distinct <= 8) return "low-entropy structured";
+    if (distinct >= 160) return "high-entropy (compressed, packed or random)";
+    return "structured binary";
+}
+
+// One tracked destination: the first few distinct blocks. The queue worker is the only writer of this table.
+struct TrackedDestination {
+    std::uintptr_t base = 0;
+    size_t bytes = 0;
+    unsigned arms = 0;
+    bool written_again = false;
+};
+constexpr unsigned kTrackedDestinations = 12;
+
+// A destination's interior pages under PAGE_GUARD. The fault handler runs on whichever thread touched them, so these
+// fields are atomic; the handler clears `armed` before it resumes the access.
+struct GuardedBlock {
+    std::atomic<std::uintptr_t> page_base{0};
+    std::atomic<size_t> page_bytes{0};
+    std::atomic<std::uintptr_t> block_base{0};
+    std::atomic<unsigned> tracked_index{0};
+    std::atomic<unsigned> faults{0};
+    std::atomic<bool> armed{false};
+};
+constexpr unsigned kGuardSlots = 32;
+GuardedBlock g_guards[kGuardSlots];
+std::atomic<unsigned> g_fault_lines{0};
+
+// The title frames on the faulting thread's stack, as game+RVAs. A shallow scan like the wait sampler's: the top stack
+// words are readable by construction, and the loop is bounded and guarded so a bad stack word cannot fault the handler.
+void print_title_stack(std::uintptr_t stack_pointer) {
+    char line[768];
+    int used = std::snprintf(line, sizeof line, "[rt] dstorage guard: stack title frames:");
+    unsigned printed = 0;
+    if (used < 0) return;
+    __try {
+        for (unsigned i = 0; i < 48 && printed < 8; ++i) {
+            const std::uintptr_t word =
+                *reinterpret_cast<const std::uintptr_t*>(stack_pointer + i * sizeof(std::uintptr_t));
+            std::uintptr_t rva = 0;
+            if (!title_rva(word, rva)) continue;
+            const int n = std::snprintf(line + used, sizeof line - static_cast<size_t>(used), " game+0x%llx",
+                                        static_cast<unsigned long long>(rva));
+            if (n < 0) break;
+            used += n;
+            if (static_cast<size_t>(used) >= sizeof line - 32) break;
+            ++printed;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    if (!printed) std::snprintf(line + used, sizeof line - static_cast<size_t>(used), " none");
+    std::fprintf(stderr, "%s\n", line);
+}
+
+// The one-shot guard handler: name the first access to a guarded streamed block, clear the guard and let the access
+// retry. Any other exception (and any guard page that is not ours) goes on to the next handler untouched.
+LONG CALLBACK stream_guard_handler(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
+    EXCEPTION_RECORD* record = info->ExceptionRecord;
+    if (record->ExceptionCode != STATUS_GUARD_PAGE_VIOLATION || record->NumberParameters < 2)
+        return EXCEPTION_CONTINUE_SEARCH;
+    const unsigned access = static_cast<unsigned>(record->ExceptionInformation[0]);
+    const auto address = static_cast<std::uintptr_t>(record->ExceptionInformation[1]);
+    for (unsigned i = 0; i < kGuardSlots; ++i) {
+        GuardedBlock& guard = g_guards[i];
+        const std::uintptr_t page = guard.page_base.load(std::memory_order_relaxed);
+        const size_t width = guard.page_bytes.load(std::memory_order_relaxed);
+        if (width == 0 || address < page || address - page >= width) continue;
+        // A second thread can fault on the same page after the first one's handler already cleared the guard: the page
+        // range still matches, the protection is cleared again (idempotent) and the access retries, so a concurrent
+        // first touch cannot end the process with an unhandled guard violation.
+        const bool first = guard.armed.load(std::memory_order_acquire);
+        const std::uintptr_t rip = info->ContextRecord ? static_cast<std::uintptr_t>(info->ContextRecord->Rip) : 0;
+        const std::uintptr_t rsp = info->ContextRecord ? static_cast<std::uintptr_t>(info->ContextRecord->Rsp) : 0;
+        const std::uintptr_t block = guard.block_base.load(std::memory_order_relaxed);
+        const unsigned tracked = guard.tracked_index.load(std::memory_order_relaxed);
+        DWORD old = 0;
+        VirtualProtect(reinterpret_cast<void*>(page), width, PAGE_READWRITE, &old);
+        guard.armed.store(false, std::memory_order_release);
+        if (!first) return EXCEPTION_CONTINUE_EXECUTION;
+        guard.faults.fetch_add(1, std::memory_order_relaxed);
+        if (g_fault_lines.fetch_add(1, std::memory_order_relaxed) < 16) {
+            char where[80];
+            std::uintptr_t rva = 0;
+            if (title_rva(rip, rva))
+                std::snprintf(where, sizeof where, "game+0x%llx", static_cast<unsigned long long>(rva));
+            else
+                std::snprintf(where, sizeof where, "0x%llx (not the title image)", static_cast<unsigned long long>(rip));
+            std::fprintf(stderr, "[rt] dstorage guard: streamed block #%u first %s at its +0x%llx by %s\n", tracked,
+                         access == 1 ? "write" : access == 8 ? "execute" : "read",
+                         static_cast<unsigned long long>(address > block ? address - block : 0), where);
+            print_title_stack(rsp);
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// The tracked destinations (worker-thread only; the guard table's entry for a tracked destination is atomic because the
+// handler touches it).
+TrackedDestination g_tracked[kTrackedDestinations];
+unsigned g_tracked_count = 0;
+TrackedDestination& g_tracked_slot(unsigned index) { return g_tracked[index % kTrackedDestinations]; }
+
+// Guard the pages wholly inside a tracked destination (the block's first and last partial pages stay readable, so the
+// title heap's own metadata and neighbours cannot fault through this). Returns 1 when armed, 0 when the block has no
+// whole page inside it, -1 when the protection failed (logged here).
+int arm_stream_guard(unsigned tracked_index) {
+    const TrackedDestination& tracked = g_tracked_slot(tracked_index);
+    GuardedBlock& guard = g_guards[tracked_index % kGuardSlots];
+    if (guard.armed.load(std::memory_order_acquire)) {
+        DWORD old = 0;
+        VirtualProtect(reinterpret_cast<void*>(guard.page_base.load(std::memory_order_relaxed)),
+                       guard.page_bytes.load(std::memory_order_relaxed), PAGE_READWRITE, &old);
+        guard.armed.store(false, std::memory_order_release);
+    }
+    const std::uintptr_t first = (tracked.base + 0xFFFull) & ~static_cast<std::uintptr_t>(0xFFF);
+    const std::uintptr_t end = (tracked.base + tracked.bytes) & ~static_cast<std::uintptr_t>(0xFFF);
+    if (end <= first) return 0;
+    guard.page_base.store(first, std::memory_order_relaxed);
+    guard.page_bytes.store(static_cast<size_t>(end - first), std::memory_order_relaxed);
+    guard.block_base.store(tracked.base, std::memory_order_relaxed);
+    guard.tracked_index.store(tracked_index, std::memory_order_relaxed);
+    guard.armed.store(true, std::memory_order_release);
+    static std::atomic<bool> handler_installed{false};
+    if (!handler_installed.exchange(true, std::memory_order_relaxed))
+        AddVectoredExceptionHandler(1, stream_guard_handler);
+    DWORD old = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(first), static_cast<size_t>(end - first), PAGE_READWRITE | PAGE_GUARD,
+                        &old)) {
+        const DWORD error = GetLastError();
+        guard.armed.store(false, std::memory_order_release);
+        std::fprintf(stderr,
+                     "[rt] dstorage guard: PAGE_GUARD on 0x%llx+0x%llx failed (error %lu); the block is not tracked "
+                     "for a first touch\n",
+                     static_cast<unsigned long long>(first), static_cast<unsigned long long>(end - first), error);
+        return -1;
+    }
+    return 1;
+}
+
+// ---- The tracked destinations, the range report and the periodic summary -------------------------------------------
+
+size_t g_distinct_destinations = 0;  // worker only, capped
+std::unordered_set<std::uintptr_t> g_distinct_seen;  // worker only
+
+// Called from the queue worker after a request wrote its destination. Reports the range to the device proxy, classifies
+// the first blocks, tracks the first few distinct destinations and re-arms their guard after each write.
+void stream_note_completed(void* destination, size_t bytes, void* caller) {
+    if (!stream_consumer_enabled() || !destination || bytes == 0) return;
+    const auto base = reinterpret_cast<std::uintptr_t>(destination);
+    if (g_title_image_base.load(std::memory_order_relaxed) == 0 && caller) {
+        std::uint64_t image = 0;
+        if (rt::shims::mapped_image_base(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(caller)), image)) {
+            g_title_image_base.store(image, std::memory_order_relaxed);
+            palmetto_stream_set_title_base(image);
+        }
+    }
+    palmetto_stream_block_completed(destination, bytes);
+    static std::uint64_t requests = 0;  // worker only
+    static std::uint64_t total_bytes = 0;
+    static unsigned first_logged = 0;
+    ++requests;
+    total_bytes += bytes;
+    if (g_distinct_seen.size() < 65536 && g_distinct_seen.insert(base).second) ++g_distinct_destinations;
+    if (first_logged < 8) {
+        ++first_logged;
+        std::fprintf(stderr, "[rt] dstorage guard: block #%u range 0x%llx+0x%llx content class: %s\n", first_logged - 1,
+                     static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes),
+                     classify_block(destination, bytes));
+    }
+    TrackedDestination* tracked = nullptr;
+    for (unsigned i = 0; i < g_tracked_count; ++i)
+        if (g_tracked[i].base == base) {
+            tracked = &g_tracked[i];
+            break;
+        }
+    if (!tracked && g_tracked_count < kTrackedDestinations && (requests <= 8 || requests % 512 == 0)) {
+        tracked = &g_tracked[g_tracked_count];
+        const unsigned index = g_tracked_count++;
+        tracked->base = base;
+        tracked->bytes = bytes;
+        tracked->arms = arm_stream_guard(index) > 0 ? 1u : 0u;
+        if (tracked->arms == 0)
+            std::fprintf(stderr,
+                         "[rt] dstorage guard: block #%u (0x%llx+0x%llx) has no whole page inside it (or failed to "
+                         "guard; see above); not tracked for a first touch\n",
+                         index, static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes));
+    } else if (tracked) {
+        const unsigned index = static_cast<unsigned>(tracked - g_tracked);
+        if (!tracked->written_again) {
+            tracked->written_again = true;
+            std::fprintf(stderr,
+                         "[rt] dstorage guard: destination 0x%llx is written again by the queue (its guard fired %u "
+                         "time(s) before this write)\n",
+                         static_cast<unsigned long long>(base), g_guards[index % kGuardSlots].faults.load());
+        }
+        if (tracked->arms < 8 && arm_stream_guard(index) > 0) ++tracked->arms;
+    }
+    if (requests % 1024 == 0) {
+        unsigned faults = 0, armed = 0;
+        for (unsigned i = 0; i < kGuardSlots; ++i) {
+            faults += g_guards[i].faults.load(std::memory_order_relaxed);
+            if (g_guards[i].armed.load(std::memory_order_relaxed)) ++armed;
+        }
+        std::fprintf(stderr,
+                     "[rt] dstorage guard: %llu request(s), %.1f MiB, %zu distinct destination(s), %u tracked, %u "
+                     "first-touch fault(s), %u still guarded\n",
+                     static_cast<unsigned long long>(requests), double(total_bytes) / double(1 << 20),
+                     g_distinct_destinations, g_tracked_count, faults, armed);
+        char tracked_line[512];
+        int at = std::snprintf(tracked_line, sizeof tracked_line, "[rt] dstorage guard: tracked blocks:");
+        for (unsigned i = 0; i < g_tracked_count && at > 0 && static_cast<size_t>(at) < sizeof tracked_line - 64; ++i) {
+            const GuardedBlock& guard = g_guards[i % kGuardSlots];
+            at += std::snprintf(tracked_line + at, sizeof tracked_line - static_cast<size_t>(at),
+                                " #%u(0x%llx: %u fault(s), %s)", i,
+                                static_cast<unsigned long long>(g_tracked[i].base),
+                                guard.faults.load(std::memory_order_relaxed),
+                                guard.armed.load(std::memory_order_relaxed) ? "guarded" : "seen");
+        }
+        std::fprintf(stderr, "%s\n", tracked_line);
+    }
 }
 
 // ---- Interface ids ------------------------------------------------------------------------------------------------
@@ -515,6 +819,7 @@ HRESULT read_file_range(HANDLE handle, uint64_t offset, void* destination, uint3
 struct Entry {
     enum class Type { Request, Status, Signal, Event } type = Type::Request;
     DSTORAGE_REQUEST request{};
+    void* caller = nullptr;        // the title's EnqueueRequest return address (PALMETTO_STREAM_CONSUMER: image base)
     File* file = nullptr;          // a reference, for a file request naming a live file
     bool file_counted = false;     // the file's pending count was raised at submit
     bool cancelled = false;        // CancelRequestsWithTag matched it before it started
@@ -581,6 +886,7 @@ public:
             e.enqueue_error = bad_call("IDStorageQueueX::EnqueueRequest", E_INVALIDARG, "null request");
         } else {
             e.request = *request;  // the title may reuse its structure as soon as this returns
+            e.caller = _ReturnAddress();  // PALMETTO_STREAM_CONSUMER names the title image from this return address
             const uint64_t o = e.request.Options.AsUINT64;
             if (options::source_type(o) == DSTORAGE_REQUEST_SOURCE_FILE &&
                 desc_.SourceType == DSTORAGE_REQUEST_SOURCE_FILE && e.request.File) {
@@ -872,6 +1178,10 @@ private:
                     set_pending(+1);
                     hr = execute_request(e);
                     set_pending(-1);
+                    // PALMETTO_STREAM_CONSUMER: report the completed destination range to the device proxy and arm the
+                    // first-touch guard (docs/streamed_consumer.md). One cached boolean when the switch is off.
+                    if (SUCCEEDED(hr) && e.request.Destination && e.request.DestinationSize)
+                        stream_note_completed(e.request.Destination, e.request.DestinationSize, e.caller);
                 }
                 if (e.file && e.file_counted) e.file->finish_pending();
                 if (FAILED(hr) && SUCCEEDED(since_notify_)) since_notify_ = hr;
