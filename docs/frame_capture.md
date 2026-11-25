@@ -284,6 +284,41 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### Offline trace of the compose pixel shader (`fspx/lib_ps_00822`): six samples, one texture, no discard
+
+Disassembling the compose PS (structure only; instruction indices and ids, no shader bytes) answers what its six image
+samples are:
+
+| sample instruction (word offset, opcode) | sampled image | source of the sampled image |
+|---|---|---|
+| 2882, OpImageSampleImplicitLod | %557 | `OpSampledImage` over a `UniformConstant` array (`%9`) load at the index `%519` |
+| 2887, OpImageSampleExplicitLod (+ Grad) | %557 | the same sampled image, so the same texture |
+| 2997, OpImageSampleImplicitLod | %578 | `OpSampledImage` over a second typed array (`%8`) load at the same index `%519` |
+| 3002, OpImageSampleExplicitLod (+ Grad) | %578 | the same, again |
+| 3094, OpImageSampleImplicitLod | %594 | `OpSampledImage` over a third typed array (`%10`) load at the same index `%519` |
+| 3099, OpImageSampleExplicitLod (+ Grad) | %594 | the same, again |
+
+`%519 = OpGroupNonUniformBroadcastFirst` of a hash (`%213`) computed from four dwords **loaded through a physical-storage
+pointer at `heap_base + (value & ~3) + 0x20`** - the table slot 1 T#, i.e. the descriptor the layer resolves (the sibling
+pass's 4K target). All three sampled-image arrays are indexed with that one hash, and the sampler array (`%11`) is indexed
+by a hash of a **literal sampler descriptor** the shim already registers (`register_literal_samplers`). So the six
+sampling instructions are **three typed views of the one available texture, each sampled twice (implicit LOD and explicit
+Grad)** - the compose pass is not missing sampled inputs at all, and the runtime's `ps_images = 6` is that count.
+
+State: the module has exactly one `OpKill`, at the end; its predicate is a private bool initialised `true` and recomputed
+from a subgroup-uniform `!= 0` test, so in the measured state the branch reaches `OpRetur`n and the colour is written
+(`OpStore %3` before it). There is no alpha test, no depth/stencil, `RenderTargetWriteMask = ALL` and blend disabled in
+the documented-default state the port uses for this pipeline, with colour format 37 on one 4K subresource - so the output
+is neither discarded nor masked, and the sampled input the shader reads is the target it should be.
+
+The conclusion for the colour path: the compose PS reads the sibling pass's target through its only available T#, samples
+it six times, kills nothing and writes all channels. Its black output therefore comes from the **composition arithmetic or
+the sibling pass content it consumes at that instant**, not from a missing sampled descriptor: the remaining measurements
+are (a) the sibling target's alpha channel (the readbacks so far count only the first three channels; a constant pass
+writing RGB with alpha 0 can make a composition that mixes by alpha output black), and (b) a PS-only control on the
+compose pipeline's own vertex stage (`fspx/lib_vs_00821` + fs_solid) at a late frame, to prove the compose geometry
+covers independently of both pixel shaders - the same acceptance shape that closed the title vertex path.
+
 Page-binding attempt (PALMETTO_TEXTURE_BIND_FETCHED): the fetched T# at block + 0xa0 names title VA 0x100001600 (format 56, 3840x2160); with no created resource at that VA the layer asked the existing title-memory hook whether the pages carry bytes at all: **the pages are NOT readable** (neither an arena-mirrored console range nor committed title memory). So the compose pass's other sampled input is not a resource the layer can bind and not title page data it can import: the producer is missing, or the +0xa0 window is not a real T# at all (the published block is mostly small values, and a 32-byte window there can imitate a descriptor). The full-block scan (all 32-byte windows at 8-byte stride over the whole 5,768 bytes) finds exactly two candidates: +0x98 (address 0, rejected) and +0xa0 (the one above); no other sampled input is fetched from the block. Next step is offline and needs no boot: disassemble the compose pixel shader (fspx/lib_ps_00822) and trace its six image-sampling instructions to their descriptor sources, which says whether the shader re-samples the one table T# or expects descriptors the layer never provides.
 
 Chain for a missing sampled input: PS fetch -> published matrix block (V# at table + 0x00, 5768 B, written by the slot-70 publication) -> T# at block + 0xa0 -> image title VA 0x100001600 (format 56, 3840x2160). Binding it (PALMETTO_TEXTURE_BIND_FETCHED: a registry of the slot-133 placed creations by title VA, then a layer image bound for every fetched T# whose address matches) found **no placed resource at 0x100001600**: the registry only knows title-placed creations, so nothing was bound and the readbacks did not change. The named next gap is that VA: a resource the layer never created a view or registry entry for. The likely producer map is the console creation ring (slot 70 pairing); if the VA is a created resource, register all console resources (not only placed ones) and bind from it; if it is a heap VA, the layer needs a layer image built from the title pages (texture-from-pages).
