@@ -37,6 +37,7 @@
 #include "../src/vulkan_device_filter.h"
 #include "../src/vulkan13_features.h"
 #include "../src/pipeline_budget.h"  // docs/memory_growth.md: the live-pipeline cap and its LRU
+#include "../src/deferred_compile.h"  // docs/deferred_compile.md: off-thread compute-pipeline compilation
 
 #include <chrono>
 #include <vulkan/vulkan_win32.h>
@@ -55,11 +56,13 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <set>
@@ -1430,6 +1433,69 @@ inline bool pipeline_lazy_build_enabled() {
     return enabled;
 }
 
+// ---- off-thread compute-pipeline compilation (docs/deferred_compile.md) -----------------------------------
+//
+// PALMETTO_PIPELINE_DEFER_COMPILE=1: CreateComputePipelineState resolves the recipe, creates the shader module and
+// the pipeline layout and registers the replay entry, but does not call vkCreateComputePipelines; a compile worker of
+// this device makes that driver call off the title's threads, and the submission that first names the pipeline waits
+// for it on the submitting (render) thread. Off by default; unset is the eager path exactly. The bound and the worker
+// count are separate switches for the A/B; a creation past the bound falls back to the synchronous path.
+inline bool pipeline_defer_compile_enabled() {
+    static const bool enabled = [] {
+        char value[8] = {};
+        size_t length = 0;
+        if (getenv_s(&length, value, "PALMETTO_PIPELINE_DEFER_COMPILE") != 0 || length <= 1) return false;
+        return value[0] != '0';
+    }();
+    return enabled;
+}
+
+inline unsigned pipeline_compile_worker_count() {
+    static const unsigned count = [] {
+        char value[8] = {};
+        size_t length = 0;
+        if (getenv_s(&length, value, "PALMETTO_PIPELINE_COMPILE_WORKERS") != 0 || length <= 1) return 1u;
+        const unsigned parsed = static_cast<unsigned>(std::strtoul(value, nullptr, 10));
+        return parsed < 1 ? 1u : (parsed > 8 ? 8u : parsed);
+    }();
+    return count;
+}
+
+inline std::size_t pipeline_compile_queue_bound() {
+    static const std::size_t bound = [] {
+        char value[16] = {};
+        size_t length = 0;
+        if (getenv_s(&length, value, "PALMETTO_PIPELINE_COMPILE_BOUND") != 0 || length <= 1) return std::size_t{256};
+        const unsigned long parsed = std::strtoul(value, nullptr, 10);
+        return parsed < 1 ? std::size_t{1} : static_cast<std::size_t>(parsed);
+    }();
+    return bound;
+}
+
+// PALMETTO_PIPELINE_CALL_STATS=<seconds>: a per-thread report of who enters pipeline creation and how long each caller
+// spends inside the driver's vkCreate*Pipelines call, every <seconds> (default 5, off when unset or "0"). Measurement
+// only: off is the default path exactly.
+inline bool pipeline_call_stats_enabled() {
+    static const bool enabled = [] {
+        char value[8] = {};
+        size_t length = 0;
+        if (getenv_s(&length, value, "PALMETTO_PIPELINE_CALL_STATS") != 0 || length <= 1) return false;
+        return value[0] != '0';
+    }();
+    return enabled;
+}
+
+inline double pipeline_call_stats_interval_s() {
+    static const double interval = [] {
+        char value[8] = {};
+        size_t length = 0;
+        if (getenv_s(&length, value, "PALMETTO_PIPELINE_CALL_STATS") != 0 || length <= 1) return 5.0;
+        const double parsed = std::strtod(value, nullptr);
+        return parsed >= 1.0 ? parsed : 5.0;
+    }();
+    return interval;
+}
+
 // ---- pooled and deferred image memory (docs/streamed_image_backing.md) ------------------------------------
     //
     // PALMETTO_IMAGE_MEM_POOL=1: small textures that are neither attachments nor CPU-visible share 64 MiB blocks of
@@ -1467,6 +1533,35 @@ inline bool pipeline_lazy_build_enabled() {
     bool bind_deferred_images();  // the queue hook: false refuses the submission rather than using an unbound image
     void add_deferred_image(Resource* resource);
     void remove_deferred_image(Resource* resource);
+
+    // docs/deferred_compile.md: off-thread compute-pipeline compilation. The queue is bounded and its workers start on
+    // the first deferred creation; the map holds the task per PSO id, so the submission path can find (and wait for)
+    // the pipeline a list names. The counters answer "who blocks in pipeline creation and for how long".
+    palmetto::CompileQueue compile_queue{pipeline_compile_queue_bound()};
+    std::atomic<bool> compile_queue_started{false};
+    std::mutex deferred_compute_mutex;
+    std::unordered_map<std::uintptr_t, std::shared_ptr<palmetto::CompileQueue::Task>> deferred_compute_tasks;
+    std::atomic<std::uint64_t> deferred_built_count{0}, deferred_failed_count{0}, deferred_fallback_count{0};
+    void start_compile_workers();
+    std::shared_ptr<palmetto::CompileQueue::Task> defer_compute_build(PipelineState* state, std::function<bool()> build);
+    void forget_deferred_compute(std::uintptr_t id);
+    void prepare_deferred_compute_pipelines(std::span<const palmetto::CommandList* const> lists);
+    std::string deferred_compile_text();
+    void stop_compile_workers();
+    // The per-thread call report (PALMETTO_PIPELINE_CALL_STATS): created and printed on first use and owned by the
+    // device, so its report can append the compile queue's counters; stopped in ~Device before the Vulkan device goes.
+    std::mutex call_stats_mutex;
+    palmetto::PipelineCallStats* call_stats = nullptr;
+    std::thread call_stats_thread;
+    std::atomic<bool> call_stats_started{false};
+    std::atomic<bool> call_stats_stop{false};
+    palmetto::PipelineCallStats* pipeline_stats() {
+        if (!pipeline_call_stats_enabled()) return nullptr;
+        if (!call_stats_started.load(std::memory_order_acquire)) start_pipeline_call_stats();
+        return call_stats;
+    }
+    void start_pipeline_call_stats();
+    void stop_pipeline_call_stats();
 
     // The shader-visible descriptor heaps the title placed at a console address (device slot 14): their descriptors are
     // CPU memory the GPU cannot address, so each keeps an arena mirror that a queue refreshes before a submission
@@ -5588,15 +5683,21 @@ public:
     ~PipelineState() override {
         auto& vk = device_.context->vk;
         const VkDevice dev = device_.info.device;
+        // docs/deferred_compile.md: the task holds a reference to this PSO until its build has run, so a deferred
+        // handle is either complete here or the build never ran; forget the id either way.
+        device_.forget_deferred_compute(id());
         device_.forget_pipeline(id());
         if (registered_) device_.context->remove_pipeline(id());
         // A shared entry owns its Vulkan objects; the PSO only releases its reference, and the entry's destructor
         // destroys them when the last PSO using it is gone. Per-PSO variant pipelines go first: the shared layout must
         // outlive every pipeline built from it.
-        if (!shared_compute_) {
-            if (pipeline_.pipeline) vk.vkDestroyPipeline(dev, pipeline_.pipeline, nullptr);
-            if (pipeline_.layout) vk.vkDestroyPipelineLayout(dev, pipeline_.layout, nullptr);
-            if (module_) vk.vkDestroyShaderModule(dev, module_, nullptr);
+        {
+            std::lock_guard lock(deferred_handle_mutex_);  // orders with the compile worker's handle write
+            if (!shared_compute_) {
+                if (pipeline_.pipeline) vk.vkDestroyPipeline(dev, pipeline_.pipeline, nullptr);
+                if (pipeline_.layout) vk.vkDestroyPipelineLayout(dev, pipeline_.layout, nullptr);
+                if (module_) vk.vkDestroyShaderModule(dev, module_, nullptr);
+            }
         }
         for (const auto& [cull, built] : ps_variants_) vk.vkDestroyPipeline(dev, built, nullptr);  // PS-only control
         for (const auto& [unbound, built] : variants_) vk.vkDestroyPipeline(dev, built, nullptr);
@@ -5771,6 +5872,10 @@ public:
         const bool profile = pipeline_profile_enabled();
         if (profile) pipeline_profile_begin(true);
         const PipelineClock::time_point profile_started = profile ? PipelineClock::now() : PipelineClock::time_point{};
+        // docs/deferred_compile.md: who enters pipeline creation, counted per caller thread
+        // (PALMETTO_PIPELINE_CALL_STATS; a null stats pointer when the switch is off).
+        const palmetto::PipelineCallStats::Scope call_scope(device_.pipeline_stats(), true,
+                                                            palmetto::PipelineCallStats::Kind::creation);
         const bool mesh = ms && ms->pShaderBytecode && ms->BytecodeLength;
         // The per-process recipe cache (PALMETTO_PIPELINE_RECIPE_CACHE, off by default): an earlier identical description
         // (same content key) already built the pipeline, layout and modules, so adopt them instead of resolving the
@@ -6654,6 +6759,10 @@ public:
         const bool profile = pipeline_profile_enabled();
         if (profile) pipeline_profile_begin(false);
         const PipelineClock::time_point profile_started = profile ? PipelineClock::now() : PipelineClock::time_point{};
+        // docs/deferred_compile.md: who enters pipeline creation, counted per caller thread
+        // (PALMETTO_PIPELINE_CALL_STATS; a null stats pointer when the switch is off).
+        const palmetto::PipelineCallStats::Scope call_scope(device_.pipeline_stats(), false,
+                                                            palmetto::PipelineCallStats::Kind::creation);
         // The per-process recipe cache (PALMETTO_PIPELINE_RECIPE_CACHE): an earlier identical compute description (same
         // content key) already built the pipeline, layout and module, so adopt them. Off by default.
         const bool recipe_cache = pipeline_recipe_cache_enabled() && recipe_cache_ready();
@@ -6790,22 +6899,96 @@ public:
         const VkResult layout_result = vk.vkCreatePipelineLayout(dev, &layout_info, nullptr, &pipeline_.layout);
         if (profile) pipeline_profile_layout(false, pipeline_elapsed_us(layout_started));
         if (layout_result != VK_SUCCESS) return E_FAIL;
-        VkComputePipelineCreateInfo pipeline_info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        pipeline_info.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-        pipeline_info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        pipeline_info.stage.module = module_;
-        pipeline_info.stage.pName = "main";
-        VkPipelineShaderStageRequiredSubgroupSizeCreateInfo required_size{};
-        subgroup_size_for(*entry, required_size, pipeline_info.stage);
-        pipeline_info.layout = pipeline_.layout;
+        // The compute stage the driver build needs, with the device's subgroup answer decided here on the creating
+        // thread (the decision is cheap and the replay reads `subgroup_requests_`), so the compile worker has no shared
+        // state to touch but the driver call itself.
+        compute_stage_ = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        compute_stage_.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        compute_stage_.module = module_;
+        compute_stage_.pName = "main";
+        subgroup_size_for(*entry, compute_required_size_, compute_stage_);
+        // The code base: shaders read constant tables embedded in their own program through s_getpc_b64. The
+        // translator's code offsets are into the bytes the key hashes (the FSSM blob, or the kind-6 program). It is a
+        // host copy, independent of the driver compile, so it is done before the deferred branch can return.
+        const std::vector<std::uint8_t>& code = program.bytes;
+        VkDeviceSize offset = 0;
+        if (!device_.arena_allocate(code.size(), 256, offset, DeviceState::arena_shader)) return E_OUTOFMEMORY;
+        std::memcpy(device_.arena.mapped + offset, code.data(), code.size());
+        code_bytes_ = code.size();
+        code_base_ = offset;
+        pipeline_.code_base = offset;
+
+        // docs/deferred_compile.md: register the pipeline state and let a compile worker make the driver call, so a
+        // title task-pool thread never blocks in the shader compiler. A queue at its bound falls back to the
+        // synchronous build below, exactly as the default path does.
+        if (device_.pipeline_defer_compile_enabled()) {
+            pipeline_.pipeline = VK_NULL_HANDLE;
+            device_.context->add_pipeline(id(), pipeline_);
+            registered_ = true;
+            compute_task_ = device_.defer_compute_build(this, [this] { return SUCCEEDED(build_compute_driver()); });
+            if (compute_task_) {
+                if (profile) pipeline_profile_created(false, profile_started, std::string("deferred"));
+                return S_OK;
+            }
+        }
+        if (const HRESULT built = build_compute_driver(); FAILED(built)) return built;
+        if (profile) {
+            std::string label;
+            if (pipeline_elapsed_us(profile_started) >
+                pipeline_profile().slow_floor_us.load(std::memory_order_relaxed))
+                label = pipeline_profile_label_compute(entry->name.c_str(), entry->binding_count);
+            pipeline_profile_created(false, profile_started, label);
+        }
+        // Everything that can fail is done. With the recipe cache on, the created objects move into a shared entry the
+        // next identical description adopts; this PSO keeps its own code-base range.
+        if (recipe_cache && !used_standin) {
+            auto shared = std::make_shared<SharedComputePipeline>();
+            shared->vk = &device_.context->vk;
+            shared->device = device_.info.device;
+            shared->pipeline = pipeline_.pipeline;
+            shared->layout = pipeline_.layout;
+            shared->module = module_;
+            shared->bindless_set = pipeline_.bindless_set;
+            shared->program_bytes = code;
+            module_ = VK_NULL_HANDLE;  // ownership moved into the entry
+            shared_compute_ = device_.add_compute_recipe(cache_key_, std::move(shared));
+        }
+        if (!registered_) {
+            device_.context->add_pipeline(id(), pipeline_);
+            registered_ = true;
+        } else {
+            // The deferred fallback registered the entry before its synchronous build; publish the real handle.
+            device_.context->set_pipeline_handle(id(), pipeline_.pipeline, false);
+        }
+        return S_OK;
+    }
+
+private:
+    // The driver half of create_compute (docs/deferred_compile.md): the one call that reaches nvgpucomp64, made on the
+    // creating thread by the default path or on a compile worker by the deferred path. The module, layout, stage and
+    // code base are already in place; this sets the handle on this state and publishes it to the replay map.
+    HRESULT build_compute_driver() {
+        auto& vk = device_.context->vk;
+        const VkDevice dev = device_.info.device;
+        const bool profile = pipeline_profile_enabled();
+        VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        info.stage = compute_stage_;
+        info.layout = pipeline_.layout;
         const bool feedback = profile && device_.pipeline_creation_feedback;
         VkPipelineCreationFeedback pipeline_feedback{};
         VkPipelineCreationFeedbackCreateInfo feedback_create{
             VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO, nullptr, &pipeline_feedback, 0, nullptr};
-        if (feedback) pipeline_info.pNext = &feedback_create;
+        if (feedback) info.pNext = &feedback_create;
         const PipelineClock::time_point driver_started = profile ? PipelineClock::now() : PipelineClock::time_point{};
-        const VkResult created = vk.vkCreateComputePipelines(dev, device_.pipeline_cache(), 1, &pipeline_info, nullptr,
-                                                             &pipeline_.pipeline);
+        VkPipeline handle = VK_NULL_HANDLE;
+        VkResult created = VK_SUCCESS;
+        {
+            // The measurement the slice starts from: who is inside the driver's compiler and for how long
+            // (PALMETTO_PIPELINE_CALL_STATS); a null stats pointer when the switch is off.
+            const palmetto::PipelineCallStats::Scope driver_scope(device_.pipeline_stats(), false,
+                                                                  palmetto::PipelineCallStats::Kind::driver);
+            created = vk.vkCreateComputePipelines(dev, device_.pipeline_cache(), 1, &info, nullptr, &handle);
+        }
         if (profile) {
             int cache_state = -1;
             if (created == VK_SUCCESS && (pipeline_feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT))
@@ -6814,44 +6997,17 @@ public:
             pipeline_profile_driver(false, pipeline_elapsed_us(driver_started), cache_state);
         }
         maybe_save_pipeline_caches();
-        if (created != VK_SUCCESS) return E_FAIL;
-        if (profile) {
-            std::string label;
-            if (pipeline_elapsed_us(profile_started) >
-                pipeline_profile().slow_floor_us.load(std::memory_order_relaxed))
-                label = pipeline_profile_label_compute(entry->name.c_str(), entry->binding_count);
-            pipeline_profile_created(false, profile_started, label);
+        if (created != VK_SUCCESS) {
+            log_once("a compute pipeline could not be built by the driver; VkResult", int(created));
+            return E_FAIL;
         }
-
-        // The code base: shaders read constant tables embedded in their own program through s_getpc_b64. The
-        // translator's code offsets are into the bytes the key hashes (the FSSM blob, or the kind-6 program).
-        const std::vector<std::uint8_t>& code = program.bytes;
-        VkDeviceSize offset = 0;
-        if (!device_.arena_allocate(code.size(), 256, offset, DeviceState::arena_shader)) return E_OUTOFMEMORY;
-        std::memcpy(device_.arena.mapped + offset, code.data(), code.size());
-        code_bytes_ = code.size();
-        code_base_ = offset;
-        pipeline_.code_base = offset;
-        // Everything that can fail is done. With the recipe cache on, the created objects move into a shared entry the
-        // next identical description adopts; this PSO keeps its own code-base range.
-        if (recipe_cache && !used_standin) {
-            auto entry = std::make_shared<SharedComputePipeline>();
-            entry->vk = &device_.context->vk;
-            entry->device = device_.info.device;
-            entry->pipeline = pipeline_.pipeline;
-            entry->layout = pipeline_.layout;
-            entry->module = module_;
-            entry->bindless_set = pipeline_.bindless_set;
-            entry->program_bytes = code;
-            module_ = VK_NULL_HANDLE;  // ownership moved into the entry
-            shared_compute_ = device_.add_compute_recipe(cache_key_, std::move(entry));
+        {
+            std::lock_guard lock(deferred_handle_mutex_);  // orders with the destructor's handle read
+            pipeline_.pipeline = handle;
         }
-        device_.context->add_pipeline(id(), pipeline_);
-        registered_ = true;
+        if (registered_) device_.context->set_pipeline_handle(id(), handle, false);
         return S_OK;
     }
-
-private:
     // The graphics pipeline with the formats of the `unbound` slots (palmetto::GraphicsPipeline::variant) undefined.
     // `substitute_ps` (diagnostic, docs/frame_capture.md): the same pipeline with its fragment stage replaced by that
     // module, which is what the frame dump's PS-only control draws the title's own vertices through. Null keeps the
@@ -6971,8 +7127,14 @@ private:
         }
         VkPipeline pipeline = VK_NULL_HANDLE;
         const PipelineClock::time_point driver_started = profile ? PipelineClock::now() : PipelineClock::time_point{};
-        const VkResult created = device_.context->vk.vkCreateGraphicsPipelines(
-            device_.info.device, device_.pipeline_cache(), 1, &info, nullptr, &pipeline);
+        const VkResult created = [&] {
+            // docs/deferred_compile.md: the driver call's wall time per caller thread (PALMETTO_PIPELINE_CALL_STATS).
+            // For a graphics pipeline this runs on the recording thread that binds it (the lazy build).
+            const palmetto::PipelineCallStats::Scope driver_scope(device_.pipeline_stats(), true,
+                                                                  palmetto::PipelineCallStats::Kind::driver);
+            return device_.context->vk.vkCreateGraphicsPipelines(device_.info.device, device_.pipeline_cache(), 1, &info,
+                                                                 nullptr, &pipeline);
+        }();
         if (profile) {
             int cache_state = -1;
             if (created == VK_SUCCESS && (pipeline_feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT))
@@ -7042,6 +7204,12 @@ private:
     // after it is released, so the two paths cannot deadlock.
     bool lazy_graphics_ = false;
     std::mutex build_mutex_;
+    // Off-thread compute compilation (docs/deferred_compile.md): the stage description the worker needs, the queued
+    // task, and the mutex that orders the worker's handle write against this PSO's destruction.
+    VkPipelineShaderStageCreateInfo compute_stage_{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo compute_required_size_{};
+    std::shared_ptr<palmetto::CompileQueue::Task> compute_task_;
+    std::mutex deferred_handle_mutex_;
 
 public:
     // The live-pipeline budget's hooks (pipeline_budget.h); the recording thread and the budget call them.
@@ -7124,6 +7292,137 @@ std::string DeviceState::pipeline_census_text() {
                   static_cast<unsigned long long>(pipelines_evicted),
                   static_cast<unsigned long long>(pipelines_rebuilt), pipeline_live_cap());
     return text;
+}
+
+// ---- off-thread compute-pipeline compilation (docs/deferred_compile.md) -----------------------------------
+void DeviceState::start_compile_workers() {
+    bool expected = false;
+    if (!compile_queue_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
+    palmetto::PipelineCallStats* stats = pipeline_stats();
+    compile_queue.start(pipeline_compile_worker_count(), [stats] {
+        if (stats) stats->note_compile_worker();
+    });
+}
+
+// Queue one compute-pipeline driver build. The task holds a reference to the pipeline state (and through its device
+// reference to this device) until the build has run, so the module, layout and code base the closure reads outlive it.
+// nullptr means "the caller builds now": the switch is off, or the queue is at its bound.
+std::shared_ptr<palmetto::CompileQueue::Task> DeviceState::defer_compute_build(PipelineState* state,
+                                                                              std::function<bool()> build) {
+    if (!state || !build) return nullptr;
+    start_compile_workers();
+    state->AddRef();
+    auto task = compile_queue.submit([this, state, build = std::move(build)]() mutable {
+        const bool ok = build();
+        state->Release();
+        return ok;
+    });
+    if (!task) {
+        state->Release();
+        deferred_fallback_count.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+    {
+        std::lock_guard lock(deferred_compute_mutex);
+        deferred_compute_tasks[state->id()] = task;
+    }
+    return task;
+}
+
+void DeviceState::forget_deferred_compute(std::uintptr_t id) {
+    std::lock_guard lock(deferred_compute_mutex);
+    deferred_compute_tasks.erase(id);
+}
+
+void DeviceState::stop_compile_workers() {
+    compile_queue.stop();
+    std::lock_guard lock(deferred_compute_mutex);
+    deferred_compute_tasks.clear();
+}
+
+// The queue hook (vulkan_backend.h prepare_pipelines, called from VulkanQueue::execute_now before the lists are
+// prepared): wait for a deferred compute pipeline only when a submitted list actually names one, on the thread that
+// submits. Called with no Vulkan lock held; the compile worker publishes the handle under resource_mutex_ itself.
+void DeviceState::prepare_deferred_compute_pipelines(std::span<const palmetto::CommandList* const> lists) {
+    if (!pipeline_defer_compile_enabled()) return;
+    for (const palmetto::CommandList* list : lists) {
+        if (!list) continue;
+        for (const palmetto::Command& command : list->commands()) {
+            std::uintptr_t pipeline = 0;
+            if (const auto* dispatch = std::get_if<palmetto::Dispatch>(&command)) {
+                pipeline = dispatch->pipeline;
+            } else if (const auto* indirect = std::get_if<palmetto::ExecuteIndirect>(&command)) {
+                if (indirect->kind == palmetto::IndirectKind::dispatch) pipeline = indirect->pipeline;
+            }
+            if (!pipeline) continue;
+            std::shared_ptr<palmetto::CompileQueue::Task> task;
+            {
+                std::lock_guard lock(deferred_compute_mutex);
+                const auto it = deferred_compute_tasks.find(pipeline);
+                if (it != deferred_compute_tasks.end()) task = it->second;
+            }
+            if (!task) continue;  // not deferred: the replay map already holds its handle
+            if (compile_queue.wait(task)) {
+                deferred_built_count.fetch_add(1, std::memory_order_relaxed);
+            } else if (deferred_failed_count.fetch_add(1, std::memory_order_relaxed) == 0) {
+                std::fprintf(stderr,
+                             "[rt] d3d12: a deferred compute pipeline did not build; the submission that names it is "
+                             "refused\n");
+            }
+        }
+    }
+}
+
+std::string DeviceState::deferred_compile_text() {
+    const auto& q = compile_queue;
+    char text[448] = {};
+    std::snprintf(text, sizeof text,
+                  "[rt] deferred compile: submitted %llu, built %llu, failed %llu, rejected(fallback) %llu, cancelled "
+                  "%llu, pending %zu of %zu, peak outstanding %llu; build time %.1f ms (max single %.1f ms); submit "
+                  "waits %llu (max single %.1f ms); workers %u\n",
+                  static_cast<unsigned long long>(q.submitted()), static_cast<unsigned long long>(q.built()),
+                  static_cast<unsigned long long>(q.failed()), static_cast<unsigned long long>(q.rejected()),
+                  static_cast<unsigned long long>(q.cancelled()), q.pending(), q.bound(),
+                  static_cast<unsigned long long>(q.peak_outstanding()),
+                  static_cast<double>(q.builds_us()) / 1000.0,
+                  static_cast<double>(q.longest_build_us()) / 1000.0,
+                  static_cast<unsigned long long>(q.waits()),
+                  static_cast<double>(q.longest_wait_us()) / 1000.0, q.workers());
+    return text;
+}
+
+// ---- the per-thread pipeline-call report (PALMETTO_PIPELINE_CALL_STATS, docs/deferred_compile.md) ------------
+void DeviceState::start_pipeline_call_stats() {
+    std::lock_guard lock(call_stats_mutex);
+    if (call_stats_started.load(std::memory_order_relaxed)) return;
+    call_stats = new palmetto::PipelineCallStats();
+    const auto period = std::chrono::milliseconds(static_cast<long long>(pipeline_call_stats_interval_s() * 1000.0));
+    call_stats_thread = std::thread([this, period] {
+        const auto slice = std::chrono::milliseconds(100);  // reacts to shutdown within a slice, not a full period
+        auto next = std::chrono::steady_clock::now() + period;
+        for (;;) {
+            std::this_thread::sleep_for(slice);
+            if (call_stats_stop.load(std::memory_order_relaxed)) return;
+            if (std::chrono::steady_clock::now() < next) continue;
+            next += period;
+            const std::string text = call_stats->report([this] { return deferred_compile_text(); });
+            std::fputs(text.c_str(), stderr);
+            std::fflush(stderr);
+        }
+    });
+    call_stats_started.store(true, std::memory_order_release);
+}
+
+void DeviceState::stop_pipeline_call_stats() {
+    {
+        std::lock_guard lock(call_stats_mutex);
+        if (!call_stats_started.load(std::memory_order_relaxed)) return;
+        call_stats_stop.store(true, std::memory_order_relaxed);
+    }
+    if (call_stats_thread.joinable()) call_stats_thread.join();
+    delete call_stats;
+    call_stats = nullptr;
+    call_stats_started.store(false, std::memory_order_relaxed);
 }
 
 void key_root_signature(palmetto::cached_pso::KeyBuilder& key, ID3D12RootSignature* signature) {
@@ -8115,6 +8414,13 @@ public:
         // Diagnostic (docs/texture_source.md): the page-writer watch for sampled placed textures, ticked once per
         // submission (it scans every 64th). Off unless PALMETTO_TEXTURE_PAGE_WATCH is set.
         state_.context->set_page_watch_tick([this] { state_.page_watch_tick(); });
+        // Deferred compute-pipeline compilation (docs/deferred_compile.md): a submission that names a deferred pipeline
+        // waits for the compile worker here, before the lists are prepared, on the thread that submits. A no-op unless
+        // PALMETTO_PIPELINE_DEFER_COMPILE is set.
+        state_.context->set_prepare_pipelines(
+            [this](std::span<const palmetto::CommandList* const> lists) {
+                state_.prepare_deferred_compute_pipelines(lists);
+            });
         if (info.conditional_rendering) {
             const auto properties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
                 info.get_instance_proc(info.instance, "vkGetPhysicalDeviceProperties"));
@@ -8449,6 +8755,11 @@ public:
     }
 
     ~Device() override {
+        // docs/deferred_compile.md: stop the call-report thread and the compile workers before the Vulkan device goes.
+        // A queued task holds a reference to its pipeline state (and through it to this device), so the queue is empty
+        // by the time the device can be destroyed.
+        state_.stop_pipeline_call_stats();
+        state_.stop_compile_workers();
         if (state_.context) {
             {
                 std::lock_guard lock(state_.context->submit_mutex());

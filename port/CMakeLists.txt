@@ -586,6 +586,16 @@ if(BUILD_TESTING)
   find_package(Threads REQUIRED)
   target_link_libraries(large_module_gate_test PRIVATE Threads::Threads)
   add_test(NAME large_module_gate COMMAND large_module_gate_test)
+  # Off-thread pipeline compilation (src/deferred_compile.h, docs/deferred_compile.md): the compile queue's state
+  # machine, its bound and synchronous-fallback signal, waiting, cancellation and shutdown, and the caller-thread
+  # pipeline-call timing report. Pure stdlib and no Vulkan device; the builds are synthetic closures.
+  add_executable(deferred_compile_test test/deferred_compile_test.cpp)
+  target_include_directories(deferred_compile_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(deferred_compile_test PRIVATE Threads::Threads)
+  if(MSVC)
+    target_compile_options(deferred_compile_test PRIVATE /W4 /permissive- /utf-8)
+  endif()
+  add_test(NAME deferred_compile COMMAND deferred_compile_test)
   # vk_pipeline_check's isolate summary stage set: pure stdlib, no Vulkan device.
   add_executable(pipeline_summary_test test/pipeline_summary_test.cpp)
   add_test(NAME pipeline_summary COMMAND pipeline_summary_test)

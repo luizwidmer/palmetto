@@ -44,3 +44,11 @@ fetched at build time by Cargo, not vendored here; the runtime loads the resulti
 PALMETTO_AUDIO_DECODE is set. The packages remain the copyright of their authors under their own licences (see the
 xma and opusdec crates' license files in that repository). The boundary code that calls them
 (port/shims/audio_decode.h) is our own.
+
+### Compile-worker mechanisms (reference only)
+
+The deferred pipeline-compilation slice ([docs/deferred_compile.md](docs/deferred_compile.md)) was informed by the public
+descriptions of the peers' compile strategies: five-star-recomp's separate shader-compile process with a disk cache,
+XCL's parallel shader compiler, VIctory's ahead-of-time translation with worker threads, and the reference fork's
+pipeline-compile workers (3de22a1904). Those projects are read as evidence of behaviour only; their code is not copied,
+and the implementation in this repository is our own.
