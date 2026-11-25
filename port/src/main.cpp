@@ -521,6 +521,146 @@ void start_thread_stack_sampler(std::uintptr_t image_base, std::uintptr_t image_
     }).detach();
 }
 
+// ---- Loader write watch (PALMETTO_LOADER_WATCH): hardware data watchpoints on the loader object's fields -------------
+// The loader object is [[game+0x79F6D70]] (the "dsms" job). Its armed flag at +0x78 rises while a load burst is in flight
+// and its in-flight count at +0x64 follows the jobs. A polling sampler misses the writer; a hardware data watchpoint in
+// every title thread catches the storing instruction itself, so the writer's RIP and the title stack around it name the
+// code that arms/drops loading. Opt-in (PALMETTO_LOADER_WATCH=1); bounded records, RVAs only.
+struct LoaderWatch {
+    std::atomic<bool> ready{false};
+    std::atomic<std::uintptr_t> armed_address{0};
+    std::atomic<std::uintptr_t> inflight_address{0};
+    std::atomic<std::uint32_t> armed_last{0xFFFFFFFFu};
+    std::atomic<std::uint32_t> inflight_last{0xFFFFFFFFu};
+    std::atomic<unsigned> records{0};
+};
+
+LoaderWatch& loader_watch() {
+    static LoaderWatch watch;
+    return watch;
+}
+
+std::uintptr_t loader_watch_image_base = 0, loader_watch_image_size = 0;
+
+
+// Title-image frames only, from the faulting thread's stack at the moment of the store. LoaderWatch values are atomics
+// only; the walker is the same fault-tolerant page scan the samplers use. Called from the VEH, so it prints directly.
+void loader_watch_record(const CONTEXT& context, const char* field, std::uint32_t old_value, std::uint32_t new_value,
+                         const WaitSampleModules& modules) {
+    if (loader_watch().records.fetch_add(1, std::memory_order_relaxed) >= 64) return;
+    std::uint64_t frames[16] = {};
+    const unsigned found = scan_stack_words_deep(context.Rsp, frames, 16, modules, 32);
+    std::string title_frames;
+    unsigned shown = 0;
+    for (unsigned i = 0; i < found && shown < 12; ++i) {
+        if (frames[i] < modules.image_base || frames[i] >= modules.image_end) continue;
+        title_frames += " " + rt::shims::module_offset(frames[i]);
+        ++shown;
+    }
+    char label[48];
+    std::snprintf(label, sizeof label, "loader field %s", field);
+    std::fprintf(stderr, "[rt] loader watch: %s 0x%x -> 0x%x, tid %lu, writer %s, title stack%s\n", label, old_value,
+                 new_value, static_cast<unsigned long>(GetCurrentThreadId()), rt::shims::module_offset(context.Rip).c_str(),
+                 title_frames.empty() ? " (none)" : "");
+}
+
+LONG CALLBACK loader_watch_exception(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
+    LoaderWatch& watch = loader_watch();
+    if (!watch.ready.load(std::memory_order_relaxed)) return EXCEPTION_CONTINUE_SEARCH;
+    const std::uintptr_t armed = watch.armed_address.load(std::memory_order_relaxed);
+    const std::uintptr_t inflight = watch.inflight_address.load(std::memory_order_relaxed);
+    if (!armed && !inflight) return EXCEPTION_CONTINUE_SEARCH;
+    WaitSampleModules modules;  // built on the faulting thread: cheap enough for a handful of transitions
+    modules.image_base = loader_watch_image_base;
+    modules.image_end = loader_watch_image_base + loader_watch_image_size;
+    if (armed) {
+        const std::uint32_t now = *reinterpret_cast<const std::uint8_t*>(armed);
+        if (now != watch.armed_last.load(std::memory_order_relaxed)) {
+            const std::uint32_t old_value = watch.armed_last.exchange(now, std::memory_order_relaxed);
+            if (old_value != 0xFFFFFFFFu)
+                loader_watch_record(*info->ContextRecord, "+0x78 armed", old_value, now, modules);
+        }
+    }
+    if (inflight) {
+        const std::uint32_t now = *reinterpret_cast<const std::uint32_t*>(inflight);
+        if (now != watch.inflight_last.load(std::memory_order_relaxed)) {
+            const std::uint32_t old_value = watch.inflight_last.exchange(now, std::memory_order_relaxed);
+            if (old_value != 0xFFFFFFFFu)
+                loader_watch_record(*info->ContextRecord, "+0x64 in flight", old_value, now, modules);
+        }
+    }
+    return EXCEPTION_CONTINUE_EXECUTION;  // hardware data breakpoints do not consume the instruction
+}
+
+
+// Arms DR0 (the armed byte, exact 1 byte) and DR1 (the in-flight dword) write-only in every thread of the process, and
+// keeps arming threads created later. Detached; ends with the process.
+void start_loader_watch(std::uintptr_t image_base, std::size_t image_size, std::uint64_t loader_global_rva) {
+    loader_watch_image_base = image_base;
+    loader_watch_image_size = image_size;
+    AddVectoredExceptionHandler(1, loader_watch_exception);
+    std::thread([image_base, loader_global_rva] {
+        const auto* global = reinterpret_cast<const std::uint64_t*>(image_base + loader_global_rva);
+        std::uintptr_t object = 0;
+        for (unsigned wait = 0; wait < 2000 && !object; ++wait) {
+            object = static_cast<std::uintptr_t>(*global);
+            if (!object) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (!object) {
+            std::fprintf(stderr, "[rt] loader watch: the loader global stayed zero; not armed\n");
+            return;
+        }
+        const std::uintptr_t armed = object + 0x78;
+        const std::uintptr_t inflight = object + 0x64;
+        LoaderWatch& watch = loader_watch();
+        watch.armed_address.store(armed, std::memory_order_relaxed);
+        watch.inflight_address.store(inflight, std::memory_order_relaxed);
+        watch.armed_last.store(*reinterpret_cast<const std::uint8_t*>(armed), std::memory_order_relaxed);
+        watch.inflight_last.store(*reinterpret_cast<const std::uint32_t*>(inflight), std::memory_order_relaxed);
+        watch.ready.store(true, std::memory_order_relaxed);
+        std::fprintf(stderr,
+                     "[rt] loader watch: armed on object %p, byte +0x78 (%p) and dword +0x64 (%p); initial 0x%x / 0x%x\n",
+                     reinterpret_cast<void*>(object), reinterpret_cast<void*>(armed),
+                     reinterpret_cast<void*>(inflight), *reinterpret_cast<const std::uint8_t*>(armed),
+                     *reinterpret_cast<const std::uint32_t*>(inflight));
+        std::set<DWORD> configured;
+        for (;;) {
+            const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if (snapshot != INVALID_HANDLE_VALUE) {
+                THREADENTRY32 entry{};
+                entry.dwSize = sizeof(entry);
+                const DWORD pid = GetCurrentProcessId();
+                if (Thread32First(snapshot, &entry))
+                    do {
+                        if (entry.th32OwnerProcessID != pid || configured.count(entry.th32ThreadID)) continue;
+                        const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT,
+                                                         FALSE, entry.th32ThreadID);
+                        if (!thread) continue;
+                        if (SuspendThread(thread) != (DWORD)-1) {
+                            CONTEXT context{};
+                            context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                            if (GetThreadContext(thread, &context)) {
+                                context.Dr0 = armed;
+                                context.Dr1 = inflight;
+                                context.Dr6 = 0;
+                                // L0 = 1, RW0 = 01 (write), LEN0 = 00 (1 byte); L1 = 1, RW1 = 01, LEN1 = 11 (4 bytes).
+                                context.Dr7 = 0x1u | (0x1u << 2) | (0x1u << 16) | (0x1u << 20) | (0x3u << 22);
+                                SetThreadContext(thread, &context);
+                                configured.insert(entry.th32ThreadID);
+                            }
+                            ResumeThread(thread);
+                        }
+                        CloseHandle(thread);
+                    } while (Thread32Next(snapshot, &entry));
+                CloseHandle(snapshot);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        }
+    }).detach();
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -903,6 +1043,11 @@ int wmain(int argc, wchar_t** argv) {
                 }
             }).detach();
         }
+        // PALMETTO_LOADER_WATCH=1: hardware data watchpoints on the loader object's armed flag (+0x78) and in-flight
+        // count (+0x64), so the storing title code and its stack are captured at each transition (diagnostic; see the
+        // loader write watch above). Off by default.
+        if (const char* watch = std::getenv("PALMETTO_LOADER_WATCH"); watch && *watch && *watch != '0')
+            start_loader_watch(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, 0x79F6D70ull);
         const int code = rt::process::run_entry(main_module.base + main_module.entry_rva);
         std::fflush(stdout);
         std::printf("game exited with code %d\n", code);

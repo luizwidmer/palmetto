@@ -284,6 +284,33 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### Loader write watch (hardware data watchpoints): armed, but no transition captured
+
+`PALMETTO_LOADER_WATCH=1` resolves the loader object `[[game+0x79F6D70]]` before the entry point runs, arms hardware
+data watchpoints in every process thread (DR0 = the armed byte at object+0x78, 1-byte write watch; DR1 = the in-flight
+dword at object+0x64, 4-byte write watch), and a vectored exception handler prints one bounded record per value
+transition: field, old->new, tid, the writing RIP and the title-image frames of the writing thread's stack.
+
+Two 130 s boots, both ALIVE: the watch armed correctly on the loader object before the first burst (initial values
+`0x0 / 0x0` on both boots), but **no transition record was captured in either boot** - no arming, no drop at ~1.75 s, no
+events at all. The instrument therefore delivered no writer RVA. Diagnosed candidates, in order:
+
+1. the first boot carried a DR7 encoding error (the DR1 write-enable/length bits were misplaced into DR0's length field);
+   the second boot used the corrected encoding (`L0|RW0=write|LEN0=1B`, `L1|RW1=write|LEN1=4B`) and still captured
+   nothing, so the encoding is not the whole story;
+2. hardware watchpoints may be silently disabled in this host/VM (some environments ignore DR7 writes), which fits zero
+   events in both boots;
+3. threads created after each 300 ms arming round can store before being armed - the loader's writes are expected on the
+   main game thread (armed in the first round), so this should not explain the drop, but it is untested;
+4. the fields may be written by a wider store or through another alias; a data breakpoint on the byte/dword range should
+   still fire on an overlapping access, so this is least likely.
+
+Next instrument: a **page-guard watch** on the page holding the loader object (`PAGE_GUARD` + vectored handler on
+`EXCEPTION_GUARD_PAGE`, filter by the exception's access address, capture the faulting thread's title stack, re-arm the
+guard) - it does not depend on debug registers. A one-line control first: arm a hardware watchpoint on a location the
+port itself writes every frame and see whether any event fires; if it does, the loader fields are the anomaly, if it does
+not, hardware watchpoints are unavailable here and the page-guard method is the way.
+
 ### Guest-stack sampling: the title runs natively, and one title frame appears
 
 The port has no emulator thread state to read for a guest RSP: `host_cpu.h` is only a host CPU-feature preflight, the
