@@ -3502,8 +3502,48 @@ void DeviceState::bind_fetched_textures(std::uint64_t table_title_va) {
             {
                 std::lock_guard resources_lock(placed_resources_mutex);
                 const auto found = placed_resources.find(image.address);
-                if (found == placed_resources.end() || !found->second) continue;
-                placed = found->second;
+                if (found != placed_resources.end()) placed = found->second;
+            }
+            if (!placed) {
+                // No created resource at the T# address: say whether the title pages there carry bytes at all, so "the data
+                // was never produced" can be told from "the data exists but no layer image was built for it".
+                static std::mutex probed_mutex;
+                static std::unordered_set<std::uint64_t> probed;
+                bool first = false;
+                {
+                    std::lock_guard probe_lock(probed_mutex);
+                    first = probed.insert(image.address).second;
+                    if (probed.size() > 512) probed.clear();
+                }
+                if (first) {
+                    std::uint32_t got = 0;
+                    std::uint8_t pages[65536] = {};
+                    std::uint64_t nonzero = 0, peak = 0;
+                    if (read_title_memory(image.address, sizeof(pages), pages, got) && got) {
+                        for (std::uint32_t i = 0; i < got; ++i) {
+                            if (pages[i]) ++nonzero;
+                            peak = std::max<std::uint64_t>(peak, pages[i]);
+                        }
+                        std::fprintf(stderr,
+                                     "[rt] d3d12: fetched T#: block 0x%llx + 0x%llx names title VA 0x%llx (format %u "
+                                     "%ux%u) with no created resource; its pages are readable, %llu of %u bytes "
+                                     "non-zero, peak %llu\n",
+                                     static_cast<unsigned long long>(matrix.address),
+                                     static_cast<unsigned long long>(at),
+                                     static_cast<unsigned long long>(image.address), image.format, image.width,
+                                     image.height, static_cast<unsigned long long>(nonzero), got,
+                                     static_cast<unsigned long long>(peak));
+                    } else {
+                        std::fprintf(stderr,
+                                     "[rt] d3d12: fetched T#: block 0x%llx + 0x%llx names title VA 0x%llx (format %u "
+                                     "%ux%u) with no created resource; its pages are NOT readable\n",
+                                     static_cast<unsigned long long>(matrix.address),
+                                     static_cast<unsigned long long>(at),
+                                     static_cast<unsigned long long>(image.address), image.format, image.width,
+                                     image.height);
+                    }
+                }
+                continue;
             }
             std::lock_guard lock(descriptor_mutex);
             if (image_entries.find(palmetto::make_tsharp_key(image_words.data())) != image_entries.end()) continue;
