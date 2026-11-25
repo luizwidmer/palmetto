@@ -3231,8 +3231,9 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                                  static_cast<unsigned long long>(resolved_offset), zero_step ? 0 : view.stride);
                     if (!vk.read_title_memory || !view.stride) continue;
                     const std::uint32_t stride = view.stride;
+                    // Whole declared range (bounded to 4 KiB), so the classification below covers every vertex record.
                     const std::uint32_t want = static_cast<std::uint32_t>(
-                        std::min<std::uint64_t>(std::uint64_t(stride) * 16, 4096));
+                        std::min<std::uint64_t>(view.size ? view.size : std::uint64_t(stride) * 16, 4096));
                     std::uint32_t got = 0;
                     std::uint8_t bytes[4096] = {};
                     if (!vk.read_title_memory(view.va, want, bytes, got) || !got) {
@@ -3256,6 +3257,39 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                             std::fprintf(stderr, " %08x", value);
                         }
                         std::fprintf(stderr, "\n");
+                    }
+                    // Diagnostic (docs/frame_capture.md): the whole vertex range's per-component classification, so a
+                    // constant-output pixel shader's colour source can be told from its position/UV attributes without
+                    // reading out the title's vertex data: counts and value classes only.
+                    {
+                        const std::uint32_t records = got / stride;
+                        for (std::uint32_t w = 0; w < stride / 4; ++w) {
+                            std::uint32_t distinct[8] = {};
+                            unsigned distinct_count = 0;
+                            std::uint64_t component_nonzero = 0;
+                            for (std::uint32_t v = 0; v < records; ++v) {
+                                std::uint32_t value = 0;
+                                std::memcpy(&value, bytes + v * stride + w * 4, sizeof(value));
+                                if (value) ++component_nonzero;
+                                bool known = false;
+                                for (unsigned d = 0; d < distinct_count; ++d)
+                                    if (distinct[d] == value) known = true;
+                                if (!known && distinct_count < 8) distinct[distinct_count++] = value;
+                            }
+                            const char* value_class = "varied";
+                            if (!component_nonzero) value_class = "all zero";
+                            else if (records && component_nonzero == records) {
+                                if (distinct_count == 1 && distinct[0] == 0xffffffffu) value_class = "all ffffffff";
+                                else if (distinct_count == 1 && distinct[0] == 0x3f800000u) value_class = "all 3f800000";
+                                else if (distinct_count == 1) value_class = "one value";
+                                else value_class = "every record non-zero";
+                            }
+                            std::fprintf(stderr,
+                                         "[rt] replay: vertex path: component %u of stride %u: %u records, %llu "
+                                         "non-zero, %s\n",
+                                         w, stride, records,
+                                         static_cast<unsigned long long>(component_nonzero), value_class);
+                        }
                     }
                 }
             }

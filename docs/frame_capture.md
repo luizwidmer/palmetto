@@ -284,6 +284,38 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### The sibling pixel shader's colour source: the push-constant user-data dwords, which the layer feeds as zero
+
+The constant-output sibling PS (`fspx/lib_ps_00820`) has no image samples, no fetches and no kill. Its single output
+store is `OpConstantSelect`-style: `OpSelect %true (v4 built from UnpackHalf2x16 words) (old)`, so the colour is the
+packed-half result of a scalar chain. Walking that chain backwards gives the source:
+
+* the two words the final colour unpacks are private-slot values (`%160[5]`, `%160[6]`, via `%283`/`%284`);
+* those slots are filled by packed-half computations over values copied from **push-constant member 0** - the module
+  copies `member0[0..31]` (all 32 dwords) into a private array at entry (`%161[i] = load %5.member0[i]`, i = 0..31) and
+  then packs derived values back into the colour slots;
+* the module accesses push-constant members 1 and 2 as well (the translated table pointers), reads no vertex attribute
+  into the colour chain (the only interpolated input `%4` is untouched by the traced chain), and contains only the
+  ordinary float->half packer literals.
+
+Our feed (the provenance line, sibling draw): `non-zero push constants: s0=9bd5ef00 s1=00000178 s8=0cf6ef00 (3 of 32)`.
+The compose PS of the same frame feeds the same shape (`3 of 32`) but reads **zero** member-0 data dwords, so the zeros
+cost it nothing; the sibling PS reads all 32 and depends on them for its colour. So the named zero input is:
+
+> **push-constant member 0 (the console user-data dwords) for the constant-output pass**: 29 of 32 dwords are fed as
+> zero, and that is exactly the data the sibling PS's colour is computed from, so it writes black.
+
+Vertex-attribute classification of the armed 170-record range (boot-sibling3; that boot's armed draw turned out to be the compose pass, 6 image samples, so this is the compose pass's vertex buffer; the sibling pass's first vertices in boot-sibling2 are the same full-screen NDC triangle shape): only 24 bytes are non-zero;
+component 2 is all zero, components 0/1/3/4/5 have 1/2/3/1/2 non-zero records respectively - the vertex buffer is the
+full-screen NDC triangle's coordinates with the rest zero, no colour attribute. This is consistent with the traced
+colour chain and rules the vertex data out as the colour source.
+
+Fix candidate: forward the draw's recorded console user SGPRs into the translated push-constant member 0 (for at least
+the indices the shader reads) instead of zero-filling everything except the three table pointers. The next concrete step
+is to dump the sibling draw's recorded root-argument provenance (the user-data values the console feed carries at that
+draw) and compare it with the zero-filled block; if the recorded feed has the values, the fix is a forwarding change in
+the push-constant emission, and if it does not, the console user-data capture needs extending for that pipeline.
+
 ### Sibling pass first: coverage works, its own PS output is the gap
 
 The sibling constant pass is the draw that writes the 4K target the compose pass samples. Arming it alone
