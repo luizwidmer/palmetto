@@ -1620,6 +1620,11 @@ public:
     void set_driver_block_allocator(std::function<bool(std::uint32_t, std::uint64_t&)> allocator) {
         replay_.allocate_driver_block = std::move(allocator);
     }
+    // Diagnostic (docs/frame_capture.md, the colour path): binds layer images for the T#s a shader fetches itself out of
+    // its published matrix block. Opt-in (PALMETTO_TEXTURE_BIND_FETCHED).
+    void set_fetched_texture_binder(std::function<void(std::uint64_t)> binder) {
+        replay_.bind_fetched_textures = std::move(binder);
+    }
     // Diagnostic (docs/frame_capture.md): the project's constant-output pixel shader (fs_solid), created once from the
     // SPIR-V file PALMETTO_FRAME_DUMP_CONTROL_PS names. Null when it cannot be read; the caller logs and skips.
     VkShaderModule frame_dump_solid_module() {

@@ -280,6 +280,12 @@ target (the presented resource) reads black: of its 6 image-sampling instruction
 (key 1); the other T# (key 5) is unresolved, and slot70's publication log reports 60 refused "texture-shaped
 description (no pinned T# encoding)" - the likely source of the remaining sampled inputs.
 
+### The remaining sampled inputs: T#s fetched out of the published matrix block
+
+Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
+
+Chain for a missing sampled input: PS fetch -> published matrix block (V# at table + 0x00, 5768 B, written by the slot-70 publication) -> T# at block + 0xa0 -> image title VA 0x100001600 (format 56, 3840x2160). Binding it (PALMETTO_TEXTURE_BIND_FETCHED: a registry of the slot-133 placed creations by title VA, then a layer image bound for every fetched T# whose address matches) found **no placed resource at 0x100001600**: the registry only knows title-placed creations, so nothing was bound and the readbacks did not change. The named next gap is that VA: a resource the layer never created a view or registry entry for. The likely producer map is the console creation ring (slot 70 pairing); if the VA is a created resource, register all console resources (not only placed ones) and bind from it; if it is a heap VA, the layer needs a layer image built from the title pages (texture-from-pages).
+
 So the structural unknown is resolved: **the frame is a constant/background pass plus an upscale pass that samples the
 previous pass's render target, and the display target is the upscale pass's**. The remaining black is the upscale pass's
 composition, whose other sampled inputs are missing/unresolved; the next increment is the texture-shaped T# publication

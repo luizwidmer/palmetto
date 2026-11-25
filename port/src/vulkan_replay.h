@@ -1043,9 +1043,10 @@ inline ReplayResult unresolved_at(const char* site, std::uint64_t id = 0, std::u
 
 // Diagnostic (docs/frame_capture.md): one console descriptor table as the shim decoded it, for the frame dump's
 // sampled-texture readback. Bounded: at most max_sampled_keys slots are copied out.
-inline constexpr std::uint32_t max_sampled_keys = 8;
+inline constexpr std::uint32_t max_sampled_keys = 16;
 struct SampledKey {
     std::uint32_t words[8]{};  // the slot's 8-dword key, as the title wrote it into the table
+    std::uint32_t slot = 0;    // the descriptor slot in the table (docs/frame_capture.md): table base + slot * 0x20
     bool image = false;        // a T# (gfx10::is_image): a texture, not a V# or S#
     // Resolved by the shim when set 0 holds a layer image for this T#: that image, the D3D12 resource behind it, and the
     // title VA the resource was placed at. title_va 0 means no title-VA alias: an ordinary committed resource, which no
@@ -1059,8 +1060,12 @@ struct SampledKey {
 };
 struct SampledTable {
     std::uint32_t slots = 0;  // slots the table holds (bounded by the caller's max_descriptors)
-    std::uint32_t keys = 0;   // entries copied into key[]
+    std::uint32_t keys = 0;   // T# entries copied into key[] (every T# slot, whatever its position)
     SampledKey key[max_sampled_keys];
+    // The table's V#/S# slots (bounded): the constants probe reads the first decodable V#, and a slot that is neither a
+    // T# nor a valid V#/S# (float data in a descriptor-sized slot) is reported as such rather than as a T#.
+    std::uint32_t buffer_keys = 0;
+    SampledKey buffer_key[8];
 };
 
 struct ReplayFunctions {
@@ -1083,6 +1088,9 @@ struct ReplayFunctions {
     // translated shader a distinct driver-block address (the s0/s1 pair) instead of the descriptor table's own. Set by
     // the shim; opt-in only.
     std::function<bool(std::uint32_t bytes, std::uint64_t& arena_address)> allocate_driver_block;
+    // Diagnostic (docs/frame_capture.md, the colour path): bind layer images for the T#s a shader fetches itself out of its
+    // published matrix block (PALMETTO_TEXTURE_BIND_FETCHED). Set by the shim; opt-in only.
+    std::function<void(std::uint64_t table_va)> bind_fetched_textures;
     // Optional; a list that needs a missing one is rejected with ReplayResult::unsupported.
     PFN_vkCmdPipelineBarrier2 pipeline_barrier2 = nullptr;  // enhanced barriers
     VkPipelineStageFlags2 queue_stages = 0;
@@ -1368,9 +1376,9 @@ inline void print_matrix_slot(const ReplayFunctions& vk, std::uint64_t heap_base
         if (vk.read_device_memory && buffer.address) {
             const std::uint64_t declared = buffer.stride ? std::uint64_t(buffer.stride) * buffer.num_records
                                                          : std::uint64_t(buffer.num_records);
-            const std::uint32_t want = static_cast<std::uint32_t>(std::min<std::uint64_t>(declared, 480));
+            const std::uint32_t want = static_cast<std::uint32_t>(std::min<std::uint64_t>(declared, 5768));
             std::uint32_t got = 0;
-            std::uint8_t data[480] = {};
+            std::uint8_t data[5768] = {};
             if (want && vk.read_device_memory(vk.heap_base + buffer.address, want, data, got) && got) {
                 std::uint64_t sum = 0, nonzero = 0, peak = 0;
                 for (std::uint32_t i = 0; i < got; ++i) {
@@ -1389,6 +1397,23 @@ inline void print_matrix_slot(const ReplayFunctions& vk, std::uint64_t heap_base
                     std::fprintf(stderr, " %08x", value);
                 }
                 std::fprintf(stderr, "\n");
+                // The published block is where a shader can fetch further descriptors itself: scan it (32-byte T#-shaped
+                // windows, 8-byte stride) for decodable T#s and name each one, so the compose pass's image inputs that are
+                // not table slots are located.
+                unsigned found = 0;
+                for (std::uint32_t at = 0; at + 32 <= got && found < 8; at += 8) {
+                    std::uint32_t words_at[8] = {};
+                    for (unsigned w = 0; w < 8; ++w) std::memcpy(&words_at[w], data + at + w * 4, 4);
+                    const gfx10::ImageWords image_words{words_at[0], words_at[1], words_at[2], words_at[3],
+                                                        words_at[4], words_at[5], words_at[6], words_at[7]};
+                    gfx10::Image image{};
+                    if (!gfx10::is_image(image_words) || !gfx10::decode(image_words, image)) continue;
+                    std::fprintf(stderr,
+                                 "[rt] replay: %s: matrix block T# at +0x%x: image title VA 0x%llx format %u %ux%u\n",
+                                 label, at, static_cast<unsigned long long>(image.address), image.format,
+                                 image.width, image.height);
+                    ++found;
+                }
             } else {
                 std::fprintf(stderr, "[rt] replay: %s: matrix A content is not readable (%llu B)\n", label,
                              static_cast<unsigned long long>(declared));
@@ -1426,6 +1451,17 @@ inline bool vertex_stream_descriptor_enabled() {
 
 // The coverage experiment's switch (docs/vertex_path.md): PALMETTO_VERTEX_MATRIX_DESCRIPTOR=1 writes a matrix V# over the
 // title's constants buffer at the s8 table's slot 0 (the module's matrix A source). Off by default.
+// The colour-path experiment switch (docs/frame_capture.md): PALMETTO_TEXTURE_BIND_FETCHED=1 has the shim give every T#
+// the compose pass fetches itself out of its published matrix block a layer image from the title-placed resource it names.
+// Off by default.
+inline bool bind_fetched_enabled() {
+    static const bool on = [] {
+        const char* value = std::getenv("PALMETTO_TEXTURE_BIND_FETCHED");
+        return value && *value && value[0] != 48 && value[0] != 110;
+    }();
+    return on;
+}
+
 inline bool matrix_descriptor_enabled() {
     static const bool on = [] {
         const char* value = std::getenv("PALMETTO_VERTEX_MATRIX_DESCRIPTOR");
@@ -1477,9 +1513,13 @@ inline void print_vertex_constants(const ReplayFunctions& vk, const Draw& draw, 
         std::fprintf(stderr, "[rt] replay: %s: table VA 0x%llx: %u slot(s), %u key(s):", label,
                      static_cast<unsigned long long>(table_va), table.slots, table.keys);
         for (std::uint32_t k = 0; k < table.keys; ++k) {
-            std::fprintf(stderr, " %s[", table.key[k].image ? "T#" : "S#/V#");
-            for (unsigned w = 0; w < 8; ++w)
-                std::fprintf(stderr, "%s%08x", w ? " " : "", table.key[k].words[w]);
+            std::fprintf(stderr, " T#[%u]", table.key[k].slot);
+            for (unsigned w = 0; w < 8; ++w) std::fprintf(stderr, "%s%08x", w ? " " : "", table.key[k].words[w]);
+            std::fprintf(stderr, "]");
+        }
+        for (std::uint32_t k = 0; k < table.buffer_keys; ++k) {
+            std::fprintf(stderr, " data/V#[%u]", table.buffer_key[k].slot);
+            for (unsigned w = 0; w < 4; ++w) std::fprintf(stderr, "%s%08x", w ? " " : "", table.buffer_key[k].words[w]);
             std::fprintf(stderr, "]");
         }
         std::fprintf(stderr, "\n");
@@ -2900,12 +2940,18 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
             for (const std::uint64_t table_va : frame_dump::descriptor_tables(draw, pipeline->table_windows)) {
                 SampledTable table;
                 if (!vk.sampled_table(table_va, 64, table)) continue;
-                std::fprintf(stderr, "[rt] replay: frame dump sample: table VA 0x%llx: %u slot(s), %u key(s):",
+                std::fprintf(stderr, "[rt] replay: frame dump sample: table VA 0x%llx: %u slot(s), %u T# key(s):",
                              static_cast<unsigned long long>(table_va), table.slots, table.keys);
                 for (std::uint32_t k = 0; k < table.keys; ++k) {
-                    std::fprintf(stderr, " %s[", table.key[k].image ? "T#" : "S#/V#");
+                    std::fprintf(stderr, " T#[%u]", table.key[k].slot);
                     for (unsigned w = 0; w < 8; ++w)
                         std::fprintf(stderr, "%s%08x", w ? " " : "", table.key[k].words[w]);
+                    std::fprintf(stderr, "]");
+                }
+                for (std::uint32_t k = 0; k < table.buffer_keys; ++k) {
+                    std::fprintf(stderr, " data/V#[%u]", table.buffer_key[k].slot);
+                    for (unsigned w = 0; w < 4; ++w)
+                        std::fprintf(stderr, "%s%08x", w ? " " : "", table.buffer_key[k].words[w]);
                     std::fprintf(stderr, "]");
                 }
                 std::fprintf(stderr, "\n");
@@ -2913,10 +2959,9 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                 // memory: a plausible transform or zeros/garbage (a vertex shader with wrong constants transforms to
                 // nowhere). The first decodable V# of the table, bounded to one 480-byte window.
                 if (vk.read_title_memory) {
-                    for (std::uint32_t k = 0; k < table.keys; ++k) {
-                        if (table.key[k].image) continue;
-                        const gfx10::BufferWords words{table.key[k].words[0], table.key[k].words[1],
-                                                      table.key[k].words[2], table.key[k].words[3]};
+                    for (std::uint32_t k = 0; k < table.buffer_keys; ++k) {
+                        const gfx10::BufferWords words{table.buffer_key[k].words[0], table.buffer_key[k].words[1],
+                                                      table.buffer_key[k].words[2], table.buffer_key[k].words[3]};
                         gfx10::Buffer buffer{};
                         if (!gfx10::decode(words, buffer) || !buffer.address) continue;
                         const std::uint64_t declared = buffer.stride
@@ -2958,29 +3003,43 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                 }
                 // The mapping chain (docs/frame_capture.md): T# key -> layer image -> D3D12 resource -> the title VA the
                 // resource was placed at (0: an ordinary committed resource no title page write can reach). Then a
-                // readback of each resolved sampled image, so "the sampled content is empty" is measured per texture.
+                // readback of each resolved sampled image, so "the sampled content is empty" is measured per texture. Each
+                // key names its descriptor slot, so an unresolved T# can be traced back to the console heap position a
+                // producer (a view wrapper, a slot-70 publication or the title itself) wrote or should have written.
                 for (std::uint32_t k = 0; k < table.keys; ++k) {
                     const SampledKey& key = table.key[k];
                     if (!key.resolved) continue;
                     std::fprintf(stderr,
-                                 "[rt] replay: frame dump sample: key %u T# image 0x%llx format %d %ux%u, resource "
-                                 "0x%llx, title VA %s0x%llx\n",
-                                 k, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(key.image_handle)),
+                                 "[rt] replay: frame dump sample: key %u slot %u (table + 0x%x) T# image 0x%llx format %d "
+                                 "%ux%u, resource 0x%llx, title VA %s0x%llx\n",
+                                 k, key.slot, key.slot * 0x20u,
+                                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(key.image_handle)),
                                  static_cast<int>(key.format), key.extent.width, key.extent.height,
                                  static_cast<unsigned long long>(key.resource),
                                  key.title_va ? "" : "none (committed, not placed) ",
                                  static_cast<unsigned long long>(key.title_va));
                     vk.capture_sample(key.image_handle, key.format, key.extent, key.resource);
                 }
-                // Every T# that does not resolve is named too: an unresolved key is an input the pixel shader reads with
-                // no layer image behind it, which shows up as an empty input rather than a black texture.
+                // Every T# that does not resolve is named in full: its descriptor slot, its 8 dwords, and the image its
+                // own T# fields name (address/format/extent) - the origin the missing layer image should come from.
                 for (std::uint32_t k = 0; k < table.keys; ++k) {
                     const SampledKey& key = table.key[k];
                     if (!key.image || key.resolved) continue;
+                    const gfx10::ImageWords image_words{key.words[0], key.words[1], key.words[2], key.words[3],
+                                                        key.words[4], key.words[5], key.words[6], key.words[7]};
+                    gfx10::Image image{};
+                    const bool decodable = gfx10::decode(image_words, image);
                     std::fprintf(stderr,
-                                 "[rt] replay: frame dump sample: key %u T# image is unresolved (set 0 holds no layer "
-                                 "image for it)\n",
-                                 k);
+                                 "[rt] replay: frame dump sample: key %u slot %u (table + 0x%x) T# UNRESOLVED: %08x %08x "
+                                 "%08x %08x %08x %08x %08x %08x",
+                                 k, key.slot, key.slot * 0x20u, key.words[0], key.words[1], key.words[2], key.words[3],
+                                 key.words[4], key.words[5], key.words[6], key.words[7]);
+                    if (decodable)
+                        std::fprintf(stderr, " -> names image at title VA 0x%llx, format %u, %ux%u\n",
+                                     static_cast<unsigned long long>(image.address), image.format, image.width,
+                                     image.height);
+                    else
+                        std::fprintf(stderr, " -> not a decodable T# image\n");
                 }
             }
         }
@@ -3102,7 +3161,15 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                 }
             }
         }
-        // Diagnostic (docs/vertex_path.md): the vertex path of the armed draw. Prints the shader-corpus identity the PSO
+        // Diagnostic (docs/frame_capture.md, the colour path): the compose pass pixel shader fetches T# descriptors
+        // itself out of its published matrix block; bind a layer image for each T# that names a title-placed resource.
+        // Opt-in and read-only otherwise (the shim only adds set-0 registrations).
+        if (frame_dump::bind_fetched_enabled() && vk.bind_fetched_textures && draw.user_data[8] &&
+            frame_dump::readback_armed_at(seen)) {
+            const std::uint64_t table_title = std::uint64_t(draw.user_data[0]) | (std::uint64_t(draw.user_data[1]) << 32);
+            if (table_title) vk.bind_fetched_textures(table_title);
+        }
+// Diagnostic (docs/vertex_path.md): the vertex path of the armed draw. Prints the shader-corpus identity the PSO
         // resolved, the input layout bound to the Vulkan pipeline, the raw vertex and index bytes the draw reads (through
         // the title-memory hook) and the constants, so the translated vertex shader's inputs can be evaluated off the
         // boot. Off unless PALMETTO_VERTEX_PATH is set; bounded and reads only.

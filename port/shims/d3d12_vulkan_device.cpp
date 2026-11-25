@@ -54,6 +54,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 #include <set>
 #include <string>
@@ -602,6 +603,11 @@ struct DeviceState {
     // (docs/texture_import.md). Pending entries are drained by the queue hook below; bounded and logged.
     std::mutex placed_texture_mutex;
     std::vector<Resource*> placed_textures_pending;
+    // Diagnostic (docs/frame_capture.md, the colour path): the resources the title placed through its console creation path,
+    // by the title VA they were placed at, so a T# descriptor a shader fetches itself (out of a published block, not a
+    // table slot) can be given a layer image from the resource it names. Registered on creation, removed on release.
+    std::mutex placed_resources_mutex;
+    std::unordered_map<std::uint64_t, Resource*> placed_resources;
     std::atomic<std::uint64_t> texture_imports{0}, texture_import_bytes{0};
     void import_placed_textures();
     // Page content copied from the title's pages into the arena stand-ins (docs/page_content.md), for the report.
@@ -1385,11 +1391,24 @@ struct DeviceState {
             const palmetto::gfx10::ImageWords descriptor{words[0], words[1], words[2], words[3],
                                                          words[4], words[5], words[6], words[7]};
             const bool image = palmetto::gfx10::is_image(descriptor);
-            if (out.keys >= palmetto::max_sampled_keys) continue;
-            palmetto::SampledKey& key = out.key[out.keys++];
+            // A slot can hold descriptor-shaped data that fails the T# decode (the compose pass's tables carry float
+            // constants in descriptor slots): those go to the buffer/data list instead of being reported as a sampled T#.
+            bool tsharp = image;
+            palmetto::gfx10::Image decoded_image{};
+            if (tsharp && !palmetto::gfx10::decode(descriptor, decoded_image)) tsharp = false;
+            palmetto::SampledKey* key_ptr = nullptr;
+            if (tsharp) {
+                if (out.keys >= palmetto::max_sampled_keys) continue;
+                key_ptr = &out.key[out.keys++];
+            } else {
+                if (out.buffer_keys >= std::size(out.buffer_key)) continue;
+                key_ptr = &out.buffer_key[out.buffer_keys++];
+            }
+            palmetto::SampledKey& key = *key_ptr;
             std::memcpy(key.words, words, sizeof(key.words));
-            key.image = image;
-            if (!image) continue;
+            key.slot = slot;
+            key.image = tsharp;
+            if (!tsharp) continue;
             const auto entry = image_entries.find(palmetto::make_tsharp_key(descriptor.data()));
             if (entry == image_entries.end() || !entry->second.image) continue;
             key.resolved = true;
@@ -1559,6 +1578,9 @@ struct DeviceState {
         return true;
     }
 
+    // Diagnostic (docs/frame_capture.md, the colour path): bind layer images for the T#s a shader fetches itself out of
+    // its published matrix block (PALMETTO_TEXTURE_BIND_FETCHED); defined after class Resource.
+    void bind_fetched_textures(std::uint64_t table_title_va);
     // Diagnostic (docs/vertex_path.md): read bytes at a device address a translated shader builds itself (heap_base + a
     // value from its push constants), through the arena's host mapping. Reads only, and never copies into the arena.
     bool read_device_memory(std::uint64_t address, std::uint32_t bytes, std::uint8_t* out, std::uint32_t& read) {
@@ -2425,6 +2447,13 @@ public:
             device_.context->defer_destroy(palmetto::DeferredDeletionQueue::Kind::acceleration_structure, accel_);
         }
         if (image_address_) device_.forget_image(image_address_);
+        if (placed_pages_) {
+            // Diagnostic (docs/frame_capture.md): the title VA is free again; drop the placed-resource registry entry.
+            std::lock_guard resources_lock(device_.placed_resources_mutex);
+            const auto found = device_.placed_resources.find(placed_pages_);
+            if (found != device_.placed_resources.end() && found->second == this)
+                device_.placed_resources.erase(found);
+        }
         device_.context->remove_resource(id());
         if (host_import_) {
             // VK_EXT_external_memory_host needs the caller's pages to stay valid for the imported memory's whole
@@ -3432,6 +3461,70 @@ private:
 // Drains the title-placed textures whose pages are ready to import. Called by the queue before it records a
 // submission (VulkanQueue::execute_now -> VulkanContext::import_placed_textures), so the image the replay samples
 // already holds the title's bytes. Each entry holds a reference from the device shim.
+    // Diagnostic (docs/frame_capture.md, the colour path): the compose pass's pixel shader fetches T# descriptors itself
+    // out of the published matrix block (the s8 table's slot 0 is a V# over that block) instead of from a table slot. Scan
+    // the block for decodable T#s and give each one a layer image from the title-placed resource its address names, so the
+    // shader's sampled lookup finds it. Opt-in (PALMETTO_TEXTURE_BIND_FETCHED); bounded, logged, and only adds set-0
+    // registrations.
+void DeviceState::bind_fetched_textures(std::uint64_t table_title_va) {
+        if (!context || !arena.mapped || !table_title_va) return;
+        std::uint64_t mirror = 0, available = 0;
+        if (!context->console_va_span(table_title_va, palmetto::ConsoleVaKind::descriptors, mirror, available)) return;
+        if (mirror >= arena.size || available < 32) return;
+        const auto* slot0 = reinterpret_cast<const std::uint32_t*>(arena.mapped + mirror);
+        const palmetto::gfx10::BufferWords matrix_words{slot0[0], slot0[1], slot0[2], slot0[3]};
+        palmetto::gfx10::Buffer matrix{};
+        if (!palmetto::gfx10::decode(matrix_words, matrix) || !matrix.address) return;
+        const std::uint64_t declared = matrix.stride ? std::uint64_t(matrix.stride) * matrix.num_records
+                                                     : std::uint64_t(matrix.num_records);
+        const std::uint64_t want = std::min<std::uint64_t>(declared, 16384);
+        if (!want || matrix.address >= arena.size || want > arena.size - matrix.address) return;
+        const auto* bytes = arena.mapped + matrix.address;
+        // The published block is handed to the shader once per frame and the table address repeats: scan a given matrix
+        // block once, not once per draw.
+        {
+            static std::mutex scanned_mutex;
+            static std::unordered_set<std::uint64_t> scanned;
+            std::lock_guard scan_lock(scanned_mutex);
+            if (!scanned.insert(matrix.address).second) return;
+            if (scanned.size() > 4096) scanned.clear();
+        }
+        unsigned bound = 0;
+        for (std::uint64_t at = 0; at + 32 <= want && bound < 16; at += 8) {
+            std::uint32_t words_at[8] = {};
+            std::memcpy(words_at, bytes + at, sizeof(words_at));
+            const palmetto::gfx10::ImageWords image_words{words_at[0], words_at[1], words_at[2], words_at[3],
+                                                          words_at[4], words_at[5], words_at[6], words_at[7]};
+            palmetto::gfx10::Image image{};
+            if (!palmetto::gfx10::is_image(image_words) || !palmetto::gfx10::decode(image_words, image)) continue;
+            if (!image.address) continue;
+            Resource* placed = nullptr;
+            {
+                std::lock_guard resources_lock(placed_resources_mutex);
+                const auto found = placed_resources.find(image.address);
+                if (found == placed_resources.end() || !found->second) continue;
+                placed = found->second;
+            }
+            std::lock_guard lock(descriptor_mutex);
+            if (image_entries.find(palmetto::make_tsharp_key(image_words.data())) != image_entries.end()) continue;
+            if (!placed->image()) continue;
+            if (!bind_image(image_words, image, placed->image(), placed->format(), placed->aspects(), false, false,
+                            placed->uint_backed(), placed->id(), placed->placed_pages(),
+                            placed->placed_subresource_bytes()))
+                continue;
+            ++bound;
+            static std::atomic<unsigned> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 16)
+                std::fprintf(stderr,
+                             "[rt] d3d12: fetched T#: block 0x%llx + 0x%llx names title VA 0x%llx (format %u %ux%u); bound "
+                             "the placed resource 0x%llx as a layer image\n",
+                             static_cast<unsigned long long>(matrix.address), static_cast<unsigned long long>(at),
+                             static_cast<unsigned long long>(image.address), image.format, image.width, image.height,
+                             static_cast<unsigned long long>(placed->id()));
+        }
+    }
+
+
 void DeviceState::import_placed_textures() {
     std::vector<Resource*> pending;
     {
@@ -6254,6 +6347,10 @@ public:
             [this](std::uint32_t bytes, std::uint64_t& address) {
                 return state_.allocate_driver_block(bytes, address);
             });
+        // Diagnostic (docs/frame_capture.md, the colour path): bind layer images for the T#s the compose pass fetches
+        // itself out of its published matrix block. Opt-in only.
+        state_.context->set_fetched_texture_binder(
+            [this](std::uint64_t table_va) { state_.bind_fetched_textures(table_va); });
         // A title-placed texture's page import (docs/texture_import.md): the queue calls this before it records a
         // submission, so the image holds the title's bytes before anything samples it.
         state_.context->set_placed_texture_import([this] { state_.import_placed_textures(); });
@@ -8433,6 +8530,13 @@ public:
             if (SUCCEEDED(hr) && out && *out) {
                 if (Resource* stand_in = Resource::from<Resource>(static_cast<IUnknown*>(*out))) {
                     stand_in->set_placed_pages(reinterpret_cast<std::uintptr_t>(address));
+                    {
+                        // Diagnostic (docs/frame_capture.md): remember which resource lives at this title VA, so a T# the
+                        // shader fetches itself can be bound from it.
+                        std::lock_guard resources_lock(state_.placed_resources_mutex);
+                        if (state_.placed_resources.size() < 4096)
+                            state_.placed_resources.emplace(reinterpret_cast<std::uintptr_t>(address), stand_in);
+                    }
                     // Diagnostic (docs/texture_source.md): from its creation, watch the pages of a placed texture big
                     // enough to be the frame's sampled 4K population, so the watch starts before the frame's draws. The
                     // armed draw's own sampled texture is registered later by the descriptor probe.
