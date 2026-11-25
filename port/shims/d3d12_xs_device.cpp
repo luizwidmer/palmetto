@@ -587,6 +587,7 @@ const char* slot_name(unsigned slot) {
         case 62: return "Xbox CreateComputePipelineState";
         case 67: return "Xbox DeserializeComputePipelineStateX";
         case 73: return "Xbox CreateCommandListX -> PC CreateCommandList";
+        case 74: return "Xbox three-word call -> S_OK";
         case 75: return "CreateCommandQueue1 -> queue proxy";
         case 76: return "Xbox resource creation";
         case 78: return "Xbox SetFrameIntervalX";
@@ -707,6 +708,52 @@ void note_heap_slot(unsigned slot) {
 
 std::uint64_t hr_to_u64(HRESULT hr) {
     return static_cast<std::uint64_t>(static_cast<std::uint32_t>(hr));
+}
+
+// Console slot 25 (GetResourceAllocationInfo) with the console's depth-stencil + unordered-access pair sized as a plain
+// depth-stencil texture. The console allows that flag pair on a texture; the PC runtime refuses it and answers D3D12's
+// invalid allocation (SizeInBytes = UINT64_MAX). The title asserts on the high word of that size at game+0x344196
+// before its allocation can fail, so the query is re-issued once with ALLOW_UNORDERED_ACCESS cleared and that size is
+// returned when it is valid. Only a refused first answer pays for the retry; a description the retry still refuses is
+// logged (bounded: one line for the measured pair, four for later refusals) and the host's answer is returned unchanged,
+// so this stand-in cannot hide a genuine refusal. The count cap keeps the stack copy bounded.
+inline D3D12_RESOURCE_ALLOCATION_INFO slot25_allocation_info(ID3D12Device* real, UINT mask, UINT count,
+                                                             const D3D12_RESOURCE_DESC* descs) {
+    D3D12_RESOURCE_ALLOCATION_INFO info = real->GetResourceAllocationInfo(mask, count, descs);
+    if (info.SizeInBytes != UINT64_MAX || !descs || !count || count > 64) return info;
+    D3D12_RESOURCE_DESC clean[64];
+    bool changed = false;
+    for (UINT i = 0; i < count; ++i) {
+        clean[i] = descs[i];
+        if (clean[i].Dimension != D3D12_RESOURCE_DIMENSION_BUFFER &&
+            (clean[i].Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) &&
+            (clean[i].Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) {
+            clean[i].Flags &= ~D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            changed = true;
+        }
+    }
+    if (changed) {
+        const D3D12_RESOURCE_ALLOCATION_INFO retry = real->GetResourceAllocationInfo(mask, count, clean);
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed))
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: slot 25: depth-stencil texture (format %d flags 0x%x) sized without unordered "
+                         "access, which the PC refuses with it: %s\n",
+                         static_cast<int>(descs[0].Format), static_cast<unsigned>(descs[0].Flags),
+                         retry.SizeInBytes != UINT64_MAX ? "sized" : "still refused");
+        if (retry.SizeInBytes != UINT64_MAX) return retry;
+    }
+    static std::atomic<unsigned> refusals{0};
+    if (refusals.fetch_add(1, std::memory_order_relaxed) < 4)
+        for (UINT i = 0; i < count; ++i)
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: slot 25 refused description %u/%u: dimension %d format %d flags 0x%x layout "
+                         "0x%x %llux%ux%u mips %u samples %u\n",
+                         i, count, static_cast<int>(descs[i].Dimension), static_cast<int>(descs[i].Format),
+                         static_cast<unsigned>(descs[i].Flags), static_cast<unsigned>(descs[i].Layout),
+                         static_cast<unsigned long long>(descs[i].Width), descs[i].Height, descs[i].DepthOrArraySize,
+                         descs[i].MipLevels, descs[i].SampleDesc.Count);
+    return info;
 }
 
 unsigned long proxy_add_ref(DeviceProxy* self) {
@@ -6195,6 +6242,21 @@ std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64
                                                         reinterpret_cast<const D3D12_RESOURCE_DESC*>(a2),
                                                         static_cast<std::uint32_t>(a3), reinterpret_cast<const IID*>(a5),
                                                         reinterpret_cast<void**>(a6)));
+    } else if constexpr (Slot == 74) {
+        // Console slot 74 takes three words (pointer, 0x185c0, pointer) at its measured call site game+0x1e6c2c1 and
+        // the title asserts when the answer is negative (int3 at game+0x1e6c2c5). The PC method at this vtable index
+        // (ID3D12Device9::ShaderCacheControl) has another shape, so forwarding the console's words asks it for a mode
+        // and a blob it cannot validate and it refuses. The console call's meaning is not measured beyond the three
+        // words, so the measured answer is S_OK; the first call's words are printed once so a later reader can compare.
+        note_slot(74);
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed))
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: device slot 74 (console three-word call, game+0x1e6c2c1) returns S_OK: "
+                         "words 0x%llx 0x%llx 0x%llx\n",
+                         static_cast<unsigned long long>(a1), static_cast<unsigned long long>(a2),
+                         static_cast<unsigned long long>(a3));
+        return hr_to_u64(S_OK);
     } else if constexpr (Slot == 25) {
         // GetResourceAllocationInfo returns D3D12_RESOURCE_ALLOCATION_INFO (16 bytes) by value: the same class as
         // slot 26 (docs/boot_audit.md A1). The console order puts the hidden return buffer in RCX, which this thunk
@@ -6203,8 +6265,8 @@ std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64
         if (is_device_proxy(reinterpret_cast<const void*>(a1))) {
             auto* device = reinterpret_cast<DeviceProxy*>(a1);
             if (device->real && device->real_vtable) {
-                const D3D12_RESOURCE_ALLOCATION_INFO info = device->real->GetResourceAllocationInfo(
-                    static_cast<UINT>(a2), static_cast<UINT>(a3),
+                const D3D12_RESOURCE_ALLOCATION_INFO info = slot25_allocation_info(
+                    device->real, static_cast<UINT>(a2), static_cast<UINT>(a3),
                     reinterpret_cast<const D3D12_RESOURCE_DESC*>(a4));
                 std::memcpy(reinterpret_cast<void*>(self), &info, sizeof(info));
                 return reinterpret_cast<std::uint64_t>(self);
@@ -6212,8 +6274,8 @@ std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64
         }
         // PC order: the device is `self`, the hidden return buffer is a1.
         if (a1) {
-            const D3D12_RESOURCE_ALLOCATION_INFO info = self->real->GetResourceAllocationInfo(
-                static_cast<UINT>(a2), static_cast<UINT>(a3),
+            const D3D12_RESOURCE_ALLOCATION_INFO info = slot25_allocation_info(
+                self->real, static_cast<UINT>(a2), static_cast<UINT>(a3),
                 reinterpret_cast<const D3D12_RESOURCE_DESC*>(a4));
             std::memcpy(reinterpret_cast<void*>(a1), &info, sizeof(info));
             return a1;
@@ -6558,7 +6620,7 @@ ID3D12Device* device_proxy_real_device(const void* device) {
 
 bool device_slot_overridden(unsigned slot) {
     if (slot <= 2 || slot == 25 || slot == 26 || slot == 8 || slot == 9 || slot == 14 || slot == 31 || slot == 32 || slot == 34 || slot == 35 ||
-        slot == 36 || slot == 45 || slot == 46 || slot == 50 || slot == 55 || slot == 62 || slot == 67 ||
+        slot == 36 || slot == 45 || slot == 46 || slot == 50 || slot == 55 || slot == 62 || slot == 67 || slot == 74 ||
         slot == 75 || slot == 76 || slot == 127 || slot == 133)
         return true;
     const XboxDeviceSlotRoutes& routes = xbox_device_slot_routes();

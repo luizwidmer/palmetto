@@ -133,6 +133,10 @@ struct Mock {
     bool create_null;        // device: creation returns create_result with no object
     HRESULT create_result;   // device: what creation returns (S_OK makes the object)
     Mock* last_child;        // device: the object its last creation or open made
+    // Device slot 25 (PC GetResourceAllocationInfo): how many descriptions the "real" method was asked to size and the
+    // flags of the last one, so the slot-25 stand-in's re-query without ALLOW_UNORDERED_ACCESS is visible.
+    unsigned allocation_queries;
+    D3D12_RESOURCE_FLAGS allocation_flags;
     unsigned calls[kMockSlots];
     std::uint64_t args[kMockSlots][5];
     std::uint64_t array[kMockSlots][4];  // device: the first entries of the array argument, as received
@@ -495,6 +499,32 @@ void WINAPI mock_queue_get_desc(void* hidden, void* object) {
     std::memcpy(hidden, &kMockQueueDesc, sizeof(kMockQueueDesc));
 }
 
+// PC ID3D12Device::GetResourceAllocationInfo returns D3D12_RESOURCE_ALLOCATION_INFO by value, so MSVC's convention hands
+// that method `this` in RCX and the hidden return buffer in RDX (the opposite of the title's console order, which puts the
+// buffer first - that is why the proxy has a conversion for slot 25). The PC runtime refuses a texture that allows both
+// depth-stencil and unordered access with D3D12's invalid allocation (SizeInBytes = UINT64_MAX) and refuses a zero-width
+// description; everything else gets a synthetic 64 KiB-aligned size. The slot-25 stand-in's re-query without
+// ALLOW_UNORDERED_ACCESS is visible through allocation_queries and allocation_flags.
+void* WINAPI mock_get_resource_allocation_info(Mock* self, void* hidden, UINT mask, UINT count,
+                                               const D3D12_RESOURCE_DESC* descs) {
+    auto* const info = reinterpret_cast<D3D12_RESOURCE_ALLOCATION_INFO*>(hidden);
+    ++self->calls[25];
+    self->args[25][0] = mask;
+    self->args[25][1] = count;
+    bool refused = !descs || !count || !descs[0].Width;
+    if (!refused) {
+        ++self->allocation_queries;
+        self->allocation_flags = descs[0].Flags;
+        refused = descs[0].Dimension != D3D12_RESOURCE_DIMENSION_BUFFER &&
+                  (descs[0].Flags & (D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL |
+                                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) ==
+                      (D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    }
+    info->SizeInBytes = refused ? UINT64_MAX : 0x10000;
+    info->Alignment = refused ? 0 : D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    return hidden;
+}
+
 // PC ID3D12Device::CreateShaderResourceView (slot 18), the layer's T# encoder: the console slot-70 pairing publication
 // hands it the paired resource and the view description it built, and the mock writes a marker at the destination.
 void WINAPI mock_create_srv(Mock* self, ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC* desc,
@@ -535,6 +565,7 @@ void** mock_vtable() {
         table[10] = reinterpret_cast<void*>(&mock_create_graphics_pipeline_state);  // PC CreateGraphicsPipelineState
         table[12] = reinterpret_cast<void*>(&mock_create_command_list);
         table[16] = reinterpret_cast<void*>(&mock_create_root_signature);  // PC CreateRootSignature
+        table[25] = reinterpret_cast<void*>(&mock_get_resource_allocation_info);  // PC GetResourceAllocationInfo
         table[27] = reinterpret_cast<void*>(&mock_create_committed_resource);  // PC CreateCommittedResource
         table[18] = reinterpret_cast<void*>(&mock_slot18);  // GetDesc for a queue, CreateShaderResourceView for a device
         return true;
@@ -1275,7 +1306,69 @@ int check_xbox_slots() {
 #endif
 }
 
-// ---- 8. Environment overrides for the Xbox device slots (one process each, read once) ----
+// ---- 7b. The measured console slot 74 and the slot-25 depth-stencil + unordered-access stand-in ----
+
+int check_slot74_and_slot25_standin() {
+    Mock* mock = nullptr;
+    void* device = make_device(mock, 11, true);
+    EXPECT(device);
+    xs::reset_device_proxy_stats();
+
+    // Slot 74: the title calls console slot 74 with three words (pointer, 0x185c0, pointer) at game+0x1e6c2c1 and
+    // asserts at game+0x1e6c2c5 when the answer is negative. The PC method at this vtable index is
+    // ID3D12Device9::ShaderCacheControl with another shape, so the proxy answers S_OK and never reaches it.
+    EXPECT(hr_of(raw(device, 74, 0x1000, 0x185c0, 0x2000)) == S_OK);
+    EXPECT(mock->calls[74] == 0 && xs::device_slot_hits(74) == 1);
+    EXPECT(xs::device_slot_overridden(74));
+
+    // Slot 25: a depth-stencil texture that also allows unordered access (the measured pair). The PC runtime refuses
+    // the pair with SizeInBytes = UINT64_MAX; the console allows it, so the stand-in re-queries the same description
+    // with ALLOW_UNORDERED_ACCESS cleared and returns that size. Format 19 is the title's measured depth-family
+    // description.
+    D3D12_RESOURCE_DESC depth_uav{};
+    depth_uav.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    depth_uav.Width = 128;
+    depth_uav.Height = 128;
+    depth_uav.DepthOrArraySize = 1;
+    depth_uav.MipLevels = 1;
+    depth_uav.Format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+    depth_uav.SampleDesc.Count = 1;
+    depth_uav.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    depth_uav.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    D3D12_RESOURCE_ALLOCATION_INFO info{};
+    info.SizeInBytes = 0xA5A5A5A5u;
+    EXPECT(raw(device, 25, word(&info), 0, 1, word(&depth_uav)) == word(&info));
+    EXPECT(info.SizeInBytes != UINT64_MAX && info.Alignment == D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
+    EXPECT(mock->allocation_queries == 2);  // asked with the pair (refused), then without the flag (sized)
+    EXPECT(static_cast<std::uint32_t>(mock->allocation_flags) ==
+           static_cast<std::uint32_t>(D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL));
+    EXPECT(xs::device_slot_hits(25) == 1);
+
+    // A description the retry still refuses (the mock refuses a zero width) keeps the host's invalid allocation: the
+    // stand-in cannot hide a genuine refusal.
+    D3D12_RESOURCE_DESC still_refused = depth_uav;
+    still_refused.Width = 0;
+    info.SizeInBytes = 0;
+    EXPECT(raw(device, 25, word(&info), 0, 1, word(&still_refused)) == word(&info));
+    EXPECT(info.SizeInBytes == UINT64_MAX);
+    EXPECT(mock->allocation_queries == 2);  // the retry did not re-size a description the host already refused
+
+    // A plain colour texture is answered by the first query: the stand-in costs nothing on a description the host sizes.
+    D3D12_RESOURCE_DESC colour = depth_uav;
+    colour.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    colour.Flags = D3D12_RESOURCE_FLAG_NONE;
+    const unsigned queries_before = mock->allocation_queries;
+    info.SizeInBytes = 0;
+    EXPECT(raw(device, 25, word(&info), 0, 1, word(&colour)) == word(&info));
+    EXPECT(info.SizeInBytes == 0x10000 && mock->allocation_queries == queries_before + 1);
+
+    EXPECT(release(device) == 0 && mock->refs == 0);
+    std::printf("%s: console slot 74 answers the measured three-word call S_OK, and slot 25 sizes a depth-stencil "
+                "texture that also allows unordered access by re-querying without the flag\n",
+                g_label);
+    return 0;
+}
+
 
 int run_env_slots(bool valid) {
     const char* frame_interval = valid ? "96" : "2";
@@ -1323,9 +1416,10 @@ int run_env_slots(bool valid) {
         EXPECT(hr_of(raw(device, 80, 0, 0, 0, 0, word(&token))) == S_OK && token && mock->calls[80] == 0);
         // 70 is measured as a console slot now: the title's thunk calls it with three arguments, so the proxy refuses
         // it (measured by console-measured arity) instead of forwarding it to the PC CreatePlacedResource1. The
-        // forwarded-slot check therefore uses 74: inside the 80-slot PC vtable and not a slot the proxy overrides.
+        // forwarded-slot check therefore uses 77: inside the 80-slot PC vtable and not a slot the proxy overrides
+        // (74 is now the measured console three-word slot).
         EXPECT(hr_of(raw(device, 70)) == E_NOTIMPL && mock->calls[70] == 0);
-        EXPECT(hr_of(raw(device, 74)) == S_OK && mock->calls[74] == 1);  // not an Xbox slot: forwarded unchanged
+        EXPECT(hr_of(raw(device, 77)) == S_OK && mock->calls[77] == 1);  // not an Xbox slot: forwarded unchanged
     }
     EXPECT(release(device) == 0 && mock->refs == 0);
     std::printf("%s: environment slot overrides %s\n", g_label,
@@ -2610,7 +2704,8 @@ int main(int argc, char** argv) {
     EXPECT(::SetEnvironmentVariableA("PALMETTO_SLOT70_PAIR", "1") != FALSE);
     if (check_tail(true) || check_queue_console_slots() || check_queue_copy_page_mappings() || check_levels() ||
         check_fence1() || check_create_failures() || check_open_shared() || check_alloc_failures() ||
-        check_allocators() || check_xbox_slots() || check_console_command_list() || check_slot57_graphics_record() ||
+        check_allocators() || check_xbox_slots() || check_slot74_and_slot25_standin() ||
+        check_console_command_list() || check_slot57_graphics_record() ||
         check_slot55_derived_pipeline_state() || check_slot70_console_view())
         return 1;
     std::printf("xs_proxy_mock_test: PASS (%d allocations refused on purpose)\n", g_failed_news);

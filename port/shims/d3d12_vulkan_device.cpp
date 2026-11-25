@@ -1935,7 +1935,16 @@ struct DeviceState {
             // render target for its output mask, and refusing it here made the allocation query report the invalid
             // D3D12 result, which the factory turned into a null resource the title then tripped over (measured: the
             // slot-108 query for format 65, then the title's int3 asserts at game+0xABFE1B and game+0xCC2936).
-            if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.SampleDesc.Count != 1 ||
+            // A sampled A8 texture may also be 1D or 3D: the title sizes 128x1 1D A8 textures through device slot 25
+            // (flags 0x300000, layouts 0x0 and 0x100), and refusing them made that query answer UINT64_MAX, which the
+            // title asserts on at game+0x344196. An A8 render target stays 2D, as measured, and depth-stencil or
+            // unordered access stays refused.
+            const bool sampled_line_or_volume = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D ||
+                                                desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+            if ((desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D && !sampled_line_or_volume) ||
+                ((desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) &&
+                 desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) ||
+                desc.SampleDesc.Count != 1 ||
                 (desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)))
                 return {};
             if ((desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) && !color_attachment_usable(VK_FORMAT_R8_UNORM)) {
