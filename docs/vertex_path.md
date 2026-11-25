@@ -215,33 +215,38 @@ is the colour/sample path (`docs/texture_source.md`).
   boot lock was acquired for each run and released after it; the control readback's own line is documented in
   `docs/frame_capture.md` section 6.
 
-## 8. The geometry fix, measured: the vertex-stream descriptor is filled, coverage is still absent
+## 8. The geometry fix, measured: coverage is proven, the colour/sample path is what remains
 
-The fix is opt-in (`PALMETTO_VERTEX_STREAM_DESCRIPTOR=1`, on top of `PALMETTO_GRAPHICS_CONSOLE_ROOT=1`): one scratch
-range per pipeline in the GPU address arena, the bound vertex stream's V# written there (`address` = the view's
-arena-relative VA, `stride` 24, `records` 170, format 0, identity swizzle), the block's heap-relative address emitted in
-the s0/s1 pair (which the module reads as the driver block), and - in the later variant - the same V# written into the
-s8 descriptor table's slot 0 (which the module reads as one of its two table V#s). Default path unchanged; every boot
-below is ALIVE 150 s with 0 exceptions, 0 failed/refused submissions and no device loss.
+`docs/root_arguments.md` section 7 pinned the module's descriptor layout: the **s0/s1 pair is the vertex-stream fetch**
+(a 4-dword buffer view: base = ((w1 & 0xFFFF) << 32) | (w0 & ~3), stride = w1[29:16], count = w2, bounds = w3[29:28],
+format = w3[18:12], select = w3[11:0], and w1 bit 31 must be 0; the module gates its inlined colour conversion on
+format != 0), and the s8 table's **+0 and +0x40 slots are MATRIX-A and MATRIX-B 4x4 buffers, not vertex streams**. The
+first version's mistake was writing the vertex V# into s8+0: the module then read the vertex stream's first 64 bytes as
+matrix A, whose dword 4 is `0xFFFFFFFF` - a NaN - so every clip coordinate was non-finite and nothing rasterised.
 
-| boot | what was written | fetch slots after the write | PS-control readback |
+The corrected fix (opt-in `PALMETTO_VERTEX_STREAM_DESCRIPTOR=1`, on top of `PALMETTO_GRAPHICS_CONSOLE_ROOT=1`): a
+per-pipeline arena driver block holding the vertex-stream V# exactly as specified (format 22 = 32_FLOAT, non-zero, the
+pass-through for the 32-bit components; w1 bit 31 clear), emitted in the s0/s1 pair; the s8 table's slots are left as the
+title wrote them. A separate experiment switch (`PALMETTO_VERTEX_MATRIX_DESCRIPTOR=1`) writes a matrix V# over the title's
+480-byte constants buffer at s8+0 (raw buffer: stride 0, byte count in w2, word 3 = 0x30000FAC), the only matrix the
+layer can currently provide.
+
+Measured boots (all ALIVE 150 s, 0 exceptions, 0 failed/refused submissions, no device loss):
+
+| boot | switches | fetch slots | PS-control readback |
 |---|---|---|---|
-| `boot-vsdesc1` | s8 table slot 0 only | s8+0 = the V# (address 0x86df10, stride 24, records 170); s8+0x40 = constants V# | mean 0 0 0, 0/16384 |
-| `boot-vsdesc3` (no PS control) | s8 table slot 0 only | same | display readback: mean 0 0 0, 0/16384 |
-| `boot-vsdesc4` | driver block in s0/s1 (table left as the title wrote it) | s0/s1 = 0xd46e500 with the V#; s8+0 = zeros; s8+0x40 = constants V# | mean 0 0 0, 0/16384 |
-| `boot-vsdesc5` | driver block + s8 table slot 0 | both s0/s1 and s8+0 decode to the V# | mean 0 0 0, 0/16384 |
-| `boot-vsdesc6` | as 5 but with the V#'s OOB mode raw (word 3 = 0x30000fac, the constants V#'s shape) | as 5 | mean 0 0 0, 0/16384 |
+| `boot-spec1` | vertex stream | s0/s1 = V# `0086df10 00180000 000000aa 00016fac` (address 0x86df10, stride 24, records 170, format 22); s8+0 = zeros | mean 0 0 0, 0/16384 (matrix A zero, as expected) |
+| `boot-spec3` | vertex stream + matrix | s0/s1 = the V#; s8+0 = matrix V# over the constants buffer (0x86dc40 + 480 B, stride 0) | **mean 23 115 172, non-black 11,776/16,384, peak 240** |
+| `boot-spec4` (no PS control) | vertex stream + matrix | same | display target: mean 0 0 0, 0/16384 (write control valid) |
 
-So every descriptor location the module's disassembly names now holds a descriptor that decodes the way the layer
-encodes one: the driver-block V# at the s0/s1 address, the same V# in the s8 table's first slot, and the title's
-constants V# at s8+0x40. Coverage is still absent, so the remaining wrong thing is **not a missing slot**: it is the
-content/encoding of the synthesized driver-block V# (which fields the shader's fetch reads as address/stride/records and
-whether the driver-block layout carries format/offset words beyond a gfx10 V#), or a data source the three fetches do not
-cover. That is the console driver-block layout question, which `docs/root_arguments.md`'s owner measured - the smallest
-next step is a joint review of this encoder against the module's fetch site (rootargs offered it in the same increment
-that defined the user-SGPR layout).
+So the **geometry frontier is closed**: with the vertex-stream V# in the s0/s1 driver block and a matrix V# at s8+0, the
+title's own vertex stage and raster state produce coverage - the constant-output pixel shader reads the control's colour
+in 11,776 of the window's 16,384 pixels (the window is 128x128 at the target's origin; the draw's own triangle does not
+cover all of it). The display target is still black because the title's real pixel shader samples the empty sampled
+textures (`docs/texture_source.md`): that is now the remaining frontier, not the vertex path.
 
-The fix's instrumentation is kept for that review: it logs `vertex stream descriptor: pipeline 0x… driver block 0x…
-(emitted at s0/s1), table slot 0 filled: wrote V# address 0x… stride … records … format 0 (dwords …)` once per pipeline
-(bounded to 8 lines), writes nothing unless the switch is set, and the fetch-slot dump in sections 5b/6 shows both
-addresses and the table. No pixel is claimed: the PS-control readback is the acceptance, and it has not changed.
+The honest source of matrix A is the slot-70 publication record, whose 128-byte block carries the real matrix (slot70's
+increment decodes it and publishes a matrix V# into this same destination slot). Until that lands,
+`PALMETTO_VERTEX_MATRIX_DESCRIPTOR=1` is a coverage experiment only: it substitutes the title's constants buffer for
+matrix A and must not be treated as the title's data. Both switches are off by default and write nothing unless set; the
+fix logs the descriptor it writes once per pipeline (bounded to 8 lines) for audit.

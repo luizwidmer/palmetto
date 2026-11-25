@@ -214,15 +214,24 @@ int main() {
     expect(push_constant_provenance(user_data, 0x3u, bare, 0).kind == kPushConstantTable,
            "the replay's table mask alone marks a table window");
 
-    // The console driver-block vertex-stream V# the geometry fix writes (docs/vertex_path.md): encode/decode round trip.
+    // The console driver-block vertex-stream V# the geometry fix writes (docs/vertex_path.md, docs/root_arguments.md
+    // section 7): encode/decode round trip, a non-zero format (the module gates its colour conversion on it), and the
+    // matrix V# shape the coverage experiment writes at the s8 table's slot 0.
     const gfx10::BufferWords stream = frame_dump::vertex_stream_descriptor(0x86df10, 24, 170);
     gfx10::Buffer decoded_stream{};
     expect(gfx10::decode(stream, decoded_stream), "the synthesised vertex-stream V# is a valid buffer descriptor");
     expect(decoded_stream.address == 0x86df10, "the V# carries the view's arena-relative address");
     expect(decoded_stream.stride == 24 && decoded_stream.num_records == 170,
            "the V# carries the vertex stride and record count");
-    expect(decoded_stream.format == 0 && decoded_stream.swizzle == gfx10::identity_swizzle,
-           "the V# is a raw, identity-swizzled buffer");
+    expect(decoded_stream.format == 22, "the V# carries a non-zero 32-bit float format");
+    expect(decoded_stream.swizzle == gfx10::identity_swizzle, "the V# keeps the identity swizzle");
+    expect((stream[1] & 0x80000000u) == 0, "word 1's top bit is clear (the module requires it)");
+    const gfx10::BufferWords matrix = frame_dump::matrix_descriptor(0x86dc40, 480);
+    expect(matrix[3] == 0x30000FACu, "the matrix V#'s word 3 is 0x30000FAC (bounds raw, identity select)");
+    gfx10::Buffer decoded_matrix{};
+    expect(gfx10::decode(matrix, decoded_matrix) && decoded_matrix.address == 0x86dc40 &&
+               decoded_matrix.stride == 0 && decoded_matrix.num_records == 480,
+           "the matrix V# is a raw buffer over the matrix bytes");
 
     if (failures) return 1;
     std::printf("frame_dump_test: command kinds, ordered writers and table windows exact\n");

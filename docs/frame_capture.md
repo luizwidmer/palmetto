@@ -178,11 +178,13 @@ the PS-only control drew, `frame dump control readback:` when the full-screen co
 only when neither did, and it ends with `the control drew after the frame's commands and this window is its output`. A
 boot that prints the control-draw line but no readback line would mean the one-shot capture was never armed (the armed
 draw's prepare did not reach the colour-target arming); with the label the control's coverage axis is readable on its
-own, without confusing it with the frame's own (black) content. The measured PS-control line is therefore
-`frame dump PS control readback: ... mean 0 0 0, non-black 0/16384` for the title's pipeline - the axis is measured, and
-it says no coverage. `docs/vertex_path.md` section 8 records the geometry fix's acceptance boots: the vertex-stream
-descriptor the module fetches is now filled and decodes as a V#, but the PS-control readback has not changed from black,
-so the coverage result stands.
+own, without confusing it with the frame's own (black) content. The measured PS-control line was
+`frame dump PS control readback: ... mean 0 0 0, non-black 0/16384` for the title's pipeline through the first geometry
+increments; `docs/vertex_path.md` section 8 records what changed: with the vertex-stream V# in the s0/s1 driver block and
+a matrix V# over the constants buffer at the s8 table's slot 0 (the matrix experiment), the **same control reads
+`mean 23 115 172, non-black 11,776/16,384, peak 240`** - the title vertex stage and raster state produce coverage, so the
+coverage axis passes; the display target is still black because the title's pixel shader samples the empty sampled
+textures (`docs/texture_source.md`), which is the next frontier, not the vertex path.
 
 ## 7. The sampled textures: the first T# resolves to a 4K image that reads black
 

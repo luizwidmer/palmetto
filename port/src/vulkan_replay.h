@@ -1335,21 +1335,44 @@ inline bool vertex_stream_descriptor_enabled() {
     return on;
 }
 
-// Diagnostic (docs/vertex_path.md): the console driver-block vertex-stream V# for a bound vertex view, encoded the way
-// the layer encodes every buffer descriptor (src/gfx10_descriptors.h): the arena-relative address the shader adds
-// heap_base to, the vertex stride, the record count, and a raw (untyped) format with identity swizzle, because the
-// shader's own fetch decides the element layout. Pure; frame_dump_test pins the round trip through gfx10::decode.
+// The coverage experiment's switch (docs/vertex_path.md): PALMETTO_VERTEX_MATRIX_DESCRIPTOR=1 writes a matrix V# over the
+// title's constants buffer at the s8 table's slot 0 (the module's matrix A source). Off by default.
+inline bool matrix_descriptor_enabled() {
+    static const bool on = [] {
+        const char* value = std::getenv("PALMETTO_VERTEX_MATRIX_DESCRIPTOR");
+        return value && *value && value[0] != '0' && value[0] != 'n';
+    }();
+    return on;
+}
+
+// Diagnostic (docs/vertex_path.md): the console driver-block vertex-stream V# for a bound vertex view, encoded as the
+// module reads it (docs/root_arguments.md section 7): base = ((w1 & 0xFFFF) << 32) | (w0 & ~3), stride = w1[29:16],
+// count = w2, bounds = w3[29:28], format = w3[18:12] (must be non-zero: the module gates its inlined colour conversion on
+// format != 0), select = w3[11:0], and w1 bit 31 must be 0. Format 22 (GFX10_FORMAT_32_FLOAT) is the pass-through for the
+// stream's 32-bit components. Pure; frame_dump_test pins the round trip through gfx10::decode.
 inline gfx10::BufferWords vertex_stream_descriptor(std::uint64_t arena_address, std::uint32_t stride,
                                                    std::uint32_t records) {
     gfx10::Buffer buffer{};
     buffer.address = arena_address;
     buffer.stride = stride;
     buffer.num_records = records;
-    buffer.format = 0;  // raw: no typed element, the fetch's own offsets/format are the layout
+    buffer.format = 22;  // 32_FLOAT: non-zero so the module's colour fetch converts, a no-op for 32-bit data
     buffer.swizzle = gfx10::identity_swizzle;
-    // Raw bounds: a vertex stream is addressed by byte offset, and the console driver block's own V# for it is measured
-    // with OOB_SELECT = raw (word 3's top bits, the shape the constants V# at slot 2 also has).
-    buffer.oob_select = gfx10::OobSelect::raw;
+    buffer.oob_select = gfx10::OobSelect::structured_with_offset;  // w3[29:28] = 0
+    return gfx10::encode(buffer);
+}
+
+// The MATRIX V# form the module reads from the s8 table's slot 0 (docs/root_arguments.md section 7): a raw buffer over a
+// 4x4 matrix (stride 0, the byte count in w2, w3 = 0x30000FAC: bounds raw, format 0, identity select). Used only by the
+// coverage experiment; pure.
+inline gfx10::BufferWords matrix_descriptor(std::uint64_t arena_address, std::uint32_t bytes) {
+    gfx10::Buffer buffer{};
+    buffer.address = arena_address;
+    buffer.stride = 0;
+    buffer.num_records = std::max(bytes, 64u);  // at least one 4x4
+    buffer.format = 0;
+    buffer.swizzle = gfx10::identity_swizzle;
+    buffer.oob_select = gfx10::OobSelect::raw;  // w3[29:28] = 3, word 3 = 0x30000FAC
     return gfx10::encode(buffer);
 }
 
@@ -2896,21 +2919,60 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                     if (vk.write_device_memory(vk.heap_base + block, sizeof(words),
                                                reinterpret_cast<const std::uint8_t*>(words.data()))) {
                         p.driver_block = block;
-                        // The disassembly reads two more V#s from the s8 descriptor table at +0 and +0x40; the title's
-                        // table has the constants V# at +0x40 but leaves +0 empty, so fill that one 4-dword slot with
-                        // the same vertex-stream V# (what the console driver block would hold). Bounded to slot 0.
-                        const std::uint64_t table = std::uint64_t(draw.user_data[8]) & ~std::uint64_t(3);
-                        const bool table_filled =
-                            table != 0 && vk.write_device_memory(vk.heap_base + table, sizeof(words),
-                                                                 reinterpret_cast<const std::uint8_t*>(words.data()));
+                        // The table's s8+0 and s8+0x40 slots are MATRIX-A and MATRIX-B buffers, not vertex streams
+                        // (docs/root_arguments.md section 7): the vertex V# deliberately does not go there. The optional
+                        // coverage experiment writes a matrix V# over the title's 480-byte constants buffer at s8+0.
+                        std::uint64_t matrix_address = 0, matrix_bytes = 0;
+                        if (frame_dump::matrix_descriptor_enabled() && vk.sampled_table) {
+                            // The descriptor-table probe reads the console heap mirror by the table's TITLE VA; the
+                            // emitted s8 carries the arena-relative form the shader adds heap_base to, so probe with the
+                            // raw s0/s1 pair (both name the same table) and write at the arena-relative one.
+                            const std::uint64_t table_title =
+                                std::uint64_t(draw.user_data[0]) | (std::uint64_t(draw.user_data[1]) << 32);
+                            const std::uint64_t table_arena = std::uint64_t(draw.user_data[8]) & ~std::uint64_t(3);
+                            SampledTable table_probe;
+                            if (table_title && table_arena && vk.sampled_table(table_title, 64, table_probe)) {
+                                for (std::uint32_t k = 0; k < table_probe.keys; ++k) {
+                                    if (table_probe.key[k].image) continue;
+                                    gfx10::Buffer buffer{};
+                                    const gfx10::BufferWords probe_words{
+                                        table_probe.key[k].words[0], table_probe.key[k].words[1],
+                                        table_probe.key[k].words[2], table_probe.key[k].words[3]};
+                                    if (!gfx10::decode(probe_words, buffer) || !buffer.address) continue;
+                                    matrix_address = buffer.address;
+                                    matrix_bytes = buffer.stride ? std::uint64_t(buffer.stride) * buffer.num_records
+                                                                 : std::uint64_t(buffer.num_records);
+                                    break;
+                                }
+                            }
+                            if (matrix_address && matrix_bytes >= 64 &&
+                                vk.write_device_memory(
+                                    vk.heap_base + table_arena, sizeof(gfx10::BufferWords),
+                                    reinterpret_cast<const std::uint8_t*>(
+                                        frame_dump::matrix_descriptor(matrix_address, static_cast<std::uint32_t>(
+                                                                                     std::min<std::uint64_t>(
+                                                                                         matrix_bytes, UINT32_MAX)))
+                                            .data()))) {
+                                static std::atomic<unsigned> matrix_logged{0};
+                                if (matrix_logged.fetch_add(1, std::memory_order_relaxed) < 8)
+                                    std::fprintf(stderr,
+                                                 "[rt] replay: vertex matrix descriptor: pipeline 0x%llx table s8=0x%llx "
+                                                 "slot 0: wrote matrix V# over the constants buffer address 0x%llx + "
+                                                 "%llu B (stride 0)\n",
+                                                 static_cast<unsigned long long>(draw.pipeline),
+                                                 static_cast<unsigned long long>(table_arena),
+                                                 static_cast<unsigned long long>(matrix_address),
+                                                 static_cast<unsigned long long>(matrix_bytes));
+                            }
+                        }
                         static std::atomic<unsigned> logged{0};
                         if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
                             std::fprintf(stderr,
                                          "[rt] replay: vertex stream descriptor: pipeline 0x%llx driver block 0x%llx "
-                                         "(emitted at s0/s1), table slot 0 %s: wrote V# address 0x%llx stride %u "
-                                         "records %u format 0 (dwords %08x %08x %08x %08x)\n",
+                                         "(emitted at s0/s1): wrote V# address 0x%llx stride %u records %u format 22 "
+                                         "(dwords %08x %08x %08x %08x)\n",
                                          static_cast<unsigned long long>(draw.pipeline),
-                                         static_cast<unsigned long long>(block), table_filled ? "filled" : "not filled",
+                                         static_cast<unsigned long long>(block),
                                          static_cast<unsigned long long>(arena_address), stride, records, words[0],
                                          words[1], words[2], words[3]);
                     }
