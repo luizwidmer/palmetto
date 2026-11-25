@@ -1,6 +1,9 @@
 #include "graphics_pso.h"
 
 #include <array>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <iterator>
 #include <utility>
 
@@ -164,7 +167,33 @@ FixedFunctionState documented_default_state() {
     state.sample_count = 1;
     state.sample_quality = 0;
     state.sample_mask = 0xffffffffu;
+    // The measured cull axis (docs/raster_state.md): the one fixed-function field a measurement of the title's own draw
+    // decides while the state record's words stay refused. Off by default; the substitution is logged once.
+    if (apply_measured_cull_axis(&state)) {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed))
+            std::fprintf(stderr,
+                         "[rt] graphics_pso: measured cull axis: the state record's rasterizer state is not decoded "
+                         "(docs/raster_state.md); building with cull NONE and clockwise front, the one value under "
+                         "which the title's own full-screen triangle is drawn beside the stand-in's back-face cull. "
+                         "Every other stand-in field is unchanged.\n");
+    }
     return state;
+}
+
+bool measured_cull_axis_enabled() {
+    static const bool on = [] {
+        const char* value = std::getenv("PALMETTO_RASTER_CULL_MEASURED");
+        return value && *value && value[0] != '0' && value[0] != 'n';
+    }();
+    return on;
+}
+
+bool apply_measured_cull_axis(FixedFunctionState* state, bool enabled) {
+    if (!state || !enabled) return false;
+    state->rasterizer.CullMode = D3D12_CULL_MODE_NONE;
+    state->rasterizer.FrontCounterClockwise = FALSE;
+    return true;
 }
 
 bool console_graphics_user_data(const rt::rootsig::RootSignature& signature, bool mesh_pipeline,

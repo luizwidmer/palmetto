@@ -114,7 +114,41 @@ struct FixedFunctionState {
 // undecoded blob: triangle list, solid fill, back-face culling, depth clipping on, blending off, depth and stencil
 // off, sample count 1 with the full mask. It is a measurement stand-in, not the console's state: passing it is a
 // decision the caller makes and logs (the create_standin_graphics_pipeline defaults are the same set).
+//
+// The one exception is the measured cull axis below: with PALMETTO_RASTER_CULL_MEASURED=1 this function returns the
+// same set with the rasterizer cull pair replaced, because a measurement of the title's own draw decides that field
+// (docs/raster_state.md). Off by default, the returned set is the documented one above, field for field.
 FixedFunctionState documented_default_state();
+
+// ---- The measured cull axis of the undecoded rasterizer state ---------------------------------------------------
+//
+// The 380..520-byte state record's rasterizer state is not decodable: no word of it is pinned to a D3D12 field
+// (docs/state_blob.md), and docs/raster_state.md re-derives the cull census over the library's 5,680 distinct blobs -
+// the only aligned word whose value stays inside the cull enum on every blob is the record's stage-set word at +0x2C,
+// not a per-pipeline rasterizer value. The cull axis alone is decidable by observation of the title's own draw: with
+// the console driver-block feed in place (docs/vertex_constant_feed.md), the constant pass's full-screen triangle,
+// fetched from the title's own vertex stream, is drawn when the pipeline's rasterizer cull mode is NONE and is
+// discarded under the documented stand-in's CULL_BACK / clockwise-front, because the pass's recorded triangle is
+// counter-clockwise in D3D screen space (docs/raster_state.md sections 2-3).
+//
+// That observation is a measurement of the pass, not of the record's words, so it is applied as an explicit, logged,
+// opt-in substitution; the record's eight fields stay refused and every other stand-in field stays the documented one:
+//
+//   PALMETTO_RASTER_CULL_MEASURED=1   build with CullMode NONE and FrontCounterClockwise FALSE
+//
+// The observation cannot tell NONE from (CULL_BACK, counter-clockwise front) or (CULL_FRONT, clockwise front) - the
+// same triangle survives all three - so the value applied is NONE, the only one of the three that adds no winding rule
+// the record has not yielded. What would pin a different value is the serialized driver layout (docs/raster_state.md
+// section 6); until then the switch stays off by default and the documented stand-in is what every pipeline carries.
+bool measured_cull_axis_enabled();
+
+// Applies the measured cull axis to `state` (CullMode NONE, FrontCounterClockwise FALSE) and returns whether it
+// changed it. The second overload takes the decision explicitly so a caller or a test can drive both sides without an
+// environment variable; the first reads PALMETTO_RASTER_CULL_MEASURED once.
+bool apply_measured_cull_axis(FixedFunctionState* state, bool enabled);
+inline bool apply_measured_cull_axis(FixedFunctionState* state) {
+    return apply_measured_cull_axis(state, measured_cull_axis_enabled());
+}
 
 // ---- Where the graphics bind point's root arguments actually go: the console user-SGPR layout ---------------------
 //

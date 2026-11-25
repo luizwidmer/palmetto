@@ -29,6 +29,10 @@
 //     enable/factors/op/write mask, topology type, strip cut, sample count, sample mask); sample quality has none, and
 //     the test says so instead of inventing a scene. The probe is the falsifier a decode would have to survive; the
 //     record supplies no observation, so the decode still refuses.
+//   - apply_measured_cull_axis(): the one fixed-function field a measurement of the title's own draw decides while the
+//     record's words are refused (docs/raster_state.md). Off is byte-identical to the documented stand-in; on changes
+//     exactly CullMode/FrontCounterClockwise to NONE/clockwise-front; and the winding-pair probe tells the two states
+//     apart (the stand-in culls one half, the measured axis draws both).
 // It prints the input and refusal tables so the boundary is visible without reading the header.
 
 #include "../src/graphics_pso.h"
@@ -556,6 +560,55 @@ void test_documented_default_state() {
     check(state.strip_cut == D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED, "defaults: no strip cut");
     check(state.sample_count == 1 && state.sample_quality == 0 && state.sample_mask == 0xffffffffu,
           "defaults: one sample, full mask");
+}
+
+// The measured cull axis (docs/raster_state.md): the state record's rasterizer state is not decoded, but a measurement
+// of the title's own draw decides the cull axis. The contract: the explicit overload changes exactly the two cull
+// fields and leaves every other stand-in field alone; with the decision off the state is byte-identical to the
+// documented set; and the project's own behavioural probe tells the two states apart on the winding pair (the stand-in
+// culls the counter-clockwise half, the measured axis draws it). The axis is a measurement of the pass, not a blob
+// decode: decode_fixed_function_state() still refuses all eight fields below.
+void test_measured_cull_axis() {
+    const pso::FixedFunctionState documented = pso::documented_default_state();
+
+    pso::FixedFunctionState off = documented;
+    check(!pso::apply_measured_cull_axis(&off, false), "cull axis: the decision off reports no change");
+    check(std::memcmp(&off.rasterizer, &documented.rasterizer, sizeof(D3D12_RASTERIZER_DESC)) == 0 &&
+              std::memcmp(&off.blend, &documented.blend, sizeof(D3D12_BLEND_DESC)) == 0 &&
+              std::memcmp(&off.depth_stencil, &documented.depth_stencil, sizeof(D3D12_DEPTH_STENCIL_DESC)) == 0 &&
+              off.topology_type == documented.topology_type && off.strip_cut == documented.strip_cut &&
+              off.sample_count == documented.sample_count && off.sample_quality == documented.sample_quality &&
+              off.sample_mask == documented.sample_mask,
+          "cull axis: off is byte-identical to the documented stand-in");
+
+    pso::FixedFunctionState on = documented;
+    check(pso::apply_measured_cull_axis(&on, true), "cull axis: the decision on reports the change");
+    check(on.rasterizer.CullMode == D3D12_CULL_MODE_NONE && on.rasterizer.FrontCounterClockwise == FALSE,
+          "cull axis: the measured value is cull NONE with clockwise front");
+    check(on.rasterizer.FillMode == documented.rasterizer.FillMode &&
+              on.rasterizer.DepthBias == documented.rasterizer.DepthBias &&
+              on.rasterizer.DepthBiasClamp == documented.rasterizer.DepthBiasClamp &&
+              on.rasterizer.SlopeScaledDepthBias == documented.rasterizer.SlopeScaledDepthBias &&
+              on.rasterizer.DepthClipEnable == documented.rasterizer.DepthClipEnable &&
+              on.rasterizer.MultisampleEnable == documented.rasterizer.MultisampleEnable &&
+              on.rasterizer.AntialiasedLineEnable == documented.rasterizer.AntialiasedLineEnable &&
+              on.rasterizer.ForcedSampleCount == documented.rasterizer.ForcedSampleCount &&
+              on.rasterizer.ConservativeRaster == documented.rasterizer.ConservativeRaster,
+          "cull axis: every other rasterizer field stays the documented stand-in's");
+    check(std::memcmp(&on.blend, &documented.blend, sizeof(D3D12_BLEND_DESC)) == 0 &&
+              std::memcmp(&on.depth_stencil, &documented.depth_stencil, sizeof(D3D12_DEPTH_STENCIL_DESC)) == 0 &&
+              on.topology_type == documented.topology_type && on.strip_cut == documented.strip_cut &&
+              on.sample_count == documented.sample_count && on.sample_quality == documented.sample_quality &&
+              on.sample_mask == documented.sample_mask,
+          "cull axis: blend, depth-stencil, topology, strip cut and the sample description stay the documented ones");
+
+    // The probe contract is the falsifier: the stand-in keeps one half of the winding pair and drops the other; the
+    // measured axis draws both. A change the probe could not tell apart would not be a measured cull decision.
+    const pso::ProbeOutcome culled = pso::run_probe(documented, pso::ProbeScene::kWindingPair);
+    const pso::ProbeOutcome drawn = pso::run_probe(on, pso::ProbeScene::kWindingPair);
+    check(culled.culled == 1 && culled.fragments == 4, "cull axis: the stand-in culls one half of the winding pair");
+    check(drawn.culled == 0 && drawn.fragments == 8, "cull axis: the measured axis draws both halves");
+    check(!(culled == drawn), "cull axis: the two states are told apart by the winding-pair probe");
 }
 
 // The state record's container decodes but its fixed-function fields do not: decode_fixed_function_state() must
@@ -1587,6 +1640,7 @@ int main() {
     test_resolve_native_stage();
     test_pick_entry();
     test_documented_default_state();
+    test_measured_cull_axis();
     test_console_graphics_user_data();
     test_console_feed_plan();
     test_fixed_function_state_decode();
