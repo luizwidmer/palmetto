@@ -3126,7 +3126,7 @@ bool slot70_enabled(const char* name) {
 bool slot70_measurement_enabled() {
     static const bool on = [] {
         return slot70_enabled("PALMETTO_SLOT70_PROBE") || slot70_enabled("PALMETTO_SLOT70_CBV") ||
-               slot70_enabled("PALMETTO_SLOT70_PUBLISH");
+               slot70_enabled("PALMETTO_SLOT70_PUBLISH") || slot70_enabled("PALMETTO_SLOT70_CENSUS");
     }();
     return on;
 }
@@ -3138,11 +3138,18 @@ bool slot70_cbv_enabled() {
     static const bool on = slot70_enabled("PALMETTO_SLOT70_CBV");
     return on;
 }
-// The measurement of the publication record (docs/device_slot70.md section 6): write a MATRIX V# over the record's CPU
+// The measurement of the publication record (docs/device_slot70.md section 5): write a MATRIX V# over the record's CPU
 // block into the destination slot. Off by default; the layout that proved wrong (a CBV over the record's first word) is
 // the separate PALMETTO_SLOT70_CBV switch above.
 bool slot70_publish_enabled() {
     static const bool on = slot70_enabled("PALMETTO_SLOT70_PUBLISH");
+    return on;
+}
+// The shape census (docs/device_slot70.md section 6): is slot 70 also the producer of sampled T#s, or are all its
+// records buffer publications? Bounded: the distinct shape is keyed by the fields the publication decision reads plus the
+// resource description and the sort of its first word; one line per new shape (64 at most) and a summary per 4096 calls.
+bool slot70_census_enabled() {
+    static const bool on = slot70_enabled("PALMETTO_SLOT70_CENSUS");
     return on;
 }
 
@@ -3164,6 +3171,36 @@ std::atomic<std::uint64_t> g_slot70_matrix_empty{0};     // the record's block p
 std::atomic<std::uint64_t> g_slot70_matrix_unplaced{0};  // the block is not inside a buffer the title placed at slot 133
 std::atomic<std::uint64_t> g_slot70_matrix_unreadable{0};
 std::atomic<bool> g_slot70_matrix_logged{false};
+// The census measured texture-shaped resource descriptions at this slot (60 calls, all at the startup wrapper site). They
+// are not pinned to a console T# encoding, so the publication refuses them by name instead of writing a guess.
+std::atomic<std::uint64_t> g_slot70_texture_refused{0};
+std::atomic<bool> g_slot70_texture_logged{false};
+
+// The census' distinct shapes. A shape is what the publication decision reads plus the resource description and the kind
+// of the record's first word, so two boots' logs can be compared as counts. The mutex is only taken on the census path
+// (off by default) and the table is bounded, so a boot cannot be slowed or flooded by it.
+struct Slot70ShapeKey {
+    std::uint32_t dimension = 0;
+    std::uint32_t height = 0;
+    std::uint32_t format = 0;
+    std::uint32_t mip_levels = 0;
+    std::uint32_t array_size = 0;
+    std::uint32_t count = 0;
+    std::uint32_t declared = 0;
+    std::uint32_t format_word = 0;
+    std::uint32_t first_word_kind = 0;  // 1 = the fixed 0x100000027, 2 = the destination address, 0 = other/absent
+    std::uint32_t block_nonzero = 0;
+    std::uint64_t width = 0;
+    std::uint64_t calls = 0;
+};
+constexpr unsigned kSlot70Shapes = 64;
+Slot70ShapeKey g_slot70_shapes[kSlot70Shapes];
+unsigned g_slot70_shape_count = 0;
+std::mutex g_slot70_census_mutex;
+std::atomic<std::uint64_t> g_slot70_census_calls{0};
+std::atomic<std::uint64_t> g_slot70_census_non_buffer{0};
+std::atomic<std::uint64_t> g_slot70_census_dest32{0};
+std::atomic<std::uint64_t> g_slot70_census_dest16{0};
 
 // The buffer placements the proxy accepted at console slot 133 (CreatePlacedResourceX), recorded on success. The
 // slot-70 publication only names a block inside one of them: only a title range the layer registered has an arena
@@ -3271,11 +3308,111 @@ void slot70_summary(std::uint64_t calls) {
     // The matrix publication: what was written, and what was refused and why (counts only - no block bytes).
     std::fprintf(stderr,
                  "[rt] d3d12_xs: slot 70 publish: %llu matrix V# written, %llu refused (empty block pages), %llu "
-                 "refused (block outside a slot-133 range), %llu refused (block unreadable)\n",
+                 "refused (block outside a slot-133 range), %llu refused (block unreadable), %llu refused "
+                 "(texture-shaped description, no pinned T# encoding)\n",
                  static_cast<unsigned long long>(g_slot70_matrix_published.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(g_slot70_matrix_empty.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(g_slot70_matrix_unplaced.load(std::memory_order_relaxed)),
-                 static_cast<unsigned long long>(g_slot70_matrix_unreadable.load(std::memory_order_relaxed)));
+                 static_cast<unsigned long long>(g_slot70_matrix_unreadable.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(g_slot70_texture_refused.load(std::memory_order_relaxed)));
+}
+
+void slot70_census_note(const D3D12_RESOURCE_DESC* desc, bool desc_readable, const std::uint8_t* record,
+                        bool record_readable, std::uint64_t dest, std::uint64_t call) {
+    Slot70ShapeKey key;
+    if (desc_readable && desc) {
+        key.dimension = desc->Dimension;
+        key.width = desc->Width;
+        key.height = desc->Height;
+        key.format = static_cast<std::uint32_t>(desc->Format);
+        key.mip_levels = desc->MipLevels;
+        key.array_size = desc->DepthOrArraySize;
+    }
+    std::uint64_t block = 0;
+    if (record_readable && record) {
+        const std::uint64_t first = *reinterpret_cast<const std::uint64_t*>(record);
+        key.count = *reinterpret_cast<const std::uint32_t*>(record + 0x18);
+        key.declared = *reinterpret_cast<const std::uint32_t*>(record + 0x08);
+        key.format_word = *reinterpret_cast<const std::uint32_t*>(record + 0x30);
+        key.first_word_kind = first == 0x100000027ull ? 1u : (first == dest ? 2u : 0u);
+        block = *reinterpret_cast<const std::uint64_t*>(record + 0x28);
+    }
+    if (block && readable_range(reinterpret_cast<const void*>(block), 64)) {
+        const auto* words = reinterpret_cast<const std::uint32_t*>(block);
+        for (unsigned i = 0; i < 16; ++i) key.block_nonzero += words[i] != 0 ? 1u : 0u;
+    }
+    g_slot70_census_calls.fetch_add(1, std::memory_order_relaxed);
+    if (key.dimension != 1) g_slot70_census_non_buffer.fetch_add(1, std::memory_order_relaxed);
+    if ((dest & 31) == 0) g_slot70_census_dest32.fetch_add(1, std::memory_order_relaxed);
+    else if ((dest & 15) == 0) g_slot70_census_dest16.fetch_add(1, std::memory_order_relaxed);
+    const std::lock_guard lock(g_slot70_census_mutex);
+    for (unsigned i = 0; i < g_slot70_shape_count; ++i) {
+        Slot70ShapeKey& known = g_slot70_shapes[i];
+        if (known.dimension == key.dimension && known.width == key.width && known.height == key.height &&
+            known.format == key.format && known.mip_levels == key.mip_levels && known.array_size == key.array_size &&
+            known.count == key.count && known.declared == key.declared && known.format_word == key.format_word &&
+            known.first_word_kind == key.first_word_kind && known.block_nonzero == key.block_nonzero) {
+            ++known.calls;
+            return;
+        }
+    }
+    if (g_slot70_shape_count >= kSlot70Shapes) {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed))
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: slot 70 census: %u distinct shapes, the table is full; later shapes are "
+                         "folded into the call count\n",
+                         kSlot70Shapes);
+        return;
+    }
+    key.calls = 1;
+    g_slot70_shapes[g_slot70_shape_count] = key;
+    ++g_slot70_shape_count;
+    std::fprintf(stderr,
+                 "[rt] d3d12_xs: slot 70 census: shape #%u: desc dim=%u width=0x%llx height=0x%x format=0x%x mips=0x%x "
+                 "array=0x%x; record count=0x%x declared=0x%x format_word=0x%x first_word_kind=%u block_nonzero=%u "
+                 "(call %llu)\n",
+                 g_slot70_shape_count, key.dimension, static_cast<unsigned long long>(key.width), key.height, key.format,
+                 key.mip_levels, key.array_size, key.count, key.declared, key.format_word, key.first_word_kind,
+                 key.block_nonzero, static_cast<unsigned long long>(call));
+}
+
+void slot70_census_summary(std::uint64_t calls) {
+    const std::lock_guard lock(g_slot70_census_mutex);
+    std::fprintf(stderr,
+                 "[rt] d3d12_xs: slot 70 census: %llu call(s), %u distinct shape(s), %llu non-buffer desc(s), "
+                 "destinations %llu 32-byte-aligned / %llu 16-byte-aligned\n",
+                 static_cast<unsigned long long>(calls), g_slot70_shape_count,
+                 static_cast<unsigned long long>(g_slot70_census_non_buffer.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(g_slot70_census_dest32.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(g_slot70_census_dest16.load(std::memory_order_relaxed)));
+    // The distinct format words with how many calls and how many distinct shapes carry each: a T#-shaped console format
+    // word would show here next to the buffer ones.
+    struct FormatWordHistogram {
+        std::uint32_t word = 0;
+        std::uint64_t calls = 0;
+        unsigned shapes = 0;
+    } histogram[16] = {};
+    unsigned used = 0;
+    for (unsigned i = 0; i < g_slot70_shape_count; ++i) {
+        unsigned at = used;
+        for (unsigned h = 0; h < used; ++h)
+            if (histogram[h].word == g_slot70_shapes[i].format_word) at = h;
+        if (at == used) {
+            if (used == std::size(histogram)) continue;
+            histogram[used].word = g_slot70_shapes[i].format_word;
+            ++used;
+        }
+        histogram[at].calls += g_slot70_shapes[i].calls;
+        ++histogram[at].shapes;
+    }
+    char line[512];
+    int at = std::snprintf(line, sizeof line, "[rt] d3d12_xs: slot 70 census: format words:");
+    for (unsigned h = 0; h < used && at > 0 && static_cast<std::size_t>(at) < sizeof line - 64; ++h)
+        at += std::snprintf(line + at, sizeof line - static_cast<std::size_t>(at), " 0x%x (%llu call(s), %u shape(s))",
+                            histogram[h].word, static_cast<unsigned long long>(histogram[h].calls),
+                            histogram[h].shapes);
+    std::fprintf(stderr, "%s\n", line);
 }
 
 std::uint64_t proxy_console_slot70(DeviceProxy* self, std::uint64_t caller, std::uint64_t a1, std::uint64_t a2,
@@ -3342,7 +3479,14 @@ std::uint64_t proxy_console_slot70(DeviceProxy* self, std::uint64_t caller, std:
                                                              : 0));
         }
     }
-    if (call % 4096 == 0) slot70_summary(call);
+    if (slot70_census_enabled() && readable_range(reinterpret_cast<const void*>(a2), 0x40))
+        slot70_census_note(resource, desc_readable, reinterpret_cast<const std::uint8_t*>(a2), true, a3, call);
+    else if (slot70_census_enabled())
+        slot70_census_note(resource, desc_readable, nullptr, false, a3, call);
+    if (call % 4096 == 0) {
+        slot70_summary(call);
+        if (slot70_census_enabled()) slot70_census_summary(call);
+    }
 
     // The measured shape: a readable buffer description, a readable view record with a nonzero address and size, and a
     // 32-byte-aligned writable destination slot. Anything else is not this call and is refused rather than guessed.
@@ -3423,6 +3567,23 @@ std::uint64_t proxy_console_slot70(DeviceProxy* self, std::uint64_t caller, std:
             }
             return hr_to_u64(S_OK);
         }
+    }
+
+    // A texture-shaped description is where the sampled-T# question lives (docs/device_slot70.md section 6). The census
+    // measured 60 such calls at the startup wrapper site with the record's format word 0 and its declared size constant,
+    // and no dimension matching the sampled images; nothing in the record pins a T# encoding, so writing one would be a
+    // guess. Refuse by name and keep the measured refusal.
+    if (publish && desc_readable && resource->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) {
+        g_slot70_texture_refused.fetch_add(1, std::memory_order_relaxed);
+        if (!g_slot70_texture_logged.exchange(true, std::memory_order_relaxed))
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: slot 70 publish: a texture-shaped description (dimension=%u width=0x%llx "
+                         "height=0x%x format=0x%x mips=0x%x array=0x%x) is not pinned to a T# encoding; refusing "
+                         "instead of writing a T# (the record's format word and size are the same as the buffer calls')\n",
+                         static_cast<unsigned>(resource->Dimension),
+                         static_cast<unsigned long long>(resource->Width), static_cast<unsigned>(resource->Height),
+                         static_cast<unsigned>(resource->Format), static_cast<unsigned>(resource->MipLevels),
+                         static_cast<unsigned>(resource->DepthOrArraySize));
     }
 
     const bool shaped = buffer_desc && view_readable && view->BufferLocation && view->SizeInBytes && dest_readable;

@@ -226,13 +226,60 @@ A diagnostic detail worth keeping: the first acceptance attempt published **0 ti
 (16-byte alignment, 16-byte V# write), not the other way round.
 
 
-## 6. What is modelled now, and what is not
+## 6. The shape census: slot 70 is a generic publication, and it is not the sampled-T# producer
+
+`PALMETTO_SLOT70_CENSUS=1` keeps a bounded census of the call shapes (distinct shape <= 64, one line per new shape, a
+summary every 4096 calls): the resource description's dimension/width/height/format/mips/array, the record's element
+count/declared size/format word, the kind of its first word, how many of the block's first 16 dwords are non-zero, and the
+destination's alignment. Measured in two 150 s boots (`boot-slot70-census` with the PS control, `boot-slot70-census2`
+without it), 12,288 calls each:
+
+| measured | value |
+|---|---|
+| distinct shapes | **34-35** |
+| per-frame dominant site (`game+0x4D9F369`) | **12,214 calls, exactly one shape**: desc dim 1 (BUFFER) width 0x80, record count 0x20, declared 0x1688, format word 0x16, first word 0x100000027 - the matrix publication |
+| startup wrapper site (`game+0x4ECC821`) | **74 calls, 34-35 shapes**: buffers of width 0x80/0xa0/0xc0/0x140/0x21c/0x300/0x800/0x1800/0x4b000/0xae00000, and **texture descriptions**: dim 2 (TEXTURE1D) 0x80x1 fmt 0x41 and 0x100x1 fmt 0x1d; dim 3 (TEXTURE2D) 0x1x1 fmt 0x1c/0x1e/0x29 with arrays 1/2/6/12, 0x100x0x80 fmt 0x3d, 0x500x0x2d0 fmt 0x43, 0x80x0x48 fmt 0x29 mips 7; dim 4 (TEXTURE3D) 0x1x1 fmt 0x1c |
+| non-buffer descriptions | **60 calls** (all at the wrapper site) |
+| record format word (`+0x30`) | **0x0 for all 74 wrapper calls**, 0x16 only for the per-frame matrix shape |
+| record declared size (`+0x08`) | **0x1688 for every shape** (buffer and texture), i.e. not the texture's byte size |
+| destinations | wrapper site: the **console descriptor heap** page (offsets from its start, e.g. 0x220); dominant site: one host staging-heap page in a ring; all 32-byte aligned in these two boots (one earlier boot had a 16-byte-aligned ring base) |
+
+**Decision.** The publication stays buffer-only. A texture-shaped record is refused by name, once logged, and counted (60
+per boot): `a texture-shaped description (dimension=3 width=0x100 height=0x80 format=0x3d ...) is not pinned to a T#
+encoding; refusing instead of writing a T#`. The reasons are the measured ones: the record carries no texture type,
+format or dimensions (its format word is 0 for every texture call and its declared size is the same constant as the buffer
+calls), so what the block contains - the texture's texels or a pre-encoded descriptor - is not pinned; the console's T#
+encoding is not in any measured field; and writing a T# from that would be a guess. The offline call sites agree where
+they can: both instantiations build a `D3D12_RESOURCE_DESC` with `Dimension = BUFFER` (the constant `1` at `[rsp+0x60]`)
+and the texture shapes arrive through the wrapper, which only forwards its caller's three records - the type comes from
+the caller, not from anything the device sees.
+
+**Why this is the negative for the sampled-T# question.** The armed draw's sampled images are not among the census
+shapes: sampled T# key 1 resolves to a **3840x2160 format-37** image over a title VA (a placed texture created through
+console slot 133), and the census' widest texture is 1280x720; sampled key 5 is **unresolved** by the layer's image set.
+So slot 70 did not publish the sampled descriptors measured in the window, and the sampled content gap is not a slot-70
+descriptor gap.
+
+**Colour-path numbers of this increment** (same binary, matrix publication on, 150 s each):
+
+| boot | PS-control readback | display readback | colour path line |
+|---|---|---|---|
+| `boot-slot70-census` (PS control on) | mean 23 115 172, non-black **11,776/16,384**, peak 240 | not produced (the control takes the one-shot readback) | `ps present, 6 image sample(s) -> the PS reads sampled images; non-zero push constants s0/s1 (table pair), s8 (table VA) - 3 of 32` |
+| `boot-slot70-census2` (plain + sample) | - | mean **0 0 0, non-black 0/16384**, peak 0; write control 16,384/16,384 | `ps present, 0 image sample(s) -> constant-output path` (this boot's armed draw); framecap's same-binary plain boot has the 6-sample PS: sampled key 1 reads back all-black, key 5 unresolved |
+
+Acceptance on the colour axis is therefore **not met**: the sampled/display axis is still black, and this increment's
+measurement says the reason is not a missing slot-70 T#. The next producer is the **page producer of the placed 4K
+texture**: its title pages are never written in the window (framecap's page-writer watch), which is the same negative
+`docs/streamed_consumer.md` and `docs/texture_source.md` reached from the other side, and sampled key 5 needs a layer
+image in set 0 before it can be read at all.
+
+## 7. What is modelled now, and what is not
 
 **Modelled:** the call's shape, arity and ABI (three words; third published with `clwb`); both call sites; the argument
 records and destination kinds measured; the measured refusal as the default; an opt-in probe that dumps the arguments,
 records, destination bytes and per-heap destination statistics; the falsified CBV conversion behind its own switch; the
 matrix publication over the record's block behind `PALMETTO_SLOT70_PUBLISH=1`, with the placement/readability/emptiness
-refusals; and a shape test that refuses anything that is not the measured call instead of guessing.
+refusals; a bounded shape census (`PALMETTO_SLOT70_CENSUS=1`) that measured the 34-35 shapes above; the named refusal of texture-shaped records (no pinned T# encoding); and a shape test that refuses anything that is not the measured call instead of guessing.
 
 **Not modelled / still open:** the record's other fields are measured but not interpreted (the first word differs between
 the two sites - `0x100000027` at the wrapper site, the destination address at the dominant site - and its writer is not
@@ -240,7 +287,7 @@ explained; the resource description in `arg1` is not used by the publication, an
 publication writes the matrix view; whether the title then copies that descriptor into the table slot its draw names is
 what the measured boot below decides.
 
-## 7. Gates, files and the next falsifier
+## 8. Gates, files and the next falsifier
 
 Gates on the final tree: `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT`;
 `xs_proxy_mock_test` -> `PASS`, whose `check_slot70_console_view` covers the falsified conversion's hand-off, the matrix
@@ -253,7 +300,8 @@ Files: `port/shims/d3d12_xs_device.cpp` (the slot-70 handler, its probe, the fal
 publication; the slot-133 placement registry), `port/test/xs_proxy_mock_test.cpp` (the mock's `CreateConstantBufferView`
 record and `check_slot70_console_view`), this page. Evidence boots under `D:\leonida-work\`: `boot-slot70-probe` (probe,
 140 s, ALIVE), `boot-slot70-cbv` (conversion, stopped at 29.5 s), `boot-slot70-final` (default path, 100 s, ALIVE), and
-`boot-slot70-publish3` (publication + acceptance, 150 s, ALIVE), `boot-slot70-publish2` (publication with the vertex-stream switch off, 150 s, ALIVE) and `boot-slot70-publish` (first publication boot, 150 s, ALIVE).
+`boot-slot70-publish3` (publication + acceptance, 150 s, ALIVE), `boot-slot70-publish2` (publication with the vertex-stream switch off, 150 s, ALIVE) and `boot-slot70-publish` (first publication boot, 150 s, ALIVE). The shape census and colour-path measurements are `boot-slot70-census` (PS control, 150 s, ALIVE) and
+`boot-slot70-census2` (plain + sampled readback, 150 s, ALIVE).
 
 **Next falsifier.** The publication's acceptance is the PS-control readback changing from black: with the matrix A view
 published, the armed draw's `s8+0` fetch slot must decode as a matrix V# and the solid-pixel control must produce colour.

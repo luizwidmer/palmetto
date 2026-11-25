@@ -2289,6 +2289,23 @@ int check_slot70_console_view() {
         std::memcpy(matrix_record + 0x28, &block, sizeof(block));
         EXPECT(hr_of(raw(device, 70, word(&resource), word(matrix_record), word(published_dest))) == E_NOTIMPL);
 
+        // A non-buffer resource description is not the measured buffer publication either: the census measured only
+        // BUFFER descriptions at this slot, so a texture-shaped record is refused rather than guessed into a V#/T#.
+        {
+            const std::uint32_t count_ok = 0x20;
+            std::memcpy(matrix_record + 0x18, &count_ok, sizeof(count_ok));
+            D3D12_RESOURCE_DESC texture_desc{};
+            texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            texture_desc.Width = 0x100;
+            texture_desc.Height = 0x100;
+            texture_desc.DepthOrArraySize = texture_desc.MipLevels = 1;
+            texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            texture_desc.SampleDesc.Count = 1;
+            alignas(32) std::uint32_t texture_dest[8] = {};
+            EXPECT(hr_of(raw(device, 70, word(&texture_desc), word(matrix_record), word(texture_dest))) == E_NOTIMPL);
+            EXPECT(texture_dest[0] == 0 && texture_dest[1] == 0 && texture_dest[2] == 0 && texture_dest[3] == 0);
+        }
+
         xs::set_placed_at_va_handler(nullptr);
     }
 
@@ -2296,8 +2313,8 @@ int check_slot70_console_view() {
     std::printf("%s: console slot 70 covers the measured descriptor publication - PALMETTO_SLOT70_CBV=1 still hands "
                 "the PC CreateConstantBufferView the measured view and destination, PALMETTO_SLOT70_PUBLISH=1 writes "
                 "the MATRIX V# (base = the placed block, stride 0, declared size, raw 0x30000FAC) over a block inside a "
-                "buffer placed through console slot 133, and a block outside the placed ranges, an empty block and a "
-                "record whose element count is not 0x20 are refused\n", g_label);
+                "buffer placed through console slot 133, and a block outside the placed ranges, an empty block, a "
+                "record whose element count is not 0x20 and a texture-shaped resource description are refused\n", g_label);
     return 0;
 }
 
@@ -2319,6 +2336,7 @@ int main(int argc, char** argv) {
     // the runner starts with no slot-70 switch set.
     EXPECT(::SetEnvironmentVariableA("PALMETTO_SLOT70_CBV", "1") != FALSE);
     EXPECT(::SetEnvironmentVariableA("PALMETTO_SLOT70_PUBLISH", "1") != FALSE);
+    EXPECT(::SetEnvironmentVariableA("PALMETTO_SLOT70_CENSUS", "1") != FALSE);
     if (check_tail(true) || check_queue_console_slots() || check_levels() || check_fence1() ||
         check_create_failures() || check_open_shared() || check_alloc_failures() || check_allocators() ||
         check_xbox_slots() || check_console_command_list() || check_slot57_graphics_record() ||
