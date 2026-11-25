@@ -1078,9 +1078,45 @@ int check_allocators() {
         EXPECT(xs::is_allocator_proxy(allocator) && word(xs::allocator_proxy_real_allocator(allocator)) == word(real));
         EXPECT(mock->args[9][0] == D3D12_COMMAND_LIST_TYPE_DIRECT && real->refs == 1);
         EXPECT(xs::allocator_proxy_slot_count(allocator) == 9 && xs::device_proxy_ref_count(device) == device_refs + 1);
-        // Reset (slot 8) reaches the real allocator; every slot past it up to the table end is refused.
+        // Reset (slot 8) reaches the real allocator. Console slot 9 is the callback registration: the pair is recorded
+        // on the proxy and the call answers S_OK without reaching the real allocator's vtable; a later pair replaces it,
+        // zeros clear it, the record is per proxy, and every slot past 9 up to the table end is refused.
         EXPECT(hr_of(raw(allocator, 8)) == S_OK && real->calls[8] == 1);
-        for (unsigned slot = 9; slot < xs::allocator_proxy_table_size(); ++slot)
+        EXPECT(xs::allocator_proxy_callback(allocator).callback == 0 &&
+               xs::allocator_proxy_callback(allocator).context == 0);
+        EXPECT(xs::allocator_proxy_callback(nullptr).callback == 0 &&
+               xs::allocator_proxy_callback(device).context == 0);
+        constexpr std::uintptr_t cb = 0x12345678u;
+        constexpr std::uintptr_t ctx = 0x9abcdef0u;
+        const std::uint64_t slot9_hits = xs::allocator_slot_hits(9);
+        EXPECT(hr_of(raw(allocator, 9, cb, ctx, 0xdead, 0xbeef)) == S_OK && real->calls[9] == 0);
+        EXPECT(xs::allocator_slot_hits(9) == slot9_hits + 1 && xs::allocator_slot_first_call_seen(9));
+        xs::AllocatorCallback record = xs::allocator_proxy_callback(allocator);
+        EXPECT(record.callback == cb && record.context == ctx);
+        EXPECT(hr_of(raw(allocator, 9, 0x2222, 0x3333)) == S_OK && real->calls[9] == 0);
+        record = xs::allocator_proxy_callback(allocator);
+        EXPECT(record.callback == 0x2222 && record.context == 0x3333);
+        EXPECT(hr_of(raw(allocator, 9, 0, 0)) == S_OK && real->calls[9] == 0);
+        record = xs::allocator_proxy_callback(allocator);
+        EXPECT(record.callback == 0 && record.context == 0);
+        // A second allocator proxy keeps its own record; the first one is unchanged, and releasing a proxy drops its
+        // record (the next proxy created starts empty rather than inheriting static state).
+        void* other_allocator = nullptr;
+        EXPECT(hr_of(raw(device, 9, 0, word(&allocator_iid), word(&other_allocator))) == S_OK);
+        Mock* const other_real = mock->last_child;
+        EXPECT(xs::is_allocator_proxy(other_allocator) && other_real && other_real->calls[9] == 0);
+        EXPECT(xs::allocator_proxy_callback(other_allocator).callback == 0);
+        EXPECT(hr_of(raw(other_allocator, 9, 0x4444, 0x5555)) == S_OK);
+        record = xs::allocator_proxy_callback(other_allocator);
+        EXPECT(record.callback == 0x4444 && record.context == 0x5555);
+        EXPECT(xs::allocator_proxy_callback(allocator).callback == 0);
+        EXPECT(release(other_allocator) == 0 && other_real->refs == 0);
+        void* reused = nullptr;
+        EXPECT(hr_of(raw(device, 9, 0, word(&allocator_iid), word(&reused))) == S_OK);
+        EXPECT(xs::is_allocator_proxy(reused) && xs::allocator_proxy_callback(reused).callback == 0 &&
+               xs::allocator_proxy_callback(reused).context == 0);
+        EXPECT(release(reused) == 0 && mock->last_child->refs == 0);
+        for (unsigned slot = 10; slot < xs::allocator_proxy_table_size(); ++slot)
             EXPECT(hr_of(raw(allocator, slot)) == E_NOTIMPL && real->calls[slot] == 0);
         // The tag and the real object stay hidden: QueryInterface answers only the modelled interfaces.
         void* found = reinterpret_cast<void*>(1);
@@ -1135,8 +1171,9 @@ int check_allocators() {
         EXPECT(mock->last_child->refs == 0);
         EXPECT(release(device) == 0 && mock->refs == 0);
     }
-    std::printf("%s: allocators answering Palmetto's tag are wrapped (Reset forwarded, tail refused, residency "
-                "unwrapped, references balanced); others come back unwrapped; failures leave no reference\n", g_label);
+    std::printf("%s: allocators answering Palmetto's tag are wrapped (Reset forwarded, console slot 9's callback "
+                "recorded and answered S_OK, tail refused, residency unwrapped, references balanced); others come back "
+                "unwrapped; failures leave no reference\n", g_label);
     return 0;
 }
 

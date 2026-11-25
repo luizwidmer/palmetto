@@ -1099,10 +1099,11 @@ HRESULT create_heap_proxy(ID3D12DescriptorHeap* real, DeviceProxy* device, REFII
 // the title. Palmetto's own code reaches the real object through queue_proxy_real_queue / fence_proxy_real_fence /
 // allocator_proxy_real_allocator.
 //
-// Command allocators (device slot 9) are the third kind: their public chain is 9 slots (Reset at 8). Slot 9 wraps
-// only an allocator that answers kPalmettoCommandAllocatorTag, because a list takes the title's allocator in
-// CreateCommandList and Reset and only the Vulkan layer's lists resolve a proxy there (CommandAllocator::from);
-// a PC runtime allocator is handed out unchanged until a command-list proxy unwraps it at Reset.
+// Command allocators (device slot 9) are the third kind: their public PC chain is 8 slots (the base chain and Reset at
+// 8), and console slot 9 is the allocator-callback registration (docs/allocator_slot9.md). Device slot 9 wraps only an
+// allocator that answers kPalmettoCommandAllocatorTag, because a list takes the title's allocator in CreateCommandList
+// and Reset and only the Vulkan layer's lists resolve a proxy there (CommandAllocator::from); a PC runtime allocator is
+// handed out unchanged until a command-list proxy unwraps it at Reset.
 
 enum class ChildKind { queue, fence, allocator };
 
@@ -1112,11 +1113,12 @@ constexpr unsigned kQueuePublicSlots = 19;   // ID3D12CommandQueue
 constexpr unsigned kQueueGetDesc = 18;           // the one queue method that returns a struct by value
 constexpr unsigned kFencePublicSlots = 11;   // ID3D12Fence
 constexpr unsigned kFence1PublicSlots = 12;  // ID3D12Fence1
-constexpr unsigned kAllocatorSlots = 64;     // the table: 9 public slots plus a refused tail
-constexpr unsigned kAllocatorPublicSlots = 9;  // ID3D12CommandAllocator: the base chain and Reset (slot 8)
+constexpr unsigned kAllocatorSlots = 64;     // the table: 9 public slots, console slot 9, plus a refused tail
+constexpr unsigned kAllocatorPublicSlots = 9;  // ID3D12CommandAllocator: the base chain and Reset (slot 8), a count
+constexpr unsigned kConsoleAllocatorCallbackSlot = 9;  // past the PC chain: the callback registration (callback, context)
 constexpr SIZE_T kTableRegion = 64 * 1024;   // one allocation granule: the table page plus 15 never-committed pages
 static_assert(kQueueSlots > kQueuePublicSlots && kFenceSlots > kFence1PublicSlots &&
-                  kAllocatorSlots > kAllocatorPublicSlots,
+                  kAllocatorSlots > kConsoleAllocatorCallbackSlot,
               "the tables need a tail");
 static_assert(kQueueSlots * sizeof(void*) <= 4096 && kFenceSlots * sizeof(void*) <= 4096 &&
                   kAllocatorSlots * sizeof(void*) <= 4096,
@@ -1146,6 +1148,11 @@ struct ChildProxy {
     // moves it can be dispatched after the proxy is released; empty on a queue or allocator proxy.
     std::shared_ptr<std::atomic<std::uint64_t>> value_cell;
     std::atomic<std::uint64_t> watched_target{0};  // highest value a watcher was asked for
+    // Allocators only: the pair console slot 9 registered (docs/allocator_slot9.md). The context is written before the
+    // callback, so a reader that sees a callback sees the context registered with it; on replacement a reader may pair
+    // the new callback with the previous context, which is documented and read by nothing in the runtime.
+    std::atomic<std::uintptr_t> console_callback{0};
+    std::atomic<std::uintptr_t> console_callback_context{0};
 };
 
 // ---- Console fence slot 12 (docs/fence_slot12.md) ----
@@ -1236,6 +1243,7 @@ const char* child_public_name(unsigned slot) {
         if (slot < kFence1PublicSlots) return fence[slot - 8];
     } else {
         if (slot == 8) return "Reset";
+        if (slot == kConsoleAllocatorCallbackSlot) return "SetAllocatorCallbackX";
     }
     return nullptr;
 }
@@ -1276,6 +1284,21 @@ void note_child_slot(unsigned slot) {
         std::fprintf(stderr, "[rt] d3d12_xs: %s slot %u (%s) call\n", child_kind_name<K>(), slot,
                      method ? method : "past the public chain");
     }
+}
+
+// Console allocator slot 9 (docs/allocator_slot9.md): record the pair the title just registered. This title registers on
+// the allocator it is about to use, once per presented frame (tens of thousands over a long boot), so only the first call
+// is logged; with XS_TRACE every call gets the usual per-slot line from note_child_slot.
+void record_console_allocator_callback(ChildProxy* self, std::uint64_t callback, std::uint64_t context) {
+    self->console_callback_context.store(static_cast<std::uintptr_t>(context), std::memory_order_relaxed);
+    self->console_callback.store(static_cast<std::uintptr_t>(callback), std::memory_order_release);
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true, std::memory_order_relaxed))
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: allocator slot %u (SetAllocatorCallbackX) recorded callback 0x%llx context 0x%llx; "
+                     "recorded on the proxy and never invoked (this line once)\n",
+                     kConsoleAllocatorCallbackSlot, static_cast<unsigned long long>(callback),
+                     static_cast<unsigned long long>(context));
 }
 
 // The counters reset_device_proxy_stats clears for one kind: per-slot hits, first-call and beyond-table flags, and
@@ -3125,6 +3148,18 @@ std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_
                          static_cast<unsigned long long>(a1), reinterpret_cast<void*>(array),
                          static_cast<unsigned long long>(a3));
         d3d12_trace::record(child_trace_name<K>(Slot));
+        return hr_to_u64(S_OK);
+    } else if constexpr (K == ChildKind::allocator && Slot == kConsoleAllocatorCallbackSlot) {
+        // Console allocator slot 9, the callback registration (docs/allocator_slot9.md). Measured on this title from
+        // game+0x188501: the caller passes (callback in RDX, context in R8) on the allocator it is about to use - once
+        // per presented frame on this title - and ignores the answer: the instructions after the return overwrite RAX
+        // before anything tests it. The console runtime would call the callback when it needs the allocator's recording
+        // memory; our command lists own that memory in the Vulkan layer, so there is nothing for a title callback to
+        // provide. The pair is recorded on this proxy and the call answers S_OK; the callback is never invoked and the
+        // real allocator is never addressed (its slot 9 is not this method). Slots 10+ keep the measured refusal below.
+        note_child_slot<K>(Slot);
+        d3d12_trace::record(child_trace_name<K>(Slot));
+        record_console_allocator_callback(self, a1, a2);
         return hr_to_u64(S_OK);
     } else if constexpr (K == ChildKind::fence && Slot == kConsoleFenceValueAddress) {
         // Console fence slot 12. The measured caller is the title's wait loop (docs/fence_slot12.md): it calls
@@ -6563,6 +6598,15 @@ unsigned fence_proxy_table_size() { return kFenceSlots; }
 unsigned allocator_proxy_table_size() { return kAllocatorSlots; }
 unsigned allocator_proxy_slot_count(const void* allocator) {
     return is_allocator_proxy(allocator) ? static_cast<const ChildProxy*>(allocator)->slot_count : 0;
+}
+
+AllocatorCallback allocator_proxy_callback(const void* allocator) {
+    AllocatorCallback record;
+    if (!is_allocator_proxy(allocator)) return record;
+    const auto* const proxy = static_cast<const ChildProxy*>(allocator);
+    record.callback = proxy->console_callback.load(std::memory_order_acquire);
+    if (record.callback) record.context = proxy->console_callback_context.load(std::memory_order_acquire);
+    return record;
 }
 
 unsigned long command_object_proxy_ref_count(const void* object) {

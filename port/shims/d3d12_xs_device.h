@@ -162,13 +162,17 @@ std::uint64_t fence_table_overruns();
 // or the fault logger failed).
 bool command_object_tables_guarded();
 
-// Command allocator proxies (device slot 9): the public chain (9 slots: the base chain and Reset) is forwarded, a
-// slot past it up to the end of the table (64 slots) is logged and refused with E_NOTIMPL, and a read past the
-// table faults in a guard region, as for queues and fences. The console allocator's extra methods are not
-// measured and not guessed. Slot 9 wraps only an allocator that answers kPalmettoCommandAllocatorTag, Palmetto's
-// own Vulkan-layer allocator: its command lists resolve the proxy (CreateCommandList, Reset). A PC runtime
-// allocator goes back unchanged, because the PC runtime's lists would take a proxy for their own allocator; a
-// command-list proxy that unwraps at Reset is what lets the host backend wrap allocators too.
+// Command allocator proxies (device slot 9): the public PC chain (8 slots, Reset at slot 8) is forwarded. Console
+// slot 9 is the allocator-callback registration (docs/allocator_slot9.md): the title calls it (callback, context) on
+// the allocator it is about to use - once per presented frame on this title - and ignores the answer; on the console
+// that callback is what the runtime would invoke when it backs the allocator's recording memory. Our Vulkan layer owns
+// that memory itself, so the proxy records the pair on the proxy (lifetime: the proxy's) and answers S_OK without
+// invoking the callback or addressing the real allocator. Slots 10..63 are logged and refused with E_NOTIMPL, and a
+// read past the table faults in a guard region, as for queues and fences. Device slot 9 wraps only an allocator that
+// answers kPalmettoCommandAllocatorTag, Palmetto's own Vulkan-layer allocator: its command lists resolve the proxy
+// (CreateCommandList, Reset). A PC runtime allocator goes back unchanged, because the PC runtime's lists would take a
+// proxy for their own allocator; a command-list proxy that unwraps at Reset is what lets the host backend wrap
+// allocators too.
 // {7d0e6b51-34a2-4f0c-9a61-0c5b2e8f4a10}: the Vulkan layer's CommandAllocator answers it with its implementation.
 inline constexpr GUID kPalmettoCommandAllocatorTag{
     0x7d0e6b51, 0x34a2, 0x4f0c, {0x9a, 0x61, 0x0c, 0x5b, 0x2e, 0x8f, 0x4a, 0x10}};
@@ -177,6 +181,15 @@ bool is_allocator_proxy(const void* allocator);
 ID3D12CommandAllocator* allocator_proxy_real_allocator(const void* allocator);
 unsigned allocator_proxy_slot_count(const void* allocator);
 unsigned allocator_proxy_table_size();
+// What console allocator slot 9 registered on one proxy: {0, 0} when the slot was never called on this proxy, when the
+// last call passed zeros, or when `allocator` is not an allocator proxy. A later call replaces the pair. One title thread
+// registers per allocator, so a concurrent registration and read can at worst pair a new callback with the previous
+// context; nothing in the runtime reads the pair, it is a record for tests and diagnostics.
+struct AllocatorCallback {
+    std::uintptr_t callback = 0;
+    std::uintptr_t context = 0;
+};
+AllocatorCallback allocator_proxy_callback(const void* allocator);
 std::uint64_t allocator_slot_hits(unsigned slot);
 bool allocator_slot_first_call_seen(unsigned slot);
 std::uint64_t allocator_table_overruns();
