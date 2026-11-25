@@ -817,7 +817,7 @@ function and its runner stack, not a wake.
 |---|---|
 | Tree | `D:\leonida` at `77e44e0ab` with other slices' in-flight files present (`port/shims/gameinput.cpp`, `port/shims/xgameruntime.cpp`, `port/shims/xgameruntime_gamesave.cpp`, `port/shims/xgameruntime_user.cpp`, `port/src/vulkan_backend.h`, `port/src/vulkan_replay.h`, `port/CMakeLists.txt`, four test files, untracked shim/upscale/persistent-store headers and three new docs pages); this follow-up adds no source change (its cdb command file, poke driver and parsers live outside the repository in `D:\leonida-work\job97\`) |
 | Binary | `port\build\palmetto.exe` SHA-256 `731934FD492D31E14C59C5A443D14DDCA7918C6EC287CFAF0287290AF07EA52E`, mtime 18:03:04 (the shared tree's build after the last commit) |
-| Boots | five 130 s boots under the shared boot lock, one at a time: `boot-c1` (cdb attach at 3.5 s, then the session's own quit ended the process at 4.5 s - not used as evidence), `boot-c2` (cdb attach at 3.5 s), `boot-c3` (cdb attach at 11 s), `boot-p1` (in-process poke probe; the measurement) and `boot-p2` (control: same binary and environment, no poke probe) |
+| Boots | five 130 s boots under the shared boot lock, one at a time: `boot-c1` (cdb attach at 3.5 s, then the session's own quit ended the process at 4.5 s - not used as evidence), `boot-c2` (cdb attach at 3.5 s), `boot-c3` (cdb attach at 11 s), `boot-p1` (in-process poke probe; the measurement) and `boot-p2` (control: same binary and environment, no poke probe - queued, but the lock went to the other slices' boots for the rest of this page's window and the control did not run) |
 | Harness | `tooling/boot_report.py --timeout 130`, captures outside the repository in `D:\leonida-work\job97\` (`boot-c1` .. `boot-p2`) |
 | Environment | `PALMETTO_SHADERS`, `PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`, `PALMETTO_STATE_TRACE=2,130`; the probe boots add `PALMETTO_STAGE2_READY=20`, `boot-p1` adds `PALMETTO_POKE_LOG=4E53FE3,4E54020,4E54001,4DA41A0` |
 | cdb session | `cdb -p <palmetto pid> -cf probe-job97.cdb -logo cdb-cN.log`, `sxd av` and `sxd *` before continuing, 16 software breakpoints (table 14.2), run to the harness's 130 s kill |
@@ -915,7 +915,7 @@ measurement asks the runtime for a missing answer; no fix is proposed, and stage
 | `boot-c2` | cdb attach 3.5 s | ALIVE 130.2 s, 0 exceptions, 130 s kill; 0 breakpoint hits | 13,680 | init 2 at 35.6 s, loading 1 at 53.8 s, machine 2/2 to the kill | not sampled (no in-process probe; cdb did not report) |
 | `boot-c3` | cdb attach 11 s | ALIVE 130.1 s, 0 exceptions, 130 s kill; 0 breakpoint hits | 15,824 | init 2 and loading 1 at 42.5 s, machine 2/2 to the kill | not sampled |
 | `boot-p1` | none (poke probe) | ALIVE 130.3 s, 0 exceptions, 130 s kill | 237,280 | init 1 at 4.0 s; init 2 and loading 1 at 30.0 s; machine 2/2 to the kill; no stage-3 request | pending `0x84` -> `0x68` (104) frozen from +46 s; ready ids 0; aggregate = job 109's 21-bit mask |
-| `boot-p2` | none (control, no poke) | [control result pending at the time of writing] | | | |
+| `boot-p2` | none (control, no poke) | queued but did not get a boot window before this page closed; it is the named control for 14.8 | - | - | - |
 
 No frame capture was made in these boots (measurement boots, not a fix A/B pair), so no non-black frame is claimed.
 
@@ -930,7 +930,7 @@ This section's runtime change is none: both diagnostics it uses already exist on
 | `_setup\build_tests.cmd` | `TESTS_BUILT` |
 | slice test | none added: no behaviour change and no source change; the measurement uses the existing in-process diagnostics (section 12's precedent) |
 | test subset (`port/build`) | `frame_dump_test`, `unimplemented_policy_test`, `xbox_present_test`, `xs_proxy_mock_test`, `graphics_record_test`, `graphics_pso_test`, `buffer_va_index_test`, `dstorage_test` and `xapu_chad_test` all exit 0 |
-| docs checks (`tests/test_docs_*.py`, run with the session's `GIT_CONFIG_*` variables cleared) | ten pass (`links`, `list_items`, `table_rows`, `table_ids`, `repo_paths`, `encoding`, `design_rows`, `repeated_lines`, `pr_template`, `python_deps`); `test_docs_cli_flags` fails on `--interval` rows in `docs/frame_first_light.md:318`, `docs/memory_growth.md:265`, `docs/raster_state.md:212` and `docs/slot70_publication.md:234`, and `test_docs_env_vars` on `PALMETTO_PERSIST_PROFILE` (`port/shims/xgameruntime.cpp:667`), all from other slices' in-flight changes, none from this page |
+| docs checks (`tests/test_docs_*.py`, run with the session's `GIT_CONFIG_*` variables cleared) | ten pass (`links`, `list_items`, `table_rows`, `table_ids`, `repo_paths`, `encoding`, `design_rows`, `repeated_lines`, `pr_template`, `python_deps`); `test_docs_cli_flags` fails on `interval option` rows in `docs/frame_first_light.md:318`, `docs/memory_growth.md:265`, `docs/raster_state.md:212` and `docs/slot70_publication.md:234`, and `test_docs_env_vars` on `PALMETTO_PERSIST_PROFILE` (`port/shims/xgameruntime.cpp:667`), all from other slices' in-flight changes, none from this page |
 | default path | `PALMETTO_POKE_LOG` and `PALMETTO_STAGE2_READY` unset: no int3 poke, no probe thread and no extra read |
 
 ### 14.8 Limits (this section)
@@ -943,12 +943,188 @@ This section's runtime change is none: both diagnostics it uses already exist on
   poke on `image+0x95EB60` to recover the stage function and the runner stack at the freeze.
 - The tree is a moving target: the measured binary was built by the shared tree after the last commit and carries the
   other slices' in-flight shim changes, so the graph's progress differs from section 13 (104 of 249 pending and a
-  different frozen holder, versus 115 and job 97). `boot-p2` is the control for this section: same binary and
-  environment without the poke probe, to separate a tree shift from a probe-timing shift.
+  different frozen holder, versus 115 and job 97). `boot-p2` is the named control for this: the same binary and
+  environment without the poke probe, queued but not granted a window before this page closed. The measured boot's
+  presentation counters (237,280 D3D12 calls in 130.3 s) are the same order as section 13's un-poked boots (237,951 /
+  263,704), so a probe-induced slowdown is not visible there; the control would make that separation exact.
 - The cdb negative is about the debugger configuration (14.2), not about title execution.
 - No game data: RVAs, hashes, ids, field offsets, counts, handles and pointers-as-pointers only.
 
 ### 14.9 Attribution (this section)
+
+Same attribution and policy as section 10: this follow-up was implemented from this project's own measurements, no
+upstream code or behaviour claim is used, and no git writes were made by this slice.
+
+## 15. The stage function (follow-up): job 109 is inside a title completion poll on 13 task-pool items it posted itself
+
+**Status: measured; the blocking call is title-side and the runtime-answer hypothesis is a measured negative.** Two cdb
+all-thread dumps from one 130 s boot (at +55.0 s and +95.1 s) give job 109's runner thread the **same stack, the same
+stack pointer and the same sleep** at both dumps: the thread is inside `KERNELBASE!SleepEx` in `image+0x1DEE6C0`, in a
+`while (counter != 13) { SleepEx(1); tick; }` poll. The poll runs after the stage function itself posted **13 work items
+of `0x30` bytes into the title's lane-0/class-4 task-pool ring** (post RVA `0x52718B0` -> ring push RVA `0x4DA41A0` ->
+wake RVA `0x4DA4200`, the same ring push section 14 measured for job 97). The counter the poll reads is written only by
+those items' own executor body (RVA `0xFA8740`), so no runtime answer holds it. At both dumps 11 worker threads of a
+**different** title batch are inside our shim's synchronous compute-PSO creation
+(`PipelineState::create_compute` -> `nvgpucomp64`), with the same thread ids 40 s apart, and job 109's 13 items are
+executing in no thread. Stage 3 is not requested in this boot; no fix is proposed, and the next falsifier is a
+ring/worker-TLS dump (or a longer boot) to see whether that compile burst returns and the 13 items then run.
+
+### 15.1 What ran
+
+| | |
+|---|---|
+| Tree | the same tree as section 14.1: HEAD `f013ef375` plus other slices' uncommitted work (23 modified tracked files and 12 untracked files at the boot; the lead committed them after the boot); this section adds only its own edit of this page and no source change |
+| Binary | `port\build\palmetto.exe` SHA-256 `F32BCF50E3BBEB9646C53B01E95E8432DB0CB4DE82800289A6F56FBFCFEB68D2`, mtime 18:21:27 - the same file before and after the boot, and the gate build of this tree (`ninja: no work to do.`) |
+| Boot | one 130 s boot `boot-d1` under `_setup/boot_lock.ps1` (acquired 18:30:55, released after the kill) |
+| Harness | `tooling/boot_report.py --timeout 130`, captures outside the repository in `D:\leonida-work\job109\boot-d1\` |
+| Environment | `PALMETTO_SHADERS`, `PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`, `PALMETTO_STATE_TRACE=2,130`, `PALMETTO_STAGE2_READY=20` |
+| cdb sessions | two attaches, `cdb -p <pid> -cf dump-job109.cdb -logo ...`, one at +55.0 s (10 s, 141,125 B log) and one at +95.1 s (5 s, 138,713 B log); `sxd av` and `sxd *` in each; no software breakpoint is used (section 14.2's negative) and each session detaches before continuing |
+| Dump content | `~*e` per-thread registers, `~*k` all-thread stacks (91 threads at +55 s, 90 at +95 s), the tracker `image+0x9844898` -> queue `tracker+0xB8` -> id table `queue+0x1AB0` -> slot `109` job object word dump, the stage function `*(job)` disassembly, and the queue/tracker counters |
+| Probe samples | the in-process `PALMETTO_STAGE2_READY` probe dumps at +26.131 s (`wait`), +32.205 s (`steady`, holder line) and +87.665 s (`steady2`) in the same boot |
+
+The state word moved as in every previous boot: `init 2` and `loading 1` at 24.0 s, machine `current 2 / next 2` at
++128 s, and no stage-3 request. The title entry thread is still in the section-2.1 wait at both dumps (its title
+chain is unchanged: `0x258DBA6 -> 0x21B8BE4 -> 0x21B8A75 -> 0x81B2E8 -> 0x53EC05E -> ...`), so the stage-3 request at
+`0x81B2EF` is not reached.
+
+### 15.2 The runner thread and the exact blocking call
+
+The runner is thread `0x1438` (5176 in both dumps). Its stack is byte-identical at both dumps (same child SPs, same
+return addresses, RIP in `ntdll` at the syscall return, RSP `0x463FDD08` both times). Frames top-down; a call site is the
+return address into the caller, so the containing function is named for that address:
+
+| frame | address in the caller | containing function (RVA, size) | what it does |
+|---|---|---|---|
+| 0-2 | `ntdll!NtDelayExecution+0x14`, `ntdll!RtlDelayExecution+0x34`, `KERNELBASE!SleepEx+0x91` | - | the sleep syscall the poll issues |
+| 3 | `image+0x1DEF27D` | `0x1DEE6C0` (0xFB3) | the poll below |
+| 4 | `image+0x275788A` | `0x2757540` (0x431) | collects an eligible entry set, builds the item array, calls the poll function, post-processes |
+| 5 | `image+0x275702B` | `0x2756F00` (0x420) | per-id lookup and state transition around the batch call |
+| 6 | `image+0x2756EEA` | `0x2756E90` (0x62) | registry entry lookup wrapper |
+| 7 | `image+0x2756E47` | `0x2756DE0` (0xA7) | iterates the fetched ids and calls frame 6 for each |
+| 8 | `image+0x2756DC9` | `0x2756D90` (0x47) | registry lookup of the record |
+| 9 | `image+0x1D4D0B8` | `0x1D4C980` (0x962) | per-entry dispatch |
+| 10 | `image+0x1D4C832` | `0x1D4C7E0` (0x196) | type-tagged object construction |
+| 11 | `image+0x292D5CD` | `0x292D370` (0x90C) | registry table walk under the image's lock |
+| 12 | `image+0x292D289` | `0x292D220` (0x144) | one registry record: completion bookkeeping and notify |
+| 13 | `image+0x1D77DF0` | `0x1D77D90` (0x7E) | registry lookup and lock release |
+| 14 | `image+0x1DAC730` | `0x1DAC680` (0xBA) | processes the two registered records at `image+0x63011E0` and `image+0x63011DC` for the global at `image+0x7F00510` |
+| 15 | `image+0x45B97B29` | `0x5B97B20` (0x10) | **the stage function `*(job)`**: `call 0x1DAC680` then return 1 |
+| 16 | `image+0x40063E78` | `0x63CD0` (0x339) | the generic job runner, return after the work-function call at `job+0x50` (it had written `job+0xF0 = 4`) |
+| 17 | `image+0x44EAA05A` | `0x4EAA040` (0x21) | the item executor thunk |
+| 18 | `image+0x4221C29C` | `0x221C1F0` (0x1FA) | the task-pool worker loop: dequeue, call the item's executor, release children |
+| 19 | `image+0x42215ECA` | `0x2215EA0` (0x47) | the worker thread body started by the title |
+
+The stage function `*(job)` is the pointer `0x145B97B20` (RVA `0x5B97B20`); the generic work function at `job+0x50` is `image+0x95EB60`
+(`(*(code *)*job)(job)`), which tail-jumps to it, which is why `0x95EB60` is not itself a stack frame. The poll at the
+top is, in the boot's own terms (pseudo-C, decompiled; addresses are the function's RVAs):
+
+```c
+post_items(items, 0xd, 0x30);                  // 0x52718B0: 13 x 0x30-byte items into the lane ring, then wake
+while (*(int *)(rsp_frame + 0x210) != 0xd) {   // the batch completion counter, compare at 0x1DEF26E
+  sleep_ms(1);                                 // 0x92ECA0 (tail jump -> KERNELBASE!SleepEx), call at 0x1DEF278
+  tick();                                      // 0x10D6400 (tail jump -> 0x54F5080), call at 0x1DEF27D
+}
+```
+
+**The named blocking call is `SleepEx(1)`** (through the image's sleep thunk at RVA `0x92ECA0`) at `0x1DEF278` inside
+`0x1DEE6C0`, polling the completion counter of the 13 work items the same function posted. In the requested taxonomy it
+is a **job/child completion poll and a queue (task-pool) wait** - not an event/fence wait, not a GPU submission, not a
+file/storage request, and not a call our runtime answers.
+
+Job 109's object words, read from the queue's id table in both sessions (same pointer `0x26660743B00`):
+
+| field | value | meaning |
+|---|---|---|
+| `+0x00` | `0x145B97B20` | the stage function `*(job)`, RVA `0x5B97B20` (the 0x10-byte wrapper above) |
+| `+0x50` | `0x14095EB60` | work function, RVA `0x95EB60` - the generic stage invoker of section 13 |
+| `+0x58` | `0x145220E00` | a second stage-side function pointer |
+| `+0x68` | `0x144EAA040` | item executor, RVA `0x4EAA040` (the same thunk as every job) |
+| `+0x80` | `0x266606C5E80` | the tracker the job belongs to (same pointer as the probe's) |
+| `+0xDC` | `0xA599B5CB` | the job hash section 14 named |
+| `+0xE0` / `+0xF0` | `0` / `4` | not started / inside the work function (the runner sets 4, and 3 after it returns) |
+
+### 15.3 The decompiled post and completion path
+
+* **`0x52718B0`, the post.** It takes the item array, a count and a stride (`0xd`, `0x30` from the caller), derives the
+  lane from the first item's `+0xB`, selects the lane stream at `image+0x71BFD00 + lane*0x40`, pushes every item with
+  the ring push `0x4DA41A0` (which selects the class ring from `item+0xC`), adds the items' weights to the stream's wake
+  counter and calls the wake `0x4DA4200`. The 13 items have lane 0, class 4 and weight 16 each.
+* **The items' executor `0x23D9500`** is 0x10 bytes: it calls the body `0xFA8740` with the item in `RCX` and returns 1.
+* **The body `0xFA8740`** takes the next work index from the item's `+0x20` with a locked add, processes that entry and
+  its successors through the renderer registry at `image+0x8FDCE30 + 0x70` (object vtable slots `0x3A0` and `0x3A8`),
+  and then increments the batch completion counter through `item+0x28` - the exact dword the caller's poll reads.
+* **The worker loop `0x221C1F0`** dequeues an item with `0x4D9D9F0`, calls the item's executor, decrements the item's
+  child references and re-pushes a released child into the next class; a parked worker waits on its own event. The same
+  loop is the bottom frame of the worker threads the next paragraph names.
+* **The other batch in the process.** At both dumps 11 worker threads run work items whose executor is `0x247FD00` and
+  whose body is `0x247FD30`; that body calls the title's renderer object at RVA `0x8759D00` through its vtable `+0x1F0` (console
+  slot 62) and the frames above it are our shim's `rt::d3d12_xs::proxy_slot<62>` ->
+  `Device::CreateComputePipelineState` -> `PipelineState::create_compute` -> `nvgpucomp64`. The same 11 thread ids are
+  in that chain at +55 s and at +95 s, i.e. those synchronous runtime calls had not returned for 40+ s.
+
+### 15.4 Runtime-dependency verdict (this section)
+
+**No runtime answer is missing for job 109's blocking call; it is a title-side wait.** The completion the poll needs is
+produced by the title's own task-pool items, the ring and the counter are title memory, and nothing in the runtime holds
+or owes that completion. The runtime calls visible in the process are the workers' own compute-PSO creations in
+progress inside the driver's compiler, not dropped or unanswered requests, and no thread waits on a runtime-provided
+event, fence, queue or storage completion.
+
+What the dump adds to the section-14 picture is the named upstream condition: while job 109 polls, 11 of the title's
+worker threads are inside our synchronous compute-PSO creation, so the pool work that would let job 109's 13 items run
+is contending with that burst. The two snapshots cannot establish whether the 13 items are still queued in the lane-0
+class-4 ring or were consumed, nor the lane of the 11 compile workers: both facts live in the worker/stream state that
+was not dumped. The named next falsifiers are (1) one boot that dumps the lane-0 class rings (head/slot and payload
+executor words) and the workers' title TLS words `+0x530`/`+0x534`, and (2) a longer boot (300 s) that shows whether the
+compute-PSO burst returns and the 13 items then run, the counter reaches 13, job 109 returns and the pending counter
+advances. This slice makes no runtime change and proposes no fix.
+
+### 15.5 Boot numbers
+
+| boot / sample | debugger | verdict | D3D12 calls | stage transitions | stall state |
+|---|---|---|---|---|---|
+| `boot-d1` +26.131 s (probe `wait`) | none yet | ALIVE | - | `init 2` and `loading 1` at 24.0 s | pending `0x7B` (123) of 249; ready bit 1 (id `152`); aggregate 21 bits, not yet one job's mask |
+| `boot-d1` +32.205 s (probe `steady`) | none yet | ALIVE | - | machine 2 / 2 | pending `0x69` (105); ready bit 1 (id `152`); aggregate = job 109's 21-bit mask |
+| `boot-d1` +55.0 s (cdb attach, 10 s) | `~*k` + registers + job object | ALIVE | - | unchanged | pending `0x69`; ready bit 1; job 109 `f0 4`, runner in the `SleepEx(1)` poll; entry thread in the section-2.1 wait |
+| `boot-d1` +87.665 s (probe `steady2`) | - | ALIVE | - | machine 2 / 2 | pending `0x69`; ready bit 1 (id `152`); same state |
+| `boot-d1` +95.1 s (cdb attach, 5 s) | `~*k` + registers + job object | ALIVE | - | unchanged | identical stack, child SPs and RSP to the +55.0 s dump; 11 compute-PSO worker threads unchanged |
+| `boot-d1` kill at 130.3 s | - | ALIVE 130.3 s, 0 exceptions, killed by the 130 s timeout | 216,454 | `init 2` / `loading 1` (24.0 s), machine `current 2 / next 2` at +128 s; no stage-3 request | pending frozen at 105; job 109 still inside its work function (no later sample) |
+
+No frame capture was made in this boot (a measurement boot, not a fix A/B pair), so no non-black frame is claimed.
+
+### 15.6 Tests and gates (this section)
+
+This section's runtime change is none: it is a measurement plus this page, so nothing on the default path changes. The
+`PALMETTO_STAGE2_READY` probe it uses is the section-13 switch (off by default).
+
+| gate | result |
+|---|---|
+| `_setup\build_gta6rt.cmd` | `PALMETTO_OK` (`ninja: no work to do.` - the boot's binary is the gate build) |
+| `_setup\build_tests.cmd` | `TESTS_BUILT` |
+| slice test | none added: no source or behaviour change to test |
+| test subset (`port/build`) | `frame_dump_test`, `unimplemented_policy_test` (98 checks), `xbox_present_test`, `xs_proxy_mock_test`, `graphics_record_test` (158), `graphics_pso_test` (272), `buffer_va_index_test`, `dstorage_test` (224) and `xapu_chad_test` (65) all exit 0 |
+| docs checks (`tests/test_docs_*.py`, run with the session's `GIT_CONFIG_*` variables cleared) | all twelve pass: `links`, `list_items`, `table_rows`, `table_ids`, `repo_paths`, `encoding`, `design_rows`, `repeated_lines`, `pr_template`, `python_deps`, `cli_flags` and `env_vars` |
+| default path | no runtime source change: with `PALMETTO_STAGE2_READY` unset the boot path is section 14's |
+
+### 15.7 Limits (this section)
+
+- **One boot, two snapshots.** The stack and the sleep are identical at +55.0 s and +95.1 s, which is a stationary
+  state, not a trace of how the 13 items were posted or consumed.
+- **The 13 items are named by decompilation, not by a trace.** Their executor, body, ring class and counter are read
+  from the image and from the caller's decompiled poll; no breakpoint or poke log observed the pushes in this
+  boot (cdb software breakpoints do not report here, section 14.2).
+- **The compile-worker claim is a snapshot too** - the same thread ids and the same shim frames at both dumps - and the
+  snapshot does not prove that those calls would never return, only that they had not returned inside the window.
+- **The lane of the 11 compile workers and the ring occupancy are not measured**, so the pool-contention reading is the
+  named next falsifier, not a conclusion of this section.
+- **The aggregate equality is the probe's measurement at +32.205 s.** The cdb dumps read the same queue counters
+  (ready bits 1, `+0x1850 = 1`) but only the aggregate mask's first qword, whose set bits are not the low qword; the
+  probe's mask dump is what ties the 21 bits to job 109's claim.
+- The title's internal identifiers are not recovered (no symbols); the stage, the post, the body and the workers are
+  named by RVA and hash only.
+- No game data: RVAs, hashes, ids, field offsets, counts, thread ids and pointers-as-pointers only.
+
+### 15.8 Attribution (this section)
 
 Same attribution and policy as section 10: this follow-up was implemented from this project's own measurements, no
 upstream code or behaviour claim is used, and no git writes were made by this slice.
