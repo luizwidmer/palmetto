@@ -2369,7 +2369,7 @@ inline bool pipeline_lazy_build_enabled() {
             max_descriptors, std::uint32_t(std::min<std::uint64_t>(available, arena.size - mirror) / kDescriptorSize));
         out = {};
         out.slots = slots;
-        std::lock_guard lock(descriptor_mutex);
+        std::unique_lock<std::mutex> lock(descriptor_mutex);
         for (std::uint32_t slot = 0; slot < slots; ++slot) {
             const auto* words = reinterpret_cast<const std::uint32_t*>(arena.mapped + mirror +
                                                                        VkDeviceSize(slot) * kDescriptorSize);
@@ -2407,6 +2407,34 @@ inline bool pipeline_lazy_build_enabled() {
             if (entry->second.title_va && entry->second.title_bytes)
                 watch_placed_pages(entry->second.title_va, entry->second.title_bytes, true);
         }
+        lock.unlock();
+        // A V# slot's base, resolved for the colour-path printer (docs/colour_path.md): the title span whose pages back
+        // the block the V# names, and whether the base is that span's arena stand-in (a rebased title VA) or the title VA
+        // itself. A slot that is not a decodable V# (a sampler, float data) stays unmapped. A small block is registered
+        // with the exact-content writer watch when the colour-path switch is on, so a boot can say whether the title ever
+        // writes the data the pass reads. Resolved after the descriptor lock is released: the title-VA map has its own
+        // lock and this path must not establish an order with it.
+        for (std::uint32_t k = 0; k < out.buffer_keys; ++k) {
+            palmetto::SampledKey& key = out.buffer_key[k];
+            const palmetto::gfx10::BufferWords buffer_words{key.words[0], key.words[1], key.words[2], key.words[3]};
+            palmetto::gfx10::Buffer buffer{};
+            if (!palmetto::gfx10::decode(buffer_words, buffer) || !buffer.address) continue;
+            std::uint64_t title = 0, span = 0;
+            if (context->console_arena_span(buffer.address, title, span)) {
+                key.buffer_title_va = title;
+                key.buffer_title_bytes = span;
+                key.buffer_arena = true;
+            } else if (context->console_va_span(buffer.address, palmetto::ConsoleVaKind::buffer, title, span)) {
+                key.buffer_title_va = title;
+                key.buffer_title_bytes = span;
+                key.buffer_arena = false;
+            }
+            const std::uint64_t declared =
+                buffer.stride ? std::uint64_t(buffer.stride) * buffer.num_records : std::uint64_t(buffer.num_records);
+            if (key.buffer_title_va && declared && declared <= palmetto::frame_dump::colour_watch_max_bytes &&
+                palmetto::frame_dump::colour_path_enabled())
+                watch_colour_pages(key.buffer_title_va, declared);
+        }
         return true;
     }
 
@@ -2415,6 +2443,8 @@ inline bool pipeline_lazy_build_enabled() {
     // changes in total). A span that never changes over the window is reported by the absence of change lines, and the
     // first sample is always printed so the watch's start is visible. Off unless PALMETTO_TEXTURE_PAGE_WATCH is set;
     // reads only, never writes title memory.
+    // The colour path (docs/colour_path.md) reuses the same machinery for at most four small spans (the block a V# slot
+    // names): those are also compared byte for byte, so a write that keeps the span's non-zero byte count is seen too.
     struct PageWatch {
         std::uint64_t title_va = 0;
         std::uint64_t bytes = 0;
@@ -2422,9 +2452,14 @@ inline bool pipeline_lazy_build_enabled() {
         std::uint64_t last_scanned = 0;  // committed+readable page-head bytes at the last sample (commit transitions)
         unsigned changes = 0;
         bool started = false;  // the first sample (all-zero, nothing committed yet) is always printed
+        // Exact content (docs/colour_path.md): the small colour span's bytes at the last sample, compared verbatim.
+        std::uint32_t content_bytes = 0;
+        std::uint8_t content[palmetto::frame_dump::colour_watch_max_bytes] = {};
     };
     PageWatch page_watches_[4];
     unsigned page_watch_count_ = 0;
+    PageWatch colour_watches_[4];  // docs/colour_path.md: the exact-content watch for the pass's constants blocks
+    unsigned colour_watch_count_ = 0;
     std::uint64_t page_watch_ticks_ = 0;
     bool page_watch_on_ = false;
     bool page_watch_env_read_ = false;
@@ -2459,6 +2494,43 @@ inline bool pipeline_lazy_build_enabled() {
                      "[rt] d3d12: page watch: watching title VA 0x%llx + 0x%llx%s (PALMETTO_TEXTURE_PAGE_WATCH=1)\n",
                      static_cast<unsigned long long>(title_va), static_cast<unsigned long long>(bytes),
                      sampled ? ", the armed draw's sampled texture" : "");
+    }
+
+    // Register a small title span for the exact-content writer watch (docs/colour_path.md): the block the constant
+    // pass's descriptor-table slot 0 V# names. Bounded to four spans and colour_watch_max_bytes; reads only, never writes
+    // the title's memory. The watch is active from the next submission on (the tick scans every 64th).
+    void watch_colour_pages(std::uint64_t title_va, std::uint64_t bytes) {
+        if (!title_va || !bytes) return;
+        bytes = std::min<std::uint64_t>(bytes, palmetto::frame_dump::colour_watch_max_bytes);
+        for (unsigned i = 0; i < colour_watch_count_; ++i)
+            if (colour_watches_[i].title_va == title_va) return;
+        if (colour_watch_count_ >= std::size(colour_watches_)) return;
+        PageWatch& watch = colour_watches_[colour_watch_count_++];
+        watch = PageWatch{};
+        watch.title_va = title_va;
+        watch.bytes = bytes;
+        std::fprintf(stderr,
+                     "[rt] d3d12: page watch: colour source title VA 0x%llx + 0x%llx (an exact-content writer watch; "
+                     "PALMETTO_COLOUR_PATH=1)\n",
+                     static_cast<unsigned long long>(title_va), static_cast<unsigned long long>(bytes));
+    }
+
+    // Up to colour_watch_max_bytes of a title span's bytes, from a committed, readable page only (the same protection
+    // rule count_span_nonzero uses). Used by the exact-content watch, so a small block's content is compared verbatim.
+    std::uint32_t read_span_content(std::uint64_t title_va, std::uint64_t bytes, std::uint8_t* out) const {
+        if (!title_va || !bytes || !out) return 0;
+        MEMORY_BASIC_INFORMATION info{};
+        if (::VirtualQuery(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(title_va)), &info, sizeof(info)) !=
+            sizeof(info))
+            return 0;
+        if (info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return 0;
+        std::uint32_t chunk = static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(bytes, palmetto::frame_dump::colour_watch_max_bytes));
+        const auto region_end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+        if (region_end > title_va) chunk = std::min<std::uint32_t>(chunk, std::uint32_t(region_end - title_va));
+        if (!chunk) return 0;
+        std::memcpy(out, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(title_va)), chunk);
+        return chunk;
     }
 
     // Sampled non-zero bytes of a title span: the first 4096 bytes of every 64 KiB page that is committed and readable
@@ -2498,14 +2570,15 @@ inline bool pipeline_lazy_build_enabled() {
     }
 
     void page_watch_tick() {
-        if (!page_watch_enabled() || !page_watch_count_) return;
+        const bool textures = page_watch_enabled() && page_watch_count_;
+        if (!textures && !colour_watch_count_) return;
         ++page_watch_ticks_;
         if (page_watch_ticks_ % 64 != 1) return;  // the first submission, then every 64th
         const std::uint64_t sample = page_watch_ticks_ / 64 + 1;
         // A line for the first sample, for every change of (committed bytes, non-zero bytes) - so an all-zero span that
         // gets committed is visible too - and for every 64th sample as a running "latest" line.
         const bool periodic = sample % 64 == 0;
-        for (unsigned i = 0; i < page_watch_count_; ++i) {
+        for (unsigned i = 0; textures && i < page_watch_count_; ++i) {
             PageWatch& watch = page_watches_[i];
             std::uint64_t scanned = 0;
             const std::uint64_t nonzero = count_span_nonzero(watch.title_va, watch.bytes, scanned);
@@ -2526,6 +2599,66 @@ inline bool pipeline_lazy_build_enabled() {
                              watch.changes, periodic && !changed ? ", periodic" : "");
             watch.last_nonzero = nonzero;
             watch.last_scanned = scanned;
+        }
+        // The colour path's exact-content watch (docs/colour_path.md): the block the constant pass's table slot 0 names
+        // is sampled byte for byte, so a write that keeps the non-zero count is still a change. The first sample prints
+        // the content, a later one prints the dwords that changed, and a span that never changes prints only its first
+        // sample - a boot with no change line therefore measured "the title never writes the block".
+        static std::atomic<unsigned> colour_printed{0};
+        for (unsigned i = 0; i < colour_watch_count_; ++i) {
+            PageWatch& watch = colour_watches_[i];
+            std::uint8_t content[palmetto::frame_dump::colour_watch_max_bytes] = {};
+            const std::uint32_t got = read_span_content(watch.title_va, watch.bytes, content);
+            const bool first = !watch.started;
+            const bool resized = got != watch.content_bytes;
+            const std::uint32_t compared = std::min(got, watch.content_bytes);
+            const bool changed =
+                compared && palmetto::frame_dump::colour_bytes_differ(watch.content, content, compared);
+            if (!first && !changed && !resized) continue;
+            watch.started = true;
+            if (changed) ++watch.changes;
+            if (colour_printed.fetch_add(1, std::memory_order_relaxed) < 40) {
+                if (changed) {
+                    std::fprintf(stderr,
+                                 "[rt] d3d12: page watch: colour source title VA 0x%llx CONTENT CHANGED at sample %llu "
+                                 "(submission ~%llu):",
+                                 static_cast<unsigned long long>(watch.title_va),
+                                 static_cast<unsigned long long>(sample),
+                                 static_cast<unsigned long long>(page_watch_ticks_));
+                    for (std::uint32_t w = 0; w < compared / 4; ++w) {
+                        std::uint32_t before = 0, after = 0;
+                        std::memcpy(&before, watch.content + w * 4, sizeof(before));
+                        std::memcpy(&after, content + w * 4, sizeof(after));
+                        if (before != after) std::fprintf(stderr, " [%u] %08x -> %08x", w, before, after);
+                    }
+                    std::fprintf(stderr, "\n");
+                } else {
+                    std::uint64_t nonzero = 0;
+                    for (std::uint32_t b = 0; b < got; ++b)
+                        if (content[b]) ++nonzero;
+                    std::fprintf(stderr,
+                                 "[rt] d3d12: page watch: colour source title VA 0x%llx: read %u of 0x%llx B, %llu "
+                                 "non-zero byte(s), %u dword(s) (sample %llu, submission ~%llu)\n",
+                                 static_cast<unsigned long long>(watch.title_va), got,
+                                 static_cast<unsigned long long>(watch.bytes),
+                                 static_cast<unsigned long long>(nonzero), got / 4,
+                                 static_cast<unsigned long long>(sample),
+                                 static_cast<unsigned long long>(page_watch_ticks_));
+                    // The dwords themselves, so the block the module reads can be quoted from the boot.
+                    for (std::uint32_t base = 0; got >= 4 && base < got / 4; base += 8) {
+                        std::fprintf(stderr, "[rt] d3d12: page watch: colour source dwords [%2u..%2u]:", base,
+                                     std::min(base + 7, got / 4 - 1));
+                        for (std::uint32_t w = base; w < got / 4 && w < base + 8; ++w) {
+                            std::uint32_t value = 0;
+                            std::memcpy(&value, content + w * 4, sizeof(value));
+                            std::fprintf(stderr, " %08x", value);
+                        }
+                        std::fprintf(stderr, "\n");
+                    }
+                }
+            }
+            std::memcpy(watch.content, content, got);
+            watch.content_bytes = got;
         }
     }
 

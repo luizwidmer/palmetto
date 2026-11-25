@@ -1059,6 +1059,13 @@ struct SampledKey {
     VkExtent2D extent{};
     ResourceId resource = 0;
     std::uint64_t title_va = 0;
+    // A V# slot's base as the shim resolved it (docs/colour_path.md): the title span whose pages back the block the V#
+    // names (0 when no title range holds the base), that span's available bytes, and whether the base is the arena
+    // stand-in for the span (a rebased title VA) or the title VA itself. The colour-path printer reads the block the
+    // table's slot 0 V# names through these, and the shim registers the span with the writer watch.
+    std::uint64_t buffer_title_va = 0;
+    std::uint64_t buffer_title_bytes = 0;
+    bool buffer_arena = false;
 };
 struct SampledTable {
     std::uint32_t slots = 0;  // slots the table holds (bounded by the caller's max_descriptors)
@@ -1607,6 +1614,198 @@ inline void print_vertex_constants(const ReplayFunctions& vk, const Draw& draw, 
             break;
         }
     }
+}
+
+// The exact-content writer watch's bound (docs/colour_path.md): the small block a V# slot names is read and compared
+// byte for byte only up to this many bytes; a block the table's slot 0 names is 96 bytes in the measured boot.
+inline constexpr std::uint32_t colour_watch_max_bytes = 256;
+
+// The colour path (docs/colour_path.md): PALMETTO_COLOUR_PATH=1 reads the constant pass's colour source at the boot's
+// first draw and at every readback-armed draw - the 96-byte block its descriptor table's slot 0 V# names, the table's
+// raw data slots at +0x20/+0x40/+0x60, and the block's title-VA mapping - so "the stationary loop paints black by
+// design" and "the console driver was expected to fill the block" can be told apart. The shim registers the block's
+// title pages with the exact-content writer watch when this switch reads a V# slot. Diagnostic only, bounded, reads only.
+inline bool colour_path_enabled() {
+    static const bool on = [] {
+        const char* value = std::getenv("PALMETTO_COLOUR_PATH");
+        return value && *value && value[0] != '0' && value[0] != 'n';
+    }();
+    return on;
+}
+
+// The declared byte count of a V#: stride x records, or the record count when the stride is 0 (a raw buffer). This is
+// the size a console buffer view declares, so the block the table's slot 0 names is read with it. Pure.
+inline std::uint64_t colour_block_bytes(const gfx10::Buffer& buffer) {
+    return buffer.stride ? std::uint64_t(buffer.stride) * buffer.num_records : std::uint64_t(buffer.num_records);
+}
+
+// A table data dword as the float a module bitcasts it to (the measured slots at +0x40/+0x60 hold float data, not
+// descriptors). Pure.
+inline float colour_dword_float(std::uint32_t bits) {
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+// Whether two bounded byte ranges differ. The shim's exact-content writer watch compares a title span against its last
+// sample with this, so a write that keeps the span's non-zero byte count is seen too. Pure; frame_dump_test pins it.
+inline bool colour_bytes_differ(const std::uint8_t* before, const std::uint8_t* current, std::uint32_t bytes) {
+    return bytes != 0 && std::memcmp(before, current, bytes) != 0;
+}
+
+// Diagnostic (docs/colour_path.md): the constant pass's colour source. For every descriptor table the draw's recorded
+// root arguments name, prints slot 0's V# and the block it names - the block's title span, every dword of the declared
+// block (bounded to 24), whether it changed since the previous armed draw, and the four dwords at block + 0x20 - plus
+// the table's raw data slots at +0x20/+0x40/+0x60 as dwords and floats. The module's only data loads are those four
+// dwords at block + 0x20 (docs/colour_path.md), so this is the pass's whole colour input. `draw_index` is the replay's
+// global draw counter and labels the lines. Reads only; returns whether it printed for at least one table.
+inline bool print_colour_source(const ReplayFunctions& vk, const Draw& draw, const GraphicsPipeline& pipeline,
+                                std::uint64_t draw_index) {
+    if (!vk.sampled_table) return false;
+    bool printed = false;
+    for (const std::uint64_t table_va : descriptor_tables(draw, pipeline.table_windows)) {
+        // prepare_draw pulls this draw's pages at its end, after this diagnostic. Pull the table here too, so the block
+        // read is the title's current bytes and not the previous submission's stand-in. The pull is idempotent.
+        if (vk.pull_title_table) vk.pull_title_table(table_va, 64);
+        SampledTable table;
+        if (!vk.sampled_table(table_va, 64, table)) continue;
+        printed = true;
+        std::fprintf(stderr,
+                     "[rt] replay: colour path: draw %llu table VA 0x%llx: %u slot(s), %u T# key(s), %u data/V# "
+                     "slot(s)\n",
+                     static_cast<unsigned long long>(draw_index), static_cast<unsigned long long>(table_va),
+                     table.slots, table.keys, table.buffer_keys);
+        // Slot 0 (table + 0x00): the V# over the block the module reads its constants from.
+        const SampledKey* block_slot = nullptr;
+        for (std::uint32_t k = 0; k < table.buffer_keys; ++k)
+            if (table.buffer_key[k].slot == 0) block_slot = &table.buffer_key[k];
+        if (!block_slot) {
+            std::fprintf(stderr, "[rt] replay: colour path: slot 0 (table + 0x00) is not a decoded data slot\n");
+        } else {
+            std::fprintf(stderr, "[rt] replay: colour path: slot 0 (table + 0x00) words: %08x %08x %08x %08x\n",
+                         block_slot->words[0], block_slot->words[1], block_slot->words[2], block_slot->words[3]);
+            gfx10::Buffer buffer{};
+            const gfx10::BufferWords words{block_slot->words[0], block_slot->words[1], block_slot->words[2],
+                                           block_slot->words[3]};
+            if (!gfx10::decode(words, buffer) || !buffer.address) {
+                std::fprintf(stderr, "[rt] replay: colour path: slot 0 is not a V# (no block to read)\n");
+            } else {
+                const std::uint64_t declared = colour_block_bytes(buffer);
+                std::fprintf(stderr,
+                             "[rt] replay: colour path: slot 0 V# address 0x%llx stride %u records %u format %u, "
+                             "declared %llu byte(s)\n",
+                             static_cast<unsigned long long>(buffer.address), buffer.stride, buffer.num_records,
+                             buffer.format, static_cast<unsigned long long>(declared));
+                // The mapping (docs/colour_path.md): the title span the shim resolved for the base and whether the base
+                // is its arena stand-in (a rebased title VA) or the title VA itself. No title span: an ordinary buffer.
+                if (block_slot->buffer_title_va) {
+                    std::fprintf(stderr,
+                                 "[rt] replay: colour path: block base 0x%llx is the %s of title VA 0x%llx (+0x%llx "
+                                 "mapped)\n",
+                                 static_cast<unsigned long long>(buffer.address),
+                                 block_slot->buffer_arena ? "arena stand-in" : "title VA",
+                                 static_cast<unsigned long long>(block_slot->buffer_title_va),
+                                 static_cast<unsigned long long>(block_slot->buffer_title_bytes));
+                } else {
+                    std::fprintf(stderr, "[rt] replay: colour path: block base 0x%llx is not in a title range\n",
+                                 static_cast<unsigned long long>(buffer.address));
+                }
+                // The block's whole declared content, bounded to 24 dwords: the four the module reads are dwords 8..11.
+                constexpr std::uint32_t kMaxBlockDwords = 24;
+                const std::uint32_t want = static_cast<std::uint32_t>(
+                    std::min<std::uint64_t>(declared, kMaxBlockDwords * sizeof(std::uint32_t)));
+                std::uint32_t dwords[kMaxBlockDwords] = {};
+                std::uint32_t got = 0;
+                const bool read =
+                    vk.read_title_memory && want &&
+                    vk.read_title_memory(buffer.address, want, reinterpret_cast<std::uint8_t*>(dwords), got);
+                if (!read || !got) {
+                    std::fprintf(stderr, "[rt] replay: colour path: block content is not readable (%llu byte(s))\n",
+                                 static_cast<unsigned long long>(declared));
+                } else {
+                    const std::uint32_t count = std::min<std::uint32_t>(got / 4, kMaxBlockDwords);
+                    std::uint64_t nonzero = 0;
+                    for (std::uint32_t w = 0; w < count; ++w)
+                        if (dwords[w]) ++nonzero;
+                    std::fprintf(stderr,
+                                 "[rt] replay: colour path: block read %u of %llu byte(s): %llu of %u dword(s) non-zero\n",
+                                 got, static_cast<unsigned long long>(declared),
+                                 static_cast<unsigned long long>(nonzero), count);
+                    for (std::uint32_t base = 0; base < count; base += 8) {
+                        std::fprintf(stderr, "[rt] replay: colour path: block dwords [%2u..%2u]:", base,
+                                     std::min(base + 7, count - 1));
+                        for (std::uint32_t w = base; w < count && w < base + 8; ++w)
+                            std::fprintf(stderr, " %08x", dwords[w]);
+                        std::fprintf(stderr, "\n");
+                    }
+                    if (count > 8) {
+                        const std::uint32_t end = std::min<std::uint32_t>(count, 12);
+                        std::fprintf(stderr, "[rt] replay: colour path: module constants (block + 0x20, dwords 8..%u):",
+                                     end - 1);
+                        for (std::uint32_t w = 8; w < end; ++w) std::fprintf(stderr, " %08x", dwords[w]);
+                        std::fprintf(stderr, " (floats");
+                        for (std::uint32_t w = 8; w < end; ++w)
+                            std::fprintf(stderr, " %.6g", static_cast<double>(colour_dword_float(dwords[w])));
+                        std::fprintf(stderr, ")\n");
+                    }
+                    // Whether the block changed since this table was last armed: the writer watch dates any actual
+                    // write between the two draws; this comparison proves the content the module reads is the same.
+                    struct Snapshot {
+                        std::uint64_t table = 0;
+                        std::uint32_t bytes = 0;
+                        std::uint32_t data[kMaxBlockDwords] = {};
+                        unsigned long long draw = 0;
+                        bool valid = false;
+                    };
+                    static Snapshot previous;
+                    static std::mutex previous_mutex;
+                    std::lock_guard lock(previous_mutex);
+                    if (!previous.valid || previous.table != table_va) {
+                        std::fprintf(stderr, "[rt] replay: colour path: first armed draw for this table\n");
+                    } else if (!colour_bytes_differ(reinterpret_cast<const std::uint8_t*>(previous.data),
+                                                    reinterpret_cast<const std::uint8_t*>(dwords), got)) {
+                        std::fprintf(stderr,
+                                     "[rt] replay: colour path: block unchanged since draw %llu (%u byte(s) compared)\n",
+                                     previous.draw, got);
+                    } else {
+                        std::fprintf(stderr,
+                                     "[rt] replay: colour path: block CHANGED since draw %llu (%u byte(s) compared):",
+                                     previous.draw, got);
+                        for (std::uint32_t w = 0; w < count; ++w)
+                            if (previous.data[w] != dwords[w])
+                                std::fprintf(stderr, " [%u] %08x -> %08x", w, previous.data[w], dwords[w]);
+                        std::fprintf(stderr, "\n");
+                    }
+                    previous = Snapshot{};
+                    previous.table = table_va;
+                    previous.bytes = got;
+                    std::memcpy(previous.data, dwords, got);
+                    previous.draw = draw_index;
+                    previous.valid = true;
+                }
+            }
+        }
+        // The table's raw data slots (not descriptors): the measured table holds float data at +0x20/+0x40/+0x60.
+        for (const std::uint32_t slot : {1u, 2u, 3u}) {
+            const SampledKey* data = nullptr;
+            for (std::uint32_t k = 0; k < table.buffer_keys; ++k)
+                if (table.buffer_key[k].slot == slot) data = &table.buffer_key[k];
+            if (!data) {
+                std::fprintf(stderr, "[rt] replay: colour path: table + 0x%02x (slot %u) is empty\n", slot * 0x20u,
+                             slot);
+                continue;
+            }
+            std::fprintf(stderr,
+                         "[rt] replay: colour path: table + 0x%02x (slot %u) raw data: %08x %08x %08x %08x (floats "
+                         "%.6g %.6g %.6g %.6g)\n",
+                         slot * 0x20u, slot, data->words[0], data->words[1], data->words[2], data->words[3],
+                         static_cast<double>(colour_dword_float(data->words[0])),
+                         static_cast<double>(colour_dword_float(data->words[1])),
+                         static_cast<double>(colour_dword_float(data->words[2])),
+                         static_cast<double>(colour_dword_float(data->words[3])));
+        }
+    }
+    return printed;
 }
 
 // Diagnostic (docs/vertex_path.md): one descriptor fetch slot the translated shader reads itself - the dwords at
@@ -3507,6 +3706,19 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                     }
                 }
             }
+        }
+        // Diagnostic (docs/colour_path.md): the constant pass's colour source - the 96-byte block its descriptor
+        // table's slot 0 V# names - at the boot's first draw and at every readback-armed draw, so its content over
+        // frames and its writer watch are measured. Bounded (at most eight early attempts plus the armed draws), reads
+        // only, and off unless PALMETTO_COLOUR_PATH is set.
+        if (frame_dump::colour_path_enabled()) {
+            static std::atomic<bool> colour_first_done{false};
+            static std::atomic<unsigned> colour_first_tries{0};
+            const bool armed = frame_dump::readback_armed_at(seen);
+            const bool first = !colour_first_done.load(std::memory_order_relaxed) &&
+                               colour_first_tries.fetch_add(1, std::memory_order_relaxed) < 8;
+            if ((armed || first) && frame_dump::print_colour_source(vk, draw, *pipeline, seen))
+                colour_first_done.store(true, std::memory_order_relaxed);
         }
     }
 

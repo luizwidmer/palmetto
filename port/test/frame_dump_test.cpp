@@ -252,6 +252,42 @@ int main() {
     expect(std::strlen(frame_dump::driver_block_decision(false, 1u, true, 24, 4080, true).why) == 0,
            "a taken feed has no reason text");
 
+    // The colour path (docs/colour_path.md): the constant pass's colour source. The measured table's slot 0 V# names a
+    // 96-byte raw block (stride 0, records 96, format 20); a V#'s declared size is the record count when the stride is 0
+    // and stride x records otherwise; the table's data slots at +0x40/+0x60 are float data, not descriptors, so neither
+    // can be mistaken for the block; and the exact-content writer watch's comparison is byte-exact (a write that keeps
+    // the non-zero byte count is still a change).
+    const gfx10::BufferWords block_words{0x0116FF20u, 0x00000000u, 0x00000060u, 0x30014FACu};
+    gfx10::Buffer block{};
+    expect(gfx10::decode(block_words, block), "the measured slot-0 words are a V#");
+    expect(block.address == 0x116FF20u, "the V# names the block's arena-relative address");
+    expect(block.stride == 0 && block.num_records == 96 && block.format == 20,
+           "the measured V# is a 96-record raw buffer with format 20");
+    expect(frame_dump::colour_block_bytes(block) == 96, "a stride-0 V# declares its record count in bytes");
+    gfx10::Buffer strided{};
+    strided.stride = 24;
+    strided.num_records = 170;
+    expect(frame_dump::colour_block_bytes(strided) == 4080, "a strided V# declares stride x records bytes");
+    expect(frame_dump::colour_dword_float(0x3f800000u) == 1.0f, "3f800000 is 1.0f");
+    expect(frame_dump::colour_dword_float(0xbf800000u) == -1.0f, "bf800000 is -1.0f");
+    expect(frame_dump::colour_dword_float(0x00000000u) == 0.0f, "0 is 0.0f");
+    const gfx10::BufferWords data60{0x3f800000u, 0xbf800000u, 0x00000000u, 0xffffffffu};
+    gfx10::Buffer data60_buffer{};
+    expect(!gfx10::decode(data60, data60_buffer), "the measured +0x60 float-data slot is not a V#");
+    const gfx10::ImageWords data60_image{data60[0], data60[1], data60[2], data60[3], 0, 0, 0, 0};
+    gfx10::Image data60_decoded{};
+    expect(!gfx10::decode(data60_image, data60_decoded), "the measured +0x60 float-data slot does not decode as a T#");
+    const gfx10::BufferWords data40{0x00000000u, 0x00000000u, 0xbf800000u, 0xbf800000u};
+    gfx10::Buffer data40_buffer{};
+    expect(!gfx10::decode(data40, data40_buffer), "the measured +0x40 float-data slot is not a V#");
+    const std::uint8_t content_before[8] = {0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff};
+    const std::uint8_t content_same[8] = {0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff};
+    const std::uint8_t content_changed[8] = {0, 0, 0, 0, 0x00, 0xff, 0xff, 0xff};
+    expect(!frame_dump::colour_bytes_differ(content_before, content_same, 8), "equal content is not a change");
+    expect(frame_dump::colour_bytes_differ(content_before, content_changed, 8),
+           "a write that keeps the non-zero byte count is still a change");
+    expect(!frame_dump::colour_bytes_differ(content_before, content_changed, 0), "an empty comparison is not a change");
+
     if (failures) return 1;
     std::printf("frame_dump_test: command kinds, ordered writers and table windows exact\n");
     return 0;
