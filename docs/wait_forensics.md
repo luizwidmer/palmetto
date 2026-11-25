@@ -71,11 +71,9 @@ no instruction bytes are reproduced.
 * **`game+0x4DA4240`, the worker-wake walker.** It walks an array of `{pending count, Event handle}` entries (stride
   `0x40`, handle at `+0x18`), and for each entry it clears the pending word and calls `SetEvent` on the handle
   (the `SetEvent` tail-jump at `game+0x5930`); the return address of that call is the `game+0x4DA42B6` setter site in the
-  tracer's signal table. 17,197 of its 17,245 calls by 120 s set `0x828`, the per-frame
-event; the rest are the startup wake-ups of the pool events, all before 27.7 s, and no entry after the first is set
-  again after that.
+  tracer's signal table. 17,197 of its 17,245 calls by 120 s set `0x828`, the per-frame event; the rest are the
+  startup wake-ups of the pool events, all before 27.7 s, so no entry after the first is set again after that.
 * **`game+0x221C1F0` and `game+0x43C4140`, the pool bodies.** Both are thread bodies that take a TLS slot, then wait
-  on a per-thread Event from the pool's array (`game+0x221C3C2` and `game+0x43C421E` are the `WaitForSingleObject`
   on a per-thread Event from the pool's array (`game+0x221C3C2` and `game+0x43C421E` are the `WaitForSingleObject`
   calls inside them, through the image's INFINITE wait tail-jump at `game+0x1784D0`).
 * **`game+0x62D0`, the condition-variable notify.** It updates a 64-bit waiter word with `lock cmpxchg`, then selects
