@@ -1580,6 +1580,13 @@ public:
         std::function<bool(std::uint64_t, std::uint32_t, std::uint8_t*, std::uint32_t&)> reader) {
         replay_.read_title_memory = std::move(reader);
     }
+    // Diagnostic (docs/vertex_path.md): the shim's reader for a device address a translated shader builds
+    // (heap_base + a push-constant value), so the fetch-slot dump can show what each descriptor fetch lands on. Reads
+    // only.
+    void set_device_memory_reader(
+        std::function<bool(std::uint64_t, std::uint32_t, std::uint8_t*, std::uint32_t&)> reader) {
+        replay_.read_device_memory = std::move(reader);
+    }
     // Diagnostic (docs/frame_capture.md): the project's constant-output pixel shader (fs_solid), created once from the
     // SPIR-V file PALMETTO_FRAME_DUMP_CONTROL_PS names. Null when it cannot be read; the caller logs and skips.
     VkShaderModule frame_dump_solid_module() {
@@ -2699,6 +2706,11 @@ private:
 
     ReplayResult execute_now(std::span<const CommandList* const> lists) {
         if (context_.is_device_lost() || !wait_for_room()) return ReplayResult::unsupported;
+        // Diagnostic (docs/frame_capture.md): which control drew after the frame's commands. The one-shot readback below
+        // copies the target after them, so its line is labelled as the control's readback; that axis measures coverage
+        // independently of the title pixel shader.
+        bool ps_control_drew = false;
+        bool control_drew = false;
         // The title's shader-visible console descriptor heaps are CPU memory; their GPU-visible mirrors are refreshed
         // here, before anything that reads them is recorded (console_va_map.h, docs/page_address_space.md). Copying
         // the title's own bytes is what a console GPU would read, so a title that rewrites descriptors still in flight
@@ -3122,6 +3134,7 @@ private:
                     : ReplayResult::unsupported;
             if (ps_result == ReplayResult::success) {
                 emit(ps_prepared, command_buffer, replay, &next_tracker, &open_labels);
+                ps_control_drew = true;
                 std::fprintf(stderr,
                              "[rt] replay: frame dump PS control: drew the armed draw's own vertices through the title "
                              "pipeline (0x%llx) with fs_solid as the pixel shader, into 0x%llx; the readback below "
@@ -3161,6 +3174,7 @@ private:
                                                     : ReplayResult::unsupported;
             if (control_result == ReplayResult::success) {
                 emit(control_prepared, command_buffer, replay, &next_tracker, &open_labels);
+                control_drew = true;
                 std::fprintf(stderr,
                              "[rt] replay: frame dump control: drew the vs_tri/fs_solid triangle into 0x%llx "
                              "(%ux%u, format %d) after the frame's commands; the readback below copies it\n",
@@ -3487,17 +3501,27 @@ private:
                         if (r || g || b) ++non_black;
                         peak = std::max<std::uint64_t>(peak, std::max(r, std::max(g, b)));
                     }
+                    // Diagnostic (docs/frame_capture.md): the copy runs after the frame's commands AND after any control
+                    // draw, so when a control drew the window holds the control's output. Say which line this is: the
+                    // PS-only control's readback is the coverage axis measured independently of the title pixel shader.
+                    const char* readback_label = ps_control_drew ? "frame dump PS control readback"
+                                                  : control_drew ? "frame dump control readback"
+                                                                 : "render-target readback";
                     std::fprintf(stderr,
-                                 "[rt] replay: render-target readback: %ux%u at the target's offset of %u,%u of %ux%u, "
-                                 "%u-byte texel: mean %llu %llu %llu, non-black %llu/%llu, peak %llu\n",
-                                 capture_region.width, capture_region.height, capture_offset.x, capture_offset.y,
-                                 context_.capture_extent_.width, context_.capture_extent_.height, capture_texel,
+                                 "[rt] replay: %s: %ux%u at the target's offset of %u,%u of %ux%u, "
+                                 "%u-byte texel: mean %llu %llu %llu, non-black %llu/%llu, peak %llu%s\n",
+                                 readback_label, capture_region.width, capture_region.height, capture_offset.x,
+                                 capture_offset.y, context_.capture_extent_.width, context_.capture_extent_.height,
+                                 capture_texel,
                                  static_cast<unsigned long long>(sums[0] / (pixels ? pixels : 1)),
                                  static_cast<unsigned long long>(sums[1] / (pixels ? pixels : 1)),
                                  static_cast<unsigned long long>(sums[2] / (pixels ? pixels : 1)),
                                  static_cast<unsigned long long>(non_black),
                                  static_cast<unsigned long long>(pixels),
-                                 static_cast<unsigned long long>(peak));
+                                 static_cast<unsigned long long>(peak),
+                                 (ps_control_drew || control_drew)
+                                     ? "; the control drew after the frame's commands and this window is its output"
+                                     : "");
                     // The write control: the same target, cleared by us to a known colour after the frame's commands.
                     const std::uint8_t* control = bytes + pixels * capture_texel;
                     std::uint64_t control_sums[3] = {0, 0, 0}, control_non_black = 0, control_peak = 0;

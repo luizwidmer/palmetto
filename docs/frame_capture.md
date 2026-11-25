@@ -170,6 +170,18 @@ still undecoded, `docs/graphics_pso.md`) culling the title vertex shader's windi
 six-image pixel shader's own arithmetic; the vertex/geometry path is the frontier, and the sampled content is a second,
 independent gap (section 7).
 
+### The control readback line
+
+The one-shot readback copies the target after the frame's commands **and** after any control draw, so when a control drew
+the copied window is the control's output. The line now says so: it is labelled `frame dump PS control readback:` when
+the PS-only control drew, `frame dump control readback:` when the full-screen control drew, and `render-target readback:`
+only when neither did, and it ends with `the control drew after the frame's commands and this window is its output`. A
+boot that prints the control-draw line but no readback line would mean the one-shot capture was never armed (the armed
+draw's prepare did not reach the colour-target arming); with the label the control's coverage axis is readable on its
+own, without confusing it with the frame's own (black) content. The measured PS-control line is therefore
+`frame dump PS control readback: ... mean 0 0 0, non-black 0/16384` for the title's pipeline - the axis is measured, and
+it says no coverage.
+
 ## 7. The sampled textures: the first T# resolves to a 4K image that reads black
 
 A boot with `PALMETTO_FRAME_DUMP_SAMPLE=1` (readback armed at draw 20001) has the shim read the armed draw's descriptor

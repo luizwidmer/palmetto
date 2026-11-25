@@ -937,7 +937,9 @@ inline BlitTransform blit_transform(const std::uint32_t* s) {
     return {as_float(s[8]), as_float(s[10]), as_float(s[9]), as_float(s[28])};
 }
 inline bool blit_transform_degenerate(const BlitTransform& transform) {
-    return transform.x == 0 && transform.y == 0 && transform.z == 0 && transform.w == 0;
+    // Clipping keeps a vertex only when w > 0 (a NaN comparison is false too), so a non-positive w is degenerate no
+    // matter what x/y/z say; a zero and a denormal x/y/z with w = 0 is exactly the measured state.
+    return !(transform.w > 0) || (transform.x == 0 && transform.y == 0 && transform.z == 0);
 }
 
 // Where one of a draw's 32 push-constant dwords comes from (docs/vertex_path.md): the pipeline's root signature says
@@ -1068,6 +1070,11 @@ struct ReplayFunctions {
     PFN_vkCmdPipelineBarrier pipeline_barrier = nullptr;
     PFN_vkCmdClearColorImage clear_color_image = nullptr;
     PFN_vkCmdClearDepthStencilImage clear_depth_stencil_image = nullptr;
+    // Diagnostic (docs/vertex_path.md): read bytes at an address a translated shader builds for a physical-storage
+    // load (heap_base + a push-constant value), through the layer's host-visible arena. Set by the shim; reads only,
+    // and never copies into the arena. False when the address is outside it.
+    std::function<bool(std::uint64_t device_address, std::uint32_t bytes, std::uint8_t* out, std::uint32_t& read)>
+        read_device_memory;
     // Optional; a list that needs a missing one is rejected with ReplayResult::unsupported.
     PFN_vkCmdPipelineBarrier2 pipeline_barrier2 = nullptr;  // enhanced barriers
     VkPipelineStageFlags2 queue_stages = 0;
@@ -1369,6 +1376,56 @@ inline void print_vertex_constants(const ReplayFunctions& vk, const Draw& draw, 
             break;
         }
     }
+}
+
+// Diagnostic (docs/vertex_path.md): one descriptor fetch slot the translated shader reads itself - the dwords at
+// heap_base + `relative`, decoded with the existing gfx10 classifiers (T#, V#, S#, or empty). A V# prints its buffer
+// address/stride/records, a T# its address/format/extent, so the slot can be compared with the draw's bound views.
+// Reads only, through the shim's device-memory reader; bounded to one line.
+inline void print_fetch_slot(const ReplayFunctions& vk, std::uint64_t heap_base, const char* label,
+                             std::uint64_t relative) {
+    if (!vk.read_device_memory) return;
+    const std::uint64_t address = heap_base + relative;
+    std::uint32_t words[8] = {};
+    std::uint32_t got = 0;
+    if (!vk.read_device_memory(address, sizeof(words), reinterpret_cast<std::uint8_t*>(words), got) ||
+        got < 4 * sizeof(std::uint32_t)) {
+        std::fprintf(stderr,
+                     "[rt] replay: vertex path: fetch slot %s: heap_base + 0x%llx (device 0x%llx) is not readable\n",
+                     label, static_cast<unsigned long long>(relative),
+                     static_cast<unsigned long long>(address));
+        return;
+    }
+    const bool empty = !words[0] && !words[1] && !words[2] && !words[3];
+    const gfx10::ImageWords image_words{words[0], words[1], words[2], words[3],
+                                        words[4], words[5], words[6], words[7]};
+    const gfx10::BufferWords buffer_words{words[0], words[1], words[2], words[3]};
+    std::fprintf(stderr, "[rt] replay: vertex path: fetch slot %s: heap_base + 0x%llx (device 0x%llx):",
+                 label, static_cast<unsigned long long>(relative),
+                 static_cast<unsigned long long>(address));
+    for (unsigned w = 0; w < 4; ++w) std::fprintf(stderr, " %08x", words[w]);
+    if (empty) {
+        std::fprintf(stderr, " -> empty (all four dwords zero)\n");
+        return;
+    }
+    if (gfx10::is_image(image_words)) {
+        gfx10::Image image{};
+        if (gfx10::decode(image_words, image))
+            std::fprintf(stderr, " -> T# image address 0x%llx format %u %ux%u\n",
+                         static_cast<unsigned long long>(image.address), image.format, image.width, image.height);
+        else
+            std::fprintf(stderr, " -> T# (undecodable)\n");
+        return;
+    }
+    gfx10::Buffer buffer{};
+    if (gfx10::decode(buffer_words, buffer)) {
+        std::fprintf(stderr, " -> V# buffer address 0x%llx stride %u records %u format %u\n",
+                     static_cast<unsigned long long>(buffer.address), buffer.stride, buffer.num_records,
+                     buffer.format);
+        return;
+    }
+    const gfx10::Sampler sampler = gfx10::decode(gfx10::SamplerWords{words[0], words[1], words[2], words[3]});
+    std::fprintf(stderr, " -> S# sampler (max anisotropy %u)\n", sampler.max_anisotropy);
 }
 
 }  // namespace frame_dump
@@ -2914,6 +2971,35 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                                  i, i + 1, static_cast<unsigned long long>(value), got, dwords[0], dwords[1],
                                  dwords[2], dwords[3]);
                     ++shown;
+                }
+            }
+            // Diagnostic (docs/vertex_path.md): the descriptor fetch slots the translated shader reads itself. The
+            // measured module builds each address as heap_base + (a push-constant dword & ~3): the console table at
+            // s8, the dword pair at s0, and s8 + 0x40. Decoding what each address holds says which of the shader's
+            // fetches gets a real V#/T# anyway. The bound views' driver-block-shaped V# is printed after them, so a
+            // vertex-stream descriptor the shader expects can be looked for in both places.
+            if (vk.read_device_memory) {
+                const std::uint64_t heap = vk.heap_base;
+                const std::uint64_t s0 = std::uint64_t(draw.user_data[0]) & ~std::uint64_t(3);
+                const std::uint64_t s8 = std::uint64_t(draw.user_data[8]) & ~std::uint64_t(3);
+                frame_dump::print_fetch_slot(vk, heap, "s0", s0);
+                frame_dump::print_fetch_slot(vk, heap, "s8", s8);
+                frame_dump::print_fetch_slot(vk, heap, "s8+0x40", s8 + 0x40);
+                if (draw.views && vk.buffer_at) {
+                    for (std::uint32_t slot = 0; slot < 32; ++slot) {
+                        const VertexBufferView& view = draw.views->vertex_buffers[slot];
+                        if (!view.va) continue;
+                        VkBuffer buffer = VK_NULL_HANDLE;
+                        VkDeviceSize offset = 0;
+                        std::uint64_t size = view.size;
+                        if (!vk.buffer_at(view.va, size, buffer, offset)) continue;
+                        std::fprintf(stderr,
+                                     "[rt] replay: vertex path: driver-block-shaped V# for vb%u: arena-relative "
+                                     "address 0x%llx stride %u records %u (view %u B, %u record(s) at that stride)\n",
+                                     slot, static_cast<unsigned long long>(offset), view.stride,
+                                     view.stride ? static_cast<std::uint32_t>(view.size / view.stride) : 0u, view.size,
+                                     view.stride ? static_cast<std::uint32_t>(view.size / view.stride) : 0u);
+                    }
                 }
             }
         }

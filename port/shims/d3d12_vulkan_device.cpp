@@ -1559,6 +1559,22 @@ struct DeviceState {
         return true;
     }
 
+    // Diagnostic (docs/vertex_path.md): read bytes at a device address a translated shader builds itself (heap_base + a
+    // value from its push constants), through the arena's host mapping. Reads only, and never copies into the arena.
+    bool read_device_memory(std::uint64_t address, std::uint32_t bytes, std::uint8_t* out, std::uint32_t& read) {
+        read = 0;
+        if (!address || !bytes || !out || !context || !arena.mapped) return false;
+        const std::uint64_t base = context->heap_base();
+        if (address < base) return false;
+        const std::uint64_t offset = address - base;
+        if (offset >= arena.size) return false;
+        const std::uint64_t room = std::min<std::uint64_t>(bytes, arena.size - offset);
+        if (!room) return false;
+        std::memcpy(out, arena.mapped + offset, std::size_t(room));
+        read = std::uint32_t(room);
+        return true;
+    }
+
     // Gives the S# `words` a sampler in set 0 and an entry in the hash table, unless it has them.
     bool bind_sampler(const palmetto::gfx10::SamplerWords& words) {
         namespace g = palmetto::gfx10;
@@ -6198,6 +6214,12 @@ public:
         state_.context->set_title_memory_reader(
             [this](std::uint64_t va, std::uint32_t bytes, std::uint8_t* out, std::uint32_t& read) {
                 return state_.read_title_memory(va, bytes, out, read);
+            });
+        // Diagnostic (docs/vertex_path.md): the fetch-slot dump reads the descriptors a translated shader fetches
+        // itself, at heap_base + a push-constant value. Reads only, through the arena's host mapping.
+        state_.context->set_device_memory_reader(
+            [this](std::uint64_t address, std::uint32_t bytes, std::uint8_t* out, std::uint32_t& read) {
+                return state_.read_device_memory(address, bytes, out, read);
             });
         // A title-placed texture's page import (docs/texture_import.md): the queue calls this before it records a
         // submission, so the image holds the title's bytes before anything samples it.

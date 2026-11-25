@@ -27,15 +27,21 @@ reads only, and off by default:
   descriptor the draw's root arguments fill), `loose` (nonzero but no parameter covers it) or `unset`, with the owning
   parameter index;
 - an `acceptance inputs` line naming the provenance of the four scalars the FSPX blit vertex shader uses (`s8`, `s9`,
-  `s10`, `s28`), so the boot after the root-argument decode states their source directly; and
+  `s10`, `s28`), so the boot after the root-argument decode states their source directly;
+- **the descriptor fetch slots** the shader reads itself: the dwords at `heap_base + (s0 & ~3)`, `heap_base + (s8 & ~3)`
+  and `+ 0x40`, decoded with the existing gfx10 classifiers (T# image with address/format/extent, V# buffer with
+  address/stride/records/format, S#, or `empty`), read through the shim's device-memory reader (the arena's host mapping);
+  and the **driver-block-shaped V#** each bound vertex view would have (arena-relative address, stride, records), so the
+  missing vertex-stream descriptor can be looked for in both places;
 - the clip-position transform the measured FSPX vertex shader applies (see section 4) with an explicit `degenerate`
-  verdict.
+  verdict - degenerate when `w` is not `> 0` (zero, negative or NaN) or when x, y and z are all zero, so a console-feed
+  value read as a float (a subnormal `s8`) cannot pass as extent while `w` stays zero.
 
 Pure helpers added to `port/src/vulkan_replay.h` and pinned by `port/test/frame_dump_test.cpp`:
 `vertex_format_bytes`, `vertex_layout_problems`, `blit_transform`, `blit_transform_degenerate`,
 `push_constant_provenance` and `push_constant_provenance_name` (format sizes, layout overruns, the four-scalar
-transform with its degenerate check, and the dword provenance from the root-signature table plus the replay's table
-mask).
+transform with its clipping-rule degenerate check, and the dword provenance from the root-signature table plus the
+replay's table mask).
 
 ## 2. The armed draw, measured
 
@@ -55,8 +61,9 @@ Boot: standard environment (`PALMETTO_SHADERS`, `PALMETTO_D3D12=vulkan`, `PALMET
 - **Vertex bytes** (through the title-memory hook): the view's first 384 bytes hold 24 non-zero bytes — exactly three
   vertices 24 bytes apart, positions `(0,0,0)`, `(0,2160,0)`, `(3840,2160,0)` (pixel coordinates of a full-screen
   triangle), plus a `0xFFFFFFFF` component and uv pairs `(0,0)`, `(0,1)`, `(1,1)`. The rest of the window is zero.
-- **Push constants**: `s0`/`s1` are the descriptor-table VA (readable through the layer); `s2..s31` are **all zero**.
-  `heap_base` is a valid arena base; `code_base` 0.
+- **Push constants**: `s0`/`s1` are the descriptor-table title-VA pair, the rest zero in the pre-console-feed boot. In the
+  console-feed boot (`PALMETTO_GRAPHICS_CONSOLE_ROOT=1`) `s8` also carries the table's arena-relative VA (`0xc16dea0`), so
+  the shader can form `heap_base + s8`; `s9`, `s10`, `s28` stay zero. `heap_base` is a valid arena base; `code_base` 0.
 
 So the vertex data the title put in the vertex buffer is present and sane, and the layer binds it correctly. The earlier
 hypothesis "the vertex bytes are zero or the strides are wrong" is excluded.
@@ -97,9 +104,12 @@ vertex path: clip-position scalars x 0 y 0 z 0 w 0 -> degenerate: every vertex a
 The draw's recorded user data holds only the descriptor-table VA in `s0`/`s1`; `s8`, `s9`, `s10` and `s28` are zero.
 Multiplying the fetched register by zero gives `(0, 0, 0, 0)` for every vertex (`w = 0`; if the fetched register were a
 NaN the product is NaN, still not rasterizable): a degenerate triangle at the origin, clipped away, **no fragments**.
+The verdict is written for that clipping rule: degenerate when `w` is not `> 0` (a NaN or a zero/negative `w`) **or**
+when x, y and z are all zero, so a console-feed value read as a float (for example the arena-relative table VA
+`0x0C16EF00`, which is a subnormal `~1.2e-31`) does not read as a real extent while `w` stays zero.
 
-The dump now also prints where every push-constant dword comes from, and names the four acceptance inputs. In the
-measured boot the provenance line reads (parameter table: one descriptor table at `s0..s1`, nothing else):
+The dump also prints where every push-constant dword comes from, and names the four acceptance inputs. In the measured
+boot the provenance line reads (parameter table: one descriptor table at `s0..s1`, nothing else):
 
 ```
 vertex path: root parameters: 1
@@ -131,34 +141,76 @@ record's root-argument block carries the values, and the shim's record decode cu
 So the gap is a record/root-signature decode gap, not a raster, cull or vertex-data gap: the FSPX blit vertex shader's
 transform coefficients (measured exactly: `s8`, `s9`, `s10`, `s28`) are never populated for the draw.
 
+The console-feed increment (`PALMETTO_GRAPHICS_CONSOLE_ROOT=1`, `docs/root_arguments.md`) then made the feed safe and
+filled `s8` with the table's arena-relative VA - but that changed the semantics, not the coverage: `s8` as a float is a
+subnormal (`1.16e-31`), and `s9`/`s10`/`s28` are still zero, so the clip position is still degenerate. The shader does not
+multiply the fetched vertex by a real transform; it fetches a *descriptor* through the address it builds, and that
+descriptor is what is now missing. Section 5b measures the three fetch slots.
+
+## 5b. The descriptor fetch slots, measured
+
+The dump reads what each of the shader's three fetches actually lands on, through the arena's host mapping, and decodes
+the 4/8 dwords with the existing gfx10 classifiers (T#, V#, S#, or empty). Console-feed boot (150 s, ALIVE 150.2 s, no
+device loss, 16,244 presents):
+
+```
+vertex path: heap_base 0x300010000 code_base 0x0; user data
+  d6f5dea0 000001a9 00000000 ... (s0/s1) ... 0c16dea0 ...  (s8)
+vertex path: fetch slot s0: heap_base + 0x4135dea0 (device 0x34136dea0) is not readable
+vertex path: fetch slot s8: heap_base + 0xc16dea0 (device 0x30c17dea0): 00000000 00000000 00000000 00000000
+                           -> empty (all four dwords zero)
+vertex path: fetch slot s8+0x40: heap_base + 0xc16dee0 (device 0x30c17dee0): 0086dc40 00000000 000001e0 30014fac
+                           -> V# buffer address 0x86dc40 stride 0 records 480 format 20
+vertex path: driver-block-shaped V# for vb0: arena-relative address 0x86df10 stride 24 records 170 (view 4080 B)
+```
+
+and the provenance line says `s8 loose`: the console feed writes dword 8, but the pipeline's decoded root-signature
+parameter table covers only the table at `s0..s1`, so no parameter owns `s8`.
+
+Read together: the descriptor table the shader is pointed at (arena-relative `0xc16dea0`, 64 slots) has an **all-zero
+first slot** - that is the fetch at table + 0, the console driver-block value the shader reads its vertex stream
+through - while its only real V# (table + `0x40`, key 2) is the 480-byte constant buffer at `0x86dc40`. The draw's
+actual vertex stream is bound at arena-relative `0x86df10` (stride 24, 170 records, 4080 B, the three measured
+vertices), immediately after that constant buffer, and **no descriptor in the table names it**. So the vertex-stream
+descriptor exists in the draw's binding, not in any slot the shader fetches; the s0 fetch is additionally unreadable
+because `s0`/`s1` hold a title VA rather than an arena-relative value.
+
 ## 6. The exact gap and the smallest next fix
 
-**Gap**: the slot-57 PC-object root signature's root-argument values are not decoded into the draw's user data; the FSPX
-lib_vs_00823 blit shader needs push-constant dwords `s8`, `s9`, `s10`, `s28` as its clip-position x/y/z/w scales, and
-receives zero.
+**Gap**: the vertex-stream descriptor the FSPX lib_vs_00823 blit shader fetches (its table's first slot, the console
+driver-block value for the IA vertex stream) is all zeros; the layer binds the vertex buffer to the pipeline but never
+synthesises that console descriptor from it. The table's only V# is the constant buffer, and the draw's vertex stream
+(`0x86df10`, stride 24, 170 records) is not named by any descriptor the shader can reach. `s9`, `s10`, `s28` remain zero
+as well, so the transform still collapses every vertex.
 
-**Smallest next fix**: decode the record's root-argument/root-constant block (or synthesize the root constants for the
-PC-object root signature) and write those dwords into the draw's user data before the replay emits it — in the slot-57
-record path (`port/shims/d3d12_xs_device.cpp` and the root-signature decode it uses), which is outside this increment's
-files. The record path can mark `VertexPathInfo::record_root_arguments` (read through the shim's `describe_vertex_path`)
-so the dump attributes the dwords to the record block instead of the title's own recorded calls. Acceptance test: the
-`PALMETTO_VERTEX_PATH=1` boot prints `clip-position scalars x ... y ... z ... w ... -> non-degenerate` with a nonzero
-`w`, and the `acceptance inputs` line shows `s8`, `s9`, `s10` and `s28` with a provenance (not `unset`). The PS-only
-control / display-target readback must be measured to change from black; the readback must not be claimed changed until
-it is measured.
+**Smallest next fix**: in the console-feed path (`PALMETTO_GRAPHICS_CONSOLE_ROOT`, `docs/root_arguments.md`), synthesise
+the driver-block vertex-stream descriptor from the draw's bound vertex views - address = the view's arena-relative VA
+(`0x86df10` for the measured draw), stride = the view's stride (24), num_records = size / stride (170), the layout's
+format words - and write it at the table slot the shader fetches (table base + 0). That path is in the slot-57
+record/console-feed files, outside this increment's files. The record path can keep marking
+`VertexPathInfo::record_root_arguments` so the dump attributes the dwords to the record block. Acceptance test: the
+`PALMETTO_VERTEX_PATH=1` boot's `fetch slot s8` decodes to a V# with address `0x86df10`/stride 24/records 170 instead of
+`empty`, the PS-control readback changes from `mean 0 0 0, non-black 0/16384` to the control colour (`mean 32 160 240,
+non-black 16384/16384`), and the display target readback changes from black. The readback must not be claimed changed
+until it is measured.
 
-**Next falsifier**: with the record's root arguments decoded, re-run the same boot; if the scalars become non-zero and
-the display readback still stays black, the vertex path is then closed and the remaining gap is the sample/colour path
-(`docs/texture_source.md`); if the scalars still decode to zero, the record's root-argument block is not where the title
-puts them and the next place is the record layout itself (`docs/state_blob.md`).
+**Next falsifier**: after the descriptor is synthesised, re-run the two-instrument boot. If the fetch slot is a real V#
+and the PS-control readback still stays black, the descriptor is being read but the vertex fetch's format/layout words
+are wrong, and the next place is the driver-block descriptor's own format/stride words against the input layout. If the
+PS-control reads the control colour but the display target stays black, the vertex path is closed and the remaining gap
+is the colour/sample path (`docs/texture_source.md`).
 
 ## 7. Limits
 
 - The dump is bounded and opt-in; it changes nothing on the default path (the shim's describe hook is only read when
   `PALMETTO_VERTEX_PATH` is set, and every helper is pure).
 - The position formula was read off the translated module and checked against the measured push constants; the fetched
-  vertex register's own value does not matter for this conclusion because all four multipliers are zero.
+  vertex register's own value does not matter for this conclusion because all four multipliers are zero or the descriptor
+  fetch is empty.
 - No game bytes, package addresses, shader bytes or extracted tables are recorded here: module identities, ids, offsets,
   formats, counts and positions only.
 - Boots for this increment: the vertex-path boots on disk outside the repository (`boot-vertex1`, `boot-vertex2`,
-  `boot-vertex3`); `boot-vertex3` is the final binary's run quoted above. The boot lock was released after each run.
+  `boot-vertex3`), and the console-feed verification boot `boot-fetchslots1` (150 s, ALIVE 150.2 s, 0 exceptions, 0
+  device loss, 16,244 presents) whose fetch slots, provenance and PS-control readback are quoted in sections 4-6. The
+  boot lock was acquired for each run and released after it; the control readback's own line is documented in
+  `docs/frame_capture.md` section 6.

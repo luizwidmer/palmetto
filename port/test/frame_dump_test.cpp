@@ -165,7 +165,10 @@ int main() {
     std::uint32_t scalars[32] = {};
     expect(blit_transform_degenerate(blit_transform(scalars)), "all-zero position scalars are degenerate");
     scalars[28] = 0x3f800000;  // w = 1
-    expect(!blit_transform_degenerate(blit_transform(scalars)), "a non-zero w scalar is not degenerate");
+    expect(blit_transform_degenerate(blit_transform(scalars)),
+           "a positive w with x = y = z = 0 still covers nothing, so it is degenerate");
+    scalars[8] = 0x3f800000;  // x = 1: the triangle now has extent
+    expect(!blit_transform_degenerate(blit_transform(scalars)), "a non-zero x with a positive w is not degenerate");
     expect(blit_transform(scalars).w == 1.0f, "s28 is the w scale");
     scalars[8] = 0x40000000;  // x = 2
     expect(blit_transform(scalars).x == 2.0f, "s8 is the x scale");
@@ -173,6 +176,18 @@ int main() {
     scalars[10] = 0x40400000;  // y = 3
     const BlitTransform transform = blit_transform(scalars);
     expect(transform.y == 3.0f && transform.z == -1.0f, "s10 is y and s9 is z");
+    // Clipping keeps a vertex only with w > 0, so a denormal x with w = 0 is still degenerate; w already 1 here.
+    std::uint32_t denormal[32] = {};
+    denormal[8] = 1;  // the smallest subnormal as a float: nonzero bits, ~1.4e-45
+    expect(blit_transform_degenerate(blit_transform(denormal)), "a denormal x with w = 0 is degenerate");
+    denormal[28] = 0x3f800000;  // w = 1
+    expect(!blit_transform_degenerate(blit_transform(denormal)), "a positive w with nonzero x is not degenerate");
+    denormal[10] = 0xbf800000;  // y = -1
+    expect(!blit_transform_degenerate(blit_transform(denormal)), "negative x/y/z with positive w is not degenerate");
+    denormal[28] = 0x80000000;  // w = -0.0: not > 0
+    expect(blit_transform_degenerate(blit_transform(denormal)), "a non-positive w is degenerate whatever x says");
+    denormal[28] = 0x7fc00000;  // w = NaN
+    expect(blit_transform_degenerate(blit_transform(denormal)), "a NaN w is degenerate");
 
     // Push-constant provenance (docs/vertex_path.md): the root signature parameter table plus the replay's table mask
     // say where each of the 32 dwords comes from.
