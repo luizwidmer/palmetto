@@ -11,8 +11,9 @@
 //   dimension: 0 = 2D, 1 = 2D array, 2 = 3D, 3 = 1D (the translator's STORE_DIMS); class: 0 = float, 1 = uint, 2 = sint.
 //   bindings 20/21: sampled multisample 2D images / 2D arrays, 256 each (runtime SRVs).
 //   bindings 22/23 and 24/25 are their UINT and SINT equivalents on devices supporting those classes.
-// These are the default counts (BindlessFeatures::counts). size_bindings() sizes the 2D, sampler and storage arrays
-// from the device's limits instead; the shaders declare runtime arrays, so any count works for them.
+// These are the default counts (BindlessFeatures::counts). size_bindings() sizes the sampled arrays of every
+// dimension, the sampler array and the storage arrays from the device's limits instead; the shaders declare runtime
+// arrays, so any count works for them.
 //
 // A shader turns a T# or S# into an index through the hash table (descriptor_table.h) and uses that index in
 // whichever binding the instruction calls for: the sampled array of the image's dimension, or one of its storage
@@ -37,6 +38,19 @@
 // flush() takes the command buffer that will use the set: it uploads only the slots that changed, from a mapped
 // staging buffer, and barriers the copy before the draws. The table at creation is empty until that first flush.
 //
+// Degradation: a flush never refuses a submission for want of table memory, because one allocation failure would
+// otherwise throw away a whole command list. Instead:
+//   * a released generation is kept as one spare, and a replacement whose table fits the spare's buffers reuses them
+//     and its descriptor set instead of allocating (spares_reused());
+//   * when a new generation still cannot be made, the last uploaded table and its descriptor set are kept, the
+//     pending descriptor and table changes stay queued for the next flush, and every key added since that upload
+//     reads the fallback index 0 (degraded_flushes(), last_flush_degraded()). The submission goes on, and a later
+//     flush with memory available makes the generation and publishes the queued changes;
+//   * a T#/S# key the shader's eight probes can never resolve (a full-probe hash collision, or the table at its
+//     capacity limit) is refused by name: insert_key() returns false and that key reads the fallback index
+//     (keys_refused()). This is a shape that cannot be expressed, not a resource shortage.
+// The counts it is measured against, and the boot A/B, are in docs/bindless_degradation.md.
+//
 // Not thread-safe: the owner serialises calls.
 
 #ifndef VK_NO_PROTOTYPES
@@ -49,8 +63,10 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <functional>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -198,6 +214,12 @@ struct SetLayout {
 // What size_bindings() grows to where the device's limits allow. At 32-64 bytes a descriptor the whole set is then
 // 3-6 MiB (93793 descriptors on an RTX 5070).
 inline constexpr std::uint32_t max_2d_images = 65536;
+// The streamed content names texture arrays, volumes and 1D textures as well as 2D textures, and each dimension has
+// its own index space: a 2D-array T# cannot use a 2D index. These are the growth targets for the other three sampled
+// arrays, the sizes a device with room for them is given (the default counts stay 1024/256/256 when it has not).
+inline constexpr std::uint32_t max_2d_array_images = 16384;
+inline constexpr std::uint32_t max_3d_images = 4096;
+inline constexpr std::uint32_t max_1d_images = 4096;
 inline constexpr std::uint32_t max_storage_indices = 4096;  // in each storage array, at most its dimension's images
 // A full D3D12 shader-visible sampler heap (2048) and room for literal and static S#s, within what the device can
 // create (maxSamplerAllocationCount, at least 4000) less the samplers that are not in the set.
@@ -206,14 +228,16 @@ inline constexpr std::uint32_t reserved_samplers = 64;
 // Growth leaves this many descriptors of each limit to the other sets of a pipeline layout.
 inline constexpr std::uint32_t growth_headroom = 64;
 
-// Sizes the 2D image, sampler and storage arrays from the device's limits: the update-after-bind ones with
-// features.update_after_bind, the plain ones otherwise. Every binding is visible to every stage, so the per-stage
-// limits apply to the whole set; fragment outputs count as stage resources (D3D12 allows eight render targets) and
-// standalone samplers do not, though they count in an update-after-bind pool.
+// Sizes the sampled arrays of all four dimensions, the sampler and the storage arrays from the device's limits: the
+// update-after-bind ones with features.update_after_bind, the plain ones otherwise. Every binding is visible to every
+// stage, so the per-stage limits apply to the whole set; fragment outputs count as stage resources (D3D12 allows
+// eight render targets) and standalone samplers do not, though they count in an update-after-bind pool.
 //   1. The default counts, or as much of them as the device holds: samplers, then storage, then 2D images.
 //   2. The MS pairs that fit beside them (limit_ms_bindings, which may turn classes off).
-//   3. Growth towards the maximums above, in the same order, within maxPerSetDescriptors. That limit only says
-//      what is sure to work (vkGetDescriptorSetLayoutSupport may allow more), so it never shrinks step 1.
+//   3. Growth towards the maximums above, in the same order, within maxPerSetDescriptors, then the 2D-array, 3D and
+//      1D sampled arrays towards theirs, each step keeping its descriptor-type limits and growth_headroom. That set
+//      limit only says what is sure to work (vkGetDescriptorSetLayoutSupport may allow more), so it never shrinks
+//      step 1.
 // A storage array holds the smaller of the storage count and its dimension's images: add_image never gives a
 // storage view an index past the sampled array. The other bindings keep their default counts.
 // layout_supported, when given, answers vkGetDescriptorSetLayoutSupport for set 0 at the counts in its argument:
@@ -305,6 +329,15 @@ inline bool size_bindings(BindlessFeatures& features, const VkPhysicalDeviceLimi
     grow(samplers, std::max(samplers, std::min(max_samplers, creatable)), growth_headroom, set_limit);
     grow(images, std::max(images, max_2d_images), growth_headroom, set_limit);
     grow(storage, std::max(storage, max_storage_indices), growth_headroom, set_limit);
+    // The other three sampled arrays are separate index spaces and grow last, so a device that can only hold today's
+    // sizes keeps them; their storage arrays follow their counts through apply().
+    grow(counts[sampled_binding(ImageDimension::dim_2d_array)],
+         std::max(counts[sampled_binding(ImageDimension::dim_2d_array)], max_2d_array_images), growth_headroom,
+         set_limit);
+    grow(counts[sampled_binding(ImageDimension::dim_3d)],
+         std::max(counts[sampled_binding(ImageDimension::dim_3d)], max_3d_images), growth_headroom, set_limit);
+    grow(counts[sampled_binding(ImageDimension::dim_1d)],
+         std::max(counts[sampled_binding(ImageDimension::dim_1d)], max_1d_images), growth_headroom, set_limit);
     apply(true);
     return full;
 }
@@ -321,6 +354,7 @@ public:
 
     ~BindlessSet() {
         release_retired();
+        release_spares();
         destroy(table_buffers_);
         if (fallback_sampler_) vk_.vkDestroySampler(device_, fallback_sampler_, nullptr);
         for (const VkImageView view : fallback_views_) vk_.vkDestroyImageView(device_, view, nullptr);
@@ -362,6 +396,17 @@ public:
     // set (and table buffers), so read set() again after it, when recording the commands that use it. A submission
     // that bound the previous set keeps it, intact, until release_retired() frees it.
     VkDescriptorSet set() const { return set_; }
+
+    // What the degradation rules above cost and how often they ran, for the boot report and the tests: flushes that
+    // could not make a new generation and kept the last uploaded table instead (the submission went on, keys added
+    // since that upload read the fallback), replacements that reused a released generation instead of allocating
+    // (spares_reused), and keys refused because the shader's eight probes can never resolve them (keys_refused).
+    std::uint64_t degraded_flushes() const { return degraded_flushes_; }
+    std::uint64_t spares_reused() const { return spares_reused_; }
+    std::uint64_t keys_refused() const { return keys_refused_; }
+    bool last_flush_degraded() const { return last_flush_degraded_; }
+    // Released generations kept for reuse (0 or 1; release_retired keeps the largest, release_spares frees it).
+    std::size_t spare_count() const { return spares_.size(); }
 
     // The fallback images are created with undefined contents: record this once, in a command buffer that executes
     // before anything uses the set. It moves them to GENERAL, the layout their descriptors name, and zeroes them.
@@ -440,9 +485,20 @@ public:
     }
 
     // T# and S# keys to the indices above: the table of binding 2 (descriptor_table.h). Changes reach the shaders
-    // at flush().
+    // at flush(). False when the key cannot be resolved at all (see the class comment): the table is unchanged, the
+    // image keeps the index it was given, its T#/S# then reads the fallback, and this is counted and logged.
     bool insert_key(const DescriptorKey& key, std::uint32_t index) {
-        const auto result = table_.insert_or_update(key.data(), index);
+        DescriptorTable::InsertResult result;
+        try {
+            result = table_.insert_or_update(key.data(), index);
+        } catch (const std::length_error& error) {
+            ++keys_refused_;
+            if (keys_refused_ == 1 || keys_refused_ % 4096 == 0)
+                std::fprintf(stderr, "[rt] d3d12: bindless: a T#/S# key the shader's eight probes can never resolve is "
+                                     "refused (%s); its shader reads the fallback index (%llu so far)\n",
+                             error.what(), static_cast<unsigned long long>(keys_refused_));
+            return false;
+        }
         table_dirty_ |= result != DescriptorTable::InsertResult::unchanged;
         existing_entries_changed_ |= result == DescriptorTable::InsertResult::replaced ||
                                      result == DescriptorTable::InsertResult::added_with_relocation;
@@ -488,17 +544,27 @@ public:
     // the set are recorded after it. When flush_replaces_table() was true this starts a new generation (table
     // buffers, descriptor set, binding 2 and every descriptor written so far) and puts the previous one on the retire
     // list, stamped `retire_ticket`: the owner's number for "every submission made so far", which release_retired()
-    // compares with what has completed. False when the new generation cannot be made: the set then still has the
-    // table as of the last flush.
+    // compares with what has completed. true whenever the submission may go on: a new generation that cannot be made
+    // keeps the last uploaded table (see the class comment) and only makes this flush a degraded one. False is
+    // reserved for the caller giving no command buffer at all, where nothing can be recorded.
     bool flush(VkCommandBuffer command_buffer, std::uint64_t retire_ticket = 0) {
         bool replaced = false;
         bool written = true;
-        const bool must_replace = flush_replaces_table();
         if (table_dirty_ || !table_uploaded_) written = upload_table(command_buffer, retire_ticket, replaced);
         last_flush_replaced_ = replaced;
-        // The new generation could not be made: the current set is the one running work reads, so its descriptors are
-        // not written in place either. The pending writes and the table's changes stay for the next flush.
-        if (!written && must_replace) return false;
+        last_flush_degraded_ = false;
+        if (!written) {
+            // The new generation could not be made. The current set is the one running work reads, so its descriptors
+            // are not written in place either: the last uploaded table stays, which still resolves every key it
+            // holds, and the pending writes and the table's changes stay queued for the next flush. A key added
+            // since that upload is a miss and reads the fallback index 0, never a wrong image.
+            if (!command_buffer) return false;  // nothing could be recorded: the caller retries
+            ++degraded_flushes_;
+            last_flush_degraded_ = true;
+            log_bounded(degraded_flushes_, "a table generation could not be made (no table memory); the last "
+                                           "uploaded table is kept, keys added since it read the fallback");
+            return true;
+        }
         for (const Pending& pending : pending_) {
             if (pending.binding >= shadow_.size() || pending.index >= shadow_[pending.binding].size()) continue;
             shadow_[pending.binding][pending.index] = pending.info;
@@ -525,13 +591,22 @@ public:
     }
 
     // Frees the generations (table buffers and descriptor set) that flush() retired with a ticket up to `completed`.
-    // The default frees all of them: when nothing submitted before the last flush() still runs.
+    // The default frees all of them: when nothing submitted before the last flush() still runs. The largest of them is
+    // kept as a spare instead (release_spares() frees it in the destructor): the next replacement whose table fits
+    // its buffers reuses them and the descriptor set, which is the allocation the streamed churn would otherwise
+    // repeat, and the one a device out of memory cannot serve.
     void release_retired(std::uint64_t completed = UINT64_MAX) {
         std::size_t kept = 0;
         for (auto& generation : retired_) {
             if (generation.ticket <= completed) {
-                destroy(generation.buffers);
-                if (generation.pool) vk_.vkDestroyDescriptorPool(device_, generation.pool, nullptr);
+                if (generation.set &&
+                    (spares_.empty() || generation.buffers.table.size > spares_.front().buffers.table.size)) {
+                    release_spares();  // one spare, the largest released table
+                    spares_.push_back(generation);
+                } else {
+                    destroy(generation.buffers);
+                    if (generation.pool) vk_.vkDestroyDescriptorPool(device_, generation.pool, nullptr);
+                }
             } else {
                 retired_[kept++] = generation;
             }
@@ -583,6 +658,7 @@ private:
         VkDeviceMemory memory = VK_NULL_HANDLE;
         void* mapped = nullptr;
         std::size_t size = 0;
+        bool device_local = false;  // the memory type this buffer was given (staging is always host-visible)
     };
 
     // The table and the mapped staging copy the CPU writes before vkCmdCopyBuffer moves the changes.
@@ -598,6 +674,14 @@ private:
     };
 
     static constexpr std::uint32_t dimensions = 6, classes = 3;
+
+    // A bounded named log for the degradation counters: the first event and every 4096th, so a streamed load that
+    // degrades often does not flood stderr.
+    static void log_bounded(std::uint64_t count, const char* what) {
+        if (count == 1 || count % 4096 == 0)
+            std::fprintf(stderr, "[rt] d3d12: bindless: %s (%llu so far)\n", what,
+                         static_cast<unsigned long long>(count));
+    }
 
     // The first free index in [begin, end), marked used; 0 when there is none.
     static std::uint32_t allocate(std::vector<std::uint8_t>& used, std::uint32_t begin, std::uint32_t end) {
@@ -777,6 +861,8 @@ private:
             *got_device_local = allocation.memoryTypeIndex != 0xffffffffu &&
                                 (memory_.memoryTypes[allocation.memoryTypeIndex].propertyFlags &
                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+        made.device_local = got_device_local ? *got_device_local
+                                            : device_local && allocation.memoryTypeIndex != 0xffffffffu;
         bool ready = allocation.memoryTypeIndex != 0xffffffffu &&
                      vk_.vkAllocateMemory(device_, &allocation, nullptr, &made.memory) == VK_SUCCESS &&
                      vk_.vkBindBufferMemory(device_, made.buffer, made.memory, 0) == VK_SUCCESS;
@@ -799,6 +885,15 @@ private:
     void destroy(TableBuffers& buffers) const {
         destroy(buffers.staging);
         destroy(buffers.table);
+    }
+
+    // Frees the spare generation kept by release_retired(); the destructor calls it, nothing else does.
+    void release_spares() {
+        for (auto& spare : spares_) {
+            destroy(spare.buffers);
+            if (spare.pool) vk_.vkDestroyDescriptorPool(device_, spare.pool, nullptr);
+        }
+        spares_.clear();
     }
 
     bool create_table_buffers() {
@@ -829,13 +924,24 @@ private:
             TableBuffers larger;
             VkDescriptorPool pool = VK_NULL_HANDLE;
             VkDescriptorSet set = VK_NULL_HANDLE;
-            bool device_local = false;
-            if (!create(larger.table, bytes, true, &device_local) || !create(larger.staging, bytes, false) ||
-                !make_set(pool, set)) {
+            if (!spares_.empty() && spares_.back().buffers.table.size >= bytes &&
+                spares_.back().buffers.staging.size >= bytes) {
+                // A released generation whose buffers hold this table: its buffers, descriptor set and pool are
+                // reused, so this replacement allocates nothing. Extra buffer bytes are unused (binding 2 names the
+                // whole buffer and the shader's mask reads only the table's slots). The set it was handed can hold
+                // only descriptors the shadow also holds, and write_shadow() rewrites every element ever written.
+                Generation spare = std::move(spares_.back());
+                spares_.pop_back();
+                larger = spare.buffers;
+                pool = spare.pool;
+                set = spare.set;
+                ++spares_reused_;
+            } else if (!create(larger.table, bytes, true, nullptr) || !create(larger.staging, bytes, false) ||
+                       !make_set(pool, set)) {
                 destroy(larger);
                 return false;
             }
-            table_device_local_ = device_local;
+            table_device_local_ = larger.table.device_local;
             retired_.push_back({table_buffers_, pool_, set_, retire_ticket});
             table_buffers_ = larger;
             pool_ = pool;
@@ -1043,8 +1149,13 @@ private:
         std::uint64_t ticket = 0;
     };
     std::vector<Generation> retired_;
+    std::vector<Generation> spares_;  // released generations kept for reuse (release_retired, release_spares)
     std::uint64_t generations_made_ = 0;
+    std::uint64_t degraded_flushes_ = 0;  // flushes that could not make a generation and kept the last table
+    std::uint64_t spares_reused_ = 0;     // replacements that reused a spare's buffers and descriptor set
+    std::uint64_t keys_refused_ = 0;      // keys the shader's eight probes can never resolve
     bool last_flush_replaced_ = false;
+    bool last_flush_degraded_ = false;
     std::array<VkDescriptorPoolSize, bindless::bindings.size()> pool_sizes_{};
     std::uint32_t pool_size_count_ = 0;
     // Every descriptor written to the set (the table's binding aside), to fill the next generation's set.
