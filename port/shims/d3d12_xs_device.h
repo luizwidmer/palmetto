@@ -1,6 +1,12 @@
 // Xbox-ABI proxy around a PC ID3D12Device.
 //
 // Measured Xbox device deviations used here (vtable indices, x64):
+//   slot 41   CreateCommandSignature at its PC position (desc, root signature, iid, out): the retail title's renderer
+//             setup creates five one-argument signatures (argument type / ByteStride: DRAW / 16, DRAW_INDEXED / 20,
+//             105 / 12, DISPATCH / 12, DISPATCH_MESH / 12). Console type 105, which has no PC value, is created as
+//             DISPATCH; the DISPATCH_MESH description is answered with a named dispatch-shaped stand-in because the
+//             layer carries no mesh signature, and an ExecuteIndirect naming that stand-in is refused by name.
+//             docs/command_signature.md has the call sites, the decode and the limits.
 //   slot 62   CreateComputePipelineState(desc, w2, w3, iid, out): two words (0 from XboxBvhBuilder, meaning unknown)
 //             before the IID. The PC slot 62 is CreateStateObject.
 //   slot 67   CreateComputePipelineState from native code (desc, iid, out): converts the Xbox native-code desc
@@ -118,6 +124,12 @@ PlacedAtVaPagesHook placed_at_va_pages_hook();
 // measured 9/10 handle conversion is on the heap proxy, and device slot 9 is CreateCommandAllocator, which the proxy
 // handles for the allocator proxy.
 bool device_slot_overridden(unsigned slot);
+
+// True when `signature` is the dispatch-shaped stand-in the proxy created for the console's DISPATCH_MESH
+// command-signature description (docs/command_signature.md). The layer carries no mesh command-signature kind, so the
+// creation is answered with the stand-in and the list proxy refuses an ExecuteIndirect that names it by name instead of
+// recording a dispatch the console would have run as mesh work.
+bool command_signature_standin(const void* signature);
 
 // Queue and fence proxies created by device slots 8/75 and 36. The real_* accessors return the wrapped object
 // (no reference added), or null when the pointer is not such a proxy.

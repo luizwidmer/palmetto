@@ -109,7 +109,7 @@ void test_fence_watcher(IUnknown* real_fence, const std::shared_ptr<std::atomic<
 
 // ---- Mocks ----
 
-enum class Kind { device, queue, fence, resource, allocator, command_list, heap, root_signature, pipeline_state };
+enum class Kind { device, queue, fence, resource, allocator, command_list, heap, root_signature, pipeline_state, command_signature };
 
 constexpr unsigned kMockSlots = 128;
 constexpr std::uint64_t kFenceHandle = 0x1000, kResourceHandle = 0x2000;  // the handles the mock device opens
@@ -155,6 +155,14 @@ struct Mock {
     // Device slot 10 (PC CreateGraphicsPipelineState): the description the proxy's slot-57 conversion built, copied at
     // call time. It is the proxy's own structure, so the test reads its contents rather than a pointer's identity.
     D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics_desc;
+    // Device slot 41 (PC CreateCommandSignature): the description the proxy's console argument mapping handed the host,
+    // copied at call time, and the pointer it was handed at. A translated console description arrives as the proxy's own
+    // copy (the pointer differs from the title's); one the measurement does not name arrives unchanged.
+    D3D12_COMMAND_SIGNATURE_DESC signature_desc;
+    const void* signature_desc_pointer;
+    std::uint64_t signature_root;
+    D3D12_INDIRECT_ARGUMENT_DESC signature_args[8];
+    unsigned signature_arg_count;
     // Device slot 27 (PC CreateCommittedResource): what the proxy's slot-127 conversion (the console's
     // CreateCommittedResource with a barrier layout in the initial state's place) hands the host, copied at call time,
     // and whether the host's out write reached the title's pointer.
@@ -444,6 +452,49 @@ HRESULT WINAPI mock_create_root_signature(Mock* self, UINT node_mask, const void
                        reinterpret_cast<std::uint64_t>(out));
 }
 
+// PC ID3D12Device::CreateCommandSignature (slot 41): the proxy's console argument mapping hands the host either the
+// title's own description or its bounded copy with the console-only argument type translated (docs/command_signature.md).
+// The mock records both and refuses an argument type it does not know, as the PC runtime does, so a console type the
+// measurement does not name cannot pass as a silent success.
+HRESULT WINAPI mock_create_command_signature(Mock* self, const D3D12_COMMAND_SIGNATURE_DESC* desc,
+                                             std::uint64_t root_signature, const IID* riid, void** out) {
+    if (self->kind != Kind::device)
+        return static_cast<HRESULT>(static_cast<std::uint32_t>(mock_slot<41>(
+            self, reinterpret_cast<std::uint64_t>(desc), root_signature, reinterpret_cast<std::uint64_t>(riid),
+            reinterpret_cast<std::uint64_t>(out), 0)));
+    ++self->calls[41];
+    self->args[41][0] = reinterpret_cast<std::uint64_t>(desc);
+    self->args[41][1] = root_signature;
+    self->args[41][2] = reinterpret_cast<std::uint64_t>(riid);
+    self->args[41][3] = reinterpret_cast<std::uint64_t>(out);
+    self->signature_desc_pointer = desc;
+    self->signature_root = root_signature;
+    self->signature_arg_count = 0;
+    if (desc) {
+        self->signature_desc = *desc;
+        for (UINT i = 0; desc->pArgumentDescs && i < desc->NumArgumentDescs && i < std::size(self->signature_args); ++i)
+            self->signature_args[self->signature_arg_count++] = desc->pArgumentDescs[i];
+        // The PC's argument types are 0..11 (11 is ExecuteIndirect tier 1.1's incrementing constant); anything else is
+        // what the host refuses with E_INVALIDARG.
+        for (unsigned i = 0; i < self->signature_arg_count; ++i) {
+            std::uint32_t type = 0;
+            std::memcpy(&type, &self->signature_args[i].Type, sizeof(type));
+            if (type > 11) {
+                if (out) *out = nullptr;
+                return E_INVALIDARG;
+            }
+        }
+    }
+    if (!out) return S_FALSE;
+    *out = nullptr;
+    if (self->create_null || FAILED(self->create_result)) return self->create_result;
+    Mock* child = new_mock(Kind::command_signature);
+    child->refs = 1;
+    self->last_child = child;
+    *out = child;
+    return S_OK;
+}
+
 // PC ID3D12Device::CreateGraphicsPipelineState (slot 10): the proxy's slot-57 conversion hands it the description it
 // built. The mock copies that description and hands out a pipeline-state object, like the PC device; create_result and
 // create_null (as on creation) choose the answer, so the test can check an honest failed HRESULT comes back unchanged.
@@ -567,6 +618,7 @@ void** mock_vtable() {
         table[16] = reinterpret_cast<void*>(&mock_create_root_signature);  // PC CreateRootSignature
         table[25] = reinterpret_cast<void*>(&mock_get_resource_allocation_info);  // PC GetResourceAllocationInfo
         table[27] = reinterpret_cast<void*>(&mock_create_committed_resource);  // PC CreateCommittedResource
+        table[41] = reinterpret_cast<void*>(&mock_create_command_signature);  // PC CreateCommandSignature
         table[18] = reinterpret_cast<void*>(&mock_slot18);  // GetDesc for a queue, CreateShaderResourceView for a device
         return true;
     }();
@@ -1304,6 +1356,137 @@ int check_xbox_slots() {
     std::printf("%s: ID3D12Device11 is not in this SDK; Xbox slot 80's beyond-table case is not built\n", g_label);
     return 0;
 #endif
+}
+
+// ---- 7c. Console command-signature descriptions at device slot 41 (docs/command_signature.md) ----
+
+int check_console_command_signature() {
+    Mock* mock = nullptr;
+    void* device = make_device(mock, 11, true);
+    EXPECT(device);
+    xs::reset_device_proxy_stats();
+    EXPECT(xs::device_slot_overridden(41));
+    const IID signature_iid = __uuidof(ID3D12CommandSignature);
+
+    // The first two measured descriptions are PC descriptions (DRAW / stride 16 and DRAW_INDEXED / stride 20): the host
+    // receives the title's own pointer, so a description with no console-only type is not copied or touched.
+    {
+        const struct {
+            D3D12_INDIRECT_ARGUMENT_TYPE type;
+            UINT stride;
+        } shapes[] = {{D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, sizeof(D3D12_DRAW_ARGUMENTS)},
+                      {D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, sizeof(D3D12_DRAW_INDEXED_ARGUMENTS)}};
+        for (unsigned i = 0; i < std::size(shapes); ++i) {
+            D3D12_INDIRECT_ARGUMENT_DESC arg{};
+            arg.Type = shapes[i].type;
+            D3D12_COMMAND_SIGNATURE_DESC desc{};
+            desc.ByteStride = shapes[i].stride;
+            desc.NumArgumentDescs = 1;
+            desc.pArgumentDescs = &arg;
+            void* signature = nullptr;
+            EXPECT(hr_of(raw(device, 41, word(&desc), 0, word(&signature_iid), word(&signature))) == S_OK);
+            EXPECT(signature && mock->calls[41] == i + 1);
+            EXPECT(mock->signature_desc_pointer == &desc);
+            EXPECT(mock->signature_arg_count == 1 && mock->signature_args[0].Type == shapes[i].type);
+            EXPECT(xs::device_slot_hits(41) == i + 1);
+            EXPECT(release(signature) == 0);
+        }
+    }
+
+    // The third measured description carries console argument type 105 with a 12-byte stride. The host is handed the
+    // proxy's copy with DISPATCH in that argument, the stride and NodeMask unchanged and no root signature, and the
+    // title's own description is not modified.
+    {
+        D3D12_INDIRECT_ARGUMENT_DESC arg{};
+        arg.Type = static_cast<D3D12_INDIRECT_ARGUMENT_TYPE>(105);
+        D3D12_COMMAND_SIGNATURE_DESC desc{};
+        desc.ByteStride = 12;
+        desc.NumArgumentDescs = 1;
+        desc.pArgumentDescs = &arg;
+        void* signature = nullptr;
+        EXPECT(hr_of(raw(device, 41, word(&desc), 0, word(&signature_iid), word(&signature))) == S_OK);
+        EXPECT(signature && mock->calls[41] == 3);
+        EXPECT(mock->signature_desc_pointer != &desc);
+        EXPECT(mock->signature_desc.ByteStride == 12 && mock->signature_desc.NumArgumentDescs == 1 &&
+               mock->signature_desc.NodeMask == 0);
+        EXPECT(mock->signature_arg_count == 1 &&
+               mock->signature_args[0].Type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH);
+        EXPECT(static_cast<std::uint32_t>(arg.Type) == 105);
+        EXPECT(mock->signature_root == 0);
+        EXPECT(release(signature) == 0);
+    }
+
+    // A console argument type the measurement does not name (106) is not translated: the host receives the title's own
+    // description and refuses it with E_INVALIDARG - the shim cannot turn an unmeasured type into a success.
+    {
+        D3D12_INDIRECT_ARGUMENT_DESC arg{};
+        arg.Type = static_cast<D3D12_INDIRECT_ARGUMENT_TYPE>(106);
+        D3D12_COMMAND_SIGNATURE_DESC desc{};
+        desc.ByteStride = 12;
+        desc.NumArgumentDescs = 1;
+        desc.pArgumentDescs = &arg;
+        void* signature = reinterpret_cast<void*>(0x1);
+        EXPECT(hr_of(raw(device, 41, word(&desc), 0, word(&signature_iid), word(&signature))) == E_INVALIDARG);
+        EXPECT(!signature && mock->signature_desc_pointer == &desc);
+    }
+
+    // The fifth measured description is DISPATCH_MESH with a 12-byte stride. The layer carries no mesh command
+    // signature, so the proxy answers with a named dispatch-shaped stand-in (the host sees DISPATCH) and records the
+    // object it handed out.
+    void* standin = nullptr;
+    {
+        D3D12_INDIRECT_ARGUMENT_DESC arg{};
+        arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
+        D3D12_COMMAND_SIGNATURE_DESC desc{};
+        desc.ByteStride = 12;
+        desc.NumArgumentDescs = 1;
+        desc.pArgumentDescs = &arg;
+        EXPECT(hr_of(raw(device, 41, word(&desc), 0, word(&signature_iid), word(&standin))) == S_OK);
+        EXPECT(standin != nullptr && xs::command_signature_standin(standin));
+        EXPECT(mock->signature_args[0].Type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH);
+    }
+
+    // ExecuteIndirect (console list slot 61) that names the stand-in is refused by name and not forwarded to the host
+    // list's ExecuteIndirect (PC slot 59); any other signature is forwarded.
+    {
+        const IID allocator_iid = __uuidof(ID3D12CommandAllocator);
+        void* allocator = nullptr;
+        EXPECT(hr_of(raw(device, 9, 0, word(&allocator_iid), word(&allocator))) == S_OK);
+        struct XboxListDesc {
+            std::uint32_t type;
+            std::uint32_t node_mask;
+            std::uint64_t reserved[2];
+        } list_desc{};
+        list_desc.type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        const IID list_iid = __uuidof(ID3D12GraphicsCommandList);
+        void* list = nullptr;
+        EXPECT(hr_of(raw(device, 73, word(&list_desc), word(allocator), 0, word(&list_iid), word(&list))) == S_OK);
+        Mock* real_list = reinterpret_cast<Mock*>(xs::command_list_proxy_real_list(list));
+        EXPECT(real_list && real_list->kind == Kind::command_list);
+        raw(list, 61, word(standin), 1, 0, 0, 0, 0);
+        EXPECT(xs::list_slot_hits(61) == 1 && real_list->calls[59] == 0);
+        D3D12_INDIRECT_ARGUMENT_DESC draw_arg{};
+        draw_arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+        D3D12_COMMAND_SIGNATURE_DESC draw_desc{};
+        draw_desc.ByteStride = sizeof(D3D12_DRAW_ARGUMENTS);
+        draw_desc.NumArgumentDescs = 1;
+        draw_desc.pArgumentDescs = &draw_arg;
+        void* signature = nullptr;
+        EXPECT(hr_of(raw(device, 41, word(&draw_desc), 0, word(&signature_iid), word(&signature))) == S_OK);
+        EXPECT(!xs::command_signature_standin(signature));
+        raw(list, 61, word(signature), 1, 0, 0, 0, 0);
+        EXPECT(xs::list_slot_hits(61) == 2 && real_list->calls[59] == 1);
+        EXPECT(release(signature) == 0);
+        EXPECT(release(list) == 0 && release(allocator) == 0);
+    }
+
+    EXPECT(release(standin) == 0);
+    EXPECT(xs::device_slot_hits(41) == 6);
+    EXPECT(release(device) == 0 && mock->refs == 0);
+    std::printf("%s: console slot 41 forwards the measured DRAW/DRAW_INDEXED descriptions, creates console argument "
+                "type 105 as DISPATCH, forwards an unmeasured type to the host's refusal, and refuses ExecuteIndirect "
+                "with the DISPATCH_MESH stand-in by name\n", g_label);
+    return 0;
 }
 
 // ---- 7b. The measured console slot 74 and the slot-25 depth-stencil + unordered-access stand-in ----
@@ -2706,7 +2889,7 @@ int main(int argc, char** argv) {
         check_fence1() || check_create_failures() || check_open_shared() || check_alloc_failures() ||
         check_allocators() || check_xbox_slots() || check_slot74_and_slot25_standin() ||
         check_console_command_list() || check_slot57_graphics_record() ||
-        check_slot55_derived_pipeline_state() || check_slot70_console_view())
+        check_slot55_derived_pipeline_state() || check_console_command_signature() || check_slot70_console_view())
         return 1;
     std::printf("xs_proxy_mock_test: PASS (%d allocations refused on purpose)\n", g_failed_news);
     return 0;

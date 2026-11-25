@@ -577,6 +577,7 @@ const char* slot_name(unsigned slot) {
         case 34: return "MakeResident (proxies unwrapped)";
         case 35: return "Evict (proxies unwrapped)";
         case 36: return "CreateFence -> fence proxy";
+        case 41: return "CreateCommandSignature (console argument mapping)";
         case 43: return "GetAdapterLuid";
         case 45: return "SetEventOnMultipleFenceCompletion (fence proxies unwrapped)";
         case 46: return "SetResidencyPriority (proxies unwrapped)";
@@ -708,6 +709,68 @@ void note_heap_slot(unsigned slot) {
 
 std::uint64_t hr_to_u64(HRESULT hr) {
     return static_cast<std::uint64_t>(static_cast<std::uint32_t>(hr));
+}
+
+// ---- Console command signatures (docs/command_signature.md) ---------------------------------------------------------
+//
+// Device slot 41 is CreateCommandSignature at its PC position: (desc, root signature, riid, out). The retail title's
+// renderer device setup game+0x2478440 creates five one-argument descriptions there, every one with NodeMask 0 and no
+// root signature (caller RVAs game+0x247954e, 0x247958a, 0x24795c6, 0x2479605, 0x2479646). Measured argument type and
+// ByteStride, in call order: 0 DRAW / 16, 1 DRAW_INDEXED / 20, 105 / 12, 2 DISPATCH / 12, 10 DISPATCH_MESH / 12. Four
+// of those are PC D3D12_INDIRECT_ARGUMENT_TYPE values and pass the layer's PC validation unchanged. 105 is outside the
+// PC enum; its record is 12 bytes, the size of D3D12_DISPATCH_ARGUMENTS, and its measured ExecuteIndirect use (console
+// list slot 61, caller game+0x94445) walks one 12-byte record after binding the compute state, the shape the DISPATCH
+// signature has. It is created as DISPATCH. HYPOTHESIS: what the console does differently for it is not identified; the
+// behaviour is cross-checked against the public fork, whose measured row reads the same type the same way.
+//
+// The fifth description is DISPATCH_MESH, a PC type this layer cannot carry: a CommandSignature here has a draw,
+// draw_indexed or dispatch kind only, and the replay has no mesh indirect path. The proxy answers that description with
+// a named dispatch-shaped stand-in so the title's setup can finish, and the list proxy refuses an ExecuteIndirect that
+// names a stand-in by name instead of recording a dispatch the console would have run as mesh work. Removing the
+// stand-in is the next slice's job: IndirectKind::dispatch_mesh plus vkCmdDrawMeshTasksIndirectEXT.
+constexpr std::uint32_t kConsoleIndirectArgumentDispatch = 105;  // the console-only argument type measured at slot 41
+constexpr unsigned kCommandSignatureArguments = 8;               // the bounded description copy
+constexpr unsigned kCommandSignatureStandins = 4;                // console DISPATCH_MESH stand-ins kept for the check
+
+std::atomic<void*> g_command_signature_standins[kCommandSignatureStandins];
+std::atomic<unsigned> g_command_signature_standin_count{0};
+
+// One relaxed flag read on the hot path; the probe prints only when PALMETTO_XS_SIG41 is set.
+bool command_signature_probe() {
+    static const bool enabled = [] {
+        char value[8] = {};
+        const DWORD length = GetEnvironmentVariableA("PALMETTO_XS_SIG41", value, sizeof(value));
+        return length > 0 && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
+std::uint32_t indirect_argument_type(const D3D12_INDIRECT_ARGUMENT_DESC& arg) {
+    std::uint32_t word = 0;
+    std::memcpy(&word, &arg.Type, sizeof(word));
+    return word;
+}
+
+void set_indirect_argument_type(D3D12_INDIRECT_ARGUMENT_DESC& arg, std::uint32_t word) {
+    std::memcpy(&arg.Type, &word, sizeof(word));
+}
+
+// The stand-in registry is only read by an ExecuteIndirect that names one of these signature objects. The creation
+// runs on the title's setup thread before the frame lists that could name it, so the release-store is enough.
+void note_command_signature_standin(void* signature) {
+    if (!signature) return;
+    const unsigned index = g_command_signature_standin_count.fetch_add(1, std::memory_order_relaxed);
+    if (index < kCommandSignatureStandins)
+        g_command_signature_standins[index].store(signature, std::memory_order_release);
+}
+
+bool is_command_signature_standin(const void* signature) {
+    if (!signature) return false;
+    const unsigned count = std::min(g_command_signature_standin_count.load(std::memory_order_acquire),
+                                    kCommandSignatureStandins);
+    for (unsigned i = 0; i < count; ++i)
+        if (g_command_signature_standins[i].load(std::memory_order_acquire) == signature) return true;
+    return false;
 }
 
 // Console slot 25 (GetResourceAllocationInfo) with the console's depth-stencil + unordered-access pair sized as a plain
@@ -2823,6 +2886,24 @@ std::uint64_t WINAPI list_slot(ListProxy* self, std::uint64_t a1, std::uint64_t 
             // no-op on the console. A real view is forwarded unchanged with the same handle.
             if constexpr (Slot == 52) {
                 if (!translate_console_clear(a1, a2)) return 0;
+            }
+            // Console slot 61 (ExecuteIndirect, PC slot 59): a signature the proxy created as a stand-in for the
+            // console's DISPATCH_MESH description has no replay in this layer (docs/command_signature.md). Refuse the
+            // call by name and record no command, instead of running a dispatch the console would have run as mesh work.
+            if constexpr (Slot == 61) {
+                if (is_command_signature_standin(reinterpret_cast<const void*>(a1))) {
+                    static std::atomic<unsigned> refused{0};
+                    if (refused.fetch_add(1, std::memory_order_relaxed) < 4) {
+                        char caller[64];
+                        streamed_blocks::caller_text(reinterpret_cast<std::uint64_t>(_ReturnAddress()), caller,
+                                                     sizeof(caller));
+                        std::fprintf(stderr,
+                                     "[rt] d3d12_xs: list slot 61 ExecuteIndirect with the console DISPATCH_MESH "
+                                     "stand-in at %s: not recorded (mesh indirect replay is not implemented)\n",
+                                     caller);
+                    }
+                    return 0;
+                }
             }
             if constexpr (Slot == 10) {
                 a1 = unwrap_object(a1);
@@ -6101,6 +6182,85 @@ HRESULT proxy_create_placed_resource_x(DeviceProxy* self, void* va, const D3D12_
     return hr;
 }
 
+// Device slot 41: CreateCommandSignature at its PC position. See the command-signature block near the top of this file
+// for the measured console descriptions and the mapping rule. `caller` is the title's return address, for the probe.
+HRESULT proxy_create_command_signature(DeviceProxy* self, const void* caller, const D3D12_COMMAND_SIGNATURE_DESC* desc,
+                                       std::uint64_t root_signature, const IID* riid, void** out) {
+    note_slot(41);
+    if (out) *out = nullptr;
+    // The title's description is never changed in place: when a console-only argument type has to be translated it is
+    // copied into a bounded stack array, and the host is handed that copy. Every other description goes on unchanged.
+    D3D12_INDIRECT_ARGUMENT_DESC translated[kCommandSignatureArguments];
+    D3D12_COMMAND_SIGNATURE_DESC pc_desc{};
+    const D3D12_COMMAND_SIGNATURE_DESC* forward_desc = desc;
+    std::uint32_t probe_types[kCommandSignatureArguments] = {};
+    unsigned probe_type_count = 0;
+    bool console_dispatch = false;
+    bool mesh_standin = false;
+    if (desc && desc->pArgumentDescs && desc->NumArgumentDescs <= kCommandSignatureArguments &&
+        readable_range(desc, sizeof(*desc)) &&
+        readable_range(desc->pArgumentDescs, desc->NumArgumentDescs * sizeof(D3D12_INDIRECT_ARGUMENT_DESC))) {
+        pc_desc = *desc;
+        for (UINT i = 0; i < desc->NumArgumentDescs; ++i) {
+            translated[i] = desc->pArgumentDescs[i];
+            const std::uint32_t type = indirect_argument_type(translated[i]);
+            probe_types[probe_type_count++] = type;
+            if (type == kConsoleIndirectArgumentDispatch) {
+                set_indirect_argument_type(translated[i], D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH);
+                console_dispatch = true;
+            } else if (type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH) {
+                // The layer carries no mesh signature: a named dispatch-shaped stand-in is created for the title's
+                // setup and the list proxy refuses an ExecuteIndirect that names it.
+                set_indirect_argument_type(translated[i], D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH);
+                mesh_standin = true;
+            }
+        }
+        if (console_dispatch || mesh_standin) {
+            pc_desc.pArgumentDescs = translated;
+            forward_desc = &pc_desc;
+        }
+    }
+    if (console_dispatch) {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed))
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: slot 41: console argument type 105 (stride %u) has no PC value; created as "
+                         "D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH (docs/command_signature.md)\n",
+                         desc ? static_cast<unsigned>(desc->ByteStride) : 0u);
+    }
+    if (mesh_standin) {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed))
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: slot 41: console DISPATCH_MESH description (stride %u) is created as a "
+                         "named dispatch-shaped stand-in; ExecuteIndirect with it is refused (mesh indirect replay is "
+                         "not implemented)\n",
+                         desc ? static_cast<unsigned>(desc->ByteStride) : 0u);
+    }
+    HRESULT hr = E_NOTIMPL;
+    if (41u >= self->slot_count) {
+        hr = refuse_beyond_device(41, self->slot_count);
+    } else {
+        using Fn = HRESULT(WINAPI*)(ID3D12Device*, const D3D12_COMMAND_SIGNATURE_DESC*, std::uint64_t, const IID*,
+                                    void**);
+        hr = reinterpret_cast<Fn>(self->real_vtable[41])(self->real, forward_desc, root_signature, riid, out);
+    }
+    if (SUCCEEDED(hr) && mesh_standin && out && *out) note_command_signature_standin(*out);
+    if (command_signature_probe()) {
+        char caller_text[64];
+        streamed_blocks::caller_text(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(caller)),
+                                     caller_text, sizeof(caller_text));
+        std::fprintf(stderr, "[rt] d3d12_xs: slot 41 call at %s: stride %u count %u node 0x%x root 0x%llx types",
+                     caller_text, desc ? static_cast<unsigned>(desc->ByteStride) : 0u,
+                     desc ? static_cast<unsigned>(desc->NumArgumentDescs) : 0u,
+                     desc ? static_cast<unsigned>(desc->NodeMask) : 0u,
+                     static_cast<unsigned long long>(root_signature));
+        for (unsigned i = 0; i < probe_type_count; ++i) std::fprintf(stderr, " %x", probe_types[i]);
+        std::fprintf(stderr, " -> 0x%08lx\n", static_cast<unsigned long>(hr));
+    }
+    return hr;
+}
+
 template <unsigned Slot>
 std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3,
                                 std::uint64_t a4, std::uint64_t a5, std::uint64_t a6, std::uint64_t a7,
@@ -6153,6 +6313,11 @@ std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64
     } else if constexpr (Slot == 32) {
         return hr_to_u64(proxy_open_shared_handle(self, a1, reinterpret_cast<const IID*>(a2),
                                                   reinterpret_cast<void**>(a3)));
+    } else if constexpr (Slot == 41) {
+        return hr_to_u64(proxy_create_command_signature(self, _ReturnAddress(),
+                                                        reinterpret_cast<const D3D12_COMMAND_SIGNATURE_DESC*>(a1),
+                                                        a2, reinterpret_cast<const IID*>(a3),
+                                                        reinterpret_cast<void**>(a4)));
     } else if constexpr (Slot == 31 || Slot == 34 || Slot == 35 || Slot == 45 || Slot == 46 || Slot == 50) {
         return hr_to_u64(proxy_unwrapping_call<Slot>(self, a1, a2, a3, a4, a5));
     } else if constexpr (Slot == 75) {
@@ -6619,14 +6784,16 @@ ID3D12Device* device_proxy_real_device(const void* device) {
 }
 
 bool device_slot_overridden(unsigned slot) {
-    if (slot <= 2 || slot == 25 || slot == 26 || slot == 8 || slot == 9 || slot == 14 || slot == 31 || slot == 32 || slot == 34 || slot == 35 ||
-        slot == 36 || slot == 45 || slot == 46 || slot == 50 || slot == 55 || slot == 62 || slot == 67 || slot == 74 ||
-        slot == 75 || slot == 76 || slot == 127 || slot == 133)
+    if (slot <= 2 || slot == 25 || slot == 26 || slot == 8 || slot == 9 || slot == 14 || slot == 31 || slot == 32 ||
+        slot == 34 || slot == 35 || slot == 36 || slot == 41 || slot == 45 || slot == 46 || slot == 50 || slot == 55 ||
+        slot == 62 || slot == 67 || slot == 74 || slot == 75 || slot == 76 || slot == 127 || slot == 133)
         return true;
     const XboxDeviceSlotRoutes& routes = xbox_device_slot_routes();
     return slot == routes.frame_interval || slot == routes.schedule_event || slot == routes.wait_event ||
            slot == routes.queue_x || slot == routes.list_x;
 }
+
+bool command_signature_standin(const void* signature) { return is_command_signature_standin(signature); }
 
 bool is_queue_proxy(const void* queue) { return is_child_proxy<ChildKind::queue>(queue); }
 bool is_fence_proxy(const void* fence) { return is_child_proxy<ChildKind::fence>(fence); }
