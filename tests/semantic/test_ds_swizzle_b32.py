@@ -17,9 +17,10 @@ on one 64-wide and on two 32-wide subgroups, partial waves (20 and 40 lanes), EX
 patterns, and a pixel shader on tests/semantic/spirv_wave_interp.py. The expected words come from hand-worked
 constants and a plain-Python model of the 16-bit offset encoding, not from the translator.
 
-The --wave64-emulate lowering goes through Workgroup memory and barriers, which spirv_mini_interp.py rejects, so it
-is checked structurally only. The translator parses the swizzle(...) text LLVM's disassembler prints; a raw numeric
-offset is refused rather than guessed.
+The --wave64-emulate lowering goes through Workgroup memory and barriers and the round loop's OpSwitch/OpUMod, which
+spirv_mini_interp.py models (the loop-guard tests added the last two), so it is checked structurally and by value
+against the same reference model. The translator parses the swizzle(...) text LLVM's disassembler prints; a raw
+numeric offset is refused rather than guessed.
 
     python -I tests/semantic/test_ds_swizzle_b32.py -v
 """
@@ -761,13 +762,13 @@ class EmulationAndParsingTests(unittest.TestCase):
 
     def test_wave64_emulate_lowers_all_five_modes_via_x_buf_without_subgroup_ops(self):
         cases = [
-            ("quad", "swizzle(QUAD_PERM,3,2,1,0)", r"%cfffffffc\b"),
-            ("bitmask", 'swizzle(BITMASK_PERM,"10p0i")', r"%cffffffe5\b"),
-            ("swap", "swizzle(SWAP,16)", r"OpBitwiseXor %uint %\w+ %c10\b"),
-            ("reverse", "swizzle(REVERSE,32)", r"OpBitwiseXor %uint %\w+ %c1f\b"),
-            ("broadcast", "swizzle(BROADCAST,16,5)", r"%cfffffff0\b"),
+            ("quad", "swizzle(QUAD_PERM,3,2,1,0)", r"%cfffffffc\b", encode_quad_perm(3, 2, 1, 0)),
+            ("bitmask", 'swizzle(BITMASK_PERM,"10p0i")', r"%cffffffe5\b", encode_bitmask_perm("10p0i")),
+            ("swap", "swizzle(SWAP,16)", r"OpBitwiseXor %uint %\w+ %c10\b", encode_swap(16)),
+            ("reverse", "swizzle(REVERSE,32)", r"OpBitwiseXor %uint %\w+ %c1f\b", encode_reverse(32)),
+            ("broadcast", "swizzle(BROADCAST,16,5)", r"%cfffffff0\b", encode_broadcast(16, 5)),
         ]
-        for label, mod_str, expected_pat in cases:
+        for label, mod_str, expected_pat, offset16 in cases:
             with self.subTest(mode=label):
                 lines = [
                     "s_mov_b64 exec, -1",
@@ -784,13 +785,16 @@ class EmulationAndParsingTests(unittest.TestCase):
                 self.assertIn("%x_buf = OpVariable", spv)
                 self.assertGreaterEqual(spv.count("OpControlBarrier"), 2)
                 self.assertRegex(spv, expected_pat)
-                # spirv_mini_interp.py deliberately rejects the Workgroup-memory round loop.
-                with self.assertRaises(si.UnsupportedConstruct):
-                    si.run_workgroup(
-                        spv, 64, 32,
-                        inputs_for=lambda i: {"%wg_id": (0, 0, 0), "%local_id": (i, 0, 0), "%sg_lane": i % 32},
-                        push_constants=VSHARP + [0] * 28, memory={},
-                    )
+                # The round loop through Workgroup memory needs OpSwitch/OpUMod, which spirv_mini_interp models
+                # now (the loop-guard tests added them), so the values are checked against the same reference model
+                # as the native wave32/wave64 cases.
+                memory = si.run_workgroup(
+                    spv, 64, 32,
+                    inputs_for=lambda i: {"%wg_id": (0, 0, 0), "%local_id": (i, 0, 0), "%sg_lane": i % 32},
+                    push_constants=VSHARP + [0] * 28, memory={},
+                )
+                self.assertEqual([memory.get(4 * lane, 0) for lane in range(64)],
+                                 ref_swizzle([100 + lane for lane in range(64)], [0] * 64, offset16, ALL64))
 
         # Wave32 shaders are unaffected by WAVE64_EMULATE = True.
         w32_lines = [

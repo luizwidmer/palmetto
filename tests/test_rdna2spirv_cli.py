@@ -47,6 +47,32 @@ class ArgumentTypes(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(argparse.ArgumentTypeError):
                 rdna2spirv._depth_arg(text)
 
+    def test_loop_limit(self):
+        self.assertEqual(rdna2spirv._loop_limit_arg("0"), 0)          # 0 disables the loop guard
+        self.assertEqual(rdna2spirv._loop_limit_arg("16"), 16)
+        self.assertEqual(rdna2spirv._loop_limit_arg("4294967295"), 4294967295)
+        for text in ("-1", "4294967296", "x", "", "1.5"):
+            with self.subTest(text=text), self.assertRaises(argparse.ArgumentTypeError):
+                rdna2spirv._loop_limit_arg(text)
+
+    def test_loop_limit_sets_the_bound(self):
+        # --loop-limit replaces LOOP_LIMIT for the run; the default is 65536, written out here rather than read from
+        # the module (and from the loop guard) so that changing either default fails this test. The global is
+        # restored afterwards: main() sets it for the process and other test files assert the default.
+        self.assertEqual(rdna2spirv.LOOP_LIMIT, 65536)
+        original = rdna2spirv.LOOP_LIMIT
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                for extra, expected in (([], 65536), (["--loop-limit", "0"], 0), (["--loop-limit", "8"], 8)):
+                    with self.subTest(extra=extra), \
+                            mock.patch.object(sys, "argv", [TOOL, tmp, "--out", os.path.join(tmp, "o")] + extra), \
+                            redirect_stdout(io.StringIO()):
+                        rdna2spirv.LOOP_LIMIT = 65536
+                        rdna2spirv.main()
+                        self.assertEqual(rdna2spirv.LOOP_LIMIT, expected)
+        finally:
+            rdna2spirv.LOOP_LIMIT = original
+
     def test_max_structured_depth_sets_the_bound(self):
         # SHADER-427: the option replaces MAX_STRUCTURED_DEPTH for the run; without it the default is 64, written out
         # here rather than read from the module so that changing the default fails this test.

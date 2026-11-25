@@ -409,12 +409,17 @@ class StructuredBranchInterp:
 
         ip = 0
         steps = 0
+        cur_label = prev_label = None
         while ip < len(self.insns):
             steps += 1
             if steps > max_steps:
                 raise BranchExecutionLimitError(f"Step limit {max_steps} exceeded: possible infinite loop")
             res, op, a, _ = self.insns[ip]
-            if op in _IGNORED or op == "OpLabel":
+            if op == "OpLabel":
+                cur_label = res
+                ip += 1
+                continue
+            if op in _IGNORED:
                 ip += 1
                 continue
             if op in ("OpReturn", "OpFunctionEnd"):
@@ -423,6 +428,7 @@ class StructuredBranchInterp:
                 target_label = a[0]
                 if target_label not in self.labels:
                     raise UnsupportedConstruct(f"OpBranch target {target_label} not found")
+                prev_label = cur_label
                 ip = self.labels[target_label]
                 continue
             if op == "OpBranchConditional":
@@ -432,6 +438,7 @@ class StructuredBranchInterp:
                 target_label = a[1] if cond else a[2]
                 if target_label not in self.labels:
                     raise UnsupportedConstruct(f"OpBranchConditional target {target_label} not found")
+                prev_label = cur_label
                 ip = self.labels[target_label]
                 continue
             if op == "OpVariable":
@@ -498,6 +505,13 @@ class StructuredBranchInterp:
                 values[res] = val(a[2]) if cond else val(a[3])
             elif op == "OpCopyObject":
                 values[res] = val(a[1])
+            elif op == "OpPhi":
+                # SPIR-V 2.16.2: the value of a phi comes from the block the edge just left. The loop guard adds a
+                # counter phi to every loop header, so the interpreter has to follow the predecessor label.
+                incoming = {a[i]: a[i - 1] for i in range(2, len(a), 2)}
+                if prev_label not in incoming:
+                    raise UnsupportedConstruct(f"OpPhi {res} has no value for predecessor {prev_label}")
+                values[res] = val(incoming[prev_label])
             elif op == "OpBitcast":
                 values[res] = val(a[1])
             elif op == "OpCompositeConstruct":

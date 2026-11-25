@@ -38,6 +38,7 @@ import fssm_header  # noqa: E402
 import fssm_unpack  # noqa: E402
 import lane_masks  # noqa: E402
 import shader_meta as _shader_meta  # noqa: E402
+import spirv_loop_guard  # noqa: E402
 import wave64_emulate_opt  # noqa: E402
 import wave64_halves  # noqa: E402
 
@@ -50,6 +51,12 @@ STRUCTURED = True     # False (--dispatch-loop): every shader with branches as o
 # the corpus, as a guard for depths where validation really grows. Both forms are equivalent; only the routing
 # differs. docs/design.md "Control flow" has the numbers.
 MAX_STRUCTURED_DEPTH = 64
+# --loop-limit N: header visits per invocation per loop entry before the loop guard (tooling/spirv_loop_guard.py)
+# leaves through the loop's merge block instead of taking the back edge. A translated loop whose exit is not
+# reachable for every input would otherwise spin forever on the GPU (the upstream fork's story-load hang); the
+# budget is per entry, so nested loops are bounded once per outer iteration. 0 disables the pass and reproduces the
+# unguarded module byte for byte. The default is the fork's 65536; changing it changes every loop-bearing module.
+LOOP_LIMIT = spirv_loop_guard.DEFAULT_LIMIT
 WAVE64_EMULATE = False   # --wave64-emulate: wave64 compute/mesh shaders exact on any subgroup size (Gen.x_round)
 # --max-shared-memory: a cap on a compute shader's Workgroup variables, LDS plus %x_buf (SHADER-309, #1721). The
 # default is the hard cap: 64 KiB, RDNA2's LDS per workgroup and the largest maxComputeSharedMemorySize drivers
@@ -7483,16 +7490,33 @@ class Gen:
             self.emit(f"{r} = OpBitReverse %uint {x}")
             self.dst(a[0], r)
         elif op in ("s_quadmask_b32", "s_quadmask_b64", "s_bitreplicate_b64_b32"):
-            # RDNA2 ISA SOP1, on scalar data (a lane-mask operand stays Unsupported: each invocation holds only its
+            # RDNA2 ISA SOP1, on scalar data (a lane-mask *source* stays Unsupported: each invocation holds only its
             # own lane's bit, and these ops read the other lanes of its quad or move bits between lanes):
             #   s_quadmask_b32: D[i] = OR of S0[4i+3:4i], i in 0..7, D[31:8] = 0; SCC = D != 0.
             #   s_quadmask_b64: the same for 16 quads of the 64-bit S0, D[63:16] = 0; SCC = D != 0.
             #   s_bitreplicate_b64_b32: D[2i+1] = D[2i] = S0[i], i in 0..31; SCC is not written.
+            # s_bitreplicate_b64_b32 may also write a lane mask (llvm-mc prints `exec` in any wave size and `vcc` in
+            # wave64 code; the story-load programs emit entire masks this way): D[L] is the bit of source bit L // 2,
+            # so lane L's write is the source's bit L // 2 as its own 0 / ~0. The other two ops keep the full refusal:
+            # their lane-mask destination would mean a quad/wave operation we do not model.
             d, x = a[0], a[1]
             wide_src = op == "s_quadmask_b64"
             wide_dst = op != "s_quadmask_b32"
-            if self.is_mask_op(x) or (d["k"] == "special" and d.get("t", "").startswith(("exec", "vcc"))):
+            if self.is_mask_op(x):
                 raise Unsupported(op + " on a lane mask")
+            if d["k"] == "special" and d.get("t", "").startswith(("exec", "vcc")):
+                # vcc in wave32 code is the data pair the *saveexec family and s_load use, not a lane mask.
+                if op != "s_bitreplicate_b64_b32" or not (d["t"] in ("exec", "exec_lo") or
+                                                          (self.wave64 and d["t"] in ("vcc", "vcc_lo"))):
+                    raise Unsupported(op + " on a lane mask")
+                word = self.src_u(x)
+                shift, shifted, bit, mask = (self.tmp() for _ in range(4))
+                self.emit(f"{shift} = OpShiftRightLogical %uint {self.wave_lane()} {self.cu(1)}")
+                self.emit(f"{shifted} = OpShiftRightLogical %uint {word} {shift}")
+                self.emit(f"{bit} = OpBitwiseAnd %uint {shifted} {self.cu(1)}")
+                self.emit(f"{mask} = OpISub %uint {self.cu(0)} {bit}")
+                self.mask_dst(d, mask)
+                return
             if wide_src:
                 lo, hi = self.src64_data(x, op)
                 words = [lo, hi]
@@ -15970,10 +15994,12 @@ def assemble(gen):
             fn += [f"%li{c} = OpCompositeExtract %uint %lci {c}",
                    f"%lip{c} = OpAccessChain %_ptr_Function_uint %vgpr {gen.cu(c)}", f"OpStore %lip{c} %li{c}"]
         if gen.cs.get("tg_size"):
-            # Work-Group Info (COMPUTE_PGM_RSRC2 TG_SIZE_EN, see check_workgroup_info_use): bits 11:6 are this
-            # wave's index in the workgroup and bits 5:0 the workgroup's wavefront count. The wave index is the
-            # local invocation index divided by the wave size; taking it from LocalInvocationId rather than from
-            # a subgroup builtin keeps it the program's wave (64 lanes) on any device subgroup size.
+            # Work-Group Info (COMPUTE_PGM_RSRC2 TG_SIZE_EN, translate()): bits 11:6 are this wave's index in the
+            # workgroup and bits 5:0 the workgroup's wavefront count (Mesa ac_nir_lower_intrinsics_to_args.c,
+            # GFX6-10). The wave index is the local invocation index divided by the wave size; taking it from
+            # LocalInvocationId rather than from a subgroup builtin keeps it the program's wave on any device
+            # subgroup size. A program that reads any other field of the register gets the zero this value leaves
+            # there (docs/translator_fixes.md, "TG_SIZE general value", limits).
             sx_, sy_, sz_ = gen.cs["size"]
             fn += ["%tgs_x = OpCompositeExtract %uint %lci 0"]
             terms = ["%tgs_x"]
@@ -15996,15 +16022,14 @@ def assemble(gen):
                 fn += [f"%tgs_l{k} = OpIAdd %uint {lin} {term}"]
                 lin = f"%tgs_l{k}"
             wave_size = 64 if gen.wave64 else 32
-            fn += [f"%tgs_w = OpShiftRightLogical %uint {lin} {gen.cu(wave_size.bit_length() - 1)}",
-                   f"%tgs_v = OpShiftLeftLogical %uint %tgs_w {gen.cu(6)}"]
-            value = "%tgs_v"
             waves = -(-(sx_ * sy_ * sz_) // wave_size)
-            if waves > 1:
-                fn += [f"%tgs_v2 = OpBitwiseOr %uint %tgs_v {gen.cu(waves)}"]
-                value = "%tgs_v2"
+            # bits 5:0 always hold the wave count (a workgroup has at least one wave), so the OR is unconditional:
+            # writing only the index left 0 there, which is not a wave count.
+            fn += [f"%tgs_w = OpShiftRightLogical %uint {lin} {gen.cu(wave_size.bit_length() - 1)}",
+                   f"%tgs_v = OpShiftLeftLogical %uint %tgs_w {gen.cu(6)}",
+                   f"%tgs_v2 = OpBitwiseOr %uint %tgs_v {gen.cu(waves)}"]
             r = gen.cs["user"] + len(gen.cs["tgid"])
-            fn += [f"%tgs_p = OpAccessChain %_ptr_Function_uint %sgpr {gen.cu(r)}", f"OpStore %tgs_p {value}"]
+            fn += [f"%tgs_p = OpAccessChain %_ptr_Function_uint %sgpr {gen.cu(r)}", "OpStore %tgs_p %tgs_v2"]
     if gen.frag_inputs:
         fn += ["%fc = OpLoad %v4float %frag_coord"]
         if bary:
@@ -17381,45 +17406,6 @@ def cs_dispatch_state(path, name):
     return (m["rsrc2"], *m["threads"])
 
 
-TG_SIZE_MASK = 0xFC0     # Work-Group Info bits 11:6: this wave's index in the workgroup, in units of 64 lanes
-
-
-def check_workgroup_info_use(insns, reg):
-    """True if ``insns`` read the RSRC2 TG_SIZE_EN work-group-info SGPR ``reg`` through the one idiom modelled here.
-
-    COMPUTE_PGM_RSRC2 TG_SIZE_EN [10] makes the hardware set a system SGPR with the work-group info; no FSSM compute
-    shader sets the bit, but the pipeline library's compute programs do (docs/shader_library.md). The idiom the
-    boot's programs use is the wave64 local-invocation-index computation: Mesa's
-    src/amd/common/nir/ac_nir_lower_intrinsics_to_args.c lowers LocalInvocationIndex to
-    `mbcnt(~0, tg_size & 0xfc0)` and its comment says the AND leaves the wave index multiplied by 64, so bits 11:6
-    hold this wave's index in the workgroup and bits 5:0 its wavefront count (LLVM docs/AMDGPUUsage, "Work-Group
-    Info"). Any other read of the register, and any use of the masked value other than v_mbcnt_lo/hi_u32_b32, is
-    refused: the remaining fields are not modelled, and a value invented for them would be a guess."""
-    found = False
-    for n, ins in enumerate(insns):
-        a, op = ins["args"], base_op(ins["op"])
-        if not any(x["k"] == "sgpr" and x.get("r", 1 << 30) <= reg < x.get("r", 0) + x.get("n", 1) for x in a):
-            continue
-        if not (op == "s_and_b32" and len(a) == 3 and
-                a[0]["k"] == "sgpr" and a[0].get("n", 1) == 1 and
-                a[1]["k"] == "sgpr" and a[1].get("r") == reg and a[1].get("n", 1) == 1 and
-                a[2]["k"] == "imm" and a[2]["v"] & 0xFFFFFFFF == TG_SIZE_MASK):
-            raise Unsupported("CS work-group-info SGPR use")
-        dest = a[0]["r"]
-        for nxt in insns[n + 1:]:
-            mentions = [x for x in nxt["args"]
-                        if x["k"] == "sgpr" and x.get("r", 1 << 30) <= dest < x.get("r", 0) + x.get("n", 1)]
-            if not mentions:
-                continue
-            if base_op(nxt["op"]) in ("v_mbcnt_lo_u32_b32", "v_mbcnt_hi_u32_b32"):
-                found = True
-                break
-            if nxt["args"] and nxt["args"][0]["k"] == "sgpr" and mentions[0] is nxt["args"][0]:
-                break                    # overwritten before use: no dependence on the value
-            raise Unsupported("CS work-group-info SGPR use")
-    return found
-
-
 def fspx_wave_size(path, name):
     """32 or 64 from an FSPX program's dispatch state, or None: the `wave32` field tooling/fspx_unpack.py writes to
     fspx/<name>.json from kind 0's word 4 bit 20 (set = wave32; docs/fspx.md, "Kind 0: dispatch state"). None when
@@ -17623,11 +17609,13 @@ def translate(path):
                 "tid": (rsrc2 >> 11) & 3, "size": (lx, ly, lz)}
         if (rsrc2 >> 10) & 1:
             # TG_SIZE_EN: the hardware fills a work-group-info system SGPR right after the enabled workgroup-id
-            # SGPRs. Only the wave64 local-invocation-index idiom is modelled (check_workgroup_info_use); a program
-            # that reads the register any other way is refused rather than translated with a guessed value.
-            if not g.wave64:
-                raise Unsupported("CS work-group-info SGPR on wave32")
-            g.cs["tg_size"] = check_workgroup_info_use(insns, user + len(g.cs["tgid"]))
+            # SGPRs (Mesa src/amd/common/nir/ac_nir_lower_intrinsics_to_args.c, GFX6-10: the workgroup's wave count
+            # in [5:0] and this wave's index in [11:6]; the address is user + enabled TGIDs). The prologue writes
+            # that whole value (assemble()), so every read of the register is supported, wave32 and wave64 alike,
+            # instead of only the s_and 0xfc0 / v_mbcnt idiom this used to accept (docs/translator_fixes.md, "the
+            # general value"). The fields the prologue does not write are the ones Mesa does not describe; see the
+            # limit noted there before trusting a shader that reads them.
+            g.cs["tg_size"] = True
         # LDS_SIZE [23:15] in 512-byte units. All 485 LDS-using corpus CS stay inside it; a constant offset past it,
         # which RDNA2 treats as out of range, is bounds-checked below (SHADER-309).
         need = ((rsrc2 >> 15) & 0x1FF) * 128
@@ -17802,11 +17790,7 @@ def translate(path):
         g.exec_changes = any(g.may_write_exec(ins) for ins in insns[:end])
         g.insns(insns[:end])
         translate.last_gen = g
-        out = assemble(g)
-        if OPT_SPIRV:
-            import spirv_opt
-            out = spirv_opt.optimize(out)
-        return out
+        return finish_module(g)
 
     # ---- basic blocks ----
     def next_pc(ins):
@@ -18130,11 +18114,20 @@ def translate(path):
     assert succ == g.succ, "the lane-mask analysis ran on a different graph"
     g.body = []
     translate.last_gen = g
+    return finish_module(g)
+
+
+def finish_module(g):
+    """Assemble the translated module, run the optional peephole pass, then bound every structured loop.
+
+    The loop guard is the last step on purpose: it works on the assembled text, and the peephole pass before it
+    must not have to reason about the counter phi and the exit branch the guard adds (tooling/spirv_loop_guard.py
+    has the rationale; LOOP_LIMIT 0 returns the unguarded module unchanged)."""
     out = assemble(g)
     if OPT_SPIRV:
         import spirv_opt
         out = spirv_opt.optimize(out)
-    return out
+    return spirv_loop_guard.add_guards(out, LOOP_LIMIT)
 
 
 _DEF = re.compile(r"(%\w+) = (Op\w+)(?: (%\w+))?")
@@ -18974,6 +18967,17 @@ def _depth_arg(text):
     return value
 
 
+def _loop_limit_arg(text):
+    """--loop-limit N: 0 (no guard) up to the guard's 32-bit counter limit."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {text!r}") from None
+    if not 0 <= value <= spirv_loop_guard.MAX_LIMIT:
+        raise argparse.ArgumentTypeError(f"must be in 0..{spirv_loop_guard.MAX_LIMIT}")
+    return value
+
+
 def _out_inside_input(src, out):
     """True when --out is the input folder or a folder inside it: translating there writes among the inputs.
 
@@ -19022,7 +19026,7 @@ def merge_refusal_parts(path):
 
 
 def main():
-    global MAX_SHARED_BYTES, MAX_STRUCTURED_DEPTH
+    global MAX_SHARED_BYTES, MAX_STRUCTURED_DEPTH, LOOP_LIMIT
     ap = argparse.ArgumentParser()
     ap.add_argument("src")
     ap.add_argument("--out", required=True)
@@ -19095,6 +19099,10 @@ def main():
                     help="a shader whose structured control flow nests deeper than N is emitted in the dispatch-loop "
                          "form instead (default %(default)s; 0 = never): that form validates faster at great depth "
                          "but compiles 1.7-2x slower on NVIDIA (SHADER-427, docs/design.md \"Control flow\")")
+    ap.add_argument("--loop-limit", type=_loop_limit_arg, default=LOOP_LIMIT, metavar="N",
+                    help="bound every translated loop at N header visits per invocation per entry and then leave "
+                         "through its merge block instead of taking the back edge (default %(default)s; 0 = no guard, "
+                         "the unguarded module byte for byte). tooling/spirv_loop_guard.py has the rationale")
     ap.add_argument("--opt", action="store_true",
                     help="run basic-block SPIR-V peephole optimization (tooling/spirv_opt.py: register store-to-load "
                          "forwarding, OpAccessChain CSE, dead-store elimination, OpSelect/CopyObject folding, DCE)")
@@ -19116,6 +19124,7 @@ def main():
         ap.error(f"cannot create {a.out}: {ancestor} is a file, not a folder")
     MAX_SHARED_BYTES = a.max_shared_memory
     MAX_STRUCTURED_DEPTH = a.max_structured_depth
+    LOOP_LIMIT = a.loop_limit
     global STRUCTURED, WAVE64_EMULATE, WAVE64_GRAPHICS, BARY_FALLBACK, TEXEL_OFFSET_FALLBACK, MESH_COMPUTE, FMA_KHR, SHADER_CLOCK, F16_HALVES, OPT_SPIRV
     global PC_TAIL_UBO
     PC_TAIL_UBO = a.pc_tail_ubo

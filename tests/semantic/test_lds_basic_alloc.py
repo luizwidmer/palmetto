@@ -10,8 +10,8 @@ translator puts the Workgroup array `%lds_arr`:
     (64 KiB), and a dynamic address wraps at its size (dword (A / 4) mod size);
   * a constant offset past the declared size (SHADER-309; RDNA2 LDS does not wrap, ISA 3.6.1/3.6.6) makes the array
     exactly the declared size and every access bounds-checked: out of range reads 0 and writes are dropped;
-  * a declared size over 64 KiB, a thread group of more than 1024 invocations and TG_SIZE_EN (RSRC2 bit 10) are
-    refused.
+  * a declared size over 64 KiB and a thread group of more than 1024 invocations are refused; TG_SIZE_EN (RSRC2
+    bit 10) no longer is: the compute prologue writes the work-group-info SGPR (tests/semantic/test_cs_tg_size.py).
 test_cs_shared_memory_limit.py runs the bounds-checked reads, writes and atomics; this file pins the array size and
 which of the two forms is chosen.
 
@@ -115,9 +115,10 @@ class TestAllocationSize(unittest.TestCase):
 
 
 class TestRefusals(unittest.TestCase):
-    def test_tg_size_en_refused(self):
-        with self.assertRaises(rdna2spirv.Unsupported):
-            L.translate([READ], rsrc2(8, extra=1 << 10))
+    def test_tg_size_en_is_accepted_and_the_value_written(self):
+        # RSRC2 bit 10: the work-group-info SGPR is written instead of the program being refused (the value itself
+        # is pinned by test_cs_tg_size.py).
+        self.assertIn("%tgs_v2", L.translate([READ], rsrc2(8, extra=1 << 10)))
 
     def test_group_over_1024_refused(self):
         for size in ((1025, 1, 1), (32, 33, 1), (16, 16, 5)):

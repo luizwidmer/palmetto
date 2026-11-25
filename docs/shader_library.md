@@ -155,11 +155,16 @@ What stops the rest, by the translator's message:
   `[s100,...,vcc_lo,vcc_hi]` lists (design.md *Scalar/buffer memory*).
 * **443: an instruction llvm-mc prints with another encoding than the blob's** (`v_fma_mix*`, `v_interp_p2_f16`):
   the existing `check_printed_encodings` refusal.
-* **90 CS: "CS thread-group-size SGPR"**: RSRC2 `TG_SIZE_EN`, which no FSSM compute shader sets.
+* **90 CS: "CS thread-group-size SGPR"**: RSRC2 `TG_SIZE_EN`, which no FSSM compute shader sets. The translator now
+  writes the work-group-info value for every read of that register instead of refusing the program
+  ([translator_fixes.md](translator_fixes.md), "TG_SIZE general value"); measured on the request union, that class
+  translates.
 * **68 translate but fail `spirv-val`**, mostly "requires a previous definition".
 * Fewer than 30 each: `ds_append`, `s_bitreplicate_b64_b32` and `s_flbit_i32_b64` on a lane mask, `v_cmp` and mask
   destinations, 25 branches into data, 10 undecodable words that can't be re-anchored, and a few `vcc`/`ttmp`
-  operands.
+  operands. A `s_bitreplicate_b64_b32` **mask destination** (exec, or vcc under wave64) translates now; a lane-mask
+  source still refuses ([translator_fixes.md](translator_fixes.md), "`s_bitreplicate_b64_b32` with a mask
+  destination").
 * Programs with no source container: a PS or MS one has no signatures and is `Unsupported` (the reads now raise
   that instead of `FileNotFoundError`, which stopped the whole run). A VS that fetches no inputs translates without
   one.

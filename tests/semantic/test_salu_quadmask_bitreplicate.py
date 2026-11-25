@@ -1,14 +1,20 @@
-"""Semantic interpreter tests for RDNA2 s_quadmask_b32, s_quadmask_b64 and s_bitreplicate_b64_b32 on scalar data.
+"""Semantic interpreter tests for RDNA2 s_quadmask_b32, s_quadmask_b64 and s_bitreplicate_b64_b32.
 
 RDNA2 ISA SOP1:
   * s_quadmask_b32: D[i] = OR of S0[4i+3:4i] for i in 0..7, the rest of D is 0; SCC = D != 0.
   * s_quadmask_b64: the same for the 16 quads of the 64-bit S0, D[63:16] = 0; SCC = D != 0.
   * s_bitreplicate_b64_b32: D[2i+1] = D[2i] = S0[i] for i in 0..31; SCC is not written.
 
-Each case translates a synthetic pixel shader with tooling/rdna2spirv.py and runs it in
-tests/semantic/spirv_mini_interp.py. Every result word leaves through exp as two 16-bit halves ORed into
-0x40000000, so no export channel is a NaN or denormal pattern that a float round trip could change. A lane-mask
-source or destination stays Unsupported: one invocation holds only its own lane's bit.
+Each case translates a synthetic shader with tooling/rdna2spirv.py and runs it in
+tests/semantic/spirv_mini_interp.py. Every scalar result word leaves through exp as two 16-bit halves ORed into
+0x40000000, so no export channel is a NaN or denormal pattern that a float round trip could change.
+
+s_bitreplicate_b64_b32 may also write a **lane mask**: llvm-mc prints `exec` in either wave size and `vcc` in wave64
+code, and D[L] is source bit L // 2, so lane L's own mask bit is the source's bit L // 2 (the story-load programs
+build whole masks with it; docs/translator_fixes.md). The mask cases run as compute shaders, one output word per
+lane: after the write each lane that the new mask leaves on sets a marker, the wave is restored and every lane
+stores its marker at its own word. A lane-mask *source* (the value the instruction reads from other lanes) and the
+other two ops stay Unsupported, as does a wave32 `vcc` destination (there `vcc` is the data pair, not a mask).
 """
 import os
 import random
@@ -28,6 +34,7 @@ sys.path.insert(0, HERE)
 
 import rdna2spirv  # noqa: E402
 import spirv_mini_interp as si  # noqa: E402
+import support  # noqa: E402
 
 M32 = 0xFFFFFFFF
 M64 = (1 << 64) - 1
@@ -163,6 +170,87 @@ class QuadmaskBitreplicateTests(unittest.TestCase):
             with self.subTest(lines=lines):
                 with self.assertRaises(rdna2spirv.Unsupported):
                     translate(lines + ["exp mrt0 v0, v0, v0, v0 done vm", "s_endpgm"])
+
+
+# ---------------------------------------------------------------------------
+# s_bitreplicate_b64_b32 writing a lane mask
+# ---------------------------------------------------------------------------
+
+VSHARP = [0, 0, 0x1000, 0x31016FAC]        # raw buffer V# for the per-lane output
+
+
+def fssm(lanes):
+    blob = bytearray(0x148)
+    struct.pack_into("<4I", blob, 0x138, 0x8088, lanes, 1, 1)
+    return bytes(blob)
+
+
+def repeated_mask(source, lanes):
+    """Each lane's mask bit from the ISA rule D[L] = S0[L // 2], as the marker a lane writes (1 on, 0 off)."""
+    return [(source >> (lane // 2)) & 1 for lane in range(lanes)]
+
+
+def mask_program(body, lanes):
+    """A compute listing: `body` writes a mask, then every lane the mask leaves on marks itself and stores a word.
+
+    The marker instruction (v20 = 1) only runs on the lanes EXEC still enables, so a lane the mask turned off
+    keeps the zero VGPR. The wave is restored so that every lane stores, at word lane of the output buffer.
+    """
+    restore = "s_mov_b64 exec, -1" if lanes == 64 else "s_mov_b32 exec_lo, -1"
+    # Only a wave64 lane id needs the high half of mbcnt; the high form is itself a wave64 marker, so a wave32
+    # case must not contain it or the translator (rightly) treats the listing as wave64 code.
+    lane_id = ["v_mbcnt_lo_u32_b32 v1, -1, 0"] + (["v_mbcnt_hi_u32_b32 v1, -1, v1"] if lanes == 64 else [])
+    return (["s_mov_b64 exec, -1" if lanes == 64 else "s_mov_b32 exec_lo, -1"] + list(body) + [
+        "v_mov_b32_e32 v20, 1", restore] + lane_id + [
+        "v_lshlrev_b32_e32 v1, 2, v1", "buffer_store_dword v20, v1, s[0:3], 0 offen", "s_endpgm"])
+
+
+def run_mask(body, lanes):
+    """The marker each lane wrote after `body` changed the mask: 1 for an enabled lane, 0 for a disabled one."""
+    module = support.translate_lines("cs_bitrep_mask", mask_program(body, lanes), fssm=fssm(lanes))
+    memory = si.run_workgroup(
+        module, lanes, lanes,
+        inputs_for=lambda i: {"%wg_id": (0, 0, 0), "%local_id": (i, 0, 0), "%sg_lane": i},
+        push_constants=VSHARP + [0] * 28, memory={})
+    return [memory.get(4 * lane, 0) for lane in range(lanes)]
+
+
+def translate_cs(body, lanes):
+    return support.translate_lines("cs_bitrep_mask", mask_program(body, lanes), fssm=fssm(lanes))
+
+
+class BitreplicateMaskDestinationTests(unittest.TestCase):
+    def test_exec_wave32(self):
+        # Destination EXEC in wave32 code: lane L's bit is the source's bit L // 2, so only lanes 0..15 of
+        # 0x0000ffff are on, and the upper source half reaches no lane of a 32-wide wave.
+        for source, lanes in ((0x0000FFFF, 32), (0xFFFF0000, 32), (0x0000AAAA, 32), (0, 32), (0x00000003, 32)):
+            with self.subTest(source=hex(source)):
+                got = run_mask([f"s_bitreplicate_b64_b32 exec, {source:#x}"], lanes)
+                self.assertEqual(got, repeated_mask(source, lanes))
+
+    def test_exec_wave64(self):
+        # Both halves of the 64-lane mask: source bit i enables lanes 2i and 2i+1.
+        for source in (0xFF00FF, 0x80000001, 0x0000FFFF, 0xFFFF0000, 0, 0xFFFFFFFF):
+            with self.subTest(source=hex(source)):
+                got = run_mask([f"s_bitreplicate_b64_b32 exec, {source:#x}"], 64)
+                self.assertEqual(got, repeated_mask(source, 64))
+
+    def test_vcc_wave64(self):
+        # A wave64 vcc destination is a 64-lane mask; consume it into EXEC before the marker.
+        for source in (0xFF00FF, 0x00010000, 0x80000000):
+            with self.subTest(source=hex(source)):
+                got = run_mask([f"s_bitreplicate_b64_b32 vcc, {source:#x}", "s_and_b64 exec, exec, vcc"], 64)
+                self.assertEqual(got, repeated_mask(source, 64))
+
+    def test_lane_mask_sources_and_wave32_vcc_stay_refused(self):
+        for body, lanes in ((["s_bitreplicate_b64_b32 exec, vcc"], 64),        # mask source
+                            (["s_mov_b64 vcc, -1", "s_bitreplicate_b64_b32 exec, vcc"], 64),
+                            (["s_bitreplicate_b64_b32 vcc, 0xff00ff"], 32),    # wave32 vcc is a data pair
+                            (["s_quadmask_b64 exec, 0xff00ff"], 64),           # only bitreplicate writes a mask
+                            (["s_quadmask_b32 exec_lo, 0xff00ff"], 32)):
+            with self.subTest(body=body):
+                with self.assertRaises(rdna2spirv.Unsupported):
+                    translate_cs(body, lanes)
 
 
 if __name__ == "__main__":

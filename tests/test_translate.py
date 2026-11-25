@@ -299,11 +299,18 @@ def test_cs_store_packed_atomic_pointers(make_shader):
         assert defs[index] == "OpConstant %uint 0"
 
 
-def test_compute_thread_group_size_sgpr_is_rejected(make_shader):
-    """TG_SIZE_EN (RSRC2 bit 10) adds an SGPR the translator doesn't model."""
-    shader = make_shader("s_endpgm\n", name="cs_test", cs_header=(0x8088 | 1 << 10, (64, 1, 1)))
-    with pytest.raises(rdna2spirv.Unsupported):
-        shader.translate()
+def test_compute_thread_group_size_sgpr_is_written_for_any_read(make_shader):
+    """TG_SIZE_EN (RSRC2 bit 10): the prologue writes the work-group-info SGPR, wave32 and wave64 alike.
+
+    The register is s5 here (4 user SGPRs and workgroup id x in s4). The value itself is pinned by
+    tests/semantic/test_cs_tg_size.py; this test is the translator-level acceptance of the general read forms.
+    """
+    for body in ("s_endpgm\n", "s_mov_b64 exec, -1\ns_and_b32 s6, s5, 0xfc0\ns_endpgm\n"):
+        # No marker: wave32. The s_mov_b64 exec marker above makes the second listing wave64 code.
+        shader = make_shader(body, name="cs_test", cs_header=(0x8088 | 1 << 10, (64, 1, 1)))
+        asm = shader.translate()
+        shader.validate(asm)
+        assert "%tgs_v2" in asm and "OpStore %tgs_p %tgs_v2" in asm, asm
 
 
 @pytest.mark.parametrize("group", [(0, 1, 1), (2048, 1, 1)], ids=["empty", "over-1024"])
