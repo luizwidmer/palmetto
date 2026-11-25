@@ -12,9 +12,9 @@
 //   - A request's zlib stage (the reference's ZlibDecompress, RFC 1950) runs here: its compressed source is inflated
 //     with the runtime's own inflate (src/shader_library.h) into the destination the request names. The advanced
 //     stages have an opt-in slice behind PALMETTO_DS_* switches (docs/directstorage_advanced.md): a bounded staging
-//     area, pinning of write-watched destinations, the physical page-list plan, the swizzle/macro-unshuffle stage and
-//     the local BCPack predictor file. Off by default, so a boot without the switches behaves exactly as before;
-//     BCPack block decode and live page-list resolve are refused by named limitations (they need the block decoder and
+//     area, pinning of write-watched destinations, the physical page-list plan, the swizzle/macro-unshuffle stage,
+//     the runtime BCPack block decoder and the local BCPack predictor file it reads. Off by default, so a boot without
+//     the switches behaves exactly as before; a live page-list resolve is still refused by a named limitation (it
 //     the xmem page table respectively).
 // Nothing here goes online or touches the GPU.
 #include <windows.h>
@@ -195,7 +195,8 @@ struct AdvancedCounters {
     std::atomic<std::uint64_t> staging_hits{0}, staging_fallbacks{0}, staging_bytes{0};
     std::atomic<std::uint64_t> pins{0}, pinned_pages{0}, write_watched{0}, pin_refusals{0}, pin_lock_failures{0};
     std::atomic<std::uint64_t> unshuffle_ok{0}, unshuffle_refused{0};
-    std::atomic<std::uint64_t> bcpack_refused{0}, pages_planned{0}, pages_refused{0};
+    std::atomic<std::uint64_t> bcpack_refused{0}, bcpack_decoded{0}, bcpack_blocks{0}, bcpack_bytes{0},
+        bcpack_history_reads{0}, pages_planned{0}, pages_refused{0};
 };
 AdvancedCounters g_advanced;
 
@@ -236,27 +237,31 @@ void note_pin(const palmetto::dstorage::PinStats& stats) {
     g_advanced.pin_lock_failures.fetch_add(stats.lock_failures, std::memory_order_relaxed);
 }
 
-// The predictor file is loaded once, on the first BCPack request, and its state is what the request is refused with.
-// A missing path, an unreadable file and an invalid table are distinct named refusals; the values are validated and
-// counted but not retained (this slice has no block decoder to consume them).
+// The predictor file is loaded once, on the first BCPack request. It supplies every built-in endpoint/index history
+// row the strict block decoder may read; nothing is compiled in. A missing path, an unreadable file and an invalid
+// table are distinct named refusals, and a request is refused before decoding when the file is not usable, so a chunk
+// that would need a row cannot be guessed at. docs/bcpack_runtime.md owns the policy.
 struct PredictorState {
     palmetto::dstorage::PredictorError error = palmetto::dstorage::PredictorError::missing;
     palmetto::dstorage::PredictorReport report;
+    palmetto::dstorage::BcpackHistory history;
 };
 const PredictorState& predictor_state() {
     static const PredictorState state = [] {
         PredictorState result;
-        result.error = palmetto::dstorage::load_dstorage_predictor(advanced_config().predictor.c_str(), result.report);
+        result.error = palmetto::dstorage::load_dstorage_predictor(advanced_config().predictor.c_str(), result.report,
+                                                                   &result.history);
         if (result.error == palmetto::dstorage::PredictorError::ok) {
             std::string counts = "loaded (";
             if (result.report.bc6h)
                 counts += "BC6H endpoints " + std::to_string(result.report.bc6h_endpoint_rows) + "/256, indices " +
-                          std::to_string(result.report.bc6h_index_rows) + "/256";
-            if (result.report.bc6h && result.report.bc7) counts += "; ";
+                          std::to_string(result.report.bc6h_index_rows) + "/256; ";
             if (result.report.bc7)
                 counts += "BC7 endpoints " + std::to_string(result.report.bc7_endpoint_rows) + "/256, indices " +
-                          std::to_string(result.report.bc7_index_rows) + "/256";
-            counts += ")";
+                          std::to_string(result.report.bc7_index_rows) + "/256; ";
+            counts += "BC1 rows " + std::to_string(result.report.bc1_rows) + ", BC3 rows " +
+                      std::to_string(result.report.bc3_rows) + ", BC4 rows " + std::to_string(result.report.bc4_rows) +
+                      ", BC5 rows " + std::to_string(result.report.bc5_rows) + ")";
             log_once("predictor-ok", "the local BCPack predictor file " + counts);
         } else {
             log_once(std::string("predictor-") + palmetto::dstorage::predictor_error_name(result.error),
@@ -1935,7 +1940,8 @@ private:
                       "advanced: shapes file=%llu memory=%llu zlib=%llu bcpack=%llu swizzle=%llu dest-pages=%llu "
                       "source-pages=%llu | staging hits=%llu fallbacks=%llu bytes=%llu | pins=%llu pages=%llu "
                       "write-watched=%llu lock-failures=%llu refusals=%llu | unshuffle ok=%llu refused=%llu | "
-                      "bcpack refused=%llu | pages planned=%llu refused=%llu | predictor=%s",
+                      "bcpack refused=%llu decoded=%llu blocks=%llu bytes=%llu history=%llu | pages planned=%llu "
+                      "refused=%llu | predictor=%s",
                       static_cast<unsigned long long>(g_advanced.file_source.load()),
                       static_cast<unsigned long long>(g_advanced.memory_source.load()),
                       static_cast<unsigned long long>(g_advanced.zlib.load()),
@@ -1954,6 +1960,10 @@ private:
                       static_cast<unsigned long long>(g_advanced.unshuffle_ok.load()),
                       static_cast<unsigned long long>(g_advanced.unshuffle_refused.load()),
                       static_cast<unsigned long long>(g_advanced.bcpack_refused.load()),
+                      static_cast<unsigned long long>(g_advanced.bcpack_decoded.load()),
+                      static_cast<unsigned long long>(g_advanced.bcpack_blocks.load()),
+                      static_cast<unsigned long long>(g_advanced.bcpack_bytes.load()),
+                      static_cast<unsigned long long>(g_advanced.bcpack_history_reads.load()),
                       static_cast<unsigned long long>(g_advanced.pages_planned.load()),
                       static_cast<unsigned long long>(g_advanced.pages_refused.load()), predictor_state_name());
         storage_trace(advanced);
@@ -2315,44 +2325,179 @@ private:
         return S_OK;
     }
 
-    // PALMETTO_DS_BCPACK: the BCPack stage's predictor policy. The predictor file is local and game-derived (it must
-    // live outside the repository; PALMETTO_DS_BCPACK_PREDICTOR names it) and its tables are validated by the bounded
-    // loader. This slice has no rANS/block decoder to consume them, so a BCPack request is refused with the named
-    // missing stage and the predictor's state: a missing/invalid file is a different refusal from a valid one.
+    // PALMETTO_DS_BCPACK: the BCPack stage. The request's compressed source (a file range or a memory range; with
+    // zlib on, the inflated intermediate) is stretched by the runtime block decoder into the destination's BCn block
+    // stream, then optionally unswizzled, and the destination is written once - a refused request leaves nothing
+    // behind. The stage order and the size/offset rules are the reference's (zlib, then BCPack, then the macro
+    // unshuffle; a decompressing destination is larger than its source and a BCPack destination is whole blocks;
+    // IntermediateSize exists only when zlib pairs with BCPack). History comes from the local predictor file only:
+    // without a usable file the request is refused by name before decoding, and a block whose built-in history entry
+    // the file does not confirm is refused by the decoder, never guessed.
     HRESULT bcpack_request(const Entry& e) {
         const DSTORAGE_REQUEST& r = e.request;
-        const uint64_t o = r.Options.AsUINT64;
+        const std::uint64_t o = r.Options.AsUINT64;
         const bool zlib = options::zlib(o);
+        const bool memory = desc_.SourceType == DSTORAGE_REQUEST_SOURCE_MEMORY;
         const unsigned mode = static_cast<unsigned>(options::bcpack(o));
-        const auto refuse = [&r, mode, zlib](HRESULT hr, const std::string& why) {
+        const unsigned swizzle_mode = static_cast<unsigned>(options::swizzle(o));
+        const auto refuse = [&r, mode, zlib, swizzle_mode](HRESULT hr, const std::string& why) {
             g_advanced.bcpack_refused.fetch_add(1, std::memory_order_relaxed);
             log_once("bcpack" + std::to_string(mode) + hr_text(hr) + why.substr(0, 16),
                      "a BCPack request is refused: " + why + " (" + hr_text(hr) + "; BCPack mode " +
-                         std::to_string(mode) + ", zlib " + (zlib ? "on" : "off") + "; source " +
-                         size_band(r.SourceSize) + ", destination " + size_band(r.DestinationSize) + ")");
+                         std::to_string(mode) + ", zlib " + (zlib ? "on" : "off") + ", swizzle " +
+                         std::to_string(swizzle_mode) + "; source " + size_band(r.SourceSize) + ", destination " +
+                         size_band(r.DestinationSize) + ")");
             return hr;
         };
         if (mode > DSTORAGE_BCPACK_MODE_BC7) return refuse(E_DSTORAGE_INVALID_BCPACK_MODE, "a BCPack mode out of range");
-        // The reference has no BCPack block decoder for BC2; this runtime has none for any mode yet.
         if (mode == DSTORAGE_BCPACK_MODE_BC2) return refuse(E_NOTIMPL, "BC2 has no known BCPack block decoder");
+        if (!advanced_config().bcpack) return refuse(E_NOTIMPL, "the BCPack stage is off (PALMETTO_DS_BCPACK)");
+        if (swizzle_mode > DSTORAGE_SWIZZLE_MODE_4K_12K_4K_12K)
+            return refuse(E_DSTORAGE_INVALID_SWIZZLE_MODE, "a swizzle mode out of range");
+        // The reference's validation: IntermediateSize exists exactly when zlib feeds BCPack, both stages only grow the
+        // data, a BCPack destination is whole blocks and a swizzle destination whole unshuffle groups.
+        if (zlib != (r.IntermediateSize != 0))
+            return refuse(E_DSTORAGE_INVALID_INTERMEDIATE_SIZE,
+                          zlib ? "a zlib request with no intermediate size for the BCPack stage"
+                               : "an intermediate size without the zlib stage that produces it");
         if (r.IntermediateSize > kMaxRequestBytes)
             return refuse(E_DSTORAGE_INVALID_INTERMEDIATE_SIZE, "an intermediate size over 1 GiB");
+        if (r.DestinationSize <= r.SourceSize)
+            return refuse(E_DSTORAGE_INVALID_DESTINATION_SIZE, "a destination no larger than the compressed source");
         const unsigned block = (mode == DSTORAGE_BCPACK_MODE_BC1 || mode == DSTORAGE_BCPACK_MODE_BC4) ? 8u : 16u;
-        if (mode != 0 && r.DestinationSize % block != 0)
+        if (r.DestinationSize % block != 0)
             return refuse(E_DSTORAGE_INVALID_DESTINATION_SIZE, "a destination that is not whole BC blocks");
-        if (!advanced_config().bcpack) return refuse(E_NOTIMPL, "the BCPack stage is off (PALMETTO_DS_BCPACK)");
+        palmetto::dstorage::SwizzleLayout layout;
+        if (swizzle_mode != 0) {
+            if (!palmetto::dstorage::swizzle_layout(swizzle_mode, layout) ||
+                r.DestinationSize % layout.group_bytes != 0)
+                return refuse(E_DSTORAGE_INVALID_DESTINATION_SIZE, "a destination that is not whole swizzle groups");
+            if (!advanced_config().unshuffle)
+                return refuse(E_NOTIMPL,
+                              "a BCPack request with a swizzle stage needs PALMETTO_DS_UNSHUFFLE for the second stage");
+        }
+        const std::uint64_t total = static_cast<std::uint64_t>(r.DestinationSize) + (memory ? r.SourceSize : 0u);
+        if (total > kMaxRequestBytes)
+            return refuse(E_DSTORAGE_REQUEST_TOO_LARGE, "source and destination over 1 GiB");
+        if (r.DestinationSize > kMax4kPageDestinationSize)
+            return refuse(E_DSTORAGE_REQUEST_TOO_LARGE, "a linear destination over 32 MiB");
+        if (!memory && r.FileOffset % 16 != 0)
+            return refuse(E_DSTORAGE_INVALID_FILE_OFFSET, "a file offset not 16-byte aligned");
+        if (!r.Destination) return refuse(E_INVALIDARG, "a null destination");
+        if (memory) {
+            if (!r.Source) return refuse(E_INVALIDARG, "a null source");
+        } else {
+            if (!r.File) return refuse(E_INVALIDARG, "a null file");
+            if (!e.file_counted) return refuse(E_DSTORAGE_FILE_NOT_OPEN, "a file that is not open");
+        }
+        if (r.SourceSize == 0) return S_OK;
+        // The predictor policy: the strict decoder reads only confirmed built-in history rows, and they live in the
+        // local file the environment names. Without a usable file the stage is not "off": it is a named limitation.
         const PredictorState& state = predictor_state();
-        if (state.error == palmetto::dstorage::PredictorError::missing)
-            return refuse(E_NOTIMPL, "no local predictor file (set PALMETTO_DS_BCPACK_PREDICTOR to the "
-                                     "tooling/bcpack_history_calib.py output path, outside the repository)");
-        if (state.error != palmetto::dstorage::PredictorError::ok)
+        if (state.error != palmetto::dstorage::PredictorError::ok) {
+            if (state.error == palmetto::dstorage::PredictorError::missing)
+                return refuse(E_NOTIMPL, "no local predictor file (set PALMETTO_DS_BCPACK_PREDICTOR to the "
+                                         "tooling/bcpack_history_calib.py output path, outside the repository)");
             return refuse(E_NOTIMPL, std::string("the local predictor file is ") +
                                          palmetto::dstorage::predictor_error_name(state.error));
-        return refuse(E_NOTIMPL, "the local predictor file loaded (" + std::to_string(state.report.source_files) +
-                                     " file(s), BC6H rows " + std::to_string(state.report.bc6h_endpoint_rows) +
-                                     ", BC7 rows " + std::to_string(state.report.bc7_endpoint_rows) +
-                                     ") but this slice has no BCPack rANS/block decoder; decode offline with "
-                                     "tooling/bcpack.py");
+        }
+        // Read the compressed source exactly as the zlib stage does (staging when enabled, owned otherwise).
+        const palmetto::dstorage::StagingStats source_before = source_scratch_.stats();
+        const palmetto::dstorage::StagingStats output_before = output_scratch_.stats();
+        const bool staging_on = source_scratch_.enabled() || output_scratch_.enabled();
+        const auto note = [&] {
+            if (staging_on) {
+                note_staging(source_before, source_scratch_.stats());
+                note_staging(output_before, output_scratch_.stats());
+            }
+        };
+        std::vector<uint8_t> owned_compressed;
+        std::span<uint8_t> staged_source;
+        if (source_scratch_.enabled()) staged_source = source_scratch_.borrow(r.SourceSize);
+        uint8_t* compressed = nullptr;
+        if (staged_source.empty()) {
+            owned_compressed.resize(r.SourceSize);
+            compressed = owned_compressed.data();
+        } else {
+            compressed = staged_source.data();
+        }
+        if (memory) {
+            if (!guarded_move(compressed, r.Source, r.SourceSize)) {
+                note();
+                return refuse(E_DSTORAGE_ACCESS_VIOLATION, "an inaccessible source");
+            }
+        } else if (const HRESULT hr = read_file_range(e.file->handle(), r.FileOffset, compressed, r.SourceSize);
+                   FAILED(hr)) {
+            note();
+            return hr;
+        }
+        // The zlib stage, when the request asks for it: inflate to IntermediateSize exactly.
+        const std::uint8_t* packed = compressed;
+        std::size_t packed_size = r.SourceSize;
+        std::vector<uint8_t> owned_intermediate;
+        if (zlib) {
+            std::vector<uint8_t>* inflated = &owned_intermediate;
+            if (output_scratch_.enabled() && r.IntermediateSize <= output_scratch_.capacity())
+                inflated = &output_scratch_.vector();
+            if (!palmetto::zlib_inflate(std::span<const std::uint8_t>(compressed, r.SourceSize), *inflated,
+                                        r.IntermediateSize) ||
+                inflated->size() != static_cast<size_t>(r.IntermediateSize)) {
+                note();
+                return refuse(kDecompressionError, "a malformed zlib stream or an inflated size that does not match the "
+                                                   "intermediate size");
+            }
+            packed = inflated->data();
+            packed_size = inflated->size();
+        }
+        // The block stage decodes into scratch; only a fully rebuilt stream is copied to the destination.
+        std::vector<uint8_t> decoded(r.DestinationSize);
+        palmetto::dstorage::bcpack::DecodeStats stats;
+        const palmetto::dstorage::bcpack::DecodeError error = palmetto::dstorage::bcpack::decode(
+            mode, packed, packed_size, decoded.data(), decoded.size(), &state.history, &stats);
+        note();
+        if (error != palmetto::dstorage::bcpack::DecodeError::ok) {
+            const std::string reason = palmetto::dstorage::bcpack::decode_error_name(error);
+            switch (error) {
+                case palmetto::dstorage::bcpack::DecodeError::destination_size:
+                    return refuse(E_DSTORAGE_INVALID_DESTINATION_SIZE, "a BCPack destination the decoder cannot fill");
+                case palmetto::dstorage::bcpack::DecodeError::history_unknown:
+                case palmetto::dstorage::bcpack::DecodeError::history_unconfirmed:
+                case palmetto::dstorage::bcpack::DecodeError::history_depth:
+                    return refuse(E_NOTIMPL, std::string("the local predictor file does not confirm every built-in "
+                                                         "history entry this chunk reads (") +
+                                                 reason + "; regenerate with tooling/bcpack_history_calib.py)");
+                case palmetto::dstorage::bcpack::DecodeError::codec:
+                    return refuse(E_NOTIMPL, std::string("no block rebuilder for this BCPack mode (") + reason + ")");
+                default:
+                    return refuse(kDecompressionError, std::string("the BCPack block stream was refused (") + reason +
+                                                           "; source " + size_band(static_cast<uint32_t>(packed_size)) +
+                                                           ")");
+            }
+        }
+        // The optional swizzle stage runs on the decoded block stream, into its own buffer, before the single write.
+        std::vector<uint8_t> unshuffled;
+        const std::uint8_t* result = decoded.data();
+        if (swizzle_mode != 0) {
+            unshuffled.resize(r.DestinationSize);
+            if (!palmetto::dstorage::unshuffle(swizzle_mode, decoded.data(), decoded.size(), unshuffled.data(),
+                                              unshuffled.size()))
+                return refuse(E_DSTORAGE_INVALID_DESTINATION_SIZE, "a destination the macro-unshuffle could not fill");
+            result = unshuffled.data();
+            g_advanced.unshuffle_ok.fetch_add(1, std::memory_order_relaxed);
+        }
+        const HRESULT written = write_pinned(r.Destination, r.DestinationSize, [&]() -> HRESULT {
+            return guarded_move(r.Destination, result, r.DestinationSize) ? S_OK : E_DSTORAGE_ACCESS_VIOLATION;
+        });
+        if (FAILED(written)) return refuse(written, "an inaccessible destination");
+        g_advanced.bcpack_decoded.fetch_add(1, std::memory_order_relaxed);
+        g_advanced.bcpack_blocks.fetch_add(stats.blocks, std::memory_order_relaxed);
+        g_advanced.bcpack_bytes.fetch_add(stats.bytes, std::memory_order_relaxed);
+        g_advanced.bcpack_history_reads.fetch_add(stats.history_reads, std::memory_order_relaxed);
+        log_once("bcpack-ok", std::string("a BCPack request decoded (mode ") + std::to_string(mode) + ", zlib " +
+                                           (zlib ? "on" : "off") + ", swizzle " + std::to_string(swizzle_mode) +
+                                           "; source " + size_band(static_cast<uint32_t>(packed_size)) +
+                                           ", destination " + size_band(r.DestinationSize) + ")");
+        return S_OK;
     }
 
     // PALMETTO_DS_PAGES: a physical-page request's plan. The plan and copy math are implemented and tested, but the

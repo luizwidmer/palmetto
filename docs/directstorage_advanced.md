@@ -65,7 +65,7 @@ test file.
 | `PALMETTO_DS_PIN_RESIDENT=1` | off | With pinning, `VirtualLock`/`VirtualUnlock` the destination range for the write, so a CPU consumer polling the block after the status completes cannot take a page fault on it while the write is in flight. The lock failures are counted, never fatal. |
 | `PALMETTO_DS_PAGES=1` | off | A physical-page request reads the page numbers the transfer needs (bounded), plans the 64 KiB spans, then refuses by name: the plan and copy math are implemented and tested, but the runtime has no page resolver (xmem keeps its page table private, `port/shims/xmem.h` exposes only commit). |
 | `PALMETTO_DS_UNSHUFFLE=1` | off | A swizzle request runs the macro-unshuffle stage (modes 1-4), with the optional zlib stage before it; the destination is written only after the whole stage succeeded, so a failed request leaves no partial unswizzled data. |
-| `PALMETTO_DS_BCPACK=1` | off | A BCPack request loads and validates the local predictor file, then refuses with the named missing stage: this slice has no BCPack rANS/block decoder, so it will not guess one. BC2 is refused by its own name (no known block decoder). |
+| `PALMETTO_DS_BCPACK=1` | off | A BCPack request loads and validates the local predictor file and decodes it in the runtime; the block decoder is the follow-up slice documented in the BCPack runtime page. BC2 is refused by its own name (no known block decoder). |
 | `PALMETTO_DS_BCPACK_PREDICTOR=<path>` | unset | The local predictor file (outside the repository), named by policy below. |
 
 **Default path.** Every switch reads once, on the first use; with none set the boot adds no line, no allocation and no
@@ -78,14 +78,15 @@ calibration tool's `--out <dir outside the repository>` writes `<codec>.json` fi
 `PALMETTO_DS_BCPACK_PREDICTOR` names that directory or a combined `.json`. The shim's loader is a bounded JSON reader
 (8 MiB file cap, depth cap, 200,000 integers, 256-row tables) that validates every range the decoder relies on - BC6H
 endpoint 16-bit components and per-channel confirmed-bit depths (16/10/6/6), index values 0..15, BC7 endpoint bytes
-0..255 and the 24/32-entry bit-depth tables, the last-resort list - and reports rows/bytes. It keeps **no values**:
-the block decoder that would consume them is the named gap. A missing, unreadable, oversized, malformed,
-no-codec-section, out-of-range or bad-length file is a distinct refusal name, never a crash.
+0..255 and the 24/32-entry bit-depth tables, the last-resort list - and reports rows/bytes. It retains the validated
+rows for the follow-up decoder (the BCPack runtime page); without a decoder this page's paths still refuse a needing
+request by name. A missing, unreadable, oversized, malformed, no-codec-section, out-of-range or bad-length file is a
+distinct refusal name, never a crash.
 
 **Named limitations the code returns** (`E_NOTIMPL` with a one-time line naming the reason, one line per kind):
 
-- BCPack block decode: no rANS/block decoder in the runtime; the predictor's state is logged first (missing, invalid,
-  or loaded with its row counts). The offline decoder is `tooling/bcpack.py`.
+- BCPack block decode: implemented in the follow-up runtime slice (BCPack runtime page); this page's predictor loader
+  feeds it, and a request whose predictor is missing or unusable is still refused by name with its state logged first.
 - Physical-page list: the plan is computed and counted, but no page resolver exists (xmem's page table is private).
 - BCPack mode 2 (BC2): no known BCPack block decoder, in the reference either.
 
@@ -114,9 +115,9 @@ back rather than growing the area.
 into them; our `port/shims/xmem.h` exposes only `commit_physical_range`/`commit_physical_pages`, not a read/write
 resolver, so we implement and test the plan and copy math and refuse a live page-list request by name rather than
 reach into another owner's file. The next increment is one resolver export in `port/shims/xmem.cpp`. (2) **BCPack**:
-the reference carries a full C++ rANS/BCn decoder generated from its Python reference; we do not have a runtime block
-decoder in this slice and refuse instead of porting a second one blind. The predictor loader is the part that can be
-verified without vectors, and it is. (3) **Pinning**: the console path pins write-watched pages through kernel writes
+the reference carries a full C++ rANS/BCn decoder generated from its Python reference; this slice ported the predictor
+loader and the request-shape handling first (verifiable without vectors, and it is), and the follow-up runtime slice
+implements the decoder against the same contract. (3) **Pinning**: the console path pins write-watched pages through kernel writes
 and `xmem` committed ranges; the PC port has neither, so our pin is the one write-watch this tree actually has (the
 stream consumer's `PAGE_GUARD` diagnostics) plus optional `VirtualLock` residency. (4) **Staging shape**: the
 reference pools staging across queues and pairs two adjacent requests so a helper thread prepares the next one; our
@@ -178,10 +179,9 @@ switch-gated and counted; the promotion falsifier is a future trace with `bcpack
 
 ## 6. Limits
 
-- **BCPack block decode is the largest gap.** The predictor file is loaded, validated and counted, but no request can
-  be decoded because the rANS entropy layer and the six BCn rebuilders are not in the runtime. A BCPack request is
-  `E_NOTIMPL` with that reason named. The offline path (`tooling/bcpack.py`) decodes the package's BCPack textures
-  today, so the format is known; the runtime decoder is a later slice.
+- **BCPack block decode is now implemented** in the follow-up runtime slice (the BCPack runtime page): the rANS
+  entropy layer, the six active BCn rebuilders and the confirmed-history window, with named errors. This page's loader
+  and request rules are unchanged. BC2 stays a named refusal (no known block decoder, in the reference either).
 - **A live physical-page request cannot transfer.** The plan/copy math and its tests are in place, but resolving a
   64 KiB page number to a CPU address needs an xmem export that does not exist yet.
 - **The unshuffle layout is reference-derived, not package-measured.** The NDA shuffle-format page is not public; the
@@ -197,7 +197,7 @@ switch-gated and counted; the promotion falsifier is a future trace with `bcpack
 ## 7. Tests
 
 `port/test/dstorage_test.cpp`, target `dstorage_test` (registered in `port/CMakeLists.txt` in the host-test block
-and built by `_setup/build_tests.cmd`; no GPU, no boot, no game data): **91 checks, 0 failed**. Sections: the staging
+and built by `_setup/build_tests.cmd`; no GPU, no boot, no game data): **213 checks, 0 failed** after the block-decoder follow-up added its vectors to the same file. Sections: the staging
 area (reuse, cap, fallback accounting, peak, the size parser), the pinner (a synthetic `PAGE_GUARD` released for the
 write and re-armed after it, reserved memory refused, null/empty ranges, residency accounted), the page plan (offset,
 boundary, short list, unmapped entry, too many spans) and the copy math both ways through a resolver, the unshuffle
