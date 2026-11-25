@@ -134,6 +134,7 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
     shims/dstorage.cpp
     shims/xg_xs.cpp
     shims/acphal.cpp
+    shims/xapu_chad.cpp
     shims/d3d12_xs.cpp
     shims/d3d12_xs_device.cpp
     shims/xgameruntime.cpp
@@ -265,6 +266,20 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
   target_compile_definitions(acphal_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(acphal_test PRIVATE /W4 /permissive- /utf-8)
   target_link_options(acphal_test PRIVATE /OPT:NOREF)
+
+  # xapu.dll and chad.dll shim ABI test: resolves the ten registered exports through the registry and drives the
+  # measured call shapes (docs/audio_shims.md). The trace section opens the startup trace, so this compiles
+  # src/crash_unwind.cpp for the same reason xmem_test does (the trace's exception handler takes a fault report there).
+  add_executable(xapu_chad_test
+    test/xapu_chad_test.cpp
+    shims/xapu_chad.cpp
+    shims/registry.cpp
+    src/crash_unwind.cpp
+  )
+  target_include_directories(xapu_chad_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_compile_definitions(xapu_chad_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(xapu_chad_test PRIVATE /W4 /permissive- /utf-8)
+  target_link_options(xapu_chad_test PRIVATE /OPT:NOREF)
 
   # The process shim's command line: GetCommandLineW must parse (CommandLineToArgvW) back to its __wargv.
   add_executable(process_cmdline_test
@@ -1029,6 +1044,16 @@ if(BUILD_TESTING)
     target_link_options(startup_trace_test PRIVATE /OPT:NOREF)
     add_dependencies(startup_trace_test palmetto_tls_host)
     add_test(NAME startup_trace COMMAND startup_trace_test)
+
+    # DirectStorage advanced mechanisms (shims/dstorage_advanced.h): staging reuse and cap, pinned-range
+    # bookkeeping, page-list plan/copy math, predictor refusal and unshuffle vectors. No game files, no GPU.
+    add_executable(dstorage_test
+      test/dstorage_test.cpp
+    )
+    target_include_directories(dstorage_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/shims)
+    target_compile_definitions(dstorage_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(dstorage_test PRIVATE /W4 /permissive- /utf-8 /EHsc)
+    add_test(NAME dstorage COMMAND dstorage_test)
   endif()
 
   if(TARGET device_proxy_test)
@@ -1187,6 +1212,9 @@ if(BUILD_TESTING)
   endif()
   if(WIN32 AND TARGET acphal_test)
     add_test(NAME acphal COMMAND acphal_test)
+  endif()
+  if(WIN32 AND TARGET xapu_chad_test)
+    add_test(NAME xapu_chad COMMAND xapu_chad_test)
   endif()
   if(WIN32 AND TARGET process_cmdline_test)
     add_test(NAME process_cmdline COMMAND process_cmdline_test)

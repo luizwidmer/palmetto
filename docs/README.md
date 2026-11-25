@@ -9,6 +9,7 @@ method, scope and caveats. No game data is included.
 | Document | What it covers |
 |---|---|
 | [design.md](design.md) | Overall project design, asset status, translator contract and open blockers. |
+| [upstream_port.md](upstream_port.md) | The porting policy for applying advances from the public prior-art fork: measure first, our own implementation, a recorded cross-check, attribution, honest limits, an A/B boot, gates green, no game data, the lead commits; the first slice under it is the audio shims. |
 | [issues.md](issues.md) | The tracked-findings ledger: incoming reports, our findings open/done/superseded, one evidence page and the next measurement per row. |
 | [arc.md](arc.md) | ARC9 archive layout, the carve tools and the unreadable encrypted TOC. |
 | [testing.md](testing.md) | Running the GPU tests on your own GPU: setup per OS, wave64 emulation, running without a GPU on Mesa llvmpipe, known problems, and the full Windows build (237 targets, its three known failures and the unblock for each). |
@@ -77,6 +78,7 @@ method, scope and caveats. No game data is included.
 | [runtime_imports.md](runtime_imports.md) | The 16 shipped modules' measured imports and shim/host/unimplemented split. |
 | [xmem_exe_calls.md](xmem_exe_calls.md) | How the retail executable calls `xmem.dll`: call sites and constant arguments per import (`tooling/import_call_sites.py`), the 23 `XMemVirtualAlloc` calls that all pass an attribute word, and the inferred shape of the physical-page family. |
 | [audio_hal_exe_calls.md](audio_hal_exe_calls.md) | How the retail executable calls the 22 audio coprocessor, texture layout and DirectStorage imports that have no shim: call sites, constant arguments, and the four calls with a negative-result branch. |
+| [audio_shims.md](audio_shims.md) | The `xapu.dll` and `chad.dll` console audio shims: the measured call sites and call shapes, the zeroed shared buffer and DSP status, the always-empty result queue, the cross-check against the upstream fork, the A/B boot numbers (what the shims change and what they do not), limits, tests and attribution. |
 | [gameinput.md](gameinput.md) | The GameInput shim on SDL3: `GameInputCreate` and the v0 `IGameInput`/`IGameInputDevice`/`IGameInputReading`/`IGameInputDispatcher` surface on any SDL gamepad, DualSense adaptive-trigger approximation and lightbar, force-feedback motors and trigger haptics through SDL's haptic API; 261 checks on virtual joysticks and a fake haptic backend, and by hand on a console gamepad (Bluetooth) and a DualSense (USB). |
 | [saves.md](saves.md) | Save containers: `JSAV` (index + JSON story save, byte-exact rebuild), `ASAV` header, `SLAYER1` packed copy (not decoded); `tooling/saves.py` and import into the offline `XGameSave` folder; key hashes are case-sensitive joaat (`tooling/save_keys.py`). |
 | [pipeline_check.md](pipeline_check.md) | Driver-level corpus check: the full corpus, 26,503 of 26,503 modules and pipelines, 0 failures (RTX 4060 Ti); an earlier 10/12-shard run covered 22,092 modules and 2,217 compute pipelines with 0 failures. |
