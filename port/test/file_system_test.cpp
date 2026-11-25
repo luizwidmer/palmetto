@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "file_system.h"
+#include "first_touch.h"
 #include "shims.h"
 #include "startup_trace.h"
 
@@ -297,6 +298,33 @@ void run(const std::filesystem::path& folder, ReadFileFn host, ReadFileFn shim) 
     const auto plain_shim = read_at(shim, file, 0, ordinary_shim.data(), kSize);
     check(plain_shim.ok && plain_shim.got == kSize && ordinary_shim == data,
           "the shimmed ReadFile of committed memory returns the same bytes");
+
+    // The shared primitive on its own (port/shims/first_touch.h): a fresh reserve-only view and no ReadFile at all.
+    // Every destination page the helper touches is committed by the handler, a second walk finds nothing left to do,
+    // and the error gate covers exactly the two errors a kernel-mode copy into first-touch memory reports. This is the
+    // same primitive the DirectStorage read path uses (port/shims/dstorage.cpp, RT-DSTORAGE-NOACCESS).
+    HANDLE helper_section = nullptr;
+    constexpr std::size_t kHelperSize = 0x8000;
+    char* const helper_view = reserve_view(kHelperSize, &helper_section);
+    g_view = helper_view;
+    g_size = kHelperSize;
+    check(helper_view != nullptr, "a third reserve-only view exercises the shared first-touch helper");
+    if (helper_view) {
+        const int commits_before = g_commits;
+        const DWORD touched = rt::first_touch::commit_range(helper_view, kHelperSize);
+        check(touched == kHelperSize / 0x1000 && g_commits - commits_before == kHelperSize / 0x1000,
+              "the shared helper commits exactly the destination's pages through the user-mode touch");
+        check(rt::first_touch::commit_range(helper_view, kHelperSize) == 0,
+              "a destination whose pages are committed is not walked again");
+        check(rt::first_touch::is_kernel_write_blocked(ERROR_NOACCESS) &&
+                  rt::first_touch::is_kernel_write_blocked(ERROR_INVALID_USER_BUFFER) &&
+                  !rt::first_touch::is_kernel_write_blocked(ERROR_FILE_NOT_FOUND),
+              "the shared error gate accepts the two first-touch errors and nothing else");
+        ::UnmapViewOfFile(helper_view);
+        if (helper_section) ::CloseHandle(helper_section);
+    }
+    g_view = first_view;
+    g_size = kViewSize;
 
     // A page the handler refuses: the touch cannot commit it, so the one retry fails and the shim reports the host's
     // error instead of retrying forever. The handler must not spin on it.

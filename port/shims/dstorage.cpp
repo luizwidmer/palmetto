@@ -41,7 +41,9 @@
 #include "../src/shader_library.h"  // palmetto::zlib_inflate: the runtime's own RFC 1950/1951 inflate
 #include "dstorage_advanced.h"     // staging, destination pinning, page-list plan, predictor file, unshuffle
 #include "dstorage_xs_abi.h"
+#include "first_touch.h"           // the shared first-touch page commit used by the file-range read repair
 #include "shims.h"
+#include "startup_trace.h"         // the named, bounded "dstorage_read_noaccess" measurement on the repair path
 
 using namespace dsx;
 
@@ -1503,6 +1505,50 @@ HRESULT read_error(DWORD error) {
     }
 }
 
+// RT-DSTORAGE-NOACCESS: a file-range read straight into title memory that is committed only on first touch.
+//
+// Same class as the file shim's RT-READFILE-NOACCESS repair (docs/readfile_first_touch.md), reached through the queue
+// worker instead of the title's own ReadFile helper. The read is a ReadFile under the hood, so a destination page nobody
+// has touched yet fails with ERROR_NOACCESS/ERROR_INVALID_USER_BUFFER before a byte is copied, and read_error would
+// report E_DSTORAGE_ACCESS_VIOLATION to the title. Measured on our tree: the first boot after the ReadFile repair let
+// the loader resume and one enqueued request failed with 0x89240009 once the request shapes grew to 5,123 (the previous
+// measurement, with the loader stalled, had zero failures and dest-pages=0). The reference's RT-READFILE-NOACCESS
+// commit repairs read_file_range for the identical reason; this is our own implementation of the same mechanism.
+//
+// The repair is error-gated (a successful read pays one branch and nothing else): on the two first-touch errors the
+// destination pages are committed from user mode with rt::first_touch::commit_range(), and the read is re-issued
+// exactly once. A destination whose retry failed is remembered, so a title that re-enqueues the same destination is
+// answered with the host's error instead of being walked again. The named measurement is one stderr line per run and a
+// bounded "dstorage_read_noaccess" startup-trace event.
+std::atomic<std::uint64_t> g_ds_first_touch_failures{0};
+std::atomic<std::uintptr_t> g_ds_repair_failed_destination{0};
+std::atomic<std::uint32_t> g_ds_repair_failed_size{0};
+
+constexpr std::uint64_t kDsFirstTouchLogLimit = 128;
+
+void note_ds_first_touch(DWORD error, std::uint32_t size, DWORD pages, bool repaired, const void* caller) {
+    const std::uint64_t count = g_ds_first_touch_failures.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count > kDsFirstTouchLogLimit && (count & 255) != 0) return;
+    static std::atomic<bool> announced{false};
+    if (!announced.exchange(true, std::memory_order_relaxed))
+        std::fprintf(stderr,
+                     "[rt] dstorage: file-range read into uncommitted title memory (error %lu) at %s; touched %lu "
+                     "destination page(s) from user mode and %s (%lu byte(s) of destination; logged once per run)\n",
+                     static_cast<unsigned long>(error),
+                     rt::startup_trace::where(reinterpret_cast<std::uint64_t>(caller)).c_str(),
+                     static_cast<unsigned long>(pages),
+                     repaired ? "the read then succeeded" : "the retry failed too",
+                     static_cast<unsigned long>(size));
+    if (!rt::startup_trace::enabled()) return;
+    rt::startup_trace::event("dstorage_read_noaccess",
+                             "\"api\":\"IDStorageQueueX::EnqueueRequest\",\"error\":" + std::to_string(error) +
+                                 ",\"size\":" + std::to_string(size) + ",\"pages\":" + std::to_string(pages) +
+                                 ",\"repaired\":" + (repaired ? "true" : "false") + ",\"count\":" +
+                                 std::to_string(count) + ",\"caller\":" +
+                                 rt::startup_trace::quote(
+                                     rt::startup_trace::where(reinterpret_cast<std::uint64_t>(caller))));
+}
+
 // Reads exactly "size" bytes at "offset" of a synchronous handle into "destination".
 HRESULT read_file_range(HANDLE handle, uint64_t offset, void* destination, uint32_t size) {
     LARGE_INTEGER length{};
@@ -1517,7 +1563,29 @@ HRESULT read_file_range(HANDLE handle, uint64_t offset, void* destination, uint3
         at.Offset = static_cast<DWORD>(position);
         at.OffsetHigh = static_cast<DWORD>(position >> 32);
         DWORD got = 0;
-        if (!ReadFile(handle, out + done, size - done, &got, &at)) return read_error(GetLastError());
+        if (!ReadFile(handle, out + done, size - done, &got, &at)) {
+            const DWORD error = GetLastError();
+            if (!rt::first_touch::is_kernel_write_blocked(error)) return read_error(error);
+            const std::uint32_t left = size - done;
+            const auto chunk = reinterpret_cast<std::uintptr_t>(out + done);
+            if (g_ds_repair_failed_destination.load(std::memory_order_relaxed) == chunk &&
+                g_ds_repair_failed_size.load(std::memory_order_relaxed) == left) {
+                return read_error(error);  // walked once already and the retry failed: do not walk it again
+            }
+            const DWORD pages = rt::first_touch::commit_range(out + done, left);
+            OVERLAPPED retry{};
+            retry.Offset = at.Offset;
+            retry.OffsetHigh = at.OffsetHigh;
+            if (ReadFile(handle, out + done, left, &got, &retry)) {  // the one and only retry
+                note_ds_first_touch(error, left, pages, true, _ReturnAddress());
+            } else {
+                const DWORD retry_error = GetLastError();
+                g_ds_repair_failed_size.store(left, std::memory_order_relaxed);
+                g_ds_repair_failed_destination.store(chunk, std::memory_order_relaxed);
+                note_ds_first_touch(retry_error, left, pages, false, _ReturnAddress());
+                return read_error(retry_error);
+            }
+        }
         if (got == 0) return E_DSTORAGE_END_OF_FILE;  // the file shrank since the size check
         done += got;
     }

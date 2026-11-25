@@ -41,6 +41,7 @@
 #include <vector>
 
 #include "file_system.h"
+#include "first_touch.h"
 #include "shims.h"
 #include "startup_trace.h"
 
@@ -734,13 +735,14 @@ void note_open(const char* api, LPCWSTR name, DWORD error, const void* caller) {
 // transient and retried after a 1 ms sleep, which makes such a destination a silent stall: the loader goes dormant
 // and the threads sit in ordinary kernel waits.
 //
-// The repair: on ERROR_NOACCESS, read one byte of every 4 KiB page of the destination that is not committed yet from
-// user mode, which raises the access violation xmem's handler commits the page for, then re-issue the read once.
-// Bounded in every direction: ONE retry (never a loop); the page walk stops after kReadTouchPageLimit pages, so a
-// wrong or enormous destination cannot spin here; and a destination whose retry also failed is remembered, so a title
-// that retries the same read forever is answered from memory instead of being walked again. A second failure is
-// returned to the title unchanged with its own error. Measured on our own boot: one caller retries a single
-// 271,044,608-byte read about 660 times a second, so the walk and the memo are what keep this bounded in practice.
+// The repair itself is the shared primitive in first_touch.h (one user-mode byte read per uncommitted destination
+// page, bounded by rt::first_touch::kPageLimit); this file keeps the ReadFile-specific gating, the one retry, the
+// memo and the named measurement around it. Bounded in every direction: ONE retry (never a loop); the page walk
+// stops after rt::first_touch::kPageLimit pages, so a wrong or enormous destination cannot spin here; and a
+// destination whose retry also failed is remembered, so a title that retries the same read forever is answered from
+// memory instead of being walked again. A second failure is returned to the title unchanged with its own error.
+// Measured on our own boot: one caller retries a single 271,044,608-byte read about 660 times a second, so the walk
+// and the memo are what keep this bounded in practice.
 //
 // The failure is logged only when it happens: one relaxed atomic on the error path and nothing at all on the
 // successful path beyond the host call and a branch. The startup-trace event is named by caller and bounded (the
@@ -748,8 +750,6 @@ void note_open(const char* api, LPCWSTR name, DWORD error, const void* caller) {
 // the last count still names the total to within 1024. One stderr line notes the first failure.
 namespace {
 
-constexpr DWORD kReadPageBytes = 0x1000;
-constexpr DWORD kReadTouchPageLimit = 0x40000;  // 262,144 pages = 1 GiB of destination walked per attempt
 constexpr std::uint64_t kReadFailureLogLimit = 256;
 std::atomic<std::uint64_t> g_read_failures{0};
 std::atomic<std::uintptr_t> g_repair_failed_buffer{0};  // a destination whose repair already failed
@@ -757,30 +757,6 @@ std::atomic<DWORD> g_repair_failed_size{0};
 
 std::string read_caller(const void* caller) {
     return rt::startup_trace::where(reinterpret_cast<uint64_t>(caller));
-}
-
-// Reads one byte of every not-yet-committed page of [buffer, buffer + size) from user mode. xmem's vectored handler
-// commits a page this way; a page that cannot be committed raises an access violation this function swallows, and the
-// retried read reports it. Returns how many pages were touched. No C++ objects in this function: it has __try.
-DWORD touch_read_destination(void* buffer, DWORD size) {
-    DWORD pages = 0;
-    const uintptr_t start = reinterpret_cast<uintptr_t>(buffer);
-    if (size > UINTPTR_MAX - start) return 0;
-    const DWORD total = (size + kReadPageBytes - 1) / kReadPageBytes;
-    const DWORD limit = total < kReadTouchPageLimit ? total : kReadTouchPageLimit;
-    for (DWORD i = 0; i < limit; ++i) {
-        const uintptr_t at = start + static_cast<uintptr_t>(i) * kReadPageBytes;
-        MEMORY_BASIC_INFORMATION info{};
-        if (!::VirtualQuery(reinterpret_cast<const void*>(at), &info, sizeof info)) break;
-        if (info.State == MEM_COMMIT) continue;  // already mapped; the retry reports any protection it cannot write
-        __try {
-            (void)*reinterpret_cast<volatile const unsigned char*>(at);
-            ++pages;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            // No user-mode commit for this page: the retry reports it. The others may still commit.
-        }
-    }
-    return pages;
 }
 
 void note_read_failure(DWORD size, DWORD pages, DWORD bytes_read, bool repaired, const void* caller) {
@@ -842,7 +818,7 @@ BOOL WINAPI read_file(HANDLE file, LPVOID buffer, DWORD size, LPDWORD read, LPOV
         ::SetLastError(error);  // walked once already and the retry failed: do not walk it again
         return FALSE;
     }
-    const DWORD pages = touch_read_destination(buffer, size);
+    const DWORD pages = rt::first_touch::commit_range(buffer, size);
     if (::ReadFile(file, buffer, size, read, overlapped)) {  // the one and only retry
         note_read_failure(size, pages, read ? *read : 0, true, _ReturnAddress());
         return TRUE;
