@@ -3564,17 +3564,22 @@ private:
                         const std::uint64_t pixels = std::uint64_t(attachment_regions[k].width) *
                                                      attachment_regions[k].height;
                         const auto* bytes = attachment_bytes + base;
-                        std::uint64_t sums[3] = {0, 0, 0}, non_black = 0, peak = 0;
+                        std::uint64_t sums[4] = {0, 0, 0, 0}, non_black = 0, peak = 0, alpha_non_black = 0,
+                                     alpha_peak = 0;
                         for (std::uint64_t i = 0; i < pixels; ++i) {
                             const std::uint8_t* texel = bytes + i * std::size_t(capture_texel);
                             const unsigned r = texel[0];
                             const unsigned g = capture_texel > 1 ? texel[1] : 0;
                             const unsigned b = capture_texel > 2 ? texel[2] : 0;
+                            const unsigned a = capture_texel > 3 ? texel[3] : 0;
                             sums[0] += r;
                             sums[1] += g;
                             sums[2] += b;
+                            sums[3] += a;
                             if (r || g || b) ++non_black;
+                            if (a) ++alpha_non_black;
                             peak = std::max<std::uint64_t>(peak, std::max(r, std::max(g, b)));
+                            alpha_peak = std::max<std::uint64_t>(alpha_peak, a);
                         }
                         // Diagnostic (docs/frame_capture.md): the copy runs after the frame's commands AND after any
                         // control draw, so when a control drew the window holds the control's output. Say which line this
@@ -3585,7 +3590,8 @@ private:
                         std::fprintf(stderr,
                                      "[rt] replay: %s [draw %llu target resource 0x%llx image 0x%llx]: %ux%u at the "
                                      "target's offset of %u,%u of %ux%u, %u-byte texel: mean %llu %llu %llu, non-black "
-                                     "%llu/%llu, peak %llu%s\n",
+                                     "%llu/%llu, peak %llu, alpha mean %llu, alpha non-black %llu/%llu, alpha peak "
+                                     "%llu%s\n",
                                      readback_label, static_cast<unsigned long long>(capture.draw),
                                      static_cast<unsigned long long>(capture.resource),
                                      static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(capture.image)),
@@ -3598,6 +3604,10 @@ private:
                                      static_cast<unsigned long long>(non_black),
                                      static_cast<unsigned long long>(pixels),
                                      static_cast<unsigned long long>(peak),
+                                     static_cast<unsigned long long>(sums[3] / (pixels ? pixels : 1)),
+                                     static_cast<unsigned long long>(alpha_non_black),
+                                     static_cast<unsigned long long>(pixels),
+                                     static_cast<unsigned long long>(alpha_peak),
                                      (ps_control_drew || control_drew)
                                          ? "; the control drew after the frame's commands and this window is its output"
                                          : "");
@@ -3683,21 +3693,26 @@ private:
                 const auto* bytes = static_cast<const std::uint8_t*>(mapped);
                 const std::uint64_t pixels = std::uint64_t(sample_regions[k].width) * sample_regions[k].height;
                 const unsigned texel_bytes = sample_texels[k];
-                std::uint64_t sums[3] = {0, 0, 0}, non_black = 0, peak = 0;
+                std::uint64_t sums[4] = {0, 0, 0, 0}, non_black = 0, peak = 0, alpha_non_black = 0, alpha_peak = 0;
                 for (std::uint64_t i = 0; i < pixels; ++i) {
                     const std::uint8_t* texel = bytes + i * std::size_t(texel_bytes);
                     const unsigned r = texel[0];
                     const unsigned g = texel_bytes > 1 ? texel[1] : 0;
                     const unsigned b = texel_bytes > 2 ? texel[2] : 0;
+                    const unsigned a = texel_bytes > 3 ? texel[3] : 0;
                     sums[0] += r;
                     sums[1] += g;
                     sums[2] += b;
+                    sums[3] += a;
                     if (r || g || b) ++non_black;
+                    if (a) ++alpha_non_black;
                     peak = std::max<std::uint64_t>(peak, std::max(r, std::max(g, b)));
+                    alpha_peak = std::max<std::uint64_t>(alpha_peak, a);
                 }
                 std::fprintf(stderr,
                              "[rt] replay: frame dump sample readback [%u/%u] image 0x%llx: %ux%u window, %u-byte "
-                             "texel: mean %llu %llu %llu, non-black %llu/%llu, peak %llu\n",
+                             "texel: mean %llu %llu %llu, non-black %llu/%llu, peak %llu, alpha mean %llu, alpha "
+                             "non-black %llu/%llu, alpha peak %llu\n",
                              k + 1, samples,
                              static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(sample_images[k])),
                              sample_regions[k].width, sample_regions[k].height, texel_bytes,
@@ -3706,7 +3721,11 @@ private:
                              static_cast<unsigned long long>(sums[2] / (pixels ? pixels : 1)),
                              static_cast<unsigned long long>(non_black),
                              static_cast<unsigned long long>(pixels),
-                             static_cast<unsigned long long>(peak));
+                             static_cast<unsigned long long>(peak),
+                             static_cast<unsigned long long>(sums[3] / (pixels ? pixels : 1)),
+                             static_cast<unsigned long long>(alpha_non_black),
+                             static_cast<unsigned long long>(pixels),
+                             static_cast<unsigned long long>(alpha_peak));
                 context_.vk.vkUnmapMemory(context_.device(), sample_memories[k]);
             }
         }

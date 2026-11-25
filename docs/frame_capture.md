@@ -284,6 +284,34 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### Fourth channel and the compose pipeline's own coverage control (measured)
+
+Readback lines now report channel 3 alongside 0..2 (mean/non-black/peak), and one boot (`boot-alpha1`, all switches plus
+the PS-only control, armed at draws 28000/28001) measures both open questions:
+
+- **The sampled image's alpha is not zero.** The compose pass's sampled T# readback (the sibling pass's 4K target, late
+  frame) is `mean 23 115 172, non-black 11,776/16,384, peak 240, alpha mean 183, alpha non-black 11,776/16,384, alpha
+  peak 255`: the blue element carries alpha 183..255 over the same coverage as its RGB, so an alpha-weighted composition
+  is not fed a zero alpha. The alpha-zero hypothesis is refuted.
+- **The compose pipeline's own vertex stage and raster state produce coverage.** Substituting the compose pipeline's
+  pixel shader with fs_solid (title VS `fspx/lib_vs_00821`, cull-none) at the same draw leaves
+  `mean 23 115 172, non-black 11,776/16,384, peak 240, alpha mean 183, alpha peak 255` in the compose target: the compose
+  geometry, target binding, viewport/scissor, format and readback path all write, so the compose pass's raster/coverage is
+  fine and only its pixel-shader arithmetic or the content it consumes at sampling time can produce the black output.
+  (Caveat: the sibling constant pass substituted the same way read black in this boot although its real PS paints the
+  blue element; that is a pass-specific coverage difference worth a separate look.)
+
+Offline arithmetic trace of `fspx/lib_ps_00822`: the stored colour is two packed half2 words loaded from the PS's private
+slots (`UnpackHalf2x16` of the two final words, then `OpCompositeConstruct` + `OpStore %3`), i.e. the PS writes the
+**packed upscale result** of a long scalar FMA/mix chain. The chain's operands are the three typed views of the one
+sampled texture (v4int/v4uint/v4float views, six sampling instructions) combined through `OpExtInst Fma` with unpacked
+half constants and bitcast float constants; there is no path in which the stored colour is a constant alone. So the
+disassembly names no single zero operand - the leading suspect is the **content at sampling time**: the compose draw
+precedes the sibling pass in the submission, so it samples the sibling target before that pass writes this frame's blue
+element (our post-submission sample readback sees it after the sibling drew). The decisive next measurement is a copy of
+the sampled window **before** the sibling pass writes it (a pre-draw capture of the compose pass's sampled T#), which
+distinguishes a clear/order gap from PS arithmetic.
+
 ### Offline trace of the compose pixel shader (`fspx/lib_ps_00822`): six samples, one texture, no discard
 
 Disassembling the compose PS (structure only; instruction indices and ids, no shader bytes) answers what its six image
