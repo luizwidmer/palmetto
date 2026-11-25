@@ -282,6 +282,43 @@ manager stops dispatching load jobs after the pipeline precompile while the pres
 frame rate. What the manager itself waits for is not visible in the shim-visible APIs; the next measurement is a stack
 scan at the loader-side calls (see section 9).
 
+## 6b. Naming the loader's state machine: the polling loop, the job state word, and the batch that never re-arms
+
+Four more 130 s boots (`boot-poll1`, `boot-peek1`, `boot-peek3`, `boot-peek4`; ALIVE, 0 exceptions) instrumented the
+loader side properly: a real stack walk (`RtlCaptureStackBackTrace`) plus a raw stack-word scan at the first status polls
+and request enqueues (`PALMETTO_DS_STACK=1`), and a reader of the loader job's own memory (`PALMETTO_TITLE_PEEK`). RVAs,
+counts and state values only; no title bytes are printed.
+
+* **The polling-loop caller is `game+0x4F6584A`.** The recorded caller of every `IsComplete(0)` is the title's loader job
+  wrapper `game+0x4F65820`, immediately after its virtual call to the status array (`call [rax+0x18]` at `0x4F65847`,
+  returning to `0x4F6584A`). The stack above it: spinner `game+0x4F657EB` (function `game+0x4F657A0`); batch-read step
+  `game+0x13308B9` (function `game+0x13307E0`, which submits the request list and then calls the spinner); retry wrapper
+  `game+0x133097B` / `game+0x314303` (function `game+0x3142E0`); chunk loop `game+0x13307A1` (function `game+0x1330560`);
+  read driver `game+0x248EE83` (function `game+0x248E070`, a 5,001-byte function in the same region as the streamed-block
+  deserializer `game+0x248F680`); job-system frames `game+0x221AD35`, `game+0x51D235D`, `game+0x9387D3`,
+  `game+0x374F244`. The polling thread is therefore the loader worker inside a streaming job, not the game thread.
+* **The exit condition of that poll loop is the job wrapper `game+0x4F65820`:** it returns true only when the loader
+  object's state byte `+0x78` is 1 **and** its pending-request count `+0x64` is 0 (then it drains the status-index array at
+  `+0x70`/`+0x6C` and the second array at `+0x20`..`+0x28`, resets `+0x64`, and returns 1); if `+0x78` is not 1, or the
+  status array still reports `E_PENDING`, it returns 0 and the spinner keeps polling. The spinner also exits its loop if
+  the object's vtable slot at `+0x260` no longer equals `game+0x4F65820` (`game+0x4F65818`).
+* **The state word: the loader object (`magic 0x6d736473` "dsms") lives at `[[game+0x79F6D70] ]`; its `+0x78` byte is
+  the batch-armed flag, `+0x64` the in-flight request count, `+0x60`/`+0x68` the batch capacity (4096), `+0x30` the
+  status array and `+0x10` the status-array owner sub-object.** Dense sampling (250 ms for 20 s, then 1 Hz) over two boots
+  measured exactly three transitions, identical within a sample step:
+  `+0.00 s: +0x78 = 1, +0x64 = 475 (0x1DB)` (the boot's first 43-request submit already in flight) -> `+0.25 s:
+  +0x78 = 1, +0x64 = 3,677 (0xE5D)` (the rest of the 4,199-request burst) -> `+1.75 s: +0x78 = 0, +0x64 = 0` (the
+  batch completed and the job disarmed). **From +1.75 s to +119 s the byte stays 0 and the count stays 0: the batch is
+  never armed again in the boot.** The 10 s and 13 s trickle (requests 4,200 and 4,234, submits 6 and 17) is a short
+  single-request batch that completes between samples.
+* **What that means.** The job mechanism itself is healthy and correctly drives our status array to `S_OK`; the loader
+  worker executed exactly one streaming job, read and deserialized the first 50 blocks (section 3), handed them to the
+  pipeline precompile, and after that the loader object sits idle. **The transition that never happens is `+0x78` going
+  back to 1 - no second read batch is ever posted**, so the pipeline-library data is the last thing the DirectStorage
+  system is asked for. The gate is therefore above this job: in the title-side stage logic that should submit the next
+  batch after the pipeline precompile, not in the DirectStorage emulation (the shim answered every call the title made)
+  and not in the job wrapper (it completed with the measured values).
+
 ## 7. The answer: where the GPU-side step is missing
 
 * **Do the streamed bytes reach a texture?** No. They reach a title CPU deserializer and, in the whole 130 s window, no
@@ -331,30 +368,35 @@ scan at the loader-side calls (see section 9).
    meaning; it is named as a device-side follow-up.
 9. The pipeline-refusal counts in section 6 come from a working tree that carried other agents' in-progress
    `graphics_pso` changes; the loader-gate conclusion does not use them.
+10. The stack walk (`RtlCaptureStackBackTrace`) resolved only the immediate title frame in these boots, so the indirect
+    chain in section 6b comes from the raw stack-word scan as well; both are printed per scan and agree on every frame
+    that appears in both. The job state is sampled at 250 ms for the first 20 s and 1 Hz after, so a shorter re-arm would
+    be missed; a batch that completes within one sample appears only in the counters (section 6b).
 
 ## 9. Gates, files and the next falsifier
 
 Gates: `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT` (both on the binary the
-load-stall and gate-naming boots ran). All switches are off by default and alter no answer. Files touched:
-`port/shims/dstorage.cpp`, `port/shims/d3d12_xs_device.cpp`, this page. Evidence boots on disk (outside the
-repository): `boot-shape1`, `boot-shape2`, `boot-shape3` (the call-shape increment), `boot-load1` (the load-stall
-increment) and `boot-gate1` (the gate-naming boot), each with `stderr.log` and `summary.txt`.
+stack-walk boots ran). All switches are off by default and alter no answer. Files touched: `port/shims/dstorage.cpp`,
+`port/shims/d3d12_xs_device.cpp`, this page. Evidence boots on disk (outside the repository): `boot-shape1`,
+`boot-shape2`, `boot-shape3` (the call-shape increment), `boot-load1` (the load-stall increment), `boot-gate1` (the
+gate-naming boot) and `boot-poll1`, `boot-peek1`, `boot-peek3`, `boot-peek4` (the stack-walk increment), each with
+`stderr.log` and `summary.txt`.
 
-Next, smallest honest first - the stream itself and DirectStorage emulation are closed, so the loader gate is the target:
+Next, smallest honest first - the stream itself and DirectStorage emulation are closed, and the state machine's own
+poll loop is now measured; the dispatcher above it is the target:
 
-1. **Stack-scan the loader-side calls (needs one 130 s boot; the smallest unblock).** The gate-naming boot showed the
-   direct-call chain of the DirectStorage submit helper dead-ending at an indirect dispatch (`game+0x28C97C0` is an entry
-   of the `.rdata` table at RVA `0x62FC780`), so the loading manager must be reached through an indirect frame. Two cheap
-   additions close that: (a) in `GetHResult`, record `_ReturnAddress()` from `IsComplete` itself (today the recorded
-   caller is the shim's own inlined `GetHResult`, `palmetto.exe+0xDD619`), which yields the *title polling loop* RVA; and
-   (b) scan the calling thread's stack for title RVAs on the first few status polls and request enqueues, which yields the
-   indirect frames above the polling loop. Then disassemble that loop's exit condition and state word, and watch the word
-   (title base is known) across a boot to name the transition that never happens. Nothing about the runtime needs to
-   change for this; it is instrumentation only.
-2. **Test the input gate if a virtual pad appears.** The observed loop is a loading screen with a blue element
-   (`docs/frame_capture.md` section 7); a "press a button" gate cannot be driven here because the GameInput shim reads
-   SDL3 gamepads and no pad is attached, so this is untestable on this host as-is. If a virtual gamepad is available,
-   one boot with a button press after the frame loop starts would separate "waiting for input" from "waiting for data".
+1. **Find the stage dispatcher above the streaming job (needs a stack sampler for the loading threads, 2-20 s).** The
+   stack-walk boots show the loader worker inside a streaming job (chain in section 6b) and show that the loader object's
+   `+0x78` armed flag never returns to 1 after 1.75 s. The next observable is the *thread that decides to post the next
+   job*: sample every thread's title-side stack at 2.5/5/7.5/10/15/20 s (the existing `PALMETTO_WAIT_SAMPLE` prints a
+   detail line with resolved stack frames only for threads caught in a named wait; extending that print to the full
+   resolved frame list, or adding a one-shot capture of all threads at those instants, would name the dispatcher). That is
+   a diagnostic-only change in `port/src/main.cpp`, which is not this increment's file: request it from the owner.
+   With the dispatcher RVA known, the same `PALMETTO_TITLE_PEEK` reader can watch its stage word.
+2. **Test the input gate if a virtual pad appears.** `docs/input_gate.md` measures the whole input surface: one
+   `GameInputCreate` and one `RegisterDeviceCallback`, no read/dispatch call in 300 s, so the loading loop has no input
+   poll at all; a keyboard/window-message button test is also measurable on the shim-bound build by whoever owns that
+   path. If a synthetic press turns the loading screen into content, the gate is title game-state, not the loader.
 3. **Console slot 70.** 13,568 calls per boot, 3 arguments, second argument a CBV-shaped struct, third a console
    descriptor destination, then a cache-line writeback; refused `E_NOTIMPL` by name. Decode it (its two stack structs and
    the engine object at `+0x1FA38`), because it is the largest unmodelled console device entry point in the boot and the

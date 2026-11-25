@@ -230,6 +230,106 @@ void ds_load_note_late(const char* what, const std::string& detail, void* caller
                  rt::shims::module_offset((std::uint64_t)(std::uintptr_t)caller).c_str());
 }
 
+// ---- Title-side stack scan for the loader gate (measurement only; PALMETTO_DS_STACK=1) -----------------------------
+//
+// docs/streamed_consumer.md section 9. The status poll's recorded caller is our own inlined GetHResult, so the title
+// polling loop is invisible, and the loading manager reaches the DirectStorage interface through an indirect dispatch.
+// This switch scans the calling thread's stack on the first few status polls and request enqueues and prints the title
+// frames it holds: those are the indirect frames above the polling / submission loop, i.e. the loading manager. Bounded
+// (8 scans, 12 frames), off by default, changes no call.
+
+// The title image base, captured from the first title caller a poll/enqueue stack scan sees (the stream consumer block
+// below uses the same value, and the guard handler must never look a module up, so it subtracts this base instead).
+std::atomic<std::uint64_t> g_title_image_base{0};
+
+bool ds_stack_enabled() {
+    static const bool on = [] {
+        char value[8] = {};
+        size_t length = 0;
+        return getenv_s(&length, value, "PALMETTO_DS_STACK") == 0 && length > 1 && value[0] != '0' &&
+               value[0] != 'n';
+    }();
+    return on;
+}
+
+// The title image base: from the stream registry when already known, else from this caller address (the loader registers
+// its module lookup at startup, so a poll/enqueue caller resolves).
+bool ensure_title_base(void* caller) {
+    if (g_title_image_base.load(std::memory_order_relaxed) != 0) return true;
+    if (!caller) return false;
+    std::uint64_t image = 0;
+    if (!rt::shims::mapped_image_base(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(caller)), image))
+        return false;
+    g_title_image_base.store(image, std::memory_order_relaxed);
+    palmetto_stream_set_title_base(image);
+    return true;
+}
+
+// The scan itself: a real stack walk (RtlCaptureStackBackTrace), so only actual return addresses are seen - the raw
+// word scan in the previous revision mixed saved registers and data pointers into the chain. Title frames are printed as
+// game+RVA; shim/host frames are skipped. No C++ object with a destructor may live here: MSVC C2712 otherwise.
+extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long frames_to_skip,
+                                                                                unsigned long frames_to_capture,
+                                                                                void** back_trace,
+                                                                                unsigned long* back_trace_hash);
+
+void ds_stack_scan_walk(const void* return_slot, char* line, size_t capacity, std::uint64_t base) {
+    unsigned printed = 0;
+    int used = static_cast<int>(std::strlen(line));
+    // A real stack walk: only actual return addresses.
+    void* frames[32] = {};
+    const unsigned depth = RtlCaptureStackBackTrace(0, 32, frames, nullptr);
+    for (unsigned i = 0; i < depth && printed < 34 && used > 0 && static_cast<size_t>(used) < capacity - 32; ++i) {
+        const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(frames[i]);
+        if (address < base || address - base >= 0x10000000ull) continue;
+        const int n = std::snprintf(line + used, capacity - static_cast<size_t>(used), " game+0x%llx",
+                                    static_cast<unsigned long long>(address - base));
+        if (n < 0) break;
+        used += n;
+        ++printed;
+    }
+    if (printed == 0) std::snprintf(line + used, capacity - static_cast<size_t>(used), " none");
+    // The raw scan of the caller's stack words, as a cross-check for frames the unwinder drops.
+    used = static_cast<int>(std::strlen(line));
+    printed = 0;
+    if (return_slot && used > 0 && static_cast<size_t>(used) < capacity - 200) {
+        used += std::snprintf(line + used, capacity - static_cast<size_t>(used), " raw:");
+        __try {
+            const auto* words = static_cast<const std::uintptr_t*>(return_slot);
+            for (unsigned i = 0; i < 160 && printed < 34 && used > 0 && static_cast<size_t>(used) < capacity - 32; ++i) {
+                const std::uintptr_t word = words[i];
+                if (word < base || word - base >= 0x10000000ull) continue;
+                const int n = std::snprintf(line + used, capacity - static_cast<size_t>(used), " game+0x%llx",
+                                            static_cast<unsigned long long>(word - base));
+                if (n < 0) break;
+                used += n;
+                ++printed;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+        if (printed == 0 && used > 0 && static_cast<size_t>(used) < capacity - 8)
+            std::snprintf(line + used, capacity - static_cast<size_t>(used), " none");
+    }
+}
+
+void ds_stack_scan(const char* what, void* caller, const void* return_slot, unsigned index, HRESULT value, bool poll) {
+    if (!ds_stack_enabled()) return;
+    static std::atomic<unsigned> poll_scans{0};
+    static std::atomic<unsigned> enqueue_scans{0};
+    std::atomic<unsigned>& counter = poll ? poll_scans : enqueue_scans;
+    const unsigned count = counter.fetch_add(1, std::memory_order_relaxed);
+    if (count >= (poll ? 8u : 4u)) return;
+    if (!ensure_title_base(caller)) return;
+    const std::uint64_t base = g_title_image_base.load(std::memory_order_relaxed);
+    char line[2400];
+    std::snprintf(line, sizeof line, "[rt] ds stack walk #%u %s (%s index %u value 0x%08lx) tid %lu title frames:",
+                  count, poll ? "poll" : "enqueue", what, index, static_cast<unsigned long>(value),
+                  static_cast<unsigned long>(GetCurrentThreadId()));
+    ds_stack_scan_walk(return_slot, line, sizeof line, base);
+    std::lock_guard lock(log_mutex());
+    std::fprintf(stderr, "%s\n", line);
+}
+
 // The heartbeat thread: one line per second for the first 20 s, cumulative counters and the last status poll. It starts
 // on the first status array or queue the title creates; a boot without the switch starts no thread.
 void ds_load_heartbeat_start() {
@@ -292,9 +392,7 @@ bool stream_consumer_enabled() {
     return on;
 }
 
-// The title image base, captured once from the DirectStorage enqueue caller. The guard handler must never look a module
-// up (the registry's lookup takes a lock, which a fault handler must not), so it subtracts this base instead.
-std::atomic<std::uint64_t> g_title_image_base{0};
+// (g_title_image_base is declared above, before the load-window stack scan, which also publishes it.)
 
 // The runtime's own image (palmetto.exe) base, captured outside the handler when the first guard is armed: a first touch
 // from host code is a shim read (the XG texture-computer copy path is the one this measurement is looking for), and it
@@ -802,7 +900,18 @@ public:
     }
 
     // IsComplete is GetHResult(index) != E_PENDING (the reference says so); an index past the array is not pending.
-    bool STDMETHODCALLTYPE IsComplete(UINT32 index) override { return GetHResult(index) != E_PENDING; }
+    bool STDMETHODCALLTYPE IsComplete(UINT32 index) override {
+        // The title's polling loop is this call's caller. GetHResult's own recorded caller is this shim, so the title
+        // address is stored after it (for the heartbeat), and the stack scan recovers the frames above the loop.
+        void* const caller = _ReturnAddress();
+        const void* const return_slot = _AddressOfReturnAddress();
+        const HRESULT hr = GetHResult(index);
+        if (ds_load_visible())
+            g_ds_load.last_poll_caller.store(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(caller)),
+                                             std::memory_order_relaxed);
+        ds_stack_scan("poll", caller, return_slot, index, hr, true);
+        return hr != E_PENDING;
+    }
     HRESULT STDMETHODCALLTYPE GetHResult(UINT32 index) override {
         const HRESULT hr = index >= capacity_ ? E_DSTORAGE_INDEX_BOUND : entries_[index].load(std::memory_order_acquire);
         if (ds_load_visible()) {
@@ -1066,6 +1175,7 @@ public:
     }
 
     void STDMETHODCALLTYPE EnqueueRequest(const DSTORAGE_REQUEST* request) override {
+        ds_stack_scan("enqueue", _ReturnAddress(), _AddressOfReturnAddress(), 0, S_OK, false);
         Entry e;
         e.type = Entry::Type::Request;
         if (!request) {

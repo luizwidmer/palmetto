@@ -1839,6 +1839,157 @@ void load_trace_note(const char* kind, unsigned slot, const void* caller, const 
                  static_cast<unsigned long>(GetCurrentThreadId()), kind, slot, count ? "" : " (none)", args, where);
 }
 
+// ---- Title memory watch (measurement only; PALMETTO_TITLE_WATCH=<hex_rva>[,...]) ------------------------------------
+//
+// docs/streamed_consumer.md section 9: once the loader gate's state word is named (from the polling-loop disassembly),
+// this reads it - and up to three more words - from the title image once a second and prints the values, so the
+// transition that never happens is a measured sequence instead of an inference. RVAs only (no title content is printed),
+// bounded (4 words x 121 lines), off by default, reads title memory and changes no call.
+constexpr unsigned kTitleWatchMax = 4;
+std::atomic<unsigned> g_title_watch_count{0};
+std::uint64_t g_title_watch_rva[kTitleWatchMax];
+
+bool title_watch_enabled() {
+    static const bool on = [] {
+        char value[128] = {};
+        return GetEnvironmentVariableA("PALMETTO_TITLE_WATCH", value, sizeof(value)) > 0;
+    }();
+    return on;
+}
+
+void title_watch_start() {
+    static std::atomic<bool> started{false};
+    if (!title_watch_enabled() || started.exchange(true, std::memory_order_relaxed)) return;
+    // Parse the RVA list (comma separated, hex with or without 0x) once.
+    char value[128] = {};
+    if (GetEnvironmentVariableA("PALMETTO_TITLE_WATCH", value, sizeof(value)) > 0) {
+        char* at = value;
+        while (*at && g_title_watch_count.load(std::memory_order_relaxed) < kTitleWatchMax) {
+            char* end = nullptr;
+            const unsigned long long rva = std::strtoull(at, &end, 16);
+            if (end == at) break;
+            const unsigned index = g_title_watch_count.fetch_add(1, std::memory_order_relaxed);
+            if (index < kTitleWatchMax) g_title_watch_rva[index] = rva;
+            at = end;
+            while (*at == ',' || *at == ' ') ++at;
+        }
+    }
+    if (g_title_watch_count.load(std::memory_order_relaxed) == 0) {
+        std::fprintf(stderr, "[rt] title watch: PALMETTO_TITLE_WATCH has no RVA; nothing is watched\n");
+        return;
+    }
+    std::thread([] {
+        std::uint64_t title_base = 0;
+        for (unsigned i = 0; i < 600 && title_base == 0; ++i) {  // the title base is published by the first DStorage call
+            title_base = streamed_blocks::g_title_base.load(std::memory_order_relaxed);
+            if (title_base == 0) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (title_base == 0) {
+            std::fprintf(stderr, "[rt] title watch: no title image base was published; nothing is watched\n");
+            return;
+        }
+        for (unsigned second = 0; second <= 120; ++second) {
+            const unsigned count = std::min(g_title_watch_count.load(std::memory_order_relaxed), kTitleWatchMax);
+            for (unsigned w = 0; w < count; ++w) {
+                const std::uint64_t address = title_base + g_title_watch_rva[w];
+                char text[96];
+                if (!readable_range(reinterpret_cast<const void*>(address), 8)) {
+                    std::snprintf(text, sizeof text, "unreadable");
+                } else {
+                    const std::uint64_t qword = *reinterpret_cast<const std::uint64_t*>(address);
+                    std::snprintf(text, sizeof text, "qword 0x%016llx dword 0x%08x",
+                                  static_cast<unsigned long long>(qword),
+                                  *reinterpret_cast<const std::uint32_t*>(address));
+                }
+                std::fprintf(stderr, "[rt] title watch +%us rva 0x%llx: %s\n", second,
+                             static_cast<unsigned long long>(g_title_watch_rva[w]), text);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        }
+    }).detach();
+}
+
+// ---- Title pointer peek (measurement only; PALMETTO_TITLE_PEEK=<slot_rva>,<deref_off>,<field_off>,...) -------------
+//
+// docs/streamed_consumer.md section 9: the loading job's state fields are reached through two pointers in title memory
+// (a global holds the manager; manager+deref holds the job object whose +0x78/+0x64/+0x6C fields the loading spinner
+// polls). Once those RVAs are known this reads the pointer chain, then the listed job fields, once a second for 120 s, so
+// the state transitions are measured values. Bounded (121 lines x fields), off by default, reads title memory, changes
+// no call.
+constexpr unsigned kTitlePeekMax = 10;
+
+bool title_peek_enabled() {
+    static const bool on = [] {
+        char value[192] = {};
+        return GetEnvironmentVariableA("PALMETTO_TITLE_PEEK", value, sizeof(value)) > 0;
+    }();
+    return on;
+}
+
+void title_peek_start() {
+    static std::atomic<bool> started{false};
+    if (!title_peek_enabled() || started.exchange(true, std::memory_order_relaxed)) return;
+    char value[192] = {};
+    if (GetEnvironmentVariableA("PALMETTO_TITLE_PEEK", value, sizeof(value)) == 0) return;
+    std::uint64_t slot_rva = 0;
+    std::uint64_t deref_offset = ~std::uint64_t{0};  // "!" after the slot means: the slot itself is the object
+    std::uint64_t fields[kTitlePeekMax] = {};
+    unsigned count = 0;
+    char* at = value;
+    slot_rva = std::strtoull(at, &at, 16);
+    if (*at == '!') {
+        ++at;
+    } else if (*at == ',') {
+        ++at;
+        deref_offset = std::strtoull(at, &at, 16);
+    }
+    while (*at && count < kTitlePeekMax) {
+        while (*at == ',' || *at == ' ') ++at;
+        const std::uint64_t offset = std::strtoull(at, &at, 16);
+        fields[count++] = offset;
+    }
+    std::thread([slot_rva, deref_offset, fields, count] {
+        std::uint64_t title_base = 0;
+        for (unsigned i = 0; i < 600 && title_base == 0; ++i) {
+            title_base = streamed_blocks::g_title_base.load(std::memory_order_relaxed);
+            if (title_base == 0) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (title_base == 0) return;
+        // Dense sampling for the first 20 s (the loading burst and the job state transitions happen there), then 1 Hz.
+        double elapsed_seconds = 0.0;
+        for (unsigned sample = 0; sample < 180; ++sample) {
+            const unsigned long milliseconds = sample < 80 ? 250 : 1000;
+            const std::uint64_t slot = title_base + slot_rva;
+            std::uint64_t manager = 0;
+            if (readable_range(reinterpret_cast<const void*>(slot), 8))
+                manager = *reinterpret_cast<const std::uint64_t*>(slot);
+            std::uint64_t job = 0;
+            if (manager && deref_offset == ~std::uint64_t{0}) {
+                job = manager;
+            } else if (manager && readable_range(reinterpret_cast<const void*>(manager + deref_offset), 8)) {
+                job = *reinterpret_cast<const std::uint64_t*>(manager + deref_offset);
+            }
+            if (job == 0 || !readable_range(reinterpret_cast<const void*>(job), 0x88)) {
+                std::fprintf(stderr, "[rt] title peek +%.2fs slot 0x%llx manager 0x%llx job 0x%llx: not set\n",
+                             elapsed_seconds, static_cast<unsigned long long>(slot_rva),
+                             static_cast<unsigned long long>(manager), static_cast<unsigned long long>(job));
+            } else {
+                for (unsigned w = 0; w < count; ++w) {
+                    const std::uint64_t address = job + fields[w];
+                    if (!readable_range(reinterpret_cast<const void*>(address), 8)) continue;
+                    std::fprintf(stderr, "[rt] title peek +%.2fs job 0x%llx off 0x%llx: qword 0x%016llx\n",
+                                 elapsed_seconds, static_cast<unsigned long long>(job),
+                                 static_cast<unsigned long long>(fields[w]),
+                                 static_cast<unsigned long long>(
+                                     *reinterpret_cast<const std::uint64_t*>(address)));
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
+            elapsed_seconds += static_cast<double>(milliseconds) / 1000.0;
+        }
+    }).detach();
+}
+
 bool clear_barrier_probe() {
     static const bool on = [] {
         char value[8] = {};
@@ -5653,6 +5804,8 @@ std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64
         const std::uint64_t load_words[4] = {a1, a2, a3, a4};
         load_trace_note("device", Slot, _ReturnAddress(), load_words, 4, 0, false);
     }
+    title_watch_start();
+    title_peek_start();
     if constexpr (Slot == 0) {
         return hr_to_u64(proxy_query_interface(self, reinterpret_cast<const IID*>(a1),
                                                reinterpret_cast<void**>(a2)));
