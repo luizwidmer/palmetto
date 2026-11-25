@@ -8,7 +8,9 @@
 // Covered: a three-frame chain that leaves the image, a repeated control PC, the 64-frame cap, a PC with no .pdata
 // entry, a fault outside the image, an unreadable stack pointer, unusable and out-of-image unwind info, unwind info
 // that runs into a PAGE_NOACCESS page (the __try around RtlVirtualUnwind), an absurd table count, the dump text, a
-// null CONTEXT, an unregistered image, and that dump() performs no C++ allocation.
+// null CONTEXT, an unregistered image, that dump() performs no C++ allocation, that the every-thread pass leaves every
+// thread it suspended resumed (checked against the suspend count, with the probe itself calibrated), and that a report
+// left at the same name by an earlier pass cannot be counted as one this pass wrote.
 
 #include "../src/crash_unwind.h"
 
@@ -500,11 +502,307 @@ void test_null_context_and_unregistered_image() {
     DeleteFileW(path.c_str());
 }
 
+// ----------------------------------------------------------------------------------------------------------------
+// dump_all: the every-thread half of the crash report. Everything below runs on real threads of this process, because
+// the point of the entry point is that it suspends *other* threads and reads their CONTEXT; a fabricated CONTEXT would
+// test nothing that dump() does not already cover.
+
+std::wstring report_directory() {
+    wchar_t directory[MAX_PATH] = {};
+    const DWORD length = GetTempPathW(MAX_PATH, directory);
+    std::wstring path = length != 0 && length < MAX_PATH ? directory : L".\\";
+    path += L"palmetto_crash_unwind_threads";
+    CreateDirectoryW(path.c_str(), nullptr);  // already existing is fine
+    return path;
+}
+
+std::wstring join(const std::wstring& directory, const wchar_t* name) {
+    std::wstring path = directory;
+    path += L"\\";
+    path += name;
+    return path;
+}
+
+std::wstring thread_report(const std::wstring& directory, DWORD tid) {
+    wchar_t name[64] = {};
+    _snwprintf_s(name, 64, _TRUNCATE, L"crash_report.%lu.txt", static_cast<unsigned long>(tid));
+    return join(directory, name);
+}
+
+// Removes the files a pass wrote, so the next case starts from an empty folder.
+void clear_reports(const std::wstring& directory) {
+    WIN32_FIND_DATAW found{};
+    const std::wstring pattern = join(directory, L"*");
+    const HANDLE handle = FindFirstFileW(pattern.c_str(), &found);
+    if (handle == INVALID_HANDLE_VALUE) return;
+    do {
+        if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+        DeleteFileW(join(directory, found.cFileName).c_str());
+    } while (FindNextFileW(handle, &found));
+    FindClose(handle);
+}
+
+struct ThreadArgs {
+    HANDLE started;   // signalled once the thread is parked (or spinning)
+    HANDLE release;   // the parked thread waits on this
+    void (*spin)();   // the spinning variant: the image address the thread parks in
+};
+
+// Parks a thread inside the image's own code range. The image is PAGE_READWRITE from the fixture, so the page is made
+// executable first; `EB FE` is `jmp $`, which keeps Rip at the same image RVA for the whole time the report runs.
+DWORD WINAPI spin_inside_image(void* parameter) {
+    auto* args = static_cast<ThreadArgs*>(parameter);
+    if (args == nullptr) return 0;
+    if (args->started != nullptr) SetEvent(args->started);
+    if (args->spin != nullptr) args->spin();  // never returns
+    return 0;
+}
+
+// Parks a thread in a kernel wait: its user-mode stack is stable and its Rip is outside the image, which is the other
+// half of what a real boot looks like (some threads waiting, some working).
+DWORD WINAPI wait_outside_image(void* parameter) {
+    auto* args = static_cast<ThreadArgs*>(parameter);
+    if (args != nullptr && args->started != nullptr) SetEvent(args->started);
+    if (args != nullptr && args->release != nullptr) WaitForSingleObject(args->release, 5000);
+    return 0;
+}
+
+void test_dump_all_threads() {
+    const std::wstring directory = report_directory();
+    clear_reports(directory);
+
+    SyntheticImage image;
+    check(image.valid(), "dump_all: the synthetic image is allocated");
+    if (!image.valid()) return;
+    image.unwind(0);
+    image.routine(0, 0x1000, 0x1100, kUnwindRva);
+    rt::crash_report::set_image(image.base(), kImageSize, image.table(), 1);
+
+    // 0x800 is in the image's first page, away from the routine text at 0x1000 and the tables at 0x2000/0x2800.
+    uint8_t* code = image.at(0x800);
+    code[0] = 0xEB;  // jmp
+    code[1] = 0xFE;  // -2: to itself
+    DWORD previous = 0;
+    const bool executable = VirtualProtect(image.at(0x800), 0x1000, PAGE_EXECUTE_READWRITE, &previous) != 0;
+    check(executable, "dump_all: the image's first page is made executable");
+    if (!executable) return;
+
+    ThreadArgs spinner{};
+    spinner.started = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    spinner.spin = reinterpret_cast<void (*)()>(code);
+    DWORD spinner_tid = 0;
+    const HANDLE spinner_thread = CreateThread(nullptr, 0, &spin_inside_image, &spinner, 0, &spinner_tid);
+    check(spinner_thread != nullptr, "dump_all: the spinning thread is created");
+
+    ThreadArgs waiter{};
+    waiter.started = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    waiter.release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    DWORD waiter_tid = 0;
+    const HANDLE waiter_thread = CreateThread(nullptr, 0, &wait_outside_image, &waiter, 0, &waiter_tid);
+    check(waiter_thread != nullptr, "dump_all: the waiting thread is created");
+
+    if (spinner.started != nullptr) WaitForSingleObject(spinner.started, 2000);
+    if (waiter.started != nullptr) WaitForSingleObject(waiter.started, 2000);
+    Sleep(50);  // let both reach their parking place before the pass walks them
+
+    const std::wstring summary = join(directory, L"crash_report.threads.txt");
+    const rt::crash_report::AllThreadsResult result = rt::crash_report::dump_all(directory.c_str(), summary.c_str());
+    std::printf("dump_all: considered %zu, written %zu, skipped %zu, truncated %zu\n", result.considered,
+                result.written, result.skipped, result.truncated);
+
+    check(result.considered >= 2, "dump_all: the two parked threads are considered");
+    check(result.written >= 2, "dump_all: a report is written for each");
+    check(result.written + result.skipped + result.truncated == result.considered,
+          "dump_all: every considered thread is accounted for (written + skipped + truncated)");
+    check(result.truncated == 0, "dump_all: a two-thread process is not truncated");
+
+    // The property this function exists to keep, and the one this test could not see: every thread the pass suspended is
+    // resumed before it returns. ResumeThread reports the count *before* its call, so a leaked suspension reads as 1
+    // here - and the call itself clears it, so the probe cannot be what leaves the process hanging. Deleting the
+    // ResumeThread() inside dump_all() makes both of these fail, which is the mutation that showed the old suite green.
+    if (spinner_thread != nullptr) {
+        const DWORD leaked = ResumeThread(spinner_thread);
+        check(leaked == 0, "dump_all: the spinning thread is left resumed (a leaked suspension reports 1 here)");
+    }
+    if (waiter_thread != nullptr) {
+        const DWORD leaked = ResumeThread(waiter_thread);
+        check(leaked == 0, "dump_all: the waiting thread is left resumed (a leaked suspension reports 1 here)");
+    }
+
+    // Calibrate the probe itself: take one suspension and require the counter to report it. Without this, the two
+    // checks above would also pass for a dump_all() that never suspended anything.
+    if (waiter_thread != nullptr) {
+        const DWORD taken = SuspendThread(waiter_thread);
+        const DWORD reported = ResumeThread(waiter_thread);
+        check(taken == 0 && reported == 1, "dump_all: the suspend-count probe detects a held suspension");
+    }
+    check(GetFileAttributesW(thread_report(directory, GetCurrentThreadId()).c_str()) == INVALID_FILE_ATTRIBUTES,
+          "dump_all: the reporting thread is not in the report (it is the handler, not a suspect)");
+
+    // The spinning thread's Rip is inside the registered image, so its report must name an image frame rather than the
+    // "faulting PC is outside the image" stop a host-only thread produces.
+    std::string spinning;
+    const bool read_spinning = read_file(thread_report(directory, spinner_tid), spinning);
+    check(read_spinning, "dump_all: the spinning thread's report exists");
+    if (read_spinning) {
+        check(contains(spinning, "[rt] crash report"), "dump_all: the report carries dump()'s header");
+        check(contains(spinning, "image+"), "dump_all: a thread parked inside the image is walked to an image frame");
+    }
+
+    std::string waiting;
+    const bool read_waiting = read_file(thread_report(directory, waiter_tid), waiting);
+    check(read_waiting, "dump_all: the waiting thread's report exists");
+    if (read_waiting) {
+        check(contains(waiting, "walk stopped:"), "dump_all: a thread in a kernel wait still gets a verdict line");
+    }
+
+    std::string text;
+    const bool read_summary = read_file(summary, text);
+    check(read_summary, "dump_all: the summary is written");
+    if (read_summary) {
+        check(contains(text, "all threads of process"), "dump_all: the summary names the process");
+        check(contains(text, "considered "), "dump_all: the summary counts what the pass saw");
+    }
+
+    // A second zero-length directory is refused rather than written to the current folder.
+    const rt::crash_report::AllThreadsResult refused = rt::crash_report::dump_all(L"", nullptr);
+    check(refused.considered == 0 && refused.written == 0, "dump_all: an empty directory is refused");
+
+    if (spinner_thread != nullptr) {
+        TerminateThread(spinner_thread, 0);
+        CloseHandle(spinner_thread);
+    }
+    if (waiter.release != nullptr) SetEvent(waiter.release);
+    if (waiter_thread != nullptr) {
+        // The second way a leaked suspension shows up: a suspended thread cannot reach its own return. The old test
+        // ignored this return value, so a ResumeThread() that was never called still finished in 5 s of silence.
+        const DWORD joined = WaitForSingleObject(waiter_thread, 5000);
+        check(joined == WAIT_OBJECT_0,
+              "dump_all: the waiting thread runs to completion afterwards (it is not left suspended)");
+        CloseHandle(waiter_thread);
+    }
+    if (spinner.started != nullptr) CloseHandle(spinner.started);
+    if (waiter.started != nullptr) CloseHandle(waiter.started);
+    if (waiter.release != nullptr) CloseHandle(waiter.release);
+
+    clear_reports(directory);
+}
+
+// The header promises dump_all() performs no C++ allocation. It does call kernel entry points (toolhelp, OpenThread,
+// CreateFileW), whose own allocations are outside this module; the counter here covers every operator new the process
+// sees, so a std::vector or std::wstring anywhere on the path would show up.
+void test_dump_all_no_allocation() {
+    const std::wstring directory = report_directory();
+    clear_reports(directory);
+
+    SyntheticImage image;
+    if (image.valid()) {
+        image.unwind(0);
+        image.routine(0, 0x1000, 0x1100, kUnwindRva);
+        rt::crash_report::set_image(image.base(), kImageSize, image.table(), 1);
+    }
+
+    ThreadArgs waiter{};
+    waiter.started = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    waiter.release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    DWORD tid = 0;
+    const HANDLE thread = CreateThread(nullptr, 0, &wait_outside_image, &waiter, 0, &tid);
+    if (waiter.started != nullptr) WaitForSingleObject(waiter.started, 2000);
+
+    g_new_calls = 0;
+    g_count_new = true;
+    const rt::crash_report::AllThreadsResult result = rt::crash_report::dump_all(directory.c_str(), nullptr);
+    g_count_new = false;
+    std::printf("dump_all allocation: %d operator new call(s) over %zu thread(s)\n", g_new_calls, result.considered);
+    check(g_new_calls == 0, "dump_all: no C++ allocation on the reporting path");
+
+    if (thread != nullptr) {
+        SetEvent(waiter.release);
+        WaitForSingleObject(thread, 5000);
+        CloseHandle(thread);
+    }
+    if (waiter.started != nullptr) CloseHandle(waiter.started);
+    if (waiter.release != nullptr) CloseHandle(waiter.release);
+
+    clear_reports(directory);
+}
+
+// R4: a report left behind by an earlier crash must not be read as "this pass wrote one". The old code asked the
+// filesystem (GetFileAttributesW) whenever dump() returned 0 frames, so a read-only report from a previous run answered
+// yes: the index said `thread N: 0 frames` while the file next to it still held the earlier three.
+void test_dump_all_stale_report() {
+    const std::wstring directory = report_directory();
+    clear_reports(directory);
+
+    ThreadArgs waiter{};
+    waiter.started = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    waiter.release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    DWORD tid = 0;
+    const HANDLE thread = CreateThread(nullptr, 0, &wait_outside_image, &waiter, 0, &tid);
+    check(thread != nullptr, "stale report: the parked thread is created");
+    if (thread == nullptr) return;
+    if (waiter.started != nullptr) WaitForSingleObject(waiter.started, 2000);
+
+    // The report an earlier pass would have left, made read-only so CREATE_ALWAYS cannot truncate it.
+    const std::wstring path = thread_report(directory, tid);
+    const char sentinel[] =
+        "[rt] crash report: rip 0x00007ff6deadbeef rsp 0x0000000000140000\n"
+        "[rt] crash report: 3 frames; walk stopped: the next return address is outside the image\n";
+    const HANDLE stale =
+        CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (stale != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        WriteFile(stale, sentinel, static_cast<DWORD>(sizeof sentinel - 1), &written, nullptr);
+        CloseHandle(stale);
+    }
+    SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_READONLY);
+
+    const rt::crash_report::AllThreadsResult result = rt::crash_report::dump_all(directory.c_str());
+    std::printf("stale report: considered %zu, written %zu, skipped %zu, truncated %zu\n", result.considered,
+                result.written, result.skipped, result.truncated);
+    check(result.written + result.skipped + result.truncated == result.considered,
+          "stale report: the pass still accounts for every thread");
+
+    // The index must name the file as the reason for this thread, and must not fall back to the sentence that blamed
+    // GetThreadContext.
+    const std::wstring summary = join(directory, L"crash_report.threads.txt");
+    std::string text;
+    const bool read_summary = read_file(summary, text);
+    check(read_summary, "stale report: the index is written");
+    if (read_summary) {
+        char expected[96] = {};
+        std::snprintf(expected, sizeof expected, "thread %lu: not captured (report file could not be created)",
+                      static_cast<unsigned long>(tid));
+        check(contains(text, expected), "stale report: the index says the report file could not be created");
+        char prefix[64] = {};
+        std::snprintf(prefix, sizeof prefix, "thread %lu:", static_cast<unsigned long>(tid));
+        size_t lines_with_tid = 0;
+        for (std::string::size_type at = text.find(prefix); at != std::string::npos; at = text.find(prefix, at + 1))
+            ++lines_with_tid;
+        check(lines_with_tid == 1, "stale report: that thread gets exactly one index line, and it is the failure");
+        check(!contains(text, "GetThreadContext failed"),
+              "stale report: the index does not blame GetThreadContext for a file that would not open");
+    }
+
+    // And the sentinel is untouched: nothing was written over it.
+    std::string on_disk;
+    if (read_file(path, on_disk)) {
+        check(contains(on_disk, "0x00007ff6deadbeef"), "stale report: the previous report is left exactly as it was");
+    }
+
+    SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);
+    SetEvent(waiter.release);
+    WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    if (waiter.started != nullptr) CloseHandle(waiter.started);
+    if (waiter.release != nullptr) CloseHandle(waiter.release);
+    clear_reports(directory);
+}
+
 }  // namespace
 
 int main() {
-    test_linear_chain();
-    test_repeated_frame();
+    test_linear_chain();    test_repeated_frame();
     test_frame_limit();
     test_no_function_entry();
     test_fault_outside_image();
@@ -513,6 +811,9 @@ int main() {
     test_unwind_fault();
     test_absurd_table_count();
     test_null_context_and_unregistered_image();
+    test_dump_all_threads();
+    test_dump_all_no_allocation();
+    test_dump_all_stale_report();
 
     if (g_failures != 0) {
         std::fprintf(stderr, "%d failure(s) of %d check(s)\n", g_failures, g_checks);

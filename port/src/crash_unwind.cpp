@@ -8,6 +8,8 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
+#include <tlhelp32.h>
 
 namespace rt::crash_report {
 namespace {
@@ -247,6 +249,10 @@ Stop walk(const CONTEXT* context, void* user, FrameSink sink) noexcept {
             stop = Stop::FrameLimit;
             break;
         }
+        // Everything below that is read from `current` (Rip for the repeat test, Rsp for the stack words, the
+        // callee-saved registers) is taken before the unwind writes to it, which is what lets the unwind land in
+        // `current` itself: a second CONTEXT local would be another 1 232 bytes of this frame, and the only thing the
+        // previous state is still needed for afterwards is "did RSP move up", which an 8-byte local answers.
         const uint64_t pc = current.Rip;
         bool repeated = false;
         for (size_t i = 0; i < frames; ++i) repeated = repeated || seen[i] == pc;
@@ -294,8 +300,8 @@ Stop walk(const CONTEXT* context, void* user, FrameSink sink) noexcept {
             break;
         }
 
-        CONTEXT next = current;
-        const UnwindStatus status = unwind_frame(image, *entry, control_pc, next);
+        const uint64_t previous_rsp = current.Rsp;
+        const UnwindStatus status = unwind_frame(image, *entry, control_pc, current);
         if (status == UnwindStatus::BadInfo) {
             stop = Stop::BadUnwindInfo;
             break;
@@ -304,11 +310,10 @@ Stop walk(const CONTEXT* context, void* user, FrameSink sink) noexcept {
             stop = Stop::UnwindFault;
             break;
         }
-        if (next.Rsp <= current.Rsp) {
+        if (current.Rsp <= previous_rsp) {
             stop = Stop::StackNotAdvancing;
             break;
         }
-        current = next;
     }
     return stop;
 }
@@ -328,15 +333,19 @@ size_t appendf(char* buffer, size_t size, size_t used, const char* format, ...) 
     return used < size ? used : size - 1;
 }
 
-void write_bytes(HANDLE file, const char* text, size_t bytes) noexcept {
-    if (file == nullptr || file == INVALID_HANDLE_VALUE || bytes == 0) return;
+// Returns what the handle did with the bytes, because dump_all() has to answer "was this thread's report written"
+// without asking the filesystem: a stale report at the same name says yes for a write that never happened.
+[[nodiscard]] bool write_bytes(HANDLE file, const char* text, size_t bytes) noexcept {
+    if (file == nullptr || file == INVALID_HANDLE_VALUE) return false;
+    if (bytes == 0) return true;
     DWORD written = 0;
-    WriteFile(file, text, static_cast<DWORD>(bytes), &written, nullptr);
+    return WriteFile(file, text, static_cast<DWORD>(bytes), &written, nullptr) != 0 && written == bytes;
 }
 
 struct DumpSink {
     HANDLE file;
     size_t frames;
+    bool failed;  // the handle rejected a line; the walk continues so the frame count stays honest
 };
 
 // One frame is two lines: the RVA/routine/stack words, then the callee-saved registers as that frame saw them. The
@@ -369,7 +378,7 @@ void write_frame(void* user, const Frame& frame) noexcept {
         }
     }
     used = appendf(line, sizeof line, used, "\n");
-    write_bytes(sink.file, line, used);
+    if (!write_bytes(sink.file, line, used)) sink.failed = true;
 
     used = appendf(line, sizeof line, 0,
                    "         rbx=%016llx rbp=%016llx rsi=%016llx rdi=%016llx "
@@ -382,7 +391,7 @@ void write_frame(void* user, const Frame& frame) noexcept {
                    static_cast<unsigned long long>(frame.callee_saved[5]),
                    static_cast<unsigned long long>(frame.callee_saved[6]),
                    static_cast<unsigned long long>(frame.callee_saved[7]));
-    write_bytes(sink.file, line, used);
+    if (!write_bytes(sink.file, line, used)) sink.failed = true;
     ++sink.frames;
 }
 
@@ -397,25 +406,27 @@ void set_image(void* base, size_t size, const IMAGE_RUNTIME_FUNCTION_ENTRY* func
     g_registered.store(base != nullptr && size != 0, std::memory_order_release);
 }
 
-size_t dump(const CONTEXT* context, const wchar_t* path, const void* user_data) noexcept {
-    (void)user_data;  // reserved for the integrator; see the header
-    const bool owns_file = path != nullptr;
-    HANDLE file = owns_file
-                      ? CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
-                                    FILE_ATTRIBUTE_NORMAL, nullptr)
-                      : GetStdHandle(STD_ERROR_HANDLE);
-    if (file == INVALID_HANDLE_VALUE) return 0;
+ReportWrite dump_to_handle(const CONTEXT* context, HANDLE file, const char* tag) noexcept {
+    ReportWrite result{0, false};
+    if (file == nullptr || file == INVALID_HANDLE_VALUE) return result;
 
     const Image image = load_image();
     char header[256];
     size_t used = 0;
+    bool ok = true;
     used = appendf(header, sizeof header, used, "[rt] crash report");
     if (context != nullptr) {
         used = appendf(header, sizeof header, used, ": rip 0x%016llx rsp 0x%016llx",
                        static_cast<unsigned long long>(context->Rip), static_cast<unsigned long long>(context->Rsp));
     }
     used = appendf(header, sizeof header, used, "\n");
-    write_bytes(file, header, used);
+    ok = write_bytes(file, header, used);
+
+    // Which fault produced this file, before the frames: a directory of reports otherwise cannot be split into passes.
+    if (tag != nullptr && tag[0] != '\0') {
+        used = appendf(header, sizeof header, 0, "pass: %s\n", tag);
+        ok = write_bytes(file, header, used) && ok;
+    }
 
     used = 0;
     if (image.base != 0 && image.size != 0) {
@@ -427,17 +438,259 @@ size_t dump(const CONTEXT* context, const wchar_t* path, const void* user_data) 
     } else {
         used = appendf(header, sizeof header, used, "no image registered\n");
     }
-    write_bytes(file, header, used);
+    ok = write_bytes(file, header, used) && ok;
 
-    DumpSink sink{file, 0};
+    DumpSink sink{file, 0, false};
     const Stop stop = walk(context, &sink, &write_frame);
 
     used = appendf(header, sizeof header, 0, "[rt] crash report: %zu frame%s; walk stopped: %s\n", sink.frames,
                    sink.frames == 1 ? "" : "s", stop_text(stop));
-    write_bytes(file, header, used);
+    ok = write_bytes(file, header, used) && ok;
 
-    if (owns_file) CloseHandle(file);
-    return sink.frames;
+    result.frames = sink.frames;
+    result.written = ok && !sink.failed;
+    return result;
+}
+
+size_t dump(const CONTEXT* context, const wchar_t* path, const char* tag) noexcept {
+    if (path == nullptr) return dump_to_handle(context, GetStdHandle(STD_ERROR_HANDLE), tag).frames;
+    const HANDLE file =
+        CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    const ReportWrite written = dump_to_handle(context, file, tag);
+    CloseHandle(file);
+    return written.frames;
+}
+
+namespace {
+
+constexpr size_t kThreadPathChars = 512;
+constexpr size_t kSummaryChars = 256;
+
+// How a slot in the handle array answers "why is there no report file for this thread". The handle doubles as the state, so a
+// second array (256 bytes) is not needed: CreateFileW never returns nullptr and never returns a usable handle equal to
+// INVALID_HANDLE_VALUE, so nullptr = "the path did not fit, no call was made" and INVALID_HANDLE_VALUE = "CreateFileW
+// refused it (missing directory, read-only report, ACL, share violation)".
+constexpr HANDLE kPathTooLong = nullptr;
+
+// "<directory>\crash_report.<tid>.txt". swprintf writes into the caller's buffer and reports truncation instead of
+// allocating, so a long directory costs a short file name, never heap. A path that would be truncated is refused: a
+// report written under a clipped name could be mistaken for another thread's.
+bool thread_report_path(const wchar_t* directory, uint32_t tid, wchar_t (&path)[kThreadPathChars]) noexcept {
+    const int written = std::swprintf(path, kThreadPathChars, L"%ls\\crash_report.%lu.txt", directory,
+                                      static_cast<unsigned long>(tid));
+    return written > 0 && static_cast<size_t>(written) < kThreadPathChars;
+}
+
+// The summary is ASCII like the per-thread reports (write_bytes on narrow text), so the same `grep`/`fread` that reads
+// one reads the other. It is not UTF-16: a report nobody can grep on a build server is a report nobody reads.
+void summary_captured(HANDLE file, uint32_t tid, size_t frames) noexcept {
+    char line[kSummaryChars];
+    const size_t used = appendf(line, sizeof line, 0, "thread %lu: %zu frame%s\n", static_cast<unsigned long>(tid),
+                                frames, frames == 1 ? "" : "s");
+    (void)write_bytes(file, line, used);
+}
+
+void summary_skipped(HANDLE file, uint32_t tid, const char* why) noexcept {
+    char line[kSummaryChars];
+    const size_t used = appendf(line, sizeof line, 0, "thread %lu: not captured (%s)\n",
+                                static_cast<unsigned long>(tid), why);
+    (void)write_bytes(file, line, used);
+}
+
+// Said once, on stderr, when the index name does not fit: a pass whose index was silently dropped looks exactly like a
+// pass that found nothing to report.
+constexpr char kNoIndexNote[] =
+    "[rt] crash report: the index path is longer than the buffer; no crash_report.threads.txt for this pass\n";
+
+}  // namespace
+
+AllThreadsResult dump_all(const wchar_t* directory, const wchar_t* summary_path, const char* reason) noexcept {
+    AllThreadsResult result{};
+    if (directory == nullptr || directory[0] == L'\0') return result;
+
+    // Headroom for the chain this call starts. SetThreadStackGuarantee is a guarantee, not a reserve: it makes no stack
+    // bigger, it decides how much of the stack stays usable to the handler when a stack overflow happens - the one
+    // fault this reporter exists for, and the one where the frame below would otherwise be its own second fault. Three
+    // limits stated where it is asked for: it is per thread (every other thread needs its own, which is why
+    // startup_trace.h asks for the same amount when it installs the handler); it only covers a fault raised after it
+    // returns; and it cannot enlarge a reserve that is already too small, in which case the call fails and the pass
+    // still runs - hence the ignored result. Measured peak chain: see the numbers in docs/crash_report.md.
+    ULONG guaranteed = kStackGuaranteeBytes;
+    (void)SetThreadStackGuarantee(&guaranteed);
+
+    const DWORD pid = GetCurrentProcessId();
+    const DWORD self = GetCurrentThreadId();
+    DWORD ids[kMaxDumpedThreads] = {};
+    size_t count = 0;
+    size_t past_cap = 0;
+
+    // Enumerate first, act second, and suspend nothing while enumerating. The snapshot is closed before any thread is
+    // suspended, so a failed suspend cannot leave a toolhelp handle open on the fault path, and the list is a fixed
+    // stack array because the caller is an exception handler (see the header's allocation note).
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return result;
+    THREADENTRY32 entry{};
+    entry.dwSize = sizeof entry;
+    if (Thread32First(snapshot, &entry)) {
+        do {
+            if (entry.th32OwnerProcessID != pid) continue;
+            if (entry.th32ThreadID == self) continue;
+            if (count >= kMaxDumpedThreads) {
+                ++past_cap;
+                continue;
+            }
+            ids[count++] = entry.th32ThreadID;
+        } while (Thread32Next(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+
+    // `considered` is the number the caller's log line reads as "threads besides mine", so the truncated ones belong in
+    // it: a 300-thread process used to print "256 besides the reporting one" and count the other 44 only in
+    // `truncated`. written + skipped + truncated == considered holds for every pass.
+    result.considered = count + past_cap;
+    result.truncated = past_cap;
+
+    // One path buffer for the whole pass: the index path and every per-thread path are built into it in turn, and the
+    // index path is dead once the index handle exists. Two live wchar_t[512] buffers (the old default_summary plus the
+    // loop's path) cost 1 KiB of this frame and bought nothing.
+    wchar_t path[kThreadPathChars] = {};
+
+    HANDLE summary = nullptr;
+    if (summary_path != nullptr) {
+        if (summary_path[0] != L'\0')
+            summary = CreateFileW(summary_path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+    } else if (std::swprintf(path, kThreadPathChars, L"%ls\\crash_report.threads.txt", directory) > 0) {
+        // No name given: the directory's own index. A caller that knows only where the reports go still gets the file
+        // that says how many there are and what each one holds. A name that does not fit used to be dropped in silence,
+        // which reads exactly like a pass that found nothing.
+        summary = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                              nullptr);
+    } else {
+        (void)write_bytes(GetStdHandle(STD_ERROR_HANDLE), kNoIndexNote, sizeof kNoIndexNote - 1);
+    }
+    if (summary != nullptr && summary != INVALID_HANDLE_VALUE) {
+        char head[kSummaryChars];
+        size_t used = appendf(head, sizeof head, 0,
+                              "[rt] crash report: all threads of process %lu, %zu besides the reporting one\n",
+                              static_cast<unsigned long>(pid), result.considered);
+        if (reason != nullptr && reason[0] != '\0') used = appendf(head, sizeof head, used, "pass: %s\n", reason);
+        if (past_cap != 0)
+            used = appendf(head, sizeof head, used, "%zu thread(s) past the cap of %zu are not in this pass\n",
+                           past_cap, kMaxDumpedThreads);
+        (void)write_bytes(summary, head, used);
+    }
+
+    // Every per-thread report file is opened while nothing is suspended. This is the fix for the deadlock, not tidying:
+    // CreateFileW takes the process heap lock, so a pass that opens its files from inside its own suspend window can
+    // park the thread holding that lock and then wait for it forever (measured: the pass stopped dead 29 files in).
+    // Inside the window below there is no CreateFileW left - only writes to an already-open handle, which needs no
+    // process heap. A file that ends up empty belongs to a thread that could not be captured, and the index says why.
+    //
+    // All of them in one burst, and that is not a stack decision open to revisiting. An earlier revision opened them in
+    // batches of 32 to keep the handle array small (256 HANDLEs are 2 KiB of this frame) and argued that the batches
+    // are serialised, so "the file is opened while nothing of this pass is parked" still held for every single open. The
+    // argument is true per open and false for the pass: a later burst is a later chance to meet a heap lock nobody will
+    // release, and it is issued only after the first 32 threads have been through the suspend window - which is exactly
+    // when a lock taker gets its chance. Measured with 60 parked threads and a thread that takes
+    // HeapLock(GetProcessHeap()) 15 ms into the pass and never lets go: one burst finished 3/3 runs with all 61
+    // per-thread reports, while 32-file batching timed out
+    // 3/3 runs, stopping inside the second batch's CreateFileW at 33/36/37/39/47/49/54 files with suspended == 0 - no
+    // thread of this pass was parked when it hung, so it was not the R3 case. The frame is what kStackGuaranteeBytes
+    // buys; a hang is not buyable at any frame size.
+    HANDLE files[kMaxDumpedThreads] = {};
+    for (size_t index = 0; index < count; ++index) {
+        if (!thread_report_path(directory, ids[index], path)) {
+            files[index] = kPathTooLong;
+            continue;
+        }
+        files[index] = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+    }
+
+    for (size_t index = 0; index < count; ++index) {
+        const DWORD tid = ids[index];
+        if (files[index] == kPathTooLong || files[index] == INVALID_HANDLE_VALUE) {
+            ++result.skipped;
+            summary_skipped(summary, tid, files[index] == kPathTooLong
+                                             ? "the report path would be longer than 511 characters"
+                                             : "report file could not be created");
+            continue;
+        }
+
+        // OpenThread stays outside the window: nothing is suspended at this point, so a lock it takes can still be
+        // released by whoever holds it. Its failure gets its own reason.
+        const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, tid);
+        if (thread == nullptr) {
+            ++result.skipped;
+            summary_skipped(summary, tid, "OpenThread failed");
+            CloseHandle(files[index]);
+            files[index] = INVALID_HANDLE_VALUE;
+            continue;
+        }
+
+        // CONTROL gives Rip/Rsp (where the walk starts) and INTEGER gives the callee-saved registers the report
+        // exists for. Without INTEGER every frame's rbx..r15 column would read zero and the attribution it carries
+        // is lost.
+        CONTEXT context{};
+        context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        ReportWrite written{0, false};
+        bool suspended = false;
+        bool captured = false;
+        const char* failure = nullptr;
+
+        __try {
+            // The suspend window. Everything in it is a kernel call on a handle somebody else already opened:
+            // SuspendThread, GetThreadContext, WriteFile. No file creation, no path joining, no C++ allocation,
+            // and no wait on a lock whose holder this pass could be holding suspended.
+            if (SuspendThread(thread) == static_cast<DWORD>(-1)) {
+                failure = "SuspendThread failed";
+            } else {
+                suspended = true;
+                captured = GetThreadContext(thread, &context) != 0;
+                if (captured) {
+                    written = dump_to_handle(&context, files[index], reason);
+                } else {
+                    failure = "GetThreadContext failed";
+                }
+            }
+        } __finally {
+            // The one action that has to happen on every way out. The caller's __except(EXCEPTION_EXECUTE_HANDLER)
+            // does not unwind the stack, so an SEH fault on the reporting path would skip a ResumeThread() written
+            // as the next statement - and the process keeps running, which leaves the thread parked forever. One
+            // ResumeThread and nothing else in here: it cannot fail with an exception and it does not block.
+            if (suspended) ResumeThread(thread);
+        }
+
+        CloseHandle(thread);
+        CloseHandle(files[index]);
+        files[index] = INVALID_HANDLE_VALUE;
+
+        if (!captured) {
+            ++result.skipped;
+            summary_skipped(summary, tid, failure != nullptr ? failure : "the thread's CONTEXT could not be read");
+            continue;
+        }
+        // The writer answers "did this report get written", not the filesystem: a stale report at the same name
+        // says yes for a write that never happened, and the index then contradicts the file next to it.
+        if (!written.written) {
+            ++result.skipped;
+            summary_skipped(summary, tid, "the report file rejected the write");
+            continue;
+        }
+        ++result.written;
+        summary_captured(summary, tid, written.frames);
+    }
+
+    if (summary != nullptr && summary != INVALID_HANDLE_VALUE) {
+        char tail[kSummaryChars];
+        const size_t used = appendf(tail, sizeof tail, 0, "considered %zu, written %zu, skipped %zu, truncated %zu\n",
+                                    result.considered, result.written, result.skipped, result.truncated);
+        (void)write_bytes(summary, tail, used);
+        CloseHandle(summary);
+    }
+    return result;
 }
 
 }  // namespace rt::crash_report
