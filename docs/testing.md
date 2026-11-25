@@ -2,13 +2,12 @@
 
 The GPU tests are small hand-written RDNA2 programs in `port/test/shaders`. They are translated to SPIR-V and run
 on your GPU, and the results are compared with what the RDNA2 hardware gives. They need no game files, and every
-result helps: post it in [#166](https://github.com/the original project/issues/166), one comment per GPU and driver.
-If your GPU is already covered there, testing an open pull request from the review queue in the [coordination
-issue][claims] helps more.
+result helps: post it in an issue of this repository, one comment per GPU and driver. If your GPU is already covered
+there, testing an open pull request from the review queue in the [open pull requests][claims] helps more.
 
 This page collects the setup steps and the problems testers have run into so far.
 
-[claims]: https://github.com/the original project/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22
+[claims]: https://github.com/luizwidmer/palmetto/pulls
 
 ## What you need
 
@@ -63,6 +62,64 @@ alone does not establish that they ran. Check the CMake configure messages and l
 configured tests with `ctest --test-dir port/build -C RelWithDebInfo -N` before comparing test counts. After
 installing missing tools, rerun CMake in an environment where they are visible and rebuild.
 
+### The full Windows build (every target)
+
+A `ctest` run only exercises the targets that were built, so a target whose **link** fails is silently absent from it.
+The whole tree is checked with a full build, which is what the local build gates and the Windows CI job run. Configure
+once with `tooling/scripts\build_runtime.ps1` (it passes this tree's CMake settings), then from the repository root in
+an x64 developer prompt:
+
+```bat
+call "...\Microsoft Visual Studio\...\VC\Auxiliary\Build\vcvars64.bat"
+cmake --build port\build -j 8
+```
+
+The build must finish with no `FAILED:` lines: on the tree of 2026-11-24 (MSVC 14.50.35717, CMake 4.4.5, Ninja,
+RelWithDebInfo) that is 237/237 steps, and a second run prints `ninja: no work to do.` Run one build at a time
+against `port\build`: two builds write the same objects and debug databases, which surfaces as `C1083`/`C1033`
+(cannot open the object or PDB), and a compiler that loses that race can report a C1001 internal compiler error even
+for a translation unit that compiles alone.
+
+The local gates are two scripts kept with the machine's build setup, outside the tree. The runtime gate builds
+`palmetto` and must end with `PALMETTO_OK`; the test gate builds `d3d12_fence_timing_test`, `frame_dump_test`,
+`xs_proxy_mock_test`, `unimplemented_policy_test`, `graphics_record_test`, `graphics_pso_test`, `xbox_present_test`
+and `buffer_va_index_test` and must end with `TESTS_BUILT`. Seven of those eight must pass; the exception is the known
+crash below. The gates do not build everything, so run the full build as well before calling a change green.
+
+Known failures in this tree, measured on 2026-11-24 (they were latent because the targets named at the end of this
+section never linked before):
+
+- `d3d12_fence_timing_test` exits with `0xC0000005`, a pre-existing crash that is quarantined: the test gate builds it,
+  but it is excluded from a `ctest` pass check (it stays registered, so a full `ctest` run reports it failed). Unblock:
+  find the faulting frame in its fence and timing checks; the other tests that use the same fences pass.
+- `root_sig_test` fails two checks: `FAIL blob helper rewrites an all-zero-checksum Xbox blob and keeps its zero
+  checksum` and `FAIL shim deserializer accepts an all-zero-checksum Xbox blob with the high byte cleared`. In
+  `copy_rts0_blob_clear_xbox_flags` (`port/shims/d3d12_xs_rootsig.cpp`) the incoming DXBC checksum is verified
+  unconditionally before the all-zero-checksum case later in the function, so an all-zero checksum returns early
+  although host `d3d12.dll` accepts it. Unblock: let an all-zero incoming checksum skip that first mismatch return;
+  the two checks should then pass.
+- `device_proxy_test` fails one check: `FAIL the queue proxy signals the fence proxy on the GPU`, with the measured
+  line `[rt] d3d12_xs: queue slot 14 is one of the console's two methods before Signal; refusing (...)`. The check
+  calls the Xbox-ABI queue proxy through the PC interface's `Signal` (PC slot 14), while the proxy's slot 14 is one of
+  the console's inserted methods; the title's Signal is console slot 16 (`kConsoleQueueSignal`). Unblock: call
+  `Signal` at slot 16 through an Xbox-shaped pointer (`HRESULT (WINAPI*)(void*, void*, UINT64)`), as the title does.
+
+Four repairs in the same pass are worth knowing while reading a red full build:
+
+- `d3d12_console_descriptor_heap_test` builds and passes. Its local `Ref<>` had no `operator->`; it read the Xbox-ABI
+  heap proxy's slots 9 and 10 through a PC virtual call (those return the 8-byte handle in RAX, so a PC virtual call
+  sees an unwritten value); and it released a device reference that `create_device_proxy` had taken ownership of.
+- `d3d12_m2_formats_test` builds; the C1001 internal compiler error it used to report in this translation unit's
+  template-instantiation context does not reproduce. See the one-build-at-a-time note above before treating a C1001
+  as a source problem.
+- `d3d12_existing_heap_test`'s line-163 case passes: `CreatePlacedResource` on an `OpenExistingHeapFromAddress` heap
+  answers the documented `E_NOTIMPL`, which needs the imported heap in the device's heap registry
+  (`port/shims/d3d12_vulkan_device.cpp`); without it the call fell into the "not a runtime heap" `E_INVALIDARG` branch.
+- The GPU-free proxy and loader tests (`root_sig_test`, `device_proxy_test`, `pe_loader_test`, `test_pe_loader_bounds`,
+  `pe_loader_fuzz`) compile `shims/d3d12_xs_device.cpp`, whose console slot 57 decodes through
+  `src/graphics_record.cpp` and `src/graphics_pso.cpp` (the `palmetto_slot57` library); `xmem_test`, `file_system_test`,
+  `int3_skip_test` and `startup_trace_test` open a startup trace and compile `src/crash_unwind.cpp`. Both groups failed
+  to link (`LNK2019`) before that, so their tests had never run.
 
 Windows, from a "Developer PowerShell for VS 2022" or a plain shell:
 
@@ -141,7 +198,7 @@ Write-Output "Test exit code: $LASTEXITCODE"
 ```
 
 Report the executable name, the workflow run and its commit, your GPU and driver,
-the exit code, and the test summary in [#166](https://github.com/the original project/issues/166).
+the exit code, and the test summary.
 Label it as a single-test run so the result is easy to distinguish from a full suite run.
 
 ## Run them
@@ -285,7 +342,7 @@ synthetic test shaders, CTest inventory and the path of the Windows checkout. Fr
 used by the Windows job, set `run_id` to the Actions run ID and download the artifact to `port/build`:
 
 ```sh
-gh run download "$run_id" --repo the original project --name runtime-windows --dir port/build
+gh run download "$run_id" --repo luizwidmer/palmetto --name runtime-windows --dir port/build
 
 WINE=wine WINEPREFIX="$(mktemp -d)" WINEDLLOVERRIDES="mscoree,mshtml=" WINEDEBUG=-all \
   bash tooling/scripts/run_wine_session.sh python3 -I tooling/scripts/run_wine_tests.py \
@@ -464,9 +521,9 @@ instruction"); at 128 bits (`LP_NATIVE_VECTOR_WIDTH=128`) some draw correctly an
 stay at the clear color); on arm64 (128 bits) `ms_tri`'s primitive comes out culled, so nothing is drawn. Storing a
 constant `false` there instead makes the emulated `ms_tri` draw a frame byte-identical to RADV's (Mesa 26.3.1), and
 `ms_tri`, `ms_wave_info_s3`, `ms_w64x_ballot` and `ms_v5_workgroup` byte-identical to NVIDIA's at both widths (Mesa
-26.0.3, [measured by @TreXito](https://github.com/the original project/pull/3838#issuecomment-7086696759), with a 42-line reduced
+26.0.3, measured by @TreXito, with a 42-line reduced
 reproducer). llvmpipe is not a substitute for a result from a
-real GPU in [#166](https://github.com/the original project/issues/166): it catches regressions, not hardware
+real GPU reported in an issue of this repository: it catches regressions, not hardware
 differences.
 
 ## Macs in CI
@@ -617,14 +674,14 @@ game's device ignores it`, so leaving them set cannot slow a game down (`run_tin
 | Validation errors that only your machine shows (e.g. `xbox_present`'s sRGB swapchain `STORAGE` message), with MSI Afterburner/RivaTuner or OBS installed | An overlay layer that hooks the swapchain: while RivaTuner Statistics Server is running, its `VK_LAYER_RTSS` adds `STORAGE` usage to it (OBS's `VK_LAYER_OBS_HOOK` injects `VK_IMAGE_USAGE_STORAGE_BIT` too). In an elevated (administrator) terminal the loader ignores `VK_LOADER_LAYERS_DISABLE` (`VK_LOADER_DEBUG=all` says so), so `~implicit~` leaves the layer in | Run the tests from a normal terminal, close the overlay application, or set the layer's own switch, which works elevated too: `DISABLE_RTSS_LAYER=1`, `DISABLE_VULKAN_OBS_CAPTURE=1` (OBS). Any other layer's switch is the `disable_environment` entry in its manifest (the JSON listed under `HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers` or `HKCU\...`). `VK_LOADER_DEBUG=layer` prints the layers that were actually inserted |
 | GPU tests crash with an access violation (`0xC0000005`, exit `-1073741819`) right after device creation, with no layer message and validation off (e.g. `d3d12_method_variants` 9 of 10 runs, `xbox_present` 10 of 10, on `main` 561b65a83, RTX 4070 Ti, NVIDIA 616.56) | An implicit layer from an overlay or game tool you did not install for these tests. FPS Monitor's `fpsmonvk64.json` (listed under `HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers`) names itself `VK_LAYER_RENDERDOC_Capture`, so `DISABLE_VULKAN_OBS_CAPTURE=1` does not disable it | `VK_LOADER_DEBUG=layer` prints the layers that were actually inserted. That manifest's `disable_environment` is `DISABLE_LAYER=1`; `DISABLE_LAYER=1` or `VK_LOADER_LAYERS_DISABLE=~implicit~` gave 20 of 20 clean runs (a layer's own switch is its `disable_environment` entry, as the row above says) |
 | `vk_sync_validation` fails with `PALMETTO_VK_VALIDATION=1` ("the write-after-write hazard was not reported") | Synchronization validation is off although the tests ask for it: an older layer, or a layer setting such as `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=false` or a `vk_layer_settings.txt` that overrides it. Every other GPU test then reports "0 validation errors" without having been checked | Remove the override or update the Vulkan SDK, then rerun `ctest -R vk_sync_validation` until it passes |
-| On RADV with Mesa 25.2 (Ubuntu 24.04's default; 25.2.8 measured) or 25.3 (from the source, not run), `cs_w32_salu64` fails with word 2 = `0` (want `0xFFFFFFFF`) and `cs_signed_zero_nan` fails with word 5 = `0` (want `1`). The `cs_signed_zero_nan` failure alone is also measured on RADV 25.0.7 (RX 7800 XT, Debian 13; @mrbean56, #4421) and on ANV 25.2.8 (Intel UHD 630; @theswiss24, #4571); llvmpipe on Mesa 26.0.8 (Ubuntu 26.04) still gives word 5 = `0`, which `check.py` does not judge there (`UNJUDGED_WORDS`) | Two Mesa bugs, not translator bugs (#166). `cs_w32_salu64`: ACO's `combine_add_sub_b2i` reads a temporary without counting the use, so dead-code elimination removes it (`ACO ERROR: ... never defined` with `MESA_SHADER_CACHE_DISABLE=true`); `RADV_DEBUG=llvm` passes. `cs_signed_zero_nan`: NIR's range analysis (`fmul_is_a_number`) calls `0 * x` a number when `x` may be infinite, so the `x != x` check folds to false despite `SignedZeroInfNanPreserve`. The same NIR code is behind llvmpipe's word 5 (#664) and ANV's, since both drivers run NIR; `cs_w32_salu64` is ACO's, so only RADV has it | Expected with these Mesa versions. From the source, the ACO function is gone from Mesa 26.0 and the NIR code was replaced in 26.1 (neither run); RADV from Mesa 26.3.1 passes both on an 8060S (gfx1151) |
+| On RADV with Mesa 25.2 (Ubuntu 24.04's default; 25.2.8 measured) or 25.3 (from the source, not run), `cs_w32_salu64` fails with word 2 = `0` (want `0xFFFFFFFF`) and `cs_signed_zero_nan` fails with word 5 = `0` (want `1`). The `cs_signed_zero_nan` failure alone is also measured on RADV 25.0.7 (RX 7800 XT, Debian 13; @mrbean56) and on ANV 25.2.8 (Intel UHD 630; @theswiss24); llvmpipe on Mesa 26.0.8 (Ubuntu 26.04) still gives word 5 = `0`, which `check.py` does not judge there (`UNJUDGED_WORDS`) | Two Mesa bugs, not translator bugs. `cs_w32_salu64`: ACO's `combine_add_sub_b2i` reads a temporary without counting the use, so dead-code elimination removes it (`ACO ERROR: ... never defined` with `MESA_SHADER_CACHE_DISABLE=true`); `RADV_DEBUG=llvm` passes. `cs_signed_zero_nan`: NIR's range analysis (`fmul_is_a_number`) calls `0 * x` a number when `x` may be infinite, so the `x != x` check folds to false despite `SignedZeroInfNanPreserve`. The same NIR code is behind llvmpipe's word 5 and ANV's, since both drivers run NIR; `cs_w32_salu64` is ACO's, so only RADV has it | Expected with these Mesa versions. From the source, the ACO function is gone from Mesa 26.0 and the NIR code was replaced in 26.1 (neither run); RADV from Mesa 26.3.1 passes both on an 8060S (gfx1151) |
 | Every test crashes inside `libnvidia-eglcore.so` | NVIDIA's 535 server driver (Ubuntu 24.04's default) | Use driver 615 or newer |
 | `build.py`: 0 translated, reason `.text` | An old `build.py` with LLVM 19 | Update to current `main` |
 | `vk_harness` doesn't compile: `VK_KHR_maintenance8` names unknown | Vulkan headers older than the SDK the code was written against | Update to current `main` (the code now builds without it), or use current Khronos Vulkan-Headers; conda-forge's package is too old |
 | `ps_bary` and `ps_uniform_branch` fail by about 0.9 | The GPU runs pixel shaders wave64 without fragment barycentrics (GCN3 and RDNA1 on RADV), or an old AMD Windows driver (22.40) | Current `main` skips them on such devices; on Windows, update the driver |
 | `ps_bary`, `ps_persp_bary` and `ps_ij_computed` read the third barycentric as about 0.99 on a gfx90c iGPU (Vega 8, AMD Windows driver 31.0.21921.13001; #5933) | The driver's native `BaryCoordKHR` is wrong there: the same tests pass through `--bary-fallback`, and natively on RADV (Radeon 8060S) | `tooling/vk_subgroup_info.py` turns the fallback on by itself for gfx90c under AMD's driver, and `build_port.py`, `run_gpu_tests.py`, `build.py` and `check.py` follow it when `PALMETTO_BARY_FALLBACK` is unset; `=1` forces the fallback and `=0` forces native barycentrics, where they still fail |
 | `cs_w32_salu64` gives eight wrong words on RDNA1 under RADV Mesa 25.2.8 (`0x1E6A2C48 0x1234 0 0x100 47 48 0xFFFF8000 0xFFFFFFFE`, where word 2 should be `0xFFFFFFFF`) | Only the high word of the `s_bfe_i64` result is wrong. The same words appear on four pinned V540s (Navi 12, PCI `1002:7360`) and on a clean upstream/main worktree, and three different valid SPIR-V sign-extension formulations give the same result while the CPU interpreter matches, so this is the driver version rather than the translator (SHADER-276) | Expected with Mesa 25.2.8; the fixture passes on NVIDIA and on AMD's Windows driver. Try a newer Mesa before treating it as a translator bug; do not weaken the fixture's expectation |
-| `d3d12_typeless_rtv` fails its WARP comparison on an AMD desktop iGPU (TEST-591) | [Reported on the Ryzen 5 7600X iGPU with Windows 10 build 19045 and AMD 23.40.02](https://github.com/the original project/issues/166#issuecomment-7083403389). The exact cause is still open. | Retest on a newer Windows and AMD driver combination. Passing results were reported on the [Ryzen 9 7900 iGPU with AMD 25.10.30.02](https://github.com/the original project/issues/3232#issuecomment-7085263408), a [gfx1036 iGPU with AMD 26.5.2](https://github.com/the original project/issues/2891#issuecomment-7084023801), and the [Ryzen 7 9800X3D iGPU with driver 32.0.21045.29003](https://github.com/the original project/pull/3440). |
+| `d3d12_typeless_rtv` fails its WARP comparison on an AMD desktop iGPU (TEST-591) | Reported on the Ryzen 5 7600X iGPU with Windows 10 build 19045 and AMD 23.40.02. The exact cause is still open. | Retest on a newer Windows and AMD driver combination. Passing results were reported on the Ryzen 9 7900 iGPU with AMD 25.10.30.02, a gfx1036 iGPU with AMD 26.5.2, and the Ryzen 7 9800X3D iGPU with driver 32.0.21045.29003. |
 | `ps_interp_f16_high` fails on a Mac: `PerVertexKHR decoration is not supported in MSL`, then `vkCreateGraphicsPipelines` -3 | MoltenVK can't convert `PerVertexKHR` inputs to Metal | Current `main` translates it with `--f16-interp-fallback` on MoltenVK (see "Macs: 16-bit interpolation") |
 | `ps_vcmpx_forms` fails on a Mac: word 1 reads `0xf05e8e16`, want `0xf05e8a12` | MoltenVK's fast-math makes a compare of a NaN with itself true (SHADER-234) | Current `main`'s test programs turn it off (`MVK_CONFIG_FAST_MATH_ENABLED=0`, unless you set the variable yourself); rebuild them |
 | On a Mac, a translated shader's GPU time is 1.5 to 16 times what it would be without the precise-arithmetic overhead | MoltenVK's SPIRV-Cross turns every `NoContraction` float add, subtract and multiply into a call to an `[[clang::optnone]]` helper that Metal does not inline. MoltenVK 1.4.2 and `main` up to at least `5189f8de` are affected (SHADER-234, [design notes](design.md#translator-status-and-runtime-contract)) | Expected with these MoltenVK versions, and the output is still exact. Before you time shaders on a Mac, build MoltenVK with SPIRV-Cross `98cbb7c0` or newer in `ExternalRevisions/SPIRV-Cross_repo_revision` (KhronosGroup/MoltenVK#2917 moves it to `57e4efcc`), and point `PALMETTO_VULKAN_LOADER` at its `libMoltenVK.dylib` |
@@ -632,9 +689,9 @@ game's device ignores it`, so leaving them set cannot slow a game down (`run_tin
 | `cs_dpp_ops` fails on a Mac with MoltenVK 1.4.2: `out[0..7] = 100 100 11 ...`, want `100 10 11 ...` | MoltenVK 1.4.2's SPIRV-Cross moves the DPP lowering's subgroup ballot and shuffle into a short-circuiting `&&` and `?:`, so only some lanes run them and lane 1 sees its source lane 0 as inactive. SPIRV-Cross `5c372ffb` (in MoltenVK `main`) keeps them out of `?:`; a ballot on the right of `&&` is still moved there in SPIRV-Cross `57e4efcc` | Expected with MoltenVK 1.4.2; it passes with MoltenVK `main` (point `PALMETTO_VULKAN_LOADER` at its `libMoltenVK.dylib`) and on KosmicKrisp |
 | `check.py`'s `cs_fma_fused` fails on a Mac with MoltenVK 1.4.2: word 7 reads `15360` (`0x3c00`), want `29521` (`0x7351`) | The f16 multiply-add (round to odd). The MSL of 1.4.2 and of MoltenVK `main` differ only in SPIRV-Cross's precise-arithmetic helpers (`[[clang::optnone]]` and `fma(l, r, 0)` against `math_mode(safe)` and `fma(l, r, -0.0)`, the SHADER-182 / SHADER-234 change) | Expected with MoltenVK 1.4.2; it passes with MoltenVK `main` |
 | `gs_tri` and `ms_tri` fail on a Mac | MoltenVK has no geometry stage and no `VK_EXT_mesh_shader` | Current `main` reports them as skipped |
-| With `PALMETTO_W64_EMULATE=1` on llvmpipe, the `ms_*` tests fail. Measured with Mesa 26.3.1: on x86_64 at 256-bit vectors (the default there) all six abort with "LLVM ERROR: Cannot emit physreg copy instruction"; on arm64 (128-bit) `ms_tri` draws nothing (the frame stays at the clear color); on x86_64 at 128 bits (`LP_NATIVE_VECTOR_WIDTH=128`) `ms_tri` happened to draw correctly, but with Mesa 26.0.3 `ms_wave_info_s3` and `ms_v5_workgroup` draw nothing there (4 of 6 pass, [measured by @TreXito](https://github.com/the original project/pull/3838#issuecomment-7086696759)) ([measured runs](https://github.com/the original project/issues/3127#issuecomment-7086469679)) | An llvmpipe bug: a mesh shader's runtime `CullPrimitiveEXT` is stored through an invalid `bitcast <N x i1> to <N x float>` (TEST-782, #3127; see "Without a GPU: Mesa llvmpipe") | Run the mesh tests on llvmpipe without `PALMETTO_W64_EMULATE`, or add `PALMETTO_MESH_COMPUTE=1` (the compute fallback): with it all 6 `ms_*` pass emulated on llvmpipe (x86_64, 256-bit) |
+| With `PALMETTO_W64_EMULATE=1` on llvmpipe, the `ms_*` tests fail. Measured with Mesa 26.3.1: on x86_64 at 256-bit vectors (the default there) all six abort with "LLVM ERROR: Cannot emit physreg copy instruction"; on arm64 (128-bit) `ms_tri` draws nothing (the frame stays at the clear color); on x86_64 at 128 bits (`LP_NATIVE_VECTOR_WIDTH=128`) `ms_tri` happened to draw correctly, but with Mesa 26.0.3 `ms_wave_info_s3` and `ms_v5_workgroup` draw nothing there (4 of 6 pass, measured by @TreXito) | An llvmpipe bug: a mesh shader's runtime `CullPrimitiveEXT` is stored through an invalid `bitcast <N x i1> to <N x float>` (TEST-782; see "Without a GPU: Mesa llvmpipe") | Run the mesh tests on llvmpipe without `PALMETTO_W64_EMULATE`, or add `PALMETTO_MESH_COMPUTE=1` (the compute fallback): with it all 6 `ms_*` pass emulated on llvmpipe (x86_64, 256-bit) |
 | On a Mac, `valu_fuzz.py --family f16` reads `+0` where the model wants `-0`, from a multiply whose exact product is -0 (`v_mul_f16`, `v_pk_mul_f16`) or from an FMA whose product and addend are both -0 (`v_fma_f16`, `v_fmac_f16`, `v_pk_fma_f16`) | MoltenVK computes a `NoContraction` multiply as `fma(l, r, +0)`, which drops the sign. MoltenVK 1.4.2 and `main` up to at least `5189f8de` are affected (SHADER-182, [design notes](design.md#translator-status-and-runtime-contract)) | Expected with these MoltenVK versions. To run the rest of the fuzzer clean, add `--skip-op` for each of the five ops. To see them match, install Homebrew's `mesa` and use its KosmicKrisp driver: `PALMETTO_VULKAN_LOADER=/opt/homebrew/opt/vulkan-loader/lib/libvulkan.1.dylib VK_DRIVER_FILES=/opt/homebrew/share/vulkan/icd.d/kosmickrisp_mesa_icd.aarch64.json python3 -I tooling/valu_fuzz.py --family f16 --build port/build/linux`. Or build MoltenVK with SPIRV-Cross `300681bb` or newer in `ExternalRevisions/SPIRV-Cross_repo_revision`, and point `PALMETTO_VULKAN_LOADER` at its `libMoltenVK.dylib` |
-| A pixel shader exporting non-canonical f32 NaNs reads back `0x7fc00000` from an RGBA32F color attachment | KosmicKrisp (Mesa 26.3.1), reproduced on Apple M3 Max, M2 Ultra and M1 Pro ([#3125](https://github.com/the original project/issues/3125)): `nir_to_msl` emits `(NAN)` for `float`-typed NaN constants (`MESA_KK_DEBUG=msl`); MoltenVK 1.4.2 preserved both tested payloads on the same hardware | `ps_nan_payload` allows the measured canonical word only for the NaN channels and only when `vk_harness` reports `driver: KosmicKrisp`. Finite channels and other drivers still require exact words. Integer or storage-buffer readback still canonicalizes constants that NIR infers as `float` (see the `cs_bvh` row below). |
+| A pixel shader exporting non-canonical f32 NaNs reads back `0x7fc00000` from an RGBA32F color attachment | KosmicKrisp (Mesa 26.3.1), reproduced on Apple M3 Max, M2 Ultra and M1 Pro (a KosmicKrisp report): `nir_to_msl` emits `(NAN)` for `float`-typed NaN constants (`MESA_KK_DEBUG=msl`); MoltenVK 1.4.2 preserved both tested payloads on the same hardware | `ps_nan_payload` allows the measured canonical word only for the NaN channels and only when `vk_harness` reports `driver: KosmicKrisp`. Finite channels and other drivers still require exact words. Integer or storage-buffer readback still canonicalizes constants that NIR infers as `float` (see the `cs_bvh` row below). |
 | `cs_bvh` and `cs_bvh32` fail on a Mac with KosmicKrisp: `out[3]` reads `0x7fc00000`, want `0xffffffff` | KosmicKrisp's `nir_to_msl` compiler (Mesa 26.3.1, measured on Apple M2 Ultra, macOS 27.3), not the translator or the buffer format. The triangle branch writes bitcast `float` words and the box branch writes `OpSelect %uint` with `0xffffffff` (`-1`) into the same VGPRs; NIR erases `OpBitcast`, type inference marks the shared register and `bcsel` as `float`, and `nir_to_msl` prints any `float`-typed 32-bit constant in the IEEE-754 NaN range (`0x7f800001..0x7fffffff`, `0xff800001..0xffffffff`) as `(NAN)` (`0x7fc00000`) | Expected with KosmicKrisp in Mesa 26.3.1; MoltenVK 1.4.2 and llvmpipe (Mesa 26.3.1) return `0xffffffff` on the same machine. Do not weaken `vk_compute_test`'s expected BVH words |
 | CMake stops with "needs the Windows SDK 10.0.26100 or newer", or MSVC reports `'Desc_1_2': is not a member of 'D3D12_VERSIONED_ROOT_SIGNATURE_DESC'` | A Windows SDK older than 10.0.26100 (10.0.22621 is the common one), which has no version 1.2 root signatures | `winget install Microsoft.WindowsSDK.10.0.26100`, or add it in the Visual Studio Installer, then delete `port/build` and configure again |
 | `ctest` lists `fsr_dispatch` and `bvh_builder` as failed (`Not Run`) after clang-cl hits an internal compiler error in `fsr_dispatch_test.cpp` and `bvh_builder_test.cpp` | clang-cl 22.1.8 on Fedora (Linux cross-build) and Windows, plus 22.1.7 on Windows | Use clang-cl 23.1.6 (both files compile on Windows) |
@@ -676,7 +733,7 @@ read back as positive zero. All guards matched. This reproduces the discrepancy 
 of RDNA translation. Independent runs of the same probe reproduced those three mismatches on
 a Linux RTX 5090 (595.99.02). On Windows, a Ryzen 7 9800X3D Radeon iGPU (25.10.30.02),
 an RTX 3080 (616.64) and an RTX 3060 (621.14) preserved all 768 words in both formats.
-The device reports are in [PR #3260](https://github.com/the original project/pull/3260).
+The device reports are collected with the GPU reports.
 
 ### Which known problems the game's shaders reach
 
@@ -706,9 +763,8 @@ CS, 10,974 PS).
 
 ## Posting your result
 
-Use the template at the top of [#166](https://github.com/the original project/issues/166): GPU, driver, subgroup
-range, OS, the commit you built, the tool versions and the counts each script printed. Post counts and pass/fail
-lines only, never shaders or logs from the game. A failure that isn't in the table above gets its own issue, linked
-from your entry.
+Use this template: GPU, driver, subgroup range, OS, the commit you built, the tool versions and the counts each
+script printed. Post counts and pass/fail lines only, never shaders or logs from the game. A failure that isn't in
+the table above gets its own issue, linked from your entry.
 
-Use your system's detected CPU, GPU, VRAM and RAM model names in the #166 entry, not benchmark scores. For a rough browser-based check against reference profiles, you can use [Can I Run Palmetto](https://assttro.github.io/can-i-run-palmetto/).
+Use your system's detected CPU, GPU, VRAM and RAM model names in the report, not benchmark scores. For a rough browser-based check against reference profiles, you can use [Can I Run Palmetto](https://assttro.github.io/can-i-run-palmetto/).
