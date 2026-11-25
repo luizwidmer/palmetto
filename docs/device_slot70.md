@@ -116,8 +116,8 @@ ALIVE, no exception, 594,356 D3D12 calls):
 | calls in the window | 74 | 14,262 |
 | `arg1` (0x80-byte dump) | `D3D12_RESOURCE_DESC` of a **BUFFER**: Dimension 1, Alignment 0, Width **0xAE00000**, Height 1, DepthOrArraySize 1, MipLevels 1, Format 0, Flags 0 | same shape over a **128-byte block**: Width 0x80, Height 1, Depth 1, MipLevels 1, Format 0, Flags 0 |
 | `arg2` measured qwords | +0x00 `0x100000027`, +0x08 `0x1688`, +0x10 0, +0x18 `0x2B80000`, +0x20 `0xFFFF00000001`, +0x28 a title VA, +0x30 0 | +0x00 **the destination address** (equal to `arg3`), +0x08 `0x1688`, +0x10 0, +0x18 **0x20** (elements), +0x20 1, +0x28 **the CPU block the caller filled** (title VA), +0x30 **0x16** (format word) |
-| `arg3` (destination) | 32-byte slot at a **console descriptor heap** page `+0x220`; first word `0x12` before the call | 32-byte slot at `+0x1680`/`0x8000` of an **ordinary shader-visible heap** (host descriptor slot); all zeros before the call |
-| destination-before statistics | - | 12,214 of the first 12,288 calls found the slot zeroed; destination offsets covered `0x0..0x8000` (a 1024-slot, 32-byte ring) across at most two heap pages |
+| `arg3` (destination) | descriptor slot at a **console descriptor heap** page `+0x220`; first word `0x12` before the call | descriptor slot at `+0x1680`/`0x8000`/`0x7890` of an **ordinary shader-visible heap** (host descriptor slot); all zeros before the call. Three earlier boots measured 32-byte-aligned offsets; the publication boots measured a 16-byte-aligned ring base (the object's array is 16-byte aligned), so the publication's rule is 16-byte alignment and a 16-byte V# write |
+| destination-before statistics | - | 12,214 of the first 12,288 calls found the slot zeroed; destination offsets covered `0x0..0x8000` across at most two heap pages |
 | published (conversion off) | 0 | 0 |
 
 The dominant caller's instruction bytes were dumped from the running image and match the on-disk function (including the
@@ -162,38 +162,102 @@ device-slot-70 call (~4.8 s). It was observed on default-path 150 s boots (3 of 
 slot-70 conversion or probe: it is recorded here so a later increment can tell it apart from a slot-70 effect, and the
 140 s ALIVE probe boot above is the data source for this page.
 
-## 5. What is modelled now, and what is not
+## 5. The matrix publication (`PALMETTO_SLOT70_PUBLISH=1`, new increment)
+
+The measured record has the shape of a view publication whose data the console device turns into a descriptor: 0x20
+elements (`+0x18`), a 128-byte BUFFER description (`arg1`), a declared byte size (`+0x08` = 0x1688), the CPU block the
+caller just filled (`+0x28`), and the block's format word (`+0x30`). The title's own table slot 0 is empty every boot
+(`docs/root_arguments.md` section 7), while these calls are the only measured producer of 32-byte descriptor slots and
+their destinations are zeroed before the call - so the destination stays empty only because this layer refuses.
+
+**Encoding decision.** The publication writes a MATRIX V# (raw constant buffer) over the record's block into the
+destination slot:
+
+| word | value | why |
+|---|---|---|
+| `w0` | block VA bits 31:0 | the module's matrix fetch builds `base = ((w1 & 0xFFFF) << 32) | (w0 & ~3)` (`docs/root_arguments.md` section 7) |
+| `w1` | block VA bits 47:32, stride 0 in bits 29:16 | stride 0 means the declared size in `w2` is a byte count |
+| `w2` | the record's declared size (>= 64) | the module reads 16 dwords (64 B) and gates each load on `declared >= 4*(k+1)`; the record's own size is used, so the view declares what the console declares |
+| `w3` | `0x30000FAC` | raw out-of-bounds select + identity destination select: the module never reads `w3` for a matrix fetch, and `0x30000FAC` is this layer's raw-buffer convention for the other raw views (the title's constants V# uses `0x30014FAC`) |
+
+The base is written as the block's **title VA**, not an arena VA. This is deliberate: the shim has no arena VA to write
+(the title-VA map lives in the layer, and the shim links no layer symbols), while the layer's console-heap mirror and
+in-place descriptor scan already rebase every 48-bit V# base that names a registered title buffer at submission - the
+same path measured for the title's own constant-buffer views ("2 V# base(s) rebased"), which produces exactly the
+arena-relative value the shader adds `heap_base` to. The replay's page pull then copies the V#'s declared range from the
+title pages into the arena before the GPU reads it (`docs/page_content.md`: the draw's table V#s are pulled by their
+declared byte range). A block inside a buffer the title placed through console slot 133 has such a range; the proxy
+records those placements and refuses to publish a block outside them, so the publication can never produce a V# that
+nothing rebases or pulls.
+
+Refusals (all logged once, counted, and then the call keeps the measured refusal): the block is not readable from this
+process; the block's first 64 bytes are all zero (the publication carries no data yet - nothing is fabricated); the block
+is outside every slot-133-placed range; the record's element count is not 0x20 or its declared size is below 64.
+
+**Measured boot (`boot-slot70-publish3`, 150 s, ALIVE 150.2 s, no exception, 665,437 D3D12 calls, 32,304 draws).**
+Environment: standard + `PALMETTO_GRAPHICS_CONSOLE_ROOT=1` (rootargs' console feed, so the draw's `s8` names the table),
+`PALMETTO_VERTEX_STREAM_DESCRIPTOR=1` (framecap's vertex-stream V# in the `s0`/`s1` driver block - without it there are no
+vertices to transform), `PALMETTO_VERTEX_PATH=1`, `PALMETTO_READBACK_AT_DRAW=20001`, `PALMETTO_FRAME_DUMP=1`,
+`PALMETTO_FRAME_DUMP_PS_CONTROL=1` (+ cull-none), `PALMETTO_FRAME_DUMP_CONTROL_PS=<build>/fs_solid.spv`,
+`PALMETTO_SLOT70_PUBLISH=1`, `PALMETTO_SLOT70_PROBE=1`. framecap's matrix-experiment switch was **off**, so the publish is the only writer of the matrix slot. (`PALMETTO_VERTEX_STREAM_DESCRIPTOR` was framecap's uncommitted diagnostic during that working window - off by default and reverted after their measurement - so the acceptance numbers above are reproducible only with that switch present; the slot-70 publication itself is independent of it, as the boot with the switch off measured the same 12,214 V# words.)
+
+| measured | value |
+|---|---|
+| matrix V# publications | **12,214 by the 12,288-call milestone** (~1/frame), 0 refused (no empty block, none outside a slot-133 range, none unreadable) |
+| V# written | `w0 = 0x...73de20` (block title VA bits 31:0), `w1 = 0x...01a2` (bits 47:32, stride 0), `w2 = 0x1688`, `w3 = 0x30000FAC` |
+| destination | one host-heap page, offsets `0x0..0x7890` (16-byte ring), 1 call left the destination zeroed (the wrapper site, whose record count is not 0x20) |
+| armed draw's table slot `s8+0x00` | `0086de20 00000000 00001688 30000fac` -> **"V# buffer address 0x86de20 stride 0 records 5768 format 0"** - a matrix V# with a real arena address (the layer rebased the published title VA `0x...73de20` to arena `0x86de20`) |
+| matrix data at that V# | `vertex path: constants at 0x86de20 + 0x1688, read 480: mean 19, non-black 74/480, peak 255` - the pages are **not empty**: the publication carries data and the replay's page pull brought it into the arena |
+| table slot `s8+0x40` | `0086dc40 ... 000001e0 30014fac` (the title's 480-byte constants V#, untouched) |
+| driver block `s0/s1` | `0086df10 00180000 000000aa 00016fac` -> vertex V# stride 24, records 170, format 22 (framecap's switch, needed for any vertex fetch) |
+| **PS-control readback** | mean **23 115 172**, non-black **11,776/16,384**, peak 240 - **the control left black for the first time with real title data** |
+| write control | mean 51 102 204, non-black 16,384/16,384 (probe path intact) |
+| page content | 65,536 pull(s), 181.3 MiB copied - the published V#'s declared ranges are part of the pull set |
+| plain display readback | not produced in this boot (the 150 s window ends before that one-shot line; framecap's equivalent boot measured the display still black), so the display axis stays open and is the sampled-texture/colour path |
+
+How the descriptor reaches the table: the title copies the staging ring's descriptor into its console descriptor heap with
+`CopyDescriptors` (not recorded by the layer's trace), and the heap's mirror sync then rebases the 48-bit V# base from the
+title VA to the arena VA at submission - the table slot at the draw shows exactly that rebased value. The publication was
+also measured the boot before with the vertex-stream switch off: **12,214 publications, same V# words**, but the PS
+control stayed black (no vertices), i.e. the publication effect and the vertex effect are independent and both are needed.
+
+A diagnostic detail worth keeping: the first acceptance attempt published **0 times** in a boot whose ring base was
+16-byte but not 32-byte aligned, because the publication then required 32-byte alignment. The measurement fixed the rule
+(16-byte alignment, 16-byte V# write), not the other way round.
+
+
+## 6. What is modelled now, and what is not
 
 **Modelled:** the call's shape, arity and ABI (three words; third published with `clwb`); both call sites; the argument
 records and destination kinds measured; the measured refusal as the default; an opt-in probe that dumps the arguments,
-records, destination bytes and per-heap destination statistics; the falsified CBV conversion behind its own switch; and a
-shape test that refuses anything that is not the measured call instead of guessing.
+records, destination bytes and per-heap destination statistics; the falsified CBV conversion behind its own switch; the
+matrix publication over the record's block behind `PALMETTO_SLOT70_PUBLISH=1`, with the placement/readability/emptiness
+refusals; and a shape test that refuses anything that is not the measured call instead of guessing.
 
-**Not modelled:** what the device is supposed to *write* into the destination. The record carries a CPU block
-(`+0x28`), a byte size (`0x1688`), an element count (`+0x18`) and a format word (`+0x30`), and the destination slots are
-zeroed before the call - so the console call publishes a device-encoded descriptor from that record, but the encoding is
-not decoded. The record's first word differs between the two sites (`0x100000027` vs the destination address) and its
-writer is not explained; the resource description in `arg1` is passed to the console and unused by the PC conversion.
+**Not modelled / still open:** the record's other fields are measured but not interpreted (the first word differs between
+the two sites - `0x100000027` at the wrapper site, the destination address at the dominant site - and its writer is not
+explained; the resource description in `arg1` is not used by the publication, and `+0x10` is zero in both sites). The
+publication writes the matrix view; whether the title then copies that descriptor into the table slot its draw names is
+what the measured boot below decides.
 
-## 6. Gates, files and the next falsifier
+## 7. Gates, files and the next falsifier
 
 Gates on the final tree: `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT`;
-`xs_proxy_mock_test` -> `PASS`, with `check_slot70_console_view` covering the conversion's hand-off (the measured view
-record and the title's 32-byte destination reach the PC `CreateConstantBufferView`, the mock's descriptor write lands in
-that slot, and the console slot is never forwarded by number) and the shape refusals; the `--env-slots-invalid` run
+`xs_proxy_mock_test` -> `PASS`, whose `check_slot70_console_view` covers the falsified conversion's hand-off, the matrix
+publication (a block placed through console slot 133 publishes the V# words above into the destination slot), and the
+refusals (empty block, block outside the placed ranges, element count other than 0x20); the `--env-slots-invalid` run
 covers the default refusal (`E_NOTIMPL`, no PC method reached) with no slot-70 switch set. Boots under the single boot
-lock, one at a time, `tooling/boot_report.py`, 100-140 s.
+lock, one at a time, `tooling/boot_report.py`, 100-150 s.
 
-Files: `port/shims/d3d12_xs_device.cpp` (the slot-70 handler, its probe and the opt-in conversion),
-`port/test/xs_proxy_mock_test.cpp` (the mock's `CreateConstantBufferView` record and `check_slot70_console_view`), this
-page. Evidence boots under `D:\leonida-work\`: `boot-slot70-probe` (probe, 140 s, ALIVE), `boot-slot70-cbv` (conversion,
-stopped at 29.5 s), `boot-slot70-final` (default path, 100 s, ALIVE).
+Files: `port/shims/d3d12_xs_device.cpp` (the slot-70 handler, its probe, the falsified conversion and the matrix
+publication; the slot-133 placement registry), `port/test/xs_proxy_mock_test.cpp` (the mock's `CreateConstantBufferView`
+record and `check_slot70_console_view`), this page. Evidence boots under `D:\leonida-work\`: `boot-slot70-probe` (probe,
+140 s, ALIVE), `boot-slot70-cbv` (conversion, stopped at 29.5 s), `boot-slot70-final` (default path, 100 s, ALIVE), and
+`boot-slot70-publish3` (publication + acceptance, 150 s, ALIVE), `boot-slot70-publish2` (publication with the vertex-stream switch off, 150 s, ALIVE) and `boot-slot70-publish` (first publication boot, 150 s, ALIVE).
 
-**Next falsifier.** If slot 70 is a descriptor publication whose record is device-encoded, then on the console the
-destination slot must be the encoding of the record's block, and a later draw that binds the table containing that slot
-must read it. The measurement that would refute the whole mapping is a destination that the title itself writes before
-the call (then there would be no device effect to model); at 12,214 of 12,288 dominant-site calls it did not. Failing
-either, the next step is to decode the record's encoding by comparing the record bytes with a destination slot that a
-console would produce - the tracked work is the record's `+0x18`/`+0x28`/`+0x30` fields against the 128-byte block and
-the element format table at `game+0x4D9F3C0`, and then to publish that encoding into the console heap's GPU mirror,
-which already rebases the V# bases the title writes.
+**Next falsifier.** The publication's acceptance is the PS-control readback changing from black: with the matrix A view
+published, the armed draw's `s8+0` fetch slot must decode as a matrix V# and the solid-pixel control must produce colour.
+If the fetch slot is a real matrix V# and the PS control stays black, the fetch-site reading is wrong or the 16 dwords
+still carry no usable transform; if the slot stays zero, the title does not copy the staging descriptor into its table
+and the next frontier is where it does. The measurement that would refute the whole mapping is a destination the title
+itself writes before the call; at 12,214 of 12,288 dominant-site calls it did not.

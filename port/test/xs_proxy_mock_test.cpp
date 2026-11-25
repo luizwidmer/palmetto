@@ -2167,39 +2167,40 @@ int check_slot55_derived_pipeline_state() {
     return 0;
 }
 
-// ---- 13. Console slot 70: the measured constant-buffer view publication (docs/device_slot70.md) ----
+// ---- 13. Console slot 70: the measured descriptor publication (docs/device_slot70.md) ----
 //
-// Measured shape: (arg1 = D3D12_RESOURCE_DESC* of a BUFFER, arg2 = a record that starts with
-// D3D12_CONSTANT_BUFFER_VIEW_DESC's BufferLocation/SizeInBytes, arg3 = a 32-byte-aligned console descriptor slot that
-// holds zeros before the call), followed by a cache-line writeback of arg3. The default answer is the measured refusal
-// (E_NOTIMPL, the title does not test it); PALMETTO_SLOT70_CBV=1 converts it to the PC device's own
-// CreateConstantBufferView. The switches are read once, on the first slot-70 call, so the default refusal is exercised
-// by the --env-slots-invalid run (which the runner starts with no slot-70 switch set) and this function runs with the
-// conversion switch set by main for the process's whole run.
+// Measured shape: (arg1 = D3D12_RESOURCE_DESC* of a BUFFER, arg2 = a 0x40-byte record, arg3 = a 32-byte-aligned
+// descriptor slot that holds zeros before the call), followed by a cache-line writeback of arg3. Two opt-in behaviours
+// are covered here: PALMETTO_SLOT70_PUBLISH=1 writes the MATRIX V# over the record's CPU block (the measured producer of
+// the matrix descriptor), and PALMETTO_SLOT70_CBV=1 is the falsified constant-buffer-view conversion. Both switches are
+// read once, on the first slot-70 call, so main sets them before any check runs; the default refusal is exercised by the
+// --env-slots-invalid run, which the runner starts with no slot-70 switch set.
 int check_slot70_console_view() {
     Mock* mock = nullptr;
     void* device = make_device(mock, 11, true);
     EXPECT(device);
     xs::reset_device_proxy_stats();
 
-    // The measured argument contents: a 128-byte BUFFER description, the view's console GPU address and byte size (the
-    // boot's qword 0x100000027 and u32 0x1688), and a fresh 32-byte descriptor slot.
+    // The measured argument contents: a 128-byte BUFFER description, a 0x40-byte record (its first words a CBV desc for
+    // the falsified conversion case), and a fresh 32-byte descriptor slot.
     D3D12_RESOURCE_DESC resource{};
     resource.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     resource.Width = 0x80;
     resource.Height = 1;
     resource.DepthOrArraySize = 1;
     resource.MipLevels = 1;
-    D3D12_CONSTANT_BUFFER_VIEW_DESC view{};
-    view.BufferLocation = 0x100000027;
-    view.SizeInBytes = 0x1688;
+    alignas(8) std::uint8_t record[0x40] = {};
+    D3D12_CONSTANT_BUFFER_VIEW_DESC* view = reinterpret_cast<D3D12_CONSTANT_BUFFER_VIEW_DESC*>(record);
+    view->BufferLocation = 0x100000027;
+    view->SizeInBytes = 0x1688;
     alignas(32) std::uint32_t destination[8] = {};
 
-    // 1. The PC CreateConstantBufferView gets exactly the measured view description and the title's destination, its
-    //    descriptor write lands in that slot, and the console slot is still not forwarded by number.
+    // 1. The falsified conversion still runs when asked: the PC CreateConstantBufferView gets the measured view
+    //    description and the title's destination, its descriptor write lands in that slot (the record's block is null,
+    //    so the matrix publication does not claim the call).
     {
         const unsigned before = mock->cbv_calls;
-        EXPECT(hr_of(raw(device, 70, word(&resource), word(&view), word(destination))) == S_OK);
+        EXPECT(hr_of(raw(device, 70, word(&resource), word(record), word(destination))) == S_OK);
         EXPECT(mock->cbv_calls == before + 1 && mock->calls[70] == 0);
         EXPECT(mock->cbv_dest == word(destination));
         EXPECT(mock->cbv_desc.BufferLocation == 0x100000027 && mock->cbv_desc.SizeInBytes == 0x1688);
@@ -2212,24 +2213,91 @@ int check_slot70_console_view() {
     //    write a descriptor over the title's memory.
     {
         const unsigned before = mock->cbv_calls;
-        D3D12_CONSTANT_BUFFER_VIEW_DESC null_view{};
-        EXPECT(hr_of(raw(device, 70, word(&resource), word(&null_view), word(destination))) == E_NOTIMPL);
+        std::uint8_t null_record[0x40] = {};
+        EXPECT(hr_of(raw(device, 70, word(&resource), word(null_record), word(destination))) == E_NOTIMPL);
         EXPECT(mock->cbv_calls == before);
         auto* unaligned = reinterpret_cast<std::uint32_t*>(reinterpret_cast<std::uint8_t*>(destination) + 4);
-        EXPECT(hr_of(raw(device, 70, word(&resource), word(&view), word(unaligned))) == E_NOTIMPL);
+        EXPECT(hr_of(raw(device, 70, word(&resource), word(record), word(unaligned))) == E_NOTIMPL);
         EXPECT(mock->cbv_calls == before);
         D3D12_RESOURCE_DESC texture{};
         texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         texture.Width = 0x80;
-        EXPECT(hr_of(raw(device, 70, word(&texture), word(&view), word(destination))) == E_NOTIMPL);
+        EXPECT(hr_of(raw(device, 70, word(&texture), word(record), word(destination))) == E_NOTIMPL);
         EXPECT(mock->cbv_calls == before);
     }
 
+    // 3. The matrix publication (PALMETTO_SLOT70_PUBLISH): the record's CPU block is resolved against the buffer ranges
+    //    the title placed through console slot 133, and a MATRIX V# is written over it. The test places a real buffer
+    //    (this process's memory) through slot 133, so the block's bytes are readable and its VA is in a placed range.
+    {
+        static xs::PlacedAtVaHandler placed = [](ID3D12Device*, void*, const D3D12_RESOURCE_DESC&, std::uint32_t,
+                                                 REFIID, void** out) -> HRESULT {
+            *out = reinterpret_cast<void*>(0x70b10c);
+            return S_OK;
+        };
+        xs::set_placed_at_va_handler(placed);
+        alignas(64) static std::uint32_t block_pages[0x1000 / sizeof(std::uint32_t)] = {};  // 4 KiB, first words filled
+        for (unsigned i = 0; i < 32; ++i) block_pages[i] = 0x3f800000u + i;  // identity-shaped floats (not title data)
+        D3D12_RESOURCE_DESC placed_desc{};
+        placed_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        placed_desc.Width = sizeof(block_pages);
+        placed_desc.Height = placed_desc.DepthOrArraySize = placed_desc.MipLevels = 1;
+        placed_desc.SampleDesc.Count = 1;
+        const GUID resource_iid = __uuidof(ID3D12Resource);
+        void* placed_out = nullptr;
+        EXPECT(hr_of(raw(device, 133, word(block_pages), word(&placed_desc), 0xFFFFFFFFull, 0,
+                         word(&resource_iid), word(&placed_out))) == S_OK);
+
+        // The measured record fields: count 0x20 at +0x18, the filled block at +0x28, a declared size at +0x08 and the
+        // block's format word at +0x30. The destination is already zeroed (checked by the boot at 12,214 of 12,288
+        // calls), so the V# write is the only change.
+        std::uint8_t matrix_record[0x40] = {};
+        const std::uint64_t block = reinterpret_cast<std::uint64_t>(block_pages);  // inside the placed range
+        std::memcpy(matrix_record + 0x08, &view->SizeInBytes, sizeof(std::uint32_t));      // declared = 0x1688
+        const std::uint32_t count = 0x20;
+        std::memcpy(matrix_record + 0x18, &count, sizeof(count));
+        std::memcpy(matrix_record + 0x28, &block, sizeof(block));
+        const std::uint32_t format_word = 0x16;
+        std::memcpy(matrix_record + 0x30, &format_word, sizeof(format_word));
+        alignas(32) std::uint32_t published_dest[8] = {};
+        const unsigned cbv_before = mock->cbv_calls;
+        EXPECT(hr_of(raw(device, 70, word(&resource), word(matrix_record), word(published_dest))) == S_OK);
+        const std::uint32_t expected_lo = static_cast<std::uint32_t>(block & 0xFFFFFFFFu);
+        const std::uint32_t expected_hi = static_cast<std::uint32_t>((block >> 32) & 0xFFFFu);
+        EXPECT(published_dest[0] == expected_lo && published_dest[1] == expected_hi);
+        EXPECT(published_dest[2] == 0x1688u && published_dest[3] == 0x30000FACu);
+        EXPECT(published_dest[4] == 0 && published_dest[5] == 0 && published_dest[6] == 0 && published_dest[7] == 0);
+        EXPECT(mock->cbv_calls == cbv_before);  // the publication is not the falsified CBV conversion
+        EXPECT(mock->calls[70] == 0);           // and the console slot is still never forwarded by number
+
+        // A block whose first 64 bytes are zero is not published: the record is carrying no data yet (logged once).
+        const std::uint64_t empty_block = reinterpret_cast<std::uint64_t>(block_pages) + 0x800;  // zeroed region
+        std::memcpy(matrix_record + 0x28, &empty_block, sizeof(empty_block));
+        alignas(32) std::uint32_t empty_dest[8] = {};
+        EXPECT(hr_of(raw(device, 70, word(&resource), word(matrix_record), word(empty_dest))) == E_NOTIMPL);
+        EXPECT(empty_dest[0] == 0 && empty_dest[1] == 0);
+
+        // A block outside every placed range is refused too: its V# base would neither be rebased nor pulled.
+        static std::uint32_t unplaced_block[16] = {1, 2, 3};
+        const std::uint64_t unplaced_block_va = reinterpret_cast<std::uint64_t>(unplaced_block);
+        std::memcpy(matrix_record + 0x28, &unplaced_block_va, sizeof(unplaced_block_va));
+        EXPECT(hr_of(raw(device, 70, word(&resource), word(matrix_record), word(published_dest))) == E_NOTIMPL);
+
+        // A record that is not the measured shape (element count != 0x20) is not published.
+        const std::uint32_t other_count = 0x10;
+        std::memcpy(matrix_record + 0x18, &other_count, sizeof(other_count));
+        std::memcpy(matrix_record + 0x28, &block, sizeof(block));
+        EXPECT(hr_of(raw(device, 70, word(&resource), word(matrix_record), word(published_dest))) == E_NOTIMPL);
+
+        xs::set_placed_at_va_handler(nullptr);
+    }
+
     EXPECT(release(device) == 0 && mock->refs == 0);
-    std::printf("%s: console slot 70 routes the measured constant-buffer view publication (arg1 buffer description, "
-                "arg2 view record, arg3 console descriptor slot) through the PC CreateConstantBufferView with the "
-                "measured view description and the title's 32-byte descriptor slot, and still refuses a call outside "
-                "the measured shape (null view, unaligned destination, non-buffer description)\n", g_label);
+    std::printf("%s: console slot 70 covers the measured descriptor publication - PALMETTO_SLOT70_CBV=1 still hands "
+                "the PC CreateConstantBufferView the measured view and destination, PALMETTO_SLOT70_PUBLISH=1 writes "
+                "the MATRIX V# (base = the placed block, stride 0, declared size, raw 0x30000FAC) over a block inside a "
+                "buffer placed through console slot 133, and a block outside the placed ranges, an empty block and a "
+                "record whose element count is not 0x20 are refused\n", g_label);
     return 0;
 }
 
@@ -2250,6 +2318,7 @@ int main(int argc, char** argv) {
     // first slot-70 call (check_slot70_console_view below). The default refusal is the --env-slots-invalid run, which
     // the runner starts with no slot-70 switch set.
     EXPECT(::SetEnvironmentVariableA("PALMETTO_SLOT70_CBV", "1") != FALSE);
+    EXPECT(::SetEnvironmentVariableA("PALMETTO_SLOT70_PUBLISH", "1") != FALSE);
     if (check_tail(true) || check_queue_console_slots() || check_levels() || check_fence1() ||
         check_create_failures() || check_open_shared() || check_alloc_failures() || check_allocators() ||
         check_xbox_slots() || check_console_command_list() || check_slot57_graphics_record() ||
