@@ -284,6 +284,29 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### Console list fallback slots: caller sites and the payload pointer
+
+A 130 s boot with the existing caller probe and the fallback-slot trace (`PALMETTO_XS_CALLERS=1`,
+`PALMETTO_XS_CALLERS_PROFILE=1`, `PALMETTO_LIST_SLOT_TRACE=1`; ALIVE, 0 exceptions) names where the fallback calls come
+from and what they carry:
+
+* list slot 20: caller `0x1400325c0`, args `(0x4, 0, 0x20266300000, 0)`; hot (13,978 calls by the last profile).
+* list slot 47: caller `0x1400328be`, args `(0, 0x7ff60e761650, 0, 0)`; hot (6,989 calls).
+* list slot 24: caller `0x1400329a1`, args all zero; hot (6,989 calls).
+
+The caller addresses are inside the port's own image (`0x1400325c0`/`0x1400328be`/`0x1400329a1` are palmetto.exe
+addresses: `+0x325c0`, `+0x328be`, `+0x329a1`), not title-image RVAs: the title's inline-writer fallback reaches the
+proxy through the port's thunk/vtable bridge, so this probe names the bridge, not the title's call site. The slot-47
+shape is consistent across calls: first argument 0 and second argument a **host stack pointer** (`0x7ff6...`), so the
+call is most likely a pointer-argument setter (a data block handed over by pointer), not a scalar setter; the earlier
+boot's `(0, 0x20, 0, 0)` shape on the same slot fits a count-32 variant of the same call.
+
+So the payload is a pointer to a 32-dword block on a title-side stack, passed through the fallback bridge: that is the
+one source the sibling pixel shader's user-data block could still come from. Not forwarded yet - the copy at call time
+(classify non-zero count/ranges; forward as the following draws' user-data behind a switch) is the next instrument, and
+the bridge RVAs (`palmetto.exe+0x325c0`, `+0x328be`, `+0x329a1`) are where to disambiguate which console list method
+each slot really is.
+
 ### Hardware-watchpoint control: debug registers work; the loader fields are never written after the burst
 
 The loader write watch was paired with a control watchpoint on a port-owned slot written every 50 ms (DR2, same
