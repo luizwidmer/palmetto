@@ -41,9 +41,10 @@ loader that maps the game's executable and resolves its imports to shims. Nothin
   number:
 
   ```sh
-  gh issue list -R the original project --state open --search "Coordinating who works on what in:title"
+  gh issue list -R luizwidmer/palmetto --state open --search "Coordinating who works on what in:title"
   ```
 
+  If that finds no open coordination issue, open one with exactly that title and claim work in it.
   With no `gh` auth, the search link in [CONTRIBUTING.md](CONTRIBUTING.md) works in a browser; say so when you cannot
   read the claims at all rather than guessing that a thing is unclaimed.
 
@@ -54,8 +55,7 @@ loader that maps the game's executable and resolves its imports to shims. Nothin
   Post it in the coordination issue as `finding: <one line>`, followed by where it is (file and line), why it matters,
   and whether it needs game files or particular hardware. The coordinator checks it and lists it for others.
 - For the D3D12 → Vulkan layer (`port/shims/d3d12_*`, `port/src/vulkan_*`), also read
-  [#313](https://github.com/the original project/issues/313): most of that work builds on a few open pull requests,
-  and it lists which D3D12 methods are still open.
+  [docs/d3d12_vulkan.md](docs/d3d12_vulkan.md): the plan, what is measured, and which D3D12 methods are still open.
 
 ## Before you guess, look
 
@@ -70,14 +70,14 @@ tests in 224 s on 16 cores) and the two builds longer - so run one translator te
 whole suite once before the pull request:
 
 ```powershell
-python -m compileall -q build_port.py tools tests
+python -m compileall -q build_port.py tooling tests
 python -I build_port.py --help
 python -I tooling/scripts/run_semantic_tests.py tests/semantic   # translator suite, one file per core; no LLVM, SPIR-V tools or GPU needed
 python -m unittest discover -s tests/semantic -p test_<name>.py   # one translator test file
 python -I tests/test_<name>.py                     # standalone standard-library unit test
 node --test tests/test_viewer_streaming.cjs        # viewer streaming; needs Node 22+
 dotnet build tooling/arc9dump/arc9dump.csproj -c Release
-cmake -S runtime -B port/build; cmake --build port/build --config RelWithDebInfo
+cmake -S port -B port/build; cmake --build port/build --config RelWithDebInfo
 ctest --test-dir port/build -C RelWithDebInfo --output-on-failure
 ```
 

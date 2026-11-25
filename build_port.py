@@ -1054,7 +1054,7 @@ def ensure_submodule() -> None:
     core = os.path.join(ROOT, "vendor", "arc9-explorer", "Core")
     if submodule_ready():
         return
-    clone = "git clone --recursive https://github.com/the original project"
+    clone = "git clone https://github.com/luizwidmer/palmetto"
     git = shutil.which("git")
     if not git:
         fail("vendor/arc9-explorer is missing (a \"Download ZIP\" from GitHub leaves it out). Install Git "

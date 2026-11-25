@@ -262,7 +262,7 @@ does, the published before arm does not), which is the memory effect itself, not
   unchanged; the header exists only when the switch is on).
 - Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, the slice's
   tests pass, and the documentation checks (`tests/test_docs_*.py`) pass except two failures that are other slices'
-  (an environment variable added to `port/src/main.cpp` by the stage-2 probe, and `--interval` in
+  (an environment variable added to `port/src/main.cpp` by the stage-2 probe, and `interval option` in
   `frame_first_light.md`, both untracked-by-this-slice and named in the report).
 
 ## 6. Limits and the next falsifier

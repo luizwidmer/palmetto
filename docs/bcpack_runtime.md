@@ -128,7 +128,7 @@ loads every codec's confirmed rows from the JSON that `tooling/bcpack_history_ca
 the repository free of derived data (the policy in [directstorage_advanced.md](directstorage_advanced.md) and
 [upstream_port.md](upstream_port.md) section 3). The reconciliation is one extra step for the player: calibrate with
 `--codec bc1,bc3,bc4,bc5,bc6h,bc7`. (2) **Confidence gate**: the reference has a non-strict "allow fitted" mode
-(`LEONIDA_DSTORAGE_FITTED`) that accepts provisional rows; we have no such path - strict confirmed-only is the only
+(its own switch, which accepts provisional rows); we have no such path - strict confirmed-only is the only
 mode, so a fitted row is a named refusal. The measurement cannot tell whether fitted decoding helps this title, so a
 permissive mode would be an unearned guess. (3) **Refusal order inside a chunk**: the reference pre-scans BC7
 signatures and history coverage for the whole chunk before rebuilding; the streaming decoder validates as it goes, so a

@@ -19,7 +19,7 @@ Sources, each optional and reported as missing rather than counted as zero when 
     imports         the measured import tables in docs/runtime_imports.md
     corpus          --work: counts per stage from <work>/shaders/dxbc/index.json and <work>/shaders/spirv/index.json
     github          --github, read-only through `gh`: every pull request into main (merged = implemented, open =
-                    partial), latest CI runs on main, the D3D- table of #313 checked against those merges, the
+                    partial), latest CI runs on main, the D3D tracking issue's table checked against those merges, the
                     coordination issue's section sizes and, with --login, that account's claims and pull requests
 
 No game data leaves the inputs: the page and the JSON carry counts, pass/fail, error classes and the project's
@@ -51,7 +51,7 @@ LOGO = os.path.join(ROOT, "assets", "mascot.png")
 SCHEMA = "palmetto.progress/1"
 STATUSES = ("verified", "implemented", "partial", "failed", "missing", "blocked", "unknown")
 PYTEST_MARKERS = re.compile(r"^import pytest|^ *HAVE_NUMPY =", re.M)   # the CI selection rule (ci.yml)
-DEFAULT_REPO = "the original project"
+DEFAULT_REPO = "luizwidmer/palmetto"
 
 
 # ----------------------------------------------------------------------------------------------- helpers
@@ -835,7 +835,7 @@ def collect_pulls(col, repo, merged, open_prs, limit=PR_LIMIT):
 
 
 def collect_github(col, repo, login):
-    col.panel("d3d12", "D3D12 → Vulkan layer items (#313)", "D3D- items")
+    col.panel("d3d12", "D3D12 → Vulkan layer items (tracking issue)", "D3D- items")
     col.panel("ci", "CI on main", "workflows")
     if not shutil.which("gh"):
         col.source("github", None, "missing", note="gh is not installed")

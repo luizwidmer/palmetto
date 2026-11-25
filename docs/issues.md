@@ -3,56 +3,48 @@
 Ledger of **what people are sending** to the project's GitHub home, plus our own tracked findings for the boot port. Each row carries area, state and one-line evidence. Counts, error classes and commit ids only — no game data, package paths, shader bytes or hashes.
 Maintained by the issue-tracker agent as a standing, read-only-plus-this-file role.
 
-**Repo:** `palmetto`, branch `main`, HEAD `5cbed67be` · **GitHub:** [luizwidmer/palmetto](https://github.com/luizwidmer/palmetto)
-**Updated:** 2026-11-24 (refreshed after the streamed-consumer measurement, the XG slot-2 decode and linear default, the sampled-texture page-writer negative, the fixed-function probe contract, the full-build repair, the vertex-path degenerate measurement and the console slot-70 decode) · **Incoming:** 2 open (#2, #3) · **Ours open:** 10 (O3 partial; O8, O9, O15, O18–O23) · **Done:** 25 · **Superseded:** 5 (O1, O6, O10, O12, O16) · **#5 closed:** 1 · **Open PRs:** 0.
+**Repo:** `palmetto`, branch `main`, HEAD `38231dd4d` · **GitHub:** [luizwidmer/palmetto](https://github.com/luizwidmer/palmetto)
+**Updated:** 2026-11-25 (only the two live issues, the pre-rename numbers marked historical, and the current frontier in "Where the project stands") · **Incoming:** #1 closed (re-baselined), #2 open · **Ours open:** 10 (O3 partial; O8, O9, O15, O18–O23) · **Done:** 25 · **Superseded:** 5 (O1, O6, O10, O12, O16) · **Open PRs:** 0.
 
 **Policy: ledger only.** Do not open, comment on, close, delete or edit GitHub issues/PRs, or commit/push, without an
-explicit ask. Draft replies below are **HOLD** — the repo owner has not approved public replies; nothing has been posted.
+explicit ask. Replies to reports are **HOLD** — the repo owner has not approved public replies; nothing has been posted.
 
 **Where the project stands (measured on one machine; one 150 s boot unless named).** The retail target console title
 boots and runs through the runtime: **ALIVE past 300 s with no exception**; **all 10,241 slot-57 records build into real
 PC graphics pipelines** and **41,545 derived pipelines** are created through the console slot-55 answer; after the
 title's page VAs were rebased into one arena the frame's draws **execute with 0 refused submissions**; the runtime
 **presents into the title's own adopted window**; and a full configure+build of the tree is **green (237 of 237
-targets)**. The presented 4K resource **is** the frame's draw target and is proven writable by a control draw, yet reads
-back uniformly black, and the content causes are now measured rather than inferred: the title's **vertex path is
-measured degenerate** - the FSPX blit transform's four push-constant scalars are zero because the slot-57 record's
-root-argument block is not decoded (O22; rootargs agent decoding it), and the **sampled 4K placed texture's own
-pages are never written** — 0 non-zero bytes of 129,792 scanned across 150 s, and the import with its cap lifted had
-nothing to copy (O19). The streamed 256 MiB are read by a **title CPU deserializer and never named to the device**
-(O20 is closed as an upload lead; the apparent block addresses in the console view calls are carry-over, not arguments).
-The XG **slot-2 resource-layout record is decoded and the linear layout is now the default** (O21 is slot 10 only), and
-console **device slot 70 is decoded as a per-frame descriptor publication** whose encoding is not modelled - its
-first naive conversion is falsified by measurement (O23). The fixed-function state
-record decodes as a container but **none of its 8 fields can be pinned by a behavioural probe** (O15). Evidence:
-`docs/frame_capture.md` §2-8, `docs/vertex_path.md`, `docs/texture_source.md` §6,
-`docs/streamed_consumer.md` §3-6, `docs/texture_layout.md` §3-4, `docs/device_slot70.md`,
-`docs/state_blob.md` §9, `docs/testing.md` ("The full Windows build").
+targets)**. The boot is parked in the title's stationary pre-content loop at stage 2: the stage-2 job-graph wait, where
+the entry thread waits inside the boot sequence's completion wait on a tracker event that no measured producer signals
+(`docs/stage2_blocker.md`). The frame that loop presents is **black by design**, not missing driver data: the constant
+pass's only colour source is a title-owned block whose colour window is zero and which nothing in the loop writes
+(`docs/colour_path.md` §5), so the content frontier is the title's stage step. The earlier frame-content causes - the
+vertex path's degenerate transform (O22) and the sampled 4K placed texture whose pages are never written (O19) - are
+measured limits of that same stationary loop and stay in the findings table below; the colour-path measurement is what
+explains the loop's black. The streamed 256 MiB are read by a **title CPU deserializer and never named to the device**
+(O20 is closed as an upload lead), the XG **slot-2 resource-layout record is decoded and the linear layout is now the
+default** (O21 is slot 10 only), console **device slot 70 is decoded as a per-frame descriptor publication** whose
+encoding is not modelled (O23), and the slot-57 fixed-function record's **8 fields cannot be pinned by a behavioural
+probe** (O15). Evidence is page-driven: `docs/stage2_blocker.md`, `docs/colour_path.md`, `docs/issue1_baseline.md`,
+`docs/frame_capture.md` §2-8, `docs/vertex_path.md`, `docs/texture_source.md` §6, `docs/streamed_consumer.md` §3-6,
+`docs/texture_layout.md` §3-4, `docs/device_slot70.md`, `docs/state_blob.md` §9, `docs/testing.md` ("The full Windows
+build").
 
 ## Incoming reports (GitHub)
 
+Live issues on [luizwidmer/palmetto](https://github.com/luizwidmer/palmetto/issues):
+
 | # | sender | state | what they sent | tracking |
 |---|---|---|---|---|
-| #2 | bittertea0323 | open · ours to answer | Independent reproduction, Windows 10 + RTX 4070 SUPER: two host build blockers (a .NET SDK pin and one unit test under newer MSVC), 26,633 SPIR-V modules, a run at the documented frontier, slot 108 publishing 0, then a fault ten frames deep in title code. Asks whether that fault is the expected slot-108 consequence, and whether console GPU-VA dereference is this layer or the translator | External, older tree, not a duplicate. Q1 answered: the invalid slot-108 answer made the title's own render-target factory return null, fixed (`c3c7a7b83`, `cc7e044b2`), and current `main` boots past it into its frame loop. Q2 answered by measurement: the `0x100000000` read was our queue `GetDesc` struct-return clobber, not a console GPU-VA dereference (`4178c742c`). The tree now also builds fully (237/237 targets, O5 done), so a re-run on current `main` is the useful next step. Draft corrected and held |
-| #3 | bittertea0323 | open · ours to answer | FSPX corpus on a second host: 18/29 translate, 11 fail `fall-through into undecodable words` and cluster on wave32; per-program word counts; asks for a preferred report shape | Addressed by `0276f2b1f` (repair → 29/29); draft held. **Comment (NinosTech, 09:21Z):** four FSPX translations from an older upstream revision cleared four lookup misses and made the 42 compute-pipeline calls succeed, but the captured frame still had 0 non-black pixels of 896,232; not matched to our cases — on our current tree that split still holds, and the black frame is now measured as the vertex path's degenerate transform (O22) plus the never-written sampled pages (O19), not the FSPX set |
+| #2 | XccQ114 | open · being fixed in the tree | Post-rename de-branding residue, checked against the tree and the GitHub API: the claim procedure and the "How to build" contact link still spell the repository as a literal placeholder in GitHub URLs and a `gh -R` command (`CONTRIBUTING.md`, `AGENTS.md`, `.github/ISSUE_TEMPLATE/config.yml`); this ledger cited issue numbers from the pre-rename repository; two de-branding leftovers remain (`docs/movie_path.md` author name, `docs/bcpack_runtime.md` env-var name); `cmake -S runtime` names a directory with no `CMakeLists.txt` (`AGENTS.md`), while the source directory is `port` | Being fixed in this pass: the real repository in the links and commands, the title-based search for the coordination issue with an open-it-yourself fallback, this ledger rewritten (the pre-rename numbers noted below), both leftovers retired, `-S port`; the same placeholder-phrase sweep also corrected `build_port.py`'s clone instruction, the dashboard's default repository and the two tests that asserted the old strings. No reply posted (HOLD) |
+| #1 | marekpastuszczak-lang | closed (done) | A finding, not a fix: the black loading loop is the title's init state (2); four shim answers that differ from the console (silent speech, slot-25 depth-stencil + unordered-access sizing, sampled A8 1D/3D, device slot 74) and the two `int3` asserts those answers remove | Closed after re-baseline and implementation: [`docs/issue1_baseline.md`](issue1_baseline.md) re-measured the probe after the read repairs, landed the three deltas still absent at HEAD (slot-25 stand-in, sampled A8 1D/3D, device slot 74 `S_OK`), removed `game+0x1e6c2c5` and `game+0x344196`, and attributed the two remaining asserts to console device slot 41 (`CreateCommandSignature`); the issue's state words still hold (game state 2, session 0, still-black stationary loop) |
 
-Closed: #1 — PR "Main"; #5 — closed as completed on `4178c742c` (its own stop was fixed; later frontiers are tracked as separate items, not a reopen).
-
-## Draft replies (HOLD — not posted; awaiting repo-owner approval)
-
-- **#2:** "Thanks — that is answered now. The slot-108 allocation answer was invalid, which made the title's own
-  render-target factory return null; it is fixed (`c3c7a7b83`, then `cc7e044b2` for A8 render targets), and current
-  `main` boots past that fault into its frame loop. The `0x100000000` read we chased turned out to be our own queue
-  `GetDesc` struct-return clobber (`4178c742c`), so it was this layer, not the translator. The tree also builds fully
-  now (237 of 237 targets), so please re-run with current `main`; `PALMETTO_CRASH_REPORT` gives the faulting-thread
-  dump."
-- **#3:** "Thanks for the per-program counts — the build now repairs each FSPX listing before translating
-  (`tooling/widen_smem_decode.py`) and measures 29/29 passing `spirv-val` (22/29 without), so the wave32 cluster is closed
-  in tree. Per-program stop word is still the report shape we would want for any surviving refusal."
-- **#3/NinosTech:** "Thanks — that matches the split we measure: resolving the lookups moves the 42 creations to
-  success, while the frame's black on our tree is a separate, later frontier — the presented target is proven writable
-  and is the draw's own target; the title draw's vertex path is degenerate (its transform push constants never arrive), and the texture it samples
-  is a placed image whose pages are never written. We will check your four programs against ours."
+**Pre-rename issue numbers are historical only.** Earlier versions of this page cited `#1`-`#5` from the repository
+that existed before the rename: that repository was deleted, its issue objects are gone, and the re-created repository
+reused the numbers for different objects (the live `#1` above is the closed black-loading finding, not the old `#1`;
+the old `#5` has no counterpart here at all). Treat every such number quoted by an older page, note or commit message
+as narrative history with no tracker link; the table above is the only live incoming list. The reports behind the old
+numbers cannot be replied to any more: nothing was posted, and the old draft replies are withdrawn as historical.
 
 ## Our findings — open
 
@@ -69,11 +61,12 @@ Closed: #1 — PR "Main"; #5 — closed as completed on `4178c742c` (its own sto
 | O22 | port/replay (geometry) | The title's vertex path is measured **degenerate**: the armed draw's translated FSPX blit vertex shader computes its clip position as one fetched vertex register times four push-constant scalars, and `s8`, `s9`, `s10`, `s28` are zero in the draw's recorded user data - every vertex lands at `(0,0,0,0)`, so `w = 0` and nothing rasterizes (forcing culling off cannot help a degenerate triangle). The vertex data and the bound input layout are sane, and the title issues 31,458 `SetGraphicsRootDescriptorTable` calls but **0** `SetGraphicsRoot32BitConstant*`, so the scalars can only come from the slot-57 record's root-argument block, which the record decode does not reconstruct yet | open - measured degenerate vertex path; the record's root-argument block is being decoded now (rootargs agent); **acceptance = the four scalars non-zero with a provenance, a `non-degenerate` verdict and a changed readback** | [docs/vertex_path.md](vertex_path.md) (it also carries the acceptance test lines: per-dword root-parameter provenance - `table`/`root`/`unset`, and `loose` for a record-filled dword no root parameter covers - and the blit transform's `degenerate` check; the measured boot prints `s8 unset s9 unset s10 unset s28 unset` and `clip-position scalars x 0 y 0 z 0 w 0 -> degenerate`), `docs/frame_capture.md` §6-8. The acceptance boot must print `non-degenerate` with a non-zero `w` and a provenance on `s8`/`s9`/`s10`/`s28`, and the measured readback must change |
 | O23 | runtime (console device slot 70) | Console device slot 70 is decoded as the **per-frame descriptor publication**: 13,568 calls per boot (plus 74 at a wrapper site), three arguments - a record (byte size `0x1688`, element count at `+0x18`, a CPU block at `+0x28`, a format word at `+0x30`), a 32-byte destination slot in a shader-visible descriptor heap (zeroed before 12,214 of the first 12,288 calls), then a `clwb` cache-line publication. The default answer stays the measured refusal (`E_NOTIMPL`, default path byte-identical); the naive constant-buffer-view conversion is **falsified**: the descriptor it writes names the destination address rather than a buffer, the frame is refused and the boot stops at 29.5 s | open - decoded shape and ABI, one conversion falsified; the **publication encoding** is not modelled. Next: decode the record's encoding (fields `+0x18`/`+0x28`/`+0x30`, the 128-byte block and the format table at `game+0x4D9F3C0`) and publish it into the console heap's GPU mirror | [docs/device_slot70.md](device_slot70.md) (probe boot 140 s ALIVE, 594,356 calls; conversion boot stops at 29.5 s; default-path validation boot 100.1 s ALIVE, readback unchanged black), `docs/streamed_consumer.md` §5, `docs/boot_audit.md` §5 |
 
-**Priority.** O22 is the frame-content frontier: the presented target is proven writable and correctly bound, and
-the vertex path is measured degenerate - the four transform scalars never arrive, so the pending root-argument
-decode is the acceptance-gated next fix (the gate is written down in `docs/vertex_path.md`). O19 is the second,
-independent content cause - the sampled 4K placed texture's pages are never written, so the next named place is the
-producer that should write them. O20 is closed as an upload lead: the streamed bytes die in a title CPU deserializer
+**Priority.** The frontier is the stage-2 job-graph wait (`docs/stage2_blocker.md`): it keeps the title in its
+stationary pre-content loop, and the frame that loop presents is black by design (`docs/colour_path.md` §5). The
+frame-content rows are measured limits of that loop: O22's vertex path is degenerate - the four transform scalars never
+arrive, with the acceptance gate written down in `docs/vertex_path.md` - and O19's sampled 4K placed texture's pages
+are never written, so the producer that should write them is the next named place once a content pass runs. O20 is
+closed as an upload lead: the streamed bytes die in a title CPU deserializer
 and no device call names them. O23 (slot 70's publication encoding) and O21 (slot 10) are the remaining unmodelled
 console entry points on that path. O15 cannot be pinned by
 behaviour and needs a layout source. O3's fault-time every-thread dump is the highest-value diagnostic while the title
@@ -91,7 +84,7 @@ runs; O8 and O9 are build/corpus hygiene. The full build is green (237/237), so 
 | runtime | Console queue slot shift: the console inserts two methods before `Signal`, so console 16/17/18/19/20 map to PC Signal/Wait/GetTimestampFrequency/GetClockCalibration/GetDesc — answers O10 | done `e1a40382d` | the 10^9 was our own `GetTimestampFrequency` answer written over the fence proxy's first qword; stop `game+0x4fb0aec` → `game+0x4fb0b03`, traced calls 12,085 → 12,087 (`docs/frontier_4fb0aec.md`) |
 | d3d12 | A8_UNORM render targets accepted as R8_UNORM colour attachments with `RENDER_TARGET`, and the slot-108 bridge treats `SizeInBytes == UINT64_MAX` as unanswered — answers O7 | done `cc7e044b2` | the null container element was the title's own 3840x2160 1-sample A8 render target whose factory failed on the invalid allocation; "format not supported yet: 65" gone, stop `game+0xcc2861` → `game+0x4fb0aec`, calls 11,986 → 12,085 (`docs/container_element.md`) |
 | build | `build_port` publishes the 1,266 graphics programs the title asks for (947 PS + 319 VS), with step ownership and shard-plan alignment | done `9271ef74c` | 1,266/1,266 found, translated and `spirv-val` clean; published as 1,337 fspx entries beside 29 FSPX + 42 library compute |
-| runtime | Console queue slot 18 `GetDesc` struct-return order (the clobbered `rbx` at `game+0x2484133`; was O2, GH #5) | done `4178c742c` | the `0x100000000` read was a clobbered queue-desc buffer, not a GPU-VA dereference; stop moved to `game+0xcc2861`, calls 11,906 → 11,986 |
+| runtime | Console queue slot 18 `GetDesc` struct-return order (the clobbered `rbx` at `game+0x2484133`; was O2) | done `4178c742c` | the `0x100000000` read was a clobbered queue-desc buffer, not a GPU-VA dereference; stop moved to `game+0xcc2861`, calls 11,906 → 11,986 |
 | build | Pipeline-library extraction and FSPX listing repair wired into `build_port.py` | done `0276f2b1f` | FSPX 29/29 with the repair (22/29 without); library 42/42 on the 42-program extraction, 1,047/1,684 on a real package subset |
 | runtime | Console device slot 108 answers a real resource allocation info | done `c3c7a7b83` | null-object stop at `game+0xCC2861` gone; run continued to `game+0x24844A9` |
 | runtime | Console queue slot 35 calibration answered (plus nonvolatile register dump) | done `818c739af` | stop unchanged at the time, so not the cause; the dump carries `rbx`, `r12`–`r15` |
@@ -139,10 +132,6 @@ runs; O8 and O9 are build/corpus hygiene. The full build is green (237/237), so 
   on a real package subset (`0276f2b1f`); the FSPX set needs the `widen_smem_decode` repair. Not a boot front today.
 - **Historical: the eleven "missing" pipeline programs** were zeroed library reads from the refused zlib stage, not a
   second container or a load-time patch; resolved by `ae876f4b5` (see `docs/pipeline_program_source.md`).
-- **External (GH #3, NinosTech): lookups can succeed and the frame still be black.** Four FSPX translations cleared four
-  misses and the 42 compute calls succeeded, yet 0 non-black pixels of 896,232. On our tree that split holds: the black is
-  now measured in the degenerate vertex path (O22) and the never-written sampled pages (O19), not in the FSPX
-  corpus; matching his four programs to ours still needs his hashes.
 - **Lifetime-tracker prototype (evidence, not a fix).** Implemented correctly and unit-tested, then reverted because the
   boot regressed 11,986 → 1,653 calls through a wrong vtable slot — evidence slot 57 is not a tracker (O4, now done).
 - **Waiting is not the blocker.** Thread samples in a 200 s boot put every thread in an ordinary pool, condition, frame or

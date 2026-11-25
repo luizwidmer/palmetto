@@ -140,7 +140,7 @@ later slice finds the trigger. Nothing is decoded by this slice, and the package
 
 The reference is the public GPL-3.0 project `ubiquitarianism/leonida`. Its pages consulted for this slice, each at
 the commit last touching it: `docs/movies.md` at `273b3bdf9` (Moriz82), `docs/xmem_exe_calls.md` at `a847ee646`
-(Mathéo Delbarre), `runtime/test/bink_decode_test.md` at `004620ec5` (ItsNotRexed), `runtime/test/bink_abi_test.md`
+(Mathéo Delbarre), `runtime/test/bink_decode_test.md` at `004620ec5` (the upstream author), `runtime/test/bink_abi_test.md`
 at `3a4bac037` (mrp1no), `runtime/test/bink_play.md` and `runtime/test/bink_audio_test.md` at `11a1f88c0`
 (bobcatchris); fork HEAD `ed94fbef9` (2026-11-25).
 
@@ -236,7 +236,7 @@ This slice was implemented from this project's own measurements. The behaviour w
 GPL-3.0 project `ubiquitarianism/leonida` (<https://github.com/ubiquitarianism/leonida>, license
 <https://github.com/ubiquitarianism/leonida/blob/main/LICENSE>), files `docs/movies.md` (commit `273b3bdf9d6e`,
 Moriz82), `docs/xmem_exe_calls.md` (`a847ee646a6e`, Mathéo Delbarre), `runtime/test/bink_decode_test.md`
-(`004620ec567b`, ItsNotRexed), `runtime/test/bink_abi_test.md` (`3a4bac0373c0`, mrp1no), `runtime/test/bink_play.md`
+(`004620ec567b`, the upstream author), `runtime/test/bink_abi_test.md` (`3a4bac0373c0`, mrp1no), `runtime/test/bink_play.md`
 and `runtime/test/bink_audio_test.md` (`11a1f88c0726`, bobcatchris). The fork's HEAD when this page was written was
 `ed94fbef9888` (2026-11-25). No code from that project was copied. The upstream project remains the copyright of its
 contributors and its license continues to apply to its own tree.

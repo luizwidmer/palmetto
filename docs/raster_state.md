@@ -209,7 +209,7 @@ Evidence outside the repository: `D:\leonida-work\raster\boot-cullnone3\` (the d
 * Gates on the tree the measurements ran on (HEAD `61f544a1b` plus this slice's files and other slices' uncommitted
   work): `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`, `_setup\build_tests.cmd` -> `TESTS_BUILT`; ten of the twelve
   documentation checks pass. The two failures are other slices' work, not this page: `test_docs_cli_flags.py` fails
-  pre-existing on `--interval` in [frame_first_light.md](frame_first_light.md) line 318, and `test_docs_env_vars.py`
+  pre-existing on `interval option` in [frame_first_light.md](frame_first_light.md) line 318, and `test_docs_env_vars.py`
   fails on `PALMETTO_STAGE2_TRACKER` read by the stage-2 slice's uncommitted `port/src/main.cpp:2504`. This page's own
   checks (links, tables, lists, encoding, repeated lines, repo paths, table ids) pass, and the new switch is named here.
 * Uncommitted files this slice: `port/src/graphics_pso.h`, `port/src/graphics_pso.cpp`,

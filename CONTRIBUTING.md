@@ -13,16 +13,16 @@ Thanks for helping. A few rules keep the project safe to host:
 ## Before you start
 
 Claim the work in [the coordination issue][claims] first: the open issue titled "Coordinating who works on what" (it
-moves to a new issue when the thread gets long, so the link searches for it). Check its tables and the open pull
+moves to a new issue when the thread gets long, so the link searches for it instead of naming a number). If that finds
+no open coordination issue, open one with exactly that title and claim work in it. Check its tables and the open pull
 requests, post `claiming: <ID>` there (or a one-line description for something not listed yet), and put the ID in
 your pull request. Found something that needs doing but won't do it yourself? Post `finding: <one line>` there, with
 where it is and why it matters, and it goes on the list for others. When two pull requests overlap anyway, the one
-that lands first is merged and the other is asked to rebase or close. GPU test results go in
-[#166](https://github.com/the original project/issues/166). Work on the D3D12 → Vulkan layer has its own page,
-[#313](https://github.com/the original project/issues/313): the critical path, who builds what, and which D3D12
-methods are still open.
+that lands first is merged and the other is asked to rebase or close. GPU test results go in the pull request that
+changes them. Work on the D3D12 → Vulkan layer is planned and tracked in
+[docs/d3d12_vulkan.md](docs/d3d12_vulkan.md): the plan, what is measured, and which D3D12 methods are still open.
 
-[claims]: https://github.com/the original project/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22
+[claims]: https://github.com/luizwidmer/palmetto/issues?q=is%3Aissue+is%3Aopen+in%3Atitle+%22Coordinating+who+works+on+what%22
 
 ## Working on the code
 
@@ -42,7 +42,7 @@ methods are still open.
   files with no `__main__` block or an `import pytest` (they need the packages in `tests/requirements.txt`) run with
   `python -m pytest tests/test_<name>.py` instead, as [AGENTS.md](AGENTS.md) describes; under `python -I` they fail
   to import or run nothing.
-- Runtime tests: `cmake -S runtime -B port/build`, `cmake --build port/build --config RelWithDebInfo`, then
+- Runtime tests: `cmake -S port -B port/build`, `cmake --build port/build --config RelWithDebInfo`, then
   `ctest --test-dir port/build -C RelWithDebInfo --output-on-failure`. The CPU tests that need no game data are configured
   on Windows; Linux and macOS configure the portable subset (`palmetto` and the shims are Windows-only). Tests that need the retail package read `PALMETTO_GAME_DIR` (and `PALMETTO_MOVIE` for the Bink
   decode test) in place and print `SKIP` when the variable is unset; never copy or commit those files.
@@ -50,7 +50,7 @@ methods are still open.
   browser, network or game data). These execute the viewer streaming code with a synthetic loader and clock.
 - `loader_test` writes small PE images to a `palmetto_loader_test` folder in `%TEMP%`. Antivirus that blocks newly
   written executables makes it stop with that reason; exclude the folder or set `PALMETTO_TEST_DIR` to one it skips.
-- Tool checks: `python -m compileall -q build_port.py tools tests`. The optional
+- Tool checks: `python -m compileall -q build_port.py tooling tests`. The optional
   `vk_pipeline_check <spirv dir> [cache.bin] [--jobs N]` creates a module (and, for compute shaders, a
   pipeline) for every translated shader and reports failures plus the saved cache path.
 - GPU tests are small hand-written RDNA2 programs in `port/test/shaders`. `build.py` turns them into SPIR-V

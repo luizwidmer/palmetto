@@ -315,7 +315,7 @@ windows exact"); the documentation checks pass for this page (it is untracked, s
 it only after the lead commits, and it was checked against the same rules by hand: no dead links, no orphan or duplicate
 table rows, no repeated openings, no mojibake). Two documentation checks fail on other slices' files, not this page:
 `test_docs_env_vars.py` reports `PALMETTO_ALLOC_TRACE` (`port/shims/xmem.cpp:210`, another slice's in-progress
-instrumentation) named in no page, and `test_docs_cli_flags.py` reports `--interval` in
+instrumentation) named in no page, and `test_docs_cli_flags.py` reports `interval option` in
 `docs/range_assert.md:218` and `docs/user_event_probe.md:576` named by no source script. The other ten documentation
 checks pass.
 [upstream_port.md](upstream_port.md) applies only to slices that port a reference here; this measurement takes no

@@ -231,7 +231,7 @@ population is 51,786, as the committed pages record.
   documentation checks pass for this page (links, encoding, table rows/ids, list items, repeated lines, repo paths),
   and the two checks that fail on the surrounding tree fail on other slices' work, not on this page:
   `test_docs_env_vars.py` reports `PALMETTO_STAGE2_DISPATCH` read by the uncommitted `port/src/main.cpp` and named in
-  no page, and `test_docs_cli_flags.py` reports `--interval` in `docs/frame_first_light.md`, `docs/memory_growth.md` and
+  no page, and `test_docs_cli_flags.py` reports `interval option` in `docs/frame_first_light.md`, `docs/memory_growth.md` and
   `docs/raster_state.md` not matched by any source script.
 * **Evidence** (outside the repository, one directory per arm under `D:\leonida-work\slot70pub\`): `boot-real-compose`,
   `boot-compose-control`, `boot-publish-off`, `boot-publish-off-table` (the 39.8 s flake),

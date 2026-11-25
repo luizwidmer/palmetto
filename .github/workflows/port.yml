@@ -549,7 +549,7 @@ jobs:
       - name: Runtime tests on MoltenVK
         shell: bash
         env:
-          # vk_overlapping_occlusion: since #2100 (D3D-252), https://github.com/the original project/issues/3796#issuecomment-7086691314
+          # vk_overlapping_occlusion: expected since an upstream change (D3D-252); an upstream discussion has the detail
           EXPECTED_FAILURES: vk_overlapping_occlusion
         run: |
           set +e
@@ -563,8 +563,8 @@ jobs:
         if: ${{ !cancelled() && steps.macos-build.outcome == 'success' }}  # also after a runtime test failure
         shell: bash
         env:
-          # ps_ssharp: #1845 (the S#'s LOD bias, which a Metal sampler can't take). cs_fma_fused is newer than the job
-          # and wrong on MoltenVK: https://github.com/the original project/issues/3796#issuecomment-7086691314
+          # ps_ssharp: an upstream item (the S#'s LOD bias, which a Metal sampler can't take). cs_fma_fused is newer than the job
+          # and wrong on MoltenVK: the same upstream discussion
           EXPECTED_FAILURES: >-
             ps_ssharp
             cs_fma_fused

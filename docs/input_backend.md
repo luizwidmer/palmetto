@@ -15,7 +15,7 @@ read a paired pad: with devices present its first-run/UI code calls `GetCurrentR
 The public peer projects describe their input layer in their READMEs (documentation only; their source was not read):
 
 - **Five Star Recomp**: the loader "boots through its start-up, answers its first-run screens through a scripted
-  gamepad ([docs/first-run.input](https://github.com/ThatRecompDev/five-star-recomp)) and starts loading story mode".
+  gamepad ([a scripted-input file in the peer's own repository](https://github.com/ThatRecompDev/five-star-recomp)) and starts loading story mode".
   That is the claim this slice tests: first-run screens advance on a scripted pad, then the save/settings path runs.
 - **XCL**: "GameInput: one gamepad - the PC's XInput controller or a PlayStation controller, and keyboard and mouse as
   a gamepad"; "any controller Windows sees through XInput ... can be plugged in or out while the game runs"; and the
@@ -90,7 +90,6 @@ introduces no new environment variable.
 | `PALMETTO_INPUT_TRACE` | off | the bounded call trace: call 1, 10, 100 ... per entry point, caller as module+RVA, plus device connect/disconnect, callback, press and rumble events (the first 16 of each event kind, then every 8th). The traced entry points are `GameInputCreate`, `RegisterDeviceCallback`/`RegisterReadingCallback`/`RegisterGuideButtonCallback`/`RegisterKeyboardLayoutCallback`, `GetCurrentReading`/`GetNextReading`/`GetPreviousReading`/`GetCurrentTimestamp`, `IGameInputReading::GetInputKind`/`GetGamepadState`/`GetUiNavigationState`, and `IGameInputDevice::GetDeviceInfo`/`GetDeviceStatus`/`SetRumbleState`: the surface `input_gate.md` defines. |
 
 The default stays OFF for both input sources: an unattended boot with no pad and no scripted presses behaves as
-The default stays OFF for both input sources: an unattended boot with no pad and no scripted presses behaves as
 before. The A/B turns them on in every arm, so an absent trace line means the title never called that entry.
 ### 3.4 The scripted first-run press schedule
 
@@ -137,7 +136,7 @@ the mechanism this slice builds, and the differences below are choices of this p
 
 | peer | agrees | differs here |
 |---|---|---|
-| Five Star Recomp | a scripted gamepad answering the first-run screens is the mechanism; our A/B reproduces the read half (the first-run/UI code polls a paired pad) and the scripted pad answers one | its `docs/first-run.input` was not read (it is peer project data, not a README claim); our sequence (30 presses, 1 s apart, A/Menu alternating) is our own generic one, and the save/stage half of its sentence did not reproduce here (section 5) |
+| Five Star Recomp | a scripted gamepad answering the first-run screens is the mechanism; our A/B reproduces the read half (the first-run/UI code polls a paired pad) and the scripted pad answers one | its a scripted-input file in the peer's own repository was not read (it is peer project data, not a README claim); our sequence (30 presses, 1 s apart, A/Menu alternating) is our own generic one, and the save/stage half of its sentence did not reproduce here (section 5) |
 | XCL | XInput as the pad source, hot-plug, keyboard/mouse as a gamepad with the left stick/mouse split and View on Tab | our key map is the one this task named, not XCL's: arrows are the left stick here (not the d-pad), Esc is start/Menu (XCL uses P for Menu and B for Backspace), X/Y are face buttons and Q/E the shoulders (XCL maps Q/E to X/Y); the PS-pad fallback is not in this backend (XInput only) |
 | VIctory | the keyboard stand-in pad exists and the mouse drives an analog stick | theirs is active when no pad is connected and the window is focused; ours is opt-in and off by default (`PALMETTO_KEYBOARD_PAD`), so an unattended boot never types into the title |
 | OpenCommunityEdition/OpenScarlett | GameInput over XInput plus a keyboard/mouse path | no SDL dependency in this backend (their description names SDL; ours is XInput plus the Win32 keyboard/mouse APIs) |
