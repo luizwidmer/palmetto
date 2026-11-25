@@ -6,18 +6,28 @@
 //
 // The test turns the switch on itself (before the device is created) so it always exercises the cache; the switch's
 // default-off behaviour is the rest of the suite's.
+//
+// Sections 1 and 2 need no device: the live-pipeline budget's pure policy, and the replay accessor lock order
+// (heap_base() must take no lock: it is read from inside execute()'s shared resource lock, and the lazy bind path supplies
+// a queued exclusive writer - the freeze docs/memory_growth.md records). Section 6 is the budget's GPU lifetime under
+// the validation layer, when PALMETTO_PIPELINE_RECIPE_CACHE=0 PALMETTO_PIPELINE_LIVE_CAP=8 is set for the run.
 #include "d3d12_test_shaders.h"
 #include "shader_fixture_path.h"
 #include "test_temp_dir.h"
 #include "vk_test_device.h"
 #include "../shims/d3d12_com.h"
 #include "../src/shader_library.h"
+#include "../src/pipeline_budget.h"  // docs/memory_growth.md: the live-pipeline cap policy
+#include "../src/vulkan_backend.h"   // the replay accessor lock order below (VulkanContext, fake Vulkan procedures)
 
 #include <d3d12.h>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if !defined(PALMETTO_TEST_VS_FULLSCREEN_SPV) || !defined(PALMETTO_TEST_PS_SPV) || !defined(PALMETTO_TEST_CS_SPV)
@@ -66,8 +76,87 @@ struct PsoRef {
 }  // namespace
 
 int main() {
-    // The switch is read once, on the first pipeline creation; set it before any device exists.
-    SetEnvironmentVariableA("PALMETTO_PIPELINE_RECIPE_CACHE", "1");
+    // The switches are read once, on the first pipeline creation; set them before any device exists. An operator who
+    // set PALMETTO_PIPELINE_RECIPE_CACHE explicitly (the budget arm: cache off, PALMETTO_PIPELINE_LIVE_CAP small) keeps
+    // that value, so the same binary covers the shared-entry and the deferred/eviction lifetime.
+    if (GetEnvironmentVariableA("PALMETTO_PIPELINE_RECIPE_CACHE", nullptr, 0) == 0)
+        SetEnvironmentVariableA("PALMETTO_PIPELINE_RECIPE_CACHE", "1");
+
+    // The live-pipeline budget's pure policy (port/src/pipeline_budget.h): a hard cap, LRU eviction, the grace and the
+    // disable switch. The GPU side of the same budget is section 6.
+    {
+        palmetto::PipelineBudget capped(4, 1);
+        for (std::uint64_t id = 1; id <= 10; ++id) capped.touch(id);
+        EXPECT(capped.live() == 4 && capped.built() == 10 && capped.evicted() == 6);
+        EXPECT(capped.least_recently_used() == 7);
+        capped.remove(7);
+        EXPECT(capped.live() == 3);
+        palmetto::PipelineBudget unlimited(0, 1);
+        EXPECT(unlimited.touch(1) == 0 && unlimited.live() == 0);
+    }
+
+    // The replay accessor lock order (docs/memory_growth.md): execute() holds VulkanContext's resource lock shared for
+    // the whole replay, and the device callbacks the replay calls read heap_base() from inside it (the device-memory
+    // reader/writer). Windows SRW locks are writer-preferring, so a nested shared acquire in heap_base() blocks behind an
+    // exclusive writer that is itself waiting for the outer shared lock - the whole-process freeze the default boot hit
+    // once the lazy build made set_pipeline_handle() an exclusive writer during the frame loop. The contract is that a
+    // replay-side accessor takes no lock. This section proves it with the real VulkanContext and fake Vulkan procedures:
+    // no device, no GPU, no game data.
+    {
+        struct Stub {
+            static PFN_vkVoidFunction VKAPI_CALL proc(VkDevice, const char* name) {
+                (void)name;
+                return nullptr;
+            }
+        };
+        palmetto::VulkanContext context(Stub::proc,
+                                        reinterpret_cast<VkDevice>(static_cast<std::uintptr_t>(1)), false);
+        context.set_heap_base(0x12340000);
+        EXPECT(context.heap_base() == 0x12340000);
+
+        std::atomic<bool> reader_in_body{false};
+        std::atomic<bool> writer_queued{false};
+        std::atomic<bool> reader_done{false};
+        std::uint64_t seen = 0;
+        // The reader is execute()'s position: it holds the resource lock shared and reads the accessor from inside.
+        std::thread reader([&] {
+            context.with_resource_shared_for_test([&] {
+                reader_in_body.store(true);
+                while (!writer_queued.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                // Let the writer reach the lock and queue for it: the nested shared acquire the old heap_base() made
+                // then hung behind it.
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                seen = context.heap_base();
+                reader_done.store(true);
+            });
+        });
+        while (!reader_in_body.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        // The writer is the bind path: add_resource() and the lazy build's set_pipeline_handle() take the lock
+        // exclusively (the two writer families the pre-fix freeze had queued). It keeps queueing until the read is done,
+        // so one is waiting for the whole read.
+        std::thread writer([&] {
+            palmetto::ResourceBinding binding{};
+            writer_queued.store(true);
+            for (std::uintptr_t id = 0x5100; !reader_done.load(); ++id) {
+                context.add_resource(id, binding);
+                context.set_pipeline_handle(id, VK_NULL_HANDLE, true);
+            }
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!reader_done.load() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!reader_done.load()) {
+            // Detach rather than join: the point is to report the regression, not to hang the suite on it.
+            reader.detach();
+            writer.detach();
+            std::fprintf(stderr, "FAIL: heap_base() blocked behind a queued exclusive writer (lock-order regression)\n");
+            return 1;
+        }
+        reader.join();
+        writer.join();
+        EXPECT(seen == 0x12340000);
+        std::printf("replay accessor lock order: ok (heap_base() takes no lock under a shared reader)\n");
+    }
 
     vktest::Device vk_dev;
     const auto status = vk_dev.initialize();
@@ -245,6 +334,33 @@ int main() {
         compute.erase(compute.begin() + 2);
         compute.push_back(create_compute(1));
         EXPECT(compute.back().pso != nullptr);
+    }
+
+    // 6. The live-pipeline budget's GPU lifetime (docs/memory_growth.md): create more PSOs than the cap (set small for
+    // this arm: PALMETTO_PIPELINE_RECIPE_CACHE=0 PALMETTO_PIPELINE_LIVE_CAP=8), then bind every one on a direct command
+    // list. A bind past the cap builds a deferred pipeline and evicts another, and a later bind of an evicted one
+    // rebuilds it. With PALMETTO_VK_VALIDATION=1 a use of a destroyed pipeline, a double destroy or a rebuilt handle
+    // used after its object went is reported by the validation layer, which the last check reads.
+    {
+        std::vector<PsoRef> budget_psos;
+        for (int i = 0; i < 24; ++i) {
+            budget_psos.push_back(create(plain));
+            EXPECT(budget_psos.back().pso != nullptr);
+        }
+        ID3D12CommandAllocator* allocator = nullptr;
+        EXPECT(SUCCEEDED(layer.device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT, __uuidof(ID3D12CommandAllocator),
+            reinterpret_cast<void**>(&allocator))));
+        ID3D12GraphicsCommandList* list = nullptr;
+        EXPECT(SUCCEEDED(layer.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr,
+                                                         __uuidof(ID3D12GraphicsCommandList),
+                                                         reinterpret_cast<void**>(&list))));
+        for (auto& pso : budget_psos) list->SetPipelineState(pso.pso);
+        // Bind a few a second time: an evicted pipeline state rebuilds its VkPipeline on the rebind.
+        for (int i = 0; i < 8; ++i) list->SetPipelineState(budget_psos[static_cast<std::size_t>(i)].pso);
+        EXPECT(SUCCEEDED(list->Close()));
+        list->Release();
+        allocator->Release();
     }
 
     root->Release();

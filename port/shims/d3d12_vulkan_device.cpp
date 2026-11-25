@@ -36,6 +36,7 @@
 #include "xbox_present.h"  // docs/present_wiring.md: the console PresentX registration hook
 #include "../src/vulkan_device_filter.h"
 #include "../src/vulkan13_features.h"
+#include "../src/pipeline_budget.h"  // docs/memory_growth.md: the live-pipeline cap and its LRU
 
 #include <chrono>
 #include <vulkan/vulkan_win32.h>
@@ -1244,6 +1245,7 @@ inline bool deferred_image_backing_enabled() {
 }
 
 // What a device's children need from it, kept apart from the COM class so children can hold a plain pointer.
+class PipelineState;  // defined below: the live-pipeline budget evicts through it
 class DescriptorHeap;  // defined below; DeviceState keeps the console-addressed shader-visible ones to refresh
 class Resource;        // defined below; DeviceState keeps the title-placed textures to import (docs/texture_import.md)
 
@@ -1387,7 +1389,48 @@ struct DeviceState {
         });
     }
 
-    // ---- pooled and deferred image memory (docs/streamed_image_backing.md) ------------------------------------
+    // ---- the live-pipeline budget (pipeline_budget.h, docs/memory_growth.md) -----------------------------------
+//
+// A boot creates 51,786 console graphics pipeline states and the layer built a VkPipeline for every one of them at
+// creation; the driver keeps per-pipeline host memory (measured: ~40 GB of process private bytes in 120 s, in
+// nvoglv64.dll/nvgpucomp64.dll allocations under PipelineState::build). The frame loop binds a handful, so every graphics
+// PSO is created with its recipe, modules and layout but no VkPipeline and is built at its first bind (the opt-in recipe
+// cache keeps its eager build, so that slice's semantics are unchanged); a bind past the cap evicts the least recently
+// bound live pipeline, which a later bind rebuilds from the retained recipe, modules and layout. The cap and the lazy
+// build are one switch each, for the A/B: PALMETTO_PIPELINE_LIVE_CAP=0 rebuilds the old path exactly
+// (PALMETTO_PIPELINE_LAZY_BUILD is the eager-build arm). Both defaults are the measured-correct ones: cap 16, lazy on.
+//
+// Lock order (docs/memory_growth.md, the default-boot freeze): a lazily built pipeline makes this path an exclusive
+// writer of VulkanContext::resource_mutex_ from inside the frame loop (set_pipeline_handle() below). The replay holds that
+// same lock shared for a whole execute(), so nothing the replay calls may take it again: a nested shared acquire blocks
+// behind the queued writer while the writer waits for the replay's outer shared lock. The replay-side accessors are
+// therefore lock-free by contract - heap_base() is the one this path made reachable.
+inline std::size_t pipeline_live_cap() {
+    static const std::size_t cap = [] {
+        char value[16] = {};
+        size_t length = 0;
+        // Unset: the measured-correct default (16 live, docs/memory_growth.md). Set: the value; 0 leaves the budget off
+        // and restores the pre-slice eager path exactly, for the A/B.
+        if (getenv_s(&length, value, "PALMETTO_PIPELINE_LIVE_CAP") != 0 || length <= 1)
+            return palmetto::PipelineBudget::kDefaultCap;
+        return static_cast<std::size_t>(std::strtoull(value, nullptr, 10));
+    }();
+    return cap;
+}
+
+inline bool pipeline_lazy_build_enabled() {
+    static const bool enabled = [] {
+        char value[8] = {};
+        size_t length = 0;
+        // Unset: on (build at the first bind, under the live cap, docs/memory_growth.md). Set with a leading 0: every
+        // graphics pipeline is built eagerly at creation instead, the A/B's old path.
+        if (getenv_s(&length, value, "PALMETTO_PIPELINE_LAZY_BUILD") != 0 || length <= 1) return true;
+        return value[0] != '0';
+    }();
+    return enabled;
+}
+
+// ---- pooled and deferred image memory (docs/streamed_image_backing.md) ------------------------------------
     //
     // PALMETTO_IMAGE_MEM_POOL=1: small textures that are neither attachments nor CPU-visible share 64 MiB blocks of
     // device memory as ranges (image_memory_pool.h), instead of one vkAllocateMemory and one vkFreeMemory each;
@@ -1407,6 +1450,19 @@ struct DeviceState {
     std::mutex deferred_images_mutex;
     std::vector<Resource*> deferred_images;
     std::atomic<std::uint64_t> deferred_bound_count{0}, deferred_bound_bytes{0}, deferred_waiting{0};
+    // The live-pipeline budget (pipeline_budget.h, docs/memory_growth.md): the first `pipeline_live_cap` graphics PSOs
+    // are built at creation, later ones at their first bind, and a bind past the cap evicts the least recently bound
+    // live pipeline (never one bound within the budget's grace). A pipeline state keeps its recipe, modules and layout,
+    // so an evicted pipeline is rebuilt on its next bind; the old object is destroyed through the deferred queue.
+    std::mutex pipeline_budget_mutex;
+    palmetto::PipelineBudget pipeline_budget{pipeline_live_cap(), palmetto::PipelineBudget::kDefaultGrace};
+    std::unordered_map<std::uintptr_t, PipelineState*> pipeline_owners;
+    std::atomic<std::uint64_t> graphics_pipelines_created{0};
+    std::uint64_t pipelines_built = 0, pipelines_evicted = 0, pipelines_rebuilt = 0;
+    bool defer_graphics_build();          // true: this graphics PSO is built at its first bind, not now
+    bool note_pipeline_built(PipelineState* state);  // records a build and evicts past the cap; false if it was evicted
+    void forget_pipeline(std::uintptr_t id);         // the PSO died: drop it from the budget
+    std::string pipeline_census_text();
     void start_image_memory_pool();
     bool bind_deferred_images();  // the queue hook: false refuses the submission rather than using an unbound image
     void add_deferred_image(Resource* resource);
@@ -2512,6 +2568,8 @@ struct DeviceState {
     void bind_fetched_textures(std::uint64_t table_title_va);
     // Diagnostic (docs/vertex_path.md): read bytes at a device address a translated shader builds itself (heap_base + a
     // value from its push constants), through the arena's host mapping. Reads only, and never copies into the arena.
+    // This runs from the replay's prepare, i.e. inside execute()'s shared resource lock, so it must take no lock of the
+    // device's or the context's: heap_base() is a lock-free read for exactly that reason (docs/memory_growth.md).
     bool read_device_memory(std::uint64_t address, std::uint32_t bytes, std::uint8_t* out, std::uint32_t& read) {
         read = 0;
         if (!address || !bytes || !out || !context || !arena.mapped) return false;
@@ -2528,6 +2586,8 @@ struct DeviceState {
 
     // Diagnostic (docs/vertex_path.md, the geometry fix): write the console driver-block V# into the arena mirror at an
     // address a translated shader fetches it from. Opt-in only; bounds-checked; writes exactly `bytes` and nothing else.
+    // Like read_device_memory it runs inside execute()'s shared resource lock, so it must not acquire a lock that a bind
+    // path queues on: heap_base() is lock-free for that reason (docs/memory_growth.md).
     bool write_device_memory(std::uint64_t address, std::uint32_t bytes, const std::uint8_t* data) {
         if (!address || !bytes || !data || !context || !arena.mapped) return false;
         const std::uint64_t base = context->heap_base();
@@ -5395,6 +5455,7 @@ public:
     ~PipelineState() override {
         auto& vk = device_.context->vk;
         const VkDevice dev = device_.info.device;
+        device_.forget_pipeline(id());
         if (registered_) device_.context->remove_pipeline(id());
         // A shared entry owns its Vulkan objects; the PSO only releases its reference, and the entry's destructor
         // destroys them when the last PSO using it is gone. Per-PSO variant pipelines go first: the shared layout must
@@ -6375,8 +6436,15 @@ public:
         recipe_.depth = depth;
         recipe_.blends = std::move(blends);
         recipe_.blend = blend;
-        graphics_.pipeline = build(0);
-        if (!graphics_.pipeline) return E_FAIL;
+        // With the recipe cache on, the entry a later description adopts must own a built pipeline, so that arm keeps
+        // its eager build (it is the opt-in sharing slice, not the bounded default). Otherwise the build is deferred
+        // to the first bind (pipeline_budget.h, docs/memory_growth.md).
+        if (device_.defer_graphics_build() && !recipe_cache) {
+            lazy_graphics_ = true;  // built at the first bind (pipeline_budget.h, docs/memory_growth.md)
+        } else {
+            graphics_.pipeline = build(0);
+            if (!graphics_.pipeline) return E_FAIL;
+        }
         if (profile) {
             std::string label;
             if (pipeline_elapsed_us(profile_started) >
@@ -6443,6 +6511,7 @@ public:
         device_.context->add_graphics_pipeline(id(), graphics_);
         registered_ = true;
         is_graphics_ = true;
+        if (!lazy_graphics_) device_.note_pipeline_built(this);  // an eager build is live from creation
         return S_OK;
     }
 
@@ -6835,7 +6904,94 @@ private:
     std::shared_ptr<SharedGraphicsPipeline> shared_graphics_;
     std::shared_ptr<SharedComputePipeline> shared_compute_;
     bool cache_key_deterministic_ = false;  // false: a foreign root signature is hashed by address, so never share
+    // The live-pipeline budget (pipeline_budget.h): this PSO's VkPipeline is built at its first bind (creation past the
+    // cap, or a rebuild after an eviction). The build mutex serializes those builds; the budget lock is only taken
+    // after it is released, so the two paths cannot deadlock.
+    bool lazy_graphics_ = false;
+    std::mutex build_mutex_;
+
+public:
+    // The live-pipeline budget's hooks (pipeline_budget.h); the recording thread and the budget call them.
+    // Build the graphics pipeline now if it has none. Called from graphics_pipeline_id() on the thread recording the
+    // bind; on success the replay's copy of the entry gets the fresh handle.
+    bool ensure_graphics_built() {
+        if (!is_graphics_) return false;
+        if (!lazy_graphics_) return graphics_.pipeline != VK_NULL_HANDLE;
+        {
+            std::lock_guard lock(build_mutex_);
+            if (graphics_.pipeline != VK_NULL_HANDLE) return true;
+            const VkPipeline built = build(0);
+            if (!built) return false;
+            graphics_.pipeline = built;
+        }
+        // Outside the build mutex: note_pipeline_built() takes the budget lock, and the eviction path takes this PSO's
+        // build mutex while it holds that lock (the order is fixed: build mutex, released, then budget lock).
+        device_.context->set_pipeline_handle(id(), graphics_.pipeline, true);
+        return device_.note_pipeline_built(this);
+    }
+
+    // With DeviceState::pipeline_budget_mutex held: the budget chose this pipeline to release. The PSO forgets the
+    // handle so its next bind rebuilds it; the replay's copy keeps the old handle until that rebuild (a recording that
+    // still names it is inside the budget's grace and the deferred queue waits for the submissions already on the GPU).
+    void evict_graphics_pipeline() {
+        std::lock_guard lock(build_mutex_);
+        const VkPipeline handle = graphics_.pipeline;
+        if (handle == VK_NULL_HANDLE) return;
+        graphics_.pipeline = VK_NULL_HANDLE;
+        ++device_.pipelines_evicted;
+        device_.context->defer_destroy(palmetto::DeferredDeletionQueue::Kind::pipeline, handle);
+    }
 };
+
+// ---- the live-pipeline budget (pipeline_budget.h, docs/memory_growth.md) -------------------------------------
+//
+// The decision is taken at PSO creation: the first `cap` graphics PSOs are built there as the layer always did, every
+// later one is built at its first bind. The budget then keeps at most `cap` live pipelines, evicting the least
+// recently bound one on a bind past the cap. Eviction takes this state's budget lock first and the PSO's build lock
+// second; ensure_graphics_built() releases the build lock before it takes the budget lock, so the order is acyclic.
+bool DeviceState::defer_graphics_build() {
+    const std::uint64_t created = graphics_pipelines_created.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (!pipeline_lazy_build_enabled()) return false;
+    const std::size_t cap = pipeline_live_cap();
+    if (!cap) return false;
+    // No eager build at all: a pipeline is built at its first bind. Measured (docs/memory_growth.md): the driver's
+    // shader compiler reserves multi-GB arenas per compile context, so even eight eager builds at creation grew the
+    // boot to 44 GB, while one built pipeline kept it at 11.5 GB. The trade-off is named in the page: a driver error
+    // in vkCreateGraphicsPipelines now surfaces at the first bind, not at CreateGraphicsPipelineState.
+    return true;
+}
+
+bool DeviceState::note_pipeline_built(PipelineState* state) {
+    if (!state) return false;
+    std::lock_guard lock(pipeline_budget_mutex);
+    pipeline_owners[state->id()] = state;
+    ++pipelines_built;
+    const std::uint64_t victim = pipeline_budget.touch(state->id());
+    if (!victim) return true;
+    const auto it = pipeline_owners.find(victim);
+    if (it == pipeline_owners.end() || !it->second) return true;
+    it->second->evict_graphics_pipeline();
+    pipeline_owners.erase(it);
+    return true;
+}
+
+void DeviceState::forget_pipeline(std::uintptr_t id) {
+    std::lock_guard lock(pipeline_budget_mutex);
+    pipeline_owners.erase(id);
+    pipeline_budget.remove(id);
+}
+
+std::string DeviceState::pipeline_census_text() {
+    std::lock_guard lock(pipeline_budget_mutex);
+    char text[224] = {};
+    std::snprintf(text, sizeof text,
+                  "graphics PSOs %llu created; %zu live, %llu built, %llu evicted, %llu rebuilt; cap %zu",
+                  static_cast<unsigned long long>(graphics_pipelines_created.load(std::memory_order_relaxed)),
+                  pipeline_budget.live(), static_cast<unsigned long long>(pipelines_built),
+                  static_cast<unsigned long long>(pipelines_evicted),
+                  static_cast<unsigned long long>(pipelines_rebuilt), pipeline_live_cap());
+    return text;
+}
 
 void key_root_signature(palmetto::cached_pso::KeyBuilder& key, ID3D12RootSignature* signature) {
     if (!signature) {
@@ -7771,6 +7927,8 @@ public:
         if (state_.context->loaded()) {
             state_.start_image_memory_pool();
             state_.context->set_deferred_image_binder([this] { return state_.bind_deferred_images(); });
+            // docs/memory_growth.md: the live-pipeline budget's counters, printed at the bounded submission milestones.
+            state_.context->set_pipeline_census([this] { return state_.pipeline_census_text(); });
         }
         // A queue refreshes the arena mirrors of the title's console descriptor heaps before each submission
         // (docs/page_address_space.md). Registered even without an arena: a heap created later decides whether it can
@@ -11767,8 +11925,12 @@ std::uintptr_t compute_pipeline_id(ID3D12PipelineState* pipeline) {
 }
 
 std::uintptr_t graphics_pipeline_id(ID3D12PipelineState* pipeline) {
-    const PipelineState* p = PipelineState::from<PipelineState>(pipeline);
-    return p && p->graphics() ? p->id() : 0;
+    PipelineState* p = PipelineState::from<PipelineState>(pipeline);
+    if (!p || !p->graphics()) return 0;
+    // The live-pipeline budget (pipeline_budget.h): a PSO created past the cap, or whose pipeline an eviction
+    // released, is built here, on the recording thread and before this list is submitted.
+    if (!p->ensure_graphics_built()) return 0;
+    return p->id();
 }
 
 const std::vector<palmetto::SubgroupRequest>* pipeline_subgroup_requests(ID3D12PipelineState* pipeline) {

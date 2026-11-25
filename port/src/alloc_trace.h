@@ -34,7 +34,7 @@ namespace palmetto::alloc_trace {
 
 constexpr unsigned kFrameCount = 32;
 constexpr unsigned kPrintFrames = 24;
-constexpr unsigned kMaxStacks = 512;
+constexpr unsigned kMaxStacks = 4096;
 constexpr unsigned kPrintStacks = 10;
 constexpr std::uint64_t kMinBytes = 1u << 20;  // 1 MiB: below this a stack is not worth capturing
 

@@ -433,6 +433,10 @@ public:
         pooled_image_memory,
         acceleration_structure,
         framebuffer,
+        // A VkPipeline the device's live-pipeline budget evicted (pipeline_budget.h, d3d12_vulkan_device.cpp): the
+        // pipeline state keeps its recipe and rebuilds on the next bind, so the old object only has to outlive the
+        // submissions already given to the GPU.
+        pipeline,
     };
 
     struct Item {
@@ -526,6 +530,9 @@ public:
                 break;
             case Kind::framebuffer:
                 vk.vkDestroyFramebuffer(device, reinterpret_cast<VkFramebuffer>(item.handle), nullptr);
+                break;
+            case Kind::pipeline:
+                vk.vkDestroyPipeline(device, reinterpret_cast<VkPipeline>(item.handle), nullptr);
                 break;
             }
         }
@@ -1353,7 +1360,8 @@ public:
         std::lock_guard tlock(tracker_mutex_);
         query_pools_.erase(id);
     }
-    // The heap's d3d12_query_heap type, or ~0u for a heap that is not registered.
+    // The heap's d3d12_query_heap type, or ~0u for a heap that is not registered. Called from the COM queue's timestamp
+    // check before execute(), never from inside execute()'s shared lock (heap_base() explains why that matters).
     std::uint32_t query_heap_type(QueryHeapId id) {
         std::shared_lock lock(resource_mutex_);   // query_pools_ is guarded by resource_mutex_, like add/remove
         const auto it = query_pools_.find(id);
@@ -1370,10 +1378,14 @@ public:
     void set_order_timestamp_copies(bool order) { order_timestamp_copies_ = order; }
 
     // The device address of the GPU address arena: console VAs are offsets from it (docs section 3.3).
-    // execute() copies replay_ under a shared resource_mutex_, so writers hold it uniquely.
+    // execute() copies replay_ under a shared resource_mutex_, so writers hold it uniquely. Called once, by the device,
+    // when the arena is created, which is inside the DeviceState constructor and therefore before any queue exists
+    // (queues are made by a later CreateCommandQueue, and no execute can precede one) - that is what makes the
+    // replay-side accessor heap_base() able to read the value without taking resource_mutex_ (see there).
     void set_heap_base(std::uint64_t heap_base) {
         std::unique_lock lock(resource_mutex_);
         replay_.heap_base = heap_base;
+        heap_base_.store(heap_base, std::memory_order_release);
     }
 
     // Zeroed memory for unbound vertex and index buffers to read (ReplayFunctions::zero_buffer).
@@ -1746,10 +1758,14 @@ public:
         std::unique_lock lock(resource_mutex_);
         replay_.color_attachment_format = std::move(check);
     }
-    std::uint64_t heap_base() {
-        std::shared_lock lock(resource_mutex_);
-        return replay_.heap_base;
-    }
+    // The arena's device address, read by the device's replay callbacks (the device-memory reader/writer that
+    // d3d12_vulkan_device.cpp hands to the replay). Those callbacks run from prepare, i.e. inside execute()'s shared
+    // resource lock, so this read must take no lock of its own: a nested shared acquire on the same thread blocks behind
+    // any queued exclusive writer (Windows SRW locks are writer-preferring), and that writer is waiting for the outer
+    // shared lock - the whole-process deadlock docs/memory_growth.md records. Lock-free is also the honest statement of
+    // the invariant: set_heap_base() runs once from device init, before any queue or submission exists, so there is one
+    // writer before every reader.
+    std::uint64_t heap_base() const { return heap_base_.load(std::memory_order_acquire); }
 
     // Pipelines are registered by an opaque id (the PSO object) for as long as the PSO lives.
     void add_pipeline(std::uintptr_t id, const ComputePipeline& pipeline) {
@@ -1761,6 +1777,21 @@ public:
         pipelines_.erase(id);
         graphics_pipelines_.erase(id);
     }
+    // The live-pipeline budget (pipeline_budget.h) rebuilds a pipeline state's VkPipeline on a bind after an eviction;
+    // the replay reads the handle from its own copy of the entry, so the rebuilt handle is written back here.
+    void set_pipeline_handle(std::uintptr_t id, VkPipeline pipeline, bool graphics_pipeline) {
+        std::unique_lock lock(resource_mutex_);
+        if (graphics_pipeline) {
+            if (const auto it = graphics_pipelines_.find(id); it != graphics_pipelines_.end())
+                it->second.pipeline = pipeline;
+        } else if (const auto it = pipelines_.find(id); it != pipelines_.end()) {
+            it->second.pipeline = pipeline;
+        }
+    }
+    // Diagnostic (docs/memory_growth.md): a one-line census of the live-pipeline budget, printed at the bounded
+    // submission milestones. Unset: the milestones print exactly what they printed before.
+    void set_pipeline_census(std::function<std::string()> census) { pipeline_census_ = std::move(census); }
+    std::string pipeline_census() const { return pipeline_census_ ? pipeline_census_() : std::string(); }
     void add_graphics_pipeline(std::uintptr_t id, const GraphicsPipeline& pipeline) {
         {
             static std::atomic<unsigned> logged{0};
@@ -1785,9 +1816,20 @@ public:
         return tracker_.layout(id, subresource);
     }
 
+    // Called from a COM/title thread (view creation), never from a replay callback: execute() already holds the shared
+    // resource lock there, so a nested shared acquire would block behind a queued writer (heap_base()).
     bool has_resource(ResourceId id) {
         std::shared_lock lock(resource_mutex_);
         return resources_.find(id) != resources_.end();
+    }
+
+    // For tests (port/test/pipeline_recipe_cache_test.cpp's replay-accessor lock-order section): run `body` while the
+    // resource lock is held shared, the way execute() holds it for a whole replay. A test that calls a replay-side
+    // accessor from `body` while another thread queues an exclusive writer proves the accessor takes no lock of its own -
+    // the pattern that deadlocked the default boot (docs/memory_growth.md). Not used by the runtime.
+    template<typename Body> void with_resource_shared_for_test(Body&& body) {
+        std::shared_lock lock(resource_mutex_);
+        body();
     }
 
     bool ray_tracing_supported() const { return ray_tracing_ && vk.vkCmdBuildAccelerationStructuresKHR != nullptr; }
@@ -1854,6 +1896,8 @@ public:
         acceleration_structures_.erase(va);
     }
 
+    // Called from a COM/title thread (a resource returning its structure handle), never from a replay callback: the
+    // replay's own lookup (replay_.resolve_acceleration_structure) reads the map lock-free under execute()'s shared lock.
     VkAccelerationStructureKHR resolve_acceleration_structure(std::uint64_t va) {
         std::shared_lock lock(resource_mutex_);
         const auto it = acceleration_structures_.find(va);
@@ -2147,6 +2191,9 @@ private:
     bool ray_tracing_ = false;
     std::unique_ptr<XdxrBuilder> xdxr_;   // set: acceleration structures are XDXR BVH4 records
     std::atomic<bool> device_lost_{false};
+    // The arena's device address, as a lock-free copy of replay_.heap_base. The replay's device-memory callbacks read it
+    // from inside execute()'s shared resource lock, so it cannot go through resource_mutex_ (heap_base()).
+    std::atomic<std::uint64_t> heap_base_{0};
     alignas(64) std::shared_mutex resource_mutex_;  // shared for prepare lookups, unique for add/remove
     alignas(64) std::mutex tracker_mutex_;
     alignas(64) std::mutex views_mutex_;
@@ -2167,6 +2214,7 @@ private:
     std::function<void()> placed_texture_import_;                           // title-placed texture pages -> image
     std::function<bool()> deferred_image_binder_;  // deferred image backing, before a submission records
     std::function<void()> page_watch_tick_;  // docs/texture_source.md: the page-writer watch, once per submission
+    std::function<std::string()> pipeline_census_;  // docs/memory_growth.md: the live-pipeline budget's counters
     std::function<void(std::uint64_t, std::uint64_t)> console_arena_pull_;  // a copy's source range -> arena stand-in
     // The one-shot colour-target readbacks of docs/page_content.md (up to four per submission, docs/frame_capture.md):
     // armed by the draws PALMETTO_READBACK_AT_DRAW lists and taken after that submission completes.
@@ -2797,6 +2845,9 @@ private:
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
                 std::fprintf(stderr, "[rt] replay: submission %llu at %.1f s\n",
                              static_cast<unsigned long long>(count), seconds);
+                // docs/memory_growth.md: the live-pipeline budget's counters ride the same bounded milestone.
+                const std::string census = context_.pipeline_census();
+                if (!census.empty()) std::fprintf(stderr, "[rt] replay: pipeline budget: %s\n", census.c_str());
             }
         }
         if (kind_ != QueueKind::direct)
@@ -3106,6 +3157,16 @@ private:
         }
         if (!tracker_lock.owns_lock()) tracker_lock.lock();
         if (!transfer_only && context_.bindless_prepare_ && !context_.bindless_prepare_(command_buffer)) {
+            // The bindless set's flush degrades a table generation that cannot be made (it keeps the last uploaded
+            // table and returns true, vulkan_bindless.h), so a false here is a prepare case that could serve
+            // nothing at all: the allocation source may be gone rather than short of table memory. Refuse the
+            // submission by name, bounded, instead of recording commands that would bind an unprepared set.
+            static std::atomic<unsigned> bindless_refusals{0};
+            if (bindless_refusals.fetch_add(1, std::memory_order_relaxed) < 8)
+                std::fprintf(stderr,
+                             "[rt] replay: bindless set 0 could not be prepared for this submission; it is refused "
+                             "(%u so far, %zu command list(s))\n",
+                             bindless_refusals.load(std::memory_order_relaxed), lists.size());
             const bool ended = context_.vk.vkEndCommandBuffer(command_buffer) == VK_SUCCESS;
             resource_lock.unlock();
             const bool submitted = ended && submit(command_buffer, VK_NULL_HANDLE, 0);

@@ -119,6 +119,8 @@ These switches are opt-in and off by default unless stated; `PALMETTO_SHADERS`, 
 | `PALMETTO_TITLE_VA` | `0` disables rebasing the title's shader-visible VAs into the arena. |
 | `PALMETTO_TITLE_WATCH` | Hex RVAs of title memory to watch during a run (measurement only). |
 | `PALMETTO_TRACE_TLS` | Traces the loader's TLS redirect resolution. |
+| `PALMETTO_PIPELINE_LIVE_CAP=<n>` | The live graphics-pipeline cap (default 16, the measured-correct default; `0` keeps the exact old eager path for the A/B). A bind past the cap evicts the least-recently-used pipeline; the state keeps its recipe and rebuilds on the next bind, and the old pipeline is deleted after the GPU passes the submissions (docs/memory_growth.md). |
+| `PALMETTO_PIPELINE_LAZY_BUILD=0` | Builds every graphics pipeline eagerly at creation instead of at its first bind (default on: lazy, under the live cap; the eager-build A/B arm). Diagnostics for comparing the driver's compiler memory (docs/memory_growth.md). |
 | `PALMETTO_ALLOC_TRACE=1` | Rewrites every loaded module's allocator imports and records a 32-frame stack for each allocation of 1 MiB or more, with live bytes per stack; attribution only - it perturbs the driver's shader compiler enough to stall a boot, so do not use it for timing. Off by default. |
 | `PALMETTO_MEM_TRACE=<seconds>` | Prints one bounded owner-counter line per interval: process private/working set, process heaps, the title XMem heap live/peak per caller, XMemVirtualAlloc and title VirtualAlloc counts, and physical-page live/mapped/committed. Off by default. |
 | `PALMETTO_AGGREGATE_DEVICE_ID` | Runtime diagnostic switch; opt-in and off by default. |
