@@ -243,6 +243,22 @@ void note(unsigned long tid) {
 
 extern "C" void palmetto_load_tid_note(unsigned long tid) { load_tids::note(tid); }
 
+// A guarded read of any committed, readable address in this process. Exported for the DirectStorage shim's loader-state
+// snapshot (docs/streamed_consumer.md section 6c): the loader object is a host-heap object whose fields the title's load
+// spinner polls, and the shim reads them to report the armed/in-flight ordering. Read-only; returns the byte count copied
+// (0 when the address is not readable), never faults.
+extern "C" unsigned palmetto_mem_read(unsigned long long address, void* out, unsigned size) {
+    if (!out || size == 0) return 0;
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof info) == 0) return 0;
+    if (info.State != MEM_COMMIT) return 0;
+    if (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return 0;
+    const std::uint64_t region_end = reinterpret_cast<std::uint64_t>(info.BaseAddress) + info.RegionSize;
+    if (address + size > region_end) return 0;
+    std::memcpy(out, reinterpret_cast<const void*>(address), size);
+    return size;
+}
+
 namespace rt::d3d12_xs {
 namespace {
 

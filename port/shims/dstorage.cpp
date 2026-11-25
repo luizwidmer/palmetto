@@ -48,6 +48,8 @@ extern "C" void palmetto_stream_set_title_base(std::uint64_t base);
 // Defined in d3d12_xs_device.cpp: register a loading thread id, so the load-window trace there can filter the frame
 // loop's device calls out and keep the loading threads' calls. Cheap (a short atomic scan); safe from the guard handler.
 extern "C" void palmetto_load_tid_note(unsigned long tid);
+// Defined in d3d12_xs_device.cpp: a guarded read of any committed, readable address (the loader-state snapshot below).
+extern "C" unsigned palmetto_mem_read(unsigned long long address, void* out, unsigned size);
 
 namespace {
 
@@ -328,6 +330,91 @@ void ds_stack_scan(const char* what, void* caller, const void* return_slot, unsi
     ds_stack_scan_walk(return_slot, line, sizeof line, base);
     std::lock_guard lock(log_mutex());
     std::fprintf(stderr, "%s\n", line);
+}
+
+// ---- Console-faithful completion ordering (diagnostic and opt-in fix; PALMETTO_DS_ORDER=<microseconds>) -------------
+//
+// docs/streamed_consumer.md section 6c. On the console a batch's completion is DMA/GPU-latency bound, so the title's
+// load spinner always observes the job while it is still armed. Here the CPU worker can finish a submit before the
+// spinner's first poll, so a completion can be observable "too early". With PALMETTO_DS_ORDER set (off by default: a
+// cached zero and no extra work), a status entry stays observably E_PENDING until both (a) N microseconds have passed
+// since its EnqueueStatus call, and (b) the spinner has polled the array at least once (bounded to 100 ms, so a title
+// that never polls cannot hang the worker). The ordering trace prints when a grace is set or the load window is on.
+
+std::chrono::steady_clock::time_point ds_order_origin() {
+    static const auto origin = std::chrono::steady_clock::now();
+    return origin;
+}
+
+std::uint64_t ds_order_now_us() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                          std::chrono::steady_clock::now() - ds_order_origin())
+                                          .count());
+}
+
+std::uint64_t ds_order_grace_us() {
+    static const std::uint64_t grace = [] {
+        char value[32] = {};
+        if (GetEnvironmentVariableA("PALMETTO_DS_ORDER", value, sizeof value) == 0 || value[0] == '\0') return 0ull;
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(value, &end, 0);
+        return end != value ? static_cast<std::uint64_t>(parsed) : 0ull;
+    }();
+    return grace;
+}
+
+bool ds_order_trace() { return ds_order_grace_us() > 0 || ds_load_visible(); }
+
+std::atomic<std::uint64_t> g_ds_order_submits{0};
+std::atomic<std::uint64_t> g_ds_order_last_submit_us{0};
+std::atomic<std::uint64_t> g_ds_order_lines{0};
+std::atomic<std::uint64_t> g_ds_order_completions{0};
+std::atomic<std::uint64_t> g_ds_order_late_polls{0};
+
+// The loader object's armed byte and in-flight count, as the title's spinner would see them right now. Empty until the
+// title image base and the loader global are readable.
+void ds_order_loader_text(char* buffer, size_t capacity) {
+    if (!buffer || capacity < 16) return;
+    buffer[0] = '\0';
+    const std::uint64_t base = g_title_image_base.load(std::memory_order_relaxed);
+    if (base == 0) return;
+    std::uint64_t object = 0;
+    if (palmetto_mem_read(base + 0x79F6D70ull, &object, sizeof object) != sizeof object || object == 0) return;
+    std::uint64_t fields[16] = {};
+    if (palmetto_mem_read(object, fields, sizeof fields) != sizeof fields) return;
+    const unsigned armed = static_cast<unsigned>(fields[15] & 0xffu);                      // byte at +0x78
+    const unsigned inflight = static_cast<unsigned>((fields[12] >> 32) & 0xffffffffu);    // dword at +0x64
+    const unsigned capacity60 = static_cast<unsigned>(fields[12] & 0xffffffffu);          // dword at +0x60
+    std::snprintf(buffer, capacity, "armed=%u inflight=%u capacity=%u object=0x%llx", armed, inflight, capacity60,
+                  static_cast<unsigned long long>(object));
+}
+
+void ds_order_note_submit(unsigned entries, unsigned status_entries, void* caller) {
+    if (!ds_order_trace()) return;
+    const std::uint64_t submit = g_ds_order_submits.fetch_add(1, std::memory_order_relaxed) + 1;
+    const std::uint64_t at = ds_order_now_us();
+    g_ds_order_last_submit_us.store(at, std::memory_order_relaxed);
+    if (submit > 3 && submit % 64 != 0) return;
+    if (g_ds_order_lines.fetch_add(1, std::memory_order_relaxed) >= 96) return;
+    char loader[160];
+    ds_order_loader_text(loader, sizeof loader);
+    std::lock_guard lock(log_mutex());
+    std::fprintf(stderr, "[rt] ds order +%.3fs submit #%llu: %u entr(ies) %u status, loader %s caller %s\n",
+                 static_cast<double>(at) / 1.0e6, static_cast<unsigned long long>(submit), entries, status_entries,
+                 loader[0] ? loader : "(loader not set)",
+                 rt::shims::module_offset(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(caller))).c_str());
+}
+
+void ds_order_note_poll(const char* what, std::uint64_t since_us, HRESULT hr, std::uint64_t polls, void* caller) {
+    if (g_ds_order_lines.fetch_add(1, std::memory_order_relaxed) >= 160) return;
+    char loader[160];
+    ds_order_loader_text(loader, sizeof loader);
+    std::lock_guard lock(log_mutex());
+    std::fprintf(stderr, "[rt] ds order +%.3fs %s: dt %llu us, value %s, polls %llu, loader %s caller %s\n",
+                 static_cast<double>(ds_order_now_us()) / 1.0e6, what, static_cast<unsigned long long>(since_us),
+                 hr == E_PENDING ? "E_PENDING" : hr_text(hr).c_str(), static_cast<unsigned long long>(polls),
+                 loader[0] ? loader : "(loader not set)",
+                 rt::shims::module_offset(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(caller))).c_str());
 }
 
 // The heartbeat thread: one line per second for the first 20 s, cumulative counters and the last status poll. It starts
@@ -877,7 +964,6 @@ public:
         std::lock_guard lock(live_mutex());
         live_status_arrays().insert(static_cast<IDStorageStatusArrayX*>(this));
     }
-
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
         *ppv = nullptr;
@@ -905,13 +991,29 @@ public:
         // address is stored after it (for the heartbeat), and the stack scan recovers the frames above the loop.
         void* const caller = _ReturnAddress();
         const void* const return_slot = _AddressOfReturnAddress();
+        const std::uint64_t polls_before = polls_.fetch_add(1, std::memory_order_relaxed);
         const HRESULT hr = GetHResult(index);
         if (ds_load_visible())
             g_ds_load.last_poll_caller.store(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(caller)),
                                              std::memory_order_relaxed);
+        if (ds_order_trace()) {
+            // The first poll after any submit is the spinner's first observation of the batch: record how long after the
+            // submit it happened and what the loader object looked like at that instant.
+            const std::uint64_t submits = g_ds_order_submits.load(std::memory_order_relaxed);
+            if (submits != 0 && seen_submits_.load(std::memory_order_relaxed) != submits) {
+                seen_submits_.store(submits, std::memory_order_relaxed);
+                const std::uint64_t submit_at = g_ds_order_last_submit_us.load(std::memory_order_relaxed);
+                const std::uint64_t now = ds_order_now_us();
+                ds_order_note_poll("first poll after a submit", now > submit_at ? now - submit_at : 0, hr, polls_before,
+                                   caller);
+            }
+            if (ds_order_now_us() >= 5'000'000ull && g_ds_order_late_polls.fetch_add(1, std::memory_order_relaxed) < 40)
+                ds_order_note_poll("poll after 5 s", 0, hr, polls_before, caller);
+        }
         ds_stack_scan("poll", caller, return_slot, index, hr, true);
         return hr != E_PENDING;
     }
+    std::uint64_t poll_count() const { return polls_.load(std::memory_order_relaxed); }
     HRESULT STDMETHODCALLTYPE GetHResult(UINT32 index) override {
         const HRESULT hr = index >= capacity_ ? E_DSTORAGE_INDEX_BOUND : entries_[index].load(std::memory_order_acquire);
         if (ds_load_visible()) {
@@ -951,6 +1053,8 @@ private:
     std::atomic<ULONG> refs_{1};
     const uint32_t capacity_;
     std::unique_ptr<std::atomic<HRESULT>[]> entries_;
+    std::atomic<std::uint64_t> polls_{0};          // IsComplete observations (ordering trace)
+    std::atomic<std::uint64_t> seen_submits_{0};   // last submit count the trace has logged a first poll for
 };
 
 // ---- Files --------------------------------------------------------------------------------------------------------
@@ -1125,6 +1229,7 @@ struct Entry {
     ID3D12Fence* fence = nullptr;  // a reference
     uint64_t value = 0;
     HANDLE event = nullptr;  // a duplicate the entry owns
+    std::uint64_t order_not_before_us = 0;  // PALMETTO_DS_ORDER: earliest time a status entry may complete
 };
 
 class Queue final : public IDStorageQueueX2 {
@@ -1236,6 +1341,8 @@ public:
             e.enqueue_error = E_DSTORAGE_INDEX_BOUND;
         } else {
             e.status->set_pending(index);  // polling after this call sees E_PENDING until the entry is reached
+            const std::uint64_t grace = ds_order_grace_us();
+            if (grace != 0) e.order_not_before_us = ds_order_now_us() + grace;
         }
         {
             std::lock_guard lock(stats().mutex);
@@ -1427,6 +1534,7 @@ private:
     }
 
     void submit_locked() {
+        const size_t first_new = submitted_;
         uint32_t requests = 0;
         uint64_t source_bytes = 0, destination_bytes = 0;
         for (size_t i = submitted_; i < entries_.size(); ++i) {
@@ -1448,6 +1556,12 @@ private:
         if (entries_.size() > submitted_) {
             submitted_ = entries_.size();
             work_.notify_one();
+        }
+        if (entries_.size() > first_new) {
+            unsigned status_entries = 0;
+            for (size_t i = first_new; i < entries_.size(); ++i)
+                if (entries_[i].type == Entry::Type::Status) ++status_entries;
+            ds_order_note_submit(static_cast<unsigned>(entries_.size() - first_new), status_entries, _ReturnAddress());
         }
     }
 
@@ -1519,6 +1633,36 @@ private:
                 break;
             case Entry::Type::Status:
                 if (SUCCEEDED(hr)) {
+                    // PALMETTO_DS_ORDER (docs/streamed_consumer.md section 6c): keep the completion observably pending
+                    // until the submitting call has returned plus the grace, and until the spinner has polled once.
+                    if (const std::uint64_t grace = ds_order_grace_us(); grace != 0) {
+                        const auto started = std::chrono::steady_clock::now();
+                        const auto elapsed = [&started] {
+                            return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+                        };
+                        while (ds_order_now_us() < e.order_not_before_us && elapsed() < 0.5)
+                            std::this_thread::sleep_for(std::chrono::microseconds(50));
+                        while (e.status && e.status->poll_count() == 0 && elapsed() < 0.1)
+                            std::this_thread::sleep_for(std::chrono::microseconds(50));
+                        if (g_ds_order_completions.fetch_add(1, std::memory_order_relaxed) < 32) {
+                            char loader[160];
+                            ds_order_loader_text(loader, sizeof loader);
+                            const std::uint64_t completed_at = ds_order_now_us();
+                            const std::uint64_t enqueued_at =
+                                e.order_not_before_us >= grace ? e.order_not_before_us - grace : 0;
+                            std::lock_guard lock(log_mutex());
+                            std::fprintf(stderr,
+                                         "[rt] ds order +%.3fs status index %u completed: %llu us after enqueue "
+                                         "(grace %llu), polls %llu, loader %s\n",
+                                         static_cast<double>(completed_at) / 1.0e6, e.index,
+                                         static_cast<unsigned long long>(completed_at > enqueued_at
+                                                                             ? completed_at - enqueued_at
+                                                                             : 0),
+                                         static_cast<unsigned long long>(grace),
+                                         static_cast<unsigned long long>(e.status ? e.status->poll_count() : 0),
+                                         loader[0] ? loader : "(loader not set)");
+                        }
+                    }
                     e.status->complete(e.index, since_notify_);
                     since_notify_ = S_OK;
                 }

@@ -1,7 +1,7 @@
 # The loading gate as a platform user/session wait: measured
 
 The title's loading state does not advance for 1,200 s: it presents a stationary two-pass blit loop, the presented image
-is uniformly black, the streaming loader is disarmed at about 1.75 s and never re-armed, and DirectStorage, GPU fences
+is uniformly black, the streaming loader is armed in shrinking small batches until about 16-20 s and then never re-armed, and DirectStorage, GPU fences
 and input are excluded ([frame_capture.md](frame_capture.md), [streamed_consumer.md](streamed_consumer.md),
 [input_gate.md](input_gate.md), [wait_state.md](wait_state.md)). This page tests the last live class of shim-side gate:
 a platform-service wait, i.e. the game state machine polling a user/session/package value that our GDK/XGameRuntime

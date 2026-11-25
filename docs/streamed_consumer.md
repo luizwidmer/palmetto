@@ -311,14 +311,54 @@ counts and state values only; no title bytes are printed.
   batch completed and the job disarmed). **From +1.75 s to +119 s the byte stays 0 and the count stays 0: the batch is
   never armed again in the boot.** The 10 s and 13 s trickle (requests 4,200 and 4,234, submits 6 and 17) is a short
   single-request batch that completes between samples.
+* **Correction from section 6c (ordering increment): the loader does re-arm, in short batches.** The 1 Hz sampling above
+  missed them; a boot with the ordering trace on (and a stretched completion, section 6c) shows the armed byte toggling
+  once per batch: arms at `+14.50 s`, `+17.50 s`, `+18.00 s`, `+18.50 s` with in-flight 2, 2, 7, 10, drops after each.
+  The panel-carrying reading holds in the durable sense: after the *last* small batch (baseline `~16.3 s`, stretched
+  `~19.8 s`) the loader object is never armed again for the rest of a 300 s boot, and no further read job is posted.
 * **What that means.** The job mechanism itself is healthy and correctly drives our status array to `S_OK`; the loader
-  worker executed exactly one streaming job, read and deserialized the first 50 blocks (section 3), handed them to the
-  pipeline precompile, and after that the loader object sits idle. **The transition that never happens is `+0x78` going
-  back to 1 - no second read batch is ever posted**, so the pipeline-library data is the last thing the DirectStorage
-  system is asked for. The gate is therefore above this job: in the title-side stage logic that should submit the next
-  batch after the pipeline precompile, not in the DirectStorage emulation (the shim answered every call the title made)
-  and not in the job wrapper (it completed with the measured values).
+  worker executed the streaming jobs, read and deserialized the first 50 blocks (section 3), handed them to the pipeline
+  precompile, and then the loader object is disarmed. **The transition that never happens is `+0x78` going back to 1
+  after the last small batch** - no further read batch is posted - so the pipeline-library data is the last thing the
+  DirectStorage system is asked for. The gate is therefore above this job: in the title-side stage logic that should
+  submit the next batch after the pipeline precompile, not in the DirectStorage emulation (the shim answered every call
+  the title made) and not in the job wrapper (it completed with the measured values).
 
+## 6c. The completion-ordering hypothesis: tested with a bounded completion grace, and refuted
+
+`PALMETTO_DS_ORDER=<microseconds>` (off by default; the default path is unchanged) makes a status entry stay observably
+`E_PENDING` until both (a) N microseconds have passed since its `EnqueueStatus` call and (b) the spinner has polled the
+array at least once (bounded so an unpolled batch cannot hang the worker). The worker's wait is capped at 500 ms, so the
+effective stretch is `min(N, 500 ms)`; the ordering trace (also printed when `PALMETTO_DS_LOAD_TRACE` is on) records,
+per submit, the loader object's armed byte and in-flight count, and the first poll after each submit with its delay, the
+status value and the loader state at that instant.
+
+Two runs: default timing (`boot-order1`, 130 s) and `PALMETTO_DS_ORDER=5000000` (`boot-order2`, 300 s with the frame
+capture/readback switches on). Both ALIVE, 0 exceptions.
+
+* **The spinner's first observation is never "already completed".** Baseline: the first poll of the first batch is
+  651 us after the submit and sees `E_PENDING` with `armed=1, inflight=43`; every later batch's first poll is 2-6 us
+  after its submit, also `E_PENDING` with `armed=1`. Stretched: completions are 0.51-2.29 s after their enqueue (instead
+  of microseconds), and every first poll still sees `E_PENDING` with `armed=1`. So a completion was never observable
+  before the spinner's first poll, and the spinner does observe the armed job: the "completion raced the spinner's first
+  observation" mechanism is not what happens.
+* **The stretch moves the loader phase later but does not change its end state.** The last small batch moves from
+  `+16.27 s` (baseline) to `+19.81 s` (stretched), and the loader object's armed byte toggles per small batch
+  (`+14.50`, `+17.50`, `+18.00`, `+18.50 s` in the stretched boot). In both runs the final recorded event has the same
+  shape: a **fresh status array is polled (`polls 0`) while the loader object is `armed=0, inflight=0`** - the title
+  enters a wait for a job that is not armed - and after that no poll happens for the rest of the boot.
+* **No population change and no content change.** Stretched run, 300 s: 61,440 submissions (identical to the 300 s
+  acceptance baseline, the last at 275.8 s), the stationary two-pass loop throughout; presenter captures at frames
+  16,001-30,001 are all `mean rgb 0.00 0.00 0.00`; the full-target readbacks at draws 60,000 and 60,001 are 3840x2160
+  `mean 0 0 0, non-black 0/8,294,400, alpha mean 0`. RIP histogram: the spinner pause site is the only hot title code in
+  5-20 s; by 60-90 s and 150-180 s the loader thread is running the frame-loop wait helper (`game+0x4FB0BD7` region) and
+  the clzero loop (`game+0x4E8AA70` region), i.e. the spinner exited and the loader system stayed dormant.
+
+**Conclusion: the ordering hypothesis is refuted as the gate.** Console-faithful completion ordering (delay + a
+guaranteed first poll) changes *when* the loader stops but not *that* it stops, and it changes neither the pipeline
+population nor the presented image. The default stays as it was (no grace; `PALMETTO_DS_ORDER` off), and the remaining
+target is the producer/stage logic that stops posting batches after the last small one (the disarmed-array wait above is
+its signature: the wait is set up for a job that the stage never arms).
 ## 7. The answer: where the GPU-side step is missing
 
 * **Do the streamed bytes reach a texture?** No. They reach a title CPU deserializer and, in the whole 130 s window, no
@@ -372,6 +412,10 @@ counts and state values only; no title bytes are printed.
     chain in section 6b comes from the raw stack-word scan as well; both are printed per scan and agree on every frame
     that appears in both. The job state is sampled at 250 ms for the first 20 s and 1 Hz after, so a shorter re-arm would
     be missed; a batch that completes within one sample appears only in the counters (section 6b).
+11. `PALMETTO_DS_ORDER`'s worker wait is capped at 500 ms, so `PALMETTO_DS_ORDER=5000000` measured an effective and
+    deterministic 0.51-2.29 s completion delay rather than 5 s; that is still far beyond console DMA latency (microseconds
+    to milliseconds), so it is a strict test of the ordering hypothesis. Both ordering runs are 130 s/300 s, so a change
+    that only appears after 300 s would not be seen.
 
 ## 9. Gates, files and the next falsifier
 
@@ -385,14 +429,13 @@ gate-naming boot) and `boot-poll1`, `boot-peek1`, `boot-peek3`, `boot-peek4` (th
 Next, smallest honest first - the stream itself and DirectStorage emulation are closed, and the state machine's own
 poll loop is now measured; the dispatcher above it is the target:
 
-1. **Find the stage dispatcher above the streaming job (needs a stack sampler for the loading threads, 2-20 s).** The
-   stack-walk boots show the loader worker inside a streaming job (chain in section 6b) and show that the loader object's
-   `+0x78` armed flag never returns to 1 after 1.75 s. The next observable is the *thread that decides to post the next
-   job*: sample every thread's title-side stack at 2.5/5/7.5/10/15/20 s (the existing `PALMETTO_WAIT_SAMPLE` prints a
-   detail line with resolved stack frames only for threads caught in a named wait; extending that print to the full
-   resolved frame list, or adding a one-shot capture of all threads at those instants, would name the dispatcher). That is
-   a diagnostic-only change in `port/src/main.cpp`, which is not this increment's file: request it from the owner.
-   With the dispatcher RVA known, the same `PALMETTO_TITLE_PEEK` reader can watch its stage word.
+1. **Find the batch producer above the streaming job (needs a producer-side observable, 13-20 s).** Section 6c narrows the
+   stall to the last small batch: the title sets up a wait on a fresh status array while the loader object is disarmed,
+   i.e. the stage logic stops posting batches after the pipeline precompile. The next observable is the thread that posts
+   those small batches (13-20 s): capture every thread's title-side stack at 13,14,...,21 s (`PALMETTO_THREAD_STACKS`,
+   `port/src/main.cpp`, already exists) and, when a posting thread is named, watch its stage word with
+   `PALMETTO_TITLE_PEEK`/`PALMETTO_WATCH_GLOBAL`. The two batch submit callers already known are the enqueue helper
+   `game+0x28C9A0E` and the locked submit wrapper `game+0x28CFA70`; naming their caller at 13-20 s names the producer.
 2. **Test the input gate if a virtual pad appears.** `docs/input_gate.md` measures the whole input surface: one
    `GameInputCreate` and one `RegisterDeviceCallback`, no read/dispatch call in 300 s, so the loading loop has no input
    poll at all; a keyboard/window-message button test is also measurable on the shim-bound build by whoever owns that
