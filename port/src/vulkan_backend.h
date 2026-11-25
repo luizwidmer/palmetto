@@ -427,6 +427,10 @@ public:
         sparse_resource,
         buffer,
         device_memory,
+        // An image's memory is a range of a pooled block (image_memory_pool.h): the handle is a heap-allocated
+        // std::function that drops the range, which hands its bytes back to the block. It runs when the submissions
+        // that used the image have retired, like the image's own destruction above it in the queue.
+        pooled_image_memory,
         acceleration_structure,
         framebuffer,
     };
@@ -511,6 +515,9 @@ public:
                 break;
             case Kind::device_memory:
                 vk.vkFreeMemory(device, reinterpret_cast<VkDeviceMemory>(item.handle), nullptr);
+                break;
+            case Kind::pooled_image_memory:
+                delete reinterpret_cast<std::function<void()>*>(item.handle);
                 break;
             case Kind::acceleration_structure:
                 if (vk.vkDestroyAccelerationStructureKHR)
@@ -1700,6 +1707,18 @@ public:
     void import_placed_textures() {
         if (placed_texture_import_) placed_texture_import_();
     }
+    // Deferred image backing (docs/streamed_image_backing.md): the device registers a hook that binds the memory of
+    // any placed/streamed image still waiting for its first write or GPU use. Called before a submission's lists are
+    // prepared and recorded, so an image is bound before anything can name it; a false answer refuses the submission
+    // rather than recording a command that uses an image with no memory.
+    void set_deferred_image_binder(std::function<bool()> binder) {
+        std::unique_lock lock(resource_mutex_);
+        deferred_image_binder_ = std::move(binder);
+    }
+    bool bind_deferred_images() {
+        if (!deferred_image_binder_) return true;
+        return deferred_image_binder_();
+    }
     // Diagnostic (docs/texture_source.md): the page-writer watch for sampled placed textures, called once per
     // submission (the callback itself scans every 64th). Registered by the device; a no-op when empty.
     void set_page_watch_tick(std::function<void()> tick) {
@@ -2146,6 +2165,7 @@ private:
     std::function<void(std::uint64_t, std::uint64_t)> console_page_pull_;   // title pages -> arena stand-in
     std::function<void(std::uint64_t, std::uint32_t)> console_table_pull_;  // a table's V# data -> arena stand-in
     std::function<void()> placed_texture_import_;                           // title-placed texture pages -> image
+    std::function<bool()> deferred_image_binder_;  // deferred image backing, before a submission records
     std::function<void()> page_watch_tick_;  // docs/texture_source.md: the page-writer watch, once per submission
     std::function<void(std::uint64_t, std::uint64_t)> console_arena_pull_;  // a copy's source range -> arena stand-in
     // The one-shot colour-target readbacks of docs/page_content.md (up to four per submission, docs/frame_capture.md):
@@ -2754,6 +2774,11 @@ private:
         // the title's own bytes is what a console GPU would read, so a title that rewrites descriptors still in flight
         // keeps the same race it would have on the console.
         context_.sync_console_heaps();
+        // Deferred image backing (docs/streamed_image_backing.md): a placed/streamed image whose memory was not
+        // allocated at creation gets it here, before the lists below are prepared or recorded, so the first command
+        // that could name it finds a bound image. A no-op unless the device registered the hook; an allocation that
+        // fails refuses the submission instead of recording a use of an image without memory.
+        if (!context_.bind_deferred_images()) return ReplayResult::unsupported;
         // A title-placed texture's pages (docs/texture_import.md) are imported before the submission that could sample
         // them: the copy runs on the staging path and waits, so the bytes are in the image when the replay records it.
         context_.import_placed_textures();

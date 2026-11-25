@@ -16,6 +16,7 @@
 #include "d3d12_copy_compare.h"  // D3D-46: copies compared with the host runtime
 #include "d3d12_depth24_compare.h"  // D24 clears compared with the host runtime
 #include "../src/vulkan_memory.h"  // D3D-96: resizable_bar
+#include "../src/image_memory_pool.h"  // the image memory pool's CPU checks
 
 #include <dxgi1_4.h>
 
@@ -5030,11 +5031,285 @@ int compare_fences(ID3D12Device* ours) {
 
 }  // namespace
 
+// The image memory pool (src/image_memory_pool.h) without a GPU: best fit and alignment, split and coalesce, block
+// growth, range reuse, the dedicated fallback (a driver with no room), the retry guard after a failed block, the one
+// kept empty block and shutdown. Counts and offsets only.
+int image_memory_checks() {
+    {
+        palmetto::ImageMemoryRuns runs(1024);
+        std::uint64_t offset = 0;
+        EXPECT(runs.allocate(100, 64, offset) && offset == 0);
+        EXPECT(runs.allocate(100, 64, offset) && offset == 128);
+        EXPECT(!runs.allocate(900, 1, offset));  // neither free run holds 900
+        EXPECT(runs.allocate(600, 1, offset) && offset == 228);
+        runs.release(0, 100);
+        runs.release(128, 100);
+        // The two released ranges coalesced into the run at the front; the 600-byte range is still in use, so the
+        // largest free run is 228 bytes there and 196 at the end.
+        EXPECT(runs.largest() == 228);
+        EXPECT(!runs.allocate(300, 64, offset));
+        EXPECT(runs.allocate(200, 64, offset) && offset == 0);  // the coalesced run comes back first
+        runs.release(0, 200);
+        runs.release(228, 600);
+        EXPECT(runs.empty() && runs.largest() == 1024 && runs.runs() == 1);
+        EXPECT(!runs.allocate(0, 1, offset) && !runs.allocate(1, 0, offset));
+        runs.release(0, 1024);  // not a run this block handed out: ignored, the block does not go negative
+        EXPECT(runs.empty() && runs.in_use() == 0);
+    }
+    std::vector<std::uint64_t> live, freed, sizes;
+    std::vector<std::uint32_t> types;
+    bool driver_full = false;
+    std::uint64_t next = 1, allocator_calls = 0;
+    palmetto::ImageMemoryPool<std::uint64_t> pool(
+        [&](std::uint32_t type, std::uint64_t bytes) -> std::uint64_t {
+            ++allocator_calls;
+            if (driver_full) return 0;
+            live.push_back(next);
+            sizes.push_back(bytes);
+            types.push_back(type);
+            return next++;
+        },
+        [&](std::uint64_t memory) { freed.push_back(memory); });
+    // Two ranges of one block share its handle and get disjoint, aligned offsets.
+    auto first = pool.allocate(1, 400, 64, 1024);
+    auto second = pool.allocate(1, 400, 64, 1024);
+    EXPECT(first && second && first->memory() == second->memory() && first->memory() == 1);
+    EXPECT(first->offset() % 64 == 0 && second->offset() % 64 == 0 && first->offset() != second->offset());
+    EXPECT(!first->reused() && !second->reused());
+    EXPECT(first->offset() + first->bytes() <= 1024 && second->offset() + second->bytes() <= 1024);
+    // A third 400-byte range does not fit the first block: a second block is made.
+    auto third = pool.allocate(1, 400, 64, 1024);
+    EXPECT(third && third->memory() == 2 && live.size() == 2);
+    // Freed and remade: the range comes back from the first block without a driver call, marked reused.
+    const std::uint64_t first_offset = first->offset();
+    first.reset();
+    auto remade = pool.allocate(1, 400, 64, 1024);
+    EXPECT(remade && remade->memory() == 1 && remade->offset() == first_offset && remade->reused());
+    EXPECT(allocator_calls == 2);
+    // A request larger than a block is the caller's to keep dedicated; the pool must not ask the driver.
+    EXPECT(!pool.allocate(1, 2048, 64, 1024) && allocator_calls == 2);
+    // A released block is kept when it is the only empty one; the second empty block is dropped, and the kept one is
+    // handed out again without a driver call.
+    third.reset();  // its block is now empty: kept, because it is the only empty block
+    EXPECT(freed.empty());
+    second.reset();
+    remade.reset();  // this block is empty too: the second empty one goes back to the driver
+    EXPECT(freed.size() == 1 && freed[0] == 1 && live.size() == 2);
+    auto reused_block = pool.allocate(1, 400, 64, 1024);
+    EXPECT(reused_block && reused_block->memory() == 2 && allocator_calls == 2);
+    reused_block.reset();
+    // The driver full: the block request fails, the caller gets null and falls back to a dedicated allocation, and the
+    // type skips block requests for a bounded number of ranges so a full heap is not re-asked per image.
+    driver_full = true;
+    const std::uint64_t calls_before = allocator_calls;
+    auto full_one = pool.allocate(1, 700, 64, 1024);  // reuses the kept block's whole free run
+    EXPECT(full_one.get() != nullptr && allocator_calls == calls_before);
+    auto full_two = pool.allocate(1, 700, 64, 1024);  // no room and no new block: null, one driver attempt
+    EXPECT(full_two.get() == nullptr && allocator_calls == calls_before + 1);
+    full_one.reset();  // a release clears the guard, so the reused range works again
+    driver_full = false;
+    auto after = pool.allocate(1, 700, 64, 1024);
+    EXPECT(after.get() != nullptr && allocator_calls == calls_before + 1);
+    after.reset();
+    const auto stats = pool.stats();
+    EXPECT(stats.blocks == 1 && stats.block_bytes == 1024 && stats.ranges == 0);
+    EXPECT(pool.allocate(1, 1, 1, 0) == nullptr);  // no block size: no range
+    pool.shutdown();
+    EXPECT(freed.size() == 2 && live.size() == 2);
+    std::printf("image memory pool: ranges, alignment, best fit, coalescing, reuse, the dedicated fallback, the retry "
+                "guard and shutdown all behaved (%zu block(s) freed)\n", freed.size());
+    std::fflush(stdout);
+    return 0;
+}
+
+// Pooled and deferred image memory on a GPU (docs/streamed_image_backing.md): a device created with
+// PALMETTO_IMAGE_MEM_POOL and PALMETTO_IMAGE_DEFERRED on still creates, views, copies and reads back small sampled
+// textures correctly; and a title-placed texture created without memory is backed at its first submission, then takes
+// its pages at the first host write that fills them (PALMETTO_TEXTURE_IMPORT).
+int image_memory_gpu_checks(vktest::Device& d) {
+    // Set before this device is created: the switches are read once per process.
+    _putenv_s("PALMETTO_IMAGE_MEM_POOL", "1");
+    _putenv_s("PALMETTO_IMAGE_DEFERRED", "1");
+    _putenv_s("PALMETTO_TEXTURE_IMPORT", "1");
+    struct RestoreEnv {
+        ~RestoreEnv() {
+            _putenv_s("PALMETTO_IMAGE_MEM_POOL", "");
+            _putenv_s("PALMETTO_IMAGE_DEFERRED", "");
+            _putenv_s("PALMETTO_TEXTURE_IMPORT", "");
+        }
+    } restore_env;
+    rt::d3d12::VulkanDeviceInfo info{};
+    info.get_instance_proc = d.instance_proc;
+    info.instance = d.instance;
+    info.physical = d.physical;
+    info.device = d.device;
+    info.queue = d.queue;
+    info.queue_family = d.family;
+    info.conditional_rendering = d.conditional_rendering;
+    info.texture_compression_bc = d.bc;
+    info.occlusion_query_precise = d.occlusion_query_precise;
+    info.pipeline_statistics_query = d.pipeline_statistics_query;
+    ID3D12Device* inner = nullptr;
+    EXPECT(SUCCEEDED(rt::d3d12::create_vulkan_device(info, IID_PPV_ARGS(&inner))));
+    Ref<ID3D12Device> device;
+    EXPECT(SUCCEEDED(
+        rt::d3d12_xs::create_device_proxy(inner, __uuidof(ID3D12Device), reinterpret_cast<void**>(&device.p))));
+    rt::d3d12::set_device_outer(inner, device.p);  // the proxy now owns `inner`
+    const D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+    D3D12_DESCRIPTOR_HEAP_DESC descriptor_desc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1,
+                                               D3D12_DESCRIPTOR_HEAP_FLAG_NONE};
+    Ref<ID3D12DescriptorHeap> descriptors;
+    EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&descriptor_desc, IID_PPV_ARGS(&descriptors.p))));
+    // Small non-attachment textures of every size class share blocks (the pool is on), then half are freed and remade
+    // to exercise range reuse; each is a valid image object with a view and device-local memory.
+    const UINT widths[] = {4, 8, 16, 32, 64, 128, 256};
+    std::vector<Ref<ID3D12Resource>> pooled(std::size(widths));
+    for (int round = 0; round < 3; ++round) {
+        for (std::size_t i = 0; i < pooled.size(); ++i) {
+            const auto desc = texture_desc(widths[i], widths[i], DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE);
+            Ref<ID3D12Resource> texture;
+            EXPECT(SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                             D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                             IID_PPV_ARGS(&texture.p))));
+            EXPECT((rt::d3d12::vulkan_memory_flags(texture.p) & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0);
+            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+            srv.Format = desc.Format;
+            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srv.Shader4ComponentMapping = 0x1688;  // identity
+            srv.Texture2D.MipLevels = 1;
+            device->CreateShaderResourceView(texture.p, &srv, descriptors->GetCPUDescriptorHandleForHeapStart());
+            if (round > 0) pooled[i].reset();  // freed and remade: the pool must reuse the ranges
+            pooled[i].p = texture.p;  // Ref has no move: hand the reference over instead of copying it
+            texture.p = nullptr;
+        }
+    }
+    for (auto& texture : pooled) texture.reset();
+    // A pooled texture still round-trips bytes: upload a pattern, copy it in, copy it back out.
+    const D3D12_HEAP_PROPERTIES upload_heap{D3D12_HEAP_TYPE_UPLOAD}, readback_heap{D3D12_HEAP_TYPE_READBACK};
+    Ref<ID3D12Resource> upload, readback, texture;
+    const auto buffer_4096 = buffer_desc(4096);
+    EXPECT(SUCCEEDED(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_4096,
+                                                     D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                     IID_PPV_ARGS(&upload.p))));
+    EXPECT(SUCCEEDED(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &buffer_4096,
+                                                     D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                     IID_PPV_ARGS(&readback.p))));
+    const auto texture_8 = texture_desc(8, 8, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE);
+    EXPECT(SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture_8,
+                                                     D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&texture.p))));
+    std::uint8_t* up = nullptr;
+    std::uint8_t* down = nullptr;
+    EXPECT(SUCCEEDED(upload->Map(0, nullptr, reinterpret_cast<void**>(&up))));
+    EXPECT(SUCCEEDED(readback->Map(0, nullptr, reinterpret_cast<void**>(&down))));
+    for (UINT y = 0; y < 8; ++y)
+        for (UINT x = 0; x < 8; ++x) {
+            const auto texel = pattern(x, y);
+            std::memcpy(up + y * 256 + x * 4, texel.data(), 4);
+        }
+    std::memset(down, 0xcd, 4096);
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT placed{0, {DXGI_FORMAT_R8G8B8A8_UNORM, 8, 8, 1, 256}};
+    Ref<ID3D12CommandQueue> queue;
+    Ref<ID3D12CommandAllocator> allocator;
+    Ref<ID3D12GraphicsCommandList> list;
+    Ref<ID3D12Fence> fence;
+    const D3D12_COMMAND_QUEUE_DESC queue_desc{};
+    // The queue objects come from the PC device under the proxy: the test's subject is the layer's image memory, and
+    // the PC queue interface is the one the other GPU tests in this file use for command lists and fence signalling.
+    EXPECT(SUCCEEDED(inner->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue.p))));
+    EXPECT(SUCCEEDED(inner->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator.p))));
+    EXPECT(SUCCEEDED(inner->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, nullptr,
+                                              IID_PPV_ARGS(&list.p))));
+    EXPECT(SUCCEEDED(inner->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.p))));
+    std::uint64_t fence_value = 1;
+    const auto submit = [&]() {
+        const HRESULT closed = list->Close();
+        if (FAILED(closed)) std::fprintf(stderr, "[test] image memory: Close failed 0x%08lx\n", closed);
+        EXPECT(closed == S_OK);
+        ID3D12CommandList* lists[] = {list.p};
+        queue->ExecuteCommandLists(1, lists);
+        const auto executed = rt::d3d12::last_execute_result(queue.p);
+        if (executed != palmetto::ReplayResult::success)
+            std::fprintf(stderr, "[test] image memory: execute result %d\n", int(executed));
+        EXPECT(executed == palmetto::ReplayResult::success);
+        EXPECT(SUCCEEDED(queue->Signal(fence.p, fence_value)) &&
+               SUCCEEDED(fence->SetEventOnCompletion(fence_value, nullptr)));
+        ++fence_value;
+        while (fence->GetCompletedValue() < fence_value - 1) Sleep(0);
+        EXPECT(SUCCEEDED(allocator->Reset()));
+        EXPECT(SUCCEEDED(list->Reset(allocator.p, nullptr)));
+    };
+    {
+        const auto dst = subresource(texture.p, 0);
+        const auto in = footprint(upload.p, placed);
+        list->CopyTextureRegion(&dst, 0, 0, 0, &in, nullptr);
+        const auto out = footprint(readback.p, placed);
+        const auto src = subresource(texture.p, 0);
+        list->CopyTextureRegion(&out, 0, 0, 0, &src, nullptr);
+    }
+    submit();
+    for (UINT y = 0; y < 8; ++y)
+        for (UINT x = 0; x < 8; ++x)
+            EXPECT(std::memcmp(down + y * 256 + x * 4, pattern(x, y).data(), 4) == 0);
+    texture.reset();
+    upload->Unmap(0, nullptr);
+    readback->Unmap(0, nullptr);
+    // A title-placed texture through device slot 133 with deferred backing: it exists with no memory, is backed before
+    // the first submission that copies from it, and takes the title's pages at the first write that fills them.
+    void* pages = VirtualAlloc(nullptr, 64 * 1024, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    EXPECT(pages != nullptr);
+    const auto placed_desc = texture_desc(8, 8, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE);
+    Ref<ID3D12Resource> placed_texture;
+    EXPECT(SUCCEEDED(rt::d3d12::create_buffer_at_host_address(device.p, pages, placed_desc, 0xFFFFFFFFu,
+                                                              __uuidof(ID3D12Resource),
+                                                              reinterpret_cast<void**>(&placed_texture.p))));
+    std::memset(down, 0xcd, 4096);
+    {
+        const auto out = footprint(readback.p, placed);
+        const auto src = subresource(placed_texture.p, 0);
+        list->CopyTextureRegion(&out, 0, 0, 0, &src, nullptr);
+    }
+    submit();  // the queue hook backs the deferred image before this submission records
+    // The copy ran against a bound image: the readback buffer was filled with 0xcd and a copy of an 8x8, 4-byte-texel
+    // surface overwrites every byte it names. (The bytes themselves are the image's zero-filled first use, which the
+    // replay owns; the point here is that the image was usable without having been backed at creation.)
+    for (UINT y = 0; y < 8; ++y)
+        for (UINT x = 0; x < 8; ++x) EXPECT(down[y * 256 + x * 4] != 0xcd);
+    // The title's fill writes the pages: the next submission imports them into the backed image, which reads them back.
+    for (UINT y = 0; y < 8; ++y)
+        for (UINT x = 0; x < 8; ++x) {
+            const auto texel = pattern(x, y + 1);
+            std::memcpy(static_cast<std::uint8_t*>(pages) + y * 32 + x * 4, texel.data(), 4);
+        }
+    std::memset(down, 0xcd, 4096);
+    {
+        const auto out = footprint(readback.p, placed);
+        const auto src = subresource(placed_texture.p, 0);
+        list->CopyTextureRegion(&out, 0, 0, 0, &src, nullptr);
+    }
+    submit();
+    for (UINT y = 0; y < 8; ++y)
+        for (UINT x = 0; x < 8; ++x)
+            EXPECT(std::memcmp(down + y * 256 + x * 4, pattern(x, y + 1).data(), 4) == 0);
+    placed_texture.reset();
+    VirtualFree(pages, 0, MEM_RELEASE);
+    std::printf("pooled and deferred image memory on the GPU: %zu small textures shared blocks and round-tripped, a "
+                "title-placed texture was backed at its first submission and imported its pages\n", std::size(widths) * 3);
+    std::fflush(stdout);
+    return 0;
+}
+
 int main() {
     vktest::Device d;
     const auto status = d.initialize();
     if (status == vktest::DeviceStatus::unavailable) return 77;
     if (status == vktest::DeviceStatus::failed) return 1;
+    // PALMETTO_IMAGE_MEM_ONLY=1 runs just the image-memory checks (docs/streamed_image_backing.md), for a quick
+    // check of that slice without the whole device suite; the switches it sets are then the only ones this run reads.
+    if (const char* only = std::getenv("PALMETTO_IMAGE_MEM_ONLY"); only && *only && *only != '0') {
+        if (image_memory_checks() != 0) return 1;
+        if (image_memory_gpu_checks(d) != 0) return 1;
+        return d.validation_errors() ? 1 : 0;
+    }
     {
         // The host comparisons (create_host_device, the copies) run on the layer's own adapter, not D3D12's default
         // one, which on a PC with two GPUs can be the other GPU (copycmp::layer_adapter).
@@ -8099,6 +8374,11 @@ int main() {
                     source, compared ? "matched the host's" : "checked on the layer alone");
     }
 #undef CAST_CHECK
+
+    // Pooled and deferred image memory (docs/streamed_image_backing.md): the pool's policy on the CPU, then a device
+    // of its own with both switches on, created last because the switches are read once per process.
+    if (image_memory_checks() != 0) return 1;
+    if (image_memory_gpu_checks(d) != 0) return 1;
 
     if (d.validation_errors()) {
         std::fprintf(stderr, "%u validation errors\n", d.validation_errors());

@@ -21,6 +21,7 @@
 #include "../src/uav_clear.h"
 #include "../src/vulkan_bindless.h"
 #include "../src/vulkan_memory.h"
+#include "../src/image_memory_pool.h"  // docs/streamed_image_backing.md: paged memory for images
 #include "../src/vulkan_mesh_limits.h"
 #include "../src/resource_tiling.h"
 #include "../src/cached_pso.h"
@@ -1209,6 +1210,39 @@ struct SharedComputePipeline {
     }
 };
 
+// PALMETTO_IMAGE_MEM_TRACE=1: the image-memory census (DeviceState::ImageMemoryCensus below). Off by default: with the
+// switch unset the recording functions return on one cached boolean, so the default path is unchanged.
+inline bool image_mem_trace_enabled() {
+    static const bool enabled = [] {
+        char text[4] = {};
+        size_t length = 0;
+        return getenv_s(&length, text, "PALMETTO_IMAGE_MEM_TRACE") == 0 && length > 1 && text[0] != '0';
+    }();
+    return enabled;
+}
+
+// PALMETTO_IMAGE_MEM_POOL=1: small textures share blocks of device memory (image_memory_pool.h); unset, every image
+// keeps its own VkDeviceMemory, exactly as before.
+inline bool image_memory_pool_enabled() {
+    static const bool enabled = [] {
+        char text[4] = {};
+        size_t length = 0;
+        return getenv_s(&length, text, "PALMETTO_IMAGE_MEM_POOL") == 0 && length > 1 && text[0] != '0';
+    }();
+    return enabled;
+}
+
+// PALMETTO_IMAGE_DEFERRED=1: a title-placed texture is created without memory and gets it at its first host write or
+// before the first submission that could use it. Unset, the texture is backed at creation, as before.
+inline bool deferred_image_backing_enabled() {
+    static const bool enabled = [] {
+        char text[4] = {};
+        size_t length = 0;
+        return getenv_s(&length, text, "PALMETTO_IMAGE_DEFERRED") == 0 && length > 1 && text[0] != '0';
+    }();
+    return enabled;
+}
+
 // What a device's children need from it, kept apart from the COM class so children can hold a plain pointer.
 class DescriptorHeap;  // defined below; DeviceState keeps the console-addressed shader-visible ones to refresh
 class Resource;        // defined below; DeviceState keeps the title-placed textures to import (docs/texture_import.md)
@@ -1231,6 +1265,152 @@ struct DeviceState {
     bool upload_in_vram = false;
     // D3D-299: the first texture or default-heap buffer that lands outside device-local memory is logged, once.
     mutable std::once_flag spill_logged;
+
+    // Diagnostic, off by default (PALMETTO_IMAGE_MEM_TRACE=1): what the load stage's memory allocations look like, so
+    // the decision to pool image memory is made on our own tree's numbers (docs/streamed_image_backing.md). Every image
+    // `create_texture` makes is recorded with its description, its chosen memory type's flags and its size; every other
+    // allocation the layer makes through `allocate` is counted. Lines are bounded (the first 256 images, and a summary
+    // line every 128), so a boot that makes thousands cannot flood the log.
+    struct ImageMemoryCensus {
+        std::mutex mutex;
+        std::uint64_t images = 0;
+        std::uint64_t image_bytes = 0;
+        std::uint64_t device_local = 0;
+        std::uint64_t device_local_bytes = 0;
+        std::uint64_t host_visible = 0;  // a CPU-visible texture (host-transfer or a mapped heap)
+        std::uint64_t host_visible_bytes = 0;
+        std::uint64_t host_only = 0;  // neither flag: the driver's own choice, counted apart
+        std::uint64_t largest_image = 0;
+        std::uint64_t render_target = 0;
+        std::uint64_t depth_stencil = 0;
+        std::uint64_t cpu_visible_images = 0;
+        std::uint64_t pooled_images = 0;  // the ones whose memory is a range of a block
+        std::uint64_t pooled_bytes = 0;
+        std::uint64_t line_count = 0;
+        std::uint64_t summary_count = 0;
+        // Every successful DeviceState::allocate (images, buffers outside the arena, heaps, staging, the arena itself).
+        std::uint64_t allocations = 0;
+        std::uint64_t allocation_bytes = 0;
+        std::chrono::steady_clock::time_point first_image{};
+        bool started = false;
+    };
+    mutable ImageMemoryCensus image_census;
+
+    // The census's recorders (the second is called from the const allocate()).
+    void record_image_allocation(const D3D12_RESOURCE_DESC& desc, VkDeviceSize bytes, VkMemoryPropertyFlags flags,
+                                 bool cpu_visible, bool pooled = false) {
+        if (!image_mem_trace_enabled()) return;
+        std::lock_guard lock(image_census.mutex);
+        const auto now = std::chrono::steady_clock::now();
+        if (!image_census.started) {
+            image_census.started = true;
+            image_census.first_image = now;
+        }
+        const double seconds = std::chrono::duration<double>(now - image_census.first_image).count();
+        ++image_census.images;
+        image_census.image_bytes += bytes;
+        if (pooled) {
+            ++image_census.pooled_images;
+            image_census.pooled_bytes += bytes;
+        }
+        if (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
+            ++image_census.device_local;
+            image_census.device_local_bytes += bytes;
+        } else if (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+            ++image_census.host_visible;
+            image_census.host_visible_bytes += bytes;
+        } else {
+            ++image_census.host_only;
+        }
+        if (bytes > image_census.largest_image) image_census.largest_image = bytes;
+        if (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) ++image_census.render_target;
+        if (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) ++image_census.depth_stencil;
+        if (cpu_visible) ++image_census.cpu_visible_images;
+        if (image_census.line_count < 256) {
+            ++image_census.line_count;
+            std::fprintf(stderr,
+                         "[rt] image-mem: #%llu at %.1f s %llux%ux%u format %d flags 0x%x mips %u layers %u, %llu B, "
+                         "memory type flags 0x%x%s%s%s%s\n",
+                         static_cast<unsigned long long>(image_census.images), seconds,
+                         static_cast<unsigned long long>(desc.Width), desc.Height, desc.DepthOrArraySize,
+                         int(desc.Format), unsigned(desc.Flags), desc.MipLevels, desc.DepthOrArraySize,
+                         static_cast<unsigned long long>(bytes), unsigned(flags),
+                         (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? " device-local" : "",
+                         (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? " host-visible" : "",
+                         cpu_visible ? " cpu-visible" : "", pooled ? " pooled" : "");
+        }
+        if ((image_census.images <= 1 || image_census.images % 8 == 0) && image_census.summary_count < 512) {
+            ++image_census.summary_count;
+            std::fprintf(stderr,
+                         "[rt] image-mem: %llu images, %.1f MiB (device-local %llu, %.1f MiB; host-visible %llu, "
+                         "%.1f MiB; other %llu; pooled %llu, %.1f MiB; deferred waiting %llu), largest %.1f MiB, "
+                         "%llu render targets, %llu depth targets, %llu CPU-visible; %llu allocations of all kinds, "
+                         "%.1f MiB; %llu pool blocks, %.1f MiB, %llu ranges live, at %.1f s\n",
+                         static_cast<unsigned long long>(image_census.images),
+                         double(image_census.image_bytes) / (1024.0 * 1024.0),
+                         static_cast<unsigned long long>(image_census.device_local),
+                         double(image_census.device_local_bytes) / (1024.0 * 1024.0),
+                         static_cast<unsigned long long>(image_census.host_visible),
+                         double(image_census.host_visible_bytes) / (1024.0 * 1024.0),
+                         static_cast<unsigned long long>(image_census.host_only),
+                         static_cast<unsigned long long>(image_census.pooled_images),
+                         double(image_census.pooled_bytes) / (1024.0 * 1024.0),
+                         static_cast<unsigned long long>(deferred_waiting.load(std::memory_order_relaxed)),
+                         double(image_census.largest_image) / (1024.0 * 1024.0),
+                         static_cast<unsigned long long>(image_census.render_target),
+                         static_cast<unsigned long long>(image_census.depth_stencil),
+                         static_cast<unsigned long long>(image_census.cpu_visible_images),
+                         static_cast<unsigned long long>(image_census.allocations),
+                         double(image_census.allocation_bytes) / (1024.0 * 1024.0),
+                         static_cast<unsigned long long>(pool_blocks_created.load(std::memory_order_relaxed)),
+                         double(pool_bytes_created.load(std::memory_order_relaxed)) / (1024.0 * 1024.0),
+                         static_cast<unsigned long long>(pool_ranges_live.load(std::memory_order_relaxed)), seconds);
+        }
+    }
+    void record_allocation(VkDeviceSize bytes) const {
+        if (!image_mem_trace_enabled()) return;
+        std::lock_guard lock(image_census.mutex);
+        ++image_census.allocations;
+        image_census.allocation_bytes += bytes;
+    }
+
+    // D3D-299, shared by the dedicated and the pooled image path: the first allocation that preferred device-local
+    // memory, needed no host access and got a type without it is logged once, so a run on a full GPU shows the spill.
+    void note_spill_once(VkDeviceSize bytes, std::uint32_t type) const {
+        std::call_once(spill_logged, [&] {
+            const std::uint32_t heap = memory.memoryTypes[type].heapIndex;
+            std::fprintf(stderr,
+                         "[rt] d3d12: a %llu-byte allocation did not fit in device-local memory and went to memory "
+                         "type %u (heap %u, %llu MiB); later ones are not logged\n",
+                         static_cast<unsigned long long>(bytes), type, heap,
+                         static_cast<unsigned long long>(memory.memoryHeaps[heap].size >> 20));
+        });
+    }
+
+    // ---- pooled and deferred image memory (docs/streamed_image_backing.md) ------------------------------------
+    //
+    // PALMETTO_IMAGE_MEM_POOL=1: small textures that are neither attachments nor CPU-visible share 64 MiB blocks of
+    // device memory as ranges (image_memory_pool.h), instead of one vkAllocateMemory and one vkFreeMemory each;
+    // everything else keeps its own allocation. PALMETTO_IMAGE_DEFERRED=1: a title-placed texture is created with no
+    // memory and gets it at its first host write or before the first submission that could use it.
+    //
+    // Both switches are off by default and leave the default path byte-identical: no block is allocated, no image is
+    // deferred and every lookup below is one false branch.
+    std::unique_ptr<palmetto::ImageMemoryPool<VkDeviceMemory>> image_memory_pool;
+    PFN_vkGetImageMemoryRequirements2 image_requirements2 = nullptr;  // dedicated-allocation check, Vulkan 1.1+
+    std::uint64_t pool_block_bytes = 0;                               // the block images share; 0: no pool
+    // Live pool counters for the census: a block allocated, a range handed out and a range given back. Kept in the
+    // device so the summary line needs no lock of the pool's.
+    std::atomic<std::uint64_t> pool_blocks_created{0}, pool_bytes_created{0}, pool_ranges_live{0};
+    // Images whose backing is deferred: created without memory and waited for by the queue hook. Guarded by
+    // deferred_images_mutex, which the queue hook, the import path and a resource's destruction all take.
+    std::mutex deferred_images_mutex;
+    std::vector<Resource*> deferred_images;
+    std::atomic<std::uint64_t> deferred_bound_count{0}, deferred_bound_bytes{0}, deferred_waiting{0};
+    void start_image_memory_pool();
+    bool bind_deferred_images();  // the queue hook: false refuses the submission rather than using an unbound image
+    void add_deferred_image(Resource* resource);
+    void remove_deferred_image(Resource* resource);
 
     // The shader-visible descriptor heaps the title placed at a console address (device slot 14): their descriptors are
     // CPU memory the GPU cannot address, so each keeps an arena mirror that a queue refreshes before a submission
@@ -2454,15 +2634,9 @@ struct DeviceState {
             if (context->vk.vkAllocateMemory(info.device, &allocate, nullptr, &out) == VK_SUCCESS) {
                 if (chosen) *chosen = memory.memoryTypes[i].propertyFlags;
                 if (chosen_type) *chosen_type = i;
+                record_allocation(requirements.size);
                 if (palmetto::spilled_to_host(required, preferred, memory.memoryTypes[i].propertyFlags))
-                    std::call_once(spill_logged, [&] {
-                        const std::uint32_t heap = memory.memoryTypes[i].heapIndex;
-                        std::fprintf(stderr,
-                                     "[rt] d3d12: a %llu-byte allocation did not fit in device-local memory and went "
-                                     "to memory type %u (heap %u, %llu MiB); later ones are not logged\n",
-                                     static_cast<unsigned long long>(requirements.size), i, heap,
-                                     static_cast<unsigned long long>(memory.memoryHeaps[heap].size >> 20));
-                    });
+                    note_spill_once(requirements.size, i);
                 return out;
             }
         }
@@ -3211,6 +3385,19 @@ public:
         if (image_ && !sparse_image_)
             device_.context->defer_destroy(palmetto::DeferredDeletionQueue::Kind::image, image_);
         if (buffer_) device_.context->defer_destroy(palmetto::DeferredDeletionQueue::Kind::buffer, buffer_);
+        // Deferred backing: an image never bound holds no memory, and the queue hook must stop waiting for it.
+        if (deferred_ && !backing_bound_) device_.remove_deferred_image(this);
+        if (pooled_range_) {
+            // The range goes back to its block after the submissions that used the image have retired, in the same
+            // deferred batch as the image's destruction just above. The token keeps the range alive until then.
+            auto range = std::move(pooled_range_);
+            auto release = new std::function<void()>([range] {
+                (void)range;  // dropped here: its destructor hands the bytes back to the block
+            });
+            device_.context->defer_destroy(palmetto::DeferredDeletionQueue::Kind::pooled_image_memory,
+                                           std::uint64_t(reinterpret_cast<std::uintptr_t>(release)));
+            device_.pool_ranges_live.fetch_sub(1, std::memory_order_relaxed);
+        }
         if (memory_) device_.context->defer_destroy(palmetto::DeferredDeletionQueue::Kind::device_memory, memory_);
     }
 
@@ -3284,6 +3471,12 @@ public:
     // pages. Bounded (a fixed attempt budget), and every give-up is logged once.
     bool import_placed_pages() {
         if (!image_ || !placed_pages_ || placed_imported_ || placed_skipped_) return false;
+        // The first host write is one of the two points a deferred image is backed at: the copy below needs the image
+        // bound. A backing failure gives up this import rather than writing into an unbound image.
+        if (deferred_ && !ensure_backing()) {
+            placed_skipped_ = true;
+            return false;
+        }
         constexpr unsigned kMaxAttempts = 512;  // ~a second of submissions at the measured rate
         // Bounded by what the title's texture-computer path can fill in one boot (docs/texture_layout.md measured
         // 34,044 B; the cap leaves room for more of the same kind while keeping one import from dominating a
@@ -3743,7 +3936,98 @@ public:
         return S_OK;
     }
 
-    HRESULT create_texture(const Format& format, const std::vector<VkFormat>& castable = {}) {
+    // ---- pooled and deferred image memory (docs/streamed_image_backing.md) --------------------------------------
+    //
+    // The set that shares a block is the one upstream measured as safe: an optimal-tiled image that is neither an
+    // attachment nor CPU-visible, no larger than an eighth of a block, and one Vulkan does not require a dedicated
+    // allocation for. Everything else keeps its own VkDeviceMemory, as before.
+    bool poolable(VkImage image, const VkMemoryRequirements& requirements) const {
+        if (!device_.image_memory_pool || !device_.pool_block_bytes) return false;
+        if (cpu_visible() || host_transfer_) return false;
+        if (desc_.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
+            return false;
+        if (requirements.size > device_.pool_block_bytes / 8) return false;
+        if (requirements.alignment > device_.pool_block_bytes) return false;
+        return !requires_dedicated_allocation(image);
+    }
+
+    // True also when the driver cannot be asked: then the image keeps its own allocation, which is always valid.
+    bool requires_dedicated_allocation(VkImage image) const {
+        if (!device_.image_requirements2) return true;
+        VkMemoryDedicatedRequirements dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
+        VkImageMemoryRequirementsInfo2 query{VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};
+        query.image = image;
+        VkMemoryRequirements2 result{VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
+        result.pNext = &dedicated;
+        device_.image_requirements2(device_.info.device, &query, &result);
+        return dedicated.requiresDedicatedAllocation == VK_TRUE;
+    }
+
+    // Gives the image its backing: a range of a pooled block where poolable(), else its own VkDeviceMemory. Called at
+    // creation, or later for a deferred image. False when neither the pool nor the driver could back it (the caller
+    // then fails the creation or refuses the submission rather than use an image without memory).
+    bool bind_image_backing(VkImage image, const VkMemoryRequirements& requirements) {
+        auto& vk = device_.context->vk;
+        if (poolable(image, requirements)) {
+            // One type per candidate, best first; a type whose block does not exist yet is only asked for one when the
+            // driver has room (the pool reports a null block otherwise and the next type gets its turn).
+            for (const std::uint32_t type : palmetto::memory_type_order(
+                     device_.memory, requirements.memoryTypeBits, 0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                     device_.pool_block_bytes)) {
+                auto range = device_.image_memory_pool->allocate(type, requirements.size, requirements.alignment,
+                                                                 device_.pool_block_bytes);
+                if (!range) continue;
+                if (vk.vkBindImageMemory(device_.info.device, image, range->memory(), range->offset()) != VK_SUCCESS)
+                    continue;  // dropped: the range goes back to its block
+                memory_flags_ = device_.memory.memoryTypes[type].propertyFlags;
+                if (palmetto::spilled_to_host(0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, memory_flags_))
+                    device_.note_spill_once(requirements.size, type);
+                pooled_range_ = std::shared_ptr<palmetto::ImageMemoryPool<VkDeviceMemory>::Range>(std::move(range));
+                device_.pool_ranges_live.fetch_add(1, std::memory_order_relaxed);
+                device_.record_image_allocation(desc_, requirements.size, memory_flags_, cpu_visible(), true);
+                return true;
+            }
+        }
+        // Its own allocation, the default path: device-local first, another type when device-local is full (D3D-299's
+        // one-time spill line), exactly as every image before the pool.
+        memory_ = device_.allocate(requirements, 0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memory_flags_);
+        if (!memory_) return false;
+        if (vk.vkBindImageMemory(device_.info.device, image, memory_, 0) != VK_SUCCESS) return false;
+        device_.record_image_allocation(desc_, requirements.size, memory_flags_, cpu_visible(), false);
+        return true;
+    }
+
+    // Gives a deferred image its memory now: its first host write, or the queue hook before the first submission that
+    // could use it. False when the driver cannot back it; the caller refuses the submission then.
+    bool ensure_backing() {
+        if (backing_bound_) return true;
+        std::lock_guard lock(device_.deferred_images_mutex);
+        return bind_backing_locked();
+    }
+
+    // The same with device_.deferred_images_mutex already held (the queue hook walks the list under it).
+    bool bind_backing_locked() {
+        if (backing_bound_) return true;
+        if (!bind_image_backing(image_, deferred_requirements_)) {
+            static std::once_flag logged;
+            std::call_once(logged, [] {
+                std::fprintf(stderr,
+                             "[rt] d3d12: a deferred image could not be backed, so the next submission is refused "
+                             "instead of using an image with no memory\n");
+            });
+            return false;
+        }
+        backing_bound_ = true;
+        deferred_ = false;
+        std::erase(device_.deferred_images, this);
+        device_.deferred_waiting.fetch_sub(1, std::memory_order_relaxed);
+        device_.deferred_bound_count.fetch_add(1, std::memory_order_relaxed);
+        device_.deferred_bound_bytes.fetch_add(deferred_requirements_.size, std::memory_order_relaxed);
+        return true;
+    }
+
+    HRESULT create_texture(const Format& format, const std::vector<VkFormat>& castable = {},
+                           bool defer_image_memory = false) {
         auto& vk = device_.context->vk;
         const bool volume = desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
         const UINT depth = volume ? desc_.DepthOrArraySize : 1;
@@ -3797,9 +4081,20 @@ public:
         }
         VkMemoryRequirements requirements{};
         vk.vkGetImageMemoryRequirements(device_.info.device, image_, &requirements);
-        memory_ = device_.allocate(requirements, 0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memory_flags_);
-        if (!memory_ || vk.vkBindImageMemory(device_.info.device, image_, memory_, 0) != VK_SUCCESS)
+        // Deferred backing (PALMETTO_IMAGE_DEFERRED): a title-placed texture is created with no memory and gets it at
+        // its first host write or before the first submission that could use it (docs/streamed_image_backing.md).
+        // Attachments and CPU-visible textures are backed at creation as before, as is one Vulkan requires a
+        // dedicated allocation for.
+        if (defer_image_memory && deferred_image_backing_enabled() && !cpu_visible() && !host_transfer_ &&
+            !(desc_.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) &&
+            !requires_dedicated_allocation(image_)) {
+            deferred_ = true;
+            backing_bound_ = false;
+            deferred_requirements_ = requirements;
+            device_.add_deferred_image(this);
+        } else if (!bind_image_backing(image_, requirements)) {
             return E_OUTOFMEMORY;
+        }
 
         palmetto::ResourceBinding binding{};
         binding.image = image_;
@@ -4175,6 +4470,15 @@ private:
     std::uint64_t buffer_va_ = 0;
     std::uint64_t gpu_va_ = 0;
     bool host_import_ = false;  // memory_ is the caller's pages (create_host_buffer): freed at once, not deferred
+    // Pooled image memory (docs/streamed_image_backing.md): memory_ is null and this range names the block, offset and
+    // size the image is bound into. Released through the deferred queue, so another image cannot reuse the bytes while
+    // a submission that read them is still running.
+    std::shared_ptr<palmetto::ImageMemoryPool<VkDeviceMemory>::Range> pooled_range_;
+    // Deferred backing: an image created with no memory yet, bound by bind_backing_locked() at its first host write or
+    // by the queue hook before the first submission. Guarded by device_.deferred_images_mutex.
+    bool deferred_ = false;
+    bool backing_bound_ = true;
+    VkMemoryRequirements deferred_requirements_{};
     bool reserved_ = false;
     bool sparse_image_ = false;
     bool placed_ = false;
@@ -4322,6 +4626,80 @@ void DeviceState::import_placed_textures() {
         std::lock_guard lock(placed_texture_mutex);
         placed_textures_pending.insert(placed_textures_pending.end(), retry.begin(), retry.end());
     }
+}
+
+// PALMETTO_IMAGE_MEM_POOL=1 (docs/streamed_image_backing.md): the blocks small textures share. The block size follows
+// upstream's measured choice, 64 MiB capped at a sixteenth of a device-local heap, so a 4 GB card's 256 MiB BAR window
+// would still get blocks. The callbacks allocate and free VkDeviceMemory; the pool only decides which ranges.
+void DeviceState::start_image_memory_pool() {
+    if (!image_memory_pool_enabled() || !context || !context->loaded()) return;
+    auto& vk = context->vk;
+    if (!vk.vkAllocateMemory || !vk.vkFreeMemory) return;
+    VkDeviceSize block = VkDeviceSize(64) << 20;
+    for (std::uint32_t i = 0; i < memory.memoryTypeCount && i < VK_MAX_MEMORY_TYPES; ++i) {
+        const VkMemoryType& type = memory.memoryTypes[i];
+        if (!(type.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) || type.heapIndex >= memory.memoryHeapCount)
+            continue;
+        block = std::min(block, memory.memoryHeaps[type.heapIndex].size / 16);
+    }
+    block &= ~VkDeviceSize(0xffff);
+    if (block < (VkDeviceSize(1) << 20)) {
+        std::fprintf(stderr,
+                     "[rt] d3d12: image memory pool off: no device-local heap is big enough for a block (largest "
+                     "candidate %llu KiB)\n",
+                     static_cast<unsigned long long>(block >> 10));
+        return;
+    }
+    pool_block_bytes = block;
+    image_memory_pool = std::make_unique<palmetto::ImageMemoryPool<VkDeviceMemory>>(
+        [this](std::uint32_t type, std::uint64_t bytes) -> VkDeviceMemory {
+            VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            allocate.allocationSize = bytes;
+            allocate.memoryTypeIndex = type;
+            VkDeviceMemory memory = VK_NULL_HANDLE;
+            if (context->vk.vkAllocateMemory(info.device, &allocate, nullptr, &memory) != VK_SUCCESS)
+                return VK_NULL_HANDLE;
+            record_allocation(bytes);
+            pool_blocks_created.fetch_add(1, std::memory_order_relaxed);
+            pool_bytes_created.fetch_add(bytes, std::memory_order_relaxed);
+            return memory;
+        },
+        [this](VkDeviceMemory memory) {
+            if (context) context->vk.vkFreeMemory(info.device, memory, nullptr);
+        });
+    std::fprintf(stderr,
+                 "[rt] d3d12: image memory pool on: blocks of %llu MiB shared by small non-attachment textures; images "
+                 "up to %llu MiB may share one\n",
+                 static_cast<unsigned long long>(block >> 20), static_cast<unsigned long long>(block >> 23));
+}
+
+// The queue's hook (called from VulkanQueue::execute_now before the lists are prepared): every deferred image still
+// waiting for its first write or GPU use gets its memory here. False refuses the submission instead of recording a
+// command that names an image with no memory.
+bool DeviceState::bind_deferred_images() {
+    std::lock_guard lock(deferred_images_mutex);
+    while (!deferred_images.empty()) {
+        const std::size_t before = deferred_images.size();
+        Resource* resource = deferred_images.front();
+        if (!resource->bind_backing_locked()) return false;
+        // The binding takes the image out of the list; an entry that stayed (already bound) would spin here.
+        if (deferred_images.size() == before) {
+            deferred_images.erase(deferred_images.begin());
+            deferred_waiting.fetch_sub(1, std::memory_order_relaxed);
+        }
+    }
+    return true;
+}
+
+void DeviceState::add_deferred_image(Resource* resource) {
+    std::lock_guard lock(deferred_images_mutex);
+    deferred_images.push_back(resource);
+    deferred_waiting.fetch_add(1, std::memory_order_relaxed);
+}
+
+void DeviceState::remove_deferred_image(Resource* resource) {
+    std::lock_guard lock(deferred_images_mutex);
+    if (std::erase(deferred_images, resource)) deferred_waiting.fetch_sub(1, std::memory_order_relaxed);
 }
 
 // DXGI -> Vulkan for vertex attributes, with each element's size for D3D12_APPEND_ALIGNED_ELEMENT.
@@ -7308,6 +7686,10 @@ public:
             if (!state_.image_requirements)
                 state_.image_requirements =
                     reinterpret_cast<PFN_vkGetDeviceImageMemoryRequirements>(get_device(info.device, name));
+        // The dedicated-allocation question the pool must ask before it shares a block with an image (Vulkan 1.1, so
+        // the core name is always there on the devices this layer runs on).
+        state_.image_requirements2 =
+            reinterpret_cast<PFN_vkGetImageMemoryRequirements2>(get_device(info.device, "vkGetImageMemoryRequirements2"));
 
         if (info.physical && info.get_instance_proc) {
             const auto get_props = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
@@ -7374,6 +7756,13 @@ public:
         }
         if (info.buffer_device_address && state_.context->loaded() && !create_arena())
             std::fprintf(stderr, "[rt] d3d12: the GPU address arena could not be created\n");
+        // Pooled and deferred image memory (docs/streamed_image_backing.md): both are off by default. The pool exists
+        // only with PALMETTO_IMAGE_MEM_POOL=1; the binder is registered always so a deferred image is backed before a
+        // submission can use it (a no-op when PALMETTO_IMAGE_DEFERRED is unset and no image was deferred).
+        if (state_.context->loaded()) {
+            state_.start_image_memory_pool();
+            state_.context->set_deferred_image_binder([this] { return state_.bind_deferred_images(); });
+        }
         // A queue refreshes the arena mirrors of the title's console descriptor heaps before each submission
         // (docs/page_address_space.md). Registered even without an arena: a heap created later decides whether it can
         // be mirrored, and refuses draws if it cannot.
@@ -7768,6 +8157,21 @@ public:
             state_.context->drain_deleted_resources(UINT64_MAX);
             state_.context->set_bindless_release(nullptr, nullptr);
             state_.context->set_bindless_current(nullptr);  // the retired generations go with state_.bindless below
+        }
+        // Every range has gone back to its block by the drain above; the blocks go before the device that owns them
+        // (docs/streamed_image_backing.md). A pool left with live ranges would mean a texture outlived the device,
+        // which the child references prevent.
+        if (state_.image_memory_pool) {
+            if (image_mem_trace_enabled()) {
+                const auto stats = state_.image_memory_pool->stats();
+                std::fprintf(stderr,
+                             "[rt] image-mem: pool at shutdown: %llu blocks, %.1f MiB, %llu ranges live (%.1f MiB)\n",
+                             static_cast<unsigned long long>(stats.blocks),
+                             double(stats.block_bytes) / (1024.0 * 1024.0),
+                             static_cast<unsigned long long>(stats.ranges),
+                             double(stats.range_bytes) / (1024.0 * 1024.0));
+            }
+            state_.image_memory_pool.reset();
         }
         state_.staging_queue.reset();  // it uses the context
         if (state_.context && state_.bindless) {
@@ -9599,10 +10003,10 @@ public:
             const D3D12_HEAP_PROPERTIES fallback{D3D12_HEAP_TYPE_DEFAULT};
             const D3D12_RESOURCE_STATES initial = state_for_barrier_layout(layout);
             HRESULT hr = create_committed_validated(nullptr, &fallback, D3D12_HEAP_FLAG_NONE, &desc, initial, nullptr,
-                                                    0, nullptr, riid, out);
+                                                    0, nullptr, riid, out, true);
             if (FAILED(hr) && initial != D3D12_RESOURCE_STATE_COMMON)
                 hr = create_committed_validated(nullptr, &fallback, D3D12_HEAP_FLAG_NONE, &desc,
-                                                D3D12_RESOURCE_STATE_COMMON, nullptr, 0, nullptr, riid, out);
+                                                D3D12_RESOURCE_STATE_COMMON, nullptr, 0, nullptr, riid, out, true);
             // Opt-in (docs/texture_import.md): the title writes its texture bytes into the pages at `address` (in the
             // measured linear mode a row-major CPU copy per subresource), so import them into this image before the
             // first submission that can sample it. Queued here, drained by the queue hook, so the title's writes are
@@ -10967,11 +11371,13 @@ private:
     }
 
     // Validation shared by CreateCommittedResource and CreateCommittedResource3; internal callers pass null `method`
-    // to skip trace recording.
+    // to skip trace recording. `defer_image_memory` is the slot-133 texture path's request to create the stand-in
+    // without memory and back it at first use (docs/streamed_image_backing.md); every other caller backs at creation.
     HRESULT create_committed_validated(const char* method, const D3D12_HEAP_PROPERTIES* heap,
                                        D3D12_HEAP_FLAGS heap_flags, const D3D12_RESOURCE_DESC* desc,
                                        D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear,
-                                       UINT32 castable_count, const DXGI_FORMAT* castable, REFIID riid, void** out) {
+                                       UINT32 castable_count, const DXGI_FORMAT* castable, REFIID riid, void** out,
+                                       bool defer_image_memory = false) {
         const auto finish = [&](HRESULT hr) { return method ? d3d12_trace::result(method, hr) : hr; };
         if (out) *out = nullptr;
         if (!heap || !desc) return finish(E_INVALIDARG);
@@ -10993,7 +11399,8 @@ private:
                      int(desc->Dimension));
             return finish(E_INVALIDARG);
         }
-        return finish(create_committed(heap, heap_flags, desc, state, castable_count, castable, riid, out));
+        return finish(create_committed(heap, heap_flags, desc, state, castable_count, castable, riid, out,
+                                       defer_image_memory));
     }
 
     // Shared by CreateCommittedResource, CreateCommittedResource3 and CreateReservedResource*. A castable-format list
@@ -11002,7 +11409,8 @@ private:
     // runtime.
     HRESULT create_committed(const D3D12_HEAP_PROPERTIES* heap, D3D12_HEAP_FLAGS heap_flags,
                              const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_STATES initial_state,
-                             UINT32 castable_count, const DXGI_FORMAT* castable, REFIID riid, void** out) {
+                             UINT32 castable_count, const DXGI_FORMAT* castable, REFIID riid, void** out,
+                             bool defer_image_memory = false) {
         if (out) *out = nullptr;
         if (!heap || !desc) return E_INVALIDARG;
         if (castable_count && castable && desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
@@ -11047,7 +11455,7 @@ private:
             } else {
                 std::vector<VkFormat> cast_formats;
                 hr = castable_view_formats(format, castable_count, castable, cast_formats);
-                if (SUCCEEDED(hr)) hr = resource->create_texture(format, cast_formats);
+                if (SUCCEEDED(hr)) hr = resource->create_texture(format, cast_formats, defer_image_memory);
                 if (SUCCEEDED(hr)) resource->keep_castable_formats(castable_count, castable);
             }
         }
