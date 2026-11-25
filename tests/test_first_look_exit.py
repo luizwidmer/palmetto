@@ -46,9 +46,11 @@ class FirstLookExitTest(unittest.TestCase):
             env["PSModulePath"] = str(Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/Modules")
             subprocess.run([*POWERSHELL, "-Command", compile_loader], cwd=scripts, env=env, check=True, timeout=30)
             fixture = scripts / "palmetto.exe"
+            # The stub stands in for tooling/scripts/build_runtime.ps1: the checkout root is two levels above its
+            # own folder now that the script lives in tooling/scripts/.
             (scripts / "build_runtime.ps1").write_text(
-                'Copy-Item "$PSScriptRoot/palmetto.exe" "$PSScriptRoot/../port/build/palmetto.exe"\n'
-                'New-Item -ItemType File -Force "$PSScriptRoot/../port/build/palmetto_tls_host.dll" | Out-Null\n'
+                'Copy-Item "$PSScriptRoot/palmetto.exe" "$PSScriptRoot/../../port/build/palmetto.exe"\n'
+                'New-Item -ItemType File -Force "$PSScriptRoot/../../port/build/palmetto_tls_host.dll" | Out-Null\n'
                 'Set-Content "$PSScriptRoot/built.txt" built\n', encoding="utf-8", newline="\n",
             )
             source = root / "port" / "src" / "loader.cpp"

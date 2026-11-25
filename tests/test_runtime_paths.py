@@ -167,9 +167,10 @@ def needed(root):
         hit = entry(name)
         if hit:
             found.setdefault(hit, f"run by {WORKFLOW}")
-    runtime = tracked(root, "runtime")
-    cmake = [f for f in runtime if f.endswith(".cmake") or f.split("/")[-1] == "CMakeLists.txt"]
-    python = [f for f in runtime if f.endswith(".py")] + sorted(set(SCRIPT_REF.findall(jobs)))
+    # The CMake and Python sources the jobs read live in port/ (runtime/ was renamed by the restructure).
+    port_tree = tracked(root, "port")
+    cmake = [f for f in port_tree if f.endswith(".cmake") or f.split("/")[-1] == "CMakeLists.txt"]
+    python = [f for f in port_tree if f.endswith(".py")] + sorted(set(SCRIPT_REF.findall(jobs)))
     for seed in cmake:
         for name in spelled(strip_hash_comments(read(root, seed))):
             hit = entry(name)

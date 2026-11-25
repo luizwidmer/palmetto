@@ -18,7 +18,9 @@ import struct
 import sys
 from collections import Counter
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# This file is tooling/scripts/audit_shader4_regs.py: three levels up is the checkout root (it was tools/ before the
+# restructure, so this used to be two levels up).
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "tooling"))
 from report_paths import same_report_path  # noqa: E402
 import shader_ir  # noqa: E402
@@ -190,7 +192,10 @@ def rbw_registers(insns):
         args = ins["args"]
         if not args:
             continue
-        mods = ins.get("extensions", ())
+        # shader_ir.parse_line stores the modifier list under "mods" (tests/test_shader_ir.py); reading an
+        # "extensions" key here silently saw no modifiers, so atomics with glc and direct-to-LDS loads were
+        # classified as if the modifier were absent.
+        mods = ins.get("mods", ())
         is_gf_atomic = op.startswith(("global_atomic_", "flat_atomic_"))
         is_bi_atomic = op.startswith(("buffer_atomic_", "image_atomic_"))
         is_no_dest = (

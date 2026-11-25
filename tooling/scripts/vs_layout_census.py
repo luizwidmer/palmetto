@@ -25,7 +25,8 @@ import re
 import sys
 from collections import Counter, defaultdict
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# This file is tooling/scripts/vs_layout_census.py: three levels up is the checkout root (two when it was in scripts/).
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "tooling"))
 sys.path.insert(0, os.path.join(ROOT, "tooling/scripts"))
 import fssm_unpack  # noqa: E402

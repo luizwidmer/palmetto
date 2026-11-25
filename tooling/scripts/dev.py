@@ -10,7 +10,8 @@ import sys
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+# This file is tooling/scripts/dev.py: three levels up is the checkout root (two when it was in scripts/).
+ROOT = Path(__file__).resolve().parents[2]
 BOOT_TRACE = "tooling/boot_trace.py"
 GUEST_SCENE = "tooling/scripts/run_guest_scene.py"
 TOOLS = (
@@ -109,7 +110,7 @@ def main() -> int:
     else:
         sys.stdout.reconfigure(encoding="utf-8")
         print("Paths and help commands are relative to the Palmetto checkout root.")
-        for tool in result["tooling"]:
+        for tool in result["tools"]:
             status = "present" if tool["present"] else "missing"
             print(f"{tool['id']}: {tool['path']} ({status})")
             if tool["help_argv"]:
@@ -122,4 +123,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:  # a redirected stdout is strict ANSI code page under -I; write '?' for what it cannot encode
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
     raise SystemExit(main())

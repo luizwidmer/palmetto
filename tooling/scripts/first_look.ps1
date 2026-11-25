@@ -5,7 +5,9 @@ param(
     [string]$GameDir
 )
 $ErrorActionPreference = "Stop"
-$root = Split-Path $PSScriptRoot -Parent
+# This script is tooling/scripts/first_look.ps1: two levels above its folder is the checkout root (one when it was
+# in scripts/).
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $Exe = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Exe)
 if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "$Exe not found" }
 $image = Get-Item -LiteralPath $Exe

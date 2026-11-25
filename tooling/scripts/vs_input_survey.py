@@ -23,7 +23,8 @@ import re
 import sys
 from collections import Counter
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# This file is tooling/scripts/vs_input_survey.py: three levels up is the checkout root (two when it was in scripts/).
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import shader_ir  # noqa: E402
 from shader_meta import SGPR_RMW  # noqa: E402
@@ -69,7 +70,10 @@ def read_before_write(insns):
         op, args = base_op(ins["op"]), ins["args"]
         if not args:
             continue
-        mods = ins.get("extensions", ())
+        # shader_ir.parse_line stores the modifier list under "mods" (tests/test_shader_ir.py); reading an
+        # "extensions" key here silently saw no modifiers, so atomics with glc were classified as if the modifier
+        # were absent.
+        mods = ins.get("mods", ())
         is_gf_atomic = op.startswith(("global_atomic_", "flat_atomic_"))
         is_bi_atomic = op.startswith(("buffer_atomic_", "image_atomic_"))
         is_ds_no_dest = op.startswith("ds_") and not op.startswith(DS_RETURNING) and "_rtn" not in op

@@ -26,7 +26,9 @@ import sys
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tooling"))
+# This file is tooling/scripts/shader_stats.py: three levels up is the checkout root (two when it was in scripts/).
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "tooling"))
 import shader_ir  # noqa: E402
 
 # (row key, RADV/ACO statistic name) of the statistics read as numbers; spills combine SPILLS.

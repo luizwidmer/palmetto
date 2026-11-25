@@ -23,7 +23,8 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# This file is tooling/scripts/bench_wave64.py: three levels up is the checkout root (two when it was in scripts/).
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SHADER_DIR = os.path.join(ROOT, "port", "test", "shaders")
 BUILD_PY = os.path.join(SHADER_DIR, "build.py")
 sys.path.insert(0, SHADER_DIR)

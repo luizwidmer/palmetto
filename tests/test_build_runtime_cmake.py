@@ -51,7 +51,9 @@ class CMakeBatchTest(unittest.TestCase):
         branch = text[start:end] + "}\n"
         writer = text[text.index('$bat = Join-Path $out "_build.cmd"'):]
         root = folder / "checkout"
-        src, out = root / "runtime", root / "port/build"
+        # The CMake source tree moved from runtime/ to port/ and the build tree is port/build, as in
+        # tooling/scripts/build_runtime.ps1 ($src = Join-Path $root "port", $out = Join-Path $src "build").
+        src, out = root / "port", root / "port/build"
         out.mkdir(parents=True)
         tools = folder / "tools ^ & 東京"
         tools.mkdir()
@@ -69,7 +71,8 @@ class CMakeBatchTest(unittest.TestCase):
         ninja = tools / "ninja.exe"
         command = ("$ErrorActionPreference = 'Stop'\n"
                    "$root = $env:PALMETTO_CMAKE_ROOT\n"
-                   "$src = Join-Path $root 'runtime'\n"
+                   # Mirrors the real script's source tree, which moved from runtime/ to port/.
+                   "$src = Join-Path $root 'port'\n"
                    "$out = Join-Path $src 'build'\n"
                    "$installer = $env:PALMETTO_CMAKE_INSTALLER\n"
                    "$vcvars = Join-Path $installer 'vcvars64.bat'\n"

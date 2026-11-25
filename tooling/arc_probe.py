@@ -69,8 +69,9 @@ def probe(path: str) -> dict:
     with open(path, "rb") as f:
         head = f.read(0x10000)
     magic = head[:4]
-    # Little-endian 'ARCn' is stored as bytes 'nFPR'.
-    version = magic[::-1].decode("latin-1") if magic[1:] == b"FPR" else None
+    # Little-endian 'ARCn' is stored as the bytes 'nFPR'; the container is named ARC4/ARC9 (the tree's generic
+    # name for the console archive format), not the old RPFn spelling the reversed bytes would give.
+    version = "ARC" + magic[0:1].decode("latin-1") if magic[1:] == b"FPR" else None
     words = list(struct.unpack_from("<4I", head, 4)) if len(head) >= 20 else []
     body = head[16:]
     return {

@@ -1,7 +1,9 @@
 # Carves every .arc in the game folder into <Out>\<archive path with _>, smallest first (research tool; the
 # build itself doesn't need it). Skips archives that already have an index.json. Summary: <Out>\coverage.json
 param([Parameter(Mandatory)][string]$Game, [Parameter(Mandatory)][string]$Out)
-$root = Split-Path $PSScriptRoot -Parent
+# This script is tooling/scripts/carve_all.ps1: two levels above its folder is the checkout root (one when it was
+# in scripts/).
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $tool = Join-Path $root "tooling\arc9_carve.py"
 # -Game may be relative or end in a separator; archive names are cut from a separator-ended prefix.
 $Game = (Resolve-Path -LiteralPath $Game).ProviderPath

@@ -32,7 +32,9 @@ import sys
 import tempfile
 import time
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# This file is tooling/scripts/run_wine_tests.py: three levels up is the checkout root (two when it was in scripts/).
+# It is only the default --root; the workflow passes --root explicitly.
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _make_parent(path: str) -> None:

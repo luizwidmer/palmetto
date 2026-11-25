@@ -3,11 +3,13 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
-$root = Split-Path $PSScriptRoot -Parent
-$runtime = Join-Path $root "runtime"
-$build = Join-Path $runtime "build\tier3-reference"
+# This script is tooling/scripts/run_conservative_tier3_reference.ps1: two levels above its folder is the checkout
+# root (one when it was in scripts/).
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$port = Join-Path $root "port"
+$build = Join-Path $port "build\tier3-reference"
 
-& cmake -S $runtime -B $build -G "Visual Studio 17 2022" -A x64 -DPALMETTO_VULKAN_HEADERS_FETCH=ON
+& cmake -S $port -B $build -G "Visual Studio 17 2022" -A x64 -DPALMETTO_VULKAN_HEADERS_FETCH=ON
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed ($LASTEXITCODE)." }
 
 & cmake --build $build --config RelWithDebInfo --target d3d12_conservative_tier3_reference_test

@@ -65,8 +65,11 @@ class CMakeListsUsesTheModuleTest(unittest.TestCase):
         self.assertNotIn("message(STATUS", m.group(1))
 
     def test_ci_requires_vulkan(self):
-        ci = (ROOT / ".github" / "workflows" / "runtime.yml").read_text(encoding="utf-8")
-        configures = re.findall(r"cmake -S runtime -B port/build.*?(?=\n\s*- name:)", ci, re.S)
+        # The runtime workflow is .github/workflows/port.yml now (runtime.yml was removed), and the checkout's
+        # CMake source tree is port/ (runtime/ was renamed). Measured today: port.yml has three configure steps,
+        # each passing -DPALMETTO_REQUIRE_VULKAN=ON.
+        ci = (ROOT / ".github" / "workflows" / "port.yml").read_text(encoding="utf-8")
+        configures = re.findall(r"cmake -S port -B port/build.*?(?=\n\s*- name:)", ci, re.S)
         self.assertGreaterEqual(len(configures), 2)
         for c in configures:
             self.assertIn("-DPALMETTO_REQUIRE_VULKAN=ON", c)

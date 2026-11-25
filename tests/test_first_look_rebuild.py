@@ -41,7 +41,9 @@ EXE_CHECKLIST_STUB = "import sys\n"
 BUILD_STUB = r"""
 Set-Content -LiteralPath (Join-Path $PSScriptRoot 'built.txt') -Value 'built'
 if ($env:PALMETTO_TEST_INCOMPLETE_RUNTIME -ne '1') {
-    $build = Join-Path (Split-Path $PSScriptRoot -Parent) 'port\build'
+    # This stub stands in for tooling/scripts/build_runtime.ps1: the checkout root is two levels above the
+    # script's folder now that scripts/ moved under tooling/.
+    $build = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'port\build'
     foreach ($name in 'palmetto.exe', 'palmetto_tls_host.dll') {
         New-Item -ItemType File -Path (Join-Path $build $name) -Force | Out-Null
     }

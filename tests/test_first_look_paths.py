@@ -61,17 +61,18 @@ public class Loader { public static void Main(string[] args) { System.Console.Wr
             self.assertIn("fake_lib.dll", (out / "shim-todo.txt").read_text())
             self.assertIn("the called ones come first", (out / "checklist.md").read_text("utf-8"))
 
-            # A source update in the bracketed checkout must still trigger the rebuild.
+            # A source update in the bracketed checkout must still trigger the rebuild. The stub replaces
+            # tooling/scripts/build_runtime.ps1, so its outputs are two levels above its own folder.
             source_dir = repo / "port/src"
             source_dir.mkdir()
             (source_dir / "main.cpp").touch()
             older = (source_dir / "main.cpp").stat().st_mtime - 3600
             os.utime(loader, (older, older))
             (repo / "tooling/scripts/build_runtime.ps1").write_text(
-                'Copy-Item -LiteralPath "$PSScriptRoot/../port/build/Release/palmetto.exe" '
-                '-Destination "$PSScriptRoot/../port/build/palmetto.exe"\n'
-                'Copy-Item -LiteralPath "$PSScriptRoot/../port/build/Release/palmetto_tls_host.dll" '
-                '-Destination "$PSScriptRoot/../port/build/palmetto_tls_host.dll"\n'
+                'Copy-Item -LiteralPath "$PSScriptRoot/../../port/build/Release/palmetto.exe" '
+                '-Destination "$PSScriptRoot/../../port/build/palmetto.exe"\n'
+                'Copy-Item -LiteralPath "$PSScriptRoot/../../port/build/Release/palmetto_tls_host.dll" '
+                '-Destination "$PSScriptRoot/../../port/build/palmetto_tls_host.dll"\n'
                 'Set-Content -LiteralPath (Join-Path $PSScriptRoot "built.txt") -Value built\n',
                 encoding="utf-8", newline="\n",
             )

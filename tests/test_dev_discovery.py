@@ -61,17 +61,21 @@ class DiscoveryTests(unittest.TestCase):
                     "import sys\nprint(sys.argv[1:])\n", encoding="utf-8", newline="\n",
                 )
                 cleanup.callback(producer.unlink)
-                # A namesake file in the caller's directory must not count.
+                # A namesake file in the caller's directory must not count. These producer paths are two
+                # directories deep now that scripts/ moved under tooling/, so the namesake's parent needs
+                # parents=True.
                 decoy = self.cwd / missing_path
-                decoy.parent.mkdir(exist_ok=True)
+                decoy.parent.mkdir(parents=True, exist_ok=True)
                 decoy.touch()
                 result = self.invoke("discover", "--json")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stderr, b"")
                 inventory = json.loads(result.stdout)
                 self.assertEqual(inventory["schema_version"], 1)
-                tools = {entry["id"]: entry for entry in inventory["tooling"]}
-                self.assertEqual(len(tools), len(inventory["tooling"]))
+                # The documented JSON schema (docs/dev-tools.md, "JSON output") names the list `tools`, which is
+                # what dev.py emits; `tooling` was the key the old test guessed at.
+                tools = {entry["id"]: entry for entry in inventory["tools"]}
+                self.assertEqual(len(tools), len(inventory["tools"]))
                 found, missing = tools[tool_id], tools[missing_id]
                 self.assertIs(found["present"], True)
                 self.assertEqual(found["path"], present_path)

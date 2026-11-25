@@ -17,7 +17,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# This file is tooling/scripts/run_gpu_tests.py: three levels up is the checkout root (two when it was in scripts/).
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SHADER_DIR = os.path.join(ROOT, "port", "test", "shaders")
 
 TRANSLATOR = os.path.join(ROOT, "tooling", "rdna2spirv.py")
@@ -778,7 +779,7 @@ def main() -> int:
             details.append(f"  {directory}: {', '.join(missing)}")
         sys.exit("Required GPU test programs were not found together in one build directory.\n"
                  "Missing files by searched directory:\n" + "\n".join(details) + "\n"
-                 "Build them with cmake -S runtime -B port/build, then cmake --build port/build.\n"
+                 "Build them with cmake -S port -B port/build, then cmake --build port/build.\n"
                  "For Visual Studio, use: cmake --build <build-dir> --config RelWithDebInfo "
                  "--target vk_compute_test vk_store_test vk_harness.\n"
                  "CMake only builds them when it finds Vulkan. If it printed \"Vulkan SDK not found\", install the "

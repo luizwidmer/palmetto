@@ -20,6 +20,7 @@ on:
       - ".gitattributes"
       - "tooling/hw_oracle/**"
       - "tooling/bary_fallback_gs.py"
+      - "tooling/boot_trace.py"
       - "tooling/cf_diff.py"
       - "tooling/cf_ref.py"
       - "tooling/cfg_structure.py"
@@ -34,7 +35,11 @@ on:
       - "tooling/lane_masks.py"
       - "tooling/mc_command.py"
       - "tooling/mesh_compute_vs.py"
+      - "tooling/pal_stages.py"
+      - "tooling/rdna2_decode.py"
+      - "tooling/rdna2_isa_tables.py"
       - "tooling/rdna2spirv.py"
+      - "tooling/replace_retry.py"
       - "tooling/report_paths.py"
       - "tooling/shader_carve.py"
       - "tooling/shader_disasm.py"
@@ -58,6 +63,7 @@ on:
       - ".gitattributes"
       - "tooling/hw_oracle/**"
       - "tooling/bary_fallback_gs.py"
+      - "tooling/boot_trace.py"
       - "tooling/cf_diff.py"
       - "tooling/cf_ref.py"
       - "tooling/cfg_structure.py"
@@ -72,7 +78,11 @@ on:
       - "tooling/lane_masks.py"
       - "tooling/mc_command.py"
       - "tooling/mesh_compute_vs.py"
+      - "tooling/pal_stages.py"
+      - "tooling/rdna2_decode.py"
+      - "tooling/rdna2_isa_tables.py"
       - "tooling/rdna2spirv.py"
+      - "tooling/replace_retry.py"
       - "tooling/report_paths.py"
       - "tooling/shader_carve.py"
       - "tooling/shader_disasm.py"
@@ -237,7 +247,7 @@ jobs:
         env:
           VULKAN_SDK: ${{ github.workspace }}/.vulkan-headers
         run: >-
-          cmake -S runtime -B port/build -G Ninja
+          cmake -S port -B port/build -G Ninja
           -DCMAKE_BUILD_TYPE=RelWithDebInfo
           -DPALMETTO_D3D12_SHIM_TESTS=ON
           -DPALMETTO_REQUIRE_VULKAN=ON
@@ -402,7 +412,7 @@ jobs:
         env:
           VULKAN_SDK: ${{ github.workspace }}/.vulkan-headers
         run: >-
-          cmake -S runtime -B port/build -G Ninja
+          cmake -S port -B port/build -G Ninja
           -DCMAKE_BUILD_TYPE=RelWithDebInfo
           -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           -DPALMETTO_REQUIRE_VULKAN=ON
@@ -526,7 +536,7 @@ jobs:
           grep -q 'driverID *= DRIVER_ID_MOLTENVK' "$RUNNER_TEMP/vulkaninfo.txt"
       - name: Configure
         run: >-
-          cmake -S runtime -B port/build -G Ninja
+          cmake -S port -B port/build -G Ninja
           -DCMAKE_BUILD_TYPE=RelWithDebInfo
           -DVulkan_INCLUDE_DIR="$(brew --prefix)/include"
           -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
