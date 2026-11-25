@@ -798,3 +798,157 @@ thread starts and no title read happens unless the variable names a second.
 
 Same attribution and policy as section 10: this slice was implemented from this project's own measurements, no upstream
 code or behaviour claim is used, and no git writes were made by this slice.
+
+## 14. The out-list post (follow-up): job 97's item is posted on this tree, and the frozen claim moves to a running stage job
+
+**Status: measured; section 13's missing post does not reproduce on the current tree.** A cdb software-breakpoint
+session on the post and pump RVAs is a measured negative (no breakpoint reported in two 130 s boots), so the question
+was answered with the runtime's own in-process poke probe instead: job 97 is dispatched once, appended to the pump's
+out-list, and its item is pushed into the lane-0/class-0 task ring **by the post `FUN_144DA40E0` itself** (return
+address `0x144DA4161`). Job 97 then runs and completes, and its 21-bit claim is released. The frozen state later in the
+same boot holds a **different** claim, job id `109`: it took the dispatcher's selected branch, its item was never
+posted, its generic runner set `job+0xF0 = 4` before calling the work function and the job is still inside that work
+function at +46 s and +85 s. No runtime answer is missing in either path; the next measurement is job 109's stage
+function and its runner stack, not a wake.
+
+### 14.1 What ran
+
+| | |
+|---|---|
+| Tree | `D:\leonida` at `77e44e0ab` with other slices' in-flight files present (`port/shims/gameinput.cpp`, `port/shims/xgameruntime.cpp`, `port/shims/xgameruntime_gamesave.cpp`, `port/shims/xgameruntime_user.cpp`, `port/src/vulkan_backend.h`, `port/src/vulkan_replay.h`, `port/CMakeLists.txt`, four test files, untracked shim/upscale/persistent-store headers and three new docs pages); this follow-up adds no source change (its cdb command file, poke driver and parsers live outside the repository in `D:\leonida-work\job97\`) |
+| Binary | `port\build\palmetto.exe` SHA-256 `731934FD492D31E14C59C5A443D14DDCA7918C6EC287CFAF0287290AF07EA52E`, mtime 18:03:04 (the shared tree's build after the last commit) |
+| Boots | five 130 s boots under the shared boot lock, one at a time: `boot-c1` (cdb attach at 3.5 s, then the session's own quit ended the process at 4.5 s - not used as evidence), `boot-c2` (cdb attach at 3.5 s), `boot-c3` (cdb attach at 11 s), `boot-p1` (in-process poke probe; the measurement) and `boot-p2` (control: same binary and environment, no poke probe) |
+| Harness | `tooling/boot_report.py --timeout 130`, captures outside the repository in `D:\leonida-work\job97\` (`boot-c1` .. `boot-p2`) |
+| Environment | `PALMETTO_SHADERS`, `PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`, `PALMETTO_STATE_TRACE=2,130`; the probe boots add `PALMETTO_STAGE2_READY=20`, `boot-p1` adds `PALMETTO_POKE_LOG=4E53FE3,4E54020,4E54001,4DA41A0` |
+| cdb session | `cdb -p <palmetto pid> -cf probe-job97.cdb -logo cdb-cN.log`, `sxd av` and `sxd *` before continuing, 16 software breakpoints (table 14.2), run to the harness's 130 s kill |
+| Poke sites | the runtime's `PALMETTO_POKE_LOG` writes one `int3` per named RVA, logs `rax/rbx/rcx/rdx/r8/r9/rdi/rsi/r12`, the eight stack words and the read window at six registers, restores the byte and re-arms (the `skip_int3` path in `port/shims/startup_trace.h`); no debugger is attached in that boot |
+| Probe samples | ready-set probe dumps at +39.957 s, +46.001 s and +85.582 s in `boot-p1`: queue/ready/aggregate/planes, per-job fields, the registered-job table and the task-pool streams |
+
+### 14.2 The cdb breakpoint session: a measured negative about the debugger
+
+The session defined software breakpoints at the post and the pump's out-list block plus their neighbours. Every one of
+them failed to report in both attached boots (`boot-c2`: 130.2 s ALIVE, 0 exceptions, 13,680 D3D12 calls; `boot-c3`:
+130.1 s ALIVE, 0 exceptions, 15,824 calls), while the same boots' state trace shows the title reaching and holding
+stage 2 (14.6).
+
+| RVA | what it would show |
+|---|---|
+| `0x21B8BDF` | section 2.1's wait call site (the one stop-style breakpoint that worked in section 12.4) |
+| `0x560B0` | pump entry: run state, queue, runnable lists, selection pointer and thresholds |
+| `0x4E53470` | run item: release-job field `+0xA88`, packet lists, out-list count |
+| `0x4E53EF0` | ready dispatcher: ready bits, aggregate, selection arguments |
+| `0x4E53FE3` | per-job dispatch candidate: id `rax`, job `rbx`, branch inputs |
+| `0x4E54020` / `0x4E54001` | out-list append / selected-instead-of-appended branch |
+| `0x4DA40E0` / `0x4DA41A0` | task-pool post entry / class-ring push |
+| `0x4E53AD0` / `0x55AD980` | claim release / release-job setter |
+| `0x63CD0` / `0x4EAA040` | generic job runner / executor thunk |
+| `0x4EACC70` | per-frame pump thunk (frame-count sampler) |
+
+- Address evidence: `dc 140000000+0x4E53FE3` at the session start prints the unmodified dispatcher bytes (`4D 85 C0 74`,
+  `TEST R8,R8` / `JZ +0x74`), and cdb logged no insertion failure (the only insertion errors in `boot-c1` were the
+  duplicated-base addresses of that aborted attempt). cdb inserts software breakpoints at the first continue, so the
+  front-of-session byte read alone does not prove insertion; the **absence of any hit over 130 s** is the measurement.
+- The one cdb pattern that has reported on this title is section 12.4's stop-style session (`boot-c4a`: a single
+  breakpoint at `0x21B8BDF` whose command does not continue); the plausible reason this session's breakpoints were
+  consumed before dbgeng is the runtime's `PALMETTO_SKIP_INT3` handler, which treats an `int3` in title code as a
+  console trap and steps over it (`skip_int3` in `port/shims/startup_trace.h`). That is a named hypothesis and the next
+  cdb falsifier (a single stop-style breakpoint in a fresh boot), not a proven mechanism.
+- Limit: this is a negative about the debugger configuration, not about title execution - the boot's own trace and
+  probe output show the title ran and reached stage 2 in the same boots. `0x4DA40E0`'s hit question was therefore
+  answered in-process (14.3).
+
+### 14.3 The in-process poke probe: job 97's item enters the lane-0/class-0 ring
+
+`boot-p1` poked four title RVAs and the runtime logged 121,897 hits, all four sites live:
+
+| site RVA | hits | registers read | result for job 97 |
+|---|---|---|---|
+| `0x4E53FE3` | 218 | `rax` = dispatched job id, `rbx` = job, `rdx` = out-list, `r8` = selection slot | id `97` dispatched once: `rax 0x61` (97), job `0x2912fb42460` (hash `0x7325b9`, lane 0, class 0, work `image+0x263CDF0` - the job section 13 named) |
+| `0x4E54020` | 189 | `rbx` = job, `rdx` = out-list | job 97 **appended once** to the pump's out-list (out-list capacity `0x100` read at `rdx`), in the state-trace interval at 40.0 s |
+| `0x4E54001` | 29 | `rbx` = job, `r8` = selection slot | job 97 **not selected**; the selected ids were 69, 76, 77, 90, 91, 95, 96, 98, 100, 103, 104, 109, 111, 112, 145, 147, 149, 161, 164, 167, 187, 197, 201, 203, 213, 214, 215, 221, 227 |
+| `0x4DA41A0` | 121,461 | `rcx` = class ring, `rdx` = item, stack word 0 = return address | job 97's item `job+0x68 = 0x2912fb424c8` **pushed once**, into ring `0x29127c66c80` - the lane-0 stream `image+0x71BFD00` ring (the ready probe's "pool lane 0" ring) - from return address `0x144DA4161`, i.e. inside the post `FUN_144DA40E0` after its push call at `0x4DA415C` |
+
+The pump's lane filter did not drop it: the item's lane byte `+0xB` is 0 and class `+0xC` is 0, so the lane-0 batch
+built by the out-list block (`0x1400566E2..0x140056713`) contains it. **This is the exact post section 13 named as
+missing, and it happened.** Later in the same boot job 97's probe `cand` line reads `e0 0 f0 0` (idle, scheduler state
+reset), its 21-bit mask is absent from the aggregate (`xorAggr over 1 under 1`), and the aggregate at +46 s belongs to
+another job: the item ran and the claim was released.
+
+### 14.4 The frozen state: the claim is job 109, inside its work function
+
+The ready probe's three samples in `boot-p1`:
+
+| sample | `tracker+0xB0` pending | ready bitmask `+0x1870` | aggregate holder | selected job state |
+|---|---|---|---|---|
+| wait (+39.957 s) | `0x84` (132) | 1 id (`152`), flags `+0x1850 = 0x1` | 23 bits, not yet one job's mask | graph still executing |
+| steady (+46.001 s) | `0x68` (104) | 0 ids | **id `109`** (mask exactly the aggregate) | job 97 `f0 0` (idle); job 109 `f0 4` |
+| steady2 (+85.582 s) | `0x68` (104) | 0 ids | id `109` (same mask) | frozen |
+
+Job 109's holder line: hash `0xa599b5cb`, item exec `image+0x4EAA040`, children 0, lane 0, class 0, weight 16,
+`e0 0 f0 4 f4 3 f5 0 f7 0 f8 0`; its work function is `image+0x95EB60`, the generic stage invoker of section 13's
+table. Its claim mask is the aggregate, 21 bits: ids 81, 83, 88, 91, 92, 94, 96, 97, 100, 101, 133, 142, 143, 144,
+151, 152, 154, 162, 172, 180, 239.
+
+The poke trace names how the claim was taken: job 109 is in the dispatch site's 218 hits (`rax 0x6D`, job
+`0x2912fb70a70`) and in the **selected** site's hits (not the append site), and no push of its item appears. The
+dispatcher's append-or-select decision is `append` unless the selection slot is non-null and empty, the job's class
+byte `+0x74` is at least `param_4` and its lane byte `+0x73` equals `param_5`; the pump's caller supplies those
+thresholds (`FUN_1400560B0(param_1, param_2, param_3, param_4)`), and a selected job is returned in the caller's slot
+to be run inline. Job 109 lane 0, class 0 matched such a caller: it is inside the generic runner
+`FUN_140063CD0`, which writes `job+0xF0 = 4` immediately before calling the work function and replaces it with 3 when
+that returns. `f0 4` at +46 s and at +85 s therefore means **job 109's work function has not returned**; the claim is a
+legitimately held claim, not a lost one, and the stall is the stage function it calls (`*(job)`) not finishing.
+
+### 14.5 Runtime-dependency verdict (this section)
+
+Unchanged for the post chain: job 97's post, ring push and release are title code and all happened; no OS call on that
+path can be the cause. The new frozen claim is also title-side: the queue, the ready set, the claim masks and the
+counters have no runtime counterpart, and the job that holds it is inside its own work function. Nothing in either
+measurement asks the runtime for a missing answer; no fix is proposed, and stage 3 is still never requested (state word
+`init 2`, `loading 1`, machine `current 2 / next 2` to the kill in every boot).
+
+### 14.6 Boot numbers
+
+| boot | debugger | verdict | D3D12 calls | stage transitions | stall state |
+|---|---|---|---|---|---|
+| `boot-c1` | cdb attach 3.5 s | killed at 4.5 s by the session's own `q` (aborted attempt) | 1,182 | none | not used |
+| `boot-c2` | cdb attach 3.5 s | ALIVE 130.2 s, 0 exceptions, 130 s kill; 0 breakpoint hits | 13,680 | init 2 at 35.6 s, loading 1 at 53.8 s, machine 2/2 to the kill | not sampled (no in-process probe; cdb did not report) |
+| `boot-c3` | cdb attach 11 s | ALIVE 130.1 s, 0 exceptions, 130 s kill; 0 breakpoint hits | 15,824 | init 2 and loading 1 at 42.5 s, machine 2/2 to the kill | not sampled |
+| `boot-p1` | none (poke probe) | ALIVE 130.3 s, 0 exceptions, 130 s kill | 237,280 | init 1 at 4.0 s; init 2 and loading 1 at 30.0 s; machine 2/2 to the kill; no stage-3 request | pending `0x84` -> `0x68` (104) frozen from +46 s; ready ids 0; aggregate = job 109's 21-bit mask |
+| `boot-p2` | none (control, no poke) | [control result pending at the time of writing] | | | |
+
+No frame capture was made in these boots (measurement boots, not a fix A/B pair), so no non-black frame is claimed.
+
+### 14.7 Tests and gates (this section)
+
+This section's runtime change is none: both diagnostics it uses already exist on the default path and are opt-in
+(`PALMETTO_POKE_LOG`, `PALMETTO_STAGE2_READY`); with them unset the boot is unchanged.
+
+| gate | result |
+|---|---|
+| `_setup\build_gta6rt.cmd` | `PALMETTO_OK` (`ninja: no work to do.` - the gate build of this tree is the measured binary) |
+| `_setup\build_tests.cmd` | `TESTS_BUILT` |
+| slice test | none added: no behaviour change and no source change; the measurement uses the existing in-process diagnostics (section 12's precedent) |
+| test subset (`port/build`) | `frame_dump_test`, `unimplemented_policy_test`, `xbox_present_test`, `xs_proxy_mock_test`, `graphics_record_test`, `graphics_pso_test`, `buffer_va_index_test`, `dstorage_test` and `xapu_chad_test` all exit 0 |
+| docs checks (`tests/test_docs_*.py`, run with the session's `GIT_CONFIG_*` variables cleared) | ten pass (`links`, `list_items`, `table_rows`, `table_ids`, `repo_paths`, `encoding`, `design_rows`, `repeated_lines`, `pr_template`, `python_deps`); `test_docs_cli_flags` fails on `--interval` rows in `docs/frame_first_light.md:318`, `docs/memory_growth.md:265`, `docs/raster_state.md:212` and `docs/slot70_publication.md:234`, and `test_docs_env_vars` on `PALMETTO_PERSIST_PROFILE` (`port/shims/xgameruntime.cpp:667`), all from other slices' in-flight changes, none from this page |
+| default path | `PALMETTO_POKE_LOG` and `PALMETTO_STAGE2_READY` unset: no int3 poke, no probe thread and no extra read |
+
+### 14.8 Limits (this section)
+
+- The poke probe logs four fixed sites; the job ids it names come from the dispatcher's own `rax`, and the appended /
+  selected / pushed attribution is by job pointer. The stack word 0 of a hit is the caller's return address, which is
+  how the post caller was identified; no other frame of that caller is read.
+- The frozen claim is job 109; its stage function (`*(job)`) and the thread that runs it are **not** named here. The
+  next measurement is one 130 s boot with cdb all-thread dumps (dumps work even though breakpoints did not report) or a
+  poke on `image+0x95EB60` to recover the stage function and the runner stack at the freeze.
+- The tree is a moving target: the measured binary was built by the shared tree after the last commit and carries the
+  other slices' in-flight shim changes, so the graph's progress differs from section 13 (104 of 249 pending and a
+  different frozen holder, versus 115 and job 97). `boot-p2` is the control for this section: same binary and
+  environment without the poke probe, to separate a tree shift from a probe-timing shift.
+- The cdb negative is about the debugger configuration (14.2), not about title execution.
+- No game data: RVAs, hashes, ids, field offsets, counts, handles and pointers-as-pointers only.
+
+### 14.9 Attribution (this section)
+
+Same attribution and policy as section 10: this follow-up was implemented from this project's own measurements, no
+upstream code or behaviour claim is used, and no git writes were made by this slice.
