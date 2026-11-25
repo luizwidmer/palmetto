@@ -1130,6 +1130,7 @@ struct DeviceState {
         VkExtent2D extent{};
         palmetto::ResourceId resource = 0;
         std::uint64_t title_va = 0;
+        std::uint64_t title_bytes = 0;  // docs/texture_source.md: the placed span the page-writer watch watches
     };
     std::unique_ptr<palmetto::BindlessSet> bindless;
     std::mutex descriptor_mutex;  // the set and the containers below
@@ -1212,7 +1213,7 @@ struct DeviceState {
     bool bind_image(const palmetto::gfx10::ImageWords& words, const palmetto::gfx10::Image& image, VkImage vk_image,
                     VkFormat image_format, VkImageAspectFlags aspects, bool storage,
                     bool allow_channel_cast = false, VkFormat uint_backed = VK_FORMAT_UNDEFINED,
-                    palmetto::ResourceId resource = 0, std::uint64_t title_va = 0) {
+                    palmetto::ResourceId resource = 0, std::uint64_t title_va = 0, std::uint64_t title_bytes = 0) {
         namespace g = palmetto::gfx10;
         std::lock_guard lock(descriptor_mutex);
         if (!bindless) return false;
@@ -1303,6 +1304,7 @@ struct DeviceState {
         entry.extent = {image.width, image.height};
         entry.resource = resource;
         entry.title_va = title_va;
+        entry.title_bytes = title_bytes;
         if (vk.vkCreateImageView(info.device, &view_info, nullptr, &entry.sampled) != VK_SUCCESS) return false;
         palmetto::StorageViews views{};
         if (storage) {
@@ -1396,8 +1398,113 @@ struct DeviceState {
             key.extent = entry->second.extent;
             key.resource = entry->second.resource;
             key.title_va = entry->second.title_va;
+            // Diagnostic (docs/texture_source.md): watch the pages of a sampled placed texture, so a measurement can say
+            // whether anything ever writes this population. Off unless PALMETTO_TEXTURE_PAGE_WATCH is set.
+            if (entry->second.title_va && entry->second.title_bytes)
+                watch_placed_pages(entry->second.title_va, entry->second.title_bytes, true);
         }
         return true;
+    }
+
+    // Diagnostic (docs/texture_source.md): the page-writer watch for sampled placed textures. Up to four spans; every
+    // 64 submissions each span's committed, readable, non-zero bytes are counted and a change is printed (the first 20
+    // changes in total). A span that never changes over the window is reported by the absence of change lines, and the
+    // first sample is always printed so the watch's start is visible. Off unless PALMETTO_TEXTURE_PAGE_WATCH is set;
+    // reads only, never writes title memory.
+    struct PageWatch {
+        std::uint64_t title_va = 0;
+        std::uint64_t bytes = 0;
+        std::uint64_t last_nonzero = 0;
+        unsigned changes = 0;
+    };
+    PageWatch page_watches_[4];
+    unsigned page_watch_count_ = 0;
+    std::uint64_t page_watch_ticks_ = 0;
+    bool page_watch_on_ = false;
+    bool page_watch_env_read_ = false;
+
+    bool page_watch_enabled() {
+        if (!page_watch_env_read_) {
+            page_watch_env_read_ = true;
+            const char* value = std::getenv("PALMETTO_TEXTURE_PAGE_WATCH");
+            page_watch_on_ = value && *value && *value != '0' && *value != 'n';
+        }
+        return page_watch_on_;
+    }
+
+    // Register a span to watch. `sampled` marks the population the frame's armed draw actually samples; when the four
+    // slots are full such a span replaces the last one, so the drawn texture is never the one left out.
+    void watch_placed_pages(std::uint64_t title_va, std::uint64_t bytes, bool sampled = false) {
+        if (!title_va || !bytes || !page_watch_enabled()) return;
+        for (unsigned i = 0; i < page_watch_count_; ++i)
+            if (page_watches_[i].title_va == title_va) return;
+        unsigned slot = page_watch_count_;
+        if (slot >= std::size(page_watches_)) {
+            if (!sampled) return;
+            slot = static_cast<unsigned>(std::size(page_watches_)) - 1;
+        } else {
+            ++page_watch_count_;
+        }
+        PageWatch& watch = page_watches_[slot];
+        watch = PageWatch{};
+        watch.title_va = title_va;
+        watch.bytes = bytes;
+        std::fprintf(stderr,
+                     "[rt] d3d12: page watch: watching title VA 0x%llx + 0x%llx%s (PALMETTO_TEXTURE_PAGE_WATCH=1)\n",
+                     static_cast<unsigned long long>(title_va), static_cast<unsigned long long>(bytes),
+                     sampled ? ", the armed draw's sampled texture" : "");
+    }
+
+    // Sampled non-zero bytes of a title span: the first 4096 bytes of every 64 KiB page that is committed and readable
+    // (page heads, so the scan is bounded to a sixteenth of the span), plus how many bytes were scanned. A page that is
+    // not committed contributes nothing.
+    std::uint64_t count_span_nonzero(std::uint64_t title_va, std::uint64_t bytes, std::uint64_t& scanned) const {
+        scanned = 0;
+        std::uint64_t nonzero = 0;
+        const std::uint64_t end = title_va + bytes;
+        for (std::uint64_t at = title_va; at < end;) {
+            MEMORY_BASIC_INFORMATION info{};
+            if (::VirtualQuery(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(at)), &info, sizeof(info)) !=
+                sizeof(info))
+                break;
+            const auto region_end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+            std::uint64_t next = region_end > at ? region_end : at + 0x10000;
+            if (next > end) next = end;
+            if (info.State == MEM_COMMIT &&
+                !(info.Protect & (PAGE_NOACCESS | PAGE_GUARD | PAGE_WRITECOMBINE | PAGE_NOCACHE))) {
+                const auto* data = reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(at));
+                const std::uint64_t head = std::min<std::uint64_t>(0x1000, next - at);
+                for (std::uint64_t i = 0; i < head; ++i)
+                    if (data[i]) ++nonzero;
+                scanned += head;
+            }
+            at = next > at ? next : at + 0x10000;
+        }
+        return nonzero;
+    }
+
+    void page_watch_tick() {
+        if (!page_watch_enabled() || !page_watch_count_) return;
+        ++page_watch_ticks_;
+        if (page_watch_ticks_ % 64 != 1) return;  // the first submission, then every 64th
+        for (unsigned i = 0; i < page_watch_count_; ++i) {
+            PageWatch& watch = page_watches_[i];
+            std::uint64_t scanned = 0;
+            const std::uint64_t nonzero = count_span_nonzero(watch.title_va, watch.bytes, scanned);
+            if (nonzero == watch.last_nonzero && watch.changes) continue;
+            ++watch.changes;
+            static std::atomic<unsigned> printed{0};
+            if (printed.fetch_add(1, std::memory_order_relaxed) < 20)
+                std::fprintf(stderr,
+                             "[rt] d3d12: page watch: title VA 0x%llx: sampled non-zero bytes %llu -> %llu of %llu "
+                             "scanned (sample %llu, change %u)\n",
+                             static_cast<unsigned long long>(watch.title_va),
+                             static_cast<unsigned long long>(watch.last_nonzero),
+                             static_cast<unsigned long long>(nonzero),
+                             static_cast<unsigned long long>(scanned),
+                             static_cast<unsigned long long>(page_watch_ticks_ / 64 + 1), watch.changes);
+            watch.last_nonzero = nonzero;
+        }
     }
 
     // Diagnostic (docs/frame_capture.md): read up to `bytes` of the title's own memory at `va` (the constants a draw's
@@ -2285,6 +2392,14 @@ public:
     // The title VA a placed texture was placed at (device slot 133), or 0 for an ordinary committed resource
     // (docs/frame_capture.md, the texture-source mapping chain).
     std::uint64_t placed_pages() const { return placed_pages_; }
+    // The bytes of subresource 0's tightly row-major footprint, or 0 for a resource that is not a title-placed texture
+    // (docs/texture_source.md: the page-writer watch watches exactly the span the import would read).
+    std::uint64_t placed_subresource_bytes() const {
+        if (!image_ || !placed_pages_) return 0;
+        Region r{};
+        if (!region(0, nullptr, r) || !r.rows || !r.slices) return 0;
+        return r.row_bytes * r.rows * r.slices;
+    }
     VkImage image() const { return image_; }
     bool sparse_image() const { return sparse_image_; }
     VkBuffer buffer() const { return buffer_; }
@@ -2348,8 +2463,21 @@ public:
         // 34,044 B; the cap leaves room for more of the same kind while keeping one import from dominating a
         // submission). A description larger than that is a title-placed render target or shadow, whose pages the
         // texture computer never writes; importing those would put uninitialised memory into an image the frame
-        // renders into, so they are skipped and logged.
-        constexpr std::uint64_t kPlacedImportCap = 16 * 1024 * 1024;
+        // renders into, so they are skipped and logged. Diagnostic (docs/texture_source.md): PALMETTO_TEXTURE_IMPORT_MAX
+        // lifts the cap for one measurement, loudly; the default and the default path are unchanged.
+        static const std::uint64_t placed_import_cap = [] {
+            const char* value = std::getenv("PALMETTO_TEXTURE_IMPORT_MAX");
+            return value && *value ? std::strtoull(value, nullptr, 0) : std::uint64_t(16) * 1024 * 1024;
+        }();
+        if (const char* override_value = std::getenv("PALMETTO_TEXTURE_IMPORT_MAX");
+            override_value && *override_value) {
+            static std::atomic<unsigned> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 1)
+                std::fprintf(stderr,
+                             "[rt] d3d12: placed texture import: size cap overridden to %llu B by "
+                             "PALMETTO_TEXTURE_IMPORT_MAX (default %u B)\n",
+                             static_cast<unsigned long long>(placed_import_cap), 16u * 1024u * 1024u);
+        }
         const std::uint32_t subresources = binding_.mip_levels * binding_.array_layers;
         if (!subresources) {
             placed_skipped_ = true;
@@ -2361,15 +2489,16 @@ public:
             return false;
         }
         const std::uint64_t sub_bytes = r.row_bytes * r.rows * r.slices;
-        if (!sub_bytes || sub_bytes > kPlacedImportCap || r.row_bytes > UINT32_MAX || r.row_bytes * r.rows > UINT32_MAX) {
+        if (!sub_bytes || sub_bytes > placed_import_cap || r.row_bytes > UINT32_MAX || r.row_bytes * r.rows > UINT32_MAX) {
             placed_skipped_ = true;
             // Diagnostic (docs/texture_source.md): which placed texture a decision was made for, so a sampled T# can be
             // followed to its resource and the reason its pages were not imported. Bounded to eight of each decision.
             static std::atomic<unsigned> too_large{0};
             if (too_large.fetch_add(1, std::memory_order_relaxed) < 8)
                 std::fprintf(stderr,
-                             "[rt] d3d12: placed texture import: resource 0x%llx at title VA 0x%llx is larger than the "
-                             "measured texture-computer fill (%llu B); left as the committed stand-in\n",
+                             "[rt] d3d12: placed texture import: resource 0x%llx at title VA 0x%llx is larger than "
+                             "the import size cap (%llu B; PALMETTO_TEXTURE_IMPORT_MAX lifts it); left as the committed "
+                             "stand-in\n",
                              static_cast<unsigned long long>(id()),
                              static_cast<unsigned long long>(placed_pages_),
                              static_cast<unsigned long long>(sub_bytes));
@@ -5982,6 +6111,9 @@ public:
         // A title-placed texture's page import (docs/texture_import.md): the queue calls this before it records a
         // submission, so the image holds the title's bytes before anything samples it.
         state_.context->set_placed_texture_import([this] { state_.import_placed_textures(); });
+        // Diagnostic (docs/texture_source.md): the page-writer watch for sampled placed textures, ticked once per
+        // submission (it scans every 64th). Off unless PALMETTO_TEXTURE_PAGE_WATCH is set.
+        state_.context->set_page_watch_tick([this] { state_.page_watch_tick(); });
         if (info.conditional_rendering) {
             const auto properties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
                 info.get_instance_proc(info.instance, "vkGetPhysicalDeviceProperties"));
@@ -8139,12 +8271,20 @@ public:
             // measured linear mode a row-major CPU copy per subresource), so import them into this image before the
             // first submission that can sample it. Queued here, drained by the queue hook, so the title's writes are
             // already in place when the import runs.
-            if (SUCCEEDED(hr) && out && *out && placed_texture_import_enabled()) {
+            if (SUCCEEDED(hr) && out && *out) {
                 if (Resource* stand_in = Resource::from<Resource>(static_cast<IUnknown*>(*out))) {
                     stand_in->set_placed_pages(reinterpret_cast<std::uintptr_t>(address));
-                    stand_in->AddRef();
-                    std::lock_guard lock(state_.placed_texture_mutex);
-                    state_.placed_textures_pending.push_back(stand_in);
+                    // Diagnostic (docs/texture_source.md): from its creation, watch the pages of a placed texture big
+                    // enough to be the frame's sampled 4K population, so the watch starts before the frame's draws. The
+                    // armed draw's own sampled texture is registered later by the descriptor probe.
+                    const std::uint64_t placed_bytes = stand_in->placed_subresource_bytes();
+                    if (placed_bytes >= 16ull * 1024 * 1024)
+                        state_.watch_placed_pages(reinterpret_cast<std::uintptr_t>(address), placed_bytes);
+                    if (placed_texture_import_enabled()) {
+                        stand_in->AddRef();
+                        std::lock_guard lock(state_.placed_texture_mutex);
+                        state_.placed_textures_pending.push_back(stand_in);
+                    }
                 }
             }
             return d3d12_trace::result(method, hr);
@@ -9476,7 +9616,8 @@ private:
         const palmetto::gfx10::ImageWords words = palmetto::gfx10::encode(image);
         const bool registered = state_.bind_image(words, image, resource.image(), resource.format(),
                                                   resource.aspects(), storage, resource.has_view_format_list(),
-                                                  resource.uint_backed(), resource.id(), resource.placed_pages());
+                                                  resource.uint_backed(), resource.id(), resource.placed_pages(),
+                                                  resource.placed_subresource_bytes());
         if (registered && resource.sparse_image()) state_.context->note_shader_image(resource.id());
         if (palmetto::gfx10::multisampled(image.type) && !registered) return;
         std::memcpy(reinterpret_cast<void*>(destination.ptr), words.data(), sizeof(words));

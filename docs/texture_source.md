@@ -104,9 +104,61 @@ Added (all diagnostic-only, off unless the named switch is set; default path unc
   (import, size skip, all-zero-head wait, give-up), so a sampled resource can be matched to its fate;
 - `port/test/frame_dump_test.cpp` is unchanged; the mapping/readback paths are exercised by the boots above.
 
-Next falsifier: **does anything ever write the sampled 4K texture's pages?** Run a bounded watch with the import's size
-cap lifted for this texture only (`PALMETTO_TEXTURE_IMPORT_MAX` style, or a watch mode that samples the pages' non-zero
-byte count every N submissions and imports only once content appears), over 150-300 s; if its pages never become
-non-zero, the title is not writing this texture through its pages at all in the observed window, and the next place to
-look is which path is supposed to produce this population (the title's streaming/DirectStorage upload, or a GPU-side
-producer not yet reached). The current measurement already closes the XG-fill and wrong-image explanations.
+Next falsifier: **does anything ever write the sampled 4K texture's pages?** Section 6 records the instruments built for
+that measurement; the boot itself is pending (the tree carries other increments' uncommitted runtime changes, so a
+build now would mix four agents' work and the measurement would not be attributable). The current measurement already
+closes the XG-fill and wrong-image explanations.
+
+## 6. The page-writer watch and the import cap override (implemented, boot pending)
+
+Two opt-in instruments were added for the next measurement; both are diagnostic-only, and with them unset the default
+path is unchanged.
+
+**`PALMETTO_TEXTURE_PAGE_WATCH=1` - the page-writer watch.** It watches up to four title-VA spans:
+
+- a placed texture whose subresource 0 is at least 16 MiB is watched **from its creation** (`create_at_host_address`),
+  so the watch starts before the frame's draws and sees the population the sampled 4K texture belongs to;
+- the armed draw's own sampled texture is watched when the descriptor probe resolves its T#, replacing the last slot if
+  all four are taken, so the exact population the six-image pass reads is always one of them.
+
+Every 64th submission the watch counts the non-zero bytes of each span's page heads (the first 4096 bytes of each 64 KiB
+page that is committed and readable, so one scan of a 33 MB span costs ~2 MB of reads). The first sample and every change
+are printed, up to 20 lines:
+
+```
+page watch: watching title VA 0x… + 0x1fa4000 (PALMETTO_TEXTURE_PAGE_WATCH=1)
+page watch: title VA 0x…: sampled non-zero bytes 0 -> 0 of 2064384 scanned (sample 1, change 1)
+```
+
+and no change line after the first sample means the span never became non-zero over the window. A page that is not
+committed contributes nothing, so an uncommitted span also reads as zero.
+
+**`PALMETTO_TEXTURE_IMPORT_MAX=<bytes>` - the import size cap override.** The placed-texture import's cap (default
+16 MiB, calibrated to the measured 34,044 B XG fill) is replaced by the given byte count, logged loudly:
+
+```
+placed texture import: size cap overridden to 67108864 B by PALMETTO_TEXTURE_IMPORT_MAX (default 16777216 B)
+```
+
+With the cap lifted to 64 MiB the sampled 4K texture (33,177,600 B) reaches the import's content gate: if the watch shows
+its pages holding bytes, the import copies them (`placed texture import: resource 0x… at title VA 0x…: subresource 0,
+33177600 B …`) and the sample readback is expected to change; if the pages stay all-zero the import keeps waiting and
+gives up with its identity logged, which together with the watch's never-changing count is the measurement that no page
+writer produces this population in the window.
+
+**The CPU page-read question.** "Does anything ever read these pages from the CPU on the title side?" cannot be trapped
+without changing the title's own page protection (guard pages or a debugger watchpoint over a guest allocation), which is
+not diagnostic-only and is outside this increment's rules. The bounded substitutes are: the write watch above (a reader
+that never writes leaves the pages unchanged), the device-level read entry points (`ReadFromSubresource`, `Map` - the
+trace counted 0 of each in every boot so far), and the positive fact that the title's own draw samples the T# (so the
+population is consumed even while nothing writes it). If the watch and the import override both come back empty, the
+next place named is the title's content-producing path for this population - the streaming/DirectStorage upload, or a
+GPU-side producer not yet reached - not a page-reader trap.
+
+**Boot command for the measurement (pending the tree being quiescent):** standard environment plus
+`PALMETTO_XG_LAYOUT=linear`, `PALMETTO_TEXTURE_IMPORT=1`, `PALMETTO_TEXTURE_IMPORT_MAX=67108864`,
+`PALMETTO_TEXTURE_PAGE_WATCH=1`, `PALMETTO_FRAME_DUMP_SAMPLE=1`, `PALMETTO_READBACK_AT_DRAW=20001`,
+`PALMETTO_FRAME_DUMP=1`, 150-300 s via the harness. Expected readings: the watch lines for the sampled span (and the
+other >=16 MiB placed spans), the import override line, the import decision for the sampled resource (imported bytes
+non-zero, or its give-up with identity), and the sample readback of the sampled T# image (non-black if the import
+changed it, black if it stayed the committed stand-in).

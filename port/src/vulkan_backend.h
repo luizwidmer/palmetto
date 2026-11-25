@@ -1654,6 +1654,15 @@ public:
     void import_placed_textures() {
         if (placed_texture_import_) placed_texture_import_();
     }
+    // Diagnostic (docs/texture_source.md): the page-writer watch for sampled placed textures, called once per
+    // submission (the callback itself scans every 64th). Registered by the device; a no-op when empty.
+    void set_page_watch_tick(std::function<void()> tick) {
+        std::unique_lock lock(resource_mutex_);
+        page_watch_tick_ = std::move(tick);
+    }
+    void tick_page_watch() {
+        if (page_watch_tick_) page_watch_tick_();
+    }
     // The arena span that stands in for a title span, and the reverse (arena span -> title span); used by the device's
     // page pull to find source and destination.
     bool console_va_span(std::uint64_t title, ConsoleVaKind kind, std::uint64_t& arena,
@@ -2091,6 +2100,7 @@ private:
     std::function<void(std::uint64_t, std::uint64_t)> console_page_pull_;   // title pages -> arena stand-in
     std::function<void(std::uint64_t, std::uint32_t)> console_table_pull_;  // a table's V# data -> arena stand-in
     std::function<void()> placed_texture_import_;                           // title-placed texture pages -> image
+    std::function<void()> page_watch_tick_;  // docs/texture_source.md: the page-writer watch, once per submission
     std::function<void(std::uint64_t, std::uint64_t)> console_arena_pull_;  // a copy's source range -> arena stand-in
     // The one-shot render-target readback of docs/page_content.md, armed by the first draw and taken after its
     // submission completes.
@@ -2697,6 +2707,9 @@ private:
         // A title-placed texture's pages (docs/texture_import.md) are imported before the submission that could sample
         // them: the copy runs on the staging path and waits, so the bytes are in the image when the replay records it.
         context_.import_placed_textures();
+        // Diagnostic (docs/texture_source.md): the page-writer watch for sampled placed textures, ticked once per
+        // submission; it scans every 64th. A no-op unless the device registered it and the switch is on.
+        context_.tick_page_watch();
         // Bounded progress diagnostic (counts only): how fast submissions come, so a clean boot's draw count can be
         // told apart from a stalled or slowed title.
         {
