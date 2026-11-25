@@ -6,6 +6,11 @@
 // The SHAPE context arrays are allocated on the process heap; the ACP interface
 // accepts and acknowledges commands to allow audio bring-up to proceed cleanly.
 //
+// DECODE BOUNDARY (docs/audio_decode.md): when AcpHalAllocateShapeContexts allocates the measured 350 XMA contexts it
+// records the array with port/shims/audio_decode.h, which the XApu result-count poll scans a bounded number of times.
+// The scan is read-only and proves whether the title ever programmes a context; in the measured boot it does not. The
+// ACP submit command is recorded and is not a decode site: no SHAPE/DSP transform is carried.
+//
 // Signatures from the public GDK reference (devdocs.xbox.com):
 //   AcpHal, APU reference, SHAPE_CONTEXTS, APU_ADDRESS.
 // Measured call-site shapes and findings from the retail executable (1.0.2.1):
@@ -28,9 +33,17 @@
 #include <vector>
 
 #include "shims.h"
+#include "audio_decode.h"
 #include "startup_trace.h"
 
 namespace {
+
+// Quoted hex scalar for the ACP trace string (the trace events are JSON-shaped).
+inline std::string quote_hex(std::uint32_t value) {
+    char text[16] = {};
+    std::snprintf(text, sizeof text, "\"0x%08x\"", value);
+    return std::string(text);
+}
 
 // ---- APU_ADDRESS (from the GDK) ----
 
@@ -305,7 +318,6 @@ struct AcpHalImpl {
     // a negative result triggers a fatal int3 kernel panic (+0x43ad94e).
     virtual HRESULT __stdcall submit_command(uint32_t cmd, uint32_t d1, uint32_t d2,
                                             const void* config, uint32_t d3) {
-        (void)cmd;
         (void)d1;
         (void)d2;
         (void)config;
@@ -315,7 +327,9 @@ struct AcpHalImpl {
             std::fprintf(stderr,
                          "[rt] acphal: command accepted and dropped: no audio DSP hardware on PC\n");
         }
-        trace_call("AcpHal::SubmitCommand", "");
+        rt::audio_decode::note_acp_command(cmd);
+        trace_call("AcpHal::SubmitCommand",
+                   ",\"cmd\":" + std::to_string(cmd) + ",\"d1\":" + quote_hex(d1) + ",\"d2\":" + quote_hex(d2));
         return S_OK;
     }
 
@@ -367,6 +381,13 @@ HRESULT __stdcall AcpHalAllocateShapeContexts(SHAPE_CONTEXTS* ctx) {
     ctx->pcmContextArray = static_cast<SHAPE_PCM_CONTEXT*>(
         alloc_array(ctx->numPcmContexts, sizeof(SHAPE_PCM_CONTEXT)));
 
+    // The decode boundary's view of the XMA context array: the retail title allocates 350 contexts here
+    // and never programmes one (docs/audio_decode.md measures that in the live boot). The pointer is
+    // only read by the bounded scan in xapu_chad.cpp, never written.
+    if (ctx->numXmaContexts != 0 && ctx->xmaContextArray != nullptr) {
+        rt::audio_decode::note_xma_contexts(ctx->xmaContextArray, ctx->numXmaContexts);
+    }
+
     // On PC there is no physical APU address translation for host context arrays;
     // assign unique synthetic addresses from the APU base.
     ctx->apuSrcContextArray = {ctx->srcContextArray ? kApuBaseAddress : 0};
@@ -388,6 +409,7 @@ HRESULT __stdcall AcpHalAllocateShapeContexts(SHAPE_CONTEXTS* ctx) {
 HRESULT __stdcall AcpHalReleaseShapeContexts(SHAPE_CONTEXTS* ctx = nullptr) {
     std::lock_guard lock(g_apu_mutex);
 
+    rt::audio_decode::clear_xma_contexts();
     // Free all recorded context allocations
     for (void* p : g_active_shape_arrays) {
         if (p) std::free(p);

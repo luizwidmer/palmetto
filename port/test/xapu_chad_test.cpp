@@ -11,14 +11,19 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <initializer_list>
 #include <sstream>
 #include <string>
+#include <vector>
 
+#include "audio_decode.h"
 #include "shims.h"
 #include "startup_trace.h"
+
+#include "audio_decode_fake_backend.h"
 
 namespace {
 
@@ -117,10 +122,106 @@ void test_trace(XApuConnectFn connect, XApuDisconnectFn disconnect, XApuEnqueueF
           "the dropped-command counter increments across the traced enqueues (1, then 2)");
 }
 
+// ---- The decode boundary's runtime wiring (docs/audio_decode.md) ----
+//
+// With the decode switch on, a submitted command routes its measured 0x280-byte stream-input region to the XMA2
+// decoder, which refuses it by name; the APU poll scans the measured XMA context array a bounded number of
+// times; the chad submit is a named DSP refusal. The decoders here are the in-process synthetic backend (the real
+// ones are covered by port/xma_decoder's Rust tests); every event below is checked from the trace file.
+void test_decode_boundary(XApuConnectFn connect, XApuDisconnectFn disconnect, XApuEnqueueFn enqueue,
+                          XApuGetResultCountFn result_count, XDspConnectFn dsp_connect, XDspActivateFn activate,
+                          XDspSubmitFn submit, XDspDisconnectFn dsp_disconnect) {
+    rt::audio_decode::reset_for_test();
+    _putenv_s("PALMETTO_AUDIO_DECODE", "1");
+    rt::audio_decode::install_backend_for_test(audio_decode_test::backend());
+
+    wchar_t temp[MAX_PATH];
+    GetTempPathW(MAX_PATH, temp);
+    const std::wstring path =
+        std::wstring(temp) + L"xapu_chad_decode_trace_" + std::to_wstring(GetCurrentProcessId()) + L".jsonl";
+    DeleteFileW(path.c_str());
+    check(rt::startup_trace::open(path.c_str()), "open a startup trace for the decode section");
+
+    uint8_t block[24] = {};
+    uint8_t out16[16] = {};
+    void* handle = nullptr;
+    check(connect(block, out16, &handle) == S_OK && handle != nullptr,
+          "connect with the decode switch on succeeds");
+
+    // A synthetic two-packet XMA2 buffer through the boundary, then the measured command region.
+    uint8_t packets[2048 * 2] = {};
+    const auto decoded = rt::audio_decode::decode_xma2("test.xapu", packets, sizeof packets, 48000, 2);
+    check(decoded.ok && decoded.frames == audio_decode_test::kFakeXmaFrames,
+          "the boundary decodes a synthetic two-packet XMA2 buffer into 480 frames");
+    check(rt::audio_decode::stats().xma2_frames == audio_decode_test::kFakeXmaFrames,
+          "the bounded sink counts the decoded frames");
+
+    const uint32_t command[2] = {2, 5};
+    check(enqueue(handle, command, 0) == S_OK, "a measured command type still returns S_OK with decode on");
+    check(rt::audio_decode::stats().last_refusal != nullptr &&
+              std::strcmp(rt::audio_decode::stats().last_refusal, "packet_size") == 0,
+          "the submitted 0x280-byte command region is a named packet_size refusal, not a fake decode");
+
+    const std::uint8_t opus_packet[1] = {0xF8};  // synthetic TOC-only 20 ms packet, no fixture
+    const auto opus = rt::audio_decode::decode_opus("test.xapu", opus_packet, sizeof opus_packet, 48000, 2, 960);
+    check(opus.ok && opus.frames == audio_decode_test::kFakeOpusFrames &&
+              rt::audio_decode::stats().opus_decodes == 1,
+          "the boundary decodes a synthetic Opus packet into 960 frames");
+
+    // The measured XMA context array: registered, scanned on the poll schedule, and read (never written).
+    std::vector<std::uint32_t> contexts(350 * 16, 0);
+    rt::audio_decode::note_xma_contexts(contexts.data(), 350);
+    check(result_count(handle, 0) == 0, "the result-count poll still returns 0 with the decode switch on");
+    check(rt::audio_decode::stats().xma_context_scans == 1, "the first poll scans the XMA context array");
+    contexts[7] = 1;
+    for (int i = 0; i < 9; ++i) (void)result_count(handle, 0);  // poll 10 takes the second scan
+    check(rt::audio_decode::stats().xma_context_scans == 2 &&
+              rt::audio_decode::stats().xma_context_nonzero_dwords == 1,
+          "the tenth poll scans again and sees exactly one programmed dword");
+
+    // The DSP submit path is a named refusal: no SHAPE DSP transform is carried.
+    void* dsp = nullptr;
+    uint8_t title_buffer[16] = {};
+    check(dsp_connect(title_buffer, 0x60000, 1, 0x80, 1, &dsp) == S_OK && dsp != nullptr,
+          "chad connect with the decode switch on succeeds");
+    void* status = nullptr;
+    void* stream = nullptr;
+    activate(dsp, nullptr, &status, &stream);
+    uint32_t id = 0;
+    check(submit(stream, title_buffer, &id) == S_OK, "the DSP submit still returns S_OK with decode on");
+    check(rt::audio_decode::stats().last_refusal != nullptr &&
+              std::strcmp(rt::audio_decode::stats().last_refusal, "dsp_transform") == 0,
+          "the DSP submit is a named dsp_transform refusal, not a silent success");
+    check(dsp_disconnect(dsp) == S_OK, "chad disconnect with the decode switch on succeeds");
+    check(disconnect(handle) == S_OK, "xapu disconnect with the decode switch on succeeds");
+
+    rt::startup_trace::close();
+    rt::audio_decode::clear_xma_contexts();
+    rt::audio_decode::reset_for_test();
+    _putenv_s("PALMETTO_AUDIO_DECODE", "0");
+
+    std::ifstream in(path);
+    std::stringstream text;
+    text << in.rdbuf();
+    const std::string log = text.str();
+    DeleteFileW(path.c_str());
+
+    check(count_occurrences(log, "\"kind\":\"audio_decode\"") >= 6,
+          "the decode boundary writes audio_decode trace events");
+    check(count_occurrences(log, "\"event\":\"decoded\"") == 2, "the two direct decodes are traced");
+    check(count_occurrences(log, "\"code\":\"packet_size\"") == 1,
+          "the command-region refusal is traced with its code");
+    check(count_occurrences(log, "\"code\":\"dsp_transform\"") == 1, "the DSP refusal is traced with its code");
+    check(count_occurrences(log, "\"event\":\"xma_scan\"") == 2, "both scheduled context scans are traced");
+    check(count_occurrences(log, "\"nonzero\":0") == 1 && count_occurrences(log, "\"nonzero\":1") == 1,
+          "the scans trace the programmed-dword counts (0 then 1)");
+    check(count_occurrences(log, "\"codec\":\"xma2\"") == 1 && count_occurrences(log, "\"codec\":\"opus\"") == 1,
+          "the decoded events name their codec");
+}
+
 }  // namespace
 
-int main() {
-    std::printf("xapu_chad_test: registered xapu.dll and chad.dll shims against the measured call shapes\n");
+int main() {    std::printf("xapu_chad_test: registered xapu.dll and chad.dll shims against the measured call shapes\n");
 
     const auto connect = reinterpret_cast<XApuConnectFn>(rt::shims::find("xapu.dll", "XApuConnect"));
     const auto disconnect = reinterpret_cast<XApuDisconnectFn>(rt::shims::find("xapu.dll", "XApuDisconnect"));
@@ -266,6 +367,10 @@ int main() {
                         cycle_handle && dsp_disconnect(cycle_handle) == S_OK;
     }
     check(dsp_cycles_ok, "32 chad connect/disconnect cycles all succeed");
+
+    // ---- The decode boundary's runtime wiring (docs/audio_decode.md) ----
+    test_decode_boundary(connect, disconnect, enqueue, result_count, dsp_connect, activate, submit,
+                         dsp_disconnect);
 
     // ---- The trace: one event per call, with the caller, and nothing before the trace is opened ----
     test_trace(connect, disconnect, enqueue, result_count, dequeue, dsp_connect, activate, deactivate, dsp_disconnect,

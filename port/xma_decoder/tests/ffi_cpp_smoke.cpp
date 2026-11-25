@@ -83,5 +83,38 @@ int main() {
   }
   palmetto_xma2_pcm_destroy(pcm);
   palmetto_xma2_decoder_destroy(nullptr);
+
+  // ---- The Opus half of the boundary, with the same synthetic-packet rule. ----
+  CHECK(palmetto_audio_decoder_abi_version() == PALMETTO_AUDIO_DECODER_ABI_VERSION);
+
+  PalmettoOpusDecoder* opus = nullptr;
+  CHECK(palmetto_opus_decoder_create(48000, 2, &opus) == PALMETTO_OPUS_OK);
+  CHECK(opus != nullptr);
+
+  // RFC 6716 TOC-only packet for a 20 ms CELT frame: no frame data, decodes deterministically
+  // to silence. It is built here in memory; no fixture is opened.
+  const std::array<uint8_t, 1> opus_packet{0xF8};
+  PalmettoOpusPcmBlock* opus_pcm = nullptr;
+  CHECK(palmetto_opus_decode(opus, opus_packet.data(), opus_packet.size(), 960, &opus_pcm) ==
+        PALMETTO_OPUS_OK);
+  CHECK(opus_pcm != nullptr);
+  CHECK(palmetto_opus_pcm_frame_count(opus_pcm) == 960);
+  CHECK(palmetto_opus_pcm_sample_count(opus_pcm) == 960 * 2);
+  const float* opus_data = palmetto_opus_pcm_data(opus_pcm);
+  CHECK(opus_data != nullptr);
+  for (size_t i = 0; i < palmetto_opus_pcm_sample_count(opus_pcm); ++i) {
+    CHECK(opus_data[i] == 0.0f);
+  }
+
+  PalmettoOpusPcmBlock* bad_opus = reinterpret_cast<PalmettoOpusPcmBlock*>(1);
+  const std::array<uint8_t, 1> empty_packet{};
+  CHECK(palmetto_opus_decode(opus, empty_packet.data(), 0, 960, &bad_opus) ==
+        PALMETTO_OPUS_BAD_PACKET);
+  CHECK(bad_opus == nullptr);
+
+  palmetto_opus_decoder_destroy(opus);
+  CHECK(palmetto_opus_pcm_frame_count(opus_pcm) == 960);
+  palmetto_opus_pcm_destroy(opus_pcm);
+  palmetto_opus_decoder_destroy(nullptr);
   return 0;
 }

@@ -5,6 +5,12 @@
 // success for every command, which is then dropped. Nothing is decoded, mixed or resampled, and every sample the title
 // would have played stays silent.
 //
+// DECODE BOUNDARY (docs/audio_decode.md). With PALMETTO_AUDIO_DECODE=1 only, the command path routes a submitted
+// command's measured 0x280-byte stream-input region to the XMA2 decoder boundary in port/shims/audio_decode.h, the
+// result-count poll scans the measured XMA context array a bounded number of times, and the DSP submit is a named
+// refusal. The measured boot sends no command and programmes no context, so this is latent; with the switch off (the
+// default) none of it runs and the behaviour above is unchanged.
+//
 // WHY THESE IMPORTS MATTER (docs/audio_shims.md section 1). The executable imports ten functions from these two DLLs
 // (five each). Before this shim they bound to the unimplemented thunk, which returns 0 and writes no out parameter, so
 // the title's XApu/XDsp objects never existed. Its 130 s baseline boot reaches exactly three of the ten (XApuConnect,
@@ -42,6 +48,8 @@
 //
 // HONEST LIMITS, in one place:
 //  - No APU and no DSP exists, so every command is accepted and dropped; no audio is produced and nothing is mixed.
+//    With the decode switch on, a submitted command buffer is offered to the decoder boundary and refused by name when
+//    it is not a whole number of packets; the measured boot never submits one.
 //  - XApuConnect's first argument is the title's own input state, not an output buffer. Our measurement: the title's
 //    audio init writes 16 bytes from a template and the qword 0x0000000100000000 there, and the dword at +0xC is
 //    0x104000 - the size of the buffer the title expects back. No title read of that address was found after the call.
@@ -52,7 +60,9 @@
 //    completion result for an open or close command, it never receives one; upstream's later revision added those
 //    results as a hypothesis. That is the named next slice in docs/audio_shims.md, not a claim of this one.
 //  - The shared buffer is PC process memory (VirtualAlloc), not APU physical memory; it is zeroed at connect and then
-//    belongs to the title, which writes stream input into it and reads output from it. This shim never looks inside.
+//    belongs to the title, which writes stream input into it and reads output from it. This shim never looks inside
+//    unless the decode switch is on, in which case it reads the measured 0x280-byte per-stream input region only and
+//    offers it to the decoder (the decoder refuses it by name: that region is a descriptor, not a packet buffer).
 //  - The DSP status block is zeroed and never changes, so a submitted command reads as "command 0 done, no error"
 //    against the id the title wrote (0) - which is what the title's wait loop compares - but nothing was executed.
 //  - The chad base buffer is the title's XMemAlloc memory; this shim never reads, writes or frees it. The length and
@@ -80,6 +90,7 @@
 #include <string>
 
 #include "shims.h"
+#include "audio_decode.h"
 #include "startup_trace.h"
 
 namespace {
@@ -90,6 +101,17 @@ namespace {
 // 0x104000 in its dword at +0xC. 128 slots fit that exactly: 0x14000 + 128 * 0x1E00 = 0x104000.
 constexpr uint32_t kXApuBufferSize = 0x14000 + 128 * 0x1E00;
 static_assert(kXApuBufferSize == 0x104000, "the size the title's own connect block names");
+
+// Measured: one stream's command input region inside the shared buffer is 0x280 bytes (the stride the title's
+// own input pointer computes) and the output region is 0x1E00 bytes. Compressed audio itself lives in the
+// APU heap the title allocates, not in this command region; docs/audio_decode.md records that.
+constexpr uint32_t kXApuStreamInputStride = 0x280;
+constexpr uint32_t kXApuStreamSlots = 128;
+constexpr uint32_t kXApuStreamInputBytes = 0x14000;
+constexpr uint32_t kDecodeSampleRate = 48000;
+
+// The console streams decode at 48 kHz (docs/audio.md: all Opus streams in the package declare 48 kHz).
+constexpr uint32_t kDecodeChannels = 2;
 
 // XAPU_E_PENDING_RESULTS: what a dequeue of the (always empty) result queue returns. The title's loop treats a
 // negative HRESULT as "no result here" and continues.
@@ -138,6 +160,26 @@ struct XDspConnection {
 
 LiveHandles<XApuClient> g_xapu_handles;
 LiveHandles<XDspConnection> g_chad_handles;
+
+// The measured command path: a command names a stream slot, and the title's own input pointer for that slot is
+// shared_buffer + slot * 0x280. That region is the only buffer the APU client ever sees from the title, so it is
+// where this boundary offers the submitted bytes to the XMA2 decoder. The measured region is 0x280 bytes, which
+// is not a whole number of 2048-byte XMA2 packets, so a boot that does send a command gets a named "packet_size"
+// refusal instead of a silent zero: the compressed audio it names lives in the title's APU heap, which this shim
+// cannot describe until the title programmes an XMA context (it programmes none in the measured boot).
+void route_command_input(const XApuClient* client, const uint32_t* command) {
+    const uint32_t slot = command[1];
+    if (slot >= kXApuStreamSlots) {
+        rt::audio_decode::refuse("xapu.enqueue", "stream_slot",
+                                 "stream slot " + std::to_string(slot) + " is outside the measured 128-slot input area");
+        return;
+    }
+    const auto* input = static_cast<const uint8_t*>(client->buffer) + slot * kXApuStreamInputStride;
+    const rt::audio_decode::Decode result =
+        rt::audio_decode::decode_xma2("xapu.enqueue", input, kXApuStreamInputStride, kDecodeSampleRate,
+                                      kDecodeChannels);
+    (void)result;
+}
 
 // ---- Trace and the once-per-process notes ----
 //
@@ -214,6 +256,9 @@ HRESULT __stdcall XApuConnect(void* block24, void* out16, void** handle) {
     static std::atomic<bool> noted{false};
     note_once(noted, "xapu connected: zeroed shared buffer handed to the title; commands are accepted and dropped, "
                      "the result queue stays empty (no APU hardware)");
+    // With the decode switch on, load the decoder library now so the boot reports whether the boundary is
+    // present before any command could use it. With the switch off this is free.
+    if (rt::audio_decode::switch_on()) rt::audio_decode::ensure_backend();
     return S_OK;
 }
 
@@ -253,6 +298,7 @@ HRESULT __stdcall XApuEnqueueCommand(void* handle, const uint32_t* command, uint
                 _ReturnAddress());
     static std::atomic<bool> noted{false};
     note_once(noted, "xapu command accepted and dropped: no APU hardware on PC");
+    if (rt::audio_decode::switch_on()) route_command_input(static_cast<XApuClient*>(handle), command);
     (void)flags;
     return S_OK;
 }
@@ -267,6 +313,16 @@ uint32_t __stdcall XApuGetResultCount(void* handle, uint64_t flags) {
                 _ReturnAddress());
     (void)handle;
     (void)flags;
+    // Bounded measurement of the XMA context array: the title allocates 350 contexts (acphal records the array)
+    // and this scan counts their non-zero dwords at five points in the poll loop, so the boot says with a number
+    // whether the title ever programmed one. It reads; it never writes.
+    if (rt::audio_decode::switch_on() && rt::startup_trace::enabled() && rt::audio_decode::has_xma_contexts()) {
+        static std::atomic<uint64_t> context_polls{0};
+        const uint64_t poll = context_polls.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (poll == 1 || poll == 10 || poll == 100 || poll == 1000 || poll == 10000) {
+            rt::audio_decode::scan_xma_contexts();
+        }
+    }
     return 0;
 }
 
@@ -382,6 +438,15 @@ HRESULT __stdcall XDspSubmitCommand(void* arg_a, void* arg_b, uint32_t* command_
     (void)command_id;
     static std::atomic<bool> noted{false};
     note_once(noted, "chad command accepted and dropped: no audio DSP hardware on PC");
+    if (rt::audio_decode::switch_on()) {
+        // The chad stream carries the DSP side of the console audio graph (SHAPE DSP transforms and the Opus
+        // stream commands XCL describes). None of those transforms is carried here, and no call site measures
+        // which of the two swapped outputs is the stream block, so this is a named refusal rather than a guess.
+        (void)rt::audio_decode::refuse(
+            "chad.submit", "dsp_transform",
+            "SHAPE DSP transforms are not carried; the XMA2 and Opus decoders are wired only at the APU command "
+            "path, and no submit is measured in the boot");
+    }
     return S_OK;
 }
 

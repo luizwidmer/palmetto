@@ -35,3 +35,12 @@ No code from that project is copied into this repository. Its evidence was used 
 this repository's own static measurement and A/B boots establish; the upstream project remains the copyright of its
 contributors, and its GPL-3.0 license continues to apply to its own tree.
 
+### xma / opusdec decoder packages (LGPL-2.1-or-later / BSD-3-Clause)
+
+The XMA2 and Opus decoding path in [port/xma_decoder](port/xma_decoder) builds two prior-art decoder packages from
+their public repositories at a pinned revision (omonkeyz/xbox-emulator, revision 27122f7d): an XMA2 decoder
+(LGPL-2.1-or-later, a port of FFmpeg's XMA decoder) and an Opus decoder (BSD-3-Clause, a port of libopus). They are
+fetched at build time by Cargo, not vendored here; the runtime loads the resulting DLL only when
+PALMETTO_AUDIO_DECODE is set. The packages remain the copyright of their authors under their own licences (see the
+xma and opusdec crates' license files in that repository). The boundary code that calls them
+(port/shims/audio_decode.h) is our own.

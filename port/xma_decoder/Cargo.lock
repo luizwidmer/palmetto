@@ -3,13 +3,19 @@
 version = 4
 
 [[package]]
+name = "opusdec"
+version = "0.1.0"
+source = "git+https://github.com/omonkeyz/xbox-emulator?rev=27122f7dfcceb9a899555362ee0dde2d530e033c#27122f7dfcceb9a899555362ee0dde2d530e033c"
+
+[[package]]
 name = "palmetto-xma2-decoder"
 version = "0.1.0"
 dependencies = [
+ "opusdec",
  "xma",
 ]
 
 [[package]]
 name = "xma"
 version = "0.1.0"
-source = "git+a public emulator project?rev=27122f7dfcceb9a899555362ee0dde2d530e033c#27122f7dfcceb9a899555362ee0dde2d530e033c"
+source = "git+https://github.com/omonkeyz/xbox-emulator?rev=27122f7dfcceb9a899555362ee0dde2d530e033c#27122f7dfcceb9a899555362ee0dde2d530e033c"

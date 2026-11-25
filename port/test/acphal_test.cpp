@@ -9,9 +9,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
+#include "audio_decode.h"
 #include "shims.h"
+
+#include "audio_decode_fake_backend.h"
 
 namespace {
 
@@ -256,6 +260,81 @@ int main() {
     check(release_ctx(&ctx_all) == S_OK, "AcpHalReleaseShapeContexts succeeds");
     check(ctx_all.xmaContextArray == nullptr, "xmaContextArray is reset to null");
     check(release_ctx(nullptr) == S_OK, "AcpHalReleaseShapeContexts(nullptr) succeeds");
+
+    // ---- The audio decode boundary (docs/audio_decode.md) ----
+    //
+    // The real decoders are covered by port/xma_decoder's Rust tests with synthetic packets; here the wiring is
+    // driven by an in-process synthetic backend so the test needs no Rust build and no decoder library.
+    rt::audio_decode::reset_for_test();
+    _putenv_s("PALMETTO_AUDIO_DECODE", "0");
+    std::uint8_t xma_packets[2048 * 2] = {};
+    const auto switched_off =
+        rt::audio_decode::decode_xma2("test.off", xma_packets, sizeof xma_packets, 48000, 2);
+    check(!switched_off.ok && std::strcmp(switched_off.refusal, "switch_off") == 0,
+          "the decode switch defaults off and refuses decode by name");
+    check(rt::audio_decode::stats().xma2_decodes == 0 && rt::audio_decode::stats().refusals == 1,
+          "the off switch decodes nothing and counts the refusal");
+
+    _putenv_s("PALMETTO_AUDIO_DECODE", "1");
+    rt::audio_decode::reset_for_test();
+    rt::audio_decode::install_backend_for_test(audio_decode_test::backend());
+
+    const auto decoded = rt::audio_decode::decode_xma2("test.xma2", xma_packets, sizeof xma_packets, 48000, 2);
+    check(decoded.ok && decoded.frames == audio_decode_test::kFakeXmaFrames,
+          "a synthetic two-packet XMA2 buffer decodes into the boundary's frame count");
+    check(decoded.bytes == std::uint64_t{audio_decode_test::kFakeXmaFrames} * 2 * 2,
+          "the decode reports interleaved 16-bit bytes");
+    check(rt::audio_decode::stats().xma2_decodes == 1 &&
+              rt::audio_decode::stats().xma2_frames == audio_decode_test::kFakeXmaFrames &&
+              rt::audio_decode::stats().xma2_bytes ==
+                  std::uint64_t{audio_decode_test::kFakeXmaFrames} * 2 * 2,
+          "the bounded sink counts the decoded frames and bytes");
+
+    const auto wrong_size = rt::audio_decode::decode_xma2("test.xma2", xma_packets, 0x280, 48000, 2);
+    check(!wrong_size.ok && std::strcmp(wrong_size.refusal, "packet_size") == 0,
+          "the measured 0x280-byte command region is refused by name (not a whole 2048-byte packet)");
+    const auto wrong_format = rt::audio_decode::decode_xma2("test.xma2", xma_packets, sizeof xma_packets, 48000, 3);
+    check(!wrong_format.ok && std::strcmp(wrong_format.refusal, "format") == 0,
+          "a three-channel XMA2 stream is refused by name");
+
+    const std::uint8_t opus_packet[1] = {0xF8};  // synthetic TOC-only 20 ms packet, no fixture
+    const auto opus = rt::audio_decode::decode_opus("test.opus", opus_packet, sizeof opus_packet, 48000, 2, 960);
+    check(opus.ok && opus.frames == audio_decode_test::kFakeOpusFrames,
+          "a synthetic Opus packet decodes into the boundary's frame count");
+    check(rt::audio_decode::stats().opus_decodes == 1 &&
+              rt::audio_decode::stats().opus_frames == audio_decode_test::kFakeOpusFrames,
+          "the bounded sink counts the Opus frames");
+    const auto opus_rate = rt::audio_decode::decode_opus("test.opus", opus_packet, sizeof opus_packet, 32000, 2, 960);
+    check(!opus_rate.ok && std::strcmp(opus_rate.refusal, "opus_format") == 0,
+          "32000 Hz is refused by name: Opus decodes at 8, 12, 16, 24 or 48 kHz");
+    const auto opus_room = rt::audio_decode::decode_opus("test.opus", opus_packet, sizeof opus_packet, 48000, 2, 0);
+    check(!opus_room.ok && std::strcmp(opus_room.refusal, "opus_frame_room") == 0,
+          "a zero-frame sink room is refused by name");
+
+    // The measured XMA context array, as AcpHalAllocateShapeContexts hands it to the decode boundary.
+    TestShapeContexts scan_ctx{};
+    scan_ctx.numXmaContexts = 350;
+    check(alloc_ctx(&scan_ctx) == S_OK, "AcpHalAllocateShapeContexts with the measured 350 XMA contexts succeeds");
+    check(rt::audio_decode::has_xma_contexts() && rt::audio_decode::stats().xma_contexts == 350,
+          "acphal records the measured 350 XMA contexts for the decode boundary");
+    check(rt::audio_decode::scan_xma_contexts() == 0,
+          "a fresh context array has no non-zero dword: the title programmed none at allocation");
+    auto* context_words = static_cast<std::uint32_t*>(scan_ctx.xmaContextArray);
+    context_words[0] = 1;
+    check(rt::audio_decode::scan_xma_contexts() == 1,
+          "the bounded scan sees a programmed context slot when one is written");
+    check(release_ctx(&scan_ctx) == S_OK && !rt::audio_decode::has_xma_contexts(),
+          "releasing the SHAPE contexts clears the decode boundary's view");
+
+    // No decoder library: a named refusal, not a link error or a silent zero.
+    rt::audio_decode::reset_for_test();
+    _putenv_s("PALMETTO_XMA2_DECODER_DLL", "Z:\\palmetto-no-decoder\\palmetto_xma2_decoder.dll");
+    const auto missing =
+        rt::audio_decode::decode_xma2("test.missing", xma_packets, sizeof xma_packets, 48000, 2);
+    check(!missing.ok && std::strcmp(missing.refusal, "backend_missing") == 0,
+          "with no decoder library, decode is a named backend_missing refusal");
+    _putenv_s("PALMETTO_XMA2_DECODER_DLL", "");
+    _putenv_s("PALMETTO_AUDIO_DECODE", "0");
 
     std::printf("acphal_test complete: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

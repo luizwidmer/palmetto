@@ -7,10 +7,15 @@ publish = false
 
 [lib]
 name = "palmetto_xma2_decoder"
-crate-type = ["staticlib", "rlib"]
+# staticlib: the C ABI smoke test links it directly.
+# rlib: the crate's own Rust tests.
+# cdylib: the runtime loads the decode boundary at run time (port/shims/audio_decode.h) so a build
+# without the Rust toolchain keeps today's silent stand-in and refuses decode by name.
+crate-type = ["staticlib", "rlib", "cdylib"]
 
 [dependencies]
-xma = { git = "a public emulator project", package = "xma", rev = "27122f7dfcceb9a899555362ee0dde2d530e033c" }
+xma = { git = "https://github.com/omonkeyz/xbox-emulator", package = "xma", rev = "27122f7dfcceb9a899555362ee0dde2d530e033c" }
+opusdec = { git = "https://github.com/omonkeyz/xbox-emulator", package = "opusdec", rev = "27122f7dfcceb9a899555362ee0dde2d530e033c" }
 
 [profile.release]
 panic = "unwind"
