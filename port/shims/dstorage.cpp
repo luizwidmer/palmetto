@@ -150,12 +150,14 @@ const char* size_band(uint32_t bytes) {
 //   * reports every completed destination to the device proxy (d3d12_xs_device.cpp, same executable): any device call
 //     whose argument points into one of those ranges is printed there - that is the GPU-side naming, if it happens;
 //   * prints the first bytes' content class for the first blocks (a label only, never a byte value);
-//   * puts PAGE_GUARD on the pages wholly inside the first few distinct destinations: the first access after the
-//     worker's write faults into a small vectored handler that prints the title-side reader (faulting RIP as game+RVA,
-//     then the title frames on its stack) and clears the guard. The handler does not change the access, allocate or
-//     read the block, so the boot runs as without the switch. Everything is bounded (8 tracked destinations, 32 guard
-//     slots, 16 fault lines, fixed lines) and off by default; with the switch unset no guard, handler or range is
-//     created and every function here returns on one cached boolean.
+//   * puts PAGE_GUARD on the pages wholly inside the tracked destinations (the first sixteen requests, then one
+//     destination every 256th request, up to 32): the first access after the worker's write faults into a small vectored
+//     handler that prints the accessing code (title RVA, host-runtime RVA or neither) and the title frames on its stack,
+//     then clears the guard. A host-runtime first touch is a shim read - the XG texture-computer copy is the one this
+//     measurement is looking for. The handler does not change the access, allocate or read the block, so the boot runs as
+//     without the switch. Everything is bounded (32 tracked destinations, 32 guard slots, 24 fault lines, fixed lines) and
+//     off by default; with the switch unset no guard, handler or range is created and every function here returns on one
+//     cached boolean.
 
 bool stream_consumer_enabled() {
     static const bool on = [] {
@@ -171,10 +173,23 @@ bool stream_consumer_enabled() {
 // up (the registry's lookup takes a lock, which a fault handler must not), so it subtracts this base instead.
 std::atomic<std::uint64_t> g_title_image_base{0};
 
+// The runtime's own image (palmetto.exe) base, captured outside the handler when the first guard is armed: a first touch
+// from host code is a shim read (the XG texture-computer copy path is the one this measurement is looking for), and it
+// has to be told apart from the title's own code without a module lookup.
+std::atomic<std::uint64_t> g_host_image_base{0};
+
 // "game+0x..." for an address in the title image (a generous 192 MiB window over a 176 MiB image), else false.
 bool title_rva(std::uintptr_t address, std::uintptr_t& rva) {
     const std::uint64_t base = g_title_image_base.load(std::memory_order_relaxed);
     if (!base || address < base || address - base >= 0x0C000000ull) return false;
+    rva = static_cast<std::uintptr_t>(address - base);
+    return true;
+}
+
+// "palmetto.exe+0x..." for an address in the runtime's image (a 64 MiB window), else false.
+bool host_rva(std::uintptr_t address, std::uintptr_t& rva) {
+    const std::uint64_t base = g_host_image_base.load(std::memory_order_relaxed);
+    if (!base || address < base || address - base >= 0x04000000ull) return false;
     rva = static_cast<std::uintptr_t>(address - base);
     return true;
 }
@@ -221,14 +236,14 @@ const char* classify_block(const void* data, size_t bytes) {
     return "structured binary";
 }
 
-// One tracked destination: the first few distinct blocks. The queue worker is the only writer of this table.
+// One tracked destination: a sample of the stream's 64 KiB blocks. The queue worker is the only writer of this table.
 struct TrackedDestination {
     std::uintptr_t base = 0;
     size_t bytes = 0;
     unsigned arms = 0;
     bool written_again = false;
 };
-constexpr unsigned kTrackedDestinations = 12;
+constexpr unsigned kTrackedDestinations = 32;
 
 // A destination's interior pages under PAGE_GUARD. The fault handler runs on whichever thread touched them, so these
 // fields are atomic; the handler clears `armed` before it resumes the access.
@@ -297,13 +312,16 @@ LONG CALLBACK stream_guard_handler(EXCEPTION_POINTERS* info) {
         guard.armed.store(false, std::memory_order_release);
         if (!first) return EXCEPTION_CONTINUE_EXECUTION;
         guard.faults.fetch_add(1, std::memory_order_relaxed);
-        if (g_fault_lines.fetch_add(1, std::memory_order_relaxed) < 16) {
+        if (g_fault_lines.fetch_add(1, std::memory_order_relaxed) < 24) {
             char where[80];
             std::uintptr_t rva = 0;
             if (title_rva(rip, rva))
                 std::snprintf(where, sizeof where, "game+0x%llx", static_cast<unsigned long long>(rva));
+            else if (host_rva(rip, rva))
+                std::snprintf(where, sizeof where, "palmetto.exe+0x%llx (a shim read, not the title's code)",
+                              static_cast<unsigned long long>(rva));
             else
-                std::snprintf(where, sizeof where, "0x%llx (not the title image)", static_cast<unsigned long long>(rip));
+                std::snprintf(where, sizeof where, "0x%llx (neither image)", static_cast<unsigned long long>(rip));
             std::fprintf(stderr, "[rt] dstorage guard: streamed block #%u first %s at its +0x%llx by %s\n", tracked,
                          access == 1 ? "write" : access == 8 ? "execute" : "read",
                          static_cast<unsigned long long>(address > block ? address - block : 0), where);
@@ -341,8 +359,12 @@ int arm_stream_guard(unsigned tracked_index) {
     guard.tracked_index.store(tracked_index, std::memory_order_relaxed);
     guard.armed.store(true, std::memory_order_release);
     static std::atomic<bool> handler_installed{false};
-    if (!handler_installed.exchange(true, std::memory_order_relaxed))
+    if (!handler_installed.exchange(true, std::memory_order_relaxed)) {
+        // Outside the handler, where a module lookup is safe: the runtime's own image base, so a fault from shim code can
+        // be labelled (the XG texture-computer copy is the shim read this measurement looks for).
+        g_host_image_base.store(reinterpret_cast<std::uint64_t>(GetModuleHandleW(nullptr)), std::memory_order_relaxed);
         AddVectoredExceptionHandler(1, stream_guard_handler);
+    }
     DWORD old = 0;
     if (!VirtualProtect(reinterpret_cast<void*>(first), static_cast<size_t>(end - first), PAGE_READWRITE | PAGE_GUARD,
                         &old)) {
@@ -393,7 +415,11 @@ void stream_note_completed(void* destination, size_t bytes, void* caller) {
             tracked = &g_tracked[i];
             break;
         }
-    if (!tracked && g_tracked_count < kTrackedDestinations && (requests <= 8 || requests % 512 == 0)) {
+    // 32 tracked blocks: the first sixteen requests, then one destination every 256th request, so the guard samples the
+    // whole 256 MiB stream instead of its first resource (the consumer chain of docs/streamed_consumer.md is one batch;
+    // the first sixteen also say whether the consumer handles a second resource in that batch, and a host-code first
+    // touch would be the XG fill path reading a block).
+    if (!tracked && g_tracked_count < kTrackedDestinations && (requests <= 16 || requests % 256 == 0)) {
         tracked = &g_tracked[g_tracked_count];
         const unsigned index = g_tracked_count++;
         tracked->base = base;
@@ -426,17 +452,23 @@ void stream_note_completed(void* destination, size_t bytes, void* caller) {
                      "first-touch fault(s), %u still guarded\n",
                      static_cast<unsigned long long>(requests), double(total_bytes) / double(1 << 20),
                      g_distinct_destinations, g_tracked_count, faults, armed);
-        char tracked_line[512];
-        int at = std::snprintf(tracked_line, sizeof tracked_line, "[rt] dstorage guard: tracked blocks:");
-        for (unsigned i = 0; i < g_tracked_count && at > 0 && static_cast<size_t>(at) < sizeof tracked_line - 64; ++i) {
-            const GuardedBlock& guard = g_guards[i % kGuardSlots];
-            at += std::snprintf(tracked_line + at, sizeof tracked_line - static_cast<size_t>(at),
-                                " #%u(0x%llx: %u fault(s), %s)", i,
-                                static_cast<unsigned long long>(g_tracked[i].base),
-                                guard.faults.load(std::memory_order_relaxed),
-                                guard.armed.load(std::memory_order_relaxed) ? "guarded" : "seen");
+        // One line per 12 tracked blocks keeps the log line bounded with 32 tracked destinations.
+        for (unsigned start = 0; start < g_tracked_count; start += 12) {
+            char tracked_line[768];
+            int at = std::snprintf(tracked_line, sizeof tracked_line, "[rt] dstorage guard: tracked blocks %u-%u:", start,
+                                   start + 11 < g_tracked_count ? start + 11 : g_tracked_count - 1);
+            for (unsigned i = start; i < g_tracked_count && i < start + 12 && at > 0 &&
+                                  static_cast<size_t>(at) < sizeof tracked_line - 64;
+                 ++i) {
+                const GuardedBlock& guard = g_guards[i % kGuardSlots];
+                at += std::snprintf(tracked_line + at, sizeof tracked_line - static_cast<size_t>(at),
+                                    " #%u(0x%llx: %u fault(s), %s)", i,
+                                    static_cast<unsigned long long>(g_tracked[i].base),
+                                    guard.faults.load(std::memory_order_relaxed),
+                                    guard.armed.load(std::memory_order_relaxed) ? "guarded" : "seen");
+            }
+            std::fprintf(stderr, "%s\n", tracked_line);
         }
-        std::fprintf(stderr, "%s\n", tracked_line);
     }
 }
 

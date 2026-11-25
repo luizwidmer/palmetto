@@ -190,6 +190,14 @@ void caller_text(std::uint64_t caller, char* out, std::size_t capacity) {
         std::snprintf(out, capacity, "0x%llx (not the title image)", static_cast<unsigned long long>(caller));
 }
 
+// The RVA of a caller when it lies in the title image, false otherwise.
+bool caller_rva(std::uint64_t caller, std::uint64_t& rva) {
+    const std::uint64_t base = g_title_base.load(std::memory_order_relaxed);
+    if (!caller || !base || caller < base || caller - base >= 0x10000000ull) return false;
+    rva = caller - base;
+    return true;
+}
+
 }  // namespace streamed_blocks
 
 extern "C" void palmetto_stream_block_completed(void* va, std::size_t bytes) {
@@ -197,6 +205,17 @@ extern "C" void palmetto_stream_block_completed(void* va, std::size_t bytes) {
 }
 
 extern "C" void palmetto_stream_set_title_base(std::uint64_t base) { streamed_blocks::set_title_base(base); }
+
+// For the next increment (docs/streamed_consumer.md): a caller outside this file - the XG texture-computer shim - can ask
+// whether an address range is one of the recorded DirectStorage blocks without reading the registry. -1 when none. Only
+// meaningful while dstorage.cpp's PALMETTO_STREAM_CONSUMER filled the registry; both calls are cheap otherwise.
+extern "C" int palmetto_streamed_block_index(const void* address, std::size_t bytes) {
+    return streamed_blocks::find(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(address)), bytes);
+}
+
+extern "C" unsigned palmetto_streamed_block_count() {
+    return streamed_blocks::g_count.load(std::memory_order_relaxed);
+}
 
 namespace rt::d3d12_xs {
 namespace {
@@ -1486,6 +1505,230 @@ void stream_note_list_call(unsigned console_slot, unsigned pc_slot, const void* 
                  static_cast<unsigned long long>(a5), static_cast<unsigned long long>(a6), where);
 }
 
+// ---- Xbox-ABI call shape of the console view-creation sites (measurement only; PALMETTO_XBOX_VIEW_SHAPE=1) ---------
+//
+// docs/streamed_consumer.md: the linear-layout A/B saw streamed-block addresses in the *higher* words of the console
+// CreateShaderResourceView (device slot 18), CreateUnorderedAccessView (slot 19) and slot 70 calls. The question is
+// whether such a word is a real Xbox-ABI argument or a saved register / caller-frame word that happens to lie in a
+// streamed block. This probe answers it without changing a call:
+//   * once per call site (up to four per slot) it prints the caller as game+RVA and all fourteen words the thunk
+//     receives, each labelled ARG (the forwarded PC method reads it) or BEYOND (the caller's stack after the callee's
+//     argument vector: a saved register, a return-address slot or the caller's own frame - not an argument);
+//   * for every word that is a readable pointer it scans the first 256 bytes of the pointed-to structure for values that
+//     fall in a recorded streamed block, and prints each hit with its byte offset, so an address carried indirectly (in
+//     a descriptor) is not missed;
+//   * the first call per site also prints the first 8 dwords of each readable pointer argument, so the structure can be
+//     identified offline;
+//   * across the boot it counts, per slot and per word position, how many calls had a word inside a streamed range, and
+//     prints that histogram on the first monitored call, whenever a position matches for the first time, and every 256
+//     monitored calls. A match at an ARG position is the finding this probe exists to rule in or out.
+// Off by default; bounded (4 sites x 3 slots, 14-word lines, 24 histogram lines); no argument is changed.
+constexpr unsigned kViewShapeWords = 14;
+constexpr unsigned kViewShapeSites = 4;
+constexpr unsigned kViewShapeSlotCount = 3;
+constexpr unsigned kViewShapeSlots[kViewShapeSlotCount] = {18, 19, 70};
+
+bool view_shape_enabled() {
+    static const bool on = [] {
+        char value[8] = {};
+        return GetEnvironmentVariableA("PALMETTO_XBOX_VIEW_SHAPE", value, sizeof(value)) > 0 && value[0] != '\0' &&
+               value[0] != '0';
+    }();
+    return on;
+}
+
+// Argument positions the forwarded PC method really reads after `this` (slot 70 is refused: its console call is measured
+// as three arguments, docs/device_slot55.md and the slot-70 refusal in proxy_slot). Everything past this is the caller's
+// stack, not the callee's argument vector.
+unsigned view_shape_argument_count(unsigned slot) { return slot == 19 ? 4u : 3u; }
+
+unsigned view_shape_index(unsigned slot) {
+    for (unsigned i = 0; i < kViewShapeSlotCount; ++i)
+        if (kViewShapeSlots[i] == slot) return i;
+    return kViewShapeSlotCount;
+}
+
+struct ViewShapeStats {
+    std::atomic<std::uint64_t> calls{0};
+    std::atomic<std::uint64_t> hits[kViewShapeWords + 1];
+    std::atomic<std::uint64_t> structure_hits{0};
+    std::atomic<bool> position_seen[kViewShapeWords + 1];
+};
+ViewShapeStats g_view_shape[kViewShapeSlotCount];
+struct ViewShapeSite {
+    std::atomic<std::uint64_t> caller{0};
+    std::atomic<bool> logged{false};
+};
+ViewShapeSite g_view_shape_sites[kViewShapeSlotCount][kViewShapeSites];
+std::atomic<std::uint64_t> g_view_shape_calls{0};
+
+void view_shape_histogram(unsigned slot) {
+    const unsigned index = view_shape_index(slot);
+    if (index >= kViewShapeSlotCount) return;
+    const ViewShapeStats& stats = g_view_shape[index];
+    const unsigned arguments = view_shape_argument_count(slot);
+    char line[512];
+    int at = std::snprintf(line, sizeof line,
+                           "[rt] d3d12_xs: view shape histogram: slot %u calls=%llu (words 1-%u = the Xbox-ABI "
+                           "arguments, the rest are caller stack):",
+                           slot, static_cast<unsigned long long>(stats.calls.load(std::memory_order_relaxed)), arguments);
+    bool any = false;
+    for (unsigned word = 1; word <= kViewShapeWords && at > 0 && static_cast<size_t>(at) < sizeof line - 48; ++word) {
+        const std::uint64_t hits = stats.hits[word].load(std::memory_order_relaxed);
+        if (!hits) continue;
+        any = true;
+        at += std::snprintf(line + at, sizeof line - static_cast<size_t>(at), " w%u=%llu%s", word,
+                            static_cast<unsigned long long>(hits), word <= arguments ? "(ARG)" : "(beyond)");
+    }
+    if (!any) at += std::snprintf(line + at, sizeof line - static_cast<size_t>(at), " no streamed-range hit in any word");
+    if (at > 0 && static_cast<size_t>(at) < sizeof line - 48)
+        std::snprintf(line + at, sizeof line - static_cast<size_t>(at), "; pointed-to structures: %llu block hit(s)",
+                      static_cast<unsigned long long>(stats.structure_hits.load(std::memory_order_relaxed)));
+    std::fprintf(stderr, "%s\n", line);
+}
+
+// Scan the first 256 bytes of a pointer argument for streamed-block addresses: a descriptor that carries the block's
+// address indirectly is the case a word scan alone would miss. Returns the number of hits (each also printed, bounded).
+unsigned view_shape_scan_pointer(unsigned slot, unsigned word, std::uint64_t pointer, std::uint64_t caller,
+                                 const char* origin) {
+    if (!pointer) return 0;
+    unsigned hits = 0;
+    for (unsigned i = 0; i < 32; ++i) {
+        const std::uint64_t address = pointer + static_cast<std::uint64_t>(i) * 8;
+        if (!readable_range(reinterpret_cast<const void*>(address), 8)) return hits;  // also refuses a guard page
+        const std::uint64_t value = *reinterpret_cast<const std::uint64_t*>(address);
+        const int block = streamed_blocks::find(value, 1);
+        if (block < 0) continue;
+        ++hits;
+        if (streamed_blocks::g_match_lines.fetch_add(1, std::memory_order_relaxed) >= 64) return hits;
+        char where[64];
+        streamed_blocks::caller_text(caller, where, sizeof where);
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: view shape: slot %u word %u [%s] structure +0x%x = 0x%llx names streamed block #%d "
+                     "(caller %s)\n",
+                     slot, word, origin, i * 8u, static_cast<unsigned long long>(value), block, where);
+    }
+    return hits;
+}
+
+// Where a word of the thunk's fourteen sits relative to the callee's argument vector. The three measured sites are
+// reached through two tiny wrappers whose prologues were disassembled offline (RVAs only):
+//   0x164EE0 (slot-18 site, returns at 0x164F01) and 0x4ECC800 (slot-70 site, returns at 0x4ECC821):
+//       push rsi; sub rsp,0x20; rsi=r8; r8=rdx; rdx=rcx; rcx=<device global>; r9=rsi; call [rax+slot]; then
+//       tail-call the cache-line writeback 0x4ECC830 with (rsi=r8, 0).  Callee words: 1-3 = the forwarded arguments,
+//       4 = the caller's rsi saved by `push rsi` (a register save, not an argument), 5 = the wrapper's return address,
+//       6+ = the wrapper caller's stack.
+//   0x16475F0 (slot-19 site, returns at 0x1647616):
+//       push rsi; sub rsp,0x30; r9=rdx; rdx=rcx; rcx=<device global>; rsi=r8; [rsp+0x20]=r8; r8d=0; call [rax+slot];
+//       then tail-call the writeback with (rsi=r8, 0).  Callee words: 1-3 = the forwarded arguments, 4 = the stored
+//       fourth argument, 5 = an unwritten local slot, 6 = the caller's rsi saved by `push rsi`, 7 = the wrapper's return
+//       address, 8+ = the wrapper caller's stack.
+// A word 4-5 match in the A/B boot is therefore a register save or an unwritten local - not a call argument.
+const char* view_shape_origin(unsigned slot, std::uint64_t caller, unsigned word) {
+    constexpr std::uint64_t kSrvSite = 0x164F01;
+    constexpr std::uint64_t kUavSite = 0x1647616;
+    constexpr std::uint64_t kSlot70Site = 0x4ECC821;
+    std::uint64_t rva = 0;
+    const bool known = streamed_blocks::caller_rva(caller, rva);
+    if (known && (rva == kSrvSite || rva == kSlot70Site)) {
+        if (word <= 3) return "arg";
+        if (word == 4) return "saved-rsi";
+        if (word == 5) return "retaddr";
+        return "caller-stack";
+    }
+    if (known && rva == kUavSite) {
+        if (word <= 3) return "arg";
+        if (word == 4) return "arg4";
+        if (word == 5) return "local";
+        if (word == 6) return "saved-rsi";
+        if (word == 7) return "retaddr";
+        return "caller-stack";
+    }
+    return word <= view_shape_argument_count(slot) ? "arg" : "caller-stack?";
+}
+
+void view_shape_log_site(unsigned slot, const std::uint64_t* words, std::uint64_t caller) {
+    char where[64];
+    streamed_blocks::caller_text(caller, where, sizeof where);
+    char line[1024];
+    int at = std::snprintf(line, sizeof line, "[rt] d3d12_xs: view shape: slot %u site %s:", slot, where);
+    for (unsigned word = 1; word <= kViewShapeWords && at > 0 && static_cast<size_t>(at) < sizeof line - 48; ++word) {
+        const int block = streamed_blocks::find(words[word - 1], 1);
+        const char* origin = view_shape_origin(slot, caller, word);
+        if (std::strcmp(origin, "retaddr") == 0) {
+            char code[64];
+            streamed_blocks::caller_text(words[word - 1], code, sizeof code);
+            at += std::snprintf(line + at, sizeof line - static_cast<size_t>(at), " w%u[%s]=%s%s", word, origin, code,
+                                block >= 0 ? " (streamed)" : "");
+        } else {
+            at += std::snprintf(line + at, sizeof line - static_cast<size_t>(at), " w%u[%s]=0x%llx%s", word, origin,
+                                static_cast<unsigned long long>(words[word - 1]), block >= 0 ? " (streamed)" : "");
+        }
+    }
+    std::fprintf(stderr, "%s\n", line);
+    // The first 8 dwords of each readable pointer word, so the structure can be identified offline. Bounded: one site
+    // line per slot, at most 14 pointer dumps of 8 dwords.
+    for (unsigned word = 1; word <= kViewShapeWords; ++word) {
+        const std::uint64_t pointer = words[word - 1];
+        if (!readable_range(reinterpret_cast<const void*>(pointer), 32)) continue;
+        const auto* dwords = reinterpret_cast<const std::uint32_t*>(pointer);
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: view shape: slot %u w%u first dwords: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                     slot, word, dwords[0], dwords[1], dwords[2], dwords[3], dwords[4], dwords[5], dwords[6],
+                     dwords[7]);
+    }
+}
+
+// Called at the top of every device thunk when the switch is on. `words` holds the fourteen words the thunk receives
+// (words 1-4 in the argument registers, words 5-14 the caller's stack).
+void view_shape_probe(unsigned slot, const void* return_address, const std::uint64_t* words) {
+    const unsigned index = view_shape_index(slot);
+    if (index >= kViewShapeSlotCount) return;
+    ViewShapeStats& stats = g_view_shape[index];
+    const std::uint64_t caller = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(return_address));
+    const bool baseline = g_view_shape_calls.fetch_add(1, std::memory_order_relaxed) == 0;
+    stats.calls.fetch_add(1, std::memory_order_relaxed);
+    bool new_position = false;
+    for (unsigned word = 1; word <= kViewShapeWords; ++word) {
+        if (streamed_blocks::find(words[word - 1], 1) < 0) continue;
+        stats.hits[word].fetch_add(1, std::memory_order_relaxed);
+        if (!stats.position_seen[word].exchange(true, std::memory_order_relaxed)) new_position = true;
+    }
+    // The pointed-to structures, across the boot: every call for slots 18/19 (a few tens of calls each), every 1024th
+    // call for slot 70 (13,824 calls), so an indirect block address inside a descriptor is measured beyond the first
+    // call of a site.
+    const bool scan_structures = slot != 70 || stats.calls.load(std::memory_order_relaxed) % 1024 == 0;
+    if (scan_structures) {
+        for (unsigned word = 1; word <= kViewShapeWords; ++word) {
+            const std::uint64_t pointer = words[word - 1];
+            if (!readable_range(reinterpret_cast<const void*>(pointer), 32)) continue;
+            const unsigned hits = view_shape_scan_pointer(slot, word, pointer, caller,
+                                                          view_shape_origin(slot, caller, word));
+            if (!hits) continue;
+            stats.structure_hits.fetch_add(hits, std::memory_order_relaxed);
+            new_position = true;
+        }
+    }
+    // The first call per call site: the full vector, the pointer structures and the argument/stack split.
+    for (unsigned site = 0; site < kViewShapeSites; ++site) {
+        ViewShapeSite& entry = g_view_shape_sites[index][site];
+        if (entry.caller.load(std::memory_order_relaxed) == caller) break;
+        if (entry.caller.load(std::memory_order_relaxed) != 0) continue;
+        std::uint64_t expected = 0;
+        if (!entry.caller.compare_exchange_strong(expected, caller, std::memory_order_relaxed)) break;
+        view_shape_log_site(slot, words, caller);
+        break;
+    }
+    const std::uint64_t calls = stats.calls.load(std::memory_order_relaxed);
+    if (baseline || new_position || calls % 256 == 0) {
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: view shape: slot %u has %llu call(s), %llu monitored call(s) in total\n", slot,
+                     static_cast<unsigned long long>(calls),
+                     static_cast<unsigned long long>(g_view_shape_calls.load(std::memory_order_relaxed)));
+        view_shape_histogram(slot);
+    }
+}
+
 bool clear_barrier_probe() {
     static const bool on = [] {
         char value[8] = {};
@@ -1494,7 +1737,6 @@ bool clear_barrier_probe() {
     }();
     return on;
 }
-
 // A CPU descriptor handle a CreateRenderTargetView wrote a capture at, with the resource it was made from. Recorded
 // unconditionally (an RTV is created rarely and the recording is one atomic add): the console ClearRenderTargetView
 // conversion asks whether the handle it was given is a slot this proxy itself filled, and with what resource.
@@ -4318,6 +4560,11 @@ std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64
                                 std::uint64_t a12, std::uint64_t a13, std::uint64_t a14) {
     if (callers_enabled()) note_caller(CallerKind::device, Slot, _ReturnAddress(), a1, a2, a3, a4);
     if (streamed_blocks::active()) stream_note_device_call(Slot, _ReturnAddress(), a1, a2, a3, a4, a5, a6);
+    if (view_shape_enabled()) {
+        const std::uint64_t shape_words[kViewShapeWords] = {a1,  a2,  a3,  a4,  a5,  a6,  a7,
+                                                            a8,  a9,  a10, a11, a12, a13, a14};
+        view_shape_probe(Slot, _ReturnAddress(), shape_words);
+    }
     if constexpr (Slot == 0) {
         return hr_to_u64(proxy_query_interface(self, reinterpret_cast<const IID*>(a1),
                                                reinterpret_cast<void**>(a2)));
