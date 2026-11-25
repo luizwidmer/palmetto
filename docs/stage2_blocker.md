@@ -467,3 +467,159 @@ table's first 48/70 buckets were read, not all 70 job objects; the second sample
 started and finished inside those 3 s would be missed - the definitions' unchanged state makes that unlikely but it is
 not excluded. No game data: RVAs, field offsets, counts, handles and outcomes only; no job names, ids or package
 contents.
+
+## 12. Dispatch split (follow-up): the batch is submitted and executed by title workers; it stops with a ready set no pump drains
+
+**Status: measured; the three-way split is answered and the batch's dispatch is not the missing step.** A cdb trace of
+the stage-2 batch dispatch shows the body queueing **115** jobs, the scheduler handing them to **five different title
+worker threads**, and the job runners (`image+0x4EAA040` -> the generic runner `image+0x63CD0`) executing on those
+threads. The graph then stops with the tracker's pending counter at **115 of 249** and **four job ids marked ready in the
+scheduler's ready bitmask that no pump ever dispatches**; the entry thread is in the section-2.1 wait throughout. So
+(a) "queued but never submitted to the scheduler" and (b) "submitted but no worker picks it up" are both **refuted by
+measurement**; what is missing is a scheduler wake for the ready set, and the only dispatch path that would post the work
+item covering those classes is the title's own loader dispatch (the one [streamed_consumer.md](streamed_consumer.md)
+sections 6a/6b measured stopping after the pipeline precompile). No runtime call is outstanding that could answer it, so
+this slice is a **measured negative**: no shim change, no fix, stage 3 is still never requested.
+
+### 12.1 What ran
+
+| | |
+|---|---|
+| Tree | `D:\leonida` working tree with other slices' uncommitted files present; this slice's source change is the opt-in `PALMETTO_STAGE2_DISPATCH` probe in `port/src/main.cpp` (off by default; no thread starts unless set) plus this page |
+| Binaries | probe build from this tree; `port\build\palmetto.exe` SHA-256 `B17FF83F8E94577A049CA84BB8137B95915CBF4C9F9CC8EC2E1DA006399A7A9B`, built 17:03:50 (rebuild by the shared tree after the probe was added; other slices' `vulkan_replay.h`/docs changes are in the tree) |
+| Boots | four 130 s boots under the shared boot lock, one at a time: `boot-d1` (the in-process dispatch probe, no debugger), `boot-c3` (one cdb session tracing the dispatch chain, then a wait-site dump), `boot-c4` (two cdb sessions in one boot: A at the wait, B at ~82 s) and two earlier cdb attempts (`c1`, `c2`) that are **not used** because the runtime's first-chance exceptions stopped the debugger before the breakpoint (see 12.7) |
+| Harness | `tooling/boot_report.py --timeout 130`, captures outside the repository in `D:\leonida-work\stage2q\` |
+| Environment | `PALMETTO_SHADERS`, `PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`, `PALMETTO_STATE_TRACE=2,130`; `boot-d1` also `PALMETTO_STAGE2_DISPATCH=2` and `PALMETTO_WAIT_SAMPLE=25,40,70`, the cdb boots also `PALMETTO_WAIT_SAMPLE=30,90` (c4) |
+| Measure points | in-process: the tracker global `image+0x9844898` polled every 1 ms from 2 s; cdb trace: entry of the body `0x21B8B20`, the dispatch `0x509B3E0`, the per-job queue test `0x509B890`, the scheduler pump `0x560B0`, the run item `0x4E53470`, the ready dispatch `0x4E53EF0`, the job executor `0x63CD0`, the executor thunk `0x4EAA040`, the completion walk `0x4E53A10`, the ready mark `0x3F470`, the worker dequeue `0x256FE80`, and the wait call site `0x21B8BDF` |
+
+The state word moved as before in every measured boot: `init 2` at 18.5-23.4 s, `loading 1` two seconds later, machine
+`current 2 / next 2` to the kill. No boot requested stage 3.
+
+### 12.2 The dispatch chain, decompiled
+
+The batch body `FUN_1421B8B20` is 0xAB bytes and does one thing: it locks in a pending operation, then tail-calls
+`FUN_14509B3E0(tracker)`. That function is the dispatch:
+
+- it walks the dispatch list at `tracker+0x88` (u16 count at `tracker+0x90`) through **`FUN_14509B890(tracker, job, run_state)`**;
+  that function tests `job+0xE0` (state), the class masks `job+0xE4 & tracker+0x5E` and `(job+0xE1 & tracker+0x70) ==
+  job+0xE2`, and the dependency callback at `job+0xE8`; a runnable job gets **`job+0xF0 = 2`** and is appended to the run
+  state (`run_state+0x87C` count, `run_state+0x880` array);
+- it then calls **`FUN_1400560B0(run_state, 0, 7, 4)`**, the scheduler pump. The pump claims the queue lock at
+  `queue+0x308` (queue = **`tracker+0xB8`**), runs the current work item through `FUN_144E53470`, enqueues a command
+  packet into the queue's 64-slot ring (head dword `queue+0`, tail dword `queue+4`, sequence dwords `queue+8`,
+  payload qwords `queue+0x108`) and drains the ring itself before returning;
+- the ready set lives in the same queue object: capacity `+0x1860`, count `+0x1864`, id array `+0x1868`, bitmask
+  **`+0x1870`** (64 qwords), min/max/count at `+0x1A90/+0x1A92/+0x1A94`; it is drained by the ready dispatcher
+  `FUN_144E53EF0`, reached from the run item `FUN_144E53470` and so only from the pump.
+
+The batch object also keeps the pending-completion counter at **`tracker+0xB0`** (dword; 249 at the body entry = the
+249 factory definition entries) and the graph id `0xAC407EB2` at `tracker+0xB4` - section 11.2's `+0xB0` reading is
+corrected to the pair. Job execution is on the title's own task pool: worker threads entered at `game+0x2215EA0`, whose
+loop `FUN_14221C1F0` dequeues a work item (`FUN_144D9D9F0`), runs its function, and parks on the worker's event at
+`worker+0x18` when idle; the pool waker `FUN_144DA4240` signals those events through the image's SetEvent wrapper
+`0x5930`. A job's executor at `job+0x68` is `FUN_4EAA040`, which calls the generic job runner **`FUN_140063CD0`**: it
+tests the same class masks, calls the job's work function at `job+0x50`, then pumps the job's tracker batch with
+`FUN_1400560B0`, so a job's completion re-enters the same scheduler.
+
+### 12.3 The split, `boot-c3` (cdb trace)
+
+The trace lines are printed in execution order; `tid` is the current thread, `b0` is `tracker+0xB0`:
+
+| trace | value | meaning |
+|---|---|---|
+| `[BODY]` | `tid 76544 tracker 0x196dfcc92f0 armed 0 b0 f9 queue 0x196dfcc9940` | body entry, 249 pending, not armed |
+| `[DISP]` | same tid, `armed 1`, `b0 f9` | the dispatch runs on the title entry thread |
+| `[QUEUE] x115` | every entry `e0 0 f0 1 e8 0`, ids `0`..`247` | **all 115 dispatch-list jobs are runnable** (no dependency callback, state idle) |
+| `[PUMP]` | `rdy 115 l4 0 l45c 0 l66c 0 a90 0x196dfcc9940` | the pump receives the 115 runnable jobs |
+| `[RUN]` / `[READY]` | `rdy 115` / `bits 115` | the ready set is filled with 115 ids |
+| `[THUNK]` / `[EXEC]` | tids **51516, 31728, 31272, 14264, 42576**; executors `0x4EAA040` -> `0x63CD0`; job `...87c40 e0 0 f0 2`, `...cb5a0 e0 0 f0 2` | **five different title worker threads execute job runners**; the jobs are no longer queued, they are running |
+| `[WAIT]` | `tid 76544 tracker ... armed 1 b0 f9 queue ...` | the entry thread reaches the section-2.1 wait while the workers are still starting the graph |
+
+At the wait breakpoint several workers were inside the job runner (stacks `0x4EAA044 <- 0x4221C29C <- 0x42215ECA` and
+`0x63CD0 <- 0x4EAA05A <- ...`), i.e. the graph was actively executing on title threads when the entry thread parked.
+
+**Reading.** (a) is refuted: the batch is queued and submitted to the scheduler, and the scheduler ring is drained by
+the pump (the section 11.5 reading of `+0xF0 = 2` as "sitting in the title's own queue" is not the state at the wait).
+(b) is refuted: worker threads pick the work up. Nothing in the dispatch chain is a GPU submit, so (c) does not apply.
+
+### 12.4 Where it stops, `boot-c4` (two cdb sessions) and `boot-d1` (in-process)
+
+| measure | `boot-c4` A: at the wait | `boot-c4` B: ~82 s | `boot-d1`: first sample / +2.1 s |
+|---|---|---|---|
+| pending `tracker+0xB0` | **0xF5 (245)** of 249 | **0x73 (115)** and frozen | 0x7C (124) / 0x73 (115) |
+| queue ring head/tail (empty when equal) | 0/0 | 5/5 | 26/26 / 26/26 |
+| ready-set count `+0x1864` | 0 | 0 | 0 |
+| **ready bitmask `+0x1870` ids** | **152** | **83, 91, 92, 152** | (not sampled) |
+| entry thread | wait call site `0x21B8BDF` | still in the section-2.1 wait | still in the wait at 130 s |
+
+The graph completes a burst of ~130 nodes in the seconds around the wait (249 -> 115) and then freezes: at 82 s it is
+still 115, with four job ids marked ready in the scheduler's ready bitmask and no work item draining them. `boot-d1`
+shows the same terminal value (0x73) two seconds after the wait and the ring and ready set empty, so it is not a queue
+backlog: the ready set's four ids are the only work left, and nothing pumps them.
+
+### 12.5 The named missing step
+
+The ready set is drained only by `FUN_144E53EF0`, which runs only inside the pump `FUN_1400560B0`, which is entered from
+a job completion (`FUN_14006AED0`), from a job runner (`FUN_140063CD0`) or from a posted task-pool work item
+(`FUN_14256FE80` and the other pump call sites). With the batch's own work items finished and no further completion
+queued, no caller re-enters the pump for the four ready ids. The work-item post that would carry them is the **title's
+loader dispatch**, the same path [streamed_consumer.md](streamed_consumer.md) section 6a/6b measured: the loader object
+is disarmed at ~19.8 s and no further read job is posted, and the stage-2 job graph's remaining nodes are the loader
+stages that depend on it. This is title-side scheduling - the title's own scheduler never posts the wake for its own
+ready set in this boot - not a call our runtime drops, and not a GPU completion (no GPU call is in the dispatch chain;
+the 4,199 DirectStorage requests of section 11.5 all completed `S_OK`).
+
+Consequences: the fix cannot be a runtime signal. Programme the measured facts: the ready set exists and is drained by a
+pump the title itself schedules; the stage-3 request at `0x81B2EF` is never written and the stage word stays 2/2, so the
+frontier remains "which title-side dispatch posts the loader work item", not "which shim answers".
+Requested follow-up: **stage 3 is not requested by this slice**; the next measurement would have to resolve the ready
+ids (`83`, `91`, `92`, `152`) to their job definitions and name the work-item class lane that owns them, which needs a
+decompile of the run-state class lanes (not done here; no game data is needed for it, only RVAs and ids).
+
+### 12.6 Boot numbers
+
+| boot | verdict | d3d12 calls | stage | dispatch facts |
+|---|---|---|---|---|
+| `boot-d1` | ALIVE 130.4 s, 0 exceptions, killed by the 130 s timeout | 254,083 | 2 at 22.0 s, 2/2 to the kill | tracker created at 23.420 s with the wait already armed at the first sample; ring 26/26; b0 0x7C -> 0x73 in 2.1 s |
+| `boot-c3` | STOP 53.2 s, exit `0x80000003`, at `game+0x4EAA044` (a breakpoint byte left by the single cdb session, see 12.7) | 55,865 | 2 (dispatch at ~24 s) | the dispatch trace of 12.3 |
+| `boot-c4` | ALIVE 130.3 s, 0 exceptions, killed by the 130 s timeout | 253,642 | 2 at 18.5 s, 2/2 at 120 s | A at the wait: b0 245, ring 0/0, ready id 152; B at 82 s: b0 115, ring 5/5, ready ids 83/91/92/152 |
+
+No frame capture was made in these boots (they are measurement boots, not a fix A/B pair), so no non-black frame is
+claimed; the presentation/frame path was already the subject of the earlier pages.
+
+### 12.7 Tests and gates (this section)
+
+This section's change to the runtime is the opt-in `PALMETTO_STAGE2_DISPATCH` probe in `port/src/main.cpp` (plus the
+census now walking the job table's full 128-slot capacity instead of its first 70 slots, which is what under-counted the
+jobs in 12.4's d1 column): off by default, no thread starts unless the variable names a second.
+
+| gate | result |
+|---|---|
+| `_setup\build_gta6rt.cmd` | `PALMETTO_OK` |
+| `_setup\build_tests.cmd` | `TESTS_BUILT` |
+| slice test | none added: the change is a diagnostic switch on the default path; the defect it measures is title-side and the slice makes no behaviour change to test |
+| test subset (`port/build`) | `frame_dump_test`, `unimplemented_policy_test`, `xbox_present_test`, `xs_proxy_mock_test`, `graphics_record_test`, `graphics_pso_test`, `buffer_va_index_test`, `dstorage_test`, `xapu_chad_test` exit 0; `d3d12_fence_timing_test` exits `0xC0000005`, the same pre-existing failure section 9 records in a tree that carries another slice's in-flight `vulkan_replay.h`/`d3d12_vulkan_device.cpp` changes |
+| docs checks (`tests/test_docs_*.py`, run with the session's `GIT_CONFIG_*` variables cleared) | `test_docs_links`, `_list_items`, `_table_rows`, `_table_ids`, `_repo_paths`, `_encoding`, `_design_rows`, `_repeated_lines`, `_pr_template` and `_python_deps` pass; `test_docs_cli_flags` fails on `docs/frame_first_light.md:318` and `test_docs_env_vars` on `PALMETTO_COLOUR_PATH` (`port/src/vulkan_replay.h`), both from other slices' untracked changes, neither from this page |
+| default path | `PALMETTO_STAGE2_DISPATCH` unset: no probe thread and no extra read; `boot-c4`'s two sessions and `boot-c3` are default-path boots apart from the named diagnostics |
+
+### 12.8 Cdb practice note and limits
+
+- The title image faults with first-chance exceptions on the normal path (the runtime's page/AV handling and its int3
+  emulation), so a cdb session must run `sxd av` and `sxd *` before continuing; without them the debugger stops on the
+  first one and the session is useless (`boot-c1`/`boot-c2`, not used as evidence). The `c3` session's STOP at
+  `game+0x4EAA044` after the session detached is a left-over breakpoint byte, not the boot's own behaviour: `c4`'s two
+  sessions detached the same way and the boot then ran to 130.3 s ALIVE with 0 exceptions.
+- The in-process probe's 1 ms poll cannot see inside the dispatch (it is sub-millisecond): `boot-d1`'s first sample is
+  already inside the wait, so the dispatch split relies on the cdb trace and the in-process probe only supplies the
+  steady state and the post-wait countdown.
+- The ready-set ids are bitmask bits, not job names; the 115 pending units were not decomposed by class. The loader
+  dispatch attribution is the earlier [streamed_consumer.md](streamed_consumer.md) measurement, not a new one; this
+  section's new fact is that the stage-2 batch is *not* the part that stops being submitted.
+- Two cdb sessions in one boot perturb timing; the 82 s dump is a snapshot, not a steady-state trace. No game data: this
+  section carries RVAs, field offsets, handles, counts, thread ids and outcomes only - no package path, executable bytes
+  or shader/table data.
+
+### 12.9 Attribution (this section)
+
+Same attribution and policy as section 10: this slice was implemented from this project's own measurements, no upstream
+code or behaviour claim is used, and no git writes were made by this slice.

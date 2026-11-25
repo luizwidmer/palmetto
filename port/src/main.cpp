@@ -2005,6 +2005,234 @@ void start_stage2_tracker_probe(std::uintptr_t image_base, std::uintptr_t image_
     }).detach();
 }
 
+// ---- Stage-2 dispatch split probe (PALMETTO_STAGE2_DISPATCH) ---------------------------------------------------------
+// Section 11 of docs/stage2_blocker.md measured the batch body's dispatch: FUN_1421B8B20 arms tracker+0x608 and tail-calls
+// FUN_14509B3E0, which walks the dispatch list at tracker+0x88 (u16 count at +0x90) through FUN_14509B890. That function
+// tests each job's class masks and dependency callback, writes job+0xF0 = 2 (the "queued" value the tracker probe saw) and
+// appends the job to a run state on the stack; FUN_14509B3E0 then calls FUN_1400560B0 with that run state. FUN_1400560B0
+// is the scheduler pump: it claims the lock at queue+0x308 (queue = tracker+0xB8), runs the current work item through
+// FUN_144E53470, enqueues a command packet into the queue's 64-slot ring (head dword +0x0, tail dword +0x4, payload
+// qwords from +0x108) and drains the ring itself until the queue reports empty (FUN_1455ADA30). The ready set lives in the
+// same queue object: capacity +0x1860, count +0x1864, id array +0x1868, bitmask +0x1870, min/max/count at +0x1A90/92/94.
+// The registered jobs are the tracker hash table at +0x628 (capacity) / +0x62C (count) / +0x630 (array of {id dword, job
+// qword}); the executing job's state byte is +0xE0 and its scheduler counter +0xF0.
+//
+// This probe dates the split between "queued", "submitted to the queue ring" and "executing". It is off by default; when
+// PALMETTO_STAGE2_DISPATCH names a start second it starts one detached thread that samples the tracker global at 1 ms
+// from that second, logs every observed change of the armed dword, queue ring head/tail, ready-set count and lock, logs a
+// full job census at creation/arming/the wait, and captures every thread's stack once when the wait is entered so the
+// threads that should pick the batch up are named. It only reads committed memory (bounds-checked) and never writes title
+// state. RVAs, field values and counts only; no game data.
+constexpr std::uint32_t kTitleJobPoolGlobalRva = 0x764A8E8;  // global scheduler pool object pointer (FUN_1400560B0)
+constexpr std::uint32_t kTitleStage2TrackerJobTableCapacity = 0x628;
+constexpr std::uint32_t kTitleStage2TrackerJobTableCount = 0x62C;
+constexpr std::uint32_t kTitleStage2TrackerJobTable = 0x630;
+
+struct Stage2QueueView {
+    std::uintptr_t pointer = 0;
+    std::uint32_t head = 0;
+    std::uint32_t tail = 0;
+    std::uint32_t lock = 0;
+    std::uint32_t ready_capacity = 0;
+    std::uint32_t ready_count = 0;
+    std::uint32_t ready_min = 0;
+    std::uint32_t ready_max = 0;
+    std::uint32_t ready_bits = 0;
+    std::uint32_t ring_0 = 0;
+    std::uint32_t ring_1 = 0;
+};
+
+Stage2QueueView stage2_queue_view(std::uintptr_t tracker) {
+    Stage2QueueView view;
+    view.pointer = stage2_read_qword(tracker + 0xB8);
+    if (view.pointer == 0 || (view.pointer & 7) != 0 || !title_address_readable(view.pointer + 0x1870)) return view;
+    view.head = stage2_read_u32(view.pointer);
+    view.tail = stage2_read_u32(view.pointer + 4);
+    view.lock = stage2_read_u32(view.pointer + 0x308);
+    view.ready_capacity = stage2_read_u32(view.pointer + 0x1860);
+    view.ready_count = stage2_read_u32(view.pointer + 0x1864);
+    view.ready_min = stage2_read_u16(view.pointer + 0x1A90);
+    view.ready_max = stage2_read_u16(view.pointer + 0x1A92);
+    view.ready_bits = stage2_read_u16(view.pointer + 0x1A94);
+    for (unsigned slot = 0; slot < 2 && view.tail + slot < view.head; ++slot) {  // 64-slot ring, payload from +0x108
+        const std::uint32_t index = (view.tail + slot) & 0x3F;
+        const std::uintptr_t payload = view.pointer + 0x108 + static_cast<std::uintptr_t>(index) * 8;
+        if (!title_address_readable(payload)) break;
+        (slot == 0 ? view.ring_0 : view.ring_1) = stage2_read_u32(payload);
+    }
+    return view;
+}
+
+// One line: the registered jobs' state byte (+0xE0), scheduler counter (+0xF0) and the queue-linked flags (+0xF4/+0xF5/
+// +0xF7/+0xF8), aggregated. `started` counts jobs whose state byte is no longer 0.
+std::string stage2_job_census(std::uintptr_t tracker) {
+    const std::uint32_t capacity = stage2_read_u32(tracker + kTitleStage2TrackerJobTableCapacity);
+    const std::uint32_t count = stage2_read_u32(tracker + kTitleStage2TrackerJobTableCount);
+    const std::uintptr_t records = stage2_read_qword(tracker + kTitleStage2TrackerJobTable);
+    if (count == 0 || count > 128 || capacity == 0 || capacity > 128 || records == 0 ||
+        !title_address_readable(records)) {
+        char text[64];
+        std::snprintf(text, sizeof text, "job table unreadable (cap %u count %u)", capacity, count);
+        return text;
+    }
+    unsigned states[4] = {}, counters[5] = {};
+    unsigned started = 0, f4 = 0, f5 = 0, f7 = 0, f8 = 0, visited = 0, unreadable = 0;
+    // The hash table's count is the number of used slots, not their prefix: empty slots can sit anywhere in the
+    // capacity, so the census walks all of it (the measured bootstrap boot read only a third of the jobs without this).
+    for (std::uint32_t i = 0; i < capacity; ++i) {
+        const std::uintptr_t job = stage2_read_qword(records + static_cast<std::uintptr_t>(i) * 16 + 8);
+        if (job == 0 || (job & 7) != 0 || !title_address_readable(job + 0xF8)) {
+            ++unreadable;
+            continue;
+        }
+        const std::uint32_t state = stage2_read_u8(job + 0xE0);
+        if (state < 4) ++states[state];
+        if (state != 0) ++started;
+        const std::int32_t counter = static_cast<std::int32_t>(stage2_read_u32(job + 0xF0));
+        if (counter >= 0 && counter < 4) ++counters[counter];
+        else ++counters[4];
+        if (stage2_read_u8(job + 0xF4) != 0) ++f4;
+        if (stage2_read_u8(job + 0xF5) != 0) ++f5;
+        if (stage2_read_u8(job + 0xF7) != 0) ++f7;
+        if (stage2_read_u8(job + 0xF8) != 0) ++f8;
+        if (stage2_read_u8(job + 0x74) != 0) ++visited;
+    }
+    char text[320];
+    std::snprintf(text, sizeof text,
+                  "jobs %u: e0[0]=%u e0[1]=%u e0[2]=%u e0[3]=%u started=%u f0[0]=%u f0[1]=%u f0[2]=%u "
+                  "f0[3]=%u f0[big]=%u f4=%u f5=%u f7=%u f8=%u +74=%u unreadable=%u",
+                  count, states[0], states[1], states[2], states[3], started, counters[0],
+                  counters[1], counters[2], counters[3], counters[4], f4, f5, f7, f8, visited, unreadable);
+    return text;
+}
+
+// Starts the dispatch split probe when PALMETTO_STAGE2_DISPATCH names a start second. Detached; off when unset.
+void start_stage2_dispatch_probe(std::uintptr_t image_base, std::uintptr_t image_size, double at_seconds) {
+    std::thread([image_base, image_size, at_seconds] {
+        const auto started = sampler_epoch();
+        auto elapsed = [&] {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        };
+        std::this_thread::sleep_until(started + std::chrono::milliseconds(static_cast<long long>(at_seconds * 1000.0)));
+        std::uintptr_t tracker = 0;
+        bool found = false;
+        for (int poll = 0; poll < 120000; ++poll) {
+            if (title_read_pointer_at(image_base + kTitleStage2TrackerRva, tracker) && tracker != 0 &&
+                (tracker & 7) == 0) {
+                found = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const double created_at = elapsed();
+        std::fprintf(stderr, "[rt] stage2 dispatch: tracker %s at %.3f s\n", found ? "created" : "not seen",
+                     created_at);
+        if (!found) return;
+        auto dump_tracker = [&](const char* label) {
+            const std::uintptr_t queue = stage2_read_qword(tracker + 0xB8);
+            std::fprintf(stderr,
+                         "[rt] stage2 dispatch %s +%.3f s: tracker 0x%llx queue 0x%llx vtbl %s b0 0x%x b8 0x%llx "
+                         "5e 0x%x 70 0x%x 48 0x%x 50 0x%llx c1 %u armed 0x%x event 0x%llx pool 0x%llx\n",
+                         label, elapsed() - created_at, static_cast<unsigned long long>(tracker),
+                         static_cast<unsigned long long>(queue),
+                         stage2_pointer_text(image_base, image_size, stage2_read_qword(tracker)).c_str(),
+                         stage2_read_u32(tracker + 0xB0), static_cast<unsigned long long>(queue),
+                         stage2_read_u16(tracker + 0x5E), stage2_read_u8(tracker + 0x70),
+                         stage2_read_u32(tracker + 0x48), static_cast<unsigned long long>(stage2_read_qword(tracker + 0x50)),
+                         stage2_read_u8(tracker + 0xC1), stage2_read_u32(tracker + 0x608),
+                         static_cast<unsigned long long>(stage2_read_qword(tracker + 0x610)),
+                         static_cast<unsigned long long>(stage2_read_qword(image_base + kTitleJobPoolGlobalRva)));
+            const Stage2QueueView view = stage2_queue_view(tracker);
+            std::fprintf(stderr,
+                         "[rt] stage2 dispatch %s queue: ptr 0x%llx head %u tail %u lock %u ready %u/%u bits %u "
+                         "min %u max %u\n",
+                         label, static_cast<unsigned long long>(view.pointer), view.head, view.tail, view.lock,
+                         view.ready_count, view.ready_capacity, view.ready_bits, view.ready_min, view.ready_max);
+            std::fprintf(stderr, "[rt] stage2 dispatch %s census: %s\n", label, stage2_job_census(tracker).c_str());
+            if (view.head != view.tail) {
+                std::string packets;
+                for (unsigned slot = 0; slot < 4 && view.tail + slot < view.head; ++slot) {
+                    const std::uint32_t index = (view.tail + slot) & 0x3F;
+                    const std::uintptr_t packet = stage2_read_qword(view.pointer + 0x108 +
+                                                                    static_cast<std::uintptr_t>(index) * 8);
+                    char one[96];
+                    std::snprintf(one, sizeof one, " [%u]0x%llx jobs=%u", slot,
+                                  static_cast<unsigned long long>(packet), packet ? stage2_read_u32(packet + 4) : 0);
+                    packets += one;
+                }
+                std::fprintf(stderr, "[rt] stage2 dispatch %s ring payload:%s\n", label, packets.c_str());
+            }
+        };
+        dump_tracker("create");
+        Stage2QueueView previous = stage2_queue_view(tracker);
+        std::uint32_t previous_armed = stage2_read_u32(tracker + 0x608);
+        bool armed_seen = previous_armed != 0;
+        bool wait_seen = false;
+        unsigned tick = 0;
+        for (;;) {
+            if (!title_address_readable(tracker + 0x608)) {
+                std::fprintf(stderr, "[rt] stage2 dispatch: tracker went away at +%.3f s\n", elapsed() - created_at);
+                return;
+            }
+            const std::uint32_t armed = stage2_read_u32(tracker + 0x608);
+            const Stage2QueueView view = stage2_queue_view(tracker);
+            const bool changed = armed != previous_armed || view.head != previous.head || view.tail != previous.tail ||
+                                 view.lock != previous.lock || view.ready_count != previous.ready_count;
+            if (changed) {
+                std::fprintf(stderr,
+                             "[rt] stage2 dispatch +%.3f ms: armed 0x%x ring %u/%u lock %u ready %u/%u bits %u "
+                             "min %u max %u\n",
+                             (elapsed() - created_at) * 1000.0, armed, view.tail, view.head, view.lock,
+                             view.ready_count, view.ready_capacity, view.ready_bits, view.ready_min, view.ready_max);
+                previous_armed = armed;
+                previous = view;
+            }
+            if (!armed_seen && armed != 0) {
+                armed_seen = true;
+                dump_tracker("armed");
+            }
+            // The wait helper turns the armed 1 into 0x80000001 with a locked add before it blocks (section 2.2).
+            if (armed == 0x80000001 || armed == 0x80000000) {
+                wait_seen = true;
+                dump_tracker("wait");
+                const std::uintptr_t event = stage2_read_qword(tracker + 0x610);
+                if (event != 0)
+                    std::fprintf(stderr,
+                                 "[rt] stage2 dispatch wait: event 0x%llx object state before 0x%lx\n",
+                                 static_cast<unsigned long long>(event),
+                                 static_cast<unsigned long>(WaitForSingleObject(reinterpret_cast<HANDLE>(event), 0)));
+                char label[64];
+                std::snprintf(label, sizeof label, "dispatch-wait+%.1f", elapsed());
+                thread_stacks_sample_once(image_base, image_size, label);
+                break;
+            }
+            if (++tick % 100 == 0 && elapsed() - created_at > 60.0) {
+                std::fprintf(stderr, "[rt] stage2 dispatch: no armed dword 60 s after creation\n");
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (!wait_seen) return;
+        // Post-wait: sample the same fields every 20 ms for 3 s to prove whether the ring/ready set/jobs move at all.
+        double last_report = 0.0;
+        const double wait_at = elapsed();
+        for (;;) {
+            const double now = elapsed();
+            if (!title_address_readable(tracker + 0x608)) break;
+            const Stage2QueueView view = stage2_queue_view(tracker);
+            if (now - last_report >= 1.0) {
+                last_report = now;
+                dump_tracker("post");
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        if (title_address_readable(tracker + 0x608)) dump_tracker("post2");
+        std::fprintf(stderr, "[rt] stage2 dispatch: wait held %.3f s (probe end)\n", elapsed() - wait_at);
+    }).detach();
+}
+
 // Starts the sampler thread named by PALMETTO_STATE_TRACE ("<interval>[,<seconds>]"; "1" means 2 s to process end).
 // Detached: it ends with the process. Off when the variable is unset, so the default path is unchanged.
 void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_size, const char* spec) {
@@ -2506,6 +2734,16 @@ int wmain(int argc, wchar_t** argv) {
             if (at_seconds >= 0.0)
                 start_stage2_tracker_probe(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size,
                                            at_seconds);
+        }
+        // PALMETTO_STAGE2_DISPATCH=<seconds>: date the stage-2 loader batch's dispatch - the armed dword, the scheduler
+        // queue ring (head/tail/lock), the ready set and the registered jobs' state/counter fields - at 1 ms from the
+        // named second, and capture every thread's stack once the wait is entered (diagnostic; see the dispatch probe
+        // above). Off when unset.
+        if (const char* spec = std::getenv("PALMETTO_STAGE2_DISPATCH"); spec && *spec) {
+            const double at_seconds = std::strtod(spec, nullptr);
+            if (at_seconds >= 0.0)
+                start_stage2_dispatch_probe(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size,
+                                            at_seconds);
         }
         // PALMETTO_LOADER_HOOK=1: inline entry detours on the loader begin/end/re-init, with per-call records
         // (diagnostic; see the loader entry detours above). Off by default.
