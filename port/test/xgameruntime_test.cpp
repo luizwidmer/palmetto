@@ -22,6 +22,7 @@
 #include <XTaskQueue.h>
 
 #include "file_system.h"
+#include "persistent_store.h"
 #include "shims.h"
 
 namespace {
@@ -663,6 +664,76 @@ void check_run_time_load() {
     std::filesystem::remove_all(scratch, scratch_ec);
 
     // XSystemImpl, asked for as libHttpClient.GDK.dll does: the class id with IXSystemImpl5's interface id.
+    // ---- the offline user's persistent profile record (persistent_store.h, docs/persistent_store.md) ----
+    // The record lives in the persistent-local-storage folder, is written atomically, is advanced and re-served on
+    // the next boot, is not trusted when truncated, and leaves no temporary file behind. The switch face is checked
+    // through the same seam a test uses to model two boots in one process.
+    {
+        const std::filesystem::path store_scratch =
+            std::filesystem::temp_directory_path() / (L"palmetto_store_test_" + std::to_wstring(GetCurrentProcessId()));
+        std::error_code store_ec;
+        std::filesystem::remove_all(store_scratch, store_ec);
+        rt::fs::configure(store_scratch / L"game", store_scratch / L"overlay");
+        rt::shims::xgameruntime_set_persistent_profile(true);
+        rt::shims::xgameruntime_offline_profile_forget();
+        const std::filesystem::path record = store_scratch / L"overlay" / L".palmetto-persistent" / L"settings.bin";
+        std::filesystem::path record_temp = record;
+        record_temp += L"~";
+
+        rt::shims::OfflineProfile first{};
+        check(rt::shims::xgameruntime_offline_profile(0x1111, 1, "Player", &first) && !first.from_store &&
+                  first.boot_count == 1 && first.user_id == 0x1111 && first.local_id == 1 &&
+                  std::strcmp(first.gamertag, "Player") == 0,
+              "the first boot creates the profile record from the defaults");
+        check(std::filesystem::is_regular_file(record) && std::filesystem::file_size(record) == 64,
+              "the record is one 64-byte file under <overlay>\\.palmetto-persistent");
+
+        rt::shims::xgameruntime_offline_profile_forget();
+        rt::shims::OfflineProfile second{};
+        check(rt::shims::xgameruntime_offline_profile(0x2222, 7, "Other", &second) && second.from_store &&
+                  second.boot_count == 2 && second.user_id == 0x1111 && second.local_id == 1 &&
+                  std::strcmp(second.gamertag, "Player") == 0,
+              "the next boot serves the record's identity, not the defaults it was given, and advances the counter");
+
+        {
+            std::ofstream truncated(record, std::ios::binary | std::ios::trunc);
+            const char junk[7] = {'P', 'M', 'P', 'S', 1, 0, 0};
+            truncated.write(junk, sizeof junk);
+        }
+        rt::shims::xgameruntime_offline_profile_forget();
+        rt::shims::OfflineProfile recovered{};
+        check(rt::shims::xgameruntime_offline_profile(0x3333, 3, "Fresh", &recovered) && !recovered.from_store &&
+                  recovered.boot_count == 1 && recovered.user_id == 0x3333,
+              "a truncated record is rejected and replaced, not trusted");
+        check(std::filesystem::file_size(record) == 64, "the rejected record is rewritten at its full size");
+
+        // A kill between the temporary write and the rename leaves "settings.bin~": never served, removed.
+        {
+            std::ofstream partial(record_temp, std::ios::binary | std::ios::trunc);
+            const std::string junk(16, 'x');
+            partial.write(junk.data(), static_cast<std::streamsize>(junk.size()));
+        }
+        rt::shims::xgameruntime_offline_profile_forget();
+        rt::shims::OfflineProfile after_temp{};
+        check(rt::shims::xgameruntime_offline_profile(0, 0, nullptr, &after_temp) && after_temp.from_store &&
+                  after_temp.boot_count == 2 && after_temp.user_id == 0x3333 && !std::filesystem::exists(record_temp),
+              "a partial temporary file is never served; the complete record before it is, and the leftover is removed");
+
+        std::filesystem::remove(record, store_ec);
+        rt::shims::xgameruntime_set_persistent_profile(false);
+        rt::shims::xgameruntime_offline_profile_forget();
+        rt::shims::OfflineProfile off{};
+        check(!rt::shims::xgameruntime_offline_profile(0x4444, 4, "Off", &off) && !std::filesystem::exists(record),
+              "with the store switched off nothing is read or written and the caller serves its constants");
+        check(!rt::shims::xgameruntime_set_persistent_profile(true), "the store seam reports the switch was off");
+
+        rt::fs::configure({}, {});
+        rt::shims::xgameruntime_offline_profile_forget();
+        check(!rt::shims::xgameruntime_offline_profile(1, 1, "NoOverlay", &off),
+              "with no overlay there is nowhere to persist, so the caller serves its constants");
+        std::filesystem::remove_all(store_scratch, store_ec);
+    }
+
     const GUID system_cls = {0xe349bd1a, 0xfc20, 0x4e40, {0xb9, 0x9c, 0x41, 0x78, 0xcc, 0x6b, 0x40, 0x9f}};
     const GUID system5 = {0x1861cf2e, 0xe18b, 0x4834, {0xa9, 0xf5, 0xb4, 0xa4, 0xe6, 0xef, 0xb4, 0xcf}};
     void* sy = nullptr;

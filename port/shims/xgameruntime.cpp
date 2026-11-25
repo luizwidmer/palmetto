@@ -16,12 +16,14 @@
 #include <intrin.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cctype>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -37,6 +39,7 @@
 #include <XTaskQueue.h>
 
 #include "file_system.h"
+#include "persistent_store.h"
 #include "platform_trace.h"
 #include "shims.h"
 
@@ -511,31 +514,283 @@ uint64_t folder_bytes(const std::filesystem::path& dir) {
     return total;
 }
 
+// ---- The offline user's persistent profile record (port/shims/persistent_store.h) ----
+//
+// One fixed 64-byte record in the persistent-local-storage folder, the runtime's own settings/profile store for the
+// one offline user (docs/persistent_store.md). The peer wording this slice tests is "one signed-in offline user ...
+// saves that survive a kill at any step" and "loading saved settings makes later boots skip the first-run screens";
+// this record is the part of that claim our own surface can hold, because the measured title makes no XGameSave call
+// at all. It is written when the title first touches the user or the storage, read and advanced on the next boot, and
+// served back as the same user id, local id and gamertag.
+//
+//  0x00 u32 magic 'PMPS'     0x04 u32 version 1      0x08 u32 record size 64   0x0C u32 boot count
+//  0x10 u64 offline user id                        0x18 u64 local id
+//  0x20 char[16] gamertag    0x30 u64 created (unix seconds)
+//  0x38 u32 last boot (unix seconds)                0x3C u32 FNV-1a over the 64 bytes with this field zero
+//
+// The bytes go to "settings.bin~" first, are flushed, and MoveFileEx replaces "settings.bin", so a kill at any step
+// leaves one complete record: the old one until the rename, the new one after it. A record that fails its checks is
+// not trusted; the process starts a fresh one. A "settings.bin~" left by a killed write is removed, never read.
+constexpr uint32_t kProfileMagic = 0x53504D50;   // "PMPS" little-endian
+constexpr uint32_t kProfileVersion = 1;
+constexpr size_t kProfileRecordSize = 64;
+constexpr size_t kProfileGamertagOffset = 0x20;
+constexpr size_t kProfileChecksumOffset = 0x3C;
+constexpr size_t kProfileGamertagSize = 16;
+
+uint32_t fnv1a(const uint8_t* data, size_t size) {
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < size; ++i) hash = (hash ^ data[i]) * 16777619u;
+    return hash;
+}
+
+void put_u32(uint8_t* p, uint32_t value) { std::memcpy(p, &value, sizeof value); }
+void put_u64(uint8_t* p, uint64_t value) { std::memcpy(p, &value, sizeof value); }
+uint32_t get_u32(const uint8_t* p) { uint32_t value; std::memcpy(&value, p, sizeof value); return value; }
+uint64_t get_u64(const uint8_t* p) { uint64_t value; std::memcpy(&value, p, sizeof value); return value; }
+
+struct ProfileRecord {
+    uint64_t user_id = 0;
+    uint64_t local_id = 0;
+    char gamertag[kProfileGamertagSize] = {};
+    uint32_t boot_count = 0;
+    uint64_t created = 0;
+    uint32_t last_boot = 0;
+};
+
+// The record's bytes, checksum last and over itself with the checksum field zero, so a truncated or half-written file
+// cannot pass.
+std::array<uint8_t, kProfileRecordSize> serialise_profile(const ProfileRecord& record) {
+    std::array<uint8_t, kProfileRecordSize> bytes{};
+    put_u32(bytes.data() + 0x00, kProfileMagic);
+    put_u32(bytes.data() + 0x04, kProfileVersion);
+    put_u32(bytes.data() + 0x08, static_cast<uint32_t>(kProfileRecordSize));
+    put_u32(bytes.data() + 0x0C, record.boot_count);
+    put_u64(bytes.data() + 0x10, record.user_id);
+    put_u64(bytes.data() + 0x18, record.local_id);
+    std::memcpy(bytes.data() + kProfileGamertagOffset, record.gamertag, kProfileGamertagSize);
+    put_u64(bytes.data() + 0x30, record.created);
+    put_u32(bytes.data() + 0x38, record.last_boot);
+    put_u32(bytes.data() + kProfileChecksumOffset, 0);
+    put_u32(bytes.data() + kProfileChecksumOffset, fnv1a(bytes.data(), kProfileRecordSize));
+    return bytes;
+}
+
+bool parse_profile(const uint8_t* bytes, ProfileRecord& out) {
+    if (get_u32(bytes + 0x00) != kProfileMagic || get_u32(bytes + 0x04) != kProfileVersion ||
+        get_u32(bytes + 0x08) != kProfileRecordSize)
+        return false;
+    std::array<uint8_t, kProfileRecordSize> copy{};
+    std::memcpy(copy.data(), bytes, kProfileRecordSize);
+    const uint32_t stored = get_u32(copy.data() + kProfileChecksumOffset);
+    put_u32(copy.data() + kProfileChecksumOffset, 0);
+    if (fnv1a(copy.data(), kProfileRecordSize) != stored) return false;
+    out = ProfileRecord{};
+    out.boot_count = get_u32(bytes + 0x0C);
+    out.user_id = get_u64(bytes + 0x10);
+    out.local_id = get_u64(bytes + 0x18);
+    std::memcpy(out.gamertag, bytes + kProfileGamertagOffset, kProfileGamertagSize);
+    out.gamertag[kProfileGamertagSize - 1] = '\0';   // a hostile/foreign record cannot leave it unterminated
+    out.created = get_u64(bytes + 0x30);
+    out.last_boot = get_u32(bytes + 0x38);
+    return true;
+}
+
+uint32_t profile_now() { return static_cast<uint32_t>(std::time(nullptr)); }
+
+std::filesystem::path profile_record_path() {
+    const std::filesystem::path dir = persistent_storage_dir();
+    return dir.empty() ? std::filesystem::path{} : dir / L"settings.bin";
+}
+
+// One write of the whole record at `path`, the bytes already serialised.
+bool write_file_bytes(const std::filesystem::path& path, const void* data, size_t size) {
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    bool ok = true;
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    size_t at = 0;
+    while (ok && at < size) {
+        const DWORD want = static_cast<DWORD>((std::min)(size - at, size_t{1} << 20));
+        DWORD wrote = 0;
+        ok = WriteFile(file, bytes + at, want, &wrote, nullptr) != 0 && wrote == want;
+        at += wrote;
+    }
+    if (ok) ok = FlushFileBuffers(file) != 0;
+    CloseHandle(file);
+    return ok;
+}
+
+bool read_file_bytes(const std::filesystem::path& path, void* data, size_t size) {
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    size_t at = 0;
+    bool ok = true;
+    auto* bytes = static_cast<uint8_t*>(data);
+    while (ok && at < size) {
+        const DWORD want = static_cast<DWORD>((std::min)(size - at, size_t{1} << 20));
+        DWORD got = 0;
+        ok = ReadFile(file, bytes + at, want, &got, nullptr) != 0 && got > 0;
+        at += got;
+        if (got == 0) ok = false;
+    }
+    CloseHandle(file);
+    return ok && at == size;
+}
+
+// Atomic: the record is fully written and flushed under "settings.bin~" before the rename puts it in place.
+bool write_profile_record(const std::filesystem::path& path, const ProfileRecord& record) {
+    const auto bytes = serialise_profile(record);
+    std::filesystem::path temp = path;
+    temp += L"~";
+    if (!write_file_bytes(temp, bytes.data(), bytes.size())) {
+        std::error_code ec;
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+    if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        std::error_code ec;
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+    return true;
+}
+
+std::atomic<int> g_profile_override{-1};   // test seam: -1 follows the environment, 0/1 force OFF/ON
+bool persistent_profile_enabled() {
+    const int forced = g_profile_override.load();
+    if (forced >= 0) return forced != 0;
+    static const bool from_environment = [] {
+        char value[16] = {};
+        const DWORD n = GetEnvironmentVariableA("PALMETTO_PERSIST_PROFILE", value, sizeof value);
+        if (n == 0 || n >= sizeof value) return true;   // on by default: the record is the runtime's own state
+        return std::strcmp(value, "0") != 0 && _stricmp(value, "off") != 0;
+    }();
+    return from_environment;
+}
+
+std::mutex g_profile_mutex;
+bool g_profile_loaded = false;
+rt::shims::OfflineProfile g_profile{};
+
+// Loads (or creates) the record once and answers the profile. Every path out of this function is either false (the
+// caller serves the constants) or a complete record that was written to disk, so the next boot finds the same user.
+bool load_offline_profile(uint64_t default_user_id, uint64_t default_local_id, const char* default_gamertag,
+                          rt::shims::OfflineProfile* out) {
+    if (!out) return false;
+    if (!persistent_profile_enabled()) return false;
+    const std::filesystem::path path = profile_record_path();
+    if (path.empty()) return false;
+    std::lock_guard<std::mutex> lock(g_profile_mutex);
+    if (g_profile_loaded) {
+        *out = g_profile;
+        return true;
+    }
+
+    ProfileRecord record{};
+    bool existed = false;
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(path, ec)) {
+        std::array<uint8_t, kProfileRecordSize> bytes{};
+        if (read_file_bytes(path, bytes.data(), bytes.size()) && parse_profile(bytes.data(), record)) {
+            existed = true;
+        } else {
+            std::fprintf(stderr, "[rt] persistent store: \"%ls\" is not a valid record; starting a new one\n",
+                         path.c_str());
+        }
+    }
+    if (existed) {
+        ++record.boot_count;
+        record.last_boot = profile_now();
+    } else {
+        record = ProfileRecord{};
+        record.user_id = default_user_id;
+        record.local_id = default_local_id;
+        if (default_gamertag && default_gamertag[0])
+            std::snprintf(record.gamertag, kProfileGamertagSize, "%s", default_gamertag);
+        record.boot_count = 1;
+        record.created = profile_now();
+        record.last_boot = static_cast<uint32_t>(record.created);
+    }
+    if (!write_profile_record(path, record))
+        std::fprintf(stderr, "[rt] persistent store: could not write \"%ls\"; this boot's profile is not kept\n",
+                     path.c_str());
+    // A "settings.bin~" left by a killed write is not a record; the one just written is. Remove it, never read it.
+    std::filesystem::path temp = path;
+    temp += L"~";
+    std::filesystem::remove(temp, ec);
+
+    g_profile = rt::shims::OfflineProfile{};
+    g_profile.user_id = record.user_id ? record.user_id : default_user_id;
+    g_profile.local_id = record.local_id ? record.local_id : default_local_id;
+    if (record.gamertag[0])
+        std::snprintf(g_profile.gamertag, sizeof g_profile.gamertag, "%s", record.gamertag);
+    else if (default_gamertag && default_gamertag[0])
+        std::snprintf(g_profile.gamertag, sizeof g_profile.gamertag, "%s", default_gamertag);
+    g_profile.boot_count = record.boot_count;
+    g_profile.from_store = existed;
+    g_profile_loaded = true;
+    std::fprintf(stderr, "[rt] persistent store: %s \"%ls\" (boot %u, user 0x%016llx)\n",
+                 existed ? "loaded" : "created", path.c_str(), record.boot_count,
+                 static_cast<unsigned long long>(g_profile.user_id));
+    *out = g_profile;
+    return true;
+}
+
+
+// ---- IXPersistentLocalStorageImpl slots ----
+//
+// Each slot names its first calls under PALMETTO_USER_TRACE=1 (platform_trace), so a boot records whether the title
+// actually asks for the folder, the space or a prompt instead of only requesting the class: the measured question of
+// docs/persistent_store.md. The trace never changes an answer.
+
 HRESULT STDMETHODCALLTYPE pls_get_path_size(void*, size_t* path_size) {
-    if (!path_size) return E_POINTER;
+    if (!path_size) {
+        rt::shims::platform_trace("XPersistentLocalStorageGetPathSize", _ReturnAddress(), static_cast<uint64_t>(static_cast<uint32_t>(E_POINTER)));
+        return E_POINTER;
+    }
     *path_size = 0;
     const std::string path = utf8_of(persistent_storage_dir().native());
-    if (path.empty()) return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
-    *path_size = path.size() + 1;  // with the terminating NUL
-    return S_OK;
+    const HRESULT hr = path.empty() ? HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND) : S_OK;
+    if (SUCCEEDED(hr)) *path_size = path.size() + 1;  // with the terminating NUL
+    rt::shims::platform_trace("XPersistentLocalStorageGetPathSize", _ReturnAddress(), static_cast<uint64_t>(hr));
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE pls_get_path(void*, size_t path_size, char* path, size_t* path_used) {
     if (path_used) *path_used = 0;
-    if (!path) return E_POINTER;
+    if (!path) {
+        rt::shims::platform_trace("XPersistentLocalStorageGetPath", _ReturnAddress(), static_cast<uint64_t>(static_cast<uint32_t>(E_POINTER)));
+        return E_POINTER;
+    }
     const std::string folder = utf8_of(persistent_storage_dir().native());
-    if (folder.empty()) return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
-    if (path_size < folder.size() + 1) return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
-    std::memcpy(path, folder.c_str(), folder.size() + 1);
-    if (path_used) *path_used = folder.size() + 1;
-    return S_OK;
+    HRESULT hr = S_OK;
+    if (folder.empty())
+        hr = HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
+    else if (path_size < folder.size() + 1)
+        hr = HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+    else {
+        std::memcpy(path, folder.c_str(), folder.size() + 1);
+        if (path_used) *path_used = folder.size() + 1;
+    }
+    rt::shims::platform_trace("XPersistentLocalStorageGetPath", _ReturnAddress(), static_cast<uint64_t>(hr));
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE pls_get_space_info(void*, PersistentSpaceInfo* info) {
-    if (!info) return E_POINTER;
+    if (!info) {
+        rt::shims::platform_trace("XPersistentLocalStorageGetSpaceInfo", _ReturnAddress(), static_cast<uint64_t>(static_cast<uint32_t>(E_POINTER)));
+        return E_POINTER;
+    }
     *info = {};
     const std::filesystem::path dir = persistent_storage_dir();
-    if (dir.empty()) return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
+    if (dir.empty()) {
+        rt::shims::platform_trace("XPersistentLocalStorageGetSpaceInfo", _ReturnAddress(),
+                                  static_cast<uint64_t>(HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND)));
+        return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
+    }
     const uint64_t used = folder_bytes(dir);
     const uint64_t left = used < kPersistentQuotaBytes ? kPersistentQuotaBytes - used : 0;
     std::error_code ec;
@@ -544,28 +799,45 @@ HRESULT STDMETHODCALLTYPE pls_get_space_info(void*, PersistentSpaceInfo* info) {
     info->used_bytes = used;
     info->total_free_bytes = left;
     info->available_free_bytes = ec || left < host.available ? left : host.available;
+    rt::shims::platform_trace("XPersistentLocalStorageGetSpaceInfo", _ReturnAddress(), static_cast<uint64_t>(static_cast<uint32_t>(S_OK)));
     return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE pls_prompt_async(void*, uint64_t requested_bytes, XAsyncBlock* async) {
-    if (!async) return E_POINTER;
+    if (!async) {
+        rt::shims::platform_trace("XPersistentLocalStoragePromptUserForSpaceAsync", _ReturnAddress(), static_cast<uint64_t>(static_cast<uint32_t>(E_POINTER)));
+        return E_POINTER;
+    }
     const std::filesystem::path dir = persistent_storage_dir();
     const bool fits = !dir.empty() && requested_bytes <= kPersistentQuotaBytes - (std::min)(folder_bytes(dir), kPersistentQuotaBytes);
+    rt::shims::platform_trace("XPersistentLocalStoragePromptUserForSpaceAsync", _ReturnAddress(),
+                              static_cast<uint64_t>(fits ? S_OK : HRESULT_FROM_WIN32(ERROR_DISK_FULL)));
     if (fits) return XAsyncRun(async, [](XAsyncBlock*) -> HRESULT { return S_OK; });
     return XAsyncRun(async, [](XAsyncBlock*) -> HRESULT { return HRESULT_FROM_WIN32(ERROR_DISK_FULL); });
 }
 
 HRESULT STDMETHODCALLTYPE pls_prompt_result(void*, XAsyncBlock* async) {
-    if (!async) return E_POINTER;
-    return XAsyncGetStatus(async, false);
+    if (!async) {
+        rt::shims::platform_trace("XPersistentLocalStoragePromptUserForSpaceResult", _ReturnAddress(), static_cast<uint64_t>(static_cast<uint32_t>(E_POINTER)));
+        return E_POINTER;
+    }
+    const HRESULT hr = XAsyncGetStatus(async, false);
+    rt::shims::platform_trace("XPersistentLocalStoragePromptUserForSpaceResult", _ReturnAddress(),
+                              static_cast<uint64_t>(hr));
+    return hr;
 }
 
 // IXPersistentLocalStorageImpl3's package mount has nothing to mount offline; the handle is left empty.
 HRESULT STDMETHODCALLTYPE pls_mount_for_package(void*, const char*, void** mount_handle) {
-    if (!mount_handle) return E_POINTER;
+    if (!mount_handle) {
+        rt::shims::platform_trace("XPersistentLocalStorageMountForPackage", _ReturnAddress(), static_cast<uint64_t>(static_cast<uint32_t>(E_POINTER)));
+        return E_POINTER;
+    }
     *mount_handle = nullptr;
+    rt::shims::platform_trace("XPersistentLocalStorageMountForPackage", _ReturnAddress(), static_cast<uint64_t>(static_cast<uint32_t>(E_NOTIMPL)));
     return E_NOTIMPL;
 }
+
 
 #define PLS(fn) reinterpret_cast<const void*>(&fn)
 const void* const kPersistentStorageVtable[] = {
@@ -1707,6 +1979,25 @@ bool xgameruntime_set_package_interface4(bool on) {
 bool xgameruntime_set_package_ready(bool on) {
     const bool previous = package_ready_enabled();
     g_package_ready_override.store(on ? 1 : 0);
+    return previous;
+}
+
+// The offline user's persistent profile (port/shims/persistent_store.h): load or create the record, the test seam
+// that models another process boot, and the switch seam. Declared in the header so the user shim can serve the same
+// identity from the record; implemented here next to the persistent-storage folder the record lives in.
+bool xgameruntime_offline_profile(uint64_t default_user_id, uint64_t default_local_id, const char* default_gamertag,
+                                  OfflineProfile* out) {
+    return load_offline_profile(default_user_id, default_local_id, default_gamertag, out);
+}
+
+void xgameruntime_offline_profile_forget() {
+    std::lock_guard<std::mutex> lock(g_profile_mutex);
+    g_profile_loaded = false;
+}
+
+bool xgameruntime_set_persistent_profile(bool on) {
+    const bool previous = persistent_profile_enabled();
+    g_profile_override.store(on ? 1 : 0);
     return previous;
 }
 

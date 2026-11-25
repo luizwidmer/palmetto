@@ -14,8 +14,15 @@
 // can collide with (an encoded name never starts with '.'). Names ending in '~' are temporary files of an update in
 // progress; an encoded name never ends in '~' either.
 //
-// An update buffers its writes and deletes; SubmitUpdate writes every new blob to "<blob>~", then renames each over
-// its blob and removes the deleted ones, so a failed write leaves the container as it was.
+// An update buffers its writes and deletes; SubmitUpdate writes every new blob to "<blob>~", flushes it, then renames
+// it over its blob and removes the deleted ones, so a kill at any step leaves the container as it was: the old blob
+// before the rename, the new one after it, never a half-written one. A "<blob>~" a killed process leaves behind is
+// never read as a blob (decode_name refuses a trailing '~') and is removed when the next provider opens. The display
+// name is committed the same way (".display~" then rename).
+//
+// PALMETTO_USER_TRACE=1 adds a bounded, named log of the store's operations (provider open, container create/delete,
+// blob read/write/delete, submit), with names and sizes only - no blob content, no game data. It never changes an
+// answer (docs/persistent_store.md).
 //
 // ASSUMPTION (no executable yet): the quota is a fixed 1 GiB (the GDK says the per-user quota "is not a fixed size");
 // a blob name is at most 256 bytes (GS_MAX_BLOB_NAME_SIZE is not on the public pages); GetContainerInfo of a
@@ -44,6 +51,8 @@
 #include <XAsync.h>
 #include <XAsyncProvider.h>
 #include <XTaskQueue.h>
+
+#include "platform_trace.h"
 
 namespace {
 
@@ -258,12 +267,63 @@ std::string read_text(const fs::path& p) {
     return f ? std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()) : std::string{};
 }
 
+// A whole file written with FILE_FLAG_WRITE_THROUGH and flushed before close: the bytes a rename will move into place
+// are on the disk, not in a stream buffer, so a kill cannot leave a shorter file under the final name.
 bool write_file(const fs::path& p, const void* data, size_t size) {
-    std::ofstream f(p, std::ios::binary | std::ios::trunc);
-    if (!f) return false;
-    f.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
-    f.close();
-    return !f.fail();
+    const HANDLE file = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    bool ok = true;
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    size_t at = 0;
+    while (ok && at < size) {
+        const DWORD want = static_cast<DWORD>((std::min)(size - at, size_t{1} << 20));
+        DWORD wrote = 0;
+        ok = WriteFile(file, bytes + at, want, &wrote, nullptr) != 0 && wrote == want;
+        at += wrote;
+    }
+    if (ok) ok = FlushFileBuffers(file) != 0;
+    CloseHandle(file);
+    return ok;
+}
+
+// The temporary files of an update ("<blob>~", ".display~") are never blobs; one left behind means a process was
+// killed between writing it and renaming it over its blob. The blobs are then the ones before that update, and the
+// leftovers are only wasted bytes: remove them the next time a provider opens (under g_mutex, single process).
+int remove_temporary_files(const fs::path& dir) {
+    std::vector<fs::path> temps;
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        std::error_code entry_ec;
+        if (!it->is_regular_file(entry_ec) || entry_ec) continue;
+        const std::wstring name = it->path().filename().wstring();
+        if (!name.empty() && name.back() == L'~') temps.push_back(it->path());
+    }
+    int removed = 0;
+    for (const fs::path& temp : temps)
+        if (fs::remove(temp, ec) && !ec) ++removed;
+    return removed;
+}
+
+// PALMETTO_USER_TRACE=1: bounded by platform_trace_tick per operation, so a title that rewrites a blob every frame
+// logs 1, 2, ... 8, 10, 100, ... lines per kind. Names and sizes only: no blob bytes, no game data. The caller passes
+// the detail already formatted (a container name, a blob name and its size, a count).
+void trace_store_op(const char* op, const std::string& detail, uint64_t bytes, HRESULT hr) {
+    if (!rt::shims::platform_trace_enabled()) return;
+    const std::uint64_t n = rt::shims::platform_trace_tick(reinterpret_cast<std::uint64_t>(op));
+    if (!n) return;
+    std::fprintf(stderr, "[rt] xgamesave trace: +%.2fs %s %s %llu bytes #%llu -> 0x%08lx\n",
+                 rt::shims::platform_trace_seconds(), op, detail.c_str(), static_cast<unsigned long long>(bytes),
+                 static_cast<unsigned long long>(n), static_cast<unsigned long>(hr));
+}
+
+std::string quoted(const char* name) {
+    if (!name) return "(all)";
+    std::string text = "\"";
+    text.append(name, (std::min)(std::strlen(name), size_t{120}));
+    text += '"';
+    return text;
 }
 
 struct ContainerRecord {
@@ -406,7 +466,17 @@ HRESULT commit(XGameSaveUpdate* u) {
             return E_GS_OUT_OF_LOCAL_STORAGE;
     for (const auto& [name, op] : u->ops)
         if (!op.write) fs::remove(dir / widen(encode_name(name)), ec);
-    if (u->has_display_name) write_file(dir / L".display", u->display_name.data(), u->display_name.size());
+    // The display name is committed the same way as a blob: a kill cannot leave a truncated ".display".
+    if (u->has_display_name) {
+        const fs::path display = dir / L".display";
+        fs::path display_temp = display;
+        display_temp += L"~";
+        if (!write_file(display_temp, u->display_name.data(), u->display_name.size()) ||
+            !MoveFileExW(display_temp.c_str(), display.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            fs::remove(display_temp, ec);
+        }
+    }
+    trace_store_op("SubmitUpdate", quoted(c->name.c_str()), u->bytes, S_OK);
     return S_OK;
 }
 
@@ -425,12 +495,22 @@ HRESULT open_provider(XUserHandle user, const char* config_id, XGameSaveProvider
     if (ec) return E_GS_OUT_OF_LOCAL_STORAGE;
     auto* p = new XGameSaveProvider{user_dir, config_id};
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    // The next boot: whatever a killed update left half-written is a "<blob>~" file, never a blob; drop it now that
+    // nothing is writing (this is what makes a kill at any step leave the previous save in place).
+    const int temps = remove_temporary_files(user_dir);
+    if (temps > 0) {
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true))
+            std::fprintf(stderr, "[rt] xgamesave: removed %d temporary blob file(s) left by an interrupted update\n",
+                         temps);
+    }
     p->serial = g_next_serial++;
     g_providers.insert(p);
     *out = p;
     static std::atomic<int> s_logged{0};
     if (s_logged.fetch_add(1) == 0)
         std::fprintf(stderr, "[rt] xgamesave: offline provider for \"%s\" at %ls\n", config_id, user_dir.c_str());
+    trace_store_op("InitializeProvider", quoted(config_id), 0, S_OK);
     return S_OK;
 }
 
@@ -449,7 +529,9 @@ HRESULT delete_container(XGameSaveProviderHandle p, const char* name) {
     if (!valid_container_name(name)) return E_GS_INVALID_CONTAINER_NAME;
     std::error_code ec;
     fs::remove_all(p->user_dir / widen(encode_name(name)), ec);
-    return ec ? E_FAIL : S_OK;
+    const HRESULT hr = ec ? E_FAIL : S_OK;
+    trace_store_op("DeleteContainer", quoted(name), 0, hr);
+    return hr;
 }
 
 HRESULT submit_update(XGameSaveUpdateHandle u) {
@@ -710,6 +792,7 @@ HRESULT STDMETHODCALLTYPE save_create_container(void*, XGameSaveProviderHandle p
     c->serial = g_next_serial++;
     g_containers.insert(c);
     *out = c;
+    trace_store_op("CreateContainer", quoted(name), 0, S_OK);
     return S_OK;
 }
 
@@ -759,6 +842,7 @@ HRESULT STDMETHODCALLTYPE save_read(void*, XGameSaveContainerHandle c, const cha
     if (size < packed_size(blobs)) return E_GS_PROVIDED_BUFFER_TOO_SMALL;
     pack(blobs, out);
     *count = static_cast<uint32_t>(blobs.size());
+    trace_store_op("ReadBlobData", quoted(c->name.c_str()), blobs.size(), S_OK);
     return S_OK;
 }
 
@@ -826,6 +910,7 @@ HRESULT STDMETHODCALLTYPE save_write(void*, XGameSaveUpdateHandle u, const char*
     if (size > kMaxUpdateBytes || u->bytes + size > kMaxUpdateBytes) return E_GS_UPDATE_TOO_BIG;
     u->ops.emplace(name, Op{true, std::vector<uint8_t>(data, data + size)});
     u->bytes += size;
+    trace_store_op("SubmitBlobWrite", quoted(name), size, S_OK);
     return S_OK;
 }
 
@@ -836,6 +921,7 @@ HRESULT STDMETHODCALLTYPE save_delete_blob(void*, XGameSaveUpdateHandle u, const
     if (!live(g_updates, u)) return E_GS_HANDLE_EXPIRED;
     if (u->ops.count(name)) return E_INVALIDARG;
     u->ops.emplace(name, Op{false, {}});
+    trace_store_op("SubmitBlobDelete", quoted(name), 0, S_OK);
     return S_OK;
 }
 

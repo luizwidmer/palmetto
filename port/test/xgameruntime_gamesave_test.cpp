@@ -362,6 +362,70 @@ int main() {
         std::filesystem::remove_all(root / L"local-user" / L"second", ec);
     }
 
+    // ---- a kill at any step, and the next boot (docs/persistent_store.md) ----
+    // The store is files, and an update writes "<blob>~" then renames it. A kill between the two leaves the temporary
+    // file and the blob it was replacing. The next open removes the leftover and serves the old blob; a later update
+    // replaces the blob whole.
+    {
+        Handle kill = nullptr;
+        check(at<Create>(save, 16)(save, provider, "killsafe", &kill) == S_OK && kill,
+              "a container for the kill checks");
+        Handle first_update = nullptr;
+        const std::string first_bytes(4096, 'A');
+        check(at<Create>(save, 23)(save, kill, nullptr, &first_update) == S_OK &&
+                  at<Write>(save, 25)(save, first_update, "profile",
+                                      reinterpret_cast<const uint8_t*>(first_bytes.data()), first_bytes.size()) == S_OK &&
+                  at<Submit>(save, 27)(save, first_update) == S_OK,
+              "the first boot commits one blob");
+        at<Close>(save, 24)(save, first_update);
+        const auto killdir = root / L"local-user" / L"killsafe";
+        {
+            // The kill: the temporary file of the next update is on disk, the rename over the blob never ran.
+            std::ofstream partial(killdir / L"profile~", std::ios::binary | std::ios::trunc);
+            const std::string partial_bytes(100, 'B');
+            partial.write(partial_bytes.data(), static_cast<std::streamsize>(partial_bytes.size()));
+        }
+        check(std::filesystem::exists(killdir / L"profile~"),
+              "a killed update leaves its \"<blob>~\" temporary file on disk");
+        at<Close>(save, 17)(save, kill);
+
+        // The next boot opens the same PALMETTO_SAVE_DIR.
+        Handle boot2 = nullptr;
+        check(at<Init>(save, 3)(save, user, "SCID", false, &boot2) == S_OK && boot2,
+              "the next boot opens the same store");
+        check(!std::filesystem::exists(killdir / L"profile~"),
+              "the next open removes the killed update's temporary file");
+        Handle kill2 = nullptr;
+        check(at<Create>(save, 16)(save, boot2, "killsafe", &kill2) == S_OK && kill2,
+              "and re-serves the container from disk");
+        {
+            const char* blob_names[] = {"profile"};
+            uint32_t read_count = 1;
+            std::vector<uint64_t> read_buffer(2048, 0);
+            auto* blobs = reinterpret_cast<Blob*>(read_buffer.data());
+            const HRESULT read_hr =
+                at<Read>(save, 20)(save, kill2, blob_names, &read_count, read_buffer.size() * sizeof(uint64_t), blobs);
+            check(read_hr == S_OK && read_count == 1 && blobs[0].info.size == first_bytes.size() &&
+                      std::memcmp(blobs[0].data, first_bytes.data(), first_bytes.size()) == 0,
+                  "the blob served after the kill is the one before it, byte for byte");
+        }
+        // A later update replaces the blob whole: the file is the new bytes and no temporary file is left.
+        Handle replace_update = nullptr;
+        const std::string second_bytes(1024, 'C');
+        check(at<Create>(save, 23)(save, kill2, nullptr, &replace_update) == S_OK &&
+                  at<Write>(save, 25)(save, replace_update, "profile",
+                                      reinterpret_cast<const uint8_t*>(second_bytes.data()), second_bytes.size()) ==
+                      S_OK &&
+                  at<Submit>(save, 27)(save, replace_update) == S_OK,
+              "a later update replaces the blob");
+        check(std::filesystem::file_size(killdir / L"profile") == second_bytes.size() &&
+                  !std::filesystem::exists(killdir / L"profile~"),
+              "the replaced blob is the whole new file and its temporary file is gone");
+        at<Close>(save, 24)(save, replace_update);
+        at<Close>(save, 17)(save, kill2);
+        at<Close>(save, 6)(save, boot2);
+    }
+
     at<Close>(save, 6)(save, provider);
     at<Close>(save, 6)(save, provider2);
     at<Close>(save, 6)(save, provider);   // twice: ignored

@@ -10,11 +10,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 
 #include <XAsync.h>
 #include <XAsyncProvider.h>
 #include <XTaskQueue.h>
 
+#include "file_system.h"
+#include "persistent_store.h"
 #include "shims.h"
 
 namespace rt::shims {
@@ -22,6 +25,7 @@ long xgameruntime_user_open_handles();
 bool xgameruntime_set_package_interface4(bool on);
 bool xgameruntime_set_package_ready(bool on);
 bool xgameruntime_set_user_change_event(bool on);
+void xgameruntime_user_forget_profile();
 }
 
 namespace {
@@ -393,6 +397,60 @@ int main(int argc, char** argv) {
 
         rt::shims::xgameruntime_set_package_ready(false);
         rt::shims::xgameruntime_set_package_interface4(false);
+    }
+
+    // ---- the persisted offline user (persistent_store.h, docs/persistent_store.md) ----
+    // With a persistent-storage folder the identity the user surface serves comes from the profile record: created
+    // from the defaults on the first boot, re-served on the next one. The record itself is checked in the
+    // xgameruntime test; here only what the user slots answer is.
+    {
+        const std::filesystem::path store_root = std::filesystem::temp_directory_path() /
+                                                 (L"palmetto_user_store_" + std::to_wstring(GetCurrentProcessId()));
+        std::error_code store_ec;
+        std::filesystem::remove_all(store_root, store_ec);
+        rt::fs::configure({}, store_root / L"overlay");
+        rt::shims::xgameruntime_set_persistent_profile(true);
+        rt::shims::xgameruntime_offline_profile_forget();
+        rt::shims::xgameruntime_user_forget_profile();
+
+        XAsyncBlock add2{};
+        XUserHandle h2 = nullptr;
+        check(at<AddAsync>(user, 7)(user, 0x01, &add2) == S_OK && finished(&add2) &&
+                  at<AddResult>(user, 8)(user, &add2, &h2) == S_OK && h2,
+              "the offline user still adds with the store configured");
+        uint64_t first_xuid = 0;
+        XUserLocalId first_local{};
+        char first_tag[16] = {};
+        size_t first_tag_used = 0;
+        check(at<GetId>(user, 11)(user, h2, &first_xuid) == S_OK && first_xuid == 0x0009000000000001ull &&
+                  at<GetLocalId>(user, 9)(user, h2, &first_local) == S_OK && first_local.value == 1 &&
+                  tag(tag_face, h2, 0, sizeof(first_tag), first_tag, &first_tag_used) == S_OK &&
+                  std::strcmp(first_tag, expect_tag) == 0,
+              "the first boot serves the runtime's default identity and records it");
+        rt::shims::OfflineProfile record{};
+        check(rt::shims::xgameruntime_offline_profile(0, 0, nullptr, &record) && record.boot_count == 1 &&
+                  record.user_id == first_xuid && record.local_id == first_local.value,
+              "the record holds exactly the identity the user surface served");
+
+        rt::shims::xgameruntime_offline_profile_forget();
+        rt::shims::xgameruntime_user_forget_profile();
+        uint64_t second_xuid = 0;
+        XUserLocalId second_local{};
+        char second_tag[16] = {};
+        size_t second_tag_used = 0;
+        check(at<GetId>(user, 11)(user, h2, &second_xuid) == S_OK && second_xuid == first_xuid &&
+                  at<GetLocalId>(user, 9)(user, h2, &second_local) == S_OK &&
+                  second_local.value == first_local.value &&
+                  tag(tag_face, h2, 0, sizeof(second_tag), second_tag, &second_tag_used) == S_OK &&
+                  std::strcmp(second_tag, expect_tag) == 0,
+              "the next boot serves the same identity from the record");
+        rt::shims::OfflineProfile reloaded{};
+        check(rt::shims::xgameruntime_offline_profile(0, 0, nullptr, &reloaded) && reloaded.from_store &&
+                  reloaded.boot_count == 2,
+              "and the record advanced once for that boot");
+        at<Close>(user, 4)(user, h2);
+        rt::fs::configure({}, {});
+        std::filesystem::remove_all(store_root, store_ec);
     }
 
     std::printf("xgameruntime_user_test: %d of %d checks failed\n", g_failures, g_checks);

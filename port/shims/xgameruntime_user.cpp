@@ -39,6 +39,7 @@
 #include <XAsyncProvider.h>
 #include <XTaskQueue.h>
 
+#include "persistent_store.h"
 #include "platform_trace.h"
 
 namespace {
@@ -93,6 +94,35 @@ const char* gamertag() {
         std::memcpy(tag, value, length);
     });
     return tag;
+}
+
+// ---- The persistent profile (port/shims/persistent_store.h, docs/persistent_store.md) ----
+//
+// The identity this file serves is the record the runtime keeps under the persistent-local-storage folder, when
+// there is one: the record is created on the first boot and served back on every later one, so the same offline
+// user id, local id and gamertag survive a kill. Without a record (no overlay, or PALMETTO_PERSIST_PROFILE=0) the
+// fixed constants below are served, which is the default path every measurement before this slice saw. Bounded: the
+// record is resolved once per process; the store prints the one create/load line.
+std::mutex g_identity_mutex;
+std::unique_ptr<rt::shims::OfflineProfile> g_identity;
+
+rt::shims::OfflineProfile offline_profile() {
+    std::lock_guard<std::mutex> lock(g_identity_mutex);
+    if (!g_identity) {
+        rt::shims::OfflineProfile stored{};
+        auto profile = std::make_unique<rt::shims::OfflineProfile>();
+        if (rt::shims::xgameruntime_offline_profile(kOfflineXuid, kOfflineLocalId, gamertag(), &stored)) {
+            *profile = stored;
+        } else {
+            profile->user_id = kOfflineXuid;
+            profile->local_id = kOfflineLocalId;
+            std::snprintf(profile->gamertag, sizeof profile->gamertag, "%s", gamertag());
+            profile->boot_count = 0;
+            profile->from_store = false;
+        }
+        g_identity = std::move(profile);
+    }
+    return *g_identity;
 }
 
 // A title must close every XUserHandle it gets exactly once, so each one is its own allocation; they all name the
@@ -225,7 +255,7 @@ HRESULT STDMETHODCALLTYPE user_add_result(void*, XAsyncBlock* async, XUserHandle
 HRESULT STDMETHODCALLTYPE user_get_local_id(void*, XUserHandle user, XUserLocalId* id) {
     if (!id) return E_POINTER;
     if (!valid(user)) return E_INVALIDARG;
-    id->value = kOfflineLocalId;
+    id->value = offline_profile().local_id;
     return S_OK;
 }
 
@@ -233,7 +263,7 @@ HRESULT STDMETHODCALLTYPE user_get_local_id(void*, XUserHandle user, XUserLocalI
 HRESULT STDMETHODCALLTYPE user_find_by_local_id(void*, XUserLocalId id, XUserHandle* handle) {
     if (!handle) return E_POINTER;
     *handle = nullptr;
-    if (id.value != kOfflineLocalId) return E_GAMEUSER_USER_NOT_FOUND;
+    if (id.value != offline_profile().local_id) return E_GAMEUSER_USER_NOT_FOUND;
     *handle = new_handle();
     return S_OK;
 }
@@ -242,7 +272,7 @@ HRESULT STDMETHODCALLTYPE user_find_by_local_id(void*, XUserLocalId id, XUserHan
 HRESULT STDMETHODCALLTYPE user_get_id(void*, XUserHandle user, uint64_t* id) {
     if (!id) return E_POINTER;
     if (!valid(user)) return E_INVALIDARG;
-    *id = kOfflineXuid;
+    *id = offline_profile().user_id;
     return S_OK;
 }
 
@@ -250,7 +280,7 @@ HRESULT STDMETHODCALLTYPE user_get_id(void*, XUserHandle user, uint64_t* id) {
 HRESULT STDMETHODCALLTYPE user_find_by_id(void*, uint64_t id, XUserHandle* handle) {
     if (!handle) return E_POINTER;
     *handle = nullptr;
-    if (id != kOfflineXuid) return E_GAMEUSER_USER_NOT_FOUND;
+    if (id != offline_profile().user_id) return E_GAMEUSER_USER_NOT_FOUND;
     *handle = new_handle();
     return S_OK;
 }
@@ -384,7 +414,8 @@ void CALLBACK run_change_delivery(void* self, bool canceled) {
     }
     std::fprintf(stderr, "[rt] xgameruntime: +%.2fs XUser change event SignedInAgain (0) delivered to the registered callback\n",
                  rt::shims::platform_trace_seconds());
-    registration.callback(registration.context, XUserLocalId{kOfflineLocalId}, XUserChangeEvent::SignedInAgain);
+    registration.callback(registration.context, XUserLocalId{offline_profile().local_id},
+                          XUserChangeEvent::SignedInAgain);
     {
         std::lock_guard<std::mutex> lock(g_tokens_mutex);
         const auto it = g_tokens.find(delivery->token);
@@ -398,6 +429,10 @@ void CALLBACK run_change_delivery(void* self, bool canceled) {
 HRESULT STDMETHODCALLTYPE user_register_change(void*, XTaskQueueHandle queue, void* context,
                                                XUserChangeEventCallback callback, XTaskQueueRegistrationToken* token) {
     if (!callback || !token) return E_POINTER;
+    // The measured point where the title first touches the user: resolve the persistent profile here (creating the
+    // record on the first boot), so this boot's identity is on disk for the next one even though the title never
+    // asks XUserGetId or XUserGetGamertag (docs/persistent_store.md).
+    offline_profile();
     uint64_t id = 0;
     {
         std::lock_guard<std::mutex> lock(g_tokens_mutex);
@@ -494,7 +529,7 @@ HRESULT STDMETHODCALLTYPE user_get_gamertag(void*, XUserHandle user, XUserGamert
     case XUserGamertagComponent::Classic:
     case XUserGamertagComponent::Modern:
     case XUserGamertagComponent::UniqueModern:
-        text = gamertag();
+        text = offline_profile().gamertag;
         break;
     case XUserGamertagComponent::ModernSuffix:
         text = "";
@@ -847,6 +882,13 @@ bool xgameruntime_set_user_change_event(bool on) {
     const bool previous = change_event_enabled();
     g_change_event_override.store(on ? 1 : 0);
     return previous;
+}
+
+// Test seam for the persistent identity (docs/persistent_store.md): drops the resolved profile so the next user call
+// resolves it again, which models the same process starting as a later boot.
+void xgameruntime_user_forget_profile() {
+    std::lock_guard<std::mutex> lock(g_identity_mutex);
+    g_identity.reset();
 }
 
 }  // namespace rt::shims
