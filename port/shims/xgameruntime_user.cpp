@@ -10,7 +10,10 @@
 // Offline there is one local user, always signed in: the default user XUserAddAsync returns (with or without
 // AddDefaultUserSilently), with a fixed Xbox user id and local id, and a gamertag from PALMETTO_GAMERTAG (15 ASCII
 // characters at most, "Player" otherwise). Nothing goes online: token and gamer-picture requests fail as they would
-// without a network, and the user never changes, so registered change callbacks are never called.
+// without a network, and the user never changes, so registered change callbacks are never called by default. The opt-in
+// probe PALMETTO_USER_CHANGE_EVENT=1 delivers one SignedInAgain event per registration instead, for the measured
+// question this file's trace answers: does the title's registered callback at game+0x2211C80 change the boot when it
+// runs? (docs/user_events.md; the default path is unchanged.)
 //
 // The executable links thunks for IXUserImpl slots 3-5, 7-14, 19-25 and 33-34 and IXUserGamertagImpl slot 3
 // (tooling/gdk_runtime_calls.py, from the file alone; docs/runtime_imports.md). None of them is a private or PC-only
@@ -20,13 +23,15 @@
 #include <intrin.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
+#include <memory>
 #include <mutex>
-#include <set>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -50,7 +55,9 @@ enum class XUserState : uint32_t { SignedIn = 0, SigningOut = 1, SignedOut = 2 }
 enum class XUserAgeGroup : uint32_t { Unknown = 0, Child = 1, Teen = 2, Adult = 3 };
 enum class XUserGamertagComponent : uint32_t { Classic = 0, Modern = 1, ModernSuffix = 2, UniqueModern = 3 };
 enum class XUserPrivilegeDenyReason : uint32_t { None = 0 };
-enum class XUserChangeEvent : uint32_t { SignedInAgain = 0 };
+// XUser.h's enum, from the GDK "XUserChangeEvent" page. The title's registered callback switches on 0, 2 and 5
+// (game+0x2211C80 -> game+0x2212190); the probe delivers 0 (docs/user_events.md).
+enum class XUserChangeEvent : uint32_t { SignedInAgain = 0, SigningOut = 1, SignedOut = 2, Gamertag = 3, GamerPicture = 4, Privileges = 5 };
 using XUserChangeEventCallback = void(CALLBACK*)(void* context, XUserLocalId user, XUserChangeEvent event);
 
 // XGameErr.h values, from the GDK "Error codes" page.
@@ -327,27 +334,117 @@ HRESULT STDMETHODCALLTYPE user_resolve_privilege_result(void*, XAsyncBlock* asyn
 // 33: HRESULT XUserRegisterForChangeEvent(XTaskQueueHandle queue, void* context, XUserChangeEventCallback* callback,
 //                                         XTaskQueueRegistrationToken* token)
 // 34: bool XUserUnregisterForChangeEvent(XTaskQueueRegistrationToken token, bool wait)
-// The user never changes offline, so the callbacks are kept only as tokens.
-std::mutex g_tokens_mutex;
-std::set<uint64_t> g_tokens;
-uint64_t g_next_token = 1;
+//
+// The user never changes offline, so the registered callback is never invoked by default: the registration is kept
+// (with the callback and its context) and unregistering is never pending. PALMETTO_USER_CHANGE_EVENT=1 (OFF by
+// default) delivers one XUserChangeEvent::SignedInAgain to each registration, on the same task queue the title
+// registered with (the queue's completion port, as the networking registrations in xgameruntime.cpp deliver their
+// documented initial notification), and invokes the title's callback once. It is the falsifier of the "a frontend
+// waits for a user change event instead of polling" hypothesis, not a claim that the offline user changed: the
+// measured registration is the only user call in the boot and nothing re-reads user state (docs/user_events.md).
+// Delivering a transition that did not happen can change a title's state, so it is opt-in, one delivery per
+// registration, and capped per process. The switch's seam for tests is xgameruntime_set_user_change_event.
+std::atomic<int> g_change_event_override{-1};   // test seam: -1 follows the environment, 0/1 force OFF/ON
+bool change_event_enabled() {
+    const int forced = g_change_event_override.load();
+    if (forced >= 0) return forced != 0;
+    char value[8] = {};
+    const DWORD n = GetEnvironmentVariableA("PALMETTO_USER_CHANGE_EVENT", value, sizeof value);
+    return n > 0 && n < sizeof value && std::strcmp(value, "0") != 0 && _stricmp(value, "off") != 0;
+}
 
-HRESULT STDMETHODCALLTYPE user_register_change(void*, XTaskQueueHandle, void*, XUserChangeEventCallback callback,
-                                               XTaskQueueRegistrationToken* token) {
+struct ChangeRegistration {
+    XUserChangeEventCallback callback;
+    void* context;
+    bool running;       // the callback is executing now
+    bool unregistered;  // XUserUnregisterForChangeEvent named this token while the callback ran
+};
+std::mutex g_tokens_mutex;
+std::condition_variable g_tokens_cv;
+std::unordered_map<uint64_t, ChangeRegistration> g_tokens;
+uint64_t g_next_token = 1;
+std::atomic<int> g_change_deliveries{0};
+constexpr int kMaxChangeEventDeliveries = 8;   // bounded: a title that re-registers cannot stream events
+
+struct ChangeDelivery {
+    uint64_t token;
+};
+
+// Runs on the title's queue's completion port. The delivery is dropped if the registration went away first, so an
+// XUserUnregisterForChangeEvent(wait = false) that returned true is never followed by the callback.
+void CALLBACK run_change_delivery(void* self, bool canceled) {
+    std::unique_ptr<ChangeDelivery> delivery(static_cast<ChangeDelivery*>(self));
+    ChangeRegistration registration;
+    {
+        std::lock_guard<std::mutex> lock(g_tokens_mutex);
+        const auto it = g_tokens.find(delivery->token);
+        if (canceled || it == g_tokens.end() || it->second.unregistered) return;
+        it->second.running = true;
+        registration = it->second;
+    }
+    std::fprintf(stderr, "[rt] xgameruntime: +%.2fs XUser change event SignedInAgain (0) delivered to the registered callback\n",
+                 rt::shims::platform_trace_seconds());
+    registration.callback(registration.context, XUserLocalId{kOfflineLocalId}, XUserChangeEvent::SignedInAgain);
+    {
+        std::lock_guard<std::mutex> lock(g_tokens_mutex);
+        const auto it = g_tokens.find(delivery->token);
+        if (it == g_tokens.end()) return;
+        if (it->second.unregistered) g_tokens.erase(it);
+        else it->second.running = false;
+    }
+    g_tokens_cv.notify_all();
+}
+
+HRESULT STDMETHODCALLTYPE user_register_change(void*, XTaskQueueHandle queue, void* context,
+                                               XUserChangeEventCallback callback, XTaskQueueRegistrationToken* token) {
     if (!callback || !token) return E_POINTER;
-    std::lock_guard<std::mutex> lock(g_tokens_mutex);
-    token->token = g_next_token++;
-    g_tokens.insert(token->token);
+    uint64_t id = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_tokens_mutex);
+        id = g_next_token++;
+        g_tokens.emplace(id, ChangeRegistration{callback, context, false, false});
+    }
+    token->token = id;
+    if (!change_event_enabled()) return S_OK;
+    if (g_change_deliveries.fetch_add(1) >= kMaxChangeEventDeliveries) {
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true))
+            std::fprintf(stderr, "[rt] xgameruntime: XUser change event cap (%d) reached; further probes are not scheduled\n",
+                         kMaxChangeEventDeliveries);
+        return S_OK;
+    }
+    XTaskQueueHandle process_queue = nullptr;
+    if (!queue) {
+        if (!XTaskQueueGetCurrentProcessTaskQueue(&process_queue)) {
+            std::fprintf(stderr, "[rt] xgameruntime: XUser change event probe: no process task queue\n");
+            return S_OK;
+        }
+        queue = process_queue;
+    }
+    auto* delivery = new ChangeDelivery{id};
+    const HRESULT hr = XTaskQueueSubmitCallback(queue, XTaskQueuePort::Completion, delivery, run_change_delivery);
+    if (process_queue) XTaskQueueCloseHandle(process_queue);
+    if (FAILED(hr)) {
+        std::fprintf(stderr, "[rt] xgameruntime: XUser change event probe could not be scheduled (0x%08lx)\n",
+                     static_cast<unsigned long>(hr));
+        delete delivery;
+    }
     return S_OK;
 }
 
-// false means "wait was false and the unregistration is still pending"; nothing is ever pending offline, so it is
-// true for every token, including one already unregistered or never handed out (a title polling with wait = false
-// would otherwise spin).
-bool STDMETHODCALLTYPE user_unregister_change(void*, XTaskQueueRegistrationToken token, bool) {
-    std::lock_guard<std::mutex> lock(g_tokens_mutex);
-    g_tokens.erase(token.token);
-    return true;
+// false means "wait was false and the unregistration is still pending": only a delivery that is already running can be
+// pending. Nothing else is ever pending, so a token that was never issued (or was already removed) is true.
+bool STDMETHODCALLTYPE user_unregister_change(void*, XTaskQueueRegistrationToken token, bool wait) {
+    std::unique_lock<std::mutex> lock(g_tokens_mutex);
+    const auto it = g_tokens.find(token.token);
+    if (it == g_tokens.end()) return true;
+    if (!it->second.running) {
+        g_tokens.erase(it);
+        return true;
+    }
+    it->second.unregistered = true;
+    if (wait) g_tokens_cv.wait(lock, [&] { return g_tokens.find(token.token) == g_tokens.end(); });
+    return wait;
 }
 
 // 35: HRESULT XUserGetSignOutDeferral(XUserSignOutDeferralHandle* deferral): nothing signs out offline, so there is
@@ -536,13 +633,24 @@ HRESULT STDMETHODCALLTYPE trace_user_register_change(void* self, XTaskQueueHandl
                                                      XTaskQueueRegistrationToken* token) {
     void* const caller = _ReturnAddress();
     const HRESULT hr = user_register_change(self, queue, context, callback, token);
-    rt::shims::platform_trace("XUserRegisterForChangeEvent", caller, static_cast<std::uint64_t>(hr));
+    // The registration's shape is what the change-event probe needs: whether the title gave a queue and a context,
+    // and which function it registered (as module+RVA).
+    char what[192];
+    std::snprintf(what, sizeof what, "XUserRegisterForChangeEvent(queue=%s context=%s callback=%s)",
+                  queue ? "given" : "null", context ? "given" : "null",
+                  callback ? rt::shims::module_offset(reinterpret_cast<std::uint64_t>(callback)).c_str() : "null");
+    rt::shims::platform_trace_keyed(reinterpret_cast<std::uint64_t>(&trace_user_register_change), what, caller,
+                                    static_cast<std::uint64_t>(hr));
     return hr;
 }
 bool STDMETHODCALLTYPE trace_user_unregister_change(void* self, XTaskQueueRegistrationToken token, bool wait) {
     void* const caller = _ReturnAddress();
     const bool done = user_unregister_change(self, token, wait);
-    rt::shims::platform_trace("XUserUnregisterForChangeEvent", caller, done ? 1 : 0);
+    char what[96];
+    std::snprintf(what, sizeof what, "XUserUnregisterForChangeEvent(token=%llu wait=%d)",
+                  static_cast<unsigned long long>(token.token), wait ? 1 : 0);
+    rt::shims::platform_trace_keyed(reinterpret_cast<std::uint64_t>(&trace_user_unregister_change), what, caller,
+                                    done ? 1 : 0);
     return done;
 }
 HRESULT STDMETHODCALLTYPE trace_user_get_gamertag(void* self, XUserHandle user, XUserGamertagComponent component,
@@ -731,6 +839,14 @@ void* xgameruntime_user_new_handle() { return new_handle(); }
 long xgameruntime_user_open_handles() {
     std::lock_guard<std::mutex> lock(g_handles_mutex);
     return static_cast<long>(g_handles.size());
+}
+
+// Test seam for PALMETTO_USER_CHANGE_EVENT (docs/user_events.md): forces the change-event probe OFF/ON and returns the
+// previous state, so one test process can check both faces without an environment variable changing mid-run.
+bool xgameruntime_set_user_change_event(bool on) {
+    const bool previous = change_event_enabled();
+    g_change_event_override.store(on ? 1 : 0);
+    return previous;
 }
 
 }  // namespace rt::shims

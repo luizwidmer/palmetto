@@ -3,6 +3,7 @@
 // arguments follow the public GDK reference. No game data; nothing online.
 #include <windows.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -17,6 +18,7 @@
 
 namespace rt::shims {
 long xgameruntime_store_open_handles();
+bool xgameruntime_set_store_async_complete(bool on);
 }
 
 namespace {
@@ -86,6 +88,9 @@ bool CALLBACK on_product(void*, void*) {
     ++g_callbacks;
     return true;
 }
+
+std::atomic<int> g_async_callbacks{0};
+void CALLBACK on_async_done(XAsyncBlock*) { g_async_callbacks.fetch_add(1); }
 
 }  // namespace
 
@@ -171,9 +176,53 @@ int main() {
           "the query has no products and no further pages");
     at<Close>(store, 19)(store, products);
 
-    // ---- what needs the service fails before starting ----
+    // ---- what needs the service fails before starting by default (the measured answer) ----
     check(at<NoArgs>(store, 49)(store) == E_FAIL, "XStoreShowPurchaseUIAsync is not available offline");
     check(at<NoArgs>(store, 46)(store) == E_NOTIMPL, "an undocumented slot answers E_NOTIMPL");
+
+    // ---- the opt-in *Async completion (docs/user_events.md) ----
+    // A caller that ignores the *Async HRESULT and waits on the block would never get an answer from the default
+    // synchronous E_FAIL. With PALMETTO_STORE_ASYNC_COMPLETE=1 (off by default) the block starts and completes with
+    // E_FAIL on its queue; the switch is the seam so both faces are checked in one process.
+    using RateAsync = HRESULT(STDMETHODCALLTYPE*)(void*, Handle, XAsyncBlock*);
+    using PurchaseAsync = HRESULT(STDMETHODCALLTYPE*)(void*, Handle, const char*, const char*, const char*, XAsyncBlock*);
+    using RedeemAsync = HRESULT(STDMETHODCALLTYPE*)(void*, Handle, const char*, const char**, size_t, bool, XAsyncBlock*);
+    using ConsumableAsync = HRESULT(STDMETHODCALLTYPE*)(void*, Handle, const char*, XAsyncBlock*);
+    using GiftAsync = HRESULT(STDMETHODCALLTYPE*)(void*, Handle, const char*, const char*, const char*, XAsyncBlock*);
+
+    XAsyncBlock default_block{};
+    default_block.callback = on_async_done;
+    check(at<RateAsync>(store, 51)(store, context, &default_block) == E_FAIL && g_async_callbacks.load() == 0,
+          "by default the *Async answer is the synchronous E_FAIL and the block's callback does not run");
+
+    check(!rt::shims::xgameruntime_set_store_async_complete(true), "the store *Async seam reports the switch was off");
+    XAsyncBlock rate{};
+    rate.callback = on_async_done;
+    check(at<RateAsync>(store, 51)(store, context, &rate) == S_OK && finished(&rate) &&
+              XAsyncGetStatus(&rate, false) == E_FAIL && g_async_callbacks.load() == 1,
+          "XStoreShowRateAndReviewUIAsync (block as the 2nd argument) starts and completes with E_FAIL");
+    check(at<NoArgs>(store, 52)(store) == E_FAIL, "its Result partner keeps returning E_FAIL");
+    XAsyncBlock consumable{};
+    check(at<ConsumableAsync>(store, 33)(store, context, "0010", &consumable) == S_OK && finished(&consumable) &&
+              XAsyncGetStatus(&consumable, false) == E_FAIL,
+          "XStoreQueryConsumableBalanceRemainingAsync (3rd argument) completes with E_FAIL");
+    XAsyncBlock purchase{};
+    check(at<PurchaseAsync>(store, 49)(store, context, "0010", nullptr, nullptr, &purchase) == S_OK &&
+              finished(&purchase) && XAsyncGetStatus(&purchase, false) == E_FAIL,
+          "XStoreShowPurchaseUIAsync (5th argument) completes with E_FAIL");
+    XAsyncBlock redeem{};
+    check(at<RedeemAsync>(store, 53)(store, context, "token", nullptr, 0, false, &redeem) == S_OK && finished(&redeem) &&
+              XAsyncGetStatus(&redeem, false) == E_FAIL,
+          "XStoreShowRedeemTokenUIAsync (6th argument, on the stack) completes with E_FAIL");
+    XAsyncBlock gift{};
+    check(at<GiftAsync>(store, 82)(store, context, "0010", nullptr, nullptr, &gift) == S_OK && finished(&gift) &&
+              XAsyncGetStatus(&gift, false) == E_FAIL,
+          "XStoreShowGiftingUIAsync (5th argument) completes with E_FAIL");
+    check(at<RateAsync>(store, 51)(store, context, nullptr) == E_POINTER, "a null XAsyncBlock is E_POINTER");
+    check(rt::shims::xgameruntime_set_store_async_complete(false), "the store *Async seam reports the switch was on");
+    XAsyncBlock off{};
+    check(at<RateAsync>(store, 51)(store, context, &off) == E_FAIL,
+          "with the switch off again the answer is the synchronous E_FAIL");
 
     check(at<Register>(store, 66)(store, context, nullptr, nullptr, on_change, &token) == S_OK &&
               at<Unregister>(store, 67)(store, context, token, true),

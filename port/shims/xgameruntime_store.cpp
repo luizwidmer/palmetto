@@ -12,6 +12,13 @@
 // service or a store UI (purchases, consumables, tokens, collections ids, downloads) fails before starting, so no
 // XAsyncBlock waits, and logs once. License-changed and license-lost callbacks are never called: nothing changes.
 //
+// The *Async half of that last group can also start and complete the caller's XAsyncBlock with E_FAIL instead, under
+// PALMETTO_STORE_ASYNC_COMPLETE=1 (OFF by default): a title that ignores the returned HRESULT and waits on the block
+// (XAsyncGetStatus(wait = true), or the block's callback) must get an answer rather than hang. That is a contract
+// repair for a path this title does not take - the retail boot makes no XStore call at all - so the default path
+// keeps the synchronous E_FAIL measured here and the switch says what would make the completed form the default
+// (docs/user_events.md). The seam for tests is xgameruntime_set_store_async_complete.
+//
 // XStoreGameLicense's layout is measured on the retail executable (docs/runtime_imports.md): the title's
 // XStoreQueryGameLicenseResult call passes a 104-byte stack buffer and reads the SKU id as a C string at +0x00, the
 // three booleans at +0x13..+0x15, the trial id as a C string at +0x1C and the expiration time at +0x60. That fixes
@@ -123,6 +130,37 @@ template <int Slot> HRESULT STDMETHODCALLTYPE offline_failure(void*) {
     if (!s_logged.exchange(true))
         std::fprintf(stderr, "[rt] xgameruntime: XStoreImpl slot %d is not available offline (E_FAIL)\n", Slot);
     return E_FAIL;
+}
+
+// The *Async half of such an operation. With PALMETTO_STORE_ASYNC_COMPLETE=1 the call starts the caller's XAsyncBlock
+// and completes it with E_FAIL on its queue, as the GDK reports an operation that fails after it starts; the
+// Result partner keeps returning E_FAIL. Without the switch it is the synchronous E_FAIL above, unchanged.
+// `BlockArg` is the 1-based position of the XAsyncBlock* among the arguments after `this`, from the published GDK
+// signature of the slot named at its vtable entry (docs/user_events.md has the table); arguments past the fourth are
+// on the caller's stack, which every x64 caller reserves. A block pointer the caller did not pass (a slot whose
+// signature has fewer arguments than six) is never read: only words[BlockArg - 1] is.
+std::atomic<int> g_store_async_override{-1};   // test seam: -1 follows the environment, 0/1 force OFF/ON
+bool store_async_complete_enabled() {
+    const int forced = g_store_async_override.load();
+    if (forced >= 0) return forced != 0;
+    char value[8] = {};
+    const DWORD n = GetEnvironmentVariableA("PALMETTO_STORE_ASYNC_COMPLETE", value, sizeof value);
+    return n > 0 && n < sizeof value && std::strcmp(value, "0") != 0 && _stricmp(value, "off") != 0;
+}
+
+template <int Slot, int BlockArg>
+HRESULT STDMETHODCALLTYPE offline_failure_async(void*, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                uint64_t a5, uint64_t a6) {
+    static_assert(BlockArg >= 1 && BlockArg <= 6, "the XAsyncBlock* is one of the first six arguments");
+    if (!store_async_complete_enabled()) return offline_failure<Slot>(nullptr);
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true))
+        std::fprintf(stderr, "[rt] xgameruntime: XStoreImpl slot %d is not available offline: started and completed "
+                             "with E_FAIL (PALMETTO_STORE_ASYNC_COMPLETE=1)\n", Slot);
+    const uint64_t words[] = {a1, a2, a3, a4, a5, a6};
+    auto* const async = reinterpret_cast<XAsyncBlock*>(words[BlockArg - 1]);
+    if (!async) return E_POINTER;
+    return XAsyncRun(async, [](XAsyncBlock*) -> HRESULT { return E_FAIL; });
 }
 
 // A slot the docs don't name, or name without a signature: E_NOTIMPL, so nothing reads outputs it didn't write.
@@ -422,36 +460,36 @@ const void* const kStoreVtable[] = {
     FN(store_addons_async),                  // 30 XStoreQueryAddOnLicensesAsync
     FN(store_addons_count),                  // 31 XStoreQueryAddOnLicensesResultCount
     FN(store_addons_result),                 // 32 XStoreQueryAddOnLicensesResult
-    FN(offline_failure<33>),                 // 33 XStoreQueryConsumableBalanceRemainingAsync
+    FN((offline_failure_async<33, 3>)),      // 33 XStoreQueryConsumableBalanceRemainingAsync(context, id, async)
     FN(offline_failure<34>),                 // 34 XStoreQueryConsumableBalanceRemainingResult
-    FN(offline_failure<35>),                 // 35 XStoreReportConsumableFulfillmentAsync
+    FN((offline_failure_async<35, 5>)),      // 35 XStoreReportConsumableFulfillmentAsync(context, id, qty, guid, async)
     FN(offline_failure<36>),                 // 36 XStoreReportConsumableFulfillmentResult
-    FN(offline_failure<37>),                 // 37 XStoreGetUserCollectionsIdAsync
+    FN((offline_failure_async<37, 4>)),      // 37 XStoreGetUserCollectionsIdAsync(context, ticket, publisher, async)
     FN(offline_failure<38>),                 // 38 XStoreGetUserCollectionsIdResultSize
     FN(offline_failure<39>),                 // 39 XStoreGetUserCollectionsIdResult
-    FN(offline_failure<40>),                 // 40 XStoreGetUserPurchaseIdAsync
+    FN((offline_failure_async<40, 4>)),      // 40 XStoreGetUserPurchaseIdAsync(context, ticket, publisher, async)
     FN(offline_failure<41>),                 // 41 XStoreGetUserPurchaseIdResultSize
     FN(offline_failure<42>),                 // 42 XStoreGetUserPurchaseIdResult
-    FN(offline_failure<43>),                 // 43 XStoreQueryLicenseTokenAsync
+    FN((offline_failure_async<43, 5>)),      // 43 XStoreQueryLicenseTokenAsync(context, ids, count, custom, async)
     FN(offline_failure<44>),                 // 44 XStoreQueryLicenseTokenResultSize
     FN(offline_failure<45>),                 // 45 XStoreQueryLicenseTokenResult
     FN(unknown_slot<46>),                    // 46 (unknown in the docs)
     FN(unknown_slot<47>),                    // 47 (unknown in the docs)
     FN(unknown_slot<48>),                    // 48 (unknown in the docs)
-    FN(offline_failure<49>),                 // 49 XStoreShowPurchaseUIAsync
+    FN((offline_failure_async<49, 5>)),      // 49 XStoreShowPurchaseUIAsync(context, id, name, json, async)
     FN(offline_failure<50>),                 // 50 XStoreShowPurchaseUIResult
-    FN(offline_failure<51>),                 // 51 XStoreShowRateAndReviewUIAsync
+    FN((offline_failure_async<51, 2>)),      // 51 XStoreShowRateAndReviewUIAsync(context, async)
     FN(offline_failure<52>),                 // 52 XStoreShowRateAndReviewUIResult
-    FN(offline_failure<53>),                 // 53 XStoreShowRedeemTokenUIAsync
+    FN((offline_failure_async<53, 6>)),      // 53 XStoreShowRedeemTokenUIAsync(context, token, ids, count, bool, async)
     FN(offline_failure<54>),                 // 54 XStoreShowRedeemTokenUIResult
     FN(store_updates_async),                 // 55 XStoreQueryGameAndDlcPackageUpdatesAsync
     FN(store_updates_count),                 // 56 XStoreQueryGameAndDlcPackageUpdatesResultCount
     FN(store_updates_result),                // 57 XStoreQueryGameAndDlcPackageUpdatesResult
-    FN(offline_failure<58>),                 // 58 XStoreDownloadPackageUpdatesAsync
+    FN((offline_failure_async<58, 4>)),      // 58 XStoreDownloadPackageUpdatesAsync(context, packages, count, async)
     FN(offline_failure<59>),                 // 59 XStoreDownloadPackageUpdatesResult
-    FN(offline_failure<60>),                 // 60 XStoreDownloadAndInstallPackageUpdatesAsync
+    FN((offline_failure_async<60, 4>)),      // 60 XStoreDownloadAndInstallPackageUpdatesAsync(context, packages, count, async)
     FN(offline_failure<61>),                 // 61 XStoreDownloadAndInstallPackageUpdatesResult
-    FN(offline_failure<62>),                 // 62 XStoreDownloadAndInstallPackagesAsync
+    FN((offline_failure_async<62, 4>)),      // 62 XStoreDownloadAndInstallPackagesAsync(context, packages, count, async)
     FN(offline_failure<63>),                 // 63 XStoreDownloadAndInstallPackagesResultCount
     FN(offline_failure<64>),                 // 64 XStoreDownloadAndInstallPackagesResult
     FN(store_query_package_identifier),      // 65 XStoreQueryPackageIdentifier
@@ -460,18 +498,18 @@ const void* const kStoreVtable[] = {
     FN(store_register),                      // 68 XStoreRegisterPackageLicenseLost
     FN(store_unregister),                    // 69 XStoreUnregisterPackageLicenseLost
     FN(unknown_slot<70>),                    // 70 XStoreIsAvailabilityPurchasable (2; no documented signature)
-    FN(offline_failure<71>),                 // 71 XStoreAcquireLicenseForDurablesAsync (3)
+    FN((offline_failure_async<71, 3>)),      // 71 XStoreAcquireLicenseForDurablesAsync(context, id, async) (3)
     FN(offline_failure<72>),                 // 72 XStoreAcquireLicenseForDurablesResult (3)
-    FN(offline_failure<73>),                 // 73 XStoreShowAssociatedProductsUIAsync (4)
+    FN((offline_failure_async<73, 4>)),      // 73 XStoreShowAssociatedProductsUIAsync(context, id, kinds, async) (4)
     FN(offline_failure<74>),                 // 74 XStoreShowAssociatedProductsUIResult (4)
-    FN(offline_failure<75>),                 // 75 XStoreShowProductPageUIAsync (4)
+    FN((offline_failure_async<75, 3>)),      // 75 XStoreShowProductPageUIAsync(context, id, async) (4)
     FN(offline_failure<76>),                 // 76 XStoreShowProductPageUIResult (4)
     FN(store_query_associated_for_id_async), // 77 XStoreQueryAssociatedProductsForStoreIdAsync (5)
     FN(store_products_result),               // 78 XStoreQueryAssociatedProductsForStoreIdResult (5)
     FN(store_package_updates_async),         // 79 XStoreQueryPackageUpdatesAsync (5)
     FN(store_updates_count),                 // 80 XStoreQueryPackageUpdatesResultCount (5)
     FN(store_updates_result),                // 81 XStoreQueryPackageUpdatesResult (5)
-    FN(offline_failure<82>),                 // 82 XStoreShowGiftingUIAsync (6)
+    FN((offline_failure_async<82, 5>)),      // 82 XStoreShowGiftingUIAsync(context, id, name, json, async) (6)
     FN(offline_failure<83>),                 // 83 XStoreShowGiftingUIResult (6)
 };
 static_assert(std::size(kStoreVtable) == 84, "IUnknown + IXStoreImpl's 67 methods + 1 + 2 + 4 + 5 + 2");
@@ -498,6 +536,15 @@ bool xgameruntime_store_query(const GUID& class_id, REFIID interface_id, void** 
 long xgameruntime_store_open_handles() {
     std::lock_guard<std::mutex> lock(g_mutex);
     return static_cast<long>(g_contexts.size() + g_licenses.size() + g_queries.size());
+}
+
+// Test seam for PALMETTO_STORE_ASYNC_COMPLETE (docs/user_events.md): forces the *Async completion answer OFF/ON and
+// returns the previous state, so one test process can check both faces without an environment variable changing
+// mid-run.
+bool xgameruntime_set_store_async_complete(bool on) {
+    const bool previous = store_async_complete_enabled();
+    g_store_async_override.store(on ? 1 : 0);
+    return previous;
 }
 
 }  // namespace rt::shims

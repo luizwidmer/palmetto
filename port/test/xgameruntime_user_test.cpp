@@ -21,6 +21,7 @@ namespace rt::shims {
 long xgameruntime_user_open_handles();
 bool xgameruntime_set_package_interface4(bool on);
 bool xgameruntime_set_package_ready(bool on);
+bool xgameruntime_set_user_change_event(bool on);
 }
 
 namespace {
@@ -62,9 +63,23 @@ void CALLBACK count_progress_changed(void* context, void* /*monitor*/) {
     static_cast<std::atomic<int>*>(context)->fetch_add(1);
 }
 
+// The change-event probe's callback (GDK: void CALLBACK(void* context, XUserLocalId, XUserChangeEvent)); the
+// registration's context is the atomic count, and the other fields are recorded for the shape checks.
+std::atomic<int> g_change_events{0};
+std::atomic<uint64_t> g_change_local_id{0};
+std::atomic<uint32_t> g_change_event_value{0xFFFFFFFF};
+std::atomic<void*> g_change_context{nullptr};
+void CALLBACK count_change_event(void* context, XUserLocalId user, uint32_t event) {
+    g_change_events.fetch_add(1);
+    g_change_local_id.store(user.value);
+    g_change_event_value.store(event);
+    g_change_context.store(context);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     const char* expect_tag = "Player";
     if (argc == 3 && std::strcmp(argv[1], "--expect-gamertag") == 0) expect_tag = argv[2];
     std::printf("xgameruntime_user_test: XUserImpl through QueryApiImpl (gamertag \"%s\")\n", expect_tag);
@@ -177,6 +192,73 @@ int main(int argc, char** argv) {
     void* deferral = reinterpret_cast<void*>(1);
     check(at<Deferral>(user, 35)(user, &deferral) == E_GAMEUSER_DEFERRAL_NOT_AVAILABLE && deferral == nullptr,
           "XUserGetSignOutDeferral: E_GAMEUSER_DEFERRAL_NOT_AVAILABLE (nothing signs out offline)");
+
+    // ---- the opt-in change-event probe (docs/user_events.md) ----
+    // Off, the registration above delivered nothing: the user never changes offline. The probe delivers one
+    // SignedInAgain event per registration on the queue the title registered with, with its context and the offline
+    // local id; the switch is the seam so both faces are checked in one process.
+    check(g_change_events.load() == 0, "the registration made with the probe off delivered no change event");
+    XTaskQueueHandle queue = nullptr;
+    if (XTaskQueueCreate(XTaskQueueDispatchMode::ThreadPool, XTaskQueueDispatchMode::ThreadPool, &queue) == S_OK &&
+        queue) {
+        int context = 7;
+        check(!rt::shims::xgameruntime_set_user_change_event(true), "the change-event seam reports the switch was off");
+        XTaskQueueRegistrationToken probed{};
+        check(at<Register>(user, 33)(user, queue, &context, count_change_event, &probed) == S_OK && probed.token != 0,
+              "a registration with the probe on hands out a token");
+        for (int i = 0; i < 400 && g_change_events.load() == 0; ++i) Sleep(10);
+        check(g_change_events.load() == 1 && g_change_local_id.load() == 1 && g_change_event_value.load() == 0 &&
+                  g_change_context.load() == &context,
+              "the registered callback ran once with its own context, the offline local id (1) and SignedInAgain (0)");
+        check(at<Unregister>(user, 34)(user, probed, false), "unregistering a delivered registration is not pending");
+
+        // A registration dropped before its queue delivers it must not reach the callback: a manual queue only
+        // delivers when dispatched.
+        XTaskQueueHandle manual = nullptr;
+        if (XTaskQueueCreate(XTaskQueueDispatchMode::Manual, XTaskQueueDispatchMode::Manual, &manual) == S_OK && manual) {
+            XTaskQueueRegistrationToken dropped{};
+            check(at<Register>(user, 33)(user, manual, &context, count_change_event, &dropped) == S_OK &&
+                      dropped.token != 0 && at<Unregister>(user, 34)(user, dropped, false),
+                  "unregistering a delivery that has not run yet is not pending");
+            while (XTaskQueueDispatch(manual, XTaskQueuePort::Completion, 0)) {
+            }
+            check(g_change_events.load() == 1, "the unregistered delivery does not reach the callback");
+
+            // The probe is bounded per process: a title that keeps re-registering cannot stream events forever.
+            for (int i = 0; i < 20; ++i) {
+                XTaskQueueRegistrationToken many{};
+                check(at<Register>(user, 33)(user, manual, &context, count_change_event, &many) == S_OK,
+                      "a registration past the probe's cap still succeeds");
+                at<Unregister>(user, 34)(user, many, false);
+            }
+            while (XTaskQueueDispatch(manual, XTaskQueuePort::Completion, 0)) {
+            }
+            const int delivered = g_change_events.load();
+            check(delivered >= 1 && delivered <= 8, "the probe delivers at most 8 events in one process");
+            XTaskQueueRegistrationToken capped{};
+            at<Register>(user, 33)(user, manual, &context, count_change_event, &capped);
+            while (XTaskQueueDispatch(manual, XTaskQueuePort::Completion, 0)) {
+            }
+            check(g_change_events.load() == delivered, "a registration past the cap schedules no more events");
+            at<Unregister>(user, 34)(user, capped, false);
+            // A manual queue has no thread pumping it, so terminate without waiting and dispatch the termination
+            // callbacks; waiting on the queue itself would wait for a callback only dispatch could run.
+            XTaskQueueTerminate(manual, false, nullptr, nullptr);
+            while (XTaskQueueDispatch(manual, XTaskQueuePort::Work, 0)) {
+            }
+            while (XTaskQueueDispatch(manual, XTaskQueuePort::Completion, 0)) {
+            }
+            XTaskQueueCloseHandle(manual);
+        } else {
+            check(false, "a manual task queue for the change-event probe could not be created");
+        }
+
+        check(rt::shims::xgameruntime_set_user_change_event(false), "the change-event seam reports the switch was on");
+        XTaskQueueTerminate(queue, true, nullptr, nullptr);
+        XTaskQueueCloseHandle(queue);
+    } else {
+        check(false, "a task queue for the change-event probe could not be created");
+    }
 
     // ---- IXUserImpl2: XUserAddByIdWithUiAsync / Result (37, 38) ----
     using AddByIdAsync = HRESULT(STDMETHODCALLTYPE*)(void*, uint64_t, XAsyncBlock*);
