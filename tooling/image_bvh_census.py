@@ -212,7 +212,10 @@ def vregs(a):
 def vgpr_access(ins):
     """(read operands as [(argument index, registers)], written registers, partial write?) by the conventions of
     rdna2spirv.reg_reads_writes, plus atomics and LDS ops that return nothing and the partial writes."""
-    op, a, mods = ins["op"], ins["args"], ins.get("extensions", [])
+    # shader_ir.parse_line stores the printed modifiers under "mods" (tests/test_shader_ir.py); the old
+    # "extensions" key read here always came back empty, so dmask/dim/offen/lds and every other modifier was
+    # classified as absent.
+    op, a, mods = ins["op"], ins["args"], ins.get("mods", [])
     if not a:
         return [], [], False
     bop = rdna2spirv.base_op(op)
@@ -263,14 +266,14 @@ def is_copy(ins):
     a = ins["args"]
     if bop not in ("v_mov_b32", "v_swap_b32") or ins["op"].endswith(("_sdwa", "_dpp")) or len(a) < 2:
         return False
-    return not ins.get("extensions") and plain(a[1]) and bool(vregs(a[1]))
+    return not ins.get("mods") and plain(a[1]) and bool(vregs(a[1]))
 
 
 def high_half_operand(ins, n):
     """Operand n of a v_mul_i32_i24 is sext(src[31:16]) (SDWA src<n-1>_sel:WORD_1 with sext)."""
     if rdna2spirv.base_op(ins["op"]) != "v_mul_i32_i24" or not ins["op"].endswith("_sdwa") or n not in (1, 2):
         return False
-    return ins["args"][n].get("sext") and f"src{n - 1}_sel:WORD_1" in ins.get("extensions", [])
+    return ins["args"][n].get("sext") and f"src{n - 1}_sel:WORD_1" in ins.get("mods", [])
 
 
 def kind_of(ins, n):
@@ -278,7 +281,7 @@ def kind_of(ins, n):
     op = ins["op"]
     bop = rdna2spirv.base_op(op)
     if bop.startswith(MEMORY) or bop.startswith("image_bvh") or bop in LANE_OPS or op.endswith("_dpp") or \
-            any(m.startswith(("quad_perm:", "row_", "dpp8:")) for m in ins.get("extensions", [])) or \
+            any(m.startswith(("quad_perm:", "row_", "dpp8:")) for m in ins.get("mods", [])) or \
             not bop.startswith("v_"):
         return "raw_other"
     return "raw_float" if source_is_float(bop) else "raw_integer"
@@ -646,9 +649,9 @@ def classify(st, ins, n, words):
     only_w1 = all(w[1] == 1 for w in words)
     if bop.startswith("v_cndmask_b32") and n in (1, 2):
         return "select", "all"
-    if bop == "v_rcp_f32" and n == 1 and only_w1 and plain(a[1]) and not ins.get("extensions"):
+    if bop == "v_rcp_f32" and n == 1 and only_w1 and plain(a[1]) and not ins.get("mods"):
         return "ratio", "all"
-    if bop in RATIO_MULS and n in (1, 2) and len(a) == 3 and plain(a[1]) and plain(a[2]) and not ins.get("extensions"):
+    if bop in RATIO_MULS and n in (1, 2) and len(a) == 3 and plain(a[1]) and plain(a[2]) and not ins.get("mods"):
         partner = ratio_partner(st, a[3 - n])
         if partner != "none":
             return "ratio", partner

@@ -143,7 +143,10 @@ def step(state, ins, wave64=True):
     op, a = base_op(ins["op"]), ins["args"]
     if not a or op.startswith(NO_DESTINATION):
         return
-    mods = ins.get("extensions", ())
+    # shader_ir.parse_line stores the printed modifiers under "mods" (tests/test_shader_ir.py); the old
+    # "extensions" key read here always came back empty, so a buffer load to LDS or glc atomic looked like a
+    # plain VGPR writer.
+    mods = ins.get("mods", ())
     if op.startswith(("buffer_load", "tbuffer_load")) and "lds" in mods:
         return
     if op.startswith(("buffer_atomic", "global_atomic", "flat_atomic", "image_atomic",

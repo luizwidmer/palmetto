@@ -60,7 +60,9 @@ class Rdna2DecodeUnitTests(unittest.TestCase):
                     asm = (f"image_atomic_{name} {data}, v[4:5], s[8:15] "
                            f"dmask:0x{mask:x} dim:SQ_RSRC_IMG_2D unorm" + (" glc" if glc else ""))
                     expected = shader_ir.parse_line(asm)
-                    for field in ("op", "args", "extensions"):
+                    # shader_ir.parse_line and decode_bytes both store the printed modifiers under "mods"; every
+                    # other modifier assertion in this file reads that key (tests/test_shader_ir.py).
+                    for field in ("op", "args", "mods"):
                         self.assertEqual(ins[field], expected[field])
 
     def test_image_slc_is_independent_of_sampler(self):
@@ -339,13 +341,15 @@ class Rdna2DecodeUnitTests(unittest.TestCase):
                 self.assertEqual(dec["invalid"], 0)
                 (ins,) = dec["insns"]
                 expected = shader_ir.parse_line(asm)
-                for field in ("op", "args", "extensions"):
+                # Both the decoder's instruction dict and shader_ir.parse_line store modifiers under "mods".
+                for field in ("op", "args", "mods"):
                     self.assertEqual(ins[field], expected[field])
                 # Formatted text also round-trips cleanly through shader_ir.parse_line.
                 text, bad = rdna2_decode.disasm_bytes(raw)
                 self.assertEqual(bad, 0)
                 reparsed = shader_ir.parse_line(text.strip())
-                for field in ("op", "args", "extensions"):
+                # Both the decoder's instruction dict and shader_ir.parse_line store modifiers under "mods".
+                for field in ("op", "args", "mods"):
                     self.assertEqual(reparsed[field], expected[field])
 
     def test_parity_with_llvm_mc_on_shader_fixtures(self):

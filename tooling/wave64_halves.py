@@ -116,7 +116,9 @@ def partial_write(ins, op):
     result, the first type in the name (v_add_f16, v_cvt_f16_f32, v_mad_u16, v_add_u16_e64), except the VOP2 16-bit
     integer ops in _e32 form, which define the whole register. Packed and 32-bit results are whole: v_pk_*,
     v_cvt_pk*, v_sad_*, v_cvt_f32_f16, v_mad_u32_u16. When unsure it says partial, which only costs tier A."""
-    mods = ins.get("extensions") or []
+    # shader_ir.parse_line stores the printed modifiers under "mods" (tests/test_shader_ir.py); the old
+    # "extensions" key read here always came back empty, so SDWA selects, DPP, op_sel and clamp went unseen.
+    mods = ins.get("mods") or []
     op = ins.get("op", op)   # the printed name: base_op drops _e32/_e64/_sdwa, which decide it here
     if "_sdwa" in op or any(m.startswith("dst_sel:") for m in mods):
         return "dst_unused:UNUSED_PRESERVE" in mods and any(m.startswith(("dst_sel:BYTE_", "dst_sel:WORD_"))
@@ -204,7 +206,7 @@ OFF_OK = ("s_nop", "s_waitcnt", "s_mov_b64", "s_wqm_b64", "s_and_b64", "s_and_sa
 def operands(ins):
     """(dests, srcs, implicit defs, implicit uses): operand dicts, and register keys the text does not show."""
     op, a = base_op(ins["op"]), ins["args"]
-    mods = ins.get("extensions") or []
+    mods = ins.get("mods") or []
     defs, uses = [], []
     if op.startswith(NO_DEST) and not op.startswith(("s_cmp", "s_bitcmp", "v_cmpx")) or op in ("s_endpgm", "s_barrier"):
         dests, srcs = [], list(a)
@@ -351,7 +353,7 @@ class Analysis:
         """k of a VALU result whose only partition-dependent source is a lane id exact modulo 2**k: sums,
         differences and bitwise ops with invariant values keep k, a left shift by an immediate c raises it to k + c."""
         # SDWA selects, DPP, op_sel and integer clamp change the value: no tag
-        mods = ins.get("extensions") or []
+        mods = ins.get("mods") or []
         if ins["op"].endswith(("_sdwa", "_dpp")) or any(
                 m == "clamp" or m.startswith(("op_sel", "dst_unused")) or "_sel:" in m for m in mods):
             return None
@@ -539,7 +541,7 @@ class Analysis:
 
     def transfer(self, n, i, ins, st, ev):
         op, a = base_op(ins["op"]), ins["args"]
-        mods = ins.get("extensions") or []
+        mods = ins.get("mods") or []
         dests, srcs, defs, uses = operands(ins)
         T = st["t"]
 
@@ -1396,7 +1398,7 @@ class Analysis:
             if b in seen:
                 continue
             seen.add(b)
-            if any(base_op(i["op"]) == "exp" and "vm" in (i.get("extensions") or []) for i in self.blocks[b]):
+            if any(base_op(i["op"]) == "exp" and "vm" in (i.get("mods") or []) for i in self.blocks[b]):
                 return True
             work.extend(pred.get(b, []))
         return False

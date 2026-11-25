@@ -112,7 +112,7 @@ def find_exe(explicit):
     if explicit:
         return Path(explicit)
     root = HERE.parent
-    for c in (root / "runtime" / "build" / "bink_play.exe", root / "runtime" / "build" / "Release" / "bink_play.exe"):
+    for c in (root / "port" / "build" / "bink_play.exe", root / "port" / "build" / "Release" / "bink_play.exe"):
         if c.is_file():
             return c
     raise SystemExit("bink_play.exe not found; build the runtime (port/build) or pass --exe")

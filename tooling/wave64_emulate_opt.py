@@ -538,7 +538,9 @@ def _scalar_rw_with_meta(ins, meta):
         dest_n = 1 if len_a else 0
         src_start = 0
     else:  # _RW_ATOMIC
-        mods = ins.get("extensions")
+        # shader_ir.parse_line stores the printed modifiers under "mods" (tests/test_shader_ir.py); the old
+        # "extensions" key read here always came back empty, so a glc atomic was given no destination.
+        mods = ins.get("mods")
         dest_n = 1 if (len_a and mods and "glc" in mods) else 0
         src_start = 0
 

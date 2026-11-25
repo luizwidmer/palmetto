@@ -75,7 +75,7 @@ jobs:
           cache: true
           cache-dependency-path: "**/packages.lock.json"
       - name: Python tools compile
-        run: python -m compileall -q build_port.py tools tests
+        run: python -m compileall -q build_port.py tooling tests
       - name: build_port.py help
         run: python -I build_port.py --help
       - name: Tests (standard library only, no game data)
@@ -195,7 +195,7 @@ jobs:
 
   # The Python suites on an Apple Silicon Mac: the standard-library loop of the check job, the translator semantic
   # tests and the pytest files of the translator-tests job, with Homebrew's llvm-mc and SPIRV-Tools. macos-26, not
-  # macos-15: the Homebrew bottles cover Sequoia and later, but the runtime needs Xcode 26's libc++ (runtime.yml).
+  # macos-15: the Homebrew bottles cover Sequoia and later, but the runtime needs Xcode 26's libc++ (port.yml).
   macos-python:
     needs: change-scope
     if: ${{ !cancelled() && needs.change-scope.outputs.docs-only != 'true' }}
@@ -214,7 +214,7 @@ jobs:
           cache: "pip"
           cache-dependency-path: tests/requirements.txt
       - name: Python tools compile
-        run: python -m compileall -q build_port.py tools tests
+        run: python -m compileall -q build_port.py tooling tests
       - name: build_port.py help
         run: python -I build_port.py --help
       # Before anything is installed, as in the check job, so these files stay standard library only. The semantic

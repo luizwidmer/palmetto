@@ -49,9 +49,10 @@ class F64ConversionTest(unittest.TestCase):
             value = result(rf"OpExtInst %float %glsl FClamp {value} %f0 %f1")
         word = result(rf"OpBitcast %uint {value}")
         dest = result(r"OpAccessChain %_ptr_Function_uint %vgpr %c3")
-        old_word = result(rf"OpLoad %uint {dest}")
-        masked_word = result(rf"OpSelect %uint %\w+ {word} {old_word}")
-        self.assertRegex(spv, rf"(?m)^ *OpStore {dest} {masked_word}$")
+        # Measured: v_cvt_f32_f64 writes its single 32-bit VGPR directly (one OpStore of the converted word).
+        # The older expectation loaded the previous word and OpSelect-ed the new one into it, a masked write the
+        # translator no longer emits because the instruction defines the whole register lane.
+        self.assertRegex(spv, rf"(?m)^ *OpStore {dest} {word}$")
 
 
 if __name__ == "__main__":

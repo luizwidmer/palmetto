@@ -120,7 +120,11 @@ def write_ogg_opus(path: str, packets: list, channels: int, serial: int, length:
     if pre_skip > total:
         pre_skip = total          # a granule below the pre-skip makes the stream undecodable
     head = b"OpusHead" + struct.pack("<BBHIhB", 1, channels, pre_skip, 48000, 0, 0)
-    tags = b"OpusTags" + struct.pack("<I", 8) + b"palmetto " + struct.pack("<I", 0)
+    # RFC 7845 section 5.2: the vendor length is the exact byte count. It read 8 for the 9-byte string, so a
+    # reader that walked vendor then comment count landed one byte early (the OpusTags packet was malformed;
+    # tests/test_opus_tags.py decoded the shifted comment length and failed with UnicodeDecodeError).
+    vendor = b"palmetto "
+    tags = b"OpusTags" + struct.pack("<I", len(vendor)) + vendor + struct.pack("<I", 0)
     out = [ogg_page(serial, 0, 0, [head], 0x02), ogg_page(serial, 1, 0, [tags], 0x00)]
     seq, granule, pending, size = 2, 0, [], 0
     target = pre_skip + length if length > 0 else None

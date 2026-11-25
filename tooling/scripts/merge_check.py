@@ -130,7 +130,12 @@ def duplicates(repo, main, tree, min_length, block=3):
     def windows(rev, path):
         r = git(repo, "show", f"{rev}:{path}", check=False)
         if r.returncode:
-            return None, Counter()
+            # A path the revision does not have is a new file (nothing to duplicate yet). A path it does have
+            # whose blob will not read is a failed check: reporting no content would call a doubled paragraph
+            # clean, so it ends the run with the git error (tests/test_merge_check.py, failed blob reads).
+            if not git(repo, "ls-tree", rev, "--", path).stdout.strip():
+                return None, Counter()
+            raise GitError(f"git show {rev}:{path}: {r.stderr.strip() or r.returncode}")
         lines = [(number, text) for number, raw in enumerate(r.stdout.split("\n"), 1) if (text := raw.strip())]
         content = [text for _, text in lines]
         return lines, Counter(tuple(content[i:i + block]) for i in range(len(content) - block + 1))

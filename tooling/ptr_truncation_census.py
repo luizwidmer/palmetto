@@ -122,7 +122,9 @@ def global_without_sgpr_base(ins):
     if not op.startswith("global_"):
         return False
     a = ins["args"]
-    k = 3 if op.startswith("global_atomic_") and "glc" in ins.get("extensions", ()) else 2
+    # shader_ir.parse_line stores the printed modifiers under "mods" (tests/test_shader_ir.py); the old
+    # "extensions" key read here always came back empty, so the saddr slot of a glc atomic was read as if no glc.
+    k = 3 if op.startswith("global_atomic_") and "glc" in ins.get("mods", ()) else 2
     return not (len(a) > k and shader_meta._sgpr_slots(a[k], 2) is not None)
 
 

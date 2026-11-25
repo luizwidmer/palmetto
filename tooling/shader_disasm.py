@@ -79,13 +79,13 @@ def probe(mcpu: str) -> None:
                            creationflags=getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0))
     except OSError as e:
         fail(f"'{MC[0]}' could not be started: {e}. Put llvm-mc on PATH or set LLVM_MC to it (on Windows,\n"
-             f"tooling/tooling/scripts\\build_llvm_mc.ps1 builds one and sets it), e.g.\n"
+             f"tooling/scripts\\build_llvm_mc.ps1 builds one and sets it), e.g.\n"
              f"  LLVM_MC=wsl -d Ubuntu -e /usr/lib/llvm-21/bin/llvm-mc")
     if p.returncode != 0 or "s_endpgm" not in p.stdout:
         why = (p.stderr.strip().splitlines() or [f"exit code {p.returncode}"])[0]
         fail(f"'{' '.join(MC)}' did not disassemble an s_endpgm: {why}\n"
              f"The disassembler needs LLVM 21+ with the AMDGPU target. The official Windows LLVM build has no\n"
-             f"AMDGPU target: build a native one with tooling/tooling/scripts\\build_llvm_mc.ps1, or run it from WSL\n"
+             f"AMDGPU target: build a native one with tooling/scripts\\build_llvm_mc.ps1, or run it from WSL\n"
              f"(docs/design.md, 'Disassembling shaders'), e.g.\n"
              f"  LLVM_MC=wsl -d Ubuntu -e /usr/lib/llvm-21/bin/llvm-mc")
 

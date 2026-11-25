@@ -337,7 +337,9 @@ class RuntimePackagingTest(unittest.TestCase):
 
         command = run.call_args.args[0]
         self.assertEqual(command[0], exe)
-        self.assertIn(os.path.join(self.root, "tooling/scripts", "build_runtime.ps1"), command)
+        # build_port.runtime() starts tooling/scripts/build_runtime.ps1 (one tooling/ level; the earlier
+        # expectation used a "tooling/scripts" segment that only matched the old double-tooling bug).
+        self.assertIn(os.path.join(self.root, "tooling", "scripts", "build_runtime.ps1"), command)
 
     def test_powershell_is_the_bare_name_where_the_file_is_not_at_its_usual_place(self):
         with mock.patch.dict(os.environ, {"SystemRoot": os.path.join(self.root, "nowhere")}):
@@ -453,7 +455,7 @@ class RuntimeBuildPackagingTest(unittest.TestCase):
                 build_port.runtime(root, os.path.join(root, "out"), {"expected_exe": "game.exe"}, jobs=1)
             command = run.call_args.args[0]
             self.assertEqual(command[command.index("-File") + 1:],
-                             [os.path.join(root, "tooling/scripts", "build_runtime.ps1"), "-Jobs", "1"])
+                             [os.path.join(root, "tooling", "scripts", "build_runtime.ps1"), "-Jobs", "1"])
 
     def test_off_windows_copies_the_build_and_writes_a_wine_launcher(self):
         with tempfile.TemporaryDirectory() as root:

@@ -230,14 +230,20 @@ class TestFormatDecoderBoundary(unittest.TestCase):
         self.gen.decode_format(words, 7, fixed=False)
         self.assertEqual(len(self.gen.tbuffer_norm_fns), fns_count)
 
-    def test_decode_any_format_selection(self):
+    def test_dynamic_format_selection_uses_the_shared_component_functions(self):
+        # Measured: decode_any_format is gone; a run-time FORMAT is decoded by one cached function per output
+        # component (SHADER-849, Gen.format_decode_call), each picking its conversion through OpIEqual/OpSelect,
+        # and format_decode_call emits exactly one call into each. 78 OpIEqual and 108 OpSelect lines in the four
+        # shared functions here.
         words = ["%w0", "%w1", "%w2", "%w3"]
         initial_lines = len(self.gen.body)
-        comps = self.gen.decode_any_format("%run_fmt", words)
+        comps = self.gen.format_decode_call("%run_fmt", words)
         self.assertEqual(len(comps), 4)
         emitted = "\n".join(self.gen.body[initial_lines:])
-        self.assertIn("OpIEqual %bool %run_fmt", emitted)
-        self.assertIn("OpSelect %uint", emitted)
+        self.assertEqual(emitted.count(" = OpFunctionCall %uint %fmt_dec_c"), 4)
+        body = "\n".join(self.gen.fmt_fn)
+        self.assertIn("OpIEqual %bool", body)
+        self.assertIn("OpSelect %uint", body)
 
     def test_format_decode_call_builds_and_caches_function(self):
         words = ["%w0", "%w1", "%w2", "%w3"]

@@ -202,7 +202,9 @@ class WaveMachine(cpu_ref.Machine):
         a = ins["args"]
         if op == "exp":
             return self._export(ins)
-        mods = ins.get("extensions") or []
+        # shader_ir.parse_line stores the printed modifiers under "mods" (tests/test_shader_ir.py); the old
+        # "extensions" key read here always came back empty, so a modifier hit no check.
+        mods = ins.get("mods") or []
         if mods and base not in cpu_ref.FLOAT_OPS:
             raise Unsupported(op, self.pc, f"modifier(s) {', '.join(mods)} are not modelled")
         if base in _BRANCHES:
@@ -332,7 +334,7 @@ class WaveMachine(cpu_ref.Machine):
 
     def _export(self, ins):
         a = ins["args"]
-        bad_mods = [m for m in (ins.get("extensions") or []) if m not in ("done", "vm")]
+        bad_mods = [m for m in (ins.get("mods") or []) if m not in ("done", "vm")]
         if bad_mods:
             raise Unsupported("exp", self.pc, f"modifier(s) {', '.join(bad_mods)} are not modelled")
         if len(a) != 5 or a[0].get("t") != "mrt0" or any(x["k"] != "vgpr" for x in a[1:]):

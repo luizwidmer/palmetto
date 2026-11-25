@@ -35,7 +35,12 @@ TOTAL = (len(check.COMPUTE) + 7 + len(check.CS_DUMPS) + len(check.W64X_DUMPS) + 
          + len(check.PIXEL_TESTS) + len(check.CLIP_TESTS) + len(check.BOUNDS) + len(check.GLOBAL_OFFSET)
          + len(check.MIP_TEST_PASSES) + len(check.GRADIENT_TESTS)
          + len(check.STORE_WORDS) + len(check.GET_LOD_TESTS)
-         + len(check.TEXTURE_CONSTANTS) + 15)  # three mesh fixtures, ps_tex, ps_imgatomic, six compute fixtures,
+         # Measured against check.main() at HEAD: 219 runnable cases. 16 (not 15) straight-line/dedicated cases
+         # outside the counted lists: cs_wavemask, cs_cmpx_class_f32, the seven cs_fmt_*/cs_tbuffer_store cases,
+         # cs_user_sgprs, cs_heap_init, cs_cvt_f32_sat, cs_fma_fused, cs_cvt_pk_u8, cs_pk_mul_lo_const and
+         # ps_table_fetch (the three table readbacks). The previous 15 missed ps_table_fetch, which check.py's
+         # main() already ran.
+         + len(check.TEXTURE_CONSTANTS) + 16)  # three mesh fixtures, ps_tex, ps_imgatomic, six compute fixtures,
          # ps_ssharp, vs_base_ids, main's standalone cs_fmt_d16_xyz / cs_heap_init dumps (net one more case) and cs_fmt_all
 CVT = {bits: [u, s] for bits, u, s in check.CVT_F32_SAT_CASES}
 
@@ -184,6 +189,9 @@ class Wave64Checks(unittest.TestCase):
                   patch.object(check, "base_ids_test", return_value=""),
                   patch.object(check, "get_lod_test", return_value=""),
                   patch.object(check, "sampler_test", return_value=""),
+                  # table_fetch_test judges three 4096-pixel readbacks the fake harness cannot write; the
+                  # summary count below still includes its one ps_table_fetch case.
+                  patch.object(check, "table_fetch_test", return_value=""),
                   contextlib.redirect_stdout(output)):
                 status = check.main()
         return status, output.getvalue()

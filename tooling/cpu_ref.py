@@ -291,7 +291,9 @@ def check_supported(ins):
     base = base_op(op)
     if base not in SUPPORTED_OPS:
         return f"{op} is not modelled"
-    mods = ins.get("extensions") or []
+    # shader_ir.parse_line stores the printed modifiers under "mods" (tests/test_shader_ir.py); the old
+    # "extensions" key read here always came back empty, so clamp and friends went unmodelled-but-accepted.
+    mods = ins.get("mods") or []
     allowed = {"clamp"} if base in FLOAT_OPS else set()
     bad = [m for m in mods if m not in allowed]
     if bad:
@@ -519,7 +521,7 @@ class Machine:
             return
         base = base_op(op)
         args = ins["args"]
-        clamp = "clamp" in (ins.get("extensions") or [])
+        clamp = "clamp" in (ins.get("mods") or [])
 
         if base == "v_mov_b32":
             self._expect(ins, 2)

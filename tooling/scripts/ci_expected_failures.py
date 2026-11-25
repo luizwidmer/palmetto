@@ -16,7 +16,7 @@ def judge(failed: list[str], status: int, expected: list[str]) -> tuple[int, lis
     """(exit status, GitHub Actions workflow commands to print)."""
     unexpected = [name for name in failed if name not in expected]
     lines = [f"::error::{name} failed" for name in unexpected]
-    # subprocess reports a signal as -N; the shell pipelines in runtime.yml report it as 128+N.
+    # subprocess reports a signal as -N; the shell pipelines in port.yml report it as 128+N.
     if status < 0 or 128 < status <= 255:
         lines.append(f"::error::abnormal test runner exit {status}; the failure list may be incomplete")
         return 1, lines

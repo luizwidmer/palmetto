@@ -16586,7 +16586,10 @@ def read_before_write_vgprs(insns):
         reads_all = op.startswith(VGPR_READ_ONLY_PREFIXES) \
             or (op.startswith("global_atomic_") and "glc" not in ins["mods"])   # no vdst without glc
         regs = []
-        for x in (a if reads_all or sdwa_reads_dst(op, ins.get("extensions", [])) else a[1:]):
+        # shader_ir.parse_line stores the printed modifiers under "mods" (as the glc read one line up does); the
+        # old "extensions" key read here always came back empty, so a SDWA UNUSED_PRESERVE insert was modelled as
+        # writing its whole destination and the register it reads was not seen as a source.
+        for x in (a if reads_all or sdwa_reads_dst(op, ins.get("mods", [])) else a[1:]):
             if x["k"] == "vgpr":
                 regs += range(x["r"], x["r"] + x.get("n", 1))
             elif x["k"] == "vlist":
@@ -16847,7 +16850,7 @@ def reg_reads_writes(insns):
             continue
         reads_all = op.startswith(VGPR_READ_ONLY_PREFIXES)
         regs = []
-        for x in (a if reads_all or sdwa_reads_dst(op, ins.get("extensions", [])) else a[1:]):
+        for x in (a if reads_all or sdwa_reads_dst(op, ins.get("mods", [])) else a[1:]):
             if x["k"] == "vgpr":
                 regs += range(x["r"], x["r"] + x.get("n", 1))
             elif x["k"] == "vlist":

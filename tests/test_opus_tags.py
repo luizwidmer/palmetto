@@ -68,9 +68,11 @@ DIALOGUE = ["wave", "key", "label", "speaker", "text_en", "text_de"]
 
 class TestPacket(unittest.TestCase):
     def test_tags_packet_layout_and_empty_values(self):
+        # The vendor length is the exact byte count of VENDOR, not the 8 the older pin assumed ("palmetto " is
+        # nine bytes); a wrong length shifts the comment count (test_names_and_dialogue below walks it).
         p = T.tags_packet([("TITLE", "wave_a"), ("SPEAKER", ""), ("SUBTITLE", "Grüß dich")])
-        self.assertTrue(p.startswith(b"OpusTags" + struct.pack("<I", 8) + T.VENDOR))
-        self.assertEqual(struct.unpack_from("<I", p, 20)[0], 2)
+        self.assertTrue(p.startswith(b"OpusTags" + struct.pack("<I", len(T.VENDOR)) + T.VENDOR))
+        self.assertEqual(struct.unpack_from("<I", p, 8 + 4 + len(T.VENDOR))[0], 2)
         self.assertIn("SUBTITLE=Grüß dich".encode(), p)
 
     def test_markup_is_removed(self):

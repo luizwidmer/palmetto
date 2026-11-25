@@ -81,7 +81,7 @@ MODES = (
 
 
 class Case:
-    __slots__ = ("group", "op", "a", "b", "c", "extensions", "neg_a", "what")
+    __slots__ = ("group", "op", "a", "b", "c", "mods", "neg_a", "what")
 
     def __init__(self, group, op, a, b, c, what, mods="", neg_a=False):
         self.group = group

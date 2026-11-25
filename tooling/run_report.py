@@ -222,11 +222,15 @@ def main():
         return 2
     print(render(summary))
     if args.json:
-        with open(args.json, "w", encoding="utf-8") as handle:
+        with open(args.json, "w", encoding="utf-8", newline="\n") as handle:
             json.dump(summary, handle, indent=2)
         print(f"(json written to {args.json})")
     return 0
 
 
 if __name__ == "__main__":
+    try:  # a redirected stdout is strict ANSI code page under -I; write '?' for what it cannot encode
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
     sys.exit(main())

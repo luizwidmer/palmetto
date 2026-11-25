@@ -374,23 +374,41 @@ class ShadersStageWithTheDlls(unittest.TestCase):
                     # build_port checks that every unpacked shader of the corpus got a non-empty listing
                     write("s_endpgm\n", bvh if builder else dxbc, "disasm",
                           ("SortKeys" if builder else "shader") + ".s")
+                elif tool_name == "fspx_unpack.py":
+                    # The FSPX step reads this index back and repairs each listing before translating it.
+                    fspx = os.path.join(work, "shaders", "fspx")
+                    write('[{"name": "Upscale", "file": "Upscale.dxbc"}]', fspx, "index.json")
+                    write("s_endpgm\n", fspx, "disasm", "Upscale.s")
+                    write("", fspx, "fspx", "Upscale.code")
                 elif tool_name == "rdna2spirv.py":
                     out = args[args.index("--out") + 1]
-                    # the FSPX step keeps its output only when the index names a program whose module is there
+                    # The FSPX step keeps its output only when the index names a program whose module is there,
+                    # with the runtime lookup key fspx_code_sha256 (fspx_cache_complete requires it).
                     name = "SortKeys" if builder else "Upscale"
                     write('{"%s": {"stage": "cs", "fssm_sha256": "%s"}}' % (name, "a" * 64) if builder else
-                          '{"%s": {"stage": "cs"}}' % name, out, "index.json")
+                          '{"%s": {"stage": "cs", "fspx_code_sha256": "%s"}}' % (name, "e" * 64),
+                          out, "index.json")
                     write("", out, name + ".spv")
 
             def fake_translate(disasm, spirv, jobs, emulate=False, fallbacks=()):
                 ran.append("translate")
                 write("", spirv, "index.json")
 
+            def fake_repair(disasm, code, repaired):
+                # build_port.repair_fspx_listings() starts a real llvm-mc; copy the listings through instead.
+                os.makedirs(repaired, exist_ok=True)
+                for name in sorted(os.listdir(disasm)):
+                    with open(os.path.join(disasm, name), "rb") as src, \
+                            open(os.path.join(repaired, name), "wb") as dst:
+                        dst.write(src.read())
+                return 0, 0
+
             def stage():
                 ran.clear()
                 with mock.patch.object(build_port, "py", fake_py), \
                         mock.patch.object(build_port, "need", lambda *a: None), \
                         mock.patch.object(build_port, "translate", fake_translate), \
+                        mock.patch.object(build_port, "repair_fspx_listings", side_effect=fake_repair), \
                         mock.patch.object(build_port, "llvm_mc_signature", return_value="llvm-mc 23"), \
                         mock.patch.object(build_port, "log", lambda *a: None):
                     build_port.shaders(game, work, 2)

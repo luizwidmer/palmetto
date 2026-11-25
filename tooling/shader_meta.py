@@ -260,7 +260,10 @@ def _step_state(sym, scale, ptr_stride, vscale, ins, events=None):
             if slots is not None:
                 _record_ptr_pair(events, sym, slots, is_desc_width=False)
         elif op.startswith("global_atomic_"):
-            saddr_idx = 3 if "glc" in ins.get("extensions", ()) else 2
+            # shader_ir.parse_line stores the printed modifiers under "mods" (tests/test_shader_ir.py); the old
+            # "extensions" key read here always came back empty, so a glc global atomic was given the saddr
+            # slot of the no-glc form and its address pair was misread.
+            saddr_idx = 3 if "glc" in ins.get("mods", ()) else 2
             if len(a) > saddr_idx:
                 slots = _sgpr_slots(a[saddr_idx], 2)
                 if slots is not None:

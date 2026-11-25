@@ -31,7 +31,7 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SHADERS = os.path.join(os.path.dirname(HERE), "runtime", "test", "shaders")
+SHADERS = os.path.join(os.path.dirname(HERE), "port", "test", "shaders")  # port/ was runtime/ before the restructure
 LANE_ID_REG = 20        # v20 holds the lane id for the epilogue; programs must leave it alone
 ADDR_REG = 21           # v21 is the store address
 
@@ -90,7 +90,7 @@ def run_programs(texts, words=4, wave=32, build=None, work_parent=None, retries=
         sys.path.insert(0, SHADERS)
     import mc_command
     from compute_fixture import compute_header, find_test_program, unpinned_subgroup
-    build = build or os.path.join(os.path.dirname(HERE), "runtime", "build")
+    build = build or os.path.join(os.path.dirname(HERE), "port", "build")
     folder = find_test_program(build, "vk_compute_test")   # the folder holding it (a Visual Studio config subfolder)
     if not folder:
         raise FileNotFoundError(f"vk_compute_test not found in {build}; build it first "

@@ -835,7 +835,7 @@ def main(argv=None):
                     help="comma-separated comparison targets: translator (default), hw (natively on an AMD GPU; see "
                          "tooling/hw_oracle/). 'hw' alone compares the hardware with the reference only")
     ap.add_argument("--hw-arch", default=None, help="GPU architecture to assemble for (default: detected)")
-    ap.add_argument("--build", default=os.path.join(os.path.dirname(HERE), "runtime", "build"),
+    ap.add_argument("--build", default=os.path.join(os.path.dirname(HERE), "port", "build"),
                     help="with vk: the folder with vk_compute_test")
     ap.add_argument("--work", default=None, help="with vk: a folder for the temporary files (VK_FUZZ_KEEP=1 keeps them)")
     a = ap.parse_args(argv)

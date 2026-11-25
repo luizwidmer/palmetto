@@ -258,7 +258,7 @@ def main(argv=None):
     src.add_argument("--game-dir", help="your package folder (holds XboxBvhBuilder.dll)")
     src.add_argument("--spirv", help="a folder of already translated programs (*.spv)")
     ap.add_argument("--work", help="work folder for the translation (default: a temporary folder)")
-    ap.add_argument("--build", default=str(HERE.parent / "runtime" / "build"), help="folder with vk_compute_test")
+    ap.add_argument("--build", default=str(HERE.parent / "port" / "build"), help="folder with vk_compute_test")
     ap.add_argument("--max-shared-memory", type=int, default=32768,
                     help="the device's maxComputeSharedMemorySize, passed to rdna2spirv.py (default 32768)")
     ap.add_argument("--table-qword", type=lambda v: int(v, 0), default=0x2000,

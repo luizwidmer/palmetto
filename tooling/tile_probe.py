@@ -11,7 +11,10 @@ import argparse
 import os
 import sys
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:  # a missing input is still a usage error, not an ImportError before the CLI runs
+    np = None
 
 # -I keeps the script directory off sys.path, so add it explicitly before importing the sibling module.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -172,6 +175,12 @@ def main():
     a = ap.parse_args()
     if not os.path.exists(a.blob):
         print(f"ERROR: {a.blob}: does not exist", file=sys.stderr)
+        return 2
+    if np is None:
+        # The probe is the only consumer; report the missing optional dependency as one line (exit 2) like any
+        # other usage problem instead of a ModuleNotFoundError traceback.
+        print("ERROR: numpy is not installed: run `python -m pip install numpy` to probe texture layouts",
+              file=sys.stderr)
         return 2
     if a.out:
         check_preview_path(a.out, a.blob)

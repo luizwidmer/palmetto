@@ -287,7 +287,7 @@ def appdata_hint(cmd: str) -> str:
 
     `python` from the Python install manager (the app execution alias in WindowsApps) doesn't see folders that other
     programs create under %LOCALAPPDATA% or %APPDATA%; `py`, or the same python.exe started by its full path, does.
-    tooling/tooling/scripts\\build_llvm_mc.ps1 used to install llvm-mc.exe to %LOCALAPPDATA%\\Palmetto\\llvm-mc."""
+    tooling/scripts\\build_llvm_mc.ps1 used to install llvm-mc.exe to %LOCALAPPDATA%\\Palmetto\\llvm-mc."""
     if os.name != "nt":
         return ""
     path = ntpath.normcase(cmd.strip().strip('"'))
@@ -295,7 +295,7 @@ def appdata_hint(cmd: str) -> str:
         base = os.environ.get(var, "").strip()
         if base and path.startswith(ntpath.normcase(ntpath.join(base, ""))):
             return (f" LLVM_MC points into %{var}%, which `python` from the Python install manager can't see: copy "
-                    "llvm-mc.exe out of AppData (tooling/tooling/scripts\\build_llvm_mc.ps1 now installs it to "
+                    "llvm-mc.exe out of AppData (tooling/scripts\\build_llvm_mc.ps1 now installs it to "
                     "%USERPROFILE%\\.palmetto\\llvm-mc), set LLVM_MC to the new path and reopen the terminal, or start "
                     "build_port.py with `py`.")
     return ""
@@ -308,12 +308,26 @@ def need(exe: str, hint: str) -> str:
 
 
 # ---------------------------------------------------------------- check
+def _is_version_manifest(doc) -> bool:
+    """Whether a profiles/ JSON document is a supported-version manifest, not another tool's profile.
+
+    profiles/ is a shared folder: next to the manifests it holds the navmesh decode report
+    (navmeshes.navmesh-decode.json, a decoder's output), so reading every .json here loaded a document with no
+    "files" and the first probe died with KeyError: 'files'. A version manifest is the object load_version() and
+    probe_mismatches() rely on: a title, a version string and the file table (expected_exe is written but
+    optional, build_port.py reads it with .get())."""
+    return (isinstance(doc, dict) and isinstance(doc.get("title"), str)
+            and isinstance(doc.get("version"), str) and isinstance(doc.get("files"), dict))
+
+
 def versions() -> list:
     out = []
     for name in sorted(os.listdir(VERSIONS)):
         if name.endswith(".json"):
             with open(os.path.join(VERSIONS, name), encoding="utf-8") as f:
-                out.append(json.load(f))
+                doc = json.load(f)
+            if _is_version_manifest(doc):
+                out.append(doc)
     return out
 
 
@@ -842,7 +856,7 @@ def preflight(stages: list, work: str, wav: bool = False, runtime_build: str | N
         if not (os.path.isfile(mc) or shutil.which(mc)):
             missing.append(
                 "llvm-mc (LLVM 21+ with the AMDGPU target). The official Windows LLVM build has no AMDGPU "
-                "target: build a native one with tooling/tooling/scripts\\build_llvm_mc.ps1, or install llvm-21 in WSL and set "
+                "target: build a native one with tooling/scripts\\build_llvm_mc.ps1, or install llvm-21 in WSL and set "
                 "LLVM_MC to the whole command, e.g. "
                 "LLVM_MC=\"wsl -d Ubuntu -e /usr/lib/llvm-21/bin/llvm-mc\" (docs/design.md)." + appdata_hint(mc))
         for t in ("spirv-as", "spirv-val"):
@@ -1407,7 +1421,7 @@ def repair_fspx_listings(disasm: str, code: str, repaired: str) -> "tuple[int, i
     if len(command) != 1:
         fail("shaders: tooling/widen_smem_decode.py starts llvm-mc by itself, so it can't use the command line LLVM_MC "
              "names here (a native llvm-mc in WSL for example). Set LLVM_MC to one llvm-mc executable "
-             "(tooling/tooling/scripts\\build_llvm_mc.ps1 builds one) and run the shaders stage again")
+             "(tooling/scripts\\build_llvm_mc.ps1 builds one) and run the shaders stage again")
     env = dict(os.environ)
     env["LLVM_MC"] = command[0]
     tool = os.path.join(TOOLS, "widen_smem_decode.py")
@@ -2255,7 +2269,11 @@ def runtime_gpu_max_push_constants():
 # Source and data files that produce the translated modules, metadata and partner stubs.
 TRANSLATION_SOURCES = ("rdna2spirv.py", "shader_ir.py", "cfg_structure.py", "fssm_header.py", "lane_masks.py", "wave64_halves.py",
                        "wave64_emulate_opt.py", "shader_meta.py", "spirv_stubs.py", "spirv_asm.py", "spirv_asm_tables.py",
-                       "spirv_opt.py", "report_paths.py", "replace_retry.py", "gfx10_formats.json")
+                       "spirv_opt.py", "report_paths.py", "replace_retry.py", "gfx10_formats.json",
+                       # the rest of the translator's own imports: a change in any of them can change its output,
+                       # and resumed index parts must not be merged with new code (tests/test_shader_stage_resume.py
+                       # walks rdna2spirv's imports and requires this list to cover every local module)
+                       "rdna2_decode.py", "rdna2_isa_tables.py", "shader_stage_manifest.py", "fssm_unpack.py")
 
 
 def sources_digest(folder: str, names, lead: str = "") -> str:
@@ -2835,7 +2853,7 @@ def runtime(game: str, out: str, v: dict, runtime_build: str | None = None, jobs
     else:
         log("runtime: building")
         run([windows_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-             os.path.join(ROOT, "tooling", "tooling/scripts", "build_runtime.ps1"), "-Jobs", str(jobs)])
+             os.path.join(ROOT, "tooling", "scripts", "build_runtime.ps1"), "-Jobs", str(jobs)])
         build = os.path.join(ROOT, "port", "build")
     artifacts = [os.path.join(build, name) for name in RUNTIME_FILES]
     for built in artifacts:

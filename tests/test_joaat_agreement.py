@@ -56,6 +56,20 @@ def string_hash_copies():
     return copies
 
 
+def runtime_joaat(name):
+    """The C++ runtime's rule (port/src/mods.h joaat): the std::string_view bytes, ASCII-lowercased."""
+    h = 0
+    for byte in name.encode("utf-8"):
+        if 0x41 <= byte <= 0x5A:
+            byte += 0x20
+        h = (h + byte) & 0xFFFFFFFF
+        h = (h + (h << 10)) & 0xFFFFFFFF
+        h ^= h >> 6
+    h = (h + (h << 3)) & 0xFFFFFFFF
+    h ^= h >> 11
+    return (h + (h << 15)) & 0xFFFFFFFF
+
+
 class JoaatAgreementTest(unittest.TestCase):
     def test_every_copy_matches_the_pinned_dictionary(self):
         copies = string_hash_copies()
@@ -64,8 +78,16 @@ class JoaatAgreementTest(unittest.TestCase):
         for module, function in sorted(copies.items()):
             for name in NAMES:
                 with self.subTest(copy=module, name=name):
-                    self.assertEqual(function(name), hashdict.joaat(name),
-                                     f"{module} hashes {name!r} differently from hashdict.joaat")
+                    if module == "palmetto_mods":
+                        # Measured contract: palmetto_mods hashes a mod.json name the way the C++ runtime does
+                        # (port/src/mods.h joaat: the UTF-8 bytes of the std::string_view, ASCII-lowercased), not
+                        # the Latin-1 pipeline dictionary below, so a non-ASCII mod name must match that rule.
+                        # For ASCII names - the game names mods reference - both rules give the same hash.
+                        self.assertEqual(function(name), runtime_joaat(name),
+                                         f"{module} hashes {name!r} differently from port/src/mods.h joaat")
+                    else:
+                        self.assertEqual(function(name), hashdict.joaat(name),
+                                         f"{module} hashes {name!r} differently from hashdict.joaat")
 
     def test_a_stream_id_is_the_name_hash_of_the_same_name(self):
         # The consequence of the bug: audio_config's id and the id awc_names recovers from a bank were

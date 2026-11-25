@@ -730,7 +730,7 @@ def main(argv=None):
     ap.add_argument("--wave", type=int, choices=(32, 64), default=32,
                     help="the wave size of the hardware kernels and of the vk programs (64 needs native 64-wide "
                          "subgroups; lane 0 is judged)")
-    ap.add_argument("--build", default=os.path.join(os.path.dirname(HERE), "runtime", "build"),
+    ap.add_argument("--build", default=os.path.join(os.path.dirname(HERE), "port", "build"),
                     help="with vk: the folder with vk_compute_test")
     ap.add_argument("--vk-constants", action="store_true",
                     help="with vk: keep the seeds as literal v_mov_b32 constants (the driver may fold them)")

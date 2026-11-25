@@ -154,7 +154,10 @@ class WaveRef(cf_ref.WaveMachine):
             # Backward permute: lane l reads vData of lane ((vAddr[l] + offset) / 4) mod 32 of its own 32-lane group
             # (a wave64 runs it as two wave32s), 0 if that lane is off in EXEC. All sources are read first.
             self._expect(ins, 3)
-            mods = ins.get("extensions") or []
+            # shader_ir.parse_line stores the printed modifiers under "mods" (tests/test_shader_ir.py); the old
+            # "extensions" key read here always came back empty, so the ds_bpermute offset modifier was dropped
+            # (every lane read its own address instead of the neighbouring one).
+            mods = ins.get("mods") or []
             if any(not m.startswith("offset:") for m in mods):
                 raise cf_ref.Unsupported(op, self.pc, "modifier is not modelled")
             off = next((int(m.split(":", 1)[1], 0) for m in mods), 0)
@@ -171,7 +174,7 @@ class WaveRef(cf_ref.WaveMachine):
             # (x16); sel is nibble (l & 7) of S1 for (l & 15) < 8, of S2 otherwise. Without op_sel (FI = 0) a
             # source lane that is off leaves vD unwritten, as measured on RDNA2 and RDNA3.5 (#374, PROC-19).
             self._expect(ins, 4)
-            if ins.get("extensions"):
+            if ins.get("mods"):
                 raise cf_ref.Unsupported(op, self.pc, "op_sel (FI/BOUND_CTRL) is not modelled")
             s1, s2 = self._int_src(a[2], 0, scalar=True), self._int_src(a[3], 0, scalar=True)
             data = self._vsrc(ins, a[1])
@@ -544,4 +547,8 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    try:  # a redirected stdout is strict ANSI code page under -I; write '?' for what it cannot encode
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
     sys.exit(main())

@@ -355,13 +355,30 @@ class ManifestTest(unittest.TestCase):
             self.assertEqual(f.read(), '{"previous": true}\n')
         self.assertEqual(os.listdir(self.tmp.name), ["manifest.json"])   # no temporary file left
 
-    def test_failed_replace_of_read_only_manifest_removes_writable_temp(self):
+    def test_read_only_manifest_is_refused_before_anything_is_staged(self):
+        # Measured: write_manifest() keeps the direct writer's permission check (it opens the existing
+        # destination for write before staging), so a read-only manifest fails there with PermissionError and
+        # nothing is staged. Before, this test forced the failure at os.replace instead, a state the tool never
+        # reaches on a read-only destination; the cleanup claim is kept below on a writable destination.
         out = os.path.join(self.tmp.name, "manifest.json")
         previous = '{"previous": true}\n'
         with open(out, "w", encoding="utf-8") as f:
             f.write(previous)
         os.chmod(out, 0o444)
         self.addCleanup(lambda: os.path.exists(out) and os.chmod(out, 0o600))
+        with mock.patch.object(awc_manifest, "replace_retry") as replace_retry:
+            with self.assertRaises(OSError):
+                awc_manifest.write_manifest([], 0, 0, "json", out)
+        replace_retry.assert_not_called()
+        with open(out, encoding="utf-8") as f:
+            self.assertEqual(f.read(), previous)
+        self.assertEqual(os.listdir(self.tmp.name), ["manifest.json"])   # no staged temp file
+
+    def test_failed_replace_removes_the_writable_temp(self):
+        out = os.path.join(self.tmp.name, "manifest.json")
+        previous = '{"previous": true}\n'
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(previous)
         made_writable = []
         real_chmod = os.chmod
 

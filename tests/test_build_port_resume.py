@@ -38,16 +38,31 @@ class ResumeShardsTest(unittest.TestCase):
             def __init__(self, args):
                 self.i = int(args[args.index("--shard") + 1].split("/")[0])
                 self.n = int(args[args.index("--shard") + 1].split("/")[1])
+                self.code = 1 if self.i in crash else 0
+                self.polled = False
                 started.append(self.i)
 
-            def wait(self):
-                if self.i in crash:
-                    return 1
-                with open(os.path.join(spirv, f"shard{self.i}.json"), "w", encoding="utf-8") as f:
-                    json.dump({"index": self.i, "count": self.n}, f)
-                with open(os.path.join(spirv, f"index.part{self.i}.json"), "w", encoding="utf-8") as f:
-                    json.dump({"tag": tag, "n": self.n}, f)
-                return 0
+            def poll(self):
+                # translate() polls each shard for its exit code and never calls wait() on a finished one, so the
+                # fake must publish its marker and index.part<i>.json (the way rdna2spirv.py --shard does) and
+                # report the code from poll().
+                if not self.polled:
+                    self.polled = True
+                    if not self.code:
+                        with open(os.path.join(spirv, f"shard{self.i}.json"), "w", encoding="utf-8") as f:
+                            json.dump({"index": self.i, "count": self.n}, f)
+                        with open(os.path.join(spirv, f"index.part{self.i}.json"), "w", encoding="utf-8") as f:
+                            json.dump({"tag": tag, "n": self.n}, f)
+                return self.code
+
+            def wait(self, timeout=None):
+                return self.poll()
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
         with mock.patch.object(build_port.subprocess, "Popen", side_effect=FakeProc), \
                 mock.patch.object(build_port, "py") as py, \
                 mock.patch.object(build_port, "translator_digest", return_value=digest), \

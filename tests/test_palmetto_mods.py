@@ -152,7 +152,10 @@ class ManagerTests(unittest.TestCase):
             game = Path(tmp, "game")
             port.mkdir()
             game.mkdir()
-            port.joinpath("palmetto.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            # build_port.py's runtime stage copies palmetto.exe on Windows and palmetto.sh elsewhere; the run
+            # command looks for the host's own name (palmetto_mods.runtime_executable), so the fixture must too.
+            port.joinpath("palmetto.exe" if os.name == "nt" else "palmetto.sh").write_text(
+                "#!/bin/sh\n", encoding="utf-8")
             port.joinpath("game_path.txt").write_text(str(game) + "\n", encoding="utf-8")
             image = game / palmetto_mods.EXPECTED_EXE
             image.write_bytes(b"MZ")

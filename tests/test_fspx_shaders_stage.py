@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -154,14 +155,36 @@ class FspxStage(unittest.TestCase):
         with open(self.dll, "wb") as f:
             f.write(dll_like(container(code)))
 
+    def unpack(self):
+        """What tooling/fspx_unpack.py writes last: its index plus one disassembled program and its code blob.
+
+        fspx_shaders() now reads the unpack's index back (fspx_program_names) and repairs every listing before
+        translating, so a mock that writes only a listing makes the step fail with "wrote no programs"; the
+        unpack's program names must be the ones the fake translator publishes."""
+        names = sorted(getattr(self, "translations", {}) or ["upscaler_00"])
+        os.makedirs(os.path.join(self.unpacked, "disasm"), exist_ok=True)
+        os.makedirs(os.path.join(self.unpacked, "fspx"), exist_ok=True)
+        with open(os.path.join(self.unpacked, "index.json"), "w", encoding="utf-8", newline="\n") as f:
+            json.dump([{"name": name, "file": name + ".dxbc"} for name in names], f)
+        for name in names:
+            with open(os.path.join(self.unpacked, "disasm", name + ".s"), "w", encoding="utf-8") as f:
+                f.write("\ts_endpgm\n")
+            with open(os.path.join(self.unpacked, "fspx", name + ".code"), "wb") as f:
+                f.write(bytes(4))
+
+    def fake_repair(self, disasm, code, repaired):
+        """Stand in for build_port.repair_fspx_listings (it starts a real llvm-mc); copy the listings through."""
+        os.makedirs(repaired, exist_ok=True)
+        for name in sorted(os.listdir(disasm)):
+            shutil.copyfile(os.path.join(disasm, name), os.path.join(repaired, name))
+        return 0, 0
+
     def fake_py(self, tool, *args):
         self.calls.append((tool, args))
         if tool == "fspx_unpack.py":
-            os.makedirs(os.path.join(self.unpacked, "disasm"), exist_ok=True)
-            open(os.path.join(self.unpacked, "disasm", "upscaler.s"), "w").close()
+            self.unpack()
         elif tool == "rdna2spirv.py":
             os.makedirs(self.spirv, exist_ok=True)
-            open(os.path.join(self.spirv, "upscaler.spv"), "w").close()
             index = {}
             for name, (code, state, module) in getattr(self, "translations", {}).items():
                 index[name] = {"stage": "cs", "fspx_code_sha256": code, "fspx_state_sha256": state}
@@ -172,7 +195,9 @@ class FspxStage(unittest.TestCase):
 
     def run_step(self, signature="llvm-mc 23", emulate=False, fallbacks=()):
         self.calls = []
-        with mock.patch.object(build_port, "py", self.fake_py), mock.patch.object(build_port, "log", lambda *a: None):
+        with mock.patch.object(build_port, "py", self.fake_py), \
+                mock.patch.object(build_port, "repair_fspx_listings", side_effect=self.fake_repair), \
+                mock.patch.object(build_port, "log", lambda *a: None):
             build_port.fspx_shaders(self.game, self.work, signature, emulate=emulate, fallbacks=fallbacks)
         return [tool for tool, _ in self.calls]
 
@@ -180,35 +205,39 @@ class FspxStage(unittest.TestCase):
         self.assertEqual(self.run_step(), ["fspx_unpack.py", "rdna2spirv.py"])
         (_, unpack), (_, translate) = self.calls
         self.assertEqual(unpack, (self.dll, "--out", self.unpacked, "--disasm"))
-        self.assertEqual(translate, (os.path.join(self.unpacked, "disasm"), "--out", self.spirv, "--no-asm"))
+        # the translator reads the listings the repair step wrote, not the unpack's own (docs/fspx.md)
+        self.assertEqual(translate, (os.path.join(self.unpacked, "disasm_repaired"), "--out", self.spirv,
+                                     "--no-asm"))
         self.assertTrue(os.path.isfile(os.path.join(self.spirv, "fspx_build.json")))
         self.assertEqual(self.run_step(), [])
 
-    def test_empty_index_is_retranslated_every_run(self):
-        """A translation that produced no modules publishes `{}`: that is not a finished FSPX stage, and
-        the build marker must not latch it as done forever (the port would silently ship with zero FSPX programs)."""
+    def test_empty_translation_fails_the_step_and_is_retried(self):
+        """A translation that produced no modules fails the step: the whole FSPX set is required (docs/fspx.md), so
+        the stage must not latch an empty index as done (the port would silently ship with zero FSPX programs)."""
         self.translations = {}
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.run_step()
+        self.assertIn("translated after the listing repair", err.getvalue())
+        self.assertFalse(os.path.exists(os.path.join(self.spirv, "index.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.spirv, "fspx_build.json")))
+        self.translations = {"upscaler_00": ("c" * 64, "s" * 64, b"synthetic module")}
         self.assertEqual(self.run_step(), ["fspx_unpack.py", "rdna2spirv.py"])
-        with open(os.path.join(self.spirv, "index.json"), encoding="utf-8") as f:
-            self.assertEqual(json.load(f), {})
-        self.assertTrue(os.path.isfile(os.path.join(self.spirv, "fspx_build.json")))
-        self.assertEqual(self.run_step(), ["fspx_unpack.py", "rdna2spirv.py"])
-        self.assertEqual(self.run_step(), ["fspx_unpack.py", "rdna2spirv.py"])
+        self.assertEqual(self.run_step(), [])
 
-    def test_empty_index_drops_stale_modules_from_the_previous_run(self):
+    def test_empty_translation_drops_stale_modules_from_the_previous_run(self):
         self.translations = {"upscaler_00": ("c" * 64, "s" * 64, b"stale module")}
         self.run_step()
         stale = os.path.join(self.spirv, "upscaler_00.spv")
         self.assertTrue(os.path.isfile(stale))
         # Simulate a translation that produced no modules over an existing cache: the marker still matches and the
-        # old module is on disk.
+        # old module is on disk. The step must delete the module and refuse the empty set, never ship it.
         with open(os.path.join(self.spirv, "index.json"), "w", encoding="utf-8", newline="\n") as f:
             f.write("{}")
         self.translations = {}
-        self.assertEqual(self.run_step(), ["fspx_unpack.py", "rdna2spirv.py"])
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr", new_callable=io.StringIO):
+            self.run_step()
         self.assertFalse(os.path.exists(stale))
-        with open(os.path.join(self.spirv, "index.json"), encoding="utf-8") as f:
-            self.assertEqual(json.load(f), {})
+        self.assertFalse(os.path.exists(os.path.join(self.spirv, "index.json")))
 
     def test_failed_disassembly_leaves_no_marker_and_is_retried(self):
         mc = os.path.join(self.tmp.name, "fake_mc.py")
@@ -220,11 +249,25 @@ class FspxStage(unittest.TestCase):
             if tool == "fspx_unpack.py":
                 self.calls.append((tool, args))
                 real_py(tool, *args)
+            elif tool == "rdna2spirv.py":
+                # The real unpack names the programs it found; the fake translator must publish exactly those or
+                # the step refuses the partial set.
+                self.calls.append((tool, args))
+                out = args[args.index("--out") + 1]
+                os.makedirs(out, exist_ok=True)
+                index = {name: {"stage": "cs", "fspx_code_sha256": "e" * 64}
+                         for name in (build_port.fspx_program_names(self.unpacked) or set())}
+                with open(os.path.join(out, "index.json"), "w", encoding="utf-8", newline="\n") as f:
+                    json.dump(index, f)
+                for name in index:
+                    with open(os.path.join(out, name + ".spv"), "wb") as f:
+                        f.write(b"synthetic module")
             else:
                 self.fake_py(tool, *args)
 
         env = dict(LLVM_MC=f'"{sys.executable}" "{mc}"')
         with mock.patch.dict(os.environ, env), mock.patch.object(build_port, "py", run_tool), \
+                mock.patch.object(build_port, "repair_fspx_listings", side_effect=self.fake_repair), \
                 mock.patch.object(build_port, "log", lambda *a: None):
             with self.assertRaises(SystemExit) as error, contextlib.redirect_stderr(io.StringIO()):
                 build_port.fspx_shaders(self.game, self.work, "llvm-mc 23")
@@ -304,7 +347,9 @@ class FspxStage(unittest.TestCase):
             if tool == "rdna2spirv.py":
                 raise KeyboardInterrupt
             self.fake_py(tool, *args)
-        with mock.patch.object(build_port, "py", stop), mock.patch.object(build_port, "log", lambda *a: None):
+        with mock.patch.object(build_port, "py", stop), \
+                mock.patch.object(build_port, "repair_fspx_listings", side_effect=self.fake_repair), \
+                mock.patch.object(build_port, "log", lambda *a: None):
             with self.assertRaises(KeyboardInterrupt):
                 build_port.fspx_shaders(self.game, self.work, "llvm-mc 24")
         self.assertFalse(os.path.exists(os.path.join(self.spirv, "index.json")))
@@ -348,6 +393,17 @@ class ShadersStageWithTheDll(unittest.TestCase):
                     # build_port checks that every unpacked shader got a non-empty listing
                     with open(os.path.join(dxbc, "disasm", "shader.s"), "w") as f:
                         f.write("s_endpgm\n")
+                elif tool == "fspx_unpack.py":
+                    # The step reads the unpack's index back and repairs its listings before translating them.
+                    unpacked = os.path.join(work, "shaders", "fspx")
+                    os.makedirs(os.path.join(unpacked, "disasm"), exist_ok=True)
+                    os.makedirs(os.path.join(unpacked, "fspx"), exist_ok=True)
+                    with open(os.path.join(unpacked, "index.json"), "w", encoding="utf-8", newline="\n") as f:
+                        json.dump([{"name": "upscaler_00", "file": "upscaler_00.dxbc"}], f)
+                    with open(os.path.join(unpacked, "disasm", "upscaler_00.s"), "w", encoding="utf-8") as f:
+                        f.write("\ts_endpgm\n")
+                    with open(os.path.join(unpacked, "fspx", "upscaler_00.code"), "wb") as f:
+                        f.write(bytes(4))
                 elif tool == "rdna2spirv.py":
                     out = args[args.index("--out") + 1]
                     touch(out, "index.json")
@@ -361,11 +417,18 @@ class ShadersStageWithTheDll(unittest.TestCase):
                 ran.append("translate")
                 touch(spirv, "index.json")
 
+            def fake_repair(disasm, code, repaired):
+                os.makedirs(repaired, exist_ok=True)
+                for name in sorted(os.listdir(disasm)):
+                    shutil.copyfile(os.path.join(disasm, name), os.path.join(repaired, name))
+                return 0, 0
+
             def stage():
                 ran.clear()
                 with mock.patch.object(build_port, "py", fake_py), \
                         mock.patch.object(build_port, "need", lambda *a: None), \
                         mock.patch.object(build_port, "translate", fake_translate), \
+                        mock.patch.object(build_port, "repair_fspx_listings", side_effect=fake_repair), \
                         mock.patch.object(build_port, "llvm_mc_signature", return_value="llvm-mc 23"), \
                         mock.patch.object(build_port, "log", lambda *a: None):
                     build_port.shaders(game, work, 2)
@@ -389,37 +452,46 @@ class FspxCacheComplete(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.spirv = os.path.join(self.tmp.name, "shaders", "spirv", "fspx")
         os.makedirs(self.spirv)
+        # fspx_cache_complete() now takes the unpack folder as well as the translation folder: reuse requires
+        # every program the unpack listed to be in the index with its module (docs/fspx.md).
+        self.unpacked = os.path.join(self.tmp.name, "shaders", "fspx")
+        os.makedirs(self.unpacked)
+        with open(os.path.join(self.unpacked, "index.json"), "w", encoding="utf-8", newline="\n") as f:
+            json.dump([{"name": "upscaler_00", "file": "upscaler_00.dxbc"}], f)
 
     def write_index(self, text):
         with open(os.path.join(self.spirv, "index.json"), "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
 
+    def complete(self):
+        return build_port.fspx_cache_complete(self.unpacked, self.spirv)
+
     def test_empty_index_is_not_complete(self):
         self.write_index("{}")
-        self.assertFalse(build_port.fspx_cache_complete(self.spirv))
+        self.assertFalse(self.complete())
 
     def test_missing_index_is_not_complete(self):
-        self.assertFalse(build_port.fspx_cache_complete(self.spirv))
+        self.assertFalse(self.complete())
 
     def test_malformed_index_is_not_complete(self):
         self.write_index("{not json")
-        self.assertFalse(build_port.fspx_cache_complete(self.spirv))
+        self.assertFalse(self.complete())
 
     def test_non_mapping_indexes_are_not_complete(self):
         for text in ("[]", "null"):
             with self.subTest(text=text):
                 self.write_index(text)
-                self.assertFalse(build_port.fspx_cache_complete(self.spirv))
+                self.assertFalse(self.complete())
 
     def test_one_entry_with_its_module_is_complete(self):
         self.write_index(json.dumps({"upscaler_00": {"stage": "cs", "fspx_code_sha256": "e" * 64}}))
         with open(os.path.join(self.spirv, "upscaler_00.spv"), "wb") as f:
             f.write(b"synthetic module")
-        self.assertTrue(build_port.fspx_cache_complete(self.spirv))
+        self.assertTrue(self.complete())
 
     def test_one_entry_without_its_module_is_not_complete(self):
         self.write_index(json.dumps({"upscaler_00": {"stage": "cs", "fspx_code_sha256": "e" * 64}}))
-        self.assertFalse(build_port.fspx_cache_complete(self.spirv))
+        self.assertFalse(self.complete())
 
     def test_existing_module_without_runtime_lookup_metadata_is_not_complete(self):
         with open(os.path.join(self.spirv, "upscaler_00.spv"), "wb") as f:
@@ -429,7 +501,7 @@ class FspxCacheComplete(unittest.TestCase):
                          {"stage": "ps", "fspx_code_sha256": "e" * 64}):
             with self.subTest(metadata=metadata):
                 self.write_index(json.dumps({"upscaler_00": metadata}))
-                self.assertFalse(build_port.fspx_cache_complete(self.spirv))
+                self.assertFalse(self.complete())
 
 
 if __name__ == "__main__":

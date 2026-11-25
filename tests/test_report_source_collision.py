@@ -16,11 +16,16 @@ import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS_DIR = os.environ.get("PALMETTO_TOOLS_DIR", os.path.join(ROOT, "tooling"))
-SENTINEL = b"SYNTHETIC-SOURCE-DO-NOT-OVERWRITE\n" * 4
 
 
 def make_bink():
-    return SENTINEL
+    # A minimal valid Bink 2 file: bink_index.py accepts a single named file only when it holds a parseable
+    # stream (a KB2<revision> tag plus a consistent header whose declared size reaches the whole record; an
+    # empty 0x2C-byte header parses as no stream and is then refused as a mislabelled file, exit 2). The earlier
+    # fixture was arbitrary text, which the single-file format check now rejects; this one gives the normal-path
+    # case below a file the tool indexes (one 1-frame stream).
+    header = b"KB2z" + struct.pack("<10I", 0x40, 1, 0, 1, 16, 16, 30, 1, 0, 0)
+    return header + bytes(0x48 - len(header))     # size8 + 8 = the whole 0x48-byte record
 
 
 def make_arc(payload, head_size=0x40):

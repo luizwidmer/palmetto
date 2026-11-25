@@ -456,7 +456,12 @@ def main(argv=None):
     try:
         names = read_mount_lists(a.mount)
     except (OSError, ValueError) as error:
-        print(f"bink_names: error: {error}", file=sys.stderr)
+        # A walk failure arrives as an OSError whose str() quotes the path through repr(), doubling every Windows
+        # backslash; name the folder once, as it is, and keep the reason in strerror.
+        if isinstance(error, OSError):
+            print(f"bink_names: error: {error.filename or '?'}: {error.strerror or error}", file=sys.stderr)
+        else:
+            print(f"bink_names: error: {error}", file=sys.stderr)
         return 1
     try:
         streams = load_streams(a.source, skip_report=a.out if a.out and os.path.isfile(a.out) else None)

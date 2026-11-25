@@ -24,10 +24,12 @@ def write(path, text):
 
 
 class Done:
+    args = ()   # subprocess.run() puts process.args in the CompletedProcess it returns
+
     def poll(self):
         return 0
 
-    def wait(self):
+    def wait(self, timeout=None):
         return 0
 
     def terminate(self):
@@ -35,6 +37,17 @@ class Done:
 
     def kill(self):
         pass
+
+    # The translate() merge step runs through subprocess.run(), which enters the Popen object as a context
+    # manager and calls communicate(); a fake Popen must support both (the old fake only had the process API).
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def communicate(self, input=None, timeout=None):
+        return b"", b""
 
 
 class TranslateEmptyIndexTest(unittest.TestCase):
@@ -102,7 +115,11 @@ class TranslateLockedIndexTest(unittest.TestCase):
             return real_open(path, mode, *a, **k)
 
         class Exited(Done):
-            def wait(self):
+            # translate() polls for a shard's exit code; the fake reports the code the failure case asks for.
+            def poll(self):
+                return shard_code
+
+            def wait(self, timeout=None):
                 return shard_code
 
         err = io.StringIO()

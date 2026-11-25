@@ -88,7 +88,7 @@ def not_found(exe: str, error: OSError, flag: str | None = None) -> str:
     option for the command, if it has one (run_gpu_tests.py's --llvm-mc); the others read LLVM_MC only."""
     where = f"set LLVM_MC (or pass {flag})" if flag else "set LLVM_MC"
     return (f"'{exe}' could not be started: {error}. Put llvm-mc on PATH or {where} to it\n"
-            f"(on Windows, tooling/tooling/scripts\\build_llvm_mc.ps1 builds one and sets it), e.g.\n"
+            f"(on Windows, tooling/scripts\\build_llvm_mc.ps1 builds one and sets it), e.g.\n"
             f"  LLVM_MC=wsl -d Ubuntu -e /usr/lib/llvm-21/bin/llvm-mc")
 
 

@@ -226,7 +226,7 @@ def patch_rdna2spirv_dot4_u8():
     def patched_insn(self, ins):
         op = ins.get("op", "")
         if op in ("v_dot4_u32_u8", "v_dot4acc_u32_u8", "v_dot4c_u32_u8"):
-            mods = ins.get("extensions", set())
+            mods = ins.get("mods", set())
             if "clamp" in mods or any(m.startswith("op_sel") for m in mods):
                 raise rdna2spirv.Unsupported(op + (" clamp" if "clamp" in mods else " op_sel"))
             a = ins["args"]
