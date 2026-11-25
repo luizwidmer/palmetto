@@ -24,6 +24,7 @@
 // behind the device before a presenter exists, so WaitFrameEventX returns at once with a fresh non-zero token.
 #include "d3d12_xs_device.h"
 #include "d3d12_trace.h"
+#include "xmem.h"  // rt::xmem::copy_page_mappings_fn, the mapping primitive of queue slot 31
 #include <tlhelp32.h>
 // docs/present_wiring.md: the presentation core (xbox_present.cpp) publishes the console PresentX path through this
 // header's registration hook. Only its hook-only layer is included, so this translation unit - which is also compiled
@@ -1132,6 +1133,7 @@ constexpr unsigned kConsoleQueueWait = 17;                 // (ID3D12Fence*, UIN
 constexpr unsigned kConsoleQueueTimestampFrequency = 18;   // (UINT64*)
 constexpr unsigned kConsoleQueueClockCalibration = 19;     // (UINT64*, UINT64*)
 constexpr unsigned kConsoleQueueGetDesc = 20;              // returns D3D12_COMMAND_QUEUE_DESC by value
+constexpr unsigned kQueueCopyPageMappingsBatchX = 31;      // CopyPageMappingsBatchX, past the public chain
 
 struct ChildProxy {
     void** vtable;          // offset 0: the caller's ID3D12CommandQueue* / ID3D12Fence* points here
@@ -2871,6 +2873,107 @@ LONG CALLBACK table_overrun_handler(EXCEPTION_POINTERS* info) {
     return EXCEPTION_CONTINUE_SEARCH;  // diagnostics only: the fault goes on to the title's handlers or the crash
 }
 
+// ---- Queue slot 31: CopyPageMappingsBatchX ---------------------------------------------------------------
+//
+// Re-derived from our own copy of the retail executable (static): the call goes through the queue's [+0xF8] entry at
+// game+0xF2CC7F, the console queue's slot 31, past the PC chain that ends at console GetDesc 20. The argument setup is
+// the console shape: EDX is the batch count, R8 the batch array, R9 the physical-page pool's base VA, [rsp+0x20] the
+// pool's length in 64 KiB pages and [rsp+0x28] 0 (flags); eax is not tested after the call, so the title reads the
+// destinations whatever the answer is. The builder (game+0xF2C460..0xF2CD18) stores a batch at a 24-byte stride
+// (game+0xF2C709 advances to the next one) as {UINT64 destination; UINT32 range count; const range* ranges} and a range
+// at a 12-byte stride (game+0xF2C6C4 advances to the next one) as {UINT32 kind, start, count}; the kinds the builder
+// emits from the pool it created in game+0x1E6C110 are 1 (one pool page at the run's destination, repeated) and 2
+// (unmap the destination pages). The console ABI name CopyPageMappingsBatchX comes from the public console layers that
+// dispatch it; Microsoft's public Learn reference does not document the method, so the shape above (not the name) is
+// what this branch implements.
+//
+// On the console the call installs GPU page-table mappings from the pool's physical pages at the destination pages. Our
+// xmem owns those physical pages, so every range reaches rt::xmem::copy_page_mappings_fn, which gives each destination
+// page a second view of its source page's physical page (both addresses are the one memory) or unmaps it; the pool base
+// is a VA of the title's own mapped pages, and a source page with nothing mapped leaves its destination page unmapped.
+// The destination window is the same title VA the D3D12 layer reads on the CPU: xmem maps host memory at the console VA
+// and the layer commits those pages before reading them (docs/page_address_space.md), so unlike a layer that reads a
+// paired CPU reservation there is no second address here to fill - making the destination readable IS making the
+// title-visible memory readable.
+//
+// Without xmem (a GPU-free test binary) the hook is null and the call keeps the answer every queue slot past the PC
+// chain gets below: the beyond-table warning once and E_NOTIMPL, never a guessed success. With it, a range outside the
+// pool, an unknown kind, a null batch array or a range xmem refuses is logged once and the call returns E_INVALIDARG
+// after applying the ranges it could (the title does not read the result, and a partly applied batch is closer to the
+// console than dropping it).
+constexpr std::uint64_t kConsolePageSize = 0x10000;
+
+// One range with the batch cursor at its first destination page. The hook is called with the pool page(s) the range
+// names: kind 0 maps pool pages start, start + 1, ... one after another; kind 1 maps the one pool page `start` at every
+// destination page; kind 2 unmaps them; kind 3 leaves the destination pages as they are (no call, nothing changes).
+bool copy_console_page_range(const rt::xmem::PageRange& range, std::uint64_t destination, std::uint64_t pool,
+                             std::uint32_t pool_pages) {
+    const rt::xmem::CopyPageMappingsFn remap = rt::xmem::copy_page_mappings_fn;
+    if (!remap) return false;
+    void* const at = reinterpret_cast<void*>(destination);
+    const void* const from = reinterpret_cast<const void*>(pool + std::uint64_t{range.start} * kConsolePageSize);
+    switch (range.kind) {
+        case 0:
+            return pool != 0 && std::uint64_t{range.start} + range.count <= pool_pages &&
+                   remap(at, from, range.count, false);
+        case 1:
+            return pool != 0 && range.start < pool_pages && remap(at, from, range.count, true);
+        case 2:
+            return remap(at, nullptr, range.count, false);
+        case 3:
+            return true;
+        default:
+            return false;
+    }
+}
+
+HRESULT queue_copy_page_mappings(std::uint64_t count_word, std::uint64_t batches_word, std::uint64_t pool,
+                                 std::uint64_t pool_pages_word) {
+    const auto count = static_cast<std::uint32_t>(count_word);
+    const auto pool_pages = static_cast<std::uint32_t>(pool_pages_word);
+    const auto* const batches = reinterpret_cast<const rt::xmem::PageBatch*>(batches_word);
+    static std::atomic<bool> first_call{true}, first_refusal{true};
+    if (first_call.exchange(false, std::memory_order_relaxed))
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: queue slot 31 (CopyPageMappingsBatchX) first call: %u batch(es), pool 0x%llx "
+                     "of %u 64 KiB pages\n",
+                     count, static_cast<unsigned long long>(pool), pool_pages);
+    const auto refuse = [](const char* why) {
+        if (first_refusal.exchange(false, std::memory_order_relaxed))
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: queue slot 31: %s; refusing that range with E_INVALIDARG (logged once)\n",
+                         why);
+    };
+    if (count && !batches) {
+        refuse("a batch count with a null batch array");
+        return E_INVALIDARG;
+    }
+    bool all = true;
+    for (std::uint32_t b = 0; b < count; ++b) {
+        const rt::xmem::PageBatch& batch = batches[b];
+        if (batch.count && !batch.ranges) {
+            all = false;
+            refuse("a range count with a null range array");
+            continue;
+        }
+        std::uint64_t destination = batch.destination;
+        for (std::uint32_t r = 0; r < batch.count; ++r) {
+            const rt::xmem::PageRange& range = batch.ranges[r];
+            if (!copy_console_page_range(range, destination, pool, pool_pages)) {
+                all = false;
+                char why[128];
+                std::snprintf(why, sizeof(why),
+                              "range kind %u, pool pages %u+%u at 0x%llx (pool of %u pages%s)", range.kind,
+                              range.start, range.count, static_cast<unsigned long long>(destination), pool_pages,
+                              rt::xmem::copy_page_mappings_fn ? "" : ", no mapper");
+                refuse(why);
+            }
+            destination += std::uint64_t{range.count} * kConsolePageSize;
+        }
+    }
+    return all ? S_OK : E_INVALIDARG;
+}
+
 template <ChildKind K, unsigned Slot>
 std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3,
                                 std::uint64_t a4, std::uint64_t a5, std::uint64_t a6, std::uint64_t a7,
@@ -3049,6 +3152,15 @@ std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_
         return reinterpret_cast<std::uint64_t>(self->value_cell.get());
     } else {
         note_child_slot<K>(Slot);
+        // Queue slot 31 (CopyPageMappingsBatchX) is answered through xmem's page mapping when this build has one. With
+        // no hook (a GPU-free test binary) the call falls through to the beyond-table refusal below, which is the
+        // answer every unmodelled queue slot past the PC chain keeps.
+        if constexpr (K == ChildKind::queue) {
+            if (Slot == kQueueCopyPageMappingsBatchX && rt::xmem::copy_page_mappings_fn) {
+                const HRESULT mapped = queue_copy_page_mappings(a1, a2, a3, a4);
+                return hr_to_u64(d3d12_trace::result(child_trace_name<K>(Slot), mapped));
+            }
+        }
         // Console order: slots from Signal on name the PC method two below them (heap and allocator proxies keep their
         // own numbering, so only the queue maps).
         constexpr unsigned real_slot =

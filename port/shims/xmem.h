@@ -8,4 +8,29 @@ namespace rt::xmem {
 bool commit_physical_range(const void* address, std::size_t size);
 bool commit_physical_pages(const std::uint64_t* page_array, std::size_t count);
 
-}
+// Console queue slot 31 (CopyPageMappingsBatchX, port/shims/d3d12_xs_device.cpp): the command-object proxy is also
+// compiled into GPU-free test binaries that link no xmem, so the mapping primitive is a hook this file's
+// implementation fills in and a test can replace. Each call gives `pages` 64 KiB destination pages a second view of
+// the physical pages already mapped at `source` (or the one page at `source` repeated for every destination page),
+// so both addresses are the one memory; a source page with nothing mapped leaves its destination page unmapped, and
+// a null `source` unmaps them all. False, with the last error set, for an unaligned address or a destination outside
+// a physical-page window. A null hook keeps the proxy's honest "past the public chain" refusal.
+using CopyPageMappingsFn = bool (*)(void* destination, const void* source, std::uint64_t pages, bool repeat_first);
+inline CopyPageMappingsFn copy_page_mappings_fn = nullptr;
+
+// The measured console page batch: a batch is 24 bytes {UINT64 destination; UINT32 range count; const PageRange*
+// ranges} and a range is 12 bytes {UINT32 kind, start, count} (our copy of the retail executable's builder stores them
+// at those strides, game+0xf2c709 / game+0xf2c6c4). Kind 0 maps pool pages start, start + 1, ... at the destination
+// pages one after another; 1 maps pool page `start` at every destination page; 2 unmaps the destination pages; 3
+// leaves them as they are. The proxy decodes this, the hook does the page mapping, and the tests share the layout here.
+struct PageRange {
+    std::uint32_t kind, start, count;
+};
+struct PageBatch {
+    std::uint64_t destination;
+    std::uint32_t count;
+    const PageRange* ranges;
+};
+static_assert(sizeof(PageRange) == 12 && sizeof(PageBatch) == 24, "the measured console page batch layout");
+
+}  // namespace rt::xmem

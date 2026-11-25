@@ -13,6 +13,10 @@
 // Every device, queue, fence and resource here is a mock that records the calls it gets. No game data, no Xbox DLLs.
 #include "../shims/d3d12_xs_device.h"
 
+// Queue slot 31's measured batch layout and the page-mapping hook the proxy calls (docs/cpu_view_mapping.md). This
+// GPU-free executable links no xmem, so the hook is null here unless a check installs its own recorder.
+#include "../shims/xmem.h"
+
 // The Vulkan layer's target-view capture (port/src/command_list.h). The proxy reads it by its five words for the
 // console ClearRenderTargetView conversion (d3d12_xs_device.cpp, TargetViewWords); these checks keep that mirror tied
 // to the layer's definition, and the mock device writes a real one into a CPU descriptor handle below.
@@ -1310,8 +1314,10 @@ int check_tail(bool want_guarded) {
     // and the proxy answers a clock calibration pair instead of E_NOTIMPL (check_queue_console_slots checks the pair
     // itself). Slot 32 is the console PresentX: it goes through the presentation's registration hook
     // (docs/present_wiring.md), and with nothing registered in this GPU-free binary the hook refuses with
-    // HRESULT_FROM_WIN32(ERROR_INVALID_STATE) without touching the real queue. The rest of the tail keeps the refused
-    // behaviour, and never reaches the real queue.
+    // HRESULT_FROM_WIN32(ERROR_INVALID_STATE) without touching the real queue. Slot 31 (CopyPageMappingsBatchX) is
+    // answered through xmem's mapping hook when a build links xmem; here that hook is null, so it is refused like the
+    // rest of the tail (check_queue_copy_page_mappings installs its own recorder and restores this answer). The rest of
+    // the tail keeps the refused behaviour, and never reaches the real queue.
     for (unsigned slot = 21; slot < xs::queue_proxy_table_size(); ++slot) {  // 16..20 map to PC 14..18
         if (slot == 32 || slot == 35) continue;
         EXPECT(hr_of(raw(queue, slot)) == E_NOTIMPL && queue_mock->calls[slot] == 0);
@@ -1399,6 +1405,117 @@ int check_queue_console_slots() {
                 "struct-return order (the title's buffer gets the descriptor, the real queue is the object, its front "
                 "words untouched) and slot 35 answers a calibration "
                 "pair when the out pointer is writable and S_OK without writing otherwise\n", g_label);
+    return 0;
+}
+
+// ---- 11. Queue slot 31: CopyPageMappingsBatchX ----
+//
+// Our own static measurement (docs/cpu_view_mapping.md): game+0xf2cc7f calls console queue slot 31 with (batch count,
+// batch array, pool base VA, pool page count, flags = 0) and does not test the answer; a batch is 24 bytes
+// {destination, range count, ranges} and a range 12 bytes {kind, start, count} (rt::xmem::PageBatch/PageRange). The page
+// mapping itself needs xmem, which this GPU-free binary does not link, so the proxy reaches it through
+// rt::xmem::copy_page_mappings_fn; these checks pin the console argument decode and the refusal bookkeeping with a
+// recorder in its place (xmem_test covers the host mapping that recorder stands for).
+
+struct RemapCall {
+    std::uint64_t destination = 0;
+    std::uint64_t source = 0;
+    std::uint64_t pages = 0;
+    bool repeat_first = false;
+};
+constexpr unsigned kMaxRemaps = 16;
+RemapCall g_remaps[kMaxRemaps];
+unsigned g_remap_calls = 0;
+bool g_remap_result = true;
+
+bool record_remap(void* destination, const void* source, std::uint64_t pages, bool repeat_first) {
+    if (g_remap_calls < kMaxRemaps)
+        g_remaps[g_remap_calls] = RemapCall{word(destination), word(source), pages, repeat_first};
+    ++g_remap_calls;
+    return g_remap_result;
+}
+
+void clear_remaps() {
+    g_remap_calls = 0;
+    g_remap_result = true;
+}
+
+int check_queue_copy_page_mappings() {
+    Mock* mock = nullptr;
+    void* device = make_device(mock, 9, true);
+    EXPECT(device);
+    void* queue = make_queue(device);
+    EXPECT(queue);
+    Mock* const real_queue = reinterpret_cast<Mock*>(xs::queue_proxy_real_queue(queue));
+    EXPECT(real_queue && real_queue->kind == Kind::queue);
+    constexpr std::uint64_t kPage = 0x10000;
+    const std::uint64_t pool = 0x7f0000000000ull;
+    const std::uint64_t destination = 0x7f1000000000ull;
+    rt::xmem::PageRange ranges[5] = {{0, 1, 2}, {1, 3, 2}, {2, 0, 1}, {3, 0, 5}, {4, 0, 1}};
+    rt::xmem::PageBatch batches[2] = {{destination, 4, ranges}, {destination + 0x300000, 2, &ranges[2]}};
+    const unsigned hits_before = xs::queue_slot_hits(31);
+
+    // No mapper in this binary: the call keeps the answer every unmodelled queue slot past the PC chain gets, is
+    // counted and traced, and never reaches the real queue (check_tail walks every refused tail slot the same way).
+    EXPECT(!rt::xmem::copy_page_mappings_fn);
+    EXPECT(hr_of(raw(queue, 31, 1, word(&batches[0]), pool, 4)) == E_NOTIMPL);
+    EXPECT(real_queue->calls[31] == 0 && xs::queue_slot_hits(31) == hits_before + 1);
+
+    rt::xmem::copy_page_mappings_fn = &record_remap;
+    clear_remaps();
+    // A two-batch call: kind 0 maps pool pages start, start + 1, ... at the destination; kind 1 the one pool page
+    // `start` at every destination page; kind 2 unmaps; kind 3 changes nothing and calls nothing. Each range moves the
+    // batch cursor on by its page count, and each batch starts at its own destination.
+    EXPECT(hr_of(raw(queue, 31, 2, word(batches), pool, 4)) == S_OK);
+    EXPECT(real_queue->calls[31] == 0);
+    EXPECT(g_remap_calls == 4);
+    EXPECT(g_remaps[0].destination == destination && g_remaps[0].source == pool + 1 * kPage &&
+           g_remaps[0].pages == 2 && !g_remaps[0].repeat_first);
+    EXPECT(g_remaps[1].destination == destination + 2 * kPage && g_remaps[1].source == pool + 3 * kPage &&
+           g_remaps[1].pages == 2 && g_remaps[1].repeat_first);
+    EXPECT(g_remaps[2].destination == destination + 4 * kPage && g_remaps[2].source == 0 && g_remaps[2].pages == 1 &&
+           !g_remaps[2].repeat_first);
+    EXPECT(g_remaps[3].destination == destination + 0x300000 && g_remaps[3].source == 0 && g_remaps[3].pages == 1 &&
+           !g_remaps[3].repeat_first);
+    EXPECT(batches[0].destination == destination && ranges[0].kind == 0 && ranges[1].start == 3);
+
+    // A kind 3-only call is S_OK and maps nothing.
+    clear_remaps();
+    rt::xmem::PageBatch unchanged{destination, 1, &ranges[3]};
+    EXPECT(hr_of(raw(queue, 31, 1, word(&unchanged), pool, 4)) == S_OK && g_remap_calls == 0);
+
+    // Refusals: a pooled run past the pool, an unknown kind, a null pool, a hook that refuses, a null batch array and a
+    // batch whose range count has a null array. Each returns E_INVALIDARG (the title reads the destinations anyway, so
+    // the ranges after a refused one in the same call are still applied) and the answered call never reaches the queue.
+    clear_remaps();
+    rt::xmem::PageRange past_pool[2] = {{0, 3, 2}, {2, 0, 1}};
+    rt::xmem::PageBatch refused{destination, 2, past_pool};
+    EXPECT(hr_of(raw(queue, 31, 1, word(&refused), pool, 4)) == E_INVALIDARG && g_remap_calls == 1);
+    clear_remaps();
+    rt::xmem::PageBatch unknown{destination, 1, &ranges[4]};
+    EXPECT(hr_of(raw(queue, 31, 1, word(&unknown), pool, 4)) == E_INVALIDARG && g_remap_calls == 0);
+    clear_remaps();
+    EXPECT(hr_of(raw(queue, 31, 1, word(&batches[0]), 0 /* no pool */, 4)) == E_INVALIDARG && g_remap_calls == 1);
+    clear_remaps();
+    g_remap_result = false;
+    rt::xmem::PageBatch refused_by_hook{destination, 1, &ranges[2]};
+    EXPECT(hr_of(raw(queue, 31, 1, word(&refused_by_hook), pool, 4)) == E_INVALIDARG && g_remap_calls == 1);
+    clear_remaps();
+    EXPECT(hr_of(raw(queue, 31, 1, 0 /* null batches with a count */, pool, 4)) == E_INVALIDARG);
+    rt::xmem::PageBatch null_ranges{destination, 1, nullptr};
+    EXPECT(hr_of(raw(queue, 31, 1, word(&null_ranges), pool, 4)) == E_INVALIDARG && g_remap_calls == 0);
+    EXPECT(hr_of(raw(queue, 31, 0, 0 /* count 0: nothing to map */, pool, 0)) == S_OK && g_remap_calls == 0);
+
+    // Clearing the hook restores the unmodelled answer.
+    rt::xmem::copy_page_mappings_fn = nullptr;
+    EXPECT(hr_of(raw(queue, 31, 1, word(&batches[0]), pool, 4)) == E_NOTIMPL && real_queue->calls[31] == 0);
+
+    EXPECT(release(queue) == 0 && real_queue->refs == 0);
+    EXPECT(release(device) == 0 && mock->refs == 0);
+    std::printf("%s: console queue slot 31 decodes the measured (count, batches, pool, pool pages, flags) call into "
+                "xmem's page-mapping hook (kinds 0/1/2/3, batch cursor and destinations), refuses a run past the pool, "
+                "an unknown kind, a null pool/array and a hook that refuses with E_INVALIDARG, and keeps the "
+                "unmodelled E_NOTIMPL without a mapper\n", g_label);
     return 0;
 }
 
@@ -2454,9 +2571,9 @@ int main(int argc, char** argv) {
     EXPECT(::SetEnvironmentVariableA("PALMETTO_SLOT70_PUBLISH", "1") != FALSE);
     EXPECT(::SetEnvironmentVariableA("PALMETTO_SLOT70_CENSUS", "1") != FALSE);
     EXPECT(::SetEnvironmentVariableA("PALMETTO_SLOT70_PAIR", "1") != FALSE);
-    if (check_tail(true) || check_queue_console_slots() || check_levels() || check_fence1() ||
-        check_create_failures() || check_open_shared() || check_alloc_failures() || check_allocators() ||
-        check_xbox_slots() || check_console_command_list() || check_slot57_graphics_record() ||
+    if (check_tail(true) || check_queue_console_slots() || check_queue_copy_page_mappings() || check_levels() ||
+        check_fence1() || check_create_failures() || check_open_shared() || check_alloc_failures() ||
+        check_allocators() || check_xbox_slots() || check_console_command_list() || check_slot57_graphics_record() ||
         check_slot55_derived_pipeline_state() || check_slot70_console_view())
         return 1;
     std::printf("xs_proxy_mock_test: PASS (%d allocations refused on purpose)\n", g_failed_news);

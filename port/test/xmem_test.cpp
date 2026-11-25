@@ -603,6 +603,78 @@ void test_commit_physical_pages(const PhysicalApi& api) {
     check(api.free_pages(kPages, pages) == TRUE, "XMemFreePhysicalPages frees them");
 }
 
+// Console queue slot 31 (port/shims/xmem.h, docs/cpu_view_mapping.md): the proxy decodes the title's batch, and the
+// hook this file installs gives each destination page a second view of the physical page already mapped at its source
+// page (a null source unmaps). This is the host mapping that makes the title's page destination readable; the decode
+// itself is xs_proxy_mock_test's check.
+void test_copy_page_mappings(const PhysicalApi& api) {
+    constexpr uint64_t kPages = 4;
+    check(rt::xmem::copy_page_mappings_fn != nullptr, "xmem installs the queue slot-31 page-mapping hook");
+    if (!rt::xmem::copy_page_mappings_fn) return;
+    auto* const source = static_cast<uint8_t*>(
+        api.virtual_alloc(nullptr, kPages * kPage64k, MEM_RESERVE | kXmem64kPages, 0x21, PAGE_READWRITE));
+    auto* const destination = static_cast<uint8_t*>(
+        api.virtual_alloc(nullptr, kPages * kPage64k, MEM_RESERVE | kXmem64kPages, 0x21, PAGE_READWRITE));
+    check(source != nullptr && destination != nullptr, "XMemVirtualAlloc reserves source and destination windows");
+    if (!source || !destination) return;
+    uint64_t pages[kPages]{};
+    uint64_t count = kPages;
+    check(api.allocate(0x280, &count, pages) == TRUE && count == kPages, "physical pages for the slot-31 copy");
+    if (count != kPages) return;
+    check(api.map(source, kPages, pages) == source, "the pages map into the source window");
+    for (uint64_t i = 0; i < kPages; ++i) fill_page(source + i * kPage64k, 0x1000u * static_cast<uint32_t>(i + 1));
+
+    // Kind 0's shape: source pages 0, 1 one after another at destination pages 0, 1.
+    check(rt::xmem::copy_page_mappings_fn(destination, source, 2, false),
+          "copy_page_mappings maps two source pages at two destination pages");
+    check(page_holds(destination, 0x1000u) && page_holds(destination + kPage64k, 0x2000u),
+          "the destination pages hold the source pages' bytes");
+    check(reserved_only(destination + 2 * kPage64k), "a destination page the copy did not name stays reserved");
+
+    // Kind 1's shape: source page 3 at both destination pages 2 and 3.
+    check(rt::xmem::copy_page_mappings_fn(destination + 2 * kPage64k, source + 3 * kPage64k, 2, true),
+          "copy_page_mappings repeats one source page over two destination pages");
+    check(page_holds(destination + 2 * kPage64k, 0x4000u) && page_holds(destination + 3 * kPage64k, 0x4000u),
+          "both repeated destination pages hold the one source page");
+
+    // One physical page, three views: the destination write is visible at the source address.
+    static_cast<volatile uint32_t*>(static_cast<void*>(destination))[3] = 0xfeedf00d;
+    check(read_u32(source, 12) == 0xfeedf00d, "a copied destination page and its source page are one memory");
+
+    // A source page with nothing mapped leaves its destination page unmapped (a page mapped there before is dropped).
+    check(api.map(source + 2 * kPage64k, 1, nullptr) == source + 2 * kPage64k, "unmap the third source page");
+    check(rt::xmem::copy_page_mappings_fn(destination, source + 2 * kPage64k, 1, false),
+          "copying an unmapped source page succeeds");
+    check(reserved_only(destination), "an unmapped source page leaves its destination page reserved");
+    check(reserved_only(source + 2 * kPage64k), "the unmapped source page stays reserved");
+
+    // A null source unmaps the destination pages it names.
+    check(rt::xmem::copy_page_mappings_fn(destination + 2 * kPage64k, nullptr, 2, false),
+          "copy_page_mappings with a null source unmaps");
+    check(reserved_only(destination + 2 * kPage64k) && reserved_only(destination + 3 * kPage64k),
+          "a null source left both destination pages reserved");
+
+    // Refusals: an unaligned page address, a page count that would wrap, and a destination outside any window.
+    SetLastError(ERROR_SUCCESS);
+    check(!rt::xmem::copy_page_mappings_fn(destination + 1, source, 1, false) &&
+              GetLastError() == ERROR_INVALID_PARAMETER,
+          "copying to an address that is not 64 KiB-aligned fails");
+    SetLastError(ERROR_SUCCESS);
+    check(!rt::xmem::copy_page_mappings_fn(destination, source + 1, 1, false) &&
+              GetLastError() == ERROR_INVALID_PARAMETER,
+          "copying from an address that is not 64 KiB-aligned fails");
+    check(!rt::xmem::copy_page_mappings_fn(destination, source, (uint64_t{1} << 62) / kPage64k + 1, false),
+          "a page count that overflows the address space fails");
+    SetLastError(ERROR_SUCCESS);
+    check(!rt::xmem::copy_page_mappings_fn(destination + kPages * kPage64k, source, 1, false) &&
+              GetLastError() == ERROR_INVALID_ADDRESS,
+          "a destination outside a physical-page window fails");
+
+    api.map(source, kPages, nullptr);
+    api.map(destination, 1, nullptr);
+    check(api.free_pages(kPages, pages) == TRUE, "XMemFreePhysicalPages frees the slot-31 pages");
+}
+
 void test_first_touch_during_remap(const PhysicalApi& api) {
     constexpr uint64_t kSlice = 16;
     constexpr uint64_t kSlices = 256;
@@ -940,6 +1012,7 @@ int main() {
         test_physical_pages(physical);
         test_physical_pages_commit_on_touch(physical);
         test_commit_physical_pages(physical);
+        test_copy_page_mappings(physical);
         test_first_touch_during_remap(physical);
         test_placeholders(physical);
     }
