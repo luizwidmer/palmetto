@@ -284,6 +284,32 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### Where the user data lives: the pixel-stage console pack is dropped before the draw
+
+The fix's reconnaissance (data path, no raw values):
+
+* **console device slot 55 (CreateDerivedPipelineStateX) does not carry it.** The shim's patch-part histogram shows the
+  derived states are patched only in fixed-function parts (0 depth-stencil, 1 rasterizer, 2 blend, 3 sample mask), i.e.
+  pipeline-state parts, not user-data registers.
+* **The recorded per-draw block is `Draw::user_data` (32 dwords)**, produced by the API layer from the root-argument
+  state: the console-layout pack (`console_graphics_user_data`, `pack_stage(signature, Stage::Vertex)`) plus the
+  console feed's table pointers, and the replay copies it into push-constant member 0 and rebases the table VAs. Its
+  provenance shows 3 of 32 non-zero - and those three are the console feed's **synthetic table pointers (s0/s1/s8)**, not
+  title constants.
+* **The graphics pack is vertex-stage only.** `console_graphics_user_data()` sets `placement.stage = Stage::Vertex` and
+  `pack_stage(signature, Stage::Vertex)`; the pixel stage's parameters sit at a different console base
+  (`rootsig::stage_base(Stage::Pixel)`), and the root-argument writer stores only dwords below the 32-user-SGPR limit:
+  `write(RootState&, dword, value)` keeps `dword < kMaxUserSgprs` and otherwise hits the
+  "root arguments beyond 32 user-data dwords (spill not modelled)" stub. So the **pixel stage's user data is dropped
+  by the recording path**, and the translated pixel shader's push-constant member 0 (which is exactly the pixel stage's
+  32 user SGPRs) receives nothing but the common block - the sibling PS's colour constants among them.
+
+Fix candidate (concrete, and it crosses files): record the pixel-stage console pack alongside the vertex one (a second
+32-dword block in the root-argument state, placed with `stage_base(Stage::Pixel)` instead of the current
+`dword < 32` cut), carry it on the draw, and emit it as the pixel stage's push-constant member 0 while the vertex stage
+keeps the current block. That is the "forward the recorded user data" change the sibling PS needs; until then the shim
+keeps filling only the synthetic table pointers and the constant pass writes black.
+
 ### The sibling pixel shader's colour source: the push-constant user-data dwords, which the layer feeds as zero
 
 The constant-output sibling PS (`fspx/lib_ps_00820`) has no image samples, no fetches and no kill. Its single output
