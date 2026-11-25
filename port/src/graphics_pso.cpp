@@ -188,6 +188,18 @@ bool console_graphics_user_data(const rt::rootsig::RootSignature& signature, boo
     return true;
 }
 
+ConsoleTableValue console_table_value(std::uint64_t arena_relative_va) {
+    // The translated vertex/pixel shaders form `heap_base + (s8 & ~3)` from the console table slot (pinned from the
+    // SPIR-V of lib_vs_00823: the slot's high half is forced to zero and the low two bits masked), so only a value
+    // that fits one dword can be expressed. A larger arena would need a different encoding; refuse instead of
+    // truncating, because a truncated address reads somewhere else.
+    ConsoleTableValue value;
+    if (arena_relative_va >> 32) return value;
+    value.fits = true;
+    value.dword = static_cast<std::uint32_t>(arena_relative_va);
+    return value;
+}
+
 bool decode_fixed_function_state(const rt::graphics_record::State& state, FixedFunctionState* out,
                                  FixedFunctionFieldStatus* fields, std::string* why) {
     if (fields) *fields = FixedFunctionFieldStatus{};

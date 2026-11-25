@@ -113,8 +113,9 @@ Added in this increment:
 * `rt::graphics_pso::console_graphics_user_data()` (port/src/graphics_pso.{h,cpp}): places a parsed root signature in
   the console user-SGPR layout for a graphics pipeline - base `s8` for a vertex/pixel/geometry pipeline, `s16` for a
   mesh one, one dword per table - and refuses a signature that would spill, naming the parameter. Pure, GPU-free,
-  tested in `graphics_pso_test` (10 new checks: base, table dword width, constant count, root-view two dwords, mesh
-  base, spill refusal).
+  tested in `graphics_pso_test` (base, table dword width, constant count, root-view two dwords, mesh base, spill
+  refusal) and its one-dword table encoding (`console_table_value()`: an arena-relative value below 4 GiB passes unchanged, a
+  larger one is refused, never truncated).
 * `RootArgumentLayout` carries each parameter's console slot (`console_offset`, `console_ok`, `console_base`), filled
   from that helper in `CreateRootSignature`.
 * `PALMETTO_GRAPHICS_CONSOLE_ROOT=1` (diagnostic, **default off**): the command-list root-argument writer fills the
@@ -133,37 +134,68 @@ Measured, one boot each, same environment and overlay, 150 s:
 | write control | mean 51 102 204, non-black 16384/16384, peak 204 | - |
 | first exception | none | `0xC0000005` at `game+0x4da41c0` after the device loss |
 
-So the duplication is **refused as a default**: writing the console slot unconditionally changes what every draw's
-shaders read, and some pipeline in the frame path faults the GPU. The console layout itself is now measured and exposed;
-the safe way to use it is not "write both layouts for every draw", which is what this A/B rules out.
+That first A/B (**title-VA form**) is refuted: writing the title VA's low dword into a one-dword console slot left the
+replay's 64-bit rebase scan unable to recognise the pair, so the shader added `heap_base` to an un-rebased title VA and
+faulted the GPU.
+
+### 5b. The pinned console encoding, and the feed that works
+
+The exact encoding comes from the translated `lib_vs_00823` module, not from assumption. It builds its first two
+addresses as `heap_base + (s8 & 0xFFFFFFFC)` and `heap_base + (s8 & 0xFFFFFFFC) + 0x40`; the local slot that would be
+the high half of that address (`s9`) is **stored zero** before use, and `heap_base` is the 64-bit value the shader
+itself builds from push-constant dwords 32/33 (`0x300010000` in these boots). So a console table slot is ONE dword: the
+arena-relative VA of the table's first descriptor (the value the replay's rebase would place in the PC pair's low dword),
+with its low two bits masked off by the shader. A value that does not fit 32 bits cannot be expressed and is refused.
+
+The feed now resolves the title VA to that same arena-relative form **at record time** (through the device's title-VA
+map, `rebase_console_va()`), writes the one dword, and leaves the neighbouring dword alone - so no second title VA
+window exists for the replay to mis-read, and a descriptor slot is never clobbered by a neighbour's high half.
+
+Measured with the fixed feed (`PALMETTO_GRAPHICS_CONSOLE_ROOT=1`, 150 s):
+
+| | value |
+|---|---|
+| verdict | **ALIVE 150.1 s**, no exception, no `VkResult -4`, no device lost |
+| traced D3D12 calls / presents | 663,911 / 16,126 |
+| console feed | `table title VA -> arena-relative 0xC16EF00 at s8` (one line, first occurrence) |
+| armed draw user data | `s0/s1` = the table's title VA pair (rebased by the replay), `s8` = `0x0C16EF00`, `s2..s31` otherwise 0 |
+| provenance | the value equals `arena_base + (title VA - heap range base)`: `0xae10000 + 0x135EF00` |
+| clip-position diagnostic | `x 1.16e-31 y 0 z 0 w 0 -> non-degenerate` (the slot is now non-zero; the diagnostic reads it as a float) |
+| display readback (128x128 at 0,0) | mean 0 0 0, non-black 0/16384, peak 0 - **unchanged** |
+| PS-control readback | the control draws (`frame dump PS control: drew the armed draw's own vertices ...`), but no control readback line was produced in this boot - the acceptance axis is not measured yet |
+
+So the layout half is now **safe and pinned**: the device survives with the console slot carrying exactly the value the
+disassembly says the shader adds to `heap_base`, and the armed draw still reads back black. **Acceptance is not met**:
+this increment removes the layout error, not the remaining cause of no coverage.
+
 
 ## 6. The next falsifier
 
-The A/B says the layout value must reach **only the shader that reads its stage's layout**, per pipeline, not every
-draw. In rough order of cost:
+The layout error is closed; the armed draw still produces no colour. The next measurements, in order:
 
-1. **A per-pipeline console window mask.** The replay already carries a per-pipeline `table_windows` mask; give the
-   pipeline a per-stage console layout record (the console base its stages read: `s8` vs/ps, `s16` ms) and feed only
-   that layout, from the pipeline's own creation (`root_signature_layout` is available there), not from the command
-   list. That is the D3D-448 "per-stage user-data windows" item and would make the two-layout collision behind the A/B
-   impossible by construction.
-   *A likely mechanism for the A/B fault, not yet measured:* the console table slot is one dword, and the feed writes
-   only its low half; a console table VA is a 41-bit title VA at record time, so the replay's 64-bit window scan sees
-   `(low, stale high)` and does not recognise (and therefore does not rebase) it, while the shader adds `heap_base` to
-   the un-rebased title VA. Writing both dwords of a console table slot - the shader reads only the low one - would let
-   the existing rebase recognise the pair; that is the first thing the per-pipeline attempt should test.
-2. **A named faulting submission.** The A/B lost the device with nothing naming the draw; run the same boot with
-   `PALMETTO_VK_VALIDATION=1` (and synchronization validation), or arm the frame dump on the last draw before the loss,
-   to name the pipeline whose shader read a console dword as an address. The pipeline's root signature and its shader
-   read set then say whether the value was a table VA, a constant or a collision between the two layouts.
-3. **Narrow the diagnostic to the armed draw only.** With the layout known, feed the console slots for a single armed
-   pipeline (the frame dump's `PALMETTO_READBACK_AT_DRAW` draw) so the vertex-path dump can show `s8` non-zero and the
-   draw's fragments appear (or not) without risking the rest of the frame. This is the smallest measurement that can
-   confirm the layout finding end to end.
+1. **What each fetch slot resolves to.** The armed draw's user data now has the console table at `s8`, but the table's
+   first 16 bytes (the descriptor the shader reads through `s0`/`s1`) are zeros, while its 64 slots also hold a V#
+   over a 480-byte constant buffer of identity-shaped floats at `0x86dc40` (the vertex-path dump's constants probe).
+   Dump the four dwords at each address the shader actually reads - `heap_base + (s0&~3)`, `heap_base + (s8&~3)`,
+   `heap_base + (s8&~3) + 0x40` - at the armed draw, and say which of the shader's three V# fetches gets a real
+   descriptor. The likely remaining gap is that the vertex-stream V# the shader expects is the **driver-block** value
+   (`s0`/`s1` on the console), which this layer has never synthesised from the draw's bound vertex buffer; the table VA
+   was filling it by accident.
+2. **A named faulting submission (if the device dies again).** Run the same boot with `PALMETTO_VK_VALIDATION=1` (and
+   synchronization validation) or arm the frame dump on the last draw before a loss, to name the pipeline whose shader
+   read a console dword as an address.
+3. **The PS-only control as the coverage axis.** `PALMETTO_FRAME_DUMP_PS_CONTROL=1` +
+   `PALMETTO_FRAME_DUMP_CONTROL_PS=<shader dir>/fs_solid.spv` draws the armed draw's own vertices through the title's
+   pipeline with a constant-output pixel shader: a coloured readback means the vertex stage and rasterisation produce
+   coverage and the black is the title PS's own work; staying black means the geometry still produces no fragment. The
+   control-draw line printed in this increment's boot but its readback line did not, so the control's own readback path
+   needs checking (framecap's harness) before that axis can be read.
 
-What would refute the layout reading: a boot with the console slot filled for the armed pipeline only that still shows
-`s8` zero at the draw (the write did not land where the shader reads), or a non-zero `s8` whose shader still produces no
-fragments (then the vertex path is closed and the remaining gap is the colour/sample path, `docs/texture_source.md`).
+What would confirm the layout reading end to end: the console slot filled for the armed pipeline only and a PS-control
+readback that changes from black to the control colour. What would refute it: `s8` non-zero at the draw while the
+PS-control stays black after the fetch slots above are shown to hold the descriptors the shader wants - then the vertex
+path is closed and the remaining gap is the colour/sample path (`docs/texture_source.md`).
+
 
 ## 7. Limits and tests
 
@@ -173,7 +205,8 @@ fragments (then the vertex path is closed and the remaining gap is the colour/sa
   shape the decoder refuses (0 today) would be a different shape and its tail would need a fresh measurement.
 * `PALMETTO_GRAPHICS_CONSOLE_ROOT` is diagnostic and off by default; the default path was booted ALIVE 150.1 s with the
   same numbers as before this increment.
-* Gates: `build_gta6rt.cmd` -> `PALMETTO_OK`; `build_tests.cmd` -> `TESTS_BUILT`; `graphics_pso_test` -> 225 checks
-  passed (10 new); `graphics_record_test` unchanged.
-* The temporary root-signature dump used for section 2 was removed from the shim after the measurement; the boot is
-  `boot-rootargs6` (25 s, ALIVE) and `boot-rootargs4/5` (25 s, ALIVE).
+* Gates: `build_gta6rt.cmd` -> `PALMETTO_OK`; `build_tests.cmd` -> `TESTS_BUILT`; `graphics_pso_test` -> 227 checks
+  passed (12 new this task: 10 placement + 2 encoding); `graphics_record_test` unchanged.
+* Boots: control `boot-rootargs-control` (150 s, ALIVE), console feed `boot-console3`, `boot-console5/6` (PS control)
+  and the final binary's `boot-console7-final` (150 s, ALIVE), all outside the repository; the 25 s root-signature
+  measurement boots are `boot-rootargs6` and `boot-rootargs4/5`.

@@ -6,6 +6,7 @@
 #include "d3d12_trace.h"
 #include "d3d12_xs_device.h"
 #include "../src/gfx10_descriptors.h"
+#include "../src/graphics_pso.h"  // console_graphics_user_data/console_table_value: the console user-SGPR layout
 
 #include <algorithm>
 #include <array>
@@ -1230,6 +1231,25 @@ private:
             stub("root arguments beyond 32 user-data dwords (spill not modelled)");
     }
 
+    // One line each way for the console-layout feed (docs/root_arguments.md): the first value it placed (with the
+    // title VA and the arena-relative form the shader adds heap_base to) and the first value it had to leave zero
+    // because the title VA was not in a registered range or its arena form would not fit the slot's one dword.
+    void note_console_feed(bool ok, std::uint64_t title, std::uint64_t arena, std::uint32_t slot) {
+        static std::atomic<unsigned> placed{0};
+        static std::atomic<unsigned> refused{0};
+        if (ok && placed.fetch_add(1, std::memory_order_relaxed) < 1) {
+            std::fprintf(stderr,
+                         "[rt] d3d12: graphics console root: table title VA 0x%llx -> arena-relative 0x%llx at s%u "
+                         "(the shader forms heap_base + it)\n",
+                         static_cast<unsigned long long>(title), static_cast<unsigned long long>(arena), slot);
+        } else if (!ok && refused.fetch_add(1, std::memory_order_relaxed) < 1) {
+            std::fprintf(stderr,
+                         "[rt] d3d12: graphics console root: title VA 0x%llx is not resolvable to a 32-bit arena value; "
+                         "s%u stays zero (first occurrence)\n",
+                         static_cast<unsigned long long>(title), slot);
+        }
+    }
+
     void constants(RootState& state, UINT index, UINT count, const void* data, UINT offset) {
         if (list_.closed()) return;
         if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
@@ -1272,12 +1292,32 @@ private:
         // In the compute layout a descriptor table is one dword, the 32-bit VA of its first descriptor (the heaps
         // live below 4 GiB); a root view keeps both halves. The graphics layout gives every address two dwords.
         if (!(is_compute(state) && type == rt::rootsig::ParamType::Table)) write(state, first + 1, std::uint32_t(va >> 32));
-        // The console graphics slot (docs/root_arguments.md): a table is one 32-bit heap VA there, a root view keeps
-        // its two dword halves.
+        // The console graphics slot (docs/root_arguments.md): a translated VS/PS reads a descriptor table's 32-bit heap
+        // VA there, one dword, while the PC packing above holds the 64-bit title VA pair the replay rebases. A console
+        // slot therefore carries the SAME arena-relative value the replay produces - resolved here from the device's
+        // title-VA map - so it needs no second dword and no replay rebase: the shader forms heap_base + (slot & ~3).
         const std::uint32_t console = console_dword(state, *p);
         if (console != rt::rootsig::kNoSgpr) {
-            write(state, console, std::uint32_t(va));
-            if (type != rt::rootsig::ParamType::Table) write(state, console + 1, std::uint32_t(va >> 32));
+            const bool descriptor = type == rt::rootsig::ParamType::Table;
+            std::uint64_t arena = 0;
+            const bool resolved = rebase_console_va(attached_device(), va, arena, descriptor);
+            if (resolved && descriptor) {
+                // The pinned console encoding (docs/root_arguments.md): one dword holding the arena-relative VA; the
+                // shader forms heap_base + (slot & ~3). A value that does not fit 32 bits is refused, never truncated.
+                const rt::graphics_pso::ConsoleTableValue encoded = rt::graphics_pso::console_table_value(arena);
+                if (encoded.fits) {
+                    write(state, console, encoded.dword);
+                    note_console_feed(true, va, arena, console);
+                } else {
+                    note_console_feed(false, va, arena, console);
+                }
+            } else if (resolved) {
+                write(state, console, std::uint32_t(arena));
+                write(state, console + 1, std::uint32_t(arena >> 32));
+                note_console_feed(true, va, arena, console);
+            } else {
+                note_console_feed(false, va, arena, console);
+            }
         }
     }
 

@@ -146,6 +146,16 @@ struct ConsoleUserDataPlacement {
 bool console_graphics_user_data(const rt::rootsig::RootSignature& signature, bool mesh_pipeline,
                                 ConsoleUserDataPlacement* out);
 
+// The value a console-layout descriptor-table slot carries (docs/root_arguments.md, pinned from the translated
+// module): ONE dword holding the arena-relative VA of the table's first descriptor. The shader forms
+// `heap_base + (dword & ~3)`, so a value that does not fit 32 bits cannot be expressed and must be refused rather than
+// truncated - `fits` is false then and `dword` 0.
+struct ConsoleTableValue {
+    bool fits = false;
+    std::uint32_t dword = 0;
+};
+ConsoleTableValue console_table_value(std::uint64_t arena_relative_va);
+
 // Which of FixedFunctionState's eight fields a decoded state record yielded. The state blob's container decodes
 // (rt::graphics_record::decode_state, docs/state_blob.md) but no measurement of this title's data pins any of its
 // words to a fixed-function field, so every member is false today; the struct exists so the refusal is per field and

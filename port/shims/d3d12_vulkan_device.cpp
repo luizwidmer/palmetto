@@ -4910,17 +4910,14 @@ public:
         // Which user-data dwords hold a descriptor table's 64-bit VA: the graphics layout packs every table as two
         // dwords (rt::rootsig::pack). The title's console descriptor-heap VAs and the VAs of its placed buffers overlap
         // in its address space, so the replay rebases a value that is in both by what the root parameter says it is
-        // (docs/page_address_space.md). The console slot of a table (one 32-bit dword, docs/root_arguments.md) is marked
-        // as well: PALMETTO_GRAPHICS_CONSOLE_ROOT writes the same rebased table VA there.
+        // (docs/page_address_space.md). The console-layout slot (docs/root_arguments.md) needs no marking: it carries
+        // the already arena-relative value the replay would produce, so the replay's 64-bit window scan must not treat
+        // it as a title VA at all.
         if (const RootArgumentLayout* root = root_signature_layout(desc.pRootSignature)) {
             for (const auto& parameter : root->parameters) {
-                if (parameter.type != rt::rootsig::ParamType::Table) continue;
-                if (parameter.user_offset + 1 < 32) {
-                    graphics_.table_windows |= std::uint32_t(1) << parameter.user_offset;
-                    graphics_.table_windows |= std::uint32_t(1) << (parameter.user_offset + 1);
-                }
-                if (parameter.console_offset != rt::rootsig::kNoSgpr && parameter.console_offset < 32)
-                    graphics_.table_windows |= std::uint32_t(1) << parameter.console_offset;
+                if (parameter.type != rt::rootsig::ParamType::Table || parameter.user_offset + 1 >= 32) continue;
+                graphics_.table_windows |= std::uint32_t(1) << parameter.user_offset;
+                graphics_.table_windows |= std::uint32_t(1) << (parameter.user_offset + 1);
             }
         }
         device_.context->add_graphics_pipeline(id(), graphics_);
@@ -10154,6 +10151,20 @@ const VulkanDeviceInfo* vulkan_device_info(ID3D12Device* device) {
     ID3D12Device* real = rt::d3d12_xs::device_proxy_real_device(device);
     if (auto* d = Device::from<Device>(real ? real : device)) return &d->state().info;
     return nullptr;
+}
+
+bool rebase_console_va(IUnknown* device, std::uint64_t title_va, std::uint64_t& arena_va, bool descriptor) {
+    if (!device || !title_va) return false;
+    // The caller holds the device identity (the command list's attached device): a proxy resolves to the Vulkan device
+    // this module implements, any other object fails Device::from and the answer is "not resolvable", never a guess.
+    auto* as_device = reinterpret_cast<ID3D12Device*>(device);
+    ID3D12Device* real = rt::d3d12_xs::device_proxy_real_device(as_device);
+    Device* d = Device::from<Device>(real ? real : as_device);
+    if (!d) return false;
+    std::uint64_t available = 0;
+    return d->context().console_va_span(
+        title_va, descriptor ? palmetto::ConsoleVaKind::descriptors : palmetto::ConsoleVaKind::buffer, arena_va,
+        available);
 }
 
 HRESULT create_buffer_at_host_address(ID3D12Device* device, void* address, const D3D12_RESOURCE_DESC& desc,

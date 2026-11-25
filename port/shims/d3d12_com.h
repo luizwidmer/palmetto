@@ -373,6 +373,14 @@ private:
 // Whether `device` (from create_vulkan_device*) was created with VK_EXT_swapchain_colorspace on its instance.
 bool device_has_swapchain_colorspace(ID3D12Device* device);
 
+// Resolves one of the title's own console VAs - a descriptor table's 32-bit heap VA or a root descriptor's placed-buffer
+// VA - to the arena-relative VA the replay's `rebase_user_data` writes into a draw's user data (docs/page_address_space.md,
+// docs/root_arguments.md). A console-layout user-data slot (one dword, no high half) carries this value directly: the
+// translated shader forms `heap_base + (slot & ~3)`, which is the stand-in's device address. `descriptor` selects which of
+// the two overlapping title ranges the site means. Returns false for a device that is not this module's Vulkan device or
+// a VA outside every registered title range; nothing is guessed.
+bool rebase_console_va(IUnknown* device, std::uint64_t title_va, std::uint64_t& arena_va, bool descriptor);
+
 // Null when `device` is not a Vulkan device created with presentation, or the window cannot be presented to.
 std::unique_ptr<WindowPresenter> create_window_presenter(ID3D12Device* device, HWND window);
 

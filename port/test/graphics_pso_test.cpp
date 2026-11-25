@@ -1319,6 +1319,14 @@ void test_console_graphics_user_data() {
     std::printf("\n  %-10s s%-5u", "mesh", mesh.base);
     for (std::uint32_t first : mesh.first_sgpr) std::printf(" s%u", first);
     std::printf("\n");
+
+    // The pinned console table encoding: one dword, the arena-relative VA; the shader forms heap_base + (dword & ~3).
+    const pso::ConsoleTableValue table_value = pso::console_table_value(0xC16DEA0ull);
+    check(table_value.fits && table_value.dword == 0xC16DEA0u,
+          "console table value: an arena-relative VA below 4 GiB is one dword, unchanged");
+    const pso::ConsoleTableValue too_big = pso::console_table_value(0x1'0000'0000ull);
+    check(!too_big.fits && too_big.dword == 0,
+          "console table value: a value that does not fit the slot's one dword is refused, not truncated");
 }
 
 void print_findings() {
