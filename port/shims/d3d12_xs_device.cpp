@@ -24,6 +24,7 @@
 // behind the device before a presenter exists, so WaitFrameEventX returns at once with a fresh non-zero token.
 #include "d3d12_xs_device.h"
 #include "d3d12_trace.h"
+#include "startup_trace.h"  // rt::startup_trace::detail::crash_image_base: the mapped title's base for the slot-127 hook
 #include "xmem.h"  // rt::xmem::copy_page_mappings_fn, the mapping primitive of queue slot 31
 #include <tlhelp32.h>
 // docs/present_wiring.md: the presentation core (xbox_present.cpp) publishes the console PresentX path through this
@@ -6052,6 +6053,58 @@ D3D12_RESOURCE_STATES state_from_barrier_layout(std::uint32_t layout) {
     }
 }
 
+// The title's one PE export is __XMemAllocationHooks__, a pointer table at image+0x6844380 (checked from the image's
+// export directory: one function, one name, RVA 0x684380, in the fixed-base retail 1.0.2.1 image). Entry 0 is the
+// XMemAlloc hook, entry 1 the XMemFree hook; the console xmem runtime calls them so the title can put its own
+// allocation scope in front of the GDK allocator, and the hook chain's bottom calls XMemAllocDefault/XMemFreeDefault.
+// The same table is a fixed RVA for this image version, like every other RVA in this port.
+constexpr std::uintptr_t kTitleAllocationHooksRva = 0x6844380;
+
+// The word that routes the XMemAlloc hook chain to the display-surface window scope, from the two measured sides:
+//   * the title registers its scope by pushing a {handler, &pair, ctx} node into bucket 0x80 of the hook table
+//     (game+0x247ad64 -> game+0x145c8f990 writes image+0x6843770, which is bucket (0x6843770-0x6843370)/8 = 0x80;
+//     game+0x4deb467 selects the bucket from (attributes >> 16) & 0xFF);
+//   * the handler game+0x56a2a60 carves the window only when `(attributes & 0xc000) == 0x8000`, and passes
+//     `attributes` through to the next handler unchanged.
+// So bits 23:16 = 0x80 and bits 15:14 = 10 route one allocation through the title's window scope. The console's exact
+// word is not observable from the title image; this is the routing part, and the shim's allocator ignores the rest.
+constexpr std::uint32_t kTitleSurfaceAttributes = 0x00808000;
+
+// The byte size the display-surface window accounts for: the measured shape is a single-sample, single-mip, 1-plane
+// 2D RGBA8 texture (the title's two 3840x2160 surfaces, console format 28), and the console runtime's allocation of
+// one is what the title's hook sees. Any other shape is not the measured surface and is left unaccounted; the doc
+// names that limit.
+std::uint64_t display_surface_bytes(const D3D12_RESOURCE_DESC& desc) {
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.SampleDesc.Count > 1 || desc.MipLevels > 1 ||
+        desc.DepthOrArraySize > 1 || desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
+        return 0;
+    return desc.Width * desc.Height * 4;
+}
+
+// The default surface allocator: run the title's exported allocation hook chain the way the console runtime does. The
+// hook returns the address the title's scope handed out (inside its window) or the default allocator's block. Before a
+// title is mapped (the GPU-free tests) there is nothing to call and the answer is null.
+void* title_surface_allocate(std::uint64_t bytes, std::uint32_t attributes) {
+    const auto base = reinterpret_cast<std::uintptr_t>(rt::startup_trace::detail::crash_image_base());
+    if (!base || !bytes) return nullptr;
+    const std::uintptr_t hook = reinterpret_cast<const std::uintptr_t*>(base + kTitleAllocationHooksRva)[0];
+    // A hook that is not an address inside the mapped image is not this image's export: refuse rather than call it.
+    if (hook < base + 0x1000 || hook >= base + rt::startup_trace::detail::crash_image_size()) return nullptr;
+    using AllocHook = std::uintptr_t (*)(std::uint64_t, std::uint32_t);
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true, std::memory_order_relaxed))
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: slot 127: display-surface memory is allocated through the title's XMem hook "
+                     "(game+0x%llx): %llu byte(s), attributes 0x%x\n",
+                     static_cast<unsigned long long>(hook - base), static_cast<unsigned long long>(bytes), attributes);
+    return reinterpret_cast<void*>(reinterpret_cast<AllocHook>(hook)(bytes, attributes));
+}
+
+std::atomic<TitleSurfaceAllocator>& title_surface_allocator_slot() {
+    static std::atomic<TitleSurfaceAllocator> slot{&title_surface_allocate};
+    return slot;
+}
+
 // Device slot 127 is the console's CreateCommittedResource with a D3D12_BARRIER_LAYOUT in the initial state's place:
 // (heap properties, heap flags, desc, layout, clear value, protected session, castable-format count, castable formats,
 // riid, out), measured on the retail executable (docs/surface_population.md section 2). The title creates its two
@@ -6092,6 +6145,16 @@ HRESULT proxy_create_committed_resource_layout(DeviceProxy* self, const D3D12_HE
                      static_cast<unsigned>(pc_desc.Format), xbox_flags,
                      static_cast<unsigned>(static_cast<std::uint32_t>(pc_desc.Flags)), xbox_layout, layout,
                      static_cast<unsigned>(state), static_cast<unsigned>(static_cast<std::uint32_t>(heap_flags)));
+    }
+    // The display-surface memory is what the title's 64 MiB window scope is for: the console runtime allocates it
+    // through the title's exported XMem allocation hook, and game+0x247af25 then checks that the window is nearly used
+    // up. The proxy replaced the runtime for this slot, so it makes that call for a display surface; without it the
+    // title's window stays at 0 used and its check fires every boot (docs/range_assert.md).
+    if ((heap_flags & D3D12_HEAP_FLAG_ALLOW_DISPLAY) != 0) {
+        if (const std::uint64_t bytes = display_surface_bytes(pc_desc)) {
+            if (const TitleSurfaceAllocator allocate = title_surface_allocator_slot().load(std::memory_order_acquire))
+                (void)allocate(bytes, kTitleSurfaceAttributes);
+        }
     }
     HRESULT hr = self->real->CreateCommittedResource(heap_properties, heap_flags, &pc_desc, state, clear_value, *riid,
                                                      out);
@@ -6777,6 +6840,12 @@ PlacedAtVaPagesHook placed_at_va_pages_hook() { return g_placed_at_va_pages.load
 void set_placed_at_va_pages_hook(PlacedAtVaPagesHook hook) {
     g_placed_at_va_pages.store(hook, std::memory_order_release);
 }
+
+void set_title_surface_allocator(TitleSurfaceAllocator allocator) {
+    title_surface_allocator_slot().store(allocator, std::memory_order_release);
+}
+
+TitleSurfaceAllocator title_surface_allocator() { return title_surface_allocator_slot().load(std::memory_order_acquire); }
 
 ID3D12Device* device_proxy_real_device(const void* device) {
     if (!is_device_proxy(device)) return nullptr;

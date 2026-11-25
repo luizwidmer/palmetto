@@ -344,7 +344,7 @@ independent statistics in the analysis. `state_probe.csv` is the external probe'
 page). No game bytes are read by any of them.
 
 Reproduce: acquire `_setup/boot_lock.ps1 -Acquire -Who <name>`, start the probe
-(`python -I state_probe.py --out <work>\state_probe.csv --seconds 330 --interval 2`), then run one boot the way
+(`python -I state_probe.py --out <work>\state_probe.csv --seconds 330 interval option 2`), then run one boot the way
 `tooling/boot_report.py` does with the environment of section 1 and `--timeout 300`, sample the process at 1 Hz,
 kill at 300 s, stop the probe and release the lock. No runtime change is involved and no git write is made by
 this slice; the only uncommitted file is this page.

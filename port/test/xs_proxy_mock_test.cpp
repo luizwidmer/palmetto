@@ -893,6 +893,56 @@ int check_levels() {
             EXPECT(static_cast<std::uint32_t>(mock->committed_desc.Flags) == 0x05);
             EXPECT(mock->committed_props.Type == D3D12_HEAP_TYPE_DEFAULT);
             EXPECT(xs::device_slot_overridden(127));
+
+            // The title's display-surface window (docs/range_assert.md): a display surface created here asks the
+            // installed title allocator for its byte size with the hook's routing word, while the same creation without
+            // ALLOW_DISPLAY does not. The recorder stands in for the title's exported XMem allocation hook chain.
+            static unsigned surface_calls = 0;
+            static std::uint64_t surface_bytes = 0;
+            static std::uint32_t surface_attributes = 0;
+            static auto record_surface = [](std::uint64_t bytes, std::uint32_t attributes) -> void* {
+                ++surface_calls;
+                surface_bytes = bytes;
+                surface_attributes = attributes;
+                return nullptr;
+            };
+            const xs::TitleSurfaceAllocator previous_allocator = xs::title_surface_allocator();
+            xs::set_title_surface_allocator(record_surface);
+            surface_calls = 0;
+            void* surface_out = nullptr;
+            const HRESULT display_hr =
+                hr_of(raw(device, 127, word(&props), 8 /* D3D12_HEAP_FLAG_ALLOW_DISPLAY */, word(&xbox_desc),
+                          3 /* D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS */, word(&clear), 0, 0, 0,
+                          word(&resource_iid), word(&surface_out)));
+            EXPECT(display_hr == S_OK);
+            // The measured surface shape is single-sample, single-mip, 1-plane RGBA8: width x height x 4 bytes, with the
+            // routing word (bucket 0x80, reserve-and-carve bits 0x8000).
+            EXPECT(surface_calls == 1);
+            EXPECT(surface_bytes == 1920ull * 1080ull * 4ull);
+            EXPECT(surface_attributes == 0x00808000u);
+            void* plain_out = nullptr;
+            const HRESULT plain_hr = hr_of(raw(device, 127, word(&props), 0, word(&xbox_desc),
+                                               3 /* D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS */, word(&clear), 0, 0, 0,
+                                               word(&resource_iid), word(&plain_out)));
+            EXPECT(plain_hr == S_OK);
+            EXPECT(surface_calls == 1);
+            xs::set_title_surface_allocator(previous_allocator);
+
+            // The window arithmetic the slot feeds (docs/range_assert.md sections 2.2 and 2.5), modelled from the
+            // measured constants: each carve is rounded up to 64 KiB, and game+0x247af25 passes only when what is
+            // left of the window is <= 2 MiB - 1. The pre-fix runtime's untouched 64 MiB window is exactly the value
+            // the check saw then (0x4000000), and two measured 3840x2160 RGBA8 surfaces leave 0xA0000.
+            {
+                const auto round_64k = [](std::uint64_t bytes) { return (bytes + 0xFFFFull) & ~0xFFFFull; };
+                const std::uint64_t window = 0x4000000ull;  // 64 MiB: this host reads the 64 MiB branch
+                const std::uint64_t carve = round_64k(3840ull * 2160ull * 4ull);
+                EXPECT(carve == 0x1FB0000ull);
+                EXPECT(window - 2 * carve == 0xA0000ull);
+                EXPECT(window - 2 * carve < 0x200000ull);  // the fixed runtime passes
+                EXPECT(window - 0 >= 0x200000ull);         // the pre-fix runtime's value fired
+                EXPECT(0x1FFFFFull < 0x200000ull);         // 2 MiB - 1 passes the title's jbe
+                EXPECT(!(0x200000ull < 0x200000ull));      // 2 MiB does not
+            }
         }
 
         Mock* const queue_mock = reinterpret_cast<Mock*>(real_queue);

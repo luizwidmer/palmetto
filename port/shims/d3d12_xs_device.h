@@ -118,6 +118,19 @@ using PlacedAtVaPagesHook = bool (*)(const void* va, std::size_t bytes);
 void set_placed_at_va_pages_hook(PlacedAtVaPagesHook hook);
 PlacedAtVaPagesHook placed_at_va_pages_hook();
 
+// Device slot 127 creates the title's two display surfaces. On the console the runtime's allocation of each surface's
+// memory runs the title's own exported XMem allocation hook (image+0x6844380, the image's one export), which carves the
+// surface from the 64 MiB window scope the title registers around those two creations; the title then checks at
+// game+0x247af25 that the window is nearly used up (docs/range_assert.md). The proxy is the runtime for slot 127 here,
+// so it makes that call for a display surface before the host creation. `bytes` is the surface's byte size and
+// `attributes` is the hook's routing word: bits 23:16 are the hook bucket the title's registration pushes to (0x80),
+// and bit 15 set with bit 14 clear is the handler's reserve-and-carve branch (game+0x56a2a60 tests the same mask).
+// The default allocator reads the hook table from the mapped image and returns null before a title is loaded (the
+// tests); a test can replace it with a recording stub.
+using TitleSurfaceAllocator = void* (*)(std::uint64_t bytes, std::uint32_t attributes);
+void set_title_surface_allocator(TitleSurfaceAllocator allocator);
+TitleSurfaceAllocator title_surface_allocator();
+
 // True for slots the proxy handles itself rather than forwarding verbatim: IUnknown (0-2), 8 and 75 (queue
 // proxies), 9 (allocator proxies), 14, 31/34/35/45/46/50 (proxies unwrapped), 32 and 36 (fence proxies), 48/73 and
 // 78/79/80 (the Xbox slots above, at their configured indices), 62, 67 and 76. Slot 10 is intentionally false: the
