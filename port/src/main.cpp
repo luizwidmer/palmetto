@@ -1680,6 +1680,91 @@ void state_trace_census(std::uintptr_t image_base, std::uintptr_t image_size, do
     }
 }
 
+// ---- Stage-2 wait wake probe (PALMETTO_STAGE2_WAKE) -----------------------------------------------------------------
+// The measured stage-2 stop: the boot sequence FUN_1421B8960 calls FUN_1421B8BD0 (RVA 0x21B8BD0) at 0x21B8A70, whose
+// first call is FUN_14258DB70 (RVA 0x258DB70), and that function waits INFINITE at RVA 0x258DBA6 on the event the
+// stage-2 tracker keeps at +0x610 when the armed dword at +0x608 is non-zero. The tracker is created by
+// FUN_145BF0B10 (RVA 0x5BF0B10) and its pointer is the image .data qword at RVA 0x9844898 (measured: the pointer, the
+// armed dword 1 before the wait and 0x80000001 inside it, an auto-reset event at +0x610 that no title code signals).
+// This opt-in probe reads the tracker at the named second, logs those fields, and signals the armed event once - the
+// smallest completion of the measured wait, so the boot's own next step (the stage-3 request at 0x81B2EF or the next
+// stop) is observable under PALMETTO_STATE_TRACE. It signals no other handle and does nothing when the switch is
+// unset; the default path never starts a thread for it.
+constexpr std::uint32_t kTitleStage2TrackerRva = 0x9844898;
+
+bool title_read_pointer_at(std::uintptr_t absolute, std::uintptr_t& value) {
+    if (!title_address_readable(absolute)) return false;
+    std::memcpy(&value, reinterpret_cast<const void*>(absolute), sizeof(value));
+    return true;
+}
+
+void start_stage2_wake_probe(std::uintptr_t image_base, std::uintptr_t image_size, double at_seconds) {
+    std::thread([image_base, image_size, at_seconds] {
+        const auto started = sampler_epoch();
+        auto elapsed = [&] {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        };
+        std::this_thread::sleep_until(started + std::chrono::milliseconds(static_cast<long long>(at_seconds * 1000.0)));
+        // The stage-2 handler's timing varies between boots, so wait for the tracker to appear with an armed event
+        // rather than assuming it exists at the named second: poll every 250 ms for at most 60 s.
+        std::uintptr_t tracker = 0;
+        std::uint32_t armed = 0;
+        std::uintptr_t event = 0;
+        bool found = false;
+        for (int poll = 0; poll < 240; ++poll) {
+            tracker = 0;
+            armed = 0;
+            event = 0;
+            if (title_read_pointer_at(image_base + kTitleStage2TrackerRva, tracker) && tracker != 0 &&
+                (tracker & 7) == 0) {
+                if (title_address_readable(tracker + 0x608))
+                    std::memcpy(&armed, reinterpret_cast<const void*>(tracker + 0x608), sizeof(armed));
+                title_read_pointer_at(tracker + 0x610, event);
+                if (armed != 0 && event != 0) {
+                    found = true;
+                    break;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+        std::fprintf(stderr, "[rt] stage2 wake at %.1f s: tracker 0x%llx, armed 0x%x, event 0x%llx\n", elapsed(),
+                     static_cast<unsigned long long>(tracker), armed, static_cast<unsigned long long>(event));
+        if (!found) {
+            std::fprintf(stderr, "[rt] stage2 wake: no armed tracker event within 60 s of the named time\n");
+            return;
+        }
+        const DWORD before = WaitForSingleObject(reinterpret_cast<HANDLE>(event), 0);
+        const BOOL hit = SetEvent(reinterpret_cast<HANDLE>(event));
+        if (hit) {
+            std::fprintf(stderr, "[rt] stage2 wake: object state before 0x%lx, SetEvent ok\n", before);
+        } else {
+            std::fprintf(stderr, "[rt] stage2 wake: object state before 0x%lx, SetEvent failed (error %lu)\n", before,
+                         GetLastError());
+        }
+        // The wake is one event, not the producer; sample every thread's title-side stack right after it so the
+        // title's own continuation is named even if it stops or faults within the second (the measured 41 s case).
+        const double offsets[] = {0.15, 0.5, 1.0, 2.0, 4.0};
+        double previous = 0.0;
+        for (const double offset : offsets) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<long long>((offset - previous) * 1000.0)));
+            previous = offset;
+            char label[48];
+            std::snprintf(label, sizeof label, "wake+%.2f", offset);
+            thread_stacks_sample_once(image_base, image_size, label);
+            bool ok_init = false;
+            const std::uint32_t init = title_read_u32(image_base, kTitleInitStateRva, ok_init);
+            std::uint32_t armed_now = 0;
+            std::uintptr_t event_now = 0;
+            if (title_address_readable(tracker + 0x608))
+                std::memcpy(&armed_now, reinterpret_cast<const void*>(tracker + 0x608), sizeof(armed_now));
+            title_read_pointer_at(tracker + 0x610, event_now);
+            std::fprintf(stderr, "[rt] stage2 wake +%.2f s: tracker 0x%llx armed 0x%x event 0x%llx, init %s%u\n",
+                         offset, static_cast<unsigned long long>(tracker), armed_now,
+                         static_cast<unsigned long long>(event_now), ok_init ? "" : "unreadable ", init);
+        }
+    }).detach();
+}
+
 // Starts the sampler thread named by PALMETTO_STATE_TRACE ("<interval>[,<seconds>]"; "1" means 2 s to process end).
 // Detached: it ends with the process. Off when the variable is unset, so the default path is unchanged.
 void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_size, const char* spec) {
@@ -2165,6 +2250,14 @@ int wmain(int argc, wchar_t** argv) {
         // Off when unset.
         if (const char* spec = std::getenv("PALMETTO_STATE_TRACE"); spec && *spec)
             start_title_state_trace(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, spec);
+        // PALMETTO_STAGE2_WAKE=<seconds>: signal the measured stage-2 tracker event once at the named second and log the
+        // tracker fields before/after (diagnostic; see the stage-2 wake probe above). Off when unset.
+        if (const char* spec = std::getenv("PALMETTO_STAGE2_WAKE"); spec && *spec) {
+            const double at_seconds = std::strtod(spec, nullptr);
+            if (at_seconds > 0.0)
+                start_stage2_wake_probe(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size,
+                                        at_seconds);
+        }
         // PALMETTO_LOADER_HOOK=1: inline entry detours on the loader begin/end/re-init, with per-call records
         // (diagnostic; see the loader entry detours above). Off by default.
         if (const char* hook_switch = std::getenv("PALMETTO_LOADER_HOOK"); hook_switch && *hook_switch &&
