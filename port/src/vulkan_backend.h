@@ -21,6 +21,7 @@
 #include "vulkan_indirect_dispatch_count.h"
 #include "vulkan_scratch.h"
 #include "vulkan_replay.h"
+#include "upscale_standin_spv.h"
 #include "queue_families.h"
 #include "resource_tiling.h"
 #include "xdxr_build.h"
@@ -1025,6 +1026,8 @@ public:
             // The frame dump's control draws (docs/frame_capture.md) name these reserved ids; they are not in the map.
             if (id == frame_dump::control_pipeline_id) return &frame_dump_control_pipeline_;
             if (id == frame_dump::ps_control_pipeline_id) return &frame_dump_ps_control_pipeline_;
+            // The upscale stand-in's own draw (docs/upscale_standin.md); the layer's pipeline, never a title one.
+            if (id == upscale_standin::pipeline_id) return &upscale_standin_pipeline_;
             const auto it = graphics_pipelines_.find(id);
             if (it == graphics_pipelines_.end()) {
                 static std::atomic<unsigned> misses{0};
@@ -1211,6 +1214,15 @@ public:
         if (frame_dump_control_pipeline_.layout) vk.vkDestroyPipelineLayout(device_, frame_dump_control_pipeline_.layout, nullptr);
         if (frame_dump_control_vs_) vk.vkDestroyShaderModule(device_, frame_dump_control_vs_, nullptr);
         if (frame_dump_control_fs_) vk.vkDestroyShaderModule(device_, frame_dump_control_fs_, nullptr);
+        // The upscale stand-in's own pipeline and views (docs/upscale_standin.md), when the switch created them.
+        if (upscale_standin_pipeline_.pipeline) vk.vkDestroyPipeline(device_, upscale_standin_pipeline_.pipeline, nullptr);
+        if (upscale_standin_layout_) vk.vkDestroyPipelineLayout(device_, upscale_standin_layout_, nullptr);
+        if (upscale_standin_vs_) vk.vkDestroyShaderModule(device_, upscale_standin_vs_, nullptr);
+        if (upscale_standin_ps_) vk.vkDestroyShaderModule(device_, upscale_standin_ps_, nullptr);
+        if (upscale_standin_view_) vk.vkDestroyImageView(device_, upscale_standin_view_, nullptr);
+        if (upscale_standin_pool_) vk.vkDestroyDescriptorPool(device_, upscale_standin_pool_, nullptr);
+        if (upscale_standin_set_layout_)
+            vk.vkDestroyDescriptorSetLayout(device_, upscale_standin_set_layout_, nullptr);
         for (const auto& [key, framebuffer] : resolve_framebuffers_)
             vk.vkDestroyFramebuffer(device_, framebuffer, nullptr);
         for (const auto& [key, pass] : resolve_passes_) vk.vkDestroyRenderPass(device_, pass, nullptr);
@@ -1710,6 +1722,202 @@ public:
         capture.extent = extent;
         capture.resource = resource;
     }
+    // The upscale stand-in's own graphics pipeline and descriptor set (docs/upscale_standin.md): a full-screen triangle
+    // whose pixel stage texel-fetches the armed upscale draw's resolved colour image (set 0 binding 0) and writes the
+    // armed draw's presented target, with the geometry in the first 64 bytes of the replay's push-constant block
+    // (upscale_standin::Push). It needs no title shader, pipeline state or descriptor table, so it can present the
+    // sampled colour even when the console upscaler's pipelines cannot be made. Diagnostic and opt-in: created once,
+    // for the armed draw's target format; `colour_layout` is the layout the colour image is in for the draw (the layer
+    // transitions it there before the draw and back after, so the tracker's state is unchanged). False (with one named
+    // line) when the device cannot build it or a second, different colour image is handed to it.
+    bool upscale_standin_ready(VkFormat target_format, VkImage colour, VkFormat colour_format,
+                               VkImageLayout colour_layout) {
+        std::lock_guard lock(upscale_standin_mutex_);
+        if (upscale_standin_failed_) return false;
+        if (colour == VK_NULL_HANDLE || colour_format == VK_FORMAT_UNDEFINED ||
+            target_format == VK_FORMAT_UNDEFINED) {
+            upscale_standin_failed_ = true;
+            std::fprintf(stderr,
+                         "[rt] replay: upscale stand-in: refused: colour image 0x%llx format %d, target format %d\n",
+                         static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(colour)),
+                         static_cast<int>(colour_format), static_cast<int>(target_format));
+            return false;
+        }
+        if (upscale_standin_set_ != VK_NULL_HANDLE) {
+            if (upscale_standin_colour_image_ != colour || upscale_standin_colour_format_ != colour_format) {
+                std::fprintf(stderr,
+                             "[rt] replay: upscale stand-in: refused: the stand-in already samples image 0x%llx "
+                             "(format %d); the armed draw names a different one\n",
+                             static_cast<unsigned long long>(
+                                 reinterpret_cast<std::uintptr_t>(upscale_standin_colour_image_)),
+                             static_cast<int>(upscale_standin_colour_format_));
+                return false;
+            }
+        } else {
+            const VkDevice device = device_;
+            VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            view_info.image = colour;
+            view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            view_info.format = colour_format;
+            view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            if (vk.vkCreateImageView(device, &view_info, nullptr, &upscale_standin_view_) != VK_SUCCESS) {
+                upscale_standin_failed_ = true;
+                std::fprintf(stderr, "[rt] replay: upscale stand-in: the colour image's view could not be created\n");
+                return false;
+            }
+            upscale_standin_colour_image_ = colour;
+            upscale_standin_colour_format_ = colour_format;
+            VkDescriptorSetLayoutBinding binding{};
+            binding.binding = 0;
+            binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            binding.descriptorCount = 1;
+            binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+            set_info.bindingCount = 1;
+            set_info.pBindings = &binding;
+            const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1};
+            VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+            pool_info.maxSets = 1;
+            pool_info.poolSizeCount = 1;
+            pool_info.pPoolSizes = &size;
+            VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            allocate.descriptorSetCount = 1;
+            if (vk.vkCreateDescriptorSetLayout(device, &set_info, nullptr, &upscale_standin_set_layout_) != VK_SUCCESS ||
+                vk.vkCreateDescriptorPool(device, &pool_info, nullptr, &upscale_standin_pool_) != VK_SUCCESS) {
+                upscale_standin_failed_ = true;
+                std::fprintf(stderr, "[rt] replay: upscale stand-in: the descriptor set layout/pool failed\n");
+                return false;
+            }
+            allocate.descriptorPool = upscale_standin_pool_;
+            allocate.pSetLayouts = &upscale_standin_set_layout_;
+            if (vk.vkAllocateDescriptorSets(device, &allocate, &upscale_standin_set_) != VK_SUCCESS) {
+                upscale_standin_failed_ = true;
+                std::fprintf(stderr, "[rt] replay: upscale stand-in: the descriptor set could not be allocated\n");
+                return false;
+            }
+            const VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                                           sizeof(ShaderUserData)};
+            VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+            layout_info.setLayoutCount = 1;
+            layout_info.pSetLayouts = &upscale_standin_set_layout_;
+            layout_info.pushConstantRangeCount = 1;
+            layout_info.pPushConstantRanges = &push;
+            if (vk.vkCreatePipelineLayout(device, &layout_info, nullptr, &upscale_standin_layout_) != VK_SUCCESS) {
+                upscale_standin_failed_ = true;
+                std::fprintf(stderr, "[rt] replay: upscale stand-in: the pipeline layout could not be created\n");
+                return false;
+            }
+            VkShaderModuleCreateInfo module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+            module_info.codeSize = sizeof(upscale_standin_vs_spirv);
+            module_info.pCode = upscale_standin_vs_spirv;
+            if (vk.vkCreateShaderModule(device, &module_info, nullptr, &upscale_standin_vs_) != VK_SUCCESS) {
+                upscale_standin_failed_ = true;
+                std::fprintf(stderr, "[rt] replay: upscale stand-in: the vertex module could not be created\n");
+                return false;
+            }
+            module_info.codeSize = sizeof(upscale_standin_ps_spirv);
+            module_info.pCode = upscale_standin_ps_spirv;
+            if (vk.vkCreateShaderModule(device, &module_info, nullptr, &upscale_standin_ps_) != VK_SUCCESS) {
+                upscale_standin_failed_ = true;
+                std::fprintf(stderr, "[rt] replay: upscale stand-in: the pixel module could not be created\n");
+                return false;
+            }
+            VkPipelineShaderStageCreateInfo stages[2]{};
+            stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+            stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+            stages[0].module = upscale_standin_vs_;
+            stages[0].pName = "main";
+            stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+            stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+            stages[1].module = upscale_standin_ps_;
+            stages[1].pName = "main";
+            VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+            VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+            assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            VkPipelineViewportStateCreateInfo viewport_state{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+            viewport_state.viewportCount = 1;
+            viewport_state.scissorCount = 1;
+            VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+            raster.polygonMode = VK_POLYGON_MODE_FILL;
+            raster.cullMode = VK_CULL_MODE_NONE;  // a stand-in full-screen triangle covers whichever way it winds
+            raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+            raster.lineWidth = 1.0f;
+            VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+            multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+            VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+            depth.depthTestEnable = VK_FALSE;
+            depth.depthWriteEnable = VK_FALSE;
+            depth.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+            depth.stencilTestEnable = VK_FALSE;
+            VkPipelineColorBlendAttachmentState blend_attachment{};
+            blend_attachment.blendEnable = VK_FALSE;
+            blend_attachment.colorWriteMask =
+                VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+            blend.attachmentCount = 1;
+            blend.pAttachments = &blend_attachment;
+            constexpr VkDynamicState dynamic_states[] = {
+                VK_DYNAMIC_STATE_VIEWPORT,           VK_DYNAMIC_STATE_SCISSOR,
+                VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY, VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE,
+                VK_DYNAMIC_STATE_STENCIL_REFERENCE,  VK_DYNAMIC_STATE_BLEND_CONSTANTS};
+            VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+            dynamic.dynamicStateCount = static_cast<std::uint32_t>(std::size(dynamic_states));
+            dynamic.pDynamicStates = dynamic_states;
+            VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+            rendering.colorAttachmentCount = 1;
+            rendering.pColorAttachmentFormats = &target_format;
+            VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &rendering};
+            info.stageCount = 2;
+            info.pStages = stages;
+            info.pVertexInputState = &vertex_input;
+            info.pInputAssemblyState = &assembly;
+            info.pViewportState = &viewport_state;
+            info.pRasterizationState = &raster;
+            info.pMultisampleState = &multisample;
+            info.pDepthStencilState = &depth;
+            info.pColorBlendState = &blend;
+            info.pDynamicState = &dynamic;
+            info.layout = upscale_standin_layout_;
+            VkPipeline pipeline = VK_NULL_HANDLE;
+            if (vk.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
+                upscale_standin_failed_ = true;
+                std::fprintf(stderr, "[rt] replay: upscale stand-in: the pipeline could not be created for format %d\n",
+                             static_cast<int>(target_format));
+                return false;
+            }
+            upscale_standin_pipeline_.pipeline = pipeline;
+            upscale_standin_pipeline_.layout = upscale_standin_layout_;
+            upscale_standin_pipeline_.push_stages = push.stageFlags;
+            upscale_standin_pipeline_.code_base = 0;
+            upscale_standin_pipeline_.bindless_set = upscale_standin_set_;  // the marker emit binds set 0 for
+            upscale_standin_pipeline_.color_formats = {target_format};
+            upscale_standin_pipeline_.samples = 1;
+            upscale_standin_pipeline_.vertex_slots = 0;
+            upscale_standin_pipeline_.has_pixel_stage = true;
+        }
+        VkDescriptorImageInfo image_info{};
+        image_info.imageView = upscale_standin_view_;
+        image_info.imageLayout = colour_layout;
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = upscale_standin_set_;
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        write.pImageInfo = &image_info;
+        vk.vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+        // One line with the shape the boot reads: the image, its format, the target format and the sampling layout.
+        static std::atomic<unsigned> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 3)
+            std::fprintf(stderr,
+                         "[rt] replay: upscale stand-in: built the layer's stretch pipeline (target format %d) over "
+                         "colour image 0x%llx (format %d) in layout %d\n",
+                         static_cast<int>(target_format),
+                         static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(colour)),
+                         static_cast<int>(colour_format), static_cast<int>(colour_layout));
+        return true;
+    }
+    // The stand-in draw's descriptor set (set 0 of its own layout), for the queue's emit call.
+    VkDescriptorSet upscale_standin_set() const { return upscale_standin_set_; }
     // A title-placed texture's page import (docs/texture_import.md): the device registers this, and every queue calls
     // it before recording a submission, so the image holds the title's bytes before anything can sample it.
     void set_placed_texture_import(std::function<void()> import) {
@@ -2231,6 +2439,20 @@ private:
     // The PS-only control (docs/frame_capture.md): the armed title pipeline with fs_solid as its pixel shader, and the
     // sampled-texture readback's one-shot arm. Both diagnostic only.
     GraphicsPipeline frame_dump_ps_control_pipeline_;
+    // The upscale stand-in (docs/upscale_standin.md): the layer's own stretch pipeline, its shader modules, its image
+    // view and its descriptor set. Created once when the switch is on and an upscale draw is measured.
+    GraphicsPipeline upscale_standin_pipeline_;
+    VkShaderModule upscale_standin_vs_ = VK_NULL_HANDLE;
+    VkShaderModule upscale_standin_ps_ = VK_NULL_HANDLE;
+    VkImageView upscale_standin_view_ = VK_NULL_HANDLE;
+    VkImage upscale_standin_colour_image_ = VK_NULL_HANDLE;
+    VkFormat upscale_standin_colour_format_ = VK_FORMAT_UNDEFINED;
+    VkDescriptorSetLayout upscale_standin_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool upscale_standin_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet upscale_standin_set_ = VK_NULL_HANDLE;
+    VkPipelineLayout upscale_standin_layout_ = VK_NULL_HANDLE;
+    bool upscale_standin_failed_ = false;
+    std::mutex upscale_standin_mutex_;
     // The sampled-texture readbacks (docs/frame_capture.md): up to max_sampled_keys one-shot copies, armed per resolved
     // sampled T# while the armed submission is prepared and consumed in that same submission.
     SampleCapture sample_captures_[max_sampled_keys];
@@ -3043,10 +3265,11 @@ private:
         // shader (PALMETTO_FRAME_DUMP_PS_CONTROL) can be drawn after the frame's commands.
         bool control_armed = false;
         bool ps_control_armed = false;
+        frame_dump::Armed armed;  // the dump/readback-armed draw's place in this submission, once per submission
         frame_dump::ArmedTarget control_target;
-        if (frame_dump::control_enabled() || frame_dump::ps_control_enabled()) {
+        if (frame_dump::control_enabled() || frame_dump::ps_control_enabled() || upscale_standin::enabled()) {
             const std::span<const PreparedList> submission(prepared.data(), lists.size());
-            const frame_dump::Armed armed = frame_dump::armed_submission(submission);
+            armed = frame_dump::armed_submission(submission);
             if (armed.armed) {
                 control_target = frame_dump::armed_target(submission, armed.first, armed.at);
                 control_armed = control_target.found;
@@ -3437,6 +3660,167 @@ private:
                              "is left as the frame wrote it\n",
                              static_cast<int>(control_result));
             }
+        }
+        // Diagnostic (docs/upscale_standin.md): with PALMETTO_UPSCALE_STANDIN set, the layer presents the colour image
+        // its measured upscale (compose) draw samples, by its own stretch pipeline, into the presented target the draw
+        // writes - the stand-in for the console upscaler's pipelines when those cannot be made. The colour image is the
+        // draw's own resolved T# (docs/frame_capture.md), stretched from its whole texel rectangle to the target's whole
+        // pixel rectangle; nothing is colourised. With the colour window zero by design (docs/colour_path.md) the result
+        // is black like the title's own compose output; PALMETTO_UPSCALE_STANDIN_CONTROL adds the project's coordinate
+        // ramp as a second draw so the boot can prove the rectangle arithmetic. Opt-in, bounded, one line each.
+        if (upscale_standin::enabled()) {
+            static std::atomic<unsigned> standin_logged{0};
+            const std::span<const PreparedList> submission(prepared.data(), lists.size());
+            const frame_dump::ArmedTarget compose = frame_dump::compose_target(submission);
+            // The stand-in executes at the dump/readback-armed draw: one measured execution per boot. The title's
+            // colour image rotates through a ring (docs/colour_path.md sampled three positions), so a per-frame
+            // substitution needs a per-image pipeline cache; that is the next step (docs/upscale_standin.md limits).
+            // compose.index is the measured upscale draw's index inside this submission; armed.at is its global index.
+            const bool at_armed_upscale_draw =
+                armed.armed && compose.found && compose.pipeline != nullptr &&
+                (armed.first + compose.index) == armed.at;
+            if (!at_armed_upscale_draw) {
+                if (standin_logged.fetch_add(1, std::memory_order_relaxed) < 4)
+                    std::fprintf(stderr,
+                                 "[rt] replay: upscale stand-in: no draw: the armed draw is %s, the measured upscale "
+                                 "draw is %s (armed %llu, measured global %llu, measured index %llu)\n",
+                                 armed.armed ? "in this submission" : "not in this submission",
+                                 compose.found ? "in this submission" : "not in this submission",
+                                 armed.armed ? armed.at : 0ull, compose.found ? armed.first + compose.index : 0ull,
+                                 compose.found ? compose.index : 0ull);
+            } else {
+            // The colour image the upscale draw samples: the first T# the shim resolved to a layer image, read from the
+            // draw's own recorded descriptor tables (the same resolution the sampled-texture readback uses).
+            SampledKey colour;
+            bool colour_found = false;
+            if (compose.found && compose.pipeline && replay.sampled_table) {
+                for (const std::uint64_t table_va :
+                     frame_dump::descriptor_tables(compose.draw, compose.pipeline->table_windows)) {
+                    SampledTable table;
+                    if (!replay.sampled_table(table_va, 64, table)) continue;
+                    for (std::uint32_t k = 0; k < table.keys; ++k) {
+                        if (!table.key[k].resolved || table.key[k].image_handle == VK_NULL_HANDLE) continue;
+                        colour = table.key[k];
+                        colour_found = true;
+                        break;
+                    }
+                    if (colour_found) break;
+                }
+            }
+            upscale_standin::Inputs inputs;
+            inputs.switch_on = true;
+            inputs.has_pixel_stage = compose.found && compose.pipeline && compose.pipeline->has_pixel_stage;
+            inputs.pixel_image_samples = compose.found && compose.pipeline ? compose.pipeline->ps_images : 0;
+            inputs.colour_resolved = colour_found;
+            inputs.colour_width = colour.extent.width;
+            inputs.colour_height = colour.extent.height;
+            inputs.target_width = compose.width;
+            inputs.target_height = compose.height;
+            const upscale_standin::Plan plan = upscale_standin::plan(inputs);
+            if (!plan.draw) {
+                if (standin_logged.fetch_add(1, std::memory_order_relaxed) < 4)
+                    std::fprintf(stderr,
+                                 "[rt] replay: upscale stand-in: no draw: %s (ps %u image sample(s), colour image %s, "
+                                 "target %ux%u)\n",
+                                 upscale_standin::refusal_name(plan.refusal), inputs.pixel_image_samples,
+                                 colour_found ? "resolved" : "unresolved", compose.width, compose.height);
+            } else {
+                // The layout the colour image is in for this draw: the constant pass wrote it as a render target in
+                // this submission, so the tracker names it. Sample it in SHADER_READ_ONLY (GENERAL stays GENERAL, the
+                // layer's sampled_in_general mode); the stand-in transitions it there and back, so the tracker's
+                // state is unchanged for the commands after this one.
+                const VkImageLayout current = next_tracker.layout(colour.resource, 0);
+                const VkImageLayout sampled = current == VK_IMAGE_LAYOUT_GENERAL
+                                                  ? VK_IMAGE_LAYOUT_GENERAL
+                                                  : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                bool ready = current != VK_IMAGE_LAYOUT_UNDEFINED &&
+                            context_.upscale_standin_ready(compose.format, colour.image_handle, colour.format, sampled);
+                if (!ready) {
+                    if (standin_logged.fetch_add(1, std::memory_order_relaxed) < 4)
+                        std::fprintf(stderr,
+                                     "[rt] replay: upscale stand-in: refused: the colour image's layout is %s\n",
+                                     current == VK_IMAGE_LAYOUT_UNDEFINED ? "untracked" : "usable");
+                } else {
+                    const auto layout_barrier = [&](VkImageLayout from, VkImageLayout to, VkAccessFlags src_access,
+                                                    VkAccessFlags dst_access, VkPipelineStageFlags src_stage,
+                                                    VkPipelineStageFlags dst_stage) {
+                        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                        barrier.srcAccessMask = src_access;
+                        barrier.dstAccessMask = dst_access;
+                        barrier.oldLayout = from;
+                        barrier.newLayout = to;
+                        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                        barrier.image = colour.image_handle;
+                        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                        replay.pipeline_barrier(command_buffer, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1,
+                                                &barrier);
+                    };
+                    constexpr VkAccessFlags kWriteAccess =
+                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                    if (sampled != current &&
+                        current != VK_IMAGE_LAYOUT_UNDEFINED)
+                        layout_barrier(current, sampled, kWriteAccess, VK_ACCESS_SHADER_READ_BIT,
+                                       VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                    // Two draws: the shipping stretch of the title's colour image, then (when switched) the project's
+                    // mapping control over the same target, which a readback can measure while the colour is black.
+                    const bool control = upscale_standin::mapping_control_enabled();
+                    const upscale_standin::Plan control_plan = upscale_standin::mapping_control(plan);
+                    for (unsigned arm = 0; arm < (control ? 2u : 1u); ++arm) {
+                        const upscale_standin::Push& push = arm ? control_plan.push : plan.push;
+                        CommandList standin_list;
+                        Draw standin_draw;
+                        standin_draw.pipeline = upscale_standin::pipeline_id;
+                        standin_draw.count = 3;  // the direction (vertex stage) builds one full-screen triangle
+                        standin_draw.instances = 1;
+                        standin_draw.topology = 4;  // D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST
+                        standin_draw.viewport = Viewport{0.0f, 0.0f, static_cast<float>(compose.width),
+                                                         static_cast<float>(compose.height), 0.0f, 1.0f};
+                        standin_draw.scissor = Rect{0, 0, static_cast<std::int32_t>(compose.width),
+                                                    static_cast<std::int32_t>(compose.height)};
+                        auto standin_views = std::make_shared<DrawViews>();
+                        standin_views->render_target_count = 1;
+                        standin_views->render_targets[0] = TargetView{compose.id, 0, 0, 1, ColorViewFormat::resource};
+                        standin_draw.views = std::move(standin_views);
+                        upscale_standin::write_push(push, standin_draw.user_data.data());
+                        ReplayFunctions standin_replay = replay;
+                        standin_replay.bindless_set = context_.upscale_standin_set();  // our own set 0, bound by emit
+                        PreparedList standin_prepared;
+                        const ReplayResult standin_result =
+                            standin_list.draw(std::move(standin_draw)) && standin_list.close()
+                                ? prepare(standin_list, resolve, replay, standin_prepared)
+                                : ReplayResult::unsupported;
+                        if (standin_result != ReplayResult::success) {
+                            if (standin_logged.fetch_add(1, std::memory_order_relaxed) < 4)
+                                std::fprintf(stderr,
+                                             "[rt] replay: upscale stand-in: the %s draw was refused in prepare (result "
+                                             "%d)\n",
+                                             arm ? "mapping-control" : "sampling", static_cast<int>(standin_result));
+                            continue;
+                        }
+                        emit(standin_prepared, command_buffer, standin_replay, &next_tracker, &open_labels);
+                        if (standin_logged.fetch_add(1, std::memory_order_relaxed) < 8)
+                            std::fprintf(stderr,
+                                         "[rt] replay: upscale stand-in: drew the %s full-screen triangle into 0x%llx "
+                                         "(%ux%u, format %d): source %.0fx%.0f -> destination %.0fx%.0f, colour image "
+                                         "0x%llx format %d in layout %d\n",
+                                         arm ? "mapping-control" : "sampling",
+                                         static_cast<unsigned long long>(compose.id), compose.width, compose.height,
+                                         static_cast<int>(compose.format), push.src[2] - push.src[0],
+                                         push.src[3] - push.src[1], push.dst[2] - push.dst[0],
+                                         push.dst[3] - push.dst[1],
+                                         static_cast<unsigned long long>(
+                                             reinterpret_cast<std::uintptr_t>(colour.image_handle)),
+                                         static_cast<int>(colour.format), static_cast<int>(sampled));
+                    }
+                    if (sampled != current && current != VK_IMAGE_LAYOUT_UNDEFINED)
+                        layout_barrier(sampled, current, VK_ACCESS_SHADER_READ_BIT, kWriteAccess,
+                                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                       VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                }
+            }
+            }  // at_armed_upscale_draw
         }
         close_labels(command_buffer, replay, open_labels);
         // Only flush GPU writes to the host domain when this batch actually wrote to a readback buffer.

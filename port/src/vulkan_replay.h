@@ -34,6 +34,7 @@
 #include "depth24.h"
 #include "gfx10_descriptors.h"
 #include "uav_clear.h"
+#include "upscale_standin.h"
 
 #include <vulkan/vulkan.h>
 #include "vulkan_predicate.h"
@@ -4974,6 +4975,9 @@ struct ArmedTarget {
     VkFormat format = VK_FORMAT_UNDEFINED;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    // The draw's global zero-based index in the boot's draw sequence (the number the readback and the controls arm
+    // by). compose_target fills it so the upscale stand-in can tell whether its pass is the armed draw.
+    unsigned long long index = 0;
     // The armed draw's own recorded command, for the PS-only control (same views, vertex buffers, counts and root
     // arguments, with only the pipeline replaced), and its translated pipeline, alive while the lists are.
     Draw draw;
@@ -5005,6 +5009,45 @@ inline ArmedTarget armed_target(std::span<const PreparedList> lists, unsigned lo
                 return out;
             }
             ++index;
+        }
+    }
+    return out;
+}
+
+// The measured upscale pass of one submission (docs/upscale_standin.md): the draw whose pixel stage takes the colour
+// image through the measured six image instructions. Same shape as armed_target - the draw's recorded command, its
+// translated pipeline and the presented colour target it writes - so the layer's stand-in can read the draw's own
+// descriptor tables and stretch the image it samples into that target. False when the submission holds no such draw
+// (a compute/present-only submission, or a boot whose upscale pipeline was never created). Pure.
+inline ArmedTarget compose_target(std::span<const PreparedList> lists) {
+    ArmedTarget out;
+    unsigned long long index = 0;
+    for (const auto& list : lists) {
+        const auto commands = list.list->commands();
+        for (std::size_t i = 0; i < commands.size(); ++i) {
+            if (!std::holds_alternative<Draw>(commands[i])) continue;
+            const detail::Prepared& p = list.commands[i];
+            if (p.draw >= list.draws.size()) {
+                ++index;
+                continue;
+            }
+            const detail::PreparedDraw& d = list.draws[p.draw];
+            if (!d.graphics ||
+                !upscale_standin::is_compose_pass(d.graphics->has_pixel_stage, d.graphics->ps_images)) {
+                ++index;
+                continue;
+            }
+            out.draw = std::get<Draw>(commands[i]);
+            out.pipeline = d.graphics;
+            out.index = index;
+            if (!d.colors.empty() && d.colors[0].id && d.colors[0].binding.image) {
+                out.found = true;
+                out.id = d.colors[0].id;
+                out.format = d.colors[0].binding.format;
+                out.width = d.colors[0].binding.width;
+                out.height = d.colors[0].binding.height;
+            }
+            return out;
         }
     }
     return out;

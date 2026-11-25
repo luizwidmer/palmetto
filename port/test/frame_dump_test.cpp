@@ -4,6 +4,7 @@
 // on, including a resolve that writes the target AFTER its last draw. No Vulkan loader, GPU or game data.
 #include "../src/vulkan_replay.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
@@ -287,6 +288,101 @@ int main() {
     expect(frame_dump::colour_bytes_differ(content_before, content_changed, 8),
            "a write that keeps the non-zero byte count is still a change");
     expect(!frame_dump::colour_bytes_differ(content_before, content_changed, 0), "an empty comparison is not a change");
+
+    // The upscale stand-in (docs/upscale_standin.md): the measured predicate, every named refusal, the measured
+    // full-rect geometry (4K colour image -> 4K presented target), the non-1:1 stretch mapping the shader's formula
+    // gives, the project mapping control's coordinate ramp, and the push dwords the draw's user data carries.
+    namespace su = palmetto::upscale_standin;
+    expect(su::is_compose_pass(true, su::compose_image_samples), "the six-sample pixel stage is the measured upscale pass");
+    expect(!su::is_compose_pass(true, 0), "the constant/background pass (0 image samples) is not the upscale pass");
+    expect(!su::is_compose_pass(false, su::compose_image_samples), "a depth-only pipeline is not the upscale pass");
+    expect(!su::is_compose_pass(true, su::compose_image_samples - 1), "one image short is not the measured shape");
+    const auto inputs = [](bool on, bool ps, std::uint32_t samples, bool colour, std::uint32_t cw, std::uint32_t ch,
+                           std::uint32_t tw, std::uint32_t th) {
+        su::Inputs in;
+        in.switch_on = on;
+        in.has_pixel_stage = ps;
+        in.pixel_image_samples = samples;
+        in.colour_resolved = colour;
+        in.colour_width = cw;
+        in.colour_height = ch;
+        in.target_width = tw;
+        in.target_height = th;
+        return in;
+    };
+    expect(su::plan(inputs(false, true, 6, true, 3840, 2160, 3840, 2160)).refusal == su::Refusal::switch_off,
+           "the stand-in is off until its switch is set");
+    expect(su::plan(inputs(true, true, 6, true, 3840, 2160, 3840, 2160)).draw,
+           "the measured upscale draw with a resolved colour image takes the stand-in");
+    expect(su::plan(inputs(true, true, 0, true, 3840, 2160, 3840, 2160)).refusal == su::Refusal::not_compose_pass,
+           "the constant pass is refused, not stretched");
+    expect(su::plan(inputs(true, true, 6, false, 0, 0, 3840, 2160)).refusal == su::Refusal::no_colour_image,
+           "no resolved colour image is a named refusal");
+    expect(su::plan(inputs(true, true, 6, true, 0, 2160, 3840, 2160)).refusal == su::Refusal::colour_extent_degenerate,
+           "a zero-width colour image is a named refusal");
+    expect(su::plan(inputs(true, true, 6, true, 3840, 0, 3840, 2160)).refusal == su::Refusal::colour_extent_degenerate,
+           "a zero-height colour image is a named refusal");
+    expect(su::plan(inputs(true, true, 6, true, 3840, 2160, 0, 2160)).refusal == su::Refusal::target_extent_degenerate,
+           "a zero-width presented target is a named refusal");
+    expect(std::strlen(su::refusal_name(su::Refusal::not_compose_pass)) != 0, "a refusal names its reason");
+    expect(std::strcmp(su::refusal_name(su::Refusal::none), "none") == 0, "the taken plan's reason is none");
+    const su::Plan measured = su::plan(inputs(true, true, 6, true, 3840, 2160, 3840, 2160));
+    expect(measured.draw && measured.refusal == su::Refusal::none, "the measured plan records a draw");
+    expect(measured.push.src[0] == 0.0f && measured.push.src[1] == 0.0f && measured.push.src[2] == 3840.0f &&
+               measured.push.src[3] == 2160.0f,
+           "the source rectangle is the whole colour image");
+    expect(measured.push.dst[0] == 0.0f && measured.push.dst[1] == 0.0f && measured.push.dst[2] == 3840.0f &&
+               measured.push.dst[3] == 2160.0f,
+           "the destination rectangle is the whole presented target");
+    expect(measured.push.mode == su::mode_sample_image && su::samples_image(measured),
+           "the shipping stand-in samples the colour image (it never invents colour)");
+    // The measured 4K->4K case is a 1:1 stretch: a destination pixel's centre maps to its own texel.
+    std::int32_t tx = -1, ty = -1;
+    su::sample_texel(measured.push, 0, 0, tx, ty);
+    expect(tx == 0 && ty == 0, "the first destination pixel samples the colour image's first texel");
+    su::sample_texel(measured.push, 3839, 2159, tx, ty);
+    expect(tx == 3839 && ty == 2159, "the last destination pixel samples the colour image's last texel");
+    su::sample_texel(measured.push, 1919, 1079, tx, ty);
+    expect(tx == 1919 && ty == 1079, "a mid destination pixel samples the matching texel (no offset, no crop)");
+    // A lower-resolution colour image is stretched: two destination pixels per source texel, nearest filtered.
+    const su::Plan half = su::plan(inputs(true, true, 6, true, 1920, 1080, 3840, 2160));
+    expect(half.draw && half.push.src[2] == 1920.0f && half.push.dst[2] == 3840.0f,
+           "a 1080p colour image over a 4K target keeps both rectangles");
+    su::sample_texel(half.push, 0, 0, tx, ty);
+    expect(tx == 0 && ty == 0, "the stretch's first destination pixel samples source texel 0");
+    su::sample_texel(half.push, 1, 0, tx, ty);
+    expect(tx == 0, "the second destination pixel still samples source texel 0");
+    su::sample_texel(half.push, 2, 0, tx, ty);
+    expect(tx == 1, "the third destination pixel samples source texel 1");
+    su::sample_texel(half.push, 3839, 2159, tx, ty);
+    expect(tx == 1919 && ty == 1079, "the stretch's last destination pixel stays inside the source image");
+    // The project's mapping control is a diagnostic arm, not the shipping plan: same geometry, a coordinate instead of
+    // a colour sample, so a boot whose colour image is black can still measure the rectangles.
+    const su::Plan ramp = su::mapping_control(measured);
+    expect(!su::samples_image(ramp) && ramp.push.mode == su::mode_mapping_control,
+           "the mapping control is not the shipping (sampling) plan");
+    expect(ramp.push.src[2] == measured.push.src[2] && ramp.push.dst[3] == measured.push.dst[3],
+           "the mapping control keeps the measured geometry");
+    float colour_px[4] = {};
+    su::mapping_control_colour(ramp.push, 0, 0, colour_px);
+    const float first_u = colour_px[0];
+    expect(first_u > 0.0f && first_u < 0.001f && colour_px[1] > 0.0f && colour_px[1] < 0.001f,
+           "the control's first pixel writes the source coordinate near 0");
+    float last = 0.0f;
+    su::mapping_control_colour(ramp.push, 3839, 2159, colour_px);
+    last = colour_px[0];
+    expect(last > 0.999f && colour_px[1] > 0.999f, "the control's last pixel writes the source coordinate near 1");
+    expect(std::fabs(first_u + last - 1.0f) < 0.001f,
+           "the control's ramp spans the destination rectangle (mean about 0.5 across the row)");
+    // The push block is the draw's user data: a plan round-trips through it exactly.
+    std::uint32_t dwords[16] = {};
+    su::write_push(measured.push, dwords);
+    su::Push restored{};
+    std::memcpy(&restored, dwords, sizeof(restored));
+    expect(std::memcmp(&restored, &measured.push, sizeof(restored)) == 0, "the push dwords round-trip the rectangles");
+    expect(su::pipeline_id != palmetto::frame_dump::control_pipeline_id &&
+               su::pipeline_id != palmetto::frame_dump::ps_control_pipeline_id,
+           "the stand-in's pipeline id is its own (not one of the frame dump's controls)");
 
     if (failures) return 1;
     std::printf("frame_dump_test: command kinds, ordered writers and table windows exact\n");
