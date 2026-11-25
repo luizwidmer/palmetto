@@ -1415,7 +1415,9 @@ struct DeviceState {
         std::uint64_t title_va = 0;
         std::uint64_t bytes = 0;
         std::uint64_t last_nonzero = 0;
+        std::uint64_t last_scanned = 0;  // committed+readable page-head bytes at the last sample (commit transitions)
         unsigned changes = 0;
+        bool started = false;  // the first sample (all-zero, nothing committed yet) is always printed
     };
     PageWatch page_watches_[4];
     unsigned page_watch_count_ = 0;
@@ -1468,12 +1470,20 @@ struct DeviceState {
                 sizeof(info))
                 break;
             const auto region_end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
-            std::uint64_t next = region_end > at ? region_end : at + 0x10000;
+            // Walk page by page even inside one big committed region, so every 64 KiB page's head is sampled rather than
+            // only the first page of the region.
+            std::uint64_t next = (region_end > at ? region_end : end);
+            const std::uint64_t page_end = at + 0x10000;
+            if (next > page_end) next = page_end;
             if (next > end) next = end;
-            if (info.State == MEM_COMMIT &&
-                !(info.Protect & (PAGE_NOACCESS | PAGE_GUARD | PAGE_WRITECOMBINE | PAGE_NOCACHE))) {
+            // The title's pages are console memory: a committed page may be mapped write-combined or non-cached, which
+            // is readable and is what the import's own commit check accepts (it only refuses NOACCESS and GUARD). The
+            // watch must use the same rule, or a readable span would read as "0 scanned".
+            if (info.State == MEM_COMMIT && !(info.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
                 const auto* data = reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(at));
-                const std::uint64_t head = std::min<std::uint64_t>(0x1000, next - at);
+                // 256 bytes per page rather than 4096: console memory can be non-cached, where reads are slow, and a fill
+                // that writes a page touches its head. Keeps the whole-span scan cheap enough not to slow the boot.
+                const std::uint64_t head = std::min<std::uint64_t>(0x100, next - at);
                 for (std::uint64_t i = 0; i < head; ++i)
                     if (data[i]) ++nonzero;
                 scanned += head;
@@ -1487,23 +1497,31 @@ struct DeviceState {
         if (!page_watch_enabled() || !page_watch_count_) return;
         ++page_watch_ticks_;
         if (page_watch_ticks_ % 64 != 1) return;  // the first submission, then every 64th
+        const std::uint64_t sample = page_watch_ticks_ / 64 + 1;
+        // A line for the first sample, for every change of (committed bytes, non-zero bytes) - so an all-zero span that
+        // gets committed is visible too - and for every 64th sample as a running "latest" line.
+        const bool periodic = sample % 64 == 0;
         for (unsigned i = 0; i < page_watch_count_; ++i) {
             PageWatch& watch = page_watches_[i];
             std::uint64_t scanned = 0;
             const std::uint64_t nonzero = count_span_nonzero(watch.title_va, watch.bytes, scanned);
-            if (nonzero == watch.last_nonzero && watch.changes) continue;
-            ++watch.changes;
+            const bool changed = scanned != watch.last_scanned || nonzero != watch.last_nonzero;
+            const bool first = !watch.started;
+            if (!changed && !periodic && !first) continue;
+            watch.started = true;
+            if (changed) ++watch.changes;
             static std::atomic<unsigned> printed{0};
-            if (printed.fetch_add(1, std::memory_order_relaxed) < 20)
+            if (printed.fetch_add(1, std::memory_order_relaxed) < 120)
                 std::fprintf(stderr,
                              "[rt] d3d12: page watch: title VA 0x%llx: sampled non-zero bytes %llu -> %llu of %llu "
-                             "scanned (sample %llu, change %u)\n",
+                             "scanned (sample %llu, change %u%s)\n",
                              static_cast<unsigned long long>(watch.title_va),
                              static_cast<unsigned long long>(watch.last_nonzero),
                              static_cast<unsigned long long>(nonzero),
-                             static_cast<unsigned long long>(scanned),
-                             static_cast<unsigned long long>(page_watch_ticks_ / 64 + 1), watch.changes);
+                             static_cast<unsigned long long>(scanned), static_cast<unsigned long long>(sample),
+                             watch.changes, periodic && !changed ? ", periodic" : "");
             watch.last_nonzero = nonzero;
+            watch.last_scanned = scanned;
         }
     }
 
@@ -2507,7 +2525,7 @@ public:
         if (++placed_attempts_ > kMaxAttempts) {
             placed_skipped_ = true;
             static std::atomic<unsigned> gave_up{0};
-            if (gave_up.fetch_add(1, std::memory_order_relaxed) < 8)
+            if (gave_up.fetch_add(1, std::memory_order_relaxed) < 24)
                 std::fprintf(stderr,
                              "[rt] d3d12: placed texture import: resource 0x%llx at title VA 0x%llx: pages never held "
                              "texture-computer bytes after %u attempt(s); left as the committed stand-in\n",
@@ -2538,7 +2556,7 @@ public:
                 if (!placed_wait_logged_) {
                     placed_wait_logged_ = true;
                     static std::atomic<unsigned> waiting{0};
-                    if (waiting.fetch_add(1, std::memory_order_relaxed) < 12)
+                    if (waiting.fetch_add(1, std::memory_order_relaxed) < 32)
                         std::fprintf(stderr,
                                      "[rt] d3d12: placed texture import: resource 0x%llx at title VA 0x%llx: the "
                                      "pages' head is all zero, waiting for the texture-computer fill\n",
