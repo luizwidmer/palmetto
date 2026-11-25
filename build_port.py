@@ -1342,6 +1342,8 @@ def shaders(game: str, work: str, jobs: int, emulate: bool = False, keep_emulate
 
 FSPX_DLL = "amd_fidelityfx_upscaler_xbox.dll"
 FSPX_TOOLS = ("fspx_unpack.py", "widen_smem_decode.py", "shader_disasm.py")   # as TRANSLATION_SOURCES, for FSPX
+FSPX_REFUSALS = "refusals.json"   # per-program refusal reasons, written by rdna2spirv.py --refusals
+FSPX_COVERAGE = "coverage.json"   # per-program coverage, written by fspx_coverage() on every run
 
 
 def file_sha256(path: str) -> str:
@@ -1401,6 +1403,71 @@ def fspx_cache_complete(unpacked: str, spirv: str) -> bool:
     )
     return has_compute_key and expected <= set(index) and \
         all(os.path.isfile(os.path.join(spirv, name + ".spv")) for name in expected)
+
+
+def refusal_reasons(path: str) -> "dict[str, str]":
+    """The translator's per-program refusal reasons (name -> reason) in a refusals file, or {} when it is unreadable.
+
+    rdna2spirv.py --refusals writes one: the reason each program it could not translate stopped at (the translator's
+    Unsupported messages). Without it a program is still reported as untranslated, only the reason is not recorded."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {name: reason for name, reason in data.items() if isinstance(name, str) and isinstance(reason, str)}
+
+
+def fspx_coverage(unpacked: str, spirv: str) -> "dict | None":
+    """What the FSPX step covers: every upscaler program the unpack found, whether its module was translated, why a
+    refused one was refused, and a one-line summary; written to <unpacked>/coverage.json and printed. None when the
+    unpack has no index.
+
+    tooling/fspx_unpack.py names the programs the package's FidelityFX DLL carries (the FSPX set, docs/fspx.md); the
+    translated index says which ones have a module and refusals.json (rdna2spirv.py --refusals) says why the others
+    did not. Unlike the pipeline library, the FSPX step translates into the folder the runtime reads, so a program with
+    an index entry and its module is published: a program without one is a compute pipeline the runtime cannot create
+    (the "no translated compute shader for FSPX" refusal). The step requires the whole set anyway, so this report is
+    what names a regression before the stage stops."""
+    names = sorted(fspx_program_names(unpacked) or ())
+    if not names:
+        return None
+    try:
+        with open(os.path.join(spirv, "index.json"), encoding="utf-8") as f:
+            index = json.load(f)
+    except (OSError, ValueError):
+        index = {}
+    if not isinstance(index, dict):
+        index = {}
+    reasons = refusal_reasons(os.path.join(spirv, FSPX_REFUSALS))
+    programs = {}
+    counted = {}
+    translated = 0
+    for name in names:
+        if name in index and os.path.isfile(os.path.join(spirv, name + ".spv")):
+            programs[name] = {"status": "translated", "reason": ""}
+            translated += 1
+        elif name in reasons:
+            programs[name] = {"status": "refused", "reason": reasons[name]}
+            counted[reasons[name]] = counted.get(reasons[name], 0) + 1
+        else:
+            programs[name] = {"status": "untranslated", "reason": "reason not recorded"}
+            counted["reason not recorded"] = counted.get("reason not recorded", 0) + 1
+    summary = {"programs": len(names), "translated": translated, "untranslated": len(names) - translated,
+               "reasons": counted}
+    path = os.path.join(unpacked, FSPX_COVERAGE)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        json.dump({"summary": summary, "programs": programs}, f, indent=0, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    why = ", ".join(f"{reason} x{count}" for reason, count in sorted(counted.items(), key=lambda kv: (-kv[1], kv[0])))
+    log(f"shaders: FidelityFX upscaler coverage: {translated} of {len(names)} translated, "
+        f"{len(names) - translated} untranslated" + (f" ({why})" if why else ""))
+    return {"summary": summary, "programs": programs}
 
 
 def repair_fspx_listings(disasm: str, code: str, repaired: str) -> "tuple[int, int]":
@@ -1472,9 +1539,10 @@ def fspx_shaders(game: str, work: str, mc_signature: str, emulate: bool = False,
         return
     settings = fspx_settings(dll, mc_signature, emulate, fallbacks)
     if read_shader_setting(settings_file) == settings and fspx_cache_complete(unpacked, spirv):
+        fspx_coverage(unpacked, spirv)   # report every program on a reused step too, as the pipeline library does
         return
     log(f"shaders: unpacking, repairing and translating the FSPX programs of {FSPX_DLL}")
-    drop(translated, settings_file)
+    drop(translated, settings_file, os.path.join(spirv, FSPX_REFUSALS), os.path.join(unpacked, FSPX_COVERAGE))
     # A program that no longer translates must not keep a module from the run before.
     for folder, suffixes in ((os.path.join(unpacked, "disasm"), (".s",)),
                              (os.path.join(unpacked, "disasm_repaired"), (".s",)),
@@ -1492,18 +1560,22 @@ def fspx_shaders(game: str, work: str, mc_signature: str, emulate: bool = False,
     rebuilt, emitted = repair_fspx_listings(os.path.join(unpacked, "disasm"), os.path.join(unpacked, "fspx"), repaired)
     log(f"shaders: repaired the FSPX listings ({rebuilt} words rebuilt, {emitted} swallowed instructions re-emitted)")
     extra = (["--wave64-emulate"] if emulate else []) + list(fallbacks)
-    py("rdna2spirv.py", repaired, "--out", spirv, "--no-asm", *extra)
+    py("rdna2spirv.py", repaired, "--out", spirv, "--no-asm",
+       "--refusals", os.path.join(spirv, FSPX_REFUSALS), *extra)
     try:
         with open(translated, encoding="utf-8") as f:
             index = json.load(f)
     except (OSError, ValueError):
         index = {}
+    fspx_coverage(unpacked, spirv)   # names a refused program before the whole-set failure below
     missing = sorted(expected - set(index)) if isinstance(index, dict) else sorted(expected)
     if missing or len(index) != len(expected):
         drop(translated)   # the runtime must not load a partial set
         fail(f"shaders: {len(expected) - len(missing)} of the {len(expected)} FSPX programs translated after the "
              f"listing repair, and {len(missing)} have no module. The FSPX set is kept whole or not at all: the "
-             "translator named the instruction each one stops at above (docs/boot_frontier.md)")
+             "translator named the instruction each one stops at above, and "
+             f"{os.path.join(unpacked, FSPX_COVERAGE)} names every program's status and reason "
+             "(docs/boot_frontier.md)")
     clash = fspx_key_clash(spirv)
     if clash:
         drop(translated)   # the runtime must not load an index whose keys pick between different modules
@@ -1795,14 +1867,7 @@ def library_refusal_reasons(staged: str) -> "dict[str, str]":
     rdna2spirv.py --refusals writes <staged>/refusals.json: the reason each program it could not translate stopped at
     (tooling/rdna2spirv.py's Unsupported messages). Without it a program is still reported as untranslated, only the
     reason is not recorded."""
-    try:
-        with open(os.path.join(staged, LIBRARY_REFUSALS), encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return {name: reason for name, reason in data.items() if isinstance(name, str) and isinstance(reason, str)}
+    return refusal_reasons(os.path.join(staged, LIBRARY_REFUSALS))
 
 
 def library_published(fspx: "str | None") -> "set[str]":

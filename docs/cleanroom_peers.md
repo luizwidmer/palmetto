@@ -222,7 +222,7 @@ one or two stages behind the peers above.
    exactly that (buffers: 68.0 to 49.8 ms of card time a frame; copy-back: 22,900 read-backs in six minutes, and it
    unblocked a mission). We have neither, and our memory figure (about 83.6 GB private bytes at 300 s) is the other
    side of the same class.
-5. **The FSR 4 console route is half translated and not routed.** 13 of 29 upscaler programs translate and the
+5. **The FSR 4 console route is translated but not yet routed by the title.** 29 of 29 upscaler programs translate and validate (measured on the current tree; the route harness maps the package DLL, creates its context, records 20 compute passes and serves all 29 pipeline creations), and the title itself requests none of them in the boot.
    console upscaler pipelines are not created, where XCL runs all 29 pipelines and 20 passes of a frame. The stand-in
    is already done, so this is the picture-parity step behind content.
 6. **Audio is still a stand-in.** Every stage-5/6 peer decodes XMA and Opus; our XMA2 decoder exists but is not wired
@@ -350,7 +350,7 @@ it exists and by a bounded explicit request otherwise.
 ### Slice 5 - the FSR 4 console-upscaler route (effort M)
 
 The stand-in is done; the parity step is running the title's own upscaler where its pipelines can be made. The
-measured gap is the translator: 13 of 29 upscaler programs translate. XCL reports all 29 pipelines translated and a
+measured gap was the translator: 29 of 29 upscaler programs now translate (the earlier 13-of-29 figure predates the widen repair). XCL reports all 29 pipelines translated and a
 frame's 20 passes run. Clean-room spec: translate the remaining upscaler programs (the parity failure classes are
 already named in the translator pages), make the console pipeline-deserialization answer create the measured upscaler
 pipelines on the host, and route the upscale to the title's own programs when they exist, keeping the stretch stand-in

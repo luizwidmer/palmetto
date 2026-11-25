@@ -207,9 +207,52 @@ class FspxStage(unittest.TestCase):
         self.assertEqual(unpack, (self.dll, "--out", self.unpacked, "--disasm"))
         # the translator reads the listings the repair step wrote, not the unpack's own (docs/fspx.md)
         self.assertEqual(translate, (os.path.join(self.unpacked, "disasm_repaired"), "--out", self.spirv,
-                                     "--no-asm"))
+                                     "--no-asm", "--refusals",
+                                     os.path.join(self.spirv, build_port.FSPX_REFUSALS)))
         self.assertTrue(os.path.isfile(os.path.join(self.spirv, "fspx_build.json")))
         self.assertEqual(self.run_step(), [])
+
+    def test_a_refused_program_is_named_in_coverage_before_the_step_fails(self):
+        """The translator's --refusals file and the coverage report name the program the whole-set check refuses."""
+        def fake_py(tool, *args):
+            if tool == "fspx_unpack.py":
+                os.makedirs(os.path.join(self.unpacked, "disasm"), exist_ok=True)
+                os.makedirs(os.path.join(self.unpacked, "fspx"), exist_ok=True)
+                with open(os.path.join(self.unpacked, "index.json"), "w", encoding="utf-8", newline="\n") as f:
+                    json.dump([{"name": "upscaler_00", "file": "upscaler_00.dxbc"},
+                               {"name": "upscaler_01", "file": "upscaler_01.dxbc"}], f)
+                for name in ("upscaler_00", "upscaler_01"):
+                    with open(os.path.join(self.unpacked, "disasm", name + ".s"), "w", encoding="utf-8") as f:
+                        f.write("\ts_endpgm\n")
+                    with open(os.path.join(self.unpacked, "fspx", name + ".code"), "wb") as f:
+                        f.write(bytes(4))
+            elif tool == "rdna2spirv.py":
+                out = args[args.index("--out") + 1]
+                os.makedirs(out, exist_ok=True)
+                with open(os.path.join(out, "index.json"), "w", encoding="utf-8", newline="\n") as f:
+                    json.dump({"upscaler_00": {"stage": "cs", "fspx_code_sha256": "c" * 64}}, f)
+                with open(os.path.join(out, "upscaler_00.spv"), "wb") as f:
+                    f.write(b"synthetic module")
+                with open(args[args.index("--refusals") + 1], "w", encoding="utf-8", newline="\n") as f:
+                    json.dump({"upscaler_01": "fall-through into undecodable words"}, f)
+
+        def run_with(fake):
+            with mock.patch.object(build_port, "py", fake), \
+                    mock.patch.object(build_port, "repair_fspx_listings", side_effect=self.fake_repair), \
+                    mock.patch.object(build_port, "log", lambda *a: None):
+                build_port.fspx_shaders(self.game, self.work, "llvm-mc 23")
+
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()) as err:
+            run_with(fake_py)
+        self.assertIn(build_port.FSPX_COVERAGE, err.getvalue())
+        with open(os.path.join(self.unpacked, build_port.FSPX_COVERAGE), encoding="utf-8") as f:
+            coverage = json.load(f)
+        self.assertEqual(coverage["summary"],
+                         {"programs": 2, "translated": 1, "untranslated": 1,
+                          "reasons": {"fall-through into undecodable words": 1}})
+        self.assertEqual(coverage["programs"]["upscaler_01"]["status"], "refused")
+        self.assertIn("fall-through", coverage["programs"]["upscaler_01"]["reason"])
+        self.assertFalse(os.path.exists(os.path.join(self.spirv, "index.json")))   # the partial set is not published
 
     def test_empty_translation_fails_the_step_and_is_retried(self):
         """A translation that produced no modules fails the step: the whole FSPX set is required (docs/fspx.md), so
@@ -442,6 +485,67 @@ class ShadersStageWithTheDll(unittest.TestCase):
             self.assertEqual(stage(), ["fspx_unpack.py", "rdna2spirv.py"])
             self.assertTrue(os.path.isfile(os.path.join(work, "shaders", "spirv", "index.json")))
             self.assertTrue(os.path.isfile(os.path.join(work, "shaders", "spirv", "fspx", "index.json")))
+
+
+class FspxCoverage(unittest.TestCase):
+    """fspx_coverage(): every unpacked upscaler program's translation status, written beside the unpack.
+
+    The FSPX step keeps the set whole or not at all, so the coverage report is what names the program it refused and
+    the reason before the stage stops, and what a build's 29-of-29 result can be read from (docs/fsr_route.md). Zero
+    game data: the "index" lists names and each module is four bytes."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.unpacked = os.path.join(self.tmp.name, "shaders", "fspx")
+        self.spirv = os.path.join(self.tmp.name, "shaders", "spirv", "fspx")
+        for path in (self.unpacked, self.spirv):
+            os.makedirs(path)
+        self.names = [f"upscaler_{n:02d}" for n in range(3)]
+        with open(os.path.join(self.unpacked, "index.json"), "w", encoding="utf-8", newline="\n") as f:
+            json.dump([{"name": name, "file": name + ".dxbc"} for name in self.names], f)
+
+    def write_index(self, names):
+        with open(os.path.join(self.spirv, "index.json"), "w", encoding="utf-8", newline="\n") as f:
+            json.dump({name: {"stage": "cs"} for name in names}, f)
+        for name in names:
+            with open(os.path.join(self.spirv, name + ".spv"), "wb") as f:
+                f.write(b"\x03\x02\x23\x07")
+
+    def write_refusals(self, reasons):
+        with open(os.path.join(self.spirv, build_port.FSPX_REFUSALS), "w", encoding="utf-8", newline="\n") as f:
+            json.dump(reasons, f)
+
+    def test_report_names_each_program_status_and_writes_coverage_json(self):
+        self.write_index(self.names[:2])
+        self.write_refusals({self.names[2]: "fall-through into undecodable words"})
+        report = build_port.fspx_coverage(self.unpacked, self.spirv)
+        summary = report["summary"]
+        self.assertEqual(summary["programs"], 3)
+        self.assertEqual(summary["translated"], 2)
+        self.assertEqual(summary["untranslated"], 1)
+        self.assertEqual(summary["reasons"], {"fall-through into undecodable words": 1})
+        self.assertEqual(report["programs"][self.names[0]], {"status": "translated", "reason": ""})
+        self.assertEqual(report["programs"][self.names[2]]["status"], "refused")
+        self.assertIn("fall-through", report["programs"][self.names[2]]["reason"])
+        with open(os.path.join(self.unpacked, build_port.FSPX_COVERAGE), encoding="utf-8") as f:
+            on_disk = json.load(f)
+        self.assertEqual(on_disk["summary"], summary)
+        self.assertEqual(on_disk["programs"], report["programs"])
+
+    def test_an_index_entry_without_its_module_is_not_translated(self):
+        """The runtime looks the module up beside the index; an entry without one creates no pipeline."""
+        self.write_index(self.names[:2])
+        os.remove(os.path.join(self.spirv, self.names[1] + ".spv"))
+        report = build_port.fspx_coverage(self.unpacked, self.spirv)
+        self.assertEqual(report["programs"][self.names[1]]["status"], "untranslated")
+        self.assertEqual(report["programs"][self.names[1]]["reason"], "reason not recorded")
+        self.assertEqual(report["summary"]["translated"], 1)
+        self.assertEqual(report["summary"]["untranslated"], 2)
+
+    def test_no_unpack_index_is_not_a_report(self):
+        os.remove(os.path.join(self.unpacked, "index.json"))
+        self.assertIsNone(build_port.fspx_coverage(self.unpacked, self.spirv))
 
 
 class FspxCacheComplete(unittest.TestCase):
