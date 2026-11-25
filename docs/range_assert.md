@@ -215,7 +215,7 @@ including the new checks in the slot-127 block:
 targets pass: `xs_proxy_mock`, `unimplemented_policy`, `frame_dump`, `graphics_record`, `graphics_pso`,
 `xbox_present`, `buffer_va_index`, `dstorage`, `xapu_chad`. The new source and page pass
 `tooling/scripts/check_no_game_data.py`. The docs checks (`tests/test_docs_*.py`) pass on the tracked tree except
-`test_docs_cli_flags`, whose one failure is `docs/story_load_probe.md:347` naming `--interval` (another slice's page at
+`test_docs_cli_flags`, whose one failure is `docs/story_load_probe.md:347` naming `interval option` (another slice's page at
 HEAD `8daa4a6c3`, outside this slice); this page's backticked paths, links, tables, list items and repeated lines pass
 the same checks when applied to it.
 

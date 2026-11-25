@@ -573,7 +573,7 @@ Outside the repository, under `D:\leonida-work\userchange-probe`:
   capture statistics quoted above.
 
 Reproduce one arm: acquire `_setup\boot_lock.ps1 -Acquire -Who <name>`, start the probe
-(`python -I state_probe.py --out <work>\state_probe.csv --seconds 330 --interval 2`), run one boot
+(`python -I state_probe.py --out <work>\state_probe.csv --seconds 330 interval option 2`), run one boot
 with the environment of section 1 and `--timeout 300`, kill at 300 s, stop the probe and release the
 lock. The second arm is the same with `--env PALMETTO_USER_CHANGE_EVENT=1`. No runtime change is
 involved and no git write is made by this slice; the only file this slice writes in the repository is
