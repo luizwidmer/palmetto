@@ -329,6 +329,34 @@ void test_state() {
               "state: the shape's family, stage block, item count, variable region and payload follow the measurement");
     }
 
+    // The probe's input contract (docs/state_blob.md section 9): the behavioural probe that a fixed-function pin has
+    // to survive reads candidate words out of the container verbatim. Every word of every measured container shape is
+    // kept, in order, unmodified, so a probe scan sees the driver's state exactly - the decoder's own checks mask,
+    // zero or reorder nothing - and the region a field could live in (the stage block plus the shared block) is
+    // word-aligned and ends exactly at the variable region.
+    bool probe_words_kept = true;
+    bool probe_window_inside = true;
+    for (const std::size_t size : shapes) {
+        const Bytes blob = make_state_shape(size);
+        State decoded;
+        if (!rt::graphics_record::decode_state(Span{blob.data(), blob.size()}, &decoded)) {
+            probe_words_kept = false;
+            continue;
+        }
+        for (std::size_t word = 0; word < blob.size() / 4; ++word) {
+            std::uint32_t stored = 0;
+            std::memcpy(&stored, blob.data() + 4 * word, sizeof stored);
+            probe_words_kept = probe_words_kept && decoded.raw[word] == stored;
+        }
+        probe_window_inside = probe_window_inside && decoded.variable_offset % 4 == 0 &&
+                              rt::graphics_record::kStateHeaderBytes + decoded.stage_block_bytes +
+                                      decoded.common_block_bytes ==
+                                  decoded.variable_offset;
+    }
+    check(probe_words_kept, "state: the probe's candidate words are the blob's words, verbatim, in every shape");
+    check(probe_window_inside,
+          "state: the stage and shared blocks the probe scans are word-aligned and end at the variable region");
+
     // Sizes inside the measured 380..520 envelope that no measured state has: the 421..463 gap between the families,
     // and a size off a family's 8-byte step.
     const std::size_t no_family[4] = {424, 436, 452, 460};

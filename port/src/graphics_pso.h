@@ -18,6 +18,8 @@
 // but no word of it is pinned to a D3D12 field (docs/state_blob.md) - decode_fixed_function_state() refuses all eight
 // fields by name and returns false. GraphicsPsoInputs::defaults is that state, every field the caller's, and
 // documented_default_state() is the one set the project documents as the measurement stand-in for the undecoded blob.
+// A field is pinned only when a behavioural probe can tell its values apart; run_probe() below is that probe's
+// GPU-free model, and docs/state_blob.md section 9 has the probe table and what a pin would still need.
 // What the record cannot prove is a refusal with the field named in `why`, never a guess: a layout element whose format
 // word is not one of the measured DXGI values, whose input slot, input-slot class or instance step rate is not the
 // measured 0, whose aligned byte offset is not the measured packed one, or whose semantic name/index duplicates another
@@ -31,6 +33,7 @@
 #include <windows.h>
 #include <d3d12.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -141,8 +144,106 @@ inline constexpr const char* kFixedFunctionFieldNames[8] = {
 // untouched. A caller that must still build uses documented_default_state() and logs the substitution, which is what
 // the slot-57 wiring does (docs/slot57_wiring.md). A state record the container decoder refused (State::size 0) is
 // refused as `state` instead, because nothing at all was decoded.
+//
+// What a pin would take is the behavioural probe below: the record's words are only a candidate *place* for a field,
+// never a value, and the probe says which values a scene can tell apart. Decoding is refused until an observation of
+// this title's own draw through the record exists to compare against; today it does not (the title's draws produce
+// no coverage, docs/frame_capture.md sections 6-8), so every field stays refused.
 bool decode_fixed_function_state(const rt::graphics_record::State& state, FixedFunctionState* out,
                                  FixedFunctionFieldStatus* fields, std::string* why);
+
+// ---- The behavioural probe of a fixed-function field -------------------------------------------------------------
+//
+// A field is pinned to a word of the serialized state record only when a *behavioural probe* tells a value of that
+// field apart: a minimal scene rendered through the state whose observable result differs between the candidate
+// values. This is the falsifier the project requires before replacing the documented stand-in - a decode that cannot
+// be told apart from a guess is not a decode. The probe is also what makes a refusal testable: the same scene under
+// two candidate values must produce two different observations, or the candidate is not measurable at all.
+//
+// run_probe() is the GPU-free, deterministic model of that observation: a 4x4 RGBA8 colour target, a 4x4 depth
+// buffer and one fixed minimal scene per probe. It creates no device and reads no game file, so the model is the
+// *contract* for the measurement; the measurement itself is what the title's own draw through the record would have
+// to produce, and that does not exist (docs/frame_capture.md sections 6-8: the title's vertices produce no coverage).
+// docs/state_blob.md section 9 has the probe table, what each probe observes and what stays unobservable even in
+// principle (sample quality).
+enum class ProbeScene {
+    // Two triangles placed over the left and the right half of the target with opposite screen winding. Observes the
+    // rasterizer's cull mode and front-face flag: four (cull, front) combinations cover a different half.
+    kWindingPair,
+    // A red near layer then a green far layer over the same pixels. Observes depth enable, depth func and depth write:
+    // the surviving colour is red only when the far layer fails the test after the near layer wrote.
+    kTwoDepthQuads,
+    // Two overlapping layers of known colour and alpha. Observes blend enable, the colour/alpha factors, the blend
+    // operation and the render-target write mask, through the resolved colour.
+    kOverlap,
+    // Twelve vertices drawn as a triangle list (four triangles covering the target). Observes the topology type: a PSO
+    // type that does not match the draw's list class assembles nothing (D3D12 rejects the pair), a matching type
+    // assembles the four triangles.
+    kTopologyList,
+    // An indexed triangle strip whose index list holds a cut sentinel (0xFFFF) and a vertex list that does not.
+    // Observes the index-buffer strip cut: a value equal to the sentinel restarts the strip; a value that does not
+    // match reads it as an out-of-range vertex index, which the probe counts.
+    kStripCut,
+    // A small triangle over one pixel of the 4x4 target that covers one of the four sample positions and not the
+    // pixel centre. Observes the sample count (covered samples and resolved colour) and the sample mask.
+    kSampleGrid,
+    // A full-screen quad whose vertices are outside the depth range. Observes depth clipping: with clipping on the
+    // quad is removed, with clipping off the API clamps its depth and draws it.
+    kDepthClip,
+};
+
+// What one probe run observed. Equality is the probe's own: two states are behaviourally distinguishable by a scene
+// exactly when their outcomes differ.
+struct ProbeOutcome {
+    std::uint32_t primitives = 0;    // primitives assembled from the scene's vertices and indices
+    std::uint32_t mismatch = 0;      // 1 when the state's topology type and the scene's list class disagree
+    std::uint32_t culled = 0;        // primitives the rasterizer's cull mode removed
+    std::uint32_t clipped = 0;       // primitives depth clipping removed
+    std::uint32_t fragments = 0;     // sample fragments that reached the pixel stage (after cull, clip and sample mask)
+    std::uint32_t depth_failed = 0;  // fragments the depth test rejected
+    std::uint32_t written = 0;       // fragments that reached the colour write stage
+    std::uint32_t out_of_range = 0;  // strip indices the cut did not cut and the vertex list does not hold
+    std::uint32_t unmodelled = 0;    // state values the model cannot express (an invalid sample count, an unknown factor)
+    std::array<std::uint8_t, 16> coverage{};  // covered samples per pixel, row-major 4x4
+    std::array<std::uint8_t, 64> colour{};    // resolved RGBA8 per pixel, row-major 4x4
+    bool operator==(const ProbeOutcome&) const = default;
+};
+
+// Runs one probe scene under `state` and returns the observation. GPU-free and deterministic; the state need not be
+// a valid API state (an invalid value is counted in ProbeOutcome::unmodelled and treated as its neutral value), so the
+// probe is safe in a test, but a caller compares outcomes of valid states.
+ProbeOutcome run_probe(const FixedFunctionState& state, ProbeScene scene);
+
+// One row of the probe contract: which FixedFunctionState field group a probe scene can decide, and what it observes.
+// `observable` is false only when no rendering result the API defines depends on the field - D3D12 defines sample
+// quality 0 as "the default pattern" and leaves other values device-dependent, so no scene can pin it; only the
+// container's layout could. The rows are in kFixedFunctionFieldNames order (probe_contract[field].field == field).
+struct ProbeContract {
+    int field = 0;          // index into kFixedFunctionFieldNames
+    ProbeScene scene = ProbeScene::kWindingPair;
+    bool observable = false;
+    const char* distinguishes = "";  // what changes in ProbeOutcome when the field's value changes
+};
+
+inline constexpr ProbeContract kProbeContract[8] = {
+    {0, ProbeScene::kWindingPair, true,
+     "the covered half: cull mode and front-face flag each select a half; the depth-clip scene adds whether an "
+     "out-of-range layer is drawn (fill mode, bias, multisample and conservative rasterization are not modelled)"},
+    {1, ProbeScene::kOverlap, true,
+     "the resolved colour: blend enable, factors, operation and write mask each change it (one target modelled)"},
+    {2, ProbeScene::kTwoDepthQuads, true,
+     "the surviving colour: depth enable, depth func and depth write mask each change it (stencil not modelled)"},
+    {3, ProbeScene::kTopologyList, true,
+     "the assembled count: a topology type outside the scene's list class assembles nothing"},
+    {4, ProbeScene::kStripCut, true,
+     "the fault count: a cut value equal to the strip's sentinel restarts it, any other value reads it as a vertex index"},
+    {5, ProbeScene::kSampleGrid, true,
+     "the partial pixel's covered-sample count and resolved colour: 0 samples at count 1, 1 sample at count 4"},
+    {6, ProbeScene::kSampleGrid, false,
+     "nothing: D3D12 defines quality 0 as the default pattern and leaves other values device-dependent"},
+    {7, ProbeScene::kSampleGrid, true,
+     "the covered-sample count and resolved colour: a mask that drops samples changes both"},
+};
 
 // One input-layout format word this tree has measured, with the DXGI format it means and its bytes per vertex.
 struct InputFormat {

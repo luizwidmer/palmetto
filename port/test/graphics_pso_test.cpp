@@ -21,6 +21,11 @@
 //   - decode_fixed_function_state(): the decoded state record's container passes, but all eight fixed-function fields
 //     refuse by name with the histogram key `state.fixed_function` and the output untouched; an undecoded container
 //     refuses as `state` (docs/state_blob.md).
+//   - run_probe(): the behavioural probe behind that refusal. Every fixed-function field a defined rendering result
+//     depends on has a scene whose observation changes with the field (cull/front face, depth enable/func/write, blend
+//     enable/factors/op/write mask, topology type, strip cut, sample count, sample mask); sample quality has none, and
+//     the test says so instead of inventing a scene. The probe is the falsifier a decode would have to survive; the
+//     record supplies no observation, so the decode still refuses.
 // It prints the input and refusal tables so the boundary is visible without reading the header.
 
 #include "../src/graphics_pso.h"
@@ -600,6 +605,219 @@ pso::GraphicsPsoInputs base_inputs(const void* ps, SIZE_T ps_size, const void* v
     return inputs;
 }
 
+// The behavioural probe: every field that can be observed has a scene whose observation changes with it, and the one
+// field that cannot be observed is named as such instead of being given a made-up probe. These checks are the
+// falsifier behind decode_fixed_function_state()'s refusal: the state record's words are only a candidate place for a
+// field, and a decode is only a pin when the observation the probe models is available from the title's own draw -
+// it is not (docs/frame_capture.md sections 6-8), so the refusal below stands while the probe stays usable.
+void test_fixed_function_probe() {
+    const pso::FixedFunctionState defaults = pso::documented_default_state();
+    const auto run = [](const pso::FixedFunctionState& state, pso::ProbeScene scene) {
+        return pso::run_probe(state, scene);
+    };
+
+    // The contract: eight rows in the field-name order, each saying what it observes, and exactly one field (sample
+    // quality) that no rendering result the API defines depends on.
+    bool order = true;
+    bool named = true;
+    int observable = 0;
+    for (int field = 0; field < 8; ++field) {
+        order = order && pso::kProbeContract[field].field == field;
+        named = named && pso::kProbeContract[field].distinguishes != nullptr &&
+                pso::kProbeContract[field].distinguishes[0] != '\0';
+        if (pso::kProbeContract[field].observable) ++observable;
+    }
+    check(order, "probe: the contract rows are the eight field names in kFixedFunctionFieldNames order");
+    check(named, "probe: every contract row says what it observes");
+    check(observable == 7, "probe: seven of the eight fields have an observable scene");
+    check(!pso::kProbeContract[6].observable, "probe: sample quality has no observable scene");
+
+    // Determinism: the same state and scene give the same outcome.
+    check(run(defaults, pso::ProbeScene::kTwoDepthQuads) == run(defaults, pso::ProbeScene::kTwoDepthQuads),
+          "probe: a probe run is deterministic");
+
+    // ---- Rasterizer: the winding pair separates cull mode and front-face flag.
+    pso::FixedFunctionState cull_none = defaults;
+    cull_none.rasterizer.CullMode = D3D12_CULL_MODE_NONE;
+    pso::FixedFunctionState cull_front = defaults;
+    cull_front.rasterizer.CullMode = D3D12_CULL_MODE_FRONT;
+    pso::FixedFunctionState front_ccw = defaults;
+    front_ccw.rasterizer.FrontCounterClockwise = TRUE;
+    const pso::ProbeOutcome back_culled = run(defaults, pso::ProbeScene::kWindingPair);
+    const pso::ProbeOutcome nothing_culled = run(cull_none, pso::ProbeScene::kWindingPair);
+    const pso::ProbeOutcome front_culled = run(cull_front, pso::ProbeScene::kWindingPair);
+    const pso::ProbeOutcome flipped_face = run(front_ccw, pso::ProbeScene::kWindingPair);
+    check(back_culled.primitives == 2 && back_culled.culled == 1 && back_culled.fragments == 4,
+          "probe: back-face culling keeps the clockwise half only (4 of the 8 rasterized sample fragments)");
+    check(nothing_culled.culled == 0 && nothing_culled.fragments == 8,
+          "probe: culling off rasterizes both halves (8 sample fragments)");
+    check(front_culled.fragments == 4 && flipped_face.fragments == 4,
+          "probe: culling the front, or flipping the front-face flag, keeps the other half");
+    check(!(back_culled == nothing_culled), "probe: cull mode is behaviourally observable");
+    check(!(back_culled == front_culled), "probe: a cull-mode change is observable even though the fragment count is equal");
+    check(!(back_culled == flipped_face), "probe: the front-face flag is behaviourally observable");
+    check(front_culled == flipped_face,
+          "probe: culling the front under a clockwise front is the same observation as culling the back counter-clockwise");
+    // Depth clipping is the rasterizer's other observable part in the model.
+    pso::FixedFunctionState clip_off = defaults;
+    clip_off.rasterizer.DepthClipEnable = FALSE;
+    const pso::ProbeOutcome clipped = run(defaults, pso::ProbeScene::kDepthClip);
+    const pso::ProbeOutcome clamped = run(clip_off, pso::ProbeScene::kDepthClip);
+    check(clipped.primitives == 4 && clipped.clipped == 4 && clipped.fragments == 0,
+          "probe: depth clipping removes every triangle of a layer outside the depth range");
+    check(clamped.clipped == 0 && clamped.fragments == 16, "probe: with clipping off the layer is depth-clamped and drawn");
+    check(!(clipped == clamped), "probe: depth clipping is behaviourally observable");
+    // A fill mode the model does not express is counted, not silently treated as solid.
+    pso::FixedFunctionState wireframe = defaults;
+    wireframe.rasterizer.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    const pso::ProbeOutcome wired = run(wireframe, pso::ProbeScene::kTopologyList);
+    check(wired.unmodelled == run(defaults, pso::ProbeScene::kTopologyList).unmodelled + 1 &&
+              wired.colour == run(defaults, pso::ProbeScene::kTopologyList).colour,
+          "probe: wireframe fill is counted unmodelled, not mistaken for solid");
+
+    // ---- Blend: the overlap scene separates enable, factors, operation and write mask.
+    pso::FixedFunctionState blend_on = defaults;
+    blend_on.blend.RenderTarget[0].BlendEnable = TRUE;
+    blend_on.blend.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    blend_on.blend.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    blend_on.blend.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    blend_on.blend.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    const pso::ProbeOutcome blend_off = run(defaults, pso::ProbeScene::kOverlap);
+    const pso::ProbeOutcome blended = run(blend_on, pso::ProbeScene::kOverlap);
+    check(blend_off.written == 32 && blended.written == 32, "probe: both overlapping quads reach the colour write");
+    check(blend_off.colour[0] == 191 && blend_off.colour[1] == 64 && blend_off.colour[2] == 64,
+          "probe: blending off leaves the second quad's own colour");
+    check(!(blend_off == blended), "probe: blend enable is behaviourally observable");
+    pso::FixedFunctionState blend_one = blend_on;
+    blend_one.blend.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+    blend_one.blend.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
+    pso::FixedFunctionState blend_subtract = blend_on;
+    blend_subtract.blend.RenderTarget[0].BlendOp = D3D12_BLEND_OP_SUBTRACT;
+    pso::FixedFunctionState blend_no_red = blend_on;
+    blend_no_red.blend.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_GREEN | D3D12_COLOR_WRITE_ENABLE_BLUE;
+    check(!(run(blend_one, pso::ProbeScene::kOverlap) == blended), "probe: the blend factors are observable");
+    check(!(run(blend_subtract, pso::ProbeScene::kOverlap) == blended), "probe: the blend operation is observable");
+    check(!(run(blend_no_red, pso::ProbeScene::kOverlap) == blended), "probe: the render-target write mask is observable");
+
+    // ---- Depth: the two-quad scene separates enable, func and write mask.
+    pso::FixedFunctionState depth_on = defaults;
+    depth_on.depth_stencil.DepthEnable = TRUE;
+    pso::FixedFunctionState depth_no_write = depth_on;
+    depth_no_write.depth_stencil.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    pso::FixedFunctionState depth_greater = depth_on;
+    depth_greater.depth_stencil.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
+    const pso::ProbeOutcome depth_off = run(defaults, pso::ProbeScene::kTwoDepthQuads);
+    const pso::ProbeOutcome depth_tested = run(depth_on, pso::ProbeScene::kTwoDepthQuads);
+    const pso::ProbeOutcome depth_unwritten = run(depth_no_write, pso::ProbeScene::kTwoDepthQuads);
+    const pso::ProbeOutcome depth_greater_out = run(depth_greater, pso::ProbeScene::kTwoDepthQuads);
+    check(depth_off.colour[0] == 0 && depth_off.colour[1] == 255,
+          "probe: with depth off the far green quad overwrites the near one");
+    check(depth_tested.colour[0] == 255 && depth_tested.colour[1] == 0 && depth_tested.depth_failed == 16,
+          "probe: with depth on the near red quad writes and the far quad fails (16 rejected fragments)");
+    check(depth_unwritten.colour[1] == 255, "probe: with the depth write mask zero the far quad still passes");
+    check(depth_greater_out.written == 0, "probe: a greater-than depth test rejects both quads against the cleared depth");
+    check(!(depth_off == depth_tested), "probe: depth enable is behaviourally observable");
+    check(!(depth_tested == depth_unwritten), "probe: the depth write mask is behaviourally observable");
+    check(!(depth_tested == depth_greater_out), "probe: the depth comparison function is behaviourally observable");
+
+    // ---- Topology type: a PSO type outside the scene's list class assembles nothing.
+    pso::FixedFunctionState point_type = defaults;
+    point_type.topology_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+    pso::FixedFunctionState line_type = defaults;
+    line_type.topology_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+    const pso::ProbeOutcome triangles = run(defaults, pso::ProbeScene::kTopologyList);
+    const pso::ProbeOutcome points = run(point_type, pso::ProbeScene::kTopologyList);
+    check(triangles.mismatch == 0 && triangles.primitives == 4 && triangles.fragments == 16,
+          "probe: a triangle topology type matches the triangle list and draws its four triangles");
+    check(points.mismatch == 1 && points.primitives == 0 && points.fragments == 0,
+          "probe: a point topology type cannot express a triangle list (the API rejects the pair)");
+    check(points == run(line_type, pso::ProbeScene::kTopologyList),
+          "probe: two non-matching types are not told apart by one draw - the draw's own list class names its type");
+
+    // ---- Strip cut: the sentinel either restarts the strip or is read as an out-of-range index.
+    pso::FixedFunctionState cut_ffff = defaults;
+    cut_ffff.strip_cut = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF;
+    pso::FixedFunctionState cut_ffffffff = defaults;
+    cut_ffffffff.strip_cut = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
+    const pso::ProbeOutcome strip_disabled = run(defaults, pso::ProbeScene::kStripCut);
+    const pso::ProbeOutcome strip_cut = run(cut_ffff, pso::ProbeScene::kStripCut);
+    check(strip_disabled.out_of_range == 3 && strip_cut.out_of_range == 0,
+          "probe: the 0xFFFF sentinel restarts the strip; a cut value that does not match reads it as a bad index");
+    check(strip_disabled.primitives == 1 && strip_cut.primitives == 1,
+          "probe: both cut values leave the one lead triangle of the strip (the fault count is the observable)");
+    check(!(strip_disabled == strip_cut), "probe: the strip-cut value is behaviourally observable");
+    check(strip_disabled == run(cut_ffffffff, pso::ProbeScene::kStripCut),
+          "probe: cut disabled and 0xFFFFFFFF are not told apart by a strip with no 0xFFFFFFFF index (a scene limit)");
+
+    // ---- Sample count and sample mask: the partial pixel and the masked samples.
+    pso::FixedFunctionState four_samples = defaults;
+    four_samples.sample_count = 4;
+    const pso::ProbeOutcome one_sample = run(defaults, pso::ProbeScene::kSampleGrid);
+    const pso::ProbeOutcome msaa = run(four_samples, pso::ProbeScene::kSampleGrid);
+    check(one_sample.fragments == 0, "probe: the partial pixel's centre is outside the triangle at one sample");
+    check(msaa.fragments == 1 && msaa.coverage[5] == 1,
+          "probe: at four samples the same triangle covers the pixel's first sample");
+    check(!(one_sample == msaa), "probe: the sample count is behaviourally observable");
+    pso::FixedFunctionState masked = four_samples;
+    masked.sample_mask = 0xfffffffeu;
+    const pso::ProbeOutcome masked_out = run(masked, pso::ProbeScene::kSampleGrid);
+    check(masked_out.fragments == 0 && masked_out.coverage[5] == 0,
+          "probe: a sample mask that drops the covered sample removes the fragment");
+    check(!(masked_out == msaa), "probe: the sample mask is behaviourally observable");
+
+    // ---- Sample quality: the one field no probe can observe. A non-zero quality selects a driver-defined pattern and
+    // changes no rendering result the API defines, so every scene gives the same outcome.
+    pso::FixedFunctionState quality_one = four_samples;
+    quality_one.sample_quality = 1;
+    bool quality_visible = false;
+    for (const pso::ProbeScene scene : {pso::ProbeScene::kWindingPair, pso::ProbeScene::kTwoDepthQuads,
+                                        pso::ProbeScene::kOverlap, pso::ProbeScene::kTopologyList,
+                                        pso::ProbeScene::kStripCut, pso::ProbeScene::kSampleGrid,
+                                        pso::ProbeScene::kDepthClip})
+        quality_visible = quality_visible || !(run(four_samples, scene) == run(quality_one, scene));
+    check(!quality_visible, "probe: no scene observes a sample-quality change (only the container's layout could)");
+
+    // The refusal the probe cannot lift: the record yields no observation, so every field stays refused.
+    const Bytes blob = make_state_blob();
+    rt::graphics_record::State state;
+    check(rt::graphics_record::decode_state(Span{blob.data(), blob.size()}, &state),
+          "probe: the fixture's measured container still decodes");
+    pso::FixedFunctionState out{};
+    pso::FixedFunctionFieldStatus fields;
+    std::string why;
+    check(!pso::decode_fixed_function_state(state, &out, &fields, &why),
+          "probe: a decodable container still yields no fixed-function field");
+    bool every_field_named = true;
+    for (int field = 0; field < 8; ++field) every_field_named = every_field_named && why.find(pso::kFixedFunctionFieldNames[field]) != std::string::npos;
+    check(every_field_named, "probe: the refusal names every field the probe contract covers");
+
+    const auto row = [](const char* scene, const char* state, const pso::ProbeOutcome& o) {
+        std::printf("  %-18s %-20s prim %u cull %u clip %u frag %3u fail %3u writ %3u oob %u colour %3u %3u %3u %3u\n",
+                    scene, state, o.primitives, o.culled, o.clipped, o.fragments, o.depth_failed, o.written,
+                    o.out_of_range, o.colour[0], o.colour[1], o.colour[2], o.colour[3]);
+    };
+    std::printf("graphics_pso_test: behavioural probe observations (4x4 target, one sample unless named)\n");
+    row("winding pair", "defaults (cull back)", back_culled);
+    row("winding pair", "cull none", nothing_culled);
+    row("winding pair", "cull front", front_culled);
+    row("depth quads", "defaults (depth off)", depth_off);
+    row("depth quads", "depth on, less", depth_tested);
+    row("depth quads", "depth write zero", depth_unwritten);
+    row("depth quads", "less -> greater", depth_greater_out);
+    row("overlap", "blend off", blend_off);
+    row("overlap", "src/one-minus-src", blended);
+    row("topology list", "triangle type", triangles);
+    row("topology list", "point type", points);
+    row("strip cut", "disabled", strip_disabled);
+    row("strip cut", "0xFFFF", strip_cut);
+    row("sample grid", "one sample", one_sample);
+    row("sample grid", "four samples", msaa);
+    row("sample grid", "four, mask 0x...FE", masked_out);
+    row("depth clip", "clip on", clipped);
+    row("depth clip", "clip off", clamped);
+    std::printf("\n");
+}
+
 void test_build_success() {
     const RecordFixture fixture = make_record();
     const Record& record = fixture.record;
@@ -1060,6 +1278,8 @@ void print_findings() {
         {"NodeMask/Flags/CachedPSO/StreamOutput", "neutral values: the record carries none of them"},
         {"record.state", "container decoded (two size families, stage blocks, variable region); no field is used"},
         {"decode_fixed_function_state", "refuses all eight fields: no word is pinned by a measurement (docs/state_blob.md)"},
+        {"run_probe", "the behavioural falsifier: 7 of 8 fixed-function fields have a scene whose observation changes"},
+        {"kProbeContract[6]", "sample quality is not observable by any defined rendering result; only the container's layout could pin it"},
         {"mesh record (slot 2)", "refused: D3D12_GRAPHICS_PIPELINE_STATE_DESC has no mesh field"},
     };
     std::printf("graphics_pso_test: where each D3D12_GRAPHICS_PIPELINE_STATE_DESC field comes from\n");
@@ -1098,6 +1318,7 @@ int main() {
     test_pick_entry();
     test_documented_default_state();
     test_fixed_function_state_decode();
+    test_fixed_function_probe();
     test_build_success();
     test_build_ps_only();
     test_build_input_layout();

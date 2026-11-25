@@ -1,6 +1,7 @@
 #include "graphics_pso.h"
 
 #include <array>
+#include <iterator>
 #include <utility>
 
 namespace rt::graphics_pso {
@@ -437,6 +438,543 @@ bool build(const rt::graphics_record::Record& record, const GraphicsPsoInputs& i
     desc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
     *out = desc;
     return true;
+}
+
+// ---- The behavioural probe: a GPU-free model of what one fixed-function field changes on screen ------------------
+//
+// The contract (graphics_pso.h, kProbeContract) pairs each FixedFunctionState field group with one minimal scene and
+// the observable that changes with it. The model below is deliberately small - a 4x4 RGBA8 target, a per-sample depth
+// buffer, D3D12's standard sample positions and one render target - so every answer is exact and reviewable rather
+// than approximate: each scene was placed so the pixels it touches have one unambiguous answer, and
+// port/test/graphics_pso_test.cpp checks the pair of values that must differ for every observable field.
+//
+// What the model does not express is named where it applies (the contract's `distinguishes` text says which
+// sub-fields a scene observes) and is counted in ProbeOutcome::unmodelled instead of silently treated as a value.
+namespace {
+
+constexpr int kProbeSize = 4;
+constexpr int kProbePixels = kProbeSize * kProbeSize;
+constexpr int kProbeMaxSamples = 16;
+// The blend factor the probe's scenes would use for D3D12_BLEND_BLEND_FACTOR: the API's blend factor is dynamic
+// state, not a FixedFunctionState field, so the probe fixes one value and the factors that read it stay distinct.
+constexpr float kProbeBlendFactor = 0.25f;
+
+struct ProbeVertex {
+    float x;
+    float y;
+    float z;
+    float r;
+    float g;
+    float b;
+    float a;
+};
+
+struct SamplePosition {
+    float x;
+    float y;
+};
+
+// D3D12's standard sample positions per sample count. Only kSampleGrid asks a question about a partial pixel, and it
+// asks it about the first sample position, so the exact pattern matters only as a fixed, documented set.
+constexpr SamplePosition kSamples1[] = {{0.5f, 0.5f}};
+constexpr SamplePosition kSamples2[] = {{0.75f, 0.25f}, {0.25f, 0.75f}};
+constexpr SamplePosition kSamples4[] = {{0.375f, 0.125f}, {0.875f, 0.375f}, {0.125f, 0.625f}, {0.625f, 0.875f}};
+constexpr SamplePosition kSamples8[] = {{0.5625f, 0.3125f}, {0.4375f, 0.6875f}, {0.8125f, 0.5625f},
+                                        {0.3125f, 0.1875f}, {0.1875f, 0.8125f}, {0.0625f, 0.4375f},
+                                        {0.6875f, 0.9375f}, {0.9375f, 0.0625f}};
+constexpr SamplePosition kSamples16[] = {{0.125f, 0.125f}, {0.375f, 0.125f}, {0.625f, 0.125f}, {0.875f, 0.125f},
+                                         {0.125f, 0.375f}, {0.375f, 0.375f}, {0.625f, 0.375f}, {0.875f, 0.375f},
+                                         {0.125f, 0.625f}, {0.375f, 0.625f}, {0.625f, 0.625f}, {0.875f, 0.625f},
+                                         {0.125f, 0.875f}, {0.375f, 0.875f}, {0.625f, 0.875f}, {0.875f, 0.875f}};
+
+// The probe scenes, in clip space (w = 1). The winding of every full-quad triangle is clockwise on the D3D screen, so
+// the documented default rasterizer (back-face culling, clockwise front) draws them; the winding pair is the one scene
+// that carries both windings on purpose.
+constexpr ProbeVertex kWindingPair[] = {
+    // left half, counter-clockwise on screen (back-facing under a clockwise front face)
+    {-1.0f, -1.0f, 0.5f, 1, 1, 1, 1}, {0.0f, -1.0f, 0.5f, 1, 1, 1, 1}, {-1.0f, 1.0f, 0.5f, 1, 1, 1, 1},
+    // right half, clockwise on screen (front-facing under a clockwise front face)
+    {0.0f, -1.0f, 0.5f, 1, 1, 1, 1}, {1.0f, 1.0f, 0.5f, 1, 1, 1, 1}, {1.0f, -1.0f, 0.5f, 1, 1, 1, 1},
+};
+// The full-target layers of the depth, blend, topology and clip scenes are split into four triangles with horizontal
+// and vertical edges at whole target coordinates (never through a sample position), so no sample lies on a shared
+// edge and the per-triangle coverage is unambiguous.
+constexpr ProbeVertex kTwoDepthQuads[] = {
+    // the near layer, red at z = 0.25, drawn first
+    {-1, 1, 0.25f, 1, 0, 0, 1}, {1, 1, 0.25f, 1, 0, 0, 1}, {-1, 0, 0.25f, 1, 0, 0, 1},
+    {-1, 0, 0.25f, 1, 0, 0, 1}, {1, 1, 0.25f, 1, 0, 0, 1}, {1, 0, 0.25f, 1, 0, 0, 1},
+    {-1, 0, 0.25f, 1, 0, 0, 1}, {1, 0, 0.25f, 1, 0, 0, 1}, {-1, -1, 0.25f, 1, 0, 0, 1},
+    {-1, -1, 0.25f, 1, 0, 0, 1}, {1, 0, 0.25f, 1, 0, 0, 1}, {1, -1, 0.25f, 1, 0, 0, 1},
+    // the far layer, green at z = 0.75, drawn second
+    {-1, 1, 0.75f, 0, 1, 0, 1}, {1, 1, 0.75f, 0, 1, 0, 1}, {-1, 0, 0.75f, 0, 1, 0, 1},
+    {-1, 0, 0.75f, 0, 1, 0, 1}, {1, 1, 0.75f, 0, 1, 0, 1}, {1, 0, 0.75f, 0, 1, 0, 1},
+    {-1, 0, 0.75f, 0, 1, 0, 1}, {1, 0, 0.75f, 0, 1, 0, 1}, {-1, -1, 0.75f, 0, 1, 0, 1},
+    {-1, -1, 0.75f, 0, 1, 0, 1}, {1, 0, 0.75f, 0, 1, 0, 1}, {1, -1, 0.75f, 0, 1, 0, 1},
+};
+constexpr ProbeVertex kOverlap[] = {
+    // the first layer, drawn first
+    {-1, 1, 0.5f, 0.25f, 0.5f, 1.0f, 0.5f}, {1, 1, 0.5f, 0.25f, 0.5f, 1.0f, 0.5f},
+    {-1, 0, 0.5f, 0.25f, 0.5f, 1.0f, 0.5f}, {-1, 0, 0.5f, 0.25f, 0.5f, 1.0f, 0.5f},
+    {1, 1, 0.5f, 0.25f, 0.5f, 1.0f, 0.5f}, {1, 0, 0.5f, 0.25f, 0.5f, 1.0f, 0.5f},
+    {-1, 0, 0.5f, 0.25f, 0.5f, 1.0f, 0.5f}, {1, 0, 0.5f, 0.25f, 0.5f, 1.0f, 0.5f},
+    {-1, -1, 0.5f, 0.25f, 0.5f, 1.0f, 0.5f}, {-1, -1, 0.5f, 0.25f, 0.5f, 1.0f, 0.5f},
+    {1, 0, 0.5f, 0.25f, 0.5f, 1.0f, 0.5f}, {1, -1, 0.5f, 0.25f, 0.5f, 1.0f, 0.5f},
+    // the second layer, drawn second: alpha 0.25, so a source-alpha blend tells the two apart
+    {-1, 1, 0.5f, 0.75f, 0.25f, 0.25f, 0.25f}, {1, 1, 0.5f, 0.75f, 0.25f, 0.25f, 0.25f},
+    {-1, 0, 0.5f, 0.75f, 0.25f, 0.25f, 0.25f}, {-1, 0, 0.5f, 0.75f, 0.25f, 0.25f, 0.25f},
+    {1, 1, 0.5f, 0.75f, 0.25f, 0.25f, 0.25f}, {1, 0, 0.5f, 0.75f, 0.25f, 0.25f, 0.25f},
+    {-1, 0, 0.5f, 0.75f, 0.25f, 0.25f, 0.25f}, {1, 0, 0.5f, 0.75f, 0.25f, 0.25f, 0.25f},
+    {-1, -1, 0.5f, 0.75f, 0.25f, 0.25f, 0.25f}, {-1, -1, 0.5f, 0.75f, 0.25f, 0.25f, 0.25f},
+    {1, 0, 0.5f, 0.75f, 0.25f, 0.25f, 0.25f}, {1, -1, 0.5f, 0.75f, 0.25f, 0.25f, 0.25f},
+};
+constexpr ProbeVertex kTopologyList[] = {
+    {-1, 1, 0.5f, 1, 1, 1, 1}, {1, 1, 0.5f, 1, 1, 1, 1}, {-1, 0, 0.5f, 1, 1, 1, 1},
+    {-1, 0, 0.5f, 1, 1, 1, 1}, {1, 1, 0.5f, 1, 1, 1, 1}, {1, 0, 0.5f, 1, 1, 1, 1},
+    {-1, 0, 0.5f, 1, 1, 1, 1}, {1, 0, 0.5f, 1, 1, 1, 1}, {-1, -1, 0.5f, 1, 1, 1, 1},
+    {-1, -1, 0.5f, 1, 1, 1, 1}, {1, 0, 0.5f, 1, 1, 1, 1}, {1, -1, 0.5f, 1, 1, 1, 1},
+};
+constexpr ProbeVertex kStripCut[] = {
+    {-1.0f, -1.0f, 0.5f, 1, 1, 1, 1}, {1.0f, 1.0f, 0.5f, 1, 1, 1, 1}, {1.0f, -1.0f, 0.5f, 1, 1, 1, 1},
+    {-1.0f, 1.0f, 0.5f, 1, 1, 1, 1}, {-1.0f, -1.0f, 0.5f, 1, 1, 1, 1}, {1.0f, 1.0f, 0.5f, 1, 1, 1, 1},
+};
+// 0xFFFF is the strip's cut sentinel, and it is not a valid index into the six vertices: a cut value equal to it
+// restarts the strip, any other cut value lets the strip read it as a vertex index.
+constexpr std::uint32_t kStripCutIndices[] = {0u, 1u, 2u, 0xFFFFu, 3u, 4u};
+// Screen (1.3,1.0) (1.6,1.0) (1.3,1.3) on the 4x4 target, converted to clip space: it covers the first of the four
+// standard sample positions inside pixel (1,1) and not the pixel centre.
+constexpr ProbeVertex kSampleGrid[] = {
+    {-0.35f, 0.5f, 0.5f, 1, 1, 1, 1}, {-0.2f, 0.5f, 0.5f, 1, 1, 1, 1}, {-0.35f, 0.35f, 0.5f, 1, 1, 1, 1},
+};
+constexpr ProbeVertex kDepthClip[] = {
+    {-1, 1, 1.5f, 1, 1, 1, 1}, {1, 1, 1.5f, 1, 1, 1, 1}, {-1, 0, 1.5f, 1, 1, 1, 1},
+    {-1, 0, 1.5f, 1, 1, 1, 1}, {1, 1, 1.5f, 1, 1, 1, 1}, {1, 0, 1.5f, 1, 1, 1, 1},
+    {-1, 0, 1.5f, 1, 1, 1, 1}, {1, 0, 1.5f, 1, 1, 1, 1}, {-1, -1, 1.5f, 1, 1, 1, 1},
+    {-1, -1, 1.5f, 1, 1, 1, 1}, {1, 0, 1.5f, 1, 1, 1, 1}, {1, -1, 1.5f, 1, 1, 1, 1},
+};
+
+enum class ProbeTopology { kPointList, kLineList, kLineStrip, kTriangleList, kTriangleStrip };
+
+struct ProbeSceneData {
+    ProbeTopology topology = ProbeTopology::kTriangleList;
+    bool indexed = false;
+    const ProbeVertex* vertices = nullptr;
+    std::size_t vertex_count = 0;
+    const std::uint32_t* indices = nullptr;
+    std::size_t index_count = 0;
+};
+
+ProbeSceneData probe_scene(ProbeScene scene) {
+    switch (scene) {
+        case ProbeScene::kWindingPair:
+            return {ProbeTopology::kTriangleList, false, kWindingPair, std::size(kWindingPair), nullptr, 0};
+        case ProbeScene::kTwoDepthQuads:
+            return {ProbeTopology::kTriangleList, false, kTwoDepthQuads, std::size(kTwoDepthQuads), nullptr, 0};
+        case ProbeScene::kOverlap:
+            return {ProbeTopology::kTriangleList, false, kOverlap, std::size(kOverlap), nullptr, 0};
+        case ProbeScene::kTopologyList:
+            return {ProbeTopology::kTriangleList, false, kTopologyList, std::size(kTopologyList), nullptr, 0};
+        case ProbeScene::kStripCut:
+            return {ProbeTopology::kTriangleStrip, true, kStripCut, std::size(kStripCut), kStripCutIndices,
+                    std::size(kStripCutIndices)};
+        case ProbeScene::kSampleGrid:
+            return {ProbeTopology::kTriangleList, false, kSampleGrid, std::size(kSampleGrid), nullptr, 0};
+        case ProbeScene::kDepthClip:
+            return {ProbeTopology::kTriangleList, false, kDepthClip, std::size(kDepthClip), nullptr, 0};
+    }
+    return {};
+}
+
+float clamp01(float value) { return value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value); }
+
+void to_screen(const ProbeVertex& vertex, float* x, float* y) {
+    *x = (vertex.x + 1.0f) * 0.5f * static_cast<float>(kProbeSize);
+    *y = (1.0f - vertex.y) * 0.5f * static_cast<float>(kProbeSize);
+}
+
+bool depth_test(D3D12_COMPARISON_FUNC func, float lhs, float rhs) {
+    switch (func) {
+        case D3D12_COMPARISON_FUNC_NEVER: return false;
+        case D3D12_COMPARISON_FUNC_LESS: return lhs < rhs;
+        case D3D12_COMPARISON_FUNC_EQUAL: return lhs == rhs;
+        case D3D12_COMPARISON_FUNC_LESS_EQUAL: return lhs <= rhs;
+        case D3D12_COMPARISON_FUNC_GREATER: return lhs > rhs;
+        case D3D12_COMPARISON_FUNC_NOT_EQUAL: return lhs != rhs;
+        case D3D12_COMPARISON_FUNC_GREATER_EQUAL: return lhs >= rhs;
+        case D3D12_COMPARISON_FUNC_ALWAYS: return true;
+        default: return true;  // an invalid enum is counted as unmodelled before the test
+    }
+}
+
+float blend_op(D3D12_BLEND_OP op, float src, float dst) {
+    switch (op) {
+        case D3D12_BLEND_OP_ADD: return src + dst;
+        case D3D12_BLEND_OP_SUBTRACT: return src - dst;
+        case D3D12_BLEND_OP_REV_SUBTRACT: return dst - src;
+        case D3D12_BLEND_OP_MIN: return src < dst ? src : dst;
+        case D3D12_BLEND_OP_MAX: return src > dst ? src : dst;
+        default: return src + dst;
+    }
+}
+
+// The four factor channels one D3D12_BLEND value contributes to the blend, or false when the probe cannot express it
+// (the dual-source SRC1_* factors need two pixel-shader outputs, which the probe does not carry).
+bool blend_factor(D3D12_BLEND factor, const float src[4], const float dst[4], float out[4]) {
+    const auto set = [&out](float r, float g, float b, float a) {
+        out[0] = r;
+        out[1] = g;
+        out[2] = b;
+        out[3] = a;
+    };
+    switch (factor) {
+        case D3D12_BLEND_ZERO: set(0.0f, 0.0f, 0.0f, 0.0f); return true;
+        case D3D12_BLEND_ONE: set(1.0f, 1.0f, 1.0f, 1.0f); return true;
+        case D3D12_BLEND_SRC_COLOR: set(src[0], src[1], src[2], src[3]); return true;
+        case D3D12_BLEND_INV_SRC_COLOR: set(1 - src[0], 1 - src[1], 1 - src[2], 1 - src[3]); return true;
+        case D3D12_BLEND_SRC_ALPHA: set(src[3], src[3], src[3], src[3]); return true;
+        case D3D12_BLEND_INV_SRC_ALPHA: set(1 - src[3], 1 - src[3], 1 - src[3], 1 - src[3]); return true;
+        case D3D12_BLEND_DEST_ALPHA: set(dst[3], dst[3], dst[3], dst[3]); return true;
+        case D3D12_BLEND_INV_DEST_ALPHA: set(1 - dst[3], 1 - dst[3], 1 - dst[3], 1 - dst[3]); return true;
+        case D3D12_BLEND_DEST_COLOR: set(dst[0], dst[1], dst[2], dst[3]); return true;
+        case D3D12_BLEND_INV_DEST_COLOR: set(1 - dst[0], 1 - dst[1], 1 - dst[2], 1 - dst[3]); return true;
+        case D3D12_BLEND_SRC_ALPHA_SAT: {
+            const float saturated = src[3] < 1 - dst[3] ? src[3] : 1 - dst[3];
+            set(saturated, saturated, saturated, 1.0f);
+            return true;
+        }
+        case D3D12_BLEND_BLEND_FACTOR:
+            set(kProbeBlendFactor, kProbeBlendFactor, kProbeBlendFactor, kProbeBlendFactor);
+            return true;
+        case D3D12_BLEND_INV_BLEND_FACTOR:
+            set(1 - kProbeBlendFactor, 1 - kProbeBlendFactor, 1 - kProbeBlendFactor, 1 - kProbeBlendFactor);
+            return true;
+        default: set(1.0f, 1.0f, 1.0f, 1.0f); return false;
+    }
+}
+
+bool topology_type_matches(D3D12_PRIMITIVE_TOPOLOGY_TYPE topology_type, ProbeTopology topology) {
+    switch (topology_type) {
+        case D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT: return topology == ProbeTopology::kPointList;
+        case D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE:
+            return topology == ProbeTopology::kLineList || topology == ProbeTopology::kLineStrip;
+        case D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE:
+            return topology == ProbeTopology::kTriangleList || topology == ProbeTopology::kTriangleStrip;
+        default: return false;  // UNDEFINED and PATCH: the probe has no patch/tessellation model
+    }
+}
+
+struct ProbeTarget {
+    const FixedFunctionState& state;
+    int sample_count = 1;
+    const SamplePosition* samples = kSamples1;
+    std::array<float, kProbePixels * kProbeMaxSamples> depth{};
+    std::array<float, kProbePixels * kProbeMaxSamples * 4> colour{};
+    std::array<std::uint32_t, kProbePixels> covered{};
+    ProbeOutcome outcome;
+};
+
+void shade_fragment(ProbeTarget& target, std::size_t pixel, int sample, float z, const float fragment[4]) {
+    if ((target.state.sample_mask & (1u << static_cast<unsigned>(sample))) == 0) return;
+    target.covered[pixel] |= 1u << static_cast<unsigned>(sample);
+    ++target.outcome.fragments;
+    const std::size_t at = pixel * kProbeMaxSamples + static_cast<std::size_t>(sample);
+    if (target.state.depth_stencil.DepthEnable != FALSE) {
+        if (!depth_test(target.state.depth_stencil.DepthFunc, z, target.depth[at])) {
+            ++target.outcome.depth_failed;
+            return;
+        }
+        if (target.state.depth_stencil.DepthWriteMask != D3D12_DEPTH_WRITE_MASK_ZERO) target.depth[at] = z;
+    }
+    const D3D12_RENDER_TARGET_BLEND_DESC& blend = target.state.blend.RenderTarget[0];
+    float source[4] = {fragment[0], fragment[1], fragment[2], fragment[3]};
+    if (blend.BlendEnable != FALSE) {
+        float dst[4] = {target.colour[at * 4 + 0], target.colour[at * 4 + 1], target.colour[at * 4 + 2],
+                        target.colour[at * 4 + 3]};
+        float src_factor[4] = {1, 1, 1, 1};
+        float dst_factor[4] = {0, 0, 0, 0};
+        float src_alpha_factor[4] = {1, 1, 1, 1};
+        float dst_alpha_factor[4] = {0, 0, 0, 0};
+        if (!blend_factor(blend.SrcBlend, source, dst, src_factor) ||
+            !blend_factor(blend.DestBlend, source, dst, dst_factor) ||
+            !blend_factor(blend.SrcBlendAlpha, source, dst, src_alpha_factor) ||
+            !blend_factor(blend.DestBlendAlpha, source, dst, dst_alpha_factor))
+            ++target.outcome.unmodelled;
+        for (int channel = 0; channel < 3; ++channel)
+            source[channel] =
+                blend_op(blend.BlendOp, source[channel] * src_factor[channel], dst[channel] * dst_factor[channel]);
+        source[3] = blend_op(blend.BlendOpAlpha, source[3] * src_alpha_factor[3], dst[3] * dst_alpha_factor[3]);
+    }
+    for (int channel = 0; channel < 4; ++channel) {
+        const UINT mask = 1u << static_cast<unsigned>(channel);
+        if ((blend.RenderTargetWriteMask & mask) != 0)
+            target.colour[at * 4 + static_cast<std::size_t>(channel)] = clamp01(source[channel]);
+    }
+    ++target.outcome.written;
+}
+
+// Rasterizes one clipped triangle: front-face/cull first, then the per-sample point-in-triangle test. Colours and depth
+// are interpolated linearly (every probe vertex has w = 1, so screen-space linear interpolation is exact).
+void rasterize_triangle(ProbeTarget& target, const ProbeVertex& a, const ProbeVertex& b, const ProbeVertex& c) {
+    float ax = 0, ay = 0, bx = 0, by = 0, cx = 0, cy = 0;
+    to_screen(a, &ax, &ay);
+    to_screen(b, &bx, &by);
+    to_screen(c, &cx, &cy);
+    const float area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    if (area == 0.0f) {
+        ++target.outcome.culled;  // a zero-area triangle covers no sample
+        return;
+    }
+    const bool clockwise = area > 0.0f;
+    const bool front = clockwise != (target.state.rasterizer.FrontCounterClockwise != FALSE);
+    switch (target.state.rasterizer.CullMode) {
+        case D3D12_CULL_MODE_FRONT:
+            if (front) {
+                ++target.outcome.culled;
+                return;
+            }
+            break;
+        case D3D12_CULL_MODE_BACK:
+            if (!front) {
+                ++target.outcome.culled;
+                return;
+            }
+            break;
+        case D3D12_CULL_MODE_NONE: break;
+        default: ++target.outcome.unmodelled; break;
+    }
+    float za = a.z, zb = b.z, zc = c.z;
+    if (target.state.rasterizer.DepthClipEnable != FALSE) {
+        if (za < 0.0f || za > 1.0f || zb < 0.0f || zb > 1.0f || zc < 0.0f || zc > 1.0f) {
+            ++target.outcome.clipped;
+            return;
+        }
+    } else {
+        za = clamp01(za);
+        zb = clamp01(zb);
+        zc = clamp01(zc);
+    }
+    for (int row = 0; row < kProbeSize; ++row) {
+        for (int column = 0; column < kProbeSize; ++column) {
+            const std::size_t pixel = static_cast<std::size_t>(row * kProbeSize + column);
+            for (int sample = 0; sample < target.sample_count; ++sample) {
+                const float px = static_cast<float>(column) + target.samples[sample].x;
+                const float py = static_cast<float>(row) + target.samples[sample].y;
+                const float w0 = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / area;
+                const float w1 = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / area;
+                const float w2 = 1.0f - w0 - w1;
+                if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
+                const float fragment[4] = {
+                    w0 * a.r + w1 * b.r + w2 * c.r, w0 * a.g + w1 * b.g + w2 * c.g,
+                    w0 * a.b + w1 * b.b + w2 * c.b, w0 * a.a + w1 * b.a + w2 * c.a};
+                shade_fragment(target, pixel, sample, w0 * za + w1 * zb + w2 * zc, fragment);
+            }
+        }
+    }
+}
+
+void rasterize_line(ProbeTarget& target, const ProbeVertex& a, const ProbeVertex& b) {
+    float ax = 0, ay = 0, bx = 0, by = 0;
+    to_screen(a, &ax, &ay);
+    to_screen(b, &bx, &by);
+    if (target.state.rasterizer.DepthClipEnable != FALSE &&
+        (a.z < 0.0f || a.z > 1.0f || b.z < 0.0f || b.z > 1.0f)) {
+        ++target.outcome.clipped;
+        return;
+    }
+    const float dx = bx - ax;
+    const float dy = by - ay;
+    const float length_squared = dx * dx + dy * dy;
+    for (int row = 0; row < kProbeSize; ++row) {
+        for (int column = 0; column < kProbeSize; ++column) {
+            const std::size_t pixel = static_cast<std::size_t>(row * kProbeSize + column);
+            for (int sample = 0; sample < target.sample_count; ++sample) {
+                const float px = static_cast<float>(column) + target.samples[sample].x;
+                const float py = static_cast<float>(row) + target.samples[sample].y;
+                float t = length_squared > 0.0f ? ((px - ax) * dx + (py - ay) * dy) / length_squared : 0.0f;
+                t = clamp01(t);
+                const float ex = ax + t * dx - px;
+                const float ey = ay + t * dy - py;
+                if (ex * ex + ey * ey > 0.25f) continue;  // a sample within half a pixel of the segment
+                const float fragment[4] = {a.r + t * (b.r - a.r), a.g + t * (b.g - a.g), a.b + t * (b.b - a.b),
+                                           a.a + t * (b.a - a.a)};
+                shade_fragment(target, pixel, sample, a.z + t * (b.z - a.z), fragment);
+            }
+        }
+    }
+}
+
+void rasterize_point(ProbeTarget& target, const ProbeVertex& vertex) {
+    float x = 0, y = 0;
+    to_screen(vertex, &x, &y);
+    if (target.state.rasterizer.DepthClipEnable != FALSE && (vertex.z < 0.0f || vertex.z > 1.0f)) {
+        ++target.outcome.clipped;
+        return;
+    }
+    const float fragment[4] = {vertex.r, vertex.g, vertex.b, vertex.a};
+    for (int row = 0; row < kProbeSize; ++row) {
+        for (int column = 0; column < kProbeSize; ++column) {
+            const std::size_t pixel = static_cast<std::size_t>(row * kProbeSize + column);
+            for (int sample = 0; sample < target.sample_count; ++sample) {
+                const float px = static_cast<float>(column) + target.samples[sample].x;
+                const float py = static_cast<float>(row) + target.samples[sample].y;
+                const float ex = px - x;
+                const float ey = py - y;
+                if (ex * ex + ey * ey > 0.25f) continue;  // a sample within half a pixel of the point
+                shade_fragment(target, pixel, sample, vertex.z, fragment);
+            }
+        }
+    }
+}
+
+std::uint8_t quantize(float value) {
+    const float clamped = clamp01(value);
+    return static_cast<std::uint8_t>(clamped * 255.0f + 0.5f);
+}
+
+}  // namespace
+
+ProbeOutcome run_probe(const FixedFunctionState& state, ProbeScene scene) {
+    const ProbeSceneData data = probe_scene(scene);
+    ProbeOutcome outcome;
+    if (data.vertices == nullptr) return outcome;
+    if (!topology_type_matches(state.topology_type, data.topology)) {
+        outcome.mismatch = 1;
+        return outcome;
+    }
+
+    ProbeTarget target{state};
+    switch (state.sample_count) {
+        case 1: target.sample_count = 1; target.samples = kSamples1; break;
+        case 2: target.sample_count = 2; target.samples = kSamples2; break;
+        case 4: target.sample_count = 4; target.samples = kSamples4; break;
+        case 8: target.sample_count = 8; target.samples = kSamples8; break;
+        case 16: target.sample_count = 16; target.samples = kSamples16; break;
+        default: ++target.outcome.unmodelled; target.sample_count = 1; target.samples = kSamples1; break;
+    }
+    if (state.rasterizer.FillMode != D3D12_FILL_MODE_SOLID) ++target.outcome.unmodelled;  // no wireframe model
+    target.depth.fill(1.0f);
+    target.colour.fill(0.0f);
+
+    // Assemble the primitives from the scene's topology, cut value and index/vertex sequence.
+    const std::uint32_t cut_value =
+        state.strip_cut == D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF
+            ? 0xFFFFu
+            : (state.strip_cut == D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF ? 0xFFFFFFFFu : 0u);
+    const bool cut_enabled = data.indexed && state.strip_cut != D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+    constexpr std::size_t kProbeMaxVertices = 32;  // every probe scene's vertex/index list fits
+    std::array<std::size_t, kProbeMaxVertices> sequence{};
+    std::size_t sequence_count = 0;
+    for (std::size_t i = 0; i < data.vertex_count && sequence_count < sequence.size(); ++i)
+        sequence[sequence_count++] = i;
+    if (data.indexed) {
+        sequence_count = 0;
+        for (std::size_t i = 0; i < data.index_count && sequence_count < sequence.size(); ++i)
+            sequence[sequence_count++] = data.indices[i];
+    }
+
+    switch (data.topology) {
+        case ProbeTopology::kPointList:            for (std::size_t i = 0; i < sequence_count; ++i) {
+                if (sequence[i] >= data.vertex_count) {
+                    ++target.outcome.out_of_range;
+                    continue;
+                }
+                ++target.outcome.primitives;
+                rasterize_point(target, data.vertices[sequence[i]]);
+            }
+            break;
+        case ProbeTopology::kLineList:
+            for (std::size_t i = 0; i + 1 < sequence_count; i += 2) {
+                if (sequence[i] >= data.vertex_count || sequence[i + 1] >= data.vertex_count) {
+                    ++target.outcome.out_of_range;
+                    continue;
+                }
+                ++target.outcome.primitives;
+                rasterize_line(target, data.vertices[sequence[i]], data.vertices[sequence[i + 1]]);
+            }
+            break;
+        case ProbeTopology::kLineStrip: {
+            const ProbeVertex* previous = nullptr;
+            for (std::size_t i = 0; i < sequence_count; ++i) {
+                if (cut_enabled && data.indices[i] == cut_value) {
+                    previous = nullptr;
+                    continue;
+                }
+                if (sequence[i] >= data.vertex_count) {
+                    ++target.outcome.out_of_range;
+                    previous = nullptr;
+                    continue;
+                }
+                const ProbeVertex* current = &data.vertices[sequence[i]];
+                if (previous != nullptr) {
+                    ++target.outcome.primitives;
+                    rasterize_line(target, *previous, *current);
+                }
+                previous = current;
+            }
+            break;
+        }
+        case ProbeTopology::kTriangleList:
+            for (std::size_t i = 0; i + 2 < sequence_count; i += 3) {
+                if (sequence[i] >= data.vertex_count || sequence[i + 1] >= data.vertex_count ||
+                    sequence[i + 2] >= data.vertex_count) {
+                    ++target.outcome.out_of_range;
+                    continue;
+                }
+                ++target.outcome.primitives;
+                rasterize_triangle(target, data.vertices[sequence[i]], data.vertices[sequence[i + 1]],
+                                   data.vertices[sequence[i + 2]]);
+            }
+            break;
+        case ProbeTopology::kTriangleStrip: {
+            std::array<std::size_t, 3> window{};
+            std::size_t window_count = 0;
+            std::size_t run_position = 0;
+            for (std::size_t i = 0; i < sequence_count; ++i) {
+                if (cut_enabled && data.indices[i] == cut_value) {
+                    window_count = 0;
+                    run_position = 0;
+                    continue;
+                }
+                window[0] = window[1];
+                window[1] = window[2];
+                window[2] = sequence[i];
+                ++run_position;
+                ++window_count;
+                if (window_count < 3) continue;
+                // Strip winding alternates: triangle t is (t, t+1, t+2) for even t and (t+1, t, t+2) for odd t.
+                const bool even_triangle = ((run_position - 3) % 2) == 0;
+                if (window[0] >= data.vertex_count || window[1] >= data.vertex_count ||
+                    window[2] >= data.vertex_count) {
+                    ++target.outcome.out_of_range;
+                    continue;
+                }
+                const std::size_t first = even_triangle ? window[0] : window[1];
+                const std::size_t second = even_triangle ? window[1] : window[0];
+                ++target.outcome.primitives;
+                rasterize_triangle(target, data.vertices[first], data.vertices[second], data.vertices[window[2]]);
+            }
+            break;
+        }
+    }
+
+    // Resolve: the average of every sample in the pixel, with uncovered samples left at the cleared colour.
+    for (std::size_t pixel = 0; pixel < kProbePixels; ++pixel) {
+        std::uint32_t covered = target.covered[pixel];
+        std::uint8_t covered_count = 0;
+        while (covered != 0) {
+            covered_count = static_cast<std::uint8_t>(covered_count + (covered & 1u));
+            covered >>= 1u;
+        }
+        target.outcome.coverage[pixel] = covered_count;
+        float sum[4] = {0, 0, 0, 0};
+        for (int sample = 0; sample < target.sample_count; ++sample) {
+            const std::size_t at = pixel * kProbeMaxSamples + static_cast<std::size_t>(sample);
+            for (int channel = 0; channel < 4; ++channel) sum[channel] += target.colour[at * 4 + channel];
+        }
+        for (int channel = 0; channel < 4; ++channel)
+            target.outcome.colour[pixel * 4 + static_cast<std::size_t>(channel)] =
+                quantize(sum[channel] / static_cast<float>(target.sample_count));
+    }
+    return target.outcome;
 }
 
 }  // namespace rt::graphics_pso
