@@ -154,10 +154,13 @@ default-path validation boot was **ALIVE 100.1 s with no exception**. The probe 
 probe boot - 128x128 window, mean 0 0 0, non-black 0/16384 - i.e. the same black frame the tree already has, so nothing
 in this increment claims to change the picture.
 
-A note on measurement mode: the probe/conversion handler is a call on the slot-70 path, and in this host some probe-mode
-boots after the first stopped early with an execute fault at `game+0x75DF0E8` (a title address in an unmapped image gap,
-~4.8 s) while the default path (inline refusal, no call) was ALIVE in every run. The 140 s ALIVE probe boot above is the
-data source; the fault is recorded here so a later increment can tell it apart from a slot-70 effect.
+A note on boot stability, measured across this increment and reported by the parallel root-signature work: an
+intermittent execute fault at `game+0x75DF0E8` (a title address in an unmapped image gap) appears right after the first
+device-slot-70 call (~4.8 s). It was observed on default-path 150 s boots (3 of 3 in one series), not on 25 s boots (0 of
+3), and re-running the same binary got past it; the default-path validation boot recorded here (`boot-slot70-final`,
+100.1 s) and a second default boot (150.1 s) were ALIVE. The fault is therefore intermittent and not attributable to a
+slot-70 conversion or probe: it is recorded here so a later increment can tell it apart from a slot-70 effect, and the
+140 s ALIVE probe boot above is the data source for this page.
 
 ## 5. What is modelled now, and what is not
 
