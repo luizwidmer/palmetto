@@ -361,6 +361,14 @@ tracker itself; flags at `+0xD8` were `0x00200000` (in-process boot) and `0xFF00
 `0x200000`/`0x400` tests depend on which flags the context carries. The ring is empty because the only waiter (the
 entry thread) has not yet inserted its record when the wait begins.
 
+One transition is worth stating explicitly, since section 2.2 records only the constructed value: the callback slot
+`+0x5F0` is **0 at construction** (section 2.2) and **`image+0x21B8F00` at the wait** in probe7/probe10, so it is
+written between construction and the wait. That matters because `FUN_14258DB70` invokes exactly that slot after its
+wait returns (`(**(code **)(p + 0x50))(...)` with `p = tracker+0x5A0`, i.e. `tracker+0x5F0`), and `image+0x21B8F00` is
+the function the wake experiment's later teardown walk entered (`section 4`, the tail-jump target from `0x21B8F00`).
+So the tracker carries its own post-wait continuation callback, set by the pre-wait step, and the wait's release is
+followed by that continuation rather than by a shim call.
+
 ### 11.3 The waited event's creator, measured from one session
 
 `boot-probe7` enabled `!htrace` at ~12 s and listed the event handle the tracker created. The log attributes the
