@@ -1497,6 +1497,304 @@ void start_loader_hooks(std::uintptr_t image_base) {
     }).detach();
 }
 
+// ---- Title state trace (PALMETTO_STATE_TRACE) ----------------------------------------------------------------------
+// The title's loading state machine keeps three zero-initialised .data words (image RVAs only, no game data):
+//   0x7446510  game/init state. Its only writer is FUN_1453EC0C0 (called from the transition executor FUN_1453EBFE0,
+//              which the message pump FUN_1453EBEA0/1453EBE50 runs on a queued transition). 1 = initial, 2 = init/load
+//              stage, 3 = running; 4..6 are further stages.
+//   0x7453ED0  loading state. Its only writer is FUN_1422572D0, which also notifies FUN_145B5D3D0(old, new). 0 = idle,
+//              1 = subsystem initialised (set once by FUN_1422571E0), 2..5 = a load is running (FUN_141D67570 starts
+//              one, FUN_141D5D040 stops it), 1 -> 2 is the poll in FUN_14011F740.
+//   0x98F828C  session state. FUN_141D83960 dispatches state 0..16 (0/10 = nothing to do); the story-stage boot
+//              FUN_1421B6CA0 runs the dispatcher once, then sets up the stage.
+// Off unless PALMETTO_STATE_TRACE names "<interval>[,<seconds>]". Every interval it prints the three words with the
+// title's own last-change tick, and (bounded) a census of the threads holding title-image frames: each thread's title
+// wait site - its RIP when it is running title code, else its nearest title stack word - and the full title stack of
+// the threads whose stack names one of the state-machine owners above. A polling probe cannot see a store between two
+// samples; the writers are named by the static decompile and the probe measures the timeline plus which parked thread
+// holds the machine. RVAs, values and counts only.
+constexpr std::uint32_t kTitleInitStateRva = 0x7446510;
+constexpr std::uint32_t kTitleInitStampRva = 0x7446508;   // title tick (ms) of the last init-state change
+constexpr std::uint32_t kTitleLoadingStateRva = 0x7453ED0;
+constexpr std::uint32_t kTitleLoadingFlagsRva = 0x7453ED4;  // byte flags beside the loading state
+constexpr std::uint32_t kTitleLoadingTickRva = 0x7453ECC;   // tick updated by the loading poll/update
+constexpr std::uint32_t kTitleLoadingStartedRva = 0x7453EBD;  // set by FUN_141D67570 when a load starts
+constexpr std::uint32_t kTitleLoadingSinceRva = 0x7453EC0;    // title tick of the last load start
+constexpr std::uint32_t kTitleSessionStateRva = 0x98F828C;
+constexpr std::uint32_t kTitleSessionCompanionRva = 0x98F8290;
+// The stage-2 boot wait: FUN_1421B8960 loops at RVA 0x21B8A3E calling the boot-media tick (0x313550) and the predicate
+// at 0x5EA6930 ("byte 0x71B9048 == 2"), then continues at 0x21B8A58. The state machine object (global 0x71273C8, set by
+// the stage-2 entry handler) keeps the current stage in a u16 at +0x10 and the requested next stage in a u16 at +0x12
+// (fn_813660); the pump FUN_1453EBE50 executes the request when the two differ.
+constexpr std::uint32_t kTitleBootMediaGateRva = 0x71B9048;   // byte: 2 = the boot-media stage the wait loop wants
+constexpr std::uint32_t kTitleBootMediaActiveRva = 0x71B90AD;  // bytes the boot-media tick tests at 0x313560
+constexpr std::uint32_t kTitleBootMediaFlagRva = 0x71B90AC;
+constexpr std::uint32_t kTitleStateMachineRva = 0x71273C8;     // state machine object pointer (set at stage-2 entry)
+constexpr std::uint32_t kTitlePlatformGateRva = 0xA210D81;     // byte; 1 makes FUN_1421B8960 take its 4 gated waits
+constexpr std::uint32_t kTitleLoadingActiveRva = 0x7453EE0;    // byte set by the loading subsystem init
+
+// RVAs of the state machine's own entry points: a thread whose RIP or stack names one of these is holding the machine.
+constexpr std::uint32_t kTitleStateOwners[] = {
+    0x53EBE50,  // queued-transition pump: runs one pending transition
+    0x53EBEA0,  // state machine queue loop
+    0x53EBFE0,  // transition executor: writes the init word, then runs the per-state entry/exit
+    0x53EC0C0,  // the only writer of the init state word
+    0x73C950,   // pump caller (UI module)
+    0x810E20,   // pump caller (story module)
+    0x1D66670,  // pump caller (event/handler registry)
+    0x81B270,   // stage-2 entry handler: calls the boot init then requests stage 3 at 0x81B2EF
+    0x21B8960,  // boot init: the wait loop at 0x21B8A3E gates stage 3
+    0x22571E0,  // loading subsystem init: sets loading = 1
+    0x1D5D040,  // loading stop: sets loading = 0
+    0x1D67570,  // loading start: sets loading = mode (requires 0)
+    0x11F740,   // loading poll: the only 1 -> 2 transition
+    0x4FD1AD0,  // the registered loading task that calls the poll
+    0x1D83960,  // session state dispatcher
+};
+
+bool title_address_readable(std::uintptr_t address) {
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info)) return false;
+    return info.State == MEM_COMMIT && (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+}
+
+std::uint16_t title_read_u16_at(std::uintptr_t address, bool& ok) {
+    ok = title_address_readable(address);
+    std::uint16_t value = 0;
+    if (ok) std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+    return value;
+}
+
+bool title_word_readable(std::uintptr_t image_base, std::uint32_t rva) {
+    return title_address_readable(image_base + rva);
+}
+
+
+std::uint32_t title_read_u32(std::uintptr_t image_base, std::uint32_t rva, bool& ok) {
+    ok = title_word_readable(image_base, rva);
+    std::uint32_t value = 0;
+    if (ok) std::memcpy(&value, reinterpret_cast<const void*>(image_base + rva), sizeof(value));
+    return value;
+}
+
+std::uint64_t title_read_u64(std::uintptr_t image_base, std::uint32_t rva, bool& ok) {
+    ok = title_word_readable(image_base, rva);
+    std::uint64_t value = 0;
+    if (ok) std::memcpy(&value, reinterpret_cast<const void*>(image_base + rva), sizeof(value));
+    return value;
+}
+
+bool title_rva_is_state_owner(std::uint32_t rva) {
+    for (const std::uint32_t owner : kTitleStateOwners)
+        if (rva == owner) return true;
+    return false;
+}
+
+// One census: every other thread's title wait site and, for the state-machine owners, its title-side stack. Every
+// object is allocated before any thread is suspended, and module_offset() (which takes the shim registry lock) is only
+// called after every thread is resumed - the same rule the samplers above follow.
+void state_trace_census(std::uintptr_t image_base, std::uintptr_t image_size, double at_seconds) {
+    WaitSampleModules modules;
+    modules.image_base = image_base;
+    modules.image_end = image_base + image_size;
+    std::vector<DWORD> tids;
+    {
+        const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) return;
+        THREADENTRY32 entry{};
+        entry.dwSize = sizeof(entry);
+        const DWORD pid = GetCurrentProcessId();
+        const DWORD self = GetCurrentThreadId();
+        if (Thread32First(snapshot, &entry))
+            do {
+                if (entry.th32OwnerProcessID == pid && entry.th32ThreadID != self && tids.size() < 256)
+                    tids.push_back(entry.th32ThreadID);
+            } while (Thread32Next(snapshot, &entry));
+        CloseHandle(snapshot);
+    }
+    struct StateThreadRow {
+        DWORD tid = 0;
+        unsigned rip_rva = 0;   // RIP when the thread is executing title code
+        unsigned site_rva = 0;  // RIP if in title code, else the nearest title stack frame
+        unsigned frames = 0;
+        bool owner = false;
+        std::uint64_t stack[10] = {};
+    };
+    std::vector<StateThreadRow> rows;
+    rows.reserve(tids.size());
+    for (const DWORD tid : tids) {
+        const HANDLE thread =
+            OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+        if (!thread) continue;
+        if (SuspendThread(thread) == (DWORD)-1) {
+            CloseHandle(thread);
+            continue;
+        }
+        CONTEXT context{};
+        context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        StateThreadRow row;
+        row.tid = tid;
+        if (GetThreadContext(thread, &context)) {
+            if (context.Rip >= image_base && context.Rip < image_base + image_size)
+                row.rip_rva = static_cast<unsigned>(context.Rip - image_base);
+            row.frames = scan_stack_words_deep(context.Rsp, row.stack, 10, modules, 8);
+            for (unsigned i = 0; i < row.frames; ++i) {
+                const auto frame_rva = static_cast<unsigned>(row.stack[i] - image_base);
+                if (title_rva_is_state_owner(frame_rva)) row.owner = true;
+            }
+        }
+        ResumeThread(thread);
+        CloseHandle(thread);
+        row.site_rva = row.rip_rva ? row.rip_rva
+                                   : (row.frames ? static_cast<unsigned>(row.stack[0] - image_base) : 0u);
+        if (row.rip_rva && title_rva_is_state_owner(row.rip_rva)) row.owner = true;
+        if (row.site_rva) rows.push_back(row);
+    }
+    std::map<unsigned, std::pair<unsigned, std::string>> sites;
+    for (const StateThreadRow& row : rows) {
+        auto& slot = sites[row.site_rva];
+        ++slot.first;
+        if (slot.second.size() < 48) slot.second += (slot.second.empty() ? "" : ",") + std::to_string(row.tid);
+    }
+    std::vector<std::pair<unsigned, std::pair<unsigned, std::string>*>> ordered;
+    for (auto& [site, slot] : sites) ordered.emplace_back(site, &slot);
+    std::sort(ordered.begin(), ordered.end(),
+              [](const auto& a, const auto& b) { return a.second->first > b.second->first; });
+    std::string top;
+    const std::size_t shown = std::min<std::size_t>(ordered.size(), 8);
+    for (std::size_t i = 0; i < shown; ++i)
+        top += " " + rt::shims::module_offset(image_base + ordered[i].first) + " x" +
+               std::to_string(ordered[i].second->first);
+    std::fprintf(stderr, "[rt] state trace at %.1f s: %zu title-image thread(s), %zu site(s);%s\n", at_seconds,
+                 rows.size(), ordered.size(), top.empty() ? " (none)" : top.c_str());
+    unsigned owners = 0;
+    for (const StateThreadRow& row : rows) {
+        if (!row.owner || owners == 2) continue;
+        std::string stack;
+        for (unsigned i = 0; i < row.frames && i < 10; ++i)
+            stack += " " + rt::shims::module_offset(static_cast<std::uintptr_t>(row.stack[i]));
+        std::fprintf(stderr, "[rt] state trace at %.1f s: owner tid %lu at %s, title stack:%s\n", at_seconds,
+                     static_cast<unsigned long>(row.tid), rt::shims::module_offset(image_base + row.site_rva).c_str(),
+                     stack.empty() ? " (none)" : stack.c_str());
+        ++owners;
+    }
+}
+
+// Starts the sampler thread named by PALMETTO_STATE_TRACE ("<interval>[,<seconds>]"; "1" means 2 s to process end).
+// Detached: it ends with the process. Off when the variable is unset, so the default path is unchanged.
+void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_size, const char* spec) {
+    double interval = 2.0;
+    double stop_after = 0.0;
+    char* end = nullptr;
+    const double first = std::strtod(spec, &end);
+    if (end != spec) interval = first;
+    if (end && *end == ',') {
+        char* end2 = nullptr;
+        const double second = std::strtod(end + 1, &end2);
+        if (end2 != end + 1) stop_after = second;
+    }
+    if (interval < 0.2) interval = 0.2;
+    if (interval > 60.0) interval = 60.0;
+    std::thread([image_base, image_size, interval, stop_after] {
+        const auto started = sampler_epoch();
+        unsigned last_init = 0xFFFFFFFFu, last_loading = 0xFFFFFFFFu, last_session = 0xFFFFFFFFu;
+        unsigned last_gate = 0xFFFFFFFFu, last_machine_next = 0xFFFFu;
+        double init_changed = 0.0, loading_changed = 0.0, session_changed = 0.0;
+        unsigned sample = 0, censuses = 0;
+        std::fprintf(stderr,
+                     "[rt] state trace: interval %.1f s%s; words init 0x%x, loading 0x%x, session 0x%x\n", interval,
+                     stop_after > 0.0 ? (", until " + std::to_string(static_cast<int>(stop_after)) + " s").c_str()
+                                      : "",
+                     kTitleInitStateRva, kTitleLoadingStateRva, kTitleSessionStateRva);
+        for (;;) {
+            const double at =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+            if (stop_after > 0.0 && at > stop_after) break;
+            bool ok_init = false, ok_loading = false, ok_session = false, ok_tick = false, ok_started = false;
+            const std::uint32_t init = title_read_u32(image_base, kTitleInitStateRva, ok_init);
+            const std::uint32_t loading = title_read_u32(image_base, kTitleLoadingStateRva, ok_loading);
+            const std::uint32_t session = title_read_u32(image_base, kTitleSessionStateRva, ok_session);
+            bool ok_stamp = false, ok_since = false, ok_flags = false;
+            const std::uint64_t init_stamp = title_read_u64(image_base, kTitleInitStampRva, ok_stamp);
+            const std::uint32_t loading_tick = title_read_u32(image_base, kTitleLoadingTickRva, ok_tick);
+            const std::uint32_t loading_started = title_read_u32(image_base, kTitleLoadingStartedRva, ok_started);
+            const std::uint64_t loading_since = title_read_u64(image_base, kTitleLoadingSinceRva, ok_since);
+            const std::uint32_t loading_flags = title_read_u32(image_base, kTitleLoadingFlagsRva, ok_flags);
+            bool ok_gate = false, ok_media = false, ok_media_flag = false, ok_platform = false, ok_active = false,
+                 ok_companion = false, ok_machine = false, ok_current = false, ok_next = false;
+            const std::uint32_t boot_media_gate = title_read_u32(image_base, kTitleBootMediaGateRva, ok_gate);
+            const std::uint32_t boot_media_active = title_read_u32(image_base, kTitleBootMediaActiveRva, ok_media);
+            const std::uint32_t boot_media_flag = title_read_u32(image_base, kTitleBootMediaFlagRva, ok_media_flag);
+            const std::uint32_t platform_gate = title_read_u32(image_base, kTitlePlatformGateRva, ok_platform);
+            const std::uint32_t loading_active = title_read_u32(image_base, kTitleLoadingActiveRva, ok_active);
+            const std::uint32_t session_companion = title_read_u32(image_base, kTitleSessionCompanionRva, ok_companion);
+            const std::uint64_t state_machine = title_read_u64(image_base, kTitleStateMachineRva, ok_machine);
+            std::uint16_t machine_current = 0, machine_next = 0;
+            if (ok_machine && state_machine && (state_machine & 7) == 0) {
+                machine_current = title_read_u16_at(static_cast<std::uintptr_t>(state_machine) + 0x10, ok_current);
+                machine_next = title_read_u16_at(static_cast<std::uintptr_t>(state_machine) + 0x12, ok_next);
+            }
+            if (ok_init && init != last_init) {
+                if (last_init != 0xFFFFFFFFu)
+                    std::fprintf(stderr, "[rt] state change at %.1f s: init %u -> %u (title tick %llu)\n", at,
+                                 last_init, init, static_cast<unsigned long long>(init_stamp));
+                init_changed = at;
+                last_init = init;
+            }
+            if (ok_loading && loading != last_loading) {
+                if (last_loading != 0xFFFFFFFFu)
+                    std::fprintf(stderr, "[rt] state change at %.1f s: loading %u -> %u (tick %u, started %u)\n", at,
+                                 last_loading, loading, loading_tick, loading_started);
+                loading_changed = at;
+                last_loading = loading;
+            }
+            if (ok_session && session != last_session) {
+                if (last_session != 0xFFFFFFFFu)
+                    std::fprintf(stderr, "[rt] state change at %.1f s: session %u -> %u\n", at, last_session, session);
+                session_changed = at;
+                last_session = session;
+            }
+            if (ok_gate && (boot_media_gate & 0xFF) != (last_gate & 0xFF)) {
+                if (last_gate != 0xFFFFFFFFu)
+                    std::fprintf(stderr, "[rt] state change at %.1f s: boot-media gate 0x%x -> 0x%x\n", at,
+                                 last_gate & 0xFF, boot_media_gate & 0xFF);
+                last_gate = boot_media_gate;
+            }
+            if (ok_next && machine_next != last_machine_next) {
+                if (last_machine_next != 0xFFFFu)
+                    std::fprintf(stderr, "[rt] state change at %.1f s: machine pending stage %u -> %u (current %u)\n",
+                                 at, last_machine_next, machine_next, machine_current);
+                last_machine_next = machine_next;
+            }
+            std::fprintf(stderr,
+                         "[rt] state trace at %.1f s: init %s%u (last change %.1f s, tick %llu), loading %s%u"
+                         " (last change %.1f s, tick %u, started %u, since %llu, flags 0x%x), session %s%u"
+                         " (last change %.1f s)\n",
+                         at, ok_init ? "" : "?", init, init_changed, static_cast<unsigned long long>(init_stamp),
+                         ok_loading ? "" : "?", loading, loading_changed, loading_tick, loading_started,
+                         static_cast<unsigned long long>(loading_since), loading_flags, ok_session ? "" : "?", session,
+                         session_changed);
+            std::fprintf(stderr,
+                         "[rt] state trace at %.1f s: boot-media gate %s0x%x (active %s0x%x flag %s0x%x), platform gate"
+                         " %s0x%x, loading-active %s0x%x, session companion %s0x%x, machine 0x%llx current %s%u next"
+                         " %s%u\n",
+                         at, ok_gate ? "" : "?", boot_media_gate, ok_media ? "" : "?", boot_media_active,
+                         ok_media_flag ? "" : "?", boot_media_flag, ok_platform ? "" : "?", platform_gate,
+                         ok_active ? "" : "?", loading_active, ok_companion ? "" : "?", session_companion,
+                         static_cast<unsigned long long>(state_machine), ok_current ? "" : "?", machine_current,
+                         ok_next ? "" : "?", machine_next);
+            ++sample;
+            const bool census_now = censuses < 12 || (sample % 10 == 0 && censuses < 24);
+            if (census_now) {
+                state_trace_census(image_base, image_size, at);
+                ++censuses;
+            }
+            std::this_thread::sleep_until(
+                started + std::chrono::milliseconds(static_cast<long long>((sample + 1) * interval * 1000.0)));
+        }
+    }).detach();
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1862,6 +2160,11 @@ int wmain(int argc, wchar_t** argv) {
         // full thread-stack sampler above). Off when unset.
         if (const char* spec = std::getenv("PALMETTO_THREAD_STACKS"); spec && *spec)
             start_thread_stack_sampler(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, spec);
+        // PALMETTO_STATE_TRACE=<interval>[,<seconds>]: sample the title's init/loading/session state words and the
+        // title-side wait site/stack of the threads holding the state machine (diagnostic; see the state trace above).
+        // Off when unset.
+        if (const char* spec = std::getenv("PALMETTO_STATE_TRACE"); spec && *spec)
+            start_title_state_trace(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, spec);
         // PALMETTO_LOADER_HOOK=1: inline entry detours on the loader begin/end/re-init, with per-call records
         // (diagnostic; see the loader entry detours above). Off by default.
         if (const char* hook_switch = std::getenv("PALMETTO_LOADER_HOOK"); hook_switch && *hook_switch &&
