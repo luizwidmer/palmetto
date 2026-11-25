@@ -99,15 +99,29 @@ int main() {
     CHECK(!list.barrier(BufferBarrier{y::copy, y::vertex_shading, a::copy_dest, a::vertex_buffer, 0}));
     CHECK(list.barrier(TextureBarrier{y::none, y::render_target, a::no_access, a::render_target, l::undefined,
                                       l::render_target, 9, all, texture_barrier_discard}));
-    CHECK(!list.barrier(TextureBarrier{y::all, y::all, a::common, a::common, l::common, l::undefined, 9, all, 0}));
-    CHECK(!list.barrier(TextureBarrier{y::all, y::all, a::common, a::common, l::common, l::common, 9, all, 0x2}));
-    CHECK(!list.barrier(TextureBarrier{y::all, y::all, a::common, a::common, l::common, l::common, 9,
+    // Into UNDEFINED from a defined layout: the contents are no longer needed, so D3D12 allows the barrier and WARP
+    // closes the list (d3d12_close_parity_test's UNDEFINED rows; the retail title ends a depth buffer's use this way).
+    CHECK(list.barrier(TextureBarrier{y::depth_stencil, y::none, a::depth_stencil_write, a::no_access,
+                                      l::depth_stencil_write, l::undefined, 9, all, 0}));
+    // The discard flag and an UNDEFINED target say the same thing and are accepted together.
+    CHECK(list.barrier(TextureBarrier{y::all, y::all, a::common, a::common, l::common, l::undefined, 9, all,
+                                      texture_barrier_discard}));
+    // Still refused, each case named: a split begin and end in one barrier, unknown texture flags, a mip range that
+    // names no layers or planes, and a texture barrier without a resource.
+    CHECK(!list.barrier(TextureBarrier{y::split, y::split, a::common, a::common, l::common, l::common, 9, all, 0}));
+    CHECK(!list.barrier(TextureBarrier{y::all, y::all, a::common, a::common, l::common, l::undefined, 9, all, 0x2}));
+    CHECK(!list.barrier(TextureBarrier{y::all, y::all, a::common, a::common, l::common, l::undefined, 9,
                                        {0, 1, 0, 0, 0, 1}, 0}));  // zero layers
+    CHECK(!list.barrier(TextureBarrier{y::all, y::all, a::common, a::common, l::common, l::undefined, 0, all, 0}));
     CHECK(list.close());
-    CHECK(list.commands().size() == 4);
+    CHECK(list.commands().size() == 6);
     CHECK(std::get<GlobalBarrier>(list.commands()[1]).sync_before == y::split);
     CHECK(std::get<BufferBarrier>(list.commands()[2]).resource == 7);
     CHECK(std::get<TextureBarrier>(list.commands()[3]).flags == texture_barrier_discard);
+    const auto& released = std::get<TextureBarrier>(list.commands()[4]);
+    CHECK(released.resource == 9 && released.layout_before == l::depth_stencil_write &&
+          released.layout_after == l::undefined && released.flags == 0);
+    CHECK(std::get<TextureBarrier>(list.commands()[5]).flags == texture_barrier_discard);
 
     // Copies: D3D12's own call rules (aligned footprints; degenerate boxes and DEFAULT-heap
     // CopyResource self-copies are accepted as no-ops and must not record Vulkan commands).

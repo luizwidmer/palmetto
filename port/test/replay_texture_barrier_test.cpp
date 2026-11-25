@@ -170,6 +170,74 @@ int main() {
         }
     }
 
+    // 3. LayoutAfter UNDEFINED from a defined layout releases the range: the contents are no longer needed, and
+    // Vulkan has no transition into UNDEFINED (VUID-VkImageMemoryBarrier2-newLayout-01198), so each piece keeps the
+    // layout the tracker has it in (oldLayout == newLayout), which orders the accesses and changes nothing in the
+    // image; the tracker keeps those layouts too.
+    {
+        const VkImageLayout old_layouts[mips] = {shader_read, transfer_src, transfer_dst};
+        for (std::uint32_t mip = 0; mip < mips; ++mip)
+            tracker.set(id, {VK_IMAGE_ASPECT_COLOR_BIT, mip, 1, 0, 1}, old_layouts[mip]);
+        g_barriers.clear();
+        g_calls = 0;
+        CommandList list;
+        expect(list.barrier(TextureBarrier{y::depth_stencil, y::none, a::depth_stencil_write, a::no_access,
+                                           l::depth_stencil_write, l::undefined, id, all, 0}) &&
+                   list.close(),
+               "record a release barrier into UNDEFINED");
+        PreparedList prepared;
+        expect(prepare(list, resolve, vk, prepared) == ReplayResult::success,
+               "prepare a release barrier into UNDEFINED");
+        emit(prepared, cb, vk, &tracker);
+        expect(g_calls == 1 && g_barriers.size() == mips, "one call with three image barriers for the release");
+        for (std::uint32_t mip = 0; mip < mips && g_barriers.size() == mips; ++mip) {
+            const VkImageMemoryBarrier2& b = g_barriers[mip];
+            expect(b.oldLayout == old_layouts[mip] && b.newLayout == old_layouts[mip],
+                   "a release keeps each piece's layout; Vulkan has no transition into UNDEFINED");
+            expect(b.image == image.image && b.subresourceRange.baseMipLevel == mip,
+                   "image and range of each release barrier");
+            expect(tracker.layout(id, mip) == old_layouts[mip], "the tracker keeps the layout across the release");
+        }
+    }
+
+    // 4. A release over a range the tracker still has in UNDEFINED was never used: it records no Vulkan barrier and
+    // is not zero-filled for it. The barrier that follows starts from UNDEFINED and discards, as it did before the
+    // release existed.
+    {
+        tracker.track(id, image, VK_IMAGE_LAYOUT_UNDEFINED);
+        g_barriers.clear();
+        g_calls = 0;
+        CommandList unused;
+        expect(unused.barrier(TextureBarrier{y::all, y::none, a::common, a::no_access, l::common, l::undefined, id,
+                                             all, 0}) &&
+                   unused.close(),
+               "record a release barrier over a never-used image");
+        PreparedList prepared;
+        expect(prepare(unused, resolve, vk, prepared) == ReplayResult::success,
+               "prepare a release over a never-used image");
+        emit(prepared, cb, vk, &tracker);
+        expect(g_calls == 0 && g_barriers.empty(), "a release over a never-used image records no Vulkan barrier");
+        for (std::uint32_t mip = 0; mip < mips; ++mip)
+            expect(tracker.layout(id, mip) == VK_IMAGE_LAYOUT_UNDEFINED, "a never-used image stays UNDEFINED");
+
+        g_barriers.clear();
+        g_calls = 0;
+        CommandList next;
+        expect(next.barrier(TextureBarrier{y::none, y::render_target, a::no_access, a::render_target, l::undefined,
+                                           l::render_target, id, all, 0}) &&
+                   next.close(),
+               "record the barrier from UNDEFINED after a release");
+        expect(prepare(next, resolve, vk, prepared) == ReplayResult::success,
+               "prepare the barrier from UNDEFINED after a release");
+        emit(prepared, cb, vk, &tracker);
+        expect(g_calls == 1 && g_barriers.size() == 1, "one barrier from UNDEFINED");
+        if (g_barriers.size() == 1)
+            expect(g_barriers[0].oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && g_barriers[0].newLayout == attachment,
+                   "the barrier after a release discards from UNDEFINED");
+        for (std::uint32_t mip = 0; mip < mips; ++mip)
+            expect(tracker.layout(id, mip) == attachment, "the tracker has the new layout after the barrier");
+    }
+
     if (failures) return 1;
     std::printf("replay_texture_barrier_test: OK\n");
     return 0;

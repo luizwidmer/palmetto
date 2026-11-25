@@ -48,9 +48,11 @@ struct Env {
     Ref<ID3D12QueryHeap> occlusion;
     Ref<ID3D12CommandAllocator> closed_bundle_allocator;
     Ref<ID3D12GraphicsCommandList> closed_bundle;
-    // The list being recorded, and the same list as ID3D12GraphicsCommandList2 (null when not given).
+    // The list being recorded, and the same list as ID3D12GraphicsCommandList2 and 7 (null when not given; list7
+    // also when the device has no enhanced barriers).
     ID3D12GraphicsCommandList* list = nullptr;
     ID3D12GraphicsCommandList2* list2 = nullptr;
+    ID3D12GraphicsCommandList7* list7 = nullptr;
 
     bool init(ID3D12Device* d) {
         device = d;
@@ -163,6 +165,29 @@ constexpr auto stricter = Known::layer_stricter;
 constexpr auto looser = Known::layer_looser;
 constexpr auto match = Known::match;
 
+// One enhanced texture barrier over every subresource of `resource`; false when the device/list has no enhanced
+// barriers, so the case does not run there.
+bool texture_barrier(Env& e, ID3D12Resource* resource, D3D12_BARRIER_SYNC sync_before, D3D12_BARRIER_SYNC sync_after,
+                     D3D12_BARRIER_ACCESS access_before, D3D12_BARRIER_ACCESS access_after,
+                     D3D12_BARRIER_LAYOUT layout_before, D3D12_BARRIER_LAYOUT layout_after) {
+    if (!e.list7) return false;
+    D3D12_TEXTURE_BARRIER b{};
+    b.SyncBefore = sync_before;
+    b.SyncAfter = sync_after;
+    b.AccessBefore = access_before;
+    b.AccessAfter = access_after;
+    b.LayoutBefore = layout_before;
+    b.LayoutAfter = layout_after;
+    b.pResource = resource;
+    b.Subresources = {0xffffffff, 0, 0, 0, 0, 0};  // every subresource
+    D3D12_BARRIER_GROUP group{};
+    group.Type = D3D12_BARRIER_TYPE_TEXTURE;
+    group.NumBarriers = 1;
+    group.pTextureBarriers = &b;
+    e.list7->Barrier(1, &group);
+    return true;
+}
+
 std::vector<Case> cases() {
     return {
         {"empty list", true, match, [](Env&) { return true; }},
@@ -200,6 +225,29 @@ std::vector<Case> cases() {
                e.list->ResourceBarrier(1, &b))},
         {"barrier type 7", false, match,
          CALLS(D3D12_RESOURCE_BARRIER b{}; b.Type = D3D12_RESOURCE_BARRIER_TYPE(7); e.list->ResourceBarrier(1, &b))},
+        // Enhanced barriers (ID3D12GraphicsCommandList7::Barrier). LayoutAfter UNDEFINED from a defined layout says
+        // the contents are no longer needed, as before the memory is aliased; D3D12 allows it and WARP closes such a
+        // list. The retail title ends a depth buffer's use this way (depth write -> no access, sync NONE). The
+        // WARP column of these three rows was measured on Windows 11 26200, the build this machine runs; a live WARP
+        // device is used when the test can make one.
+        {"Barrier: depth DEPTH_STENCIL_WRITE -> COPY_SOURCE", true, match,
+         [](Env& e) {
+             return texture_barrier(e, e.depth.p, D3D12_BARRIER_SYNC_DEPTH_STENCIL, D3D12_BARRIER_SYNC_COPY,
+                                    D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE, D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                                    D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_LAYOUT_COPY_SOURCE);
+         }},
+        {"Barrier: depth DEPTH_STENCIL_WRITE -> UNDEFINED", true, match,
+         [](Env& e) {
+             return texture_barrier(e, e.depth.p, D3D12_BARRIER_SYNC_DEPTH_STENCIL, D3D12_BARRIER_SYNC_NONE,
+                                    D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE, D3D12_BARRIER_ACCESS_NO_ACCESS,
+                                    D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE, D3D12_BARRIER_LAYOUT_UNDEFINED);
+         }},
+        {"Barrier: texture COMMON -> UNDEFINED", true, match,
+         [](Env& e) {
+             return texture_barrier(e, e.tex.p, D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_NONE,
+                                    D3D12_BARRIER_ACCESS_COMMON, D3D12_BARRIER_ACCESS_NO_ACCESS,
+                                    D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_UNDEFINED);
+         }},
         // CopyBufferRegion
         {"CopyBufferRegion of 0 bytes", true, match, CALLS(e.list->CopyBufferRegion(e.buffer.p, 0, e.upload.p, 0, 0))},
         {"CopyBufferRegion past the end of the destination", false, looser,
@@ -438,13 +486,22 @@ bool run_case(Env& env, const Case& c, HRESULT& close) {
     CHECK(SUCCEEDED(env.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, nullptr,
                                                   IID_PPV_ARGS(&list.p))));
     if (FAILED(list->QueryInterface(IID_PPV_ARGS(&list2.p)))) list2.p = nullptr;
+    // A device without enhanced barriers (or a runtime whose list has no GCL7) leaves the enhanced-barrier cases
+    // unrun rather than failed.
+    Ref<ID3D12GraphicsCommandList7> list7;
+    D3D12_FEATURE_DATA_D3D12_OPTIONS12 options12{};
+    if (FAILED(env.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12, &options12, sizeof(options12))) ||
+        !options12.EnhancedBarriersSupported || FAILED(list->QueryInterface(IID_PPV_ARGS(&list7.p))))
+        list7.p = nullptr;
     env.list = list.p;
     env.list2 = list2.p;
+    env.list7 = list7.p;
     const bool recorded = c.record(env);
     close = recorded ? list->Close() : not_run;
     if (!recorded) list->Close();
     env.list = nullptr;
     env.list2 = nullptr;
+    env.list7 = nullptr;
     return true;
 }
 

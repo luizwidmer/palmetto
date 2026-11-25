@@ -688,10 +688,19 @@ public:
         return append(barrier);
     }
 
+    // The texture rules this recorder enforces, each a refused case the command-list test names:
+    //   - a barrier with no resource (D3D12 rejects a texture barrier without one);
+    //   - both sync halves SPLIT (a begin and an end cannot be the same barrier);
+    //   - flags other than texture_barrier_discard;
+    //   - a mip-count range that names no layers or planes;
+    //   - a closed list.
+    // LayoutAfter UNDEFINED from a defined layout is not one of them: D3D12 allows it, the contents are no longer
+    // needed, as before the memory is aliased. WARP closes such a list (measured here: d3d12_close_parity_test's two
+    // rows into UNDEFINED), and it is the shape the retail title uses to end a depth buffer's use (the public fork's
+    // D3D-BARRIER-INTO-UNDEFINED measurement). Replay keeps the image's layout and orders the accesses only; see the
+    // TextureBarrier branch of emit() in vulkan_replay.h.
     bool barrier(const TextureBarrier& barrier) {
         if (!barrier.resource || !valid_sync(barrier.sync_before, barrier.sync_after)) return false;
-        if (barrier.layout_after == d3d12_layout::undefined && barrier.layout_before != d3d12_layout::undefined)
-            return false;
         if (barrier.flags & ~texture_barrier_discard) return false;
         if (barrier.range.mip_count && (!barrier.range.layer_count || !barrier.range.plane_count)) return false;
         if (barrier.sync_after == d3d12_sync::split) return !closed_;
