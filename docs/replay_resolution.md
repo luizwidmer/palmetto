@@ -4,6 +4,13 @@
 `PALMETTO_SHADERS`, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`, 150 s boots. Counts, pointers-as-classes
 and error codes only; no package bytes, paths or shader data.
 
+**Resolution, measured later.** The rebase section 5 specifies landed as `port/src/console_va_map.h` (commit
+`ea771ec60`): the title VA stays an alias for the command arguments, and every shader-visible copy of it is rewritten to
+an arena VA at replay. The same draws then execute — 17,674 per 150 s, `ExecuteCommandLists` 35,349 ok / 0 refused, 0
+TDR, no device lost ([page_address_space.md](page_address_space.md) section 4). The evidence after execution is frame
+content: the presented target is the draw's own target, is proven writable by a control draw, and reads black
+([frame_capture.md](frame_capture.md)). The measurements below remain the record of this frontier.
+
 The boot reaches the draw path (`d0095ca70`): per 150 s, 43,750 `SetPipelineState` and 43,750 `DrawInstanced` are
 recorded, 10,241 device-slot-57 records build 10,241 PC graphics pipelines with no refusal, and every `Close` is
 accepted. But every submission that carries one of those draws is refused by the replay layer, before anything is
@@ -17,7 +24,7 @@ submitted.
 [rt] d3d12: ExecuteCommandLists failed: unknown resource; nothing was submitted
 ```
 
-Measured on an unmodified boot (`F:\palmetto-work\boot-replay-baseline2`, 150 s): `ExecuteCommandLists` ok 43,755,
+Measured on an unmodified boot (`boot-replay-baseline2`, 150 s): `ExecuteCommandLists` ok 43,755,
 failed 43,750 — one failed submission per draw, each carrying a separate `[d3d12-trace] ... failed` line. No `Close`
 fails, and the run is ALIVE for the whole timeout with no exception, so the recording side is consistent; only the
 replay's lookup refuses.
@@ -25,7 +32,7 @@ replay's lookup refuses.
 ## 2. Which check fails, with evidence
 
 The replay returns `unresolved_resource` from several places. Bounded diagnostics were added (section 6) and a fresh
-150 s boot (`F:\palmetto-work\boot-replay-diag1`) names the one that fails:
+150 s boot (`boot-replay-diag1`) names the one that fails:
 
 ```
 [rt] replay: buffer_at miss for VA 0x25780b3df10 size 0xff0
@@ -66,7 +73,7 @@ register the returned buffer under the address the resource was placed at (a sma
 re-registers the binding's `va`; no lookup was loosened). The stand-in's bytes still are not the title's writes, which
 the line above the change already says.
 
-Measured with that change (`F:\palmetto-work\boot-replay-fix1`; the boot did not reach the timeout):
+Measured with that change (`boot-replay-fix1`; the boot did not reach the timeout):
 
 | | before (baseline, 150 s) | with the VA registration |
 |---|---:|---:|
@@ -77,8 +84,8 @@ Measured with that change (`F:\palmetto-work\boot-replay-fix1`; the boot did not
 | run | ALIVE 150.2 s, no exception | **GPU reset (TDR)** at 22.95 s, title `0xC0000005` at 27.1 s |
 
 The GPU did not merely refuse the work: it faulted. `Get-WinEvent System` shows two `nvlddmkm` event 153 (GPU error /
-TDR) entries at the minute of that boot, and with the device-lost line added (`F:\palmetto-work\boot-replay-val1`,
-`F:\palmetto-work\boot-replay-zerovtx`) the replay reports
+TDR) entries at the minute of that boot, and with the device-lost line added (`boot-replay-val1`,
+`boot-replay-zerovtx`) the replay reports
 
 ```
 [rt] replay: the Vulkan device was lost
@@ -88,7 +95,7 @@ followed by `ExecuteCommandLists failed: unsupported`, `Signal failed`, and the 
 
 A control run separates the vertex-fetch data from the shader path: with the same VA registration and **every**
 vertex-buffer binding redirected to the replay's zero page (stride 0, so no bytes are fetched from the stand-in), the
-TDR still happens at the same trace point (`F:\palmetto-work\boot-replay-zerovtx`). The fault is therefore not the
+TDR still happens at the same trace point (`boot-replay-zerovtx`). The fault is therefore not the
 fetch of the stand-in's bytes; it is what the draw's shaders and descriptors address.
 
 That is the fault mode `docs/d3d12_vulkan.md` section 3.3 already measures: a translated shader computes
@@ -132,3 +139,6 @@ Bounded, on by default, and behaviour-neutral:
 
 These are what identified the check in section 2 and the TDR in section 4; they are cheap enough to keep for the next
 frontier. Remove them if the log is expected to stay byte-comparable.
+
+**Resolution and next evidence:** [page_address_space.md](page_address_space.md) (the rebase that executes these draws),
+then [frame_capture.md](frame_capture.md) (the presented target is the draw's target and reads black).

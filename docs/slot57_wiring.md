@@ -6,9 +6,12 @@ and sends it to the PC device's own `CreateGraphicsPipelineState` exactly as slo
 (docs/graphics_pso.md sections 2-5). The wiring's own boot refused 8,926 of the first 10,000 records at the
 input-layout blob; the element table was decoded next (docs/input_layout.md), and one post-decode 150 s boot now builds
 **10,241 of 10,241 records with 0 refusals and 0 PC failures**, with the frame recording **42,721 `SetPipelineState` /
-42,722 `DrawInstanced`** (docs/input_layout.md section 6). Every submit that carries one of those draws is then refused
+42,722 `DrawInstanced`** (docs/input_layout.md section 6). Every submit that carries one of those draws was then refused
 by the replay layer on the title VA the draw binds, and registering that VA alone so the draw executes TDRs the GPU
-(docs/replay_resolution.md).
+(docs/replay_resolution.md). **Correction, measured later:** the page-VA rebase resolved that frontier — every
+shader-visible title VA is rewritten into the arena, the same draws execute with 0 refused submissions and no TDR, and
+the frontier moved to frame content ([page_address_space.md](page_address_space.md),
+[frame_capture.md](frame_capture.md)).
 
 ## 1. The wiring
 
@@ -93,10 +96,14 @@ The conversion is real and cheap: the frame loop keeps its submit rate, every re
 draws for the first time - `Close` succeeds 86,059 times with 0 failures, the run is ALIVE for the whole timeout, and
 `ExecuteCommandLists` is attempted 85,444 times (34,134 per 60 s). But no draw executes: 42,724 submits succeed and
 **42,720 fail, one per recorded draw**, all with `ExecuteCommandLists failed: unknown resource; nothing was submitted`
-from the replay layer. That refusal - not the layout, which is decoded - is the next functional frontier, and it is the
-draw's resource binding: docs/replay_resolution.md sections 1-3 name the check (`buffer_at` cannot cover the title VA
-inside the title-placed 174 MiB buffer) and the measured wall behind it (the title-VA address space, docs/issues.md
-O16/O17).
+from the replay layer. That refusal - not the layout, which is decoded - is the draw's resource binding:
+docs/replay_resolution.md sections 1-3 name the check (`buffer_at` cannot cover the title VA inside the title-placed
+174 MiB buffer) and the measured wall behind it (the title-VA address space, docs/issues.md O16/O17).
+
+**Correction, measured later** (`ea771ec60`, [page_address_space.md](page_address_space.md)): that refusal was resolved
+by rebasing the title's page VAs into one arena rather than importing the pages, and the same draws now execute with
+`ExecuteCommandLists` 35,349 ok / 0 refused, 0 TDR and no device lost. "No draw executes" describes this page's boots
+only.
 
 ## 3. The layout blobs are an element table
 
@@ -120,12 +127,12 @@ strip cut and the attachment formats/sample count that only the state blob carri
 docs/graphics_record.md section 4). The smallest next change there is to decode one field at a time and histogram it over
 the same 10,241 records, as the layout decode did - a field measurement, not a boot refusal.
 
-The functional frontier the draws expose is separate and higher priority: every draw-carrying submit is refused on the
-title VA the draw binds (docs/replay_resolution.md). The single-candidate VA registration removes **all 43,750
-refusals** in the later replay baseline boot, but the first executed draws TDR the GPU at 22.95 s because the un-rebased
-title VA is not an arena address; until the title-placed pages are imported and their VAs rebased (docs/issues.md
-O16/O17), refusing the submit is the honest behaviour, and executing it is a device reset (docs/replay_resolution.md
-sections 4-5).
+The functional frontier the draws exposed was separate and higher priority: every draw-carrying submit was refused on
+the title VA the draw binds (docs/replay_resolution.md). The single-candidate VA registration removed **all 43,750
+refusals** in the later replay baseline boot, but the first executed draws TDR'd the GPU at 22.95 s because the
+un-rebased title VA is not an arena address. **Resolved by the page-VA rebase** (`ea771ec60`): every shader-visible
+title VA is rewritten to an arena VA before replay, the same draws execute with 0 refused submissions and no TDR, and
+anything the map cannot rebase still refuses ([page_address_space.md](page_address_space.md)).
 
 ## 5. Tests and gates
 
@@ -160,11 +167,12 @@ is a separate change, `d0095ca70`).
 
 * **The fixed-function state blob** (O15): the only record field still on a documented stand-in; decoding it decides
   fidelity, not whether a record builds.
-* **The recorded draws do not execute.** They are refused on the title VA (`unknown resource`, one per draw); the
-  candidate VA registration removes every refusal but TDRs the GPU. The next work is the title-placed page import and
-  the VA rebase (O16/O17): docs/replay_resolution.md sections 4-5.
-* **Presentation is a separate frontier**: the title's own display surface carries a null resource, so the frame has
-  nothing to present (docs/display_path.md).
+* **The recorded draws did not execute in this page's boots.** They were refused on the title VA (`unknown resource`, one
+  per draw). Resolved later by the page-VA rebase, which executes them with 0 refused submissions and no TDR: see
+  docs/page_address_space.md (O11/O17 in the ledger).
+* **Presentation was a separate frontier in this tree.** The title's display surface carried a null resource; the later
+  slot-127 measurement shows that null was the beyond-vtable stub not writing the out pointer, and with a real resource
+  the present plane is non-null and is the frame draw's target (docs/surface_population.md, docs/frame_capture.md).
 * When this page was written, docs/graphics_pso.md said "backend, not wired" and the root README's tracking block said
-  slot 57 is not wired. docs/graphics_pso.md is repaired in the same documentation pass; the root README's block is
-  generated from docs/progress.json and stays stale until that is refreshed (outside this change's scope).
+  slot 57 is not wired. docs/graphics_pso.md was repaired in the same documentation pass, and the root README's block
+  was refreshed from docs/progress.json afterwards (commit `287ec4654`), so neither is stale now.

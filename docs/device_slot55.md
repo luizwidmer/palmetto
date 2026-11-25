@@ -198,8 +198,8 @@ d3d12_fence_timing_test   -> still crashes (known pre-existing failure, untouche
 ```
 
 Scope: `port/shims/d3d12_xs_device.cpp`, `port/test/xs_proxy_mock_test.cpp`, this page. No git writes.
-Artifacts: `F:\palmetto-work\boot-slot55-1` (the post-fix boot), `F:\palmetto-work\boot-rt-readback` (the pre-fix boot),
-`F:\palmetto-work\boot-slot55-ab-before` / `ab-after` and `F:\palmetto-work\cap-slot55-before` / `cap-slot55-after`
+Artifacts: `boot-slot55-1` (the post-fix boot), `boot-rt-readback` (the pre-fix boot),
+`boot-slot55-ab-before` / `ab-after` and `cap-slot55-before` / `cap-slot55-after`
 (the A/B and its captures).
 
 ## 7. Limits

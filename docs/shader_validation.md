@@ -776,8 +776,8 @@ python -m pytest tests/test_image_fuzz_hw.py
   that as an error instead of reading from a wrong base. The same texels, sizes (8 to 64 per side) and 15 masks as the
   translator run; a seed names the same textures for both.
 - **The T# per family** (`hw_oracle/tsharp.py`, exact words in `tests/test_image_fuzz_hw.py`). Facts from Mesa's AMD
-  register database and `ac_descriptors.c` and LLVM's `SIDefines.h` (MIT / Apache-2.0; own code, see
-  [related_projects.md](related_projects.md)). GFX10 and GFX11 differ here, and GFX12 is a third layout that is not
+  register database and `ac_descriptors.c` and LLVM's `SIDefines.h` (MIT / Apache-2.0; own code, not copied). GFX10 and
+  GFX11 differ here, and GFX12 is a third layout that is not
   built (`--oracle hw` on gfx12xx exits 77 with that reason):
 
   | | GFX10 (gfx10xx, RDNA1/2) | GFX11 (gfx11xx, RDNA3 and RDNA3.5) |

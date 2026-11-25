@@ -172,7 +172,7 @@ the title's pages, capped at 8 MiB per copy. Uncommitted pages are left as the s
 The first requests are logged as `page pull (copy source): arena VA 0x... + 0x..., a title range (pulled)` or
 `not a title range (no pull needed)`, and the pulls are counted apart from the draw-read pulls.
 
-Boot (`F:\palmetto-work\boot-copysrc3`, 150 s, capture on, readback armed): ALIVE 150.2 s, 0 exceptions, 0 device-lost,
+Boot (`boot-copysrc3`, 150 s, capture on, readback armed): ALIVE 150.2 s, 0 exceptions, 0 device-lost,
 `ExecuteCommandLists` ok 27,936 / failed 0 / refused 0, draws 27,935, presents 13,968, 0 failed `Close`. The measured
 result is **negative but informative**: the window contains **no copy commands at all** - `CopyBufferRegion`,
 `CopyTextureRegion`, `CopyResource`, `CopyTiles`, `ResolveSubresource`, `WriteToSubresource` and `ReadFromSubresource`
@@ -187,7 +187,7 @@ refuse with E_NOTIMPL), or through a resource-creation path that is still refuse
 
 ## 8. The 300 s boot: still no uploads, and the late frame is still black
 
-One clean 300 s harness boot (`F:\palmetto-work\boot-300`; capture every 2,000 presented frames, readback armed at draw
+One clean 300 s harness boot (`boot-300`; capture every 2,000 presented frames, readback armed at draw
 45,000 so it measures the frame around 170-190 s, not the first frame):
 
 | Measure | 150 s boot | 300 s boot |

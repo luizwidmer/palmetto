@@ -28,7 +28,7 @@ MiB/s). Both are off by default and change no behaviour.
 
 ## 2. What the samples show
 
-Thread counts and RIP-site histogram, one 200 s boot (`F:\palmetto-work\boot-wait2`; the 150 s `boot-dscaller` and
+Thread counts and RIP-site histogram, one 200 s boot (`boot-wait2`; the 150 s `boot-dscaller` and
 `boot-dsprogress` agree):
 
 | Sample | Threads | Dominant RIP sites (counts) |
@@ -59,7 +59,7 @@ worker-pool events (8-11), the CRT thread start/join Event+Thread pair (10-11), 
 
 ## 3. The DirectStorage hypothesis, tested: no signal or event is missing
 
-`PALMETTO_DSTORAGE_TRACE=1` over 150 s (`F:\palmetto-work\boot-dscaller`) shows the whole queue traffic:
+`PALMETTO_DSTORAGE_TRACE=1` over 150 s (`boot-dscaller`) shows the whole queue traffic:
 
 * **Requests:** `file -> memory`, `zlib=1`, `bcpack=0`, `swizzle=0`, ~17.8-24 KiB source and 64 KiB destination each.
   The 64 KiB destinations are ordinary process-heap addresses (e.g. `0x20ED6BFB2A0`-style, not a title-page VA).
@@ -108,6 +108,6 @@ types, shallow stack, per-sample site histogram and wait detail). `port/shims/ds
 per-call trace with caller RVAs, per-entry completion HRESULTs, and periodic request/MiB/MiB/s progress counters; no
 queue semantics changed.
 
-Measured boots: `F:\palmetto-work\boot-waits`, `boot-dstrace`, `boot-dsprogress`, `boot-wait2` (200 s with samples at
+Measured boots: `boot-waits`, `boot-dstrace`, `boot-dsprogress`, `boot-wait2` (200 s with samples at
 10/30/60/120/180 s), `boot-dscaller`. All ALIVE to their timeout, 0 exceptions, 0 device-lost, 0 failed `Close`,
 0 refused submits.

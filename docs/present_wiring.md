@@ -214,8 +214,8 @@ null), and the `[rt] present:` lines name which one happened.
 
 ## 6. Measured: one 150 s boot with the wiring in
 
-run: `palmetto.exe --run <title> --game-dir <package> --overlay F:\palmetto-overlay --trace <out>/boot.jsonl
---trace-d3d12` through `tooling/boot_report.py` (env: `PALMETTO_SHADERS=F:\palmetto-work\shaders\spirv`,
+run: `palmetto.exe --run <title> --game-dir <package> --overlay <overlay-dir> --trace <out>/boot.jsonl
+--trace-d3d12` through `tooling/boot_report.py` (env: `PALMETTO_SHADERS=<shaders-dir>`,
 `PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`), 150 s timeout, retired image
 1.0.2.1. The surface fix (console device slot 127) was in the same binary. The boot log lines, in order:
 

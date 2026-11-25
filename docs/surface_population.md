@@ -6,8 +6,10 @@ device's vtable. The proxy used to answer that slot from the generic beyond-vtab
 **without writing the out pointer**. The title checks the HRESULT, saw success, and kept the surface whose resource
 field the proxy had left null - which is what `docs/display_path.md` measured the title writing into its own present
 state. Slot 127 is now mapped to a real PC `CreateCommittedResource`; both display surfaces carry real PC resources,
-the present plane's first resource is non-null, and the frame's clears now reach the PC command list. Nothing is
-displayed yet because the present still has no presenter (see section 7).
+the present plane's first resource is non-null, and the frame's clears now reach the PC command list. Nothing was
+displayed at this measurement because the present had no presenter yet; the presenter and window were wired next
+(`docs/present_wiring.md`, `docs/window.md`), so the frames now present into the title's own window - and they are black
+for the frame-content reasons in `docs/frame_capture.md` (see section 7).
 
 ## 1. The measurement that separated the populations
 
@@ -147,18 +149,20 @@ as `docs/display_path.md` measured - because the proxy's success answer left it 
 | population split, 150 s | `PALMETTO_XS_CALLERS=1`, `PALMETTO_POKE_LOG=193E1BA,193E2DB,CC29D8,CD74D7` | ALIVE, no exception; slot 127 = 2 creations, all `S_OK`, out null; present surfaces = those 2; 13 of 15 render-target surfaces from slot 133 with real resources |
 | after the fix, 150 s | `PALMETTO_POKE_LOG=193E1BA,193E2DB,CC29D8` | ALIVE, no exception; slot 127 creations 2, out non-null; present plane non-null at calls 1/2/1,000/10,000; 0 null render-target views; 36,306 clears execute |
 
-Artifacts: `F:\palmetto-work\boot-surface-null1` (sections 1-2), `F:\palmetto-work\boot-surface-fixed1` (sections 4-6).
+Artifacts: `boot-surface-null1` (sections 1-2), `boot-surface-fixed1` (sections 4-6).
 Gates: `build_palmetto.cmd` -> `PALMETTO_OK`; `the test build script` -> `TESTS_BUILT`; `xs_proxy_mock_test` -> `PASS`;
 `d3d12_fence_timing_test` is the pre-existing failure and still fails.
 
 ## 7. What this does not do
 
-* **Nothing is visible yet.** The queue's `PresentX` (slot 32) is still answered `unsupported`, and no window presenter
-  is registered in this build, so the frame that now has display resources has nowhere to present them. The
-  presentation core (`port/shims/xbox_present.*`, the window presenter in `port/shims/d3d12_com.h`) is the
-  next piece: its `PresentX` refuses a plane whose first resource is null, and that refusal no longer applies - the
-  plane now names a real resource.
-* The submit failures (`ExecuteCommandLists` unresolved resource) are the replay layer's frontier, not this one.
+* **Nothing was visible at this measurement.** At this boot's tree the queue's `PresentX` (slot 32) was still answered
+  `unsupported` and no window presenter was registered, so the frame that now had display resources had nowhere to
+  present them. The presentation core (`port/shims/xbox_present.*`, the window presenter in
+  `port/shims/d3d12_com.h`) was wired next (`docs/present_wiring.md`): its `PresentX` refuses a plane whose first
+  resource is null, and that refusal no longer applies because the plane names a real resource. The presented frames
+  are black for the frame-content reasons in `docs/frame_capture.md`.
+* The submit failures (`ExecuteCommandLists` unresolved resource) were the replay layer's frontier at this measurement,
+  not this one; the page-VA rebase later resolved them (`docs/page_address_space.md`).
 * The 3840-wide display targets are created as ordinary committed textures of their own; the console made them from
   the title's display memory. Nothing in this title's remaining path reads that memory back, so no import is needed
   for visibility, but a future console-memory-fidelity step would have to provide it.

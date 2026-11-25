@@ -71,9 +71,8 @@ An inflated size of exactly `0x800000` is a chunk head, not a continuation. All 
 indexes are resource or graphics pages. [bvh.md](bvh.md) records the same 8 MiB-first relationship from the payload
 side.
 
-The boundary rule is independently read by meetox80/an open research project. No an open research project code, prose or table was used; the
-repository has **no licence** (all rights reserved), and every count above was re-measured from this package. See
-[related_projects.md](related_projects.md).
+The boundary rule is independently read by meetox80's public prior-art project. No code, prose or table from that
+project was used; it has **no licence** (all rights reserved), and every count above was re-measured from this package.
 
 ## Carving
 

@@ -152,9 +152,8 @@ Com `PALMETTO_D3D12=vulkan`, o runtime encontra os shaders em `<work>/shaders/sp
 
 O contrato do tradutor e todas as notas de formato estão em [`docs/design.md`](../../design.md); as notas de
 formato, recursos, runtime e validação estão indexadas em [`docs/README.md`](../../README.md). O plano D3D12
-está em [`docs/d3d12_vulkan.md`](../../d3d12_vulkan.md), os formatos de áudio em
-[`docs/audio.md`](../../audio.md) e as referências relacionadas em
-[`the removed comparison notes`](../../related_projects.md).
+está em [`docs/d3d12_vulkan.md`](../../d3d12_vulkan.md) e os formatos de áudio em
+[`docs/audio.md`](../../audio.md).
 
 ## Problemas comuns
 

@@ -33,7 +33,7 @@ shader-visible title VA; the response is to put an arena VA in the shader's hand
 
 ## 2. What the title's address space measurably looks like
 
-One diagnostic boot (`F:\palmetto-work\boot-pageva2`, standard environment plus the existing
+One diagnostic boot (`boot-pageva2`, standard environment plus the existing
 `PALMETTO_XS_CLEAR_BARRIER_PROBE=1`; behaviour-neutral) measured the values the two designs have to work with:
 
 ```
@@ -95,7 +95,7 @@ the expensive side.
 
 ## 4. What executes now
 
-One clean 150 s boot (`F:\palmetto-work\boot-pageva4`; standard environment, the harness, no other boot running, tree
+One clean 150 s boot (`boot-pageva4`; standard environment, the harness, no other boot running, tree
 `523d94759` plus this increment):
 
 | Measure | Result |

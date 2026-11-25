@@ -946,8 +946,7 @@ the SDK; the console GUIDs are attributed to a public prior-art project in
 - [d3d12_xs_surface.md](d3d12_xs_surface.md) §2, §4, §5, §5.1, §6, §7, §9 — the export/IID
   contract, console GUIDs, extension catalogue, GCL8 correction, DMA list rule and `PresentX`
   status.
-- [related_projects.md](related_projects.md) — the GPL-2.0-only and GPL-3.0-only provenance
-  rules.
+- the GPL-2.0-only and GPL-3.0-only provenance rules for the prior art cited below.
 - a public prior-art project, pinned at `d304fa26c0292e2f3ba76f23b15c9f30734bec02`:
   [`docs/d3d12-xs-wrapper.md:69-97`](a public prior-art project),
   [`components/extension-wrapper/console_extensions.h:13-31,45-72,84-191`](a public prior-art project),

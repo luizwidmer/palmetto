@@ -365,8 +365,8 @@ Bits 8 and 13 are mostly set together. The tool counts the four combinations:
 
 So nine in ten lane nodes stand on polygons that carry both bits, which cover 2.5% of the area. Bit 13
 alone covers almost four times that area (9.5%) with almost no node on it, and bit 8 alone is rare.
-[an open research project](an open research project) labels bit 13 "road surface" after a visual check
-(`crates/an open research project-core/src/navmesh.rs`, commit `0619601`, GPL-3.0; see [related_projects.md](related_projects.md)).
+A public prior-art project labels bit 13 "road surface" after a visual check (its navmesh decoder, commit `0619601`,
+GPL-3.0; no code copied).
 The count is consistent with that if road surface is wider than the driven lanes. It does not settle which bit,
 or which combination, means road surface. That stays open, as do bit 8's meaning and the other bits. The vertex
 formula above is stated in the same file and is confirmed by the heights.

@@ -7,6 +7,14 @@ not a shim answer on the present path, and it is not a first-frame artefact: the
 a plane whose first resource is null, so the prepared presenter has nothing to present until that record carries a
 resource; the exact next measurement is in section 3.
 
+> **Superseded (measured later, `804a01f06`).** The null these sections measure was the console device slot 127 answer:
+> the proxy returned `S_OK` from the generic beyond-vtable stub without writing the out pointer, so the title kept a
+> surface whose resource field was null. With slot 127 creating a real PC resource the display surfaces carry real
+> resources, the present plane's first resource is non-null, the frame's clears reach the command list, and the
+> presented resource is the frame draw's own target. Read the measurements below as the pre-fix tree's state; the fix
+> and its boots are [surface_population.md](surface_population.md), and the presented picture is still black for the
+> frame-content reasons in [frame_capture.md](frame_capture.md).
+
 ## 1. What the present carries, and where the plane comes from
 
 One 140 s baseline boot (retail image, Vulkan backend, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`, no
