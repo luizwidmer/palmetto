@@ -32,6 +32,7 @@
 
 #include "command_list.h"
 #include "depth24.h"
+#include "gfx10_descriptors.h"
 #include "uav_clear.h"
 
 #include <vulkan/vulkan.h>
@@ -45,6 +46,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <map>
@@ -782,6 +784,12 @@ struct GraphicsPipeline {
     // and stencil. Null when it cannot be built.
     static constexpr std::uint32_t unbound_depth = 1u << 8;
     std::function<VkPipeline(std::uint32_t unbound)> variant;
+    // Diagnostic (docs/frame_capture.md): the same pipeline with a substituted pixel shader (the frame dump's
+    // constant-output PS control). The shim builds it from the same recipe, so the vertex stage, input layout and
+    // fixed-function state are the title's; cull_none overrides only the substituted variant's cull mode, so a culling
+    // vs degenerate-geometry question can be answered. Null when the shim did not offer it or the recipe has no
+    // fragment stage; consumed only by the env-gated diagnostic.
+    std::function<VkPipeline(VkShaderModule ps, bool cull_none)> with_ps;
     std::uint32_t samples = 1;  // rasterizationSamples; every bound attachment must have this count
     // Diagnostic (docs/page_content.md): what the translated pixel stage does with images, counted from its SPIR-V at
     // creation, so a black frame can be told apart from a texture-content gap. has_pixel_stage is false when the
@@ -856,6 +864,23 @@ inline ReplayResult unresolved_at(const char* site, std::uint64_t id = 0, std::u
     }
     return ReplayResult::unresolved_resource;
 }
+
+// Diagnostic (docs/frame_capture.md): one console descriptor table as the shim decoded it, for the frame dump's
+// sampled-texture readback. Bounded: at most max_sampled_keys slots are copied out.
+inline constexpr std::uint32_t max_sampled_keys = 8;
+struct SampledKey {
+    std::uint32_t words[8]{};  // the slot's 8-dword key, as the title wrote it into the table
+    bool image = false;        // a T# (gfx10::is_image): a texture, not a V# or S#
+};
+struct SampledTable {
+    std::uint32_t slots = 0;  // slots the table holds (bounded by the caller's max_descriptors)
+    std::uint32_t keys = 0;   // entries copied into key[]
+    SampledKey key[max_sampled_keys];
+    // The layer image of the first T# set 0 resolves, for the readback; 0 when none.
+    VkImage image = VK_NULL_HANDLE;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    VkExtent2D extent{};
+};
 
 struct ReplayFunctions {
     // Set 0 for the pipelines that declare one (their own `bindless_set` is only the marker): the device's current
@@ -944,6 +969,13 @@ struct ReplayFunctions {
     // Diagnostic (docs/page_content.md): read the first draw's render target back after its submission, so a frame
     // that stays black can be told apart from a draw that writes nothing. Optional and bounded to one capture.
     std::function<void(VkImage image, VkFormat format, VkExtent2D extent)> capture_attachment;
+    // Diagnostic (docs/frame_capture.md): the armed draw's descriptor table, decoded by the shim from the console heap
+    // mirror, and a readback of the first sampled image. Both optional; consumed only by the frame dump's sample mode.
+    std::function<bool(std::uint64_t table_va, std::uint32_t max_descriptors, SampledTable& out)> sampled_table;
+    std::function<void(VkImage image, VkFormat format, VkExtent2D extent)> capture_sample;
+    // Diagnostic (docs/frame_capture.md): read up to `bytes` of the title's own memory at `va` (the constants a draw's
+    // V# names), in place. False when the range is not committed/readable; `read` returns the bytes actually copied.
+    std::function<bool(std::uint64_t va, std::uint32_t bytes, std::uint8_t* out, std::uint32_t& read)> read_title_memory;
     // Zeroed memory that unbound vertex-buffer slots and an unbound index buffer read (D3D12 reads zeros there).
     VkBuffer zero_buffer = VK_NULL_HANDLE;
     VkDeviceSize zero_offset = 0;
@@ -1056,6 +1088,38 @@ inline unsigned rebase_user_data(const ReplayFunctions& vk, ShaderUserData& data
     }
     return applied;
 }
+
+// ---- Frame dump: the helpers prepare_draw uses (docs/frame_capture.md) --------------------------------------------------
+// The rest of the diagnostic lives in namespace frame_dump further down, after PreparedList; these two are needed while
+// a draw is prepared, so they are declared here.
+namespace frame_dump {
+
+// The sampled-texture readback (docs/frame_capture.md): PALMETTO_FRAME_DUMP_SAMPLE=1 prints the armed draw's
+// descriptor-table keys and copies the first sampled image into host memory after the submission, so "the textures are
+// black" can be told from "the textures are fine and the pixel shader computes black". Diagnostic only.
+inline bool sample_enabled() {
+    static const bool on = [] {
+        const char* value = std::getenv("PALMETTO_FRAME_DUMP_SAMPLE");
+        return value && *value && value[0] != '0' && value[0] != 'n';
+    }();
+    return on;
+}
+
+// The descriptor-table VAs a draw's recorded root arguments name: one 64-bit value at each set bit of `table_windows`
+// (the graphics layout gives every table two dwords). At most `max_tables`, in dword order. Pure.
+inline std::vector<std::uint64_t> descriptor_tables(const Draw& draw, std::uint32_t table_windows,
+                                                    std::size_t max_tables = 8) {
+    std::vector<std::uint64_t> out;
+    for (unsigned i = 0; i + 1 < 32 && out.size() < max_tables; i += 2) {
+        if (!((table_windows >> i) & 1u)) continue;
+        const std::uint64_t value =
+            std::uint64_t(draw.user_data[i]) | (std::uint64_t(draw.user_data[i + 1]) << 32);
+        if (value) out.push_back(value);
+    }
+    return out;
+}
+
+}  // namespace frame_dump
 
 namespace detail {
 
@@ -2348,6 +2412,78 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
             vk.capture_attachment(p.colors[0].binding.image, captured, p.area);
             std::fprintf(stderr, "[rt] replay: readback armed at draw %llu\n", seen);
         }
+        // Diagnostic (docs/frame_capture.md): the armed draw's sampled textures. Prints the descriptor tables' keys
+        // the shim decodes from the console heap mirror and arms a readback of the first sampled image, so a black
+        // target can be told apart from black sampled content. Bounded; off unless PALMETTO_FRAME_DUMP_SAMPLE is set.
+        if (seen == readback_at && frame_dump::sample_enabled() && vk.sampled_table && vk.capture_sample) {
+            for (const std::uint64_t table_va : frame_dump::descriptor_tables(draw, pipeline->table_windows)) {
+                SampledTable table;
+                if (!vk.sampled_table(table_va, 64, table)) continue;
+                std::fprintf(stderr, "[rt] replay: frame dump sample: table VA 0x%llx: %u slot(s), %u key(s):",
+                             static_cast<unsigned long long>(table_va), table.slots, table.keys);
+                for (std::uint32_t k = 0; k < table.keys; ++k) {
+                    std::fprintf(stderr, " %s[", table.key[k].image ? "T#" : "S#/V#");
+                    for (unsigned w = 0; w < 8; ++w)
+                        std::fprintf(stderr, "%s%08x", w ? " " : "", table.key[k].words[w]);
+                    std::fprintf(stderr, "]");
+                }
+                std::fprintf(stderr, "\n");
+                // Diagnostic (docs/frame_capture.md): the constants a draw's V# names, read straight from the title's
+                // memory: a plausible transform or zeros/garbage (a vertex shader with wrong constants transforms to
+                // nowhere). The first decodable V# of the table, bounded to one 480-byte window.
+                if (vk.read_title_memory) {
+                    for (std::uint32_t k = 0; k < table.keys; ++k) {
+                        if (table.key[k].image) continue;
+                        const gfx10::BufferWords words{table.key[k].words[0], table.key[k].words[1],
+                                                      table.key[k].words[2], table.key[k].words[3]};
+                        gfx10::Buffer buffer{};
+                        if (!gfx10::decode(words, buffer) || !buffer.address) continue;
+                        const std::uint64_t declared = buffer.stride
+                                                           ? std::uint64_t(buffer.stride) * buffer.num_records
+                                                           : std::uint64_t(buffer.num_records);
+                        if (!declared) continue;
+                        constexpr std::uint32_t kMaxConstants = 480;
+                        const std::uint32_t want =
+                            static_cast<std::uint32_t>(std::min<std::uint64_t>(declared, kMaxConstants));
+                        std::uint32_t got = 0;
+                        std::uint8_t data[kMaxConstants] = {};
+                        if (!vk.read_title_memory(buffer.address, want, data, got) || !got) {
+                            std::fprintf(stderr,
+                                         "[rt] replay: frame dump sample: V# base 0x%llx + 0x%llx is not readable\n",
+                                         static_cast<unsigned long long>(buffer.address),
+                                         static_cast<unsigned long long>(declared));
+                            break;
+                        }
+                        std::uint64_t sum = 0, nonzero = 0, peak = 0;
+                        for (std::uint32_t i = 0; i < got; ++i) {
+                            sum += data[i];
+                            if (data[i]) ++nonzero;
+                            peak = std::max<std::uint64_t>(peak, data[i]);
+                        }
+                        std::fprintf(stderr,
+                                     "[rt] replay: frame dump sample: V# base 0x%llx + 0x%llx, read %u: mean %llu, "
+                                     "non-black %llu/%u, peak %llu; dwords",
+                                     static_cast<unsigned long long>(buffer.address),
+                                     static_cast<unsigned long long>(declared), got, sum / got, nonzero, got, peak);
+                        const std::uint32_t dwords = std::min<std::uint32_t>(got / 4, 8);
+                        for (std::uint32_t w = 0; w < dwords; ++w) {
+                            std::uint32_t value = 0;
+                            std::memcpy(&value, data + w * 4, sizeof(value));
+                            std::fprintf(stderr, " %08x", value);
+                        }
+                        std::fprintf(stderr, "\n");
+                        break;
+                    }
+                }
+                if (!table.image) continue;
+                std::fprintf(stderr,
+                             "[rt] replay: frame dump sample: first T# image 0x%llx format %d %ux%u; readback armed\n",
+                             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(table.image)),
+                             static_cast<int>(table.format), table.extent.width, table.extent.height);
+                vk.capture_sample(table.image, table.format, table.extent);
+                break;
+            }
+        }
     }
 
     // Slots the pipeline has a format for but the draw leaves unbound take a variant whose format there is
@@ -3545,6 +3681,33 @@ inline bool control_enabled() {
 // The opaque pipeline id the control draw names; 1 is never a PSO pointer and never a registered pipeline id.
 inline constexpr std::uintptr_t control_pipeline_id = 1;
 
+// The PS-only control (docs/frame_capture.md): PALMETTO_FRAME_DUMP_PS_CONTROL=1 draws the armed draw's own recorded
+// vertices through the title's pipeline with only the pixel shader replaced by the project's constant-output fs_solid.
+// Its target reading back the constant colour means the title's vertex stage and rasterisation produce coverage and
+// the black comes from the title PS's own work; staying black means the geometry/state produces no fragment. The
+// pipelines are built by the shim (`GraphicsPipeline::with_ps`); diagnostic only.
+inline bool ps_control_enabled() {
+    static const bool on = [] {
+        const char* value = std::getenv("PALMETTO_FRAME_DUMP_PS_CONTROL");
+        return value && *value && value[0] != '0' && value[0] != 'n';
+    }();
+    return on;
+}
+
+// The reserved pipeline id of the PS-only control; 2, for the same reason as control_pipeline_id.
+inline constexpr std::uintptr_t ps_control_pipeline_id = 2;
+
+// The cull-mode axis of the PS-only control: PALMETTO_FRAME_DUMP_PS_CONTROL_CULL_NONE=1 builds the substituted recipe
+// with back-face culling off. If the control then writes colour, the documented-default cull mode was discarding the
+// title's winding; if it stays black, the geometry itself produces no coverage in the window and the cull axis closes.
+inline bool ps_control_cull_none() {
+    static const bool on = [] {
+        const char* value = std::getenv("PALMETTO_FRAME_DUMP_PS_CONTROL_CULL_NONE");
+        return value && *value && value[0] != '0' && value[0] != 'n';
+    }();
+    return on;
+}
+
 // One submission's place in the draw sequence, for the control draw: whether it holds the draw the readback and the
 // control name, and the global index of its first draw.
 struct Armed {
@@ -3575,6 +3738,10 @@ struct ArmedTarget {
     VkFormat format = VK_FORMAT_UNDEFINED;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    // The armed draw's own recorded command, for the PS-only control (same views, vertex buffers, counts and root
+    // arguments, with only the pipeline replaced), and its translated pipeline, alive while the lists are.
+    Draw draw;
+    const GraphicsPipeline* pipeline = nullptr;
 };
 
 inline ArmedTarget armed_target(std::span<const PreparedList> lists, unsigned long long first,
@@ -3589,6 +3756,8 @@ inline ArmedTarget armed_target(std::span<const PreparedList> lists, unsigned lo
                 const detail::Prepared& p = list.commands[i];
                 if (p.draw < list.draws.size()) {
                     const detail::PreparedDraw& d = list.draws[p.draw];
+                    out.draw = std::get<Draw>(commands[i]);
+                    out.pipeline = d.graphics;
                     if (!d.colors.empty() && d.colors[0].id && d.colors[0].binding.image) {
                         out.found = true;
                         out.id = d.colors[0].id;

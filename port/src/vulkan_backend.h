@@ -988,8 +988,9 @@ public:
         replay_.draw_mesh_tasks = vk.vkCmdDrawMeshTasksEXT;  // null unless VK_EXT_mesh_shader is enabled
         replay_.draw_indexed = vk.vkCmdDrawIndexed;
         replay_.graphics_pipeline = [this](std::uintptr_t id) -> const GraphicsPipeline* {
-            // The frame dump's control draw (docs/frame_capture.md) names this reserved id; it is not in the map.
+            // The frame dump's control draws (docs/frame_capture.md) name these reserved ids; they are not in the map.
             if (id == frame_dump::control_pipeline_id) return &frame_dump_control_pipeline_;
+            if (id == frame_dump::ps_control_pipeline_id) return &frame_dump_ps_control_pipeline_;
             const auto it = graphics_pipelines_.find(id);
             if (it == graphics_pipelines_.end()) {
                 static std::atomic<unsigned> misses{0};
@@ -1084,6 +1085,11 @@ public:
         };
         replay_.capture_attachment = [this](VkImage image, VkFormat format, VkExtent2D extent) {
             arm_attachment_capture(image, format, extent);
+        };
+        // Diagnostic (docs/frame_capture.md): the sampled-texture readback's copy. Off unless the frame dump's sample
+        // mode arms it, and it only ever copies.
+        replay_.capture_sample = [this](VkImage image, VkFormat format, VkExtent2D extent) {
+            arm_sample_capture(image, format, extent);
         };
         if (xdxr && loaded_) {
             xdxr_ = std::make_unique<XdxrBuilder>(get, device);
@@ -1554,6 +1560,81 @@ public:
                      static_cast<int>(format));
         return true;
     }
+    // Diagnostic (docs/frame_capture.md): the shim's descriptor-table probe for the frame dump's sampled-texture
+    // readback (a draw's table keys and the layer image of its first T#). Registered once by the device; read only by
+    // the env-gated diagnostic.
+    void set_sampled_table_probe(std::function<bool(std::uint64_t, std::uint32_t, SampledTable&)> probe) {
+        replay_.sampled_table = std::move(probe);
+    }
+    // Diagnostic (docs/frame_capture.md): the shim's reader of the title's own memory, for the frame dump's constants
+    // read-through. Reads only; registered once by the device.
+    void set_title_memory_reader(
+        std::function<bool(std::uint64_t, std::uint32_t, std::uint8_t*, std::uint32_t&)> reader) {
+        replay_.read_title_memory = std::move(reader);
+    }
+    // Diagnostic (docs/frame_capture.md): the project's constant-output pixel shader (fs_solid), created once from the
+    // SPIR-V file PALMETTO_FRAME_DUMP_CONTROL_PS names. Null when it cannot be read; the caller logs and skips.
+    VkShaderModule frame_dump_solid_module() {
+        std::lock_guard lock(frame_dump_control_mutex_);
+        if (frame_dump_control_fs_) return frame_dump_control_fs_;
+        if (frame_dump_control_failed_) return VK_NULL_HANDLE;
+        const char* path = std::getenv("PALMETTO_FRAME_DUMP_CONTROL_PS");
+        std::vector<std::uint32_t> words;
+        if (path && *path) {
+            std::FILE* file = std::fopen(path, "rb");
+            if (file) {
+                std::uint32_t word = 0;
+                while (std::fread(&word, sizeof(word), 1, file) == 1) words.push_back(word);
+                std::fclose(file);
+            }
+        }
+        if (words.size() < 5 || words[0] != 0x07230203u) {
+            frame_dump_control_failed_ = true;
+            std::fprintf(stderr,
+                         "[rt] replay: frame dump control: PALMETTO_FRAME_DUMP_CONTROL_PS cannot be read (the build's "
+                         "fs_solid.spv); no PS-only control\n");
+            return VK_NULL_HANDLE;
+        }
+        VkShaderModuleCreateInfo module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        module_info.codeSize = words.size() * sizeof(std::uint32_t);
+        module_info.pCode = words.data();
+        if (vk.vkCreateShaderModule(device_, &module_info, nullptr, &frame_dump_control_fs_) != VK_SUCCESS) {
+            frame_dump_control_failed_ = true;
+            return VK_NULL_HANDLE;
+        }
+        return frame_dump_control_fs_;
+    }
+    // Diagnostic (docs/frame_capture.md): the PS-only control's pipeline: `title` with only its pixel shader replaced
+    // by fs_solid. False when the shim offers no with_ps, the module cannot be read, or the title recipe has no
+    // fragment stage; the caller logs and skips the control.
+    bool frame_dump_ps_pipeline(const GraphicsPipeline& title) {
+        const VkShaderModule ps = frame_dump_solid_module();
+        if (!ps) return false;
+        if (!title.with_ps) {
+            std::fprintf(stderr, "[rt] replay: frame dump PS control: the shim offers no substituted-shader pipeline\n");
+            return false;
+        }
+        const VkPipeline pipeline = title.with_ps(ps, frame_dump::ps_control_cull_none());
+        if (!pipeline) {
+            std::fprintf(stderr,
+                         "[rt] replay: frame dump PS control: the pipeline could not be built (no fragment stage?)\n");
+            return false;
+        }
+        std::lock_guard lock(frame_dump_control_mutex_);
+        GraphicsPipeline control = title;
+        control.pipeline = pipeline;
+        control.variant = nullptr;   // a control draw never needs the unbound-slot variants
+        control.with_ps = nullptr;
+        frame_dump_ps_control_pipeline_ = std::move(control);
+        return true;
+    }
+    // Diagnostic (docs/frame_capture.md): arm the sampled-texture readback's one-shot copy of `image`.
+    void arm_sample_capture(VkImage image, VkFormat format, VkExtent2D extent) {
+        sample_image_ = image;
+        sample_format_ = format;
+        sample_extent_ = extent;
+        sample_armed_.store(true, std::memory_order_relaxed);
+    }
     // A title-placed texture's page import (docs/texture_import.md): the device registers this, and every queue calls
     // it before recording a submission, so the image holds the title's bytes before anything can sample it.
     void set_placed_texture_import(std::function<void()> import) {
@@ -2014,6 +2095,13 @@ private:
     VkShaderModule frame_dump_control_fs_ = VK_NULL_HANDLE;
     bool frame_dump_control_failed_ = false;
     std::mutex frame_dump_control_mutex_;
+    // The PS-only control (docs/frame_capture.md): the armed title pipeline with fs_solid as its pixel shader, and the
+    // sampled-texture readback's one-shot arm. Both diagnostic only.
+    GraphicsPipeline frame_dump_ps_control_pipeline_;
+    VkImage sample_image_ = VK_NULL_HANDLE;
+    VkFormat sample_format_ = VK_FORMAT_UNDEFINED;
+    VkExtent2D sample_extent_{};
+    std::atomic<bool> sample_armed_{false};
     std::unordered_map<ResourceId, std::shared_ptr<SparseResource>> sparse_resources_;
     std::unordered_map<std::uintptr_t, ComputePipeline> pipelines_;
     std::unordered_map<std::uintptr_t, GraphicsPipeline> graphics_pipelines_;
@@ -2800,17 +2888,20 @@ private:
         // writer measured. Off, this is one false branch; the recorded commands are unchanged either way.
         if (frame_dump::enabled())
             frame_dump::submission(std::span<const PreparedList>(prepared.data(), lists.size()));
-        // Diagnostic (docs/frame_capture.md): the known-good pipeline control. Find whether this is the submission
-        // that holds the draw PALMETTO_FRAME_DUMP_AT_DRAW names, and that draw's colour target, so the project-built
-        // full-screen triangle can be drawn into it after the frame's commands.
+        // Diagnostic (docs/frame_capture.md): the controls. Find whether this is the submission that holds the draw
+        // PALMETTO_FRAME_DUMP_AT_DRAW names, and that draw's colour target and recorded command, so the project-built
+        // full-screen triangle (PALMETTO_FRAME_DUMP_CONTROL) or the title's own vertices with a substituted pixel
+        // shader (PALMETTO_FRAME_DUMP_PS_CONTROL) can be drawn after the frame's commands.
         bool control_armed = false;
+        bool ps_control_armed = false;
         frame_dump::ArmedTarget control_target;
-        if (frame_dump::control_enabled()) {
+        if (frame_dump::control_enabled() || frame_dump::ps_control_enabled()) {
             const std::span<const PreparedList> submission(prepared.data(), lists.size());
             const frame_dump::Armed armed = frame_dump::armed_submission(submission);
             if (armed.armed) {
                 control_target = frame_dump::armed_target(submission, armed.first, armed.at);
                 control_armed = control_target.found;
+                ps_control_armed = control_target.found && control_target.pipeline != nullptr;
             }
             if (armed.armed && !control_armed)
                 std::fprintf(stderr,
@@ -2992,11 +3083,41 @@ private:
             wrote_readback |= list.wrote_readback;
             readback_stages |= list.readback_src_stages;
         }
+        // Diagnostic (docs/frame_capture.md): the PS-only control. Draw the armed draw's OWN recorded command (same
+        // render target, vertex/index buffers, counts, viewport, scissor and root arguments) through the title's
+        // pipeline with only the pixel shader replaced by the project's constant-output fs_solid. The readback below
+        // copies the target, so 32 160 240 means the title's vertex stage, input layout and rasterisation produce
+        // coverage and the black comes from the title PS's own data; black means the geometry or state produces none.
+        if (frame_dump::ps_control_enabled() && ps_control_armed && context_.frame_dump_ps_pipeline(*control_target.pipeline)) {
+            CommandList ps_control;
+            Draw ps_draw = control_target.draw;
+            ps_draw.pipeline = frame_dump::ps_control_pipeline_id;
+            PreparedList ps_prepared;
+            const ReplayResult ps_result =
+                ps_control.draw(std::move(ps_draw)) && ps_control.close()
+                    ? prepare(ps_control, resolve, replay, ps_prepared)
+                    : ReplayResult::unsupported;
+            if (ps_result == ReplayResult::success) {
+                emit(ps_prepared, command_buffer, replay, &next_tracker, &open_labels);
+                std::fprintf(stderr,
+                             "[rt] replay: frame dump PS control: drew the armed draw's own vertices through the title "
+                             "pipeline (0x%llx) with fs_solid as the pixel shader, into 0x%llx; the readback below "
+                             "copies it\n",
+                             static_cast<unsigned long long>(
+                                 reinterpret_cast<std::uintptr_t>(control_target.pipeline->pipeline)),
+                             static_cast<unsigned long long>(control_target.id));
+            } else {
+                std::fprintf(stderr,
+                             "[rt] replay: frame dump PS control: the control list was refused (result %d); the target "
+                             "is left as the frame wrote it\n",
+                             static_cast<int>(ps_result));
+            }
+        }
         // Diagnostic (docs/frame_capture.md): draw the project's own known-good full-screen triangle into the armed
         // draw's colour target, after the frame's commands and before the one-shot readback copies it. Its target
         // reading back 32 160 240 says this target's raster, binding, viewport, subresource and readback path all
         // write; reading back black says the replay's raster path for this target is what to chase.
-        if (control_armed && context_.frame_dump_control_pipeline(control_target.format)) {
+        if (frame_dump::control_enabled() && control_armed && context_.frame_dump_control_pipeline(control_target.format)) {
             CommandList control;
             Draw control_draw;
             control_draw.pipeline = frame_dump::control_pipeline_id;
@@ -3066,6 +3187,7 @@ private:
         VkBuffer capture_buffer = VK_NULL_HANDLE;
         VkDeviceMemory capture_memory = VK_NULL_HANDLE;
         VkExtent2D capture_region{};
+        VkOffset2D capture_offset{0, 0};
         unsigned capture_texel = 0;
         const bool capture = context_.capture_armed_.exchange(false) &&
                              context_.capture_image_ != VK_NULL_HANDLE && context_.vk.vkCmdCopyImageToBuffer;
@@ -3081,6 +3203,13 @@ private:
             }
             capture_region.width = std::min(128u, context_.capture_extent_.width);
             capture_region.height = std::min(128u, context_.capture_extent_.height);
+            // Diagnostic (docs/frame_capture.md): PALMETTO_READBACK_CENTRE=1 copies a window at the target's centre
+            // instead of its origin, so a region that is only black in one corner is not mistaken for an empty target.
+            if (const char* centre = std::getenv("PALMETTO_READBACK_CENTRE");
+                centre && *centre && *centre != '0' && *centre != 'n')
+                capture_offset = {
+                    static_cast<std::int32_t>((context_.capture_extent_.width - capture_region.width) / 2),
+                    static_cast<std::int32_t>((context_.capture_extent_.height - capture_region.height) / 2)};
             VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
             // Two windows: the frame's own content, then a write control (the same target cleared by us to a known
             // colour), so an all-zero readback cannot be an artefact of the copy or the host mapping.
@@ -3121,6 +3250,7 @@ private:
                                                      VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to);
                     VkBufferImageCopy region{};
                     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                    region.imageOffset = {capture_offset.x, capture_offset.y, 0};
                     region.imageExtent = {capture_region.width, capture_region.height, 1};
                     context_.vk.vkCmdCopyImageToBuffer(command_buffer, context_.capture_image_,
                                                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, capture_buffer, 1, &region);
@@ -3166,6 +3296,83 @@ private:
                     capture_buffer = VK_NULL_HANDLE;
                     if (capture_memory) context_.vk.vkFreeMemory(context_.device(), capture_memory, nullptr);
                     capture_memory = VK_NULL_HANDLE;
+                }
+            }
+        }
+        // Diagnostic (docs/frame_capture.md): the sampled-texture readback. Copies a 128x128 window of the first
+        // sampled image into host memory after the submission, in GENERAL layout both ways (set 0 reads every image in
+        // GENERAL). No write control: this is the title's texture and the diagnostic must not modify it.
+        VkBuffer sample_buffer = VK_NULL_HANDLE;
+        VkDeviceMemory sample_memory = VK_NULL_HANDLE;
+        VkExtent2D sample_region{};
+        unsigned sample_texel = 0;
+        const bool sample = context_.sample_armed_.exchange(false) &&
+                            context_.sample_image_ != VK_NULL_HANDLE && context_.vk.vkCmdCopyImageToBuffer;
+        if (sample) {
+            switch (context_.sample_format_) {
+            case VK_FORMAT_R16G16B16A16_UNORM:
+            case VK_FORMAT_R16G16B16A16_SFLOAT: sample_texel = 8; break;
+            case VK_FORMAT_R32G32B32A32_SFLOAT: sample_texel = 16; break;
+            case VK_FORMAT_R32G32_UINT:
+            case VK_FORMAT_R32G32_SINT:
+            case VK_FORMAT_R32G32_SFLOAT: sample_texel = 8; break;
+            default: sample_texel = 4; break;
+            }
+            sample_region.width = std::min(128u, std::max(1u, context_.sample_extent_.width));
+            sample_region.height = std::min(128u, std::max(1u, context_.sample_extent_.height));
+            VkBufferCreateInfo sample_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            sample_info.size = VkDeviceSize(sample_region.width) * sample_region.height * sample_texel;
+            sample_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            if (context_.vk.vkCreateBuffer(context_.device(), &sample_info, nullptr, &sample_buffer) == VK_SUCCESS) {
+                VkMemoryRequirements requirements{};
+                context_.vk.vkGetBufferMemoryRequirements(context_.device(), sample_buffer, &requirements);
+                const auto& memory = context_.occlusion_resolve_memory_;
+                std::uint32_t type = memory.memoryTypeCount;
+                for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
+                    if (!(requirements.memoryTypeBits & (1u << i))) continue;
+                    const VkMemoryPropertyFlags flags = memory.memoryTypes[i].propertyFlags;
+                    if (type == memory.memoryTypeCount) type = i;
+                    if ((flags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                        (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+                        type = i;
+                        break;
+                    }
+                }
+                VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+                allocation.allocationSize = requirements.size;
+                allocation.memoryTypeIndex = type;
+                if (type < memory.memoryTypeCount &&
+                    context_.vk.vkAllocateMemory(context_.device(), &allocation, nullptr, &sample_memory) ==
+                        VK_SUCCESS &&
+                    context_.vk.vkBindBufferMemory(context_.device(), sample_buffer, sample_memory, 0) == VK_SUCCESS) {
+                    VkImageMemoryBarrier to{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                    to.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+                    to.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    to.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    to.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    to.image = context_.sample_image_;
+                    to.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                    to.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
+                    to.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                    context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to);
+                    VkBufferImageCopy region{};
+                    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                    region.imageExtent = {sample_region.width, sample_region.height, 1};
+                    context_.vk.vkCmdCopyImageToBuffer(command_buffer, context_.sample_image_,
+                                                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sample_buffer, 1, &region);
+                    to.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    to.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                    to.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                    to.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
+                    context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                                     &to);
+                } else {
+                    context_.vk.vkDestroyBuffer(context_.device(), sample_buffer, nullptr);
+                    sample_buffer = VK_NULL_HANDLE;
+                    if (sample_memory) context_.vk.vkFreeMemory(context_.device(), sample_memory, nullptr);
+                    sample_memory = VK_NULL_HANDLE;
                 }
             }
         }
@@ -3244,10 +3451,10 @@ private:
                         peak = std::max<std::uint64_t>(peak, std::max(r, std::max(g, b)));
                     }
                     std::fprintf(stderr,
-                                 "[rt] replay: render-target readback: %ux%u at the target's origin of %ux%u, %u-byte "
-                                 "texel: mean %llu %llu %llu, non-black %llu/%llu, peak %llu\n",
-                                 capture_region.width, capture_region.height, context_.capture_extent_.width,
-                                 context_.capture_extent_.height, capture_texel,
+                                 "[rt] replay: render-target readback: %ux%u at the target's offset of %u,%u of %ux%u, "
+                                 "%u-byte texel: mean %llu %llu %llu, non-black %llu/%llu, peak %llu\n",
+                                 capture_region.width, capture_region.height, capture_offset.x, capture_offset.y,
+                                 context_.capture_extent_.width, context_.capture_extent_.height, capture_texel,
                                  static_cast<unsigned long long>(sums[0] / (pixels ? pixels : 1)),
                                  static_cast<unsigned long long>(sums[1] / (pixels ? pixels : 1)),
                                  static_cast<unsigned long long>(sums[2] / (pixels ? pixels : 1)),
@@ -3280,6 +3487,44 @@ private:
                 }
             }
         }
+        // The sampled-texture window (docs/frame_capture.md): what the first sampled image holds, so "the textures are
+        // black" can be told from "the textures are fine and the pixel shader computes black".
+        if (sample && sample_memory && submitted) {
+            if (context_.vk.vkQueueWaitIdle(queue_) == VK_SUCCESS) {
+                void* mapped = nullptr;
+                if (context_.vk.vkMapMemory(context_.device(), sample_memory, 0, VK_WHOLE_SIZE, 0, &mapped) ==
+                    VK_SUCCESS) {
+                    const auto* bytes = static_cast<const std::uint8_t*>(mapped);
+                    const std::uint64_t pixels = std::uint64_t(sample_region.width) * sample_region.height;
+                    std::uint64_t sums[3] = {0, 0, 0}, non_black = 0, peak = 0;
+                    for (std::uint64_t i = 0; i < pixels; ++i) {
+                        const std::uint8_t* texel = bytes + i * std::size_t(sample_texel);
+                        const unsigned r = texel[0];
+                        const unsigned g = sample_texel > 1 ? texel[1] : 0;
+                        const unsigned b = sample_texel > 2 ? texel[2] : 0;
+                        sums[0] += r;
+                        sums[1] += g;
+                        sums[2] += b;
+                        if (r || g || b) ++non_black;
+                        peak = std::max<std::uint64_t>(peak, std::max(r, std::max(g, b)));
+                    }
+                    std::fprintf(stderr,
+                                 "[rt] replay: frame dump sample readback: %ux%u of a %ux%u image, %u-byte texel: "
+                                 "mean %llu %llu %llu, non-black %llu/%llu, peak %llu\n",
+                                 sample_region.width, sample_region.height, context_.sample_extent_.width,
+                                 context_.sample_extent_.height, sample_texel,
+                                 static_cast<unsigned long long>(sums[0] / (pixels ? pixels : 1)),
+                                 static_cast<unsigned long long>(sums[1] / (pixels ? pixels : 1)),
+                                 static_cast<unsigned long long>(sums[2] / (pixels ? pixels : 1)),
+                                 static_cast<unsigned long long>(non_black),
+                                 static_cast<unsigned long long>(pixels),
+                                 static_cast<unsigned long long>(peak));
+                    context_.vk.vkUnmapMemory(context_.device(), sample_memory);
+                }
+            }
+        }
+        if (sample_buffer) context_.vk.vkDestroyBuffer(context_.device(), sample_buffer, nullptr);
+        if (sample_memory) context_.vk.vkFreeMemory(context_.device(), sample_memory, nullptr);
         if (capture_buffer) context_.vk.vkDestroyBuffer(context_.device(), capture_buffer, nullptr);
         if (capture_memory) context_.vk.vkFreeMemory(context_.device(), capture_memory, nullptr);
         tracker_lock.unlock();

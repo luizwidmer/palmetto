@@ -1122,6 +1122,11 @@ struct DeviceState {
         VkImageView sampled;
         VkImageView storage;  // the same range without a component mapping, for the storage bindings; or null
         std::uint64_t address;
+        // Diagnostic (docs/frame_capture.md): the layer image, its format and its top-mip extent, so the frame dump's
+        // sampled-texture readback can copy what a T# names. Nothing on the draw path reads these.
+        VkImage image = VK_NULL_HANDLE;
+        VkFormat format = VK_FORMAT_UNDEFINED;
+        VkExtent2D extent{};
     };
     std::unique_ptr<palmetto::BindlessSet> bindless;
     std::mutex descriptor_mutex;  // the set and the containers below
@@ -1289,6 +1294,9 @@ struct DeviceState {
                                                                        : VK_IMAGE_ASPECT_COLOR_BIT),
             image.first_mip, image.mip_count, image.first_layer, image.layer_count};
         ImageEntry entry{dimension, 0, VK_NULL_HANDLE, VK_NULL_HANDLE, image.address};
+        entry.image = vk_image;
+        entry.format = image_format;
+        entry.extent = {image.width, image.height};
         if (vk.vkCreateImageView(info.device, &view_info, nullptr, &entry.sampled) != VK_SUCCESS) return false;
         palmetto::StorageViews views{};
         if (storage) {
@@ -1345,6 +1353,76 @@ struct DeviceState {
             release(entry);
             return true;
         });
+    }
+
+    // Diagnostic (docs/frame_capture.md): one descriptor table of the draw the frame dump armed, read from the console
+    // heap mirror the way console_pull_table reads it. Copies up to `palmetto::max_sampled_keys` slot keys out (a T# is
+    // 8 dwords; a V# or S# occupies the first 4 and is flagged as not an image) and resolves the first T# to the layer
+    // image set 0 holds for it, so the frame dump can copy that image and say whether the sampled content is black.
+    // Reads only: nothing is pulled, bound or recorded, and a miss just leaves image null.
+    bool sampled_table(std::uint64_t table_va, std::uint32_t max_descriptors, palmetto::SampledTable& out) {
+        if (!context || !table_va || !arena.mapped) return false;
+        std::uint64_t mirror = 0, available = 0;
+        if (!context->console_va_span(table_va, palmetto::ConsoleVaKind::descriptors, mirror, available)) return false;
+        if (mirror >= arena.size) return false;
+        const std::uint32_t slots = std::min<std::uint32_t>(
+            max_descriptors, std::uint32_t(std::min<std::uint64_t>(available, arena.size - mirror) / kDescriptorSize));
+        out = {};
+        out.slots = slots;
+        std::lock_guard lock(descriptor_mutex);
+        for (std::uint32_t slot = 0; slot < slots; ++slot) {
+            const auto* words = reinterpret_cast<const std::uint32_t*>(arena.mapped + mirror +
+                                                                       VkDeviceSize(slot) * kDescriptorSize);
+            const palmetto::gfx10::ImageWords descriptor{words[0], words[1], words[2], words[3],
+                                                         words[4], words[5], words[6], words[7]};
+            const bool image = palmetto::gfx10::is_image(descriptor);
+            if (out.keys < palmetto::max_sampled_keys) {
+                palmetto::SampledKey& key = out.key[out.keys++];
+                std::memcpy(key.words, words, sizeof(key.words));
+                key.image = image;
+            }
+            if (!image || out.image) continue;
+            const auto entry = image_entries.find(palmetto::make_tsharp_key(descriptor.data()));
+            if (entry == image_entries.end()) continue;
+            out.image = entry->second.image;
+            out.format = entry->second.format;
+            out.extent = entry->second.extent;
+        }
+        return true;
+    }
+
+    // Diagnostic (docs/frame_capture.md): read up to `bytes` of the title's own memory at `va` (the constants a draw's
+    // V# names), in place. A V# base the page-address-space work rebased holds the *arena* VA of the stand-in that
+    // mirrors the title range (docs/page_address_space.md), so that case reads the mirror; otherwise the base is a title
+    // VA and the bytes are read from the title's own memory. False when neither is readable; `read` is what was copied.
+    // Reads only: no copy into the arena and no logging.
+    bool read_title_memory(std::uint64_t va, std::uint32_t bytes, std::uint8_t* out, std::uint32_t& read) {
+        read = 0;
+        if (!va || !bytes || !out) return false;
+        if (context && arena.mapped) {
+            std::uint64_t title = 0, available = 0;
+            if (context->console_arena_span(va, title, available) && va < arena.size) {
+                const std::uint64_t room = std::min<std::uint64_t>(
+                    bytes, std::min<std::uint64_t>(available, arena.size - va));
+                if (!room) return false;
+                std::memcpy(out, arena.mapped + va, std::size_t(room));
+                read = std::uint32_t(room);
+                return true;
+            }
+        }
+        const auto base = static_cast<std::uintptr_t>(va);
+        MEMORY_BASIC_INFORMATION info{};
+        if (::VirtualQuery(reinterpret_cast<const void*>(base), &info, sizeof(info)) != sizeof(info)) return false;
+        if (info.State != MEM_COMMIT ||
+            (info.Protect & (PAGE_NOACCESS | PAGE_GUARD | PAGE_WRITECOMBINE | PAGE_NOCACHE)))
+            return false;
+        const auto region_end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+        std::uint32_t chunk = bytes;
+        if (region_end > base) chunk = std::min<std::uint32_t>(chunk, std::uint32_t(region_end - base));
+        if (!chunk) return false;
+        std::memcpy(out, reinterpret_cast<const void*>(base), chunk);
+        read = chunk;
+        return true;
     }
 
     // Gives the S# `words` a sampler in set 0 and an entry in the hash table, unless it has them.
@@ -3828,6 +3906,7 @@ public:
         if (pipeline_.layout) vk.vkDestroyPipelineLayout(dev, pipeline_.layout, nullptr);
         if (module_) vk.vkDestroyShaderModule(dev, module_, nullptr);
         if (graphics_.pipeline) vk.vkDestroyPipeline(dev, graphics_.pipeline, nullptr);
+        for (const auto& [cull, built] : ps_variants_) vk.vkDestroyPipeline(dev, built, nullptr);  // PS-only control
         for (const auto& [unbound, built] : variants_) vk.vkDestroyPipeline(dev, built, nullptr);
         if (graphics_.layout) vk.vkDestroyPipelineLayout(dev, graphics_.layout, nullptr);
         for (VkShaderModule module : modules_) vk.vkDestroyShaderModule(dev, module, nullptr);
@@ -4554,6 +4633,9 @@ public:
         graphics_.pipeline = build(0);
         if (!graphics_.pipeline) return E_FAIL;
         graphics_.variant = [this](std::uint32_t unbound) { return variant(unbound); };
+        // Diagnostic (docs/frame_capture.md): the frame dump's PS-only control, the same recipe with another pixel
+        // shader. Only read by the env-gated diagnostic; nothing on the normal draw path calls it.
+        graphics_.with_ps = [this](VkShaderModule ps, bool cull_none) { return variant_with_ps(ps, cull_none); };
 
         if (code_stage) {
             VkDeviceSize offset = 0;
@@ -4747,7 +4829,13 @@ private:
     };
 
     // The graphics pipeline with the formats of the `unbound` slots (palmetto::GraphicsPipeline::variant) undefined.
-    VkPipeline build(std::uint32_t unbound) const {
+    // `substitute_ps` (diagnostic, docs/frame_capture.md): the same pipeline with its fragment stage replaced by that
+    // module, which is what the frame dump's PS-only control draws the title's own vertices through. Null keeps the
+    // recipe's stages, and the create info then points at the recipe's own list, so the default build is unchanged.
+    // `cull_none` (diagnostic, substituted variants only): turn back-face culling off, to tell a culled winding from
+    // degenerate geometry.
+    VkPipeline build(std::uint32_t unbound, VkShaderModule substitute_ps = VK_NULL_HANDLE,
+                     bool cull_none = false) const {
         // The stride state is last: a pipeline without vertex bindings (a full-screen pass that builds its vertices
         // from SV_VertexID) leaves it out, since no vkCmdBindVertexBuffers2 would ever set it
         // (VUID-vkCmdDraw-pStrides-04913).
@@ -4757,6 +4845,24 @@ private:
             VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_BLEND_CONSTANTS,
             VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE};
         const Recipe& r = recipe_;
+        // Diagnostic only: the recipe's stages with the fragment module swapped and its required-subgroup-size chain
+        // dropped (the substituted shader declares none). Empty when the recipe has no fragment stage.
+        std::vector<VkPipelineShaderStageCreateInfo> substituted_stages;
+        const VkPipelineShaderStageCreateInfo* stage_infos = r.stages.data();
+        std::uint32_t stage_count = std::uint32_t(r.stages.size());
+        if (substitute_ps) {
+            substituted_stages = r.stages;
+            bool replaced = false;
+            for (auto& stage : substituted_stages) {
+                if (stage.stage != VK_SHADER_STAGE_FRAGMENT_BIT) continue;
+                stage.module = substitute_ps;
+                stage.pNext = nullptr;
+                replaced = true;
+            }
+            if (!replaced) return VK_NULL_HANDLE;
+            stage_infos = substituted_stages.data();
+            stage_count = std::uint32_t(substituted_stages.size());
+        }
         std::vector<VkFormat> colors = graphics_.color_formats;
         for (std::size_t slot = 0; slot < colors.size(); ++slot)
             if (unbound & (1u << slot)) colors[slot] = VK_FORMAT_UNDEFINED;
@@ -4786,6 +4892,7 @@ private:
         viewport.scissorCount = 1;
         VkPipelineMultisampleStateCreateInfo multisample = r.multisample;
         VkPipelineRasterizationStateCreateInfo raster = r.raster;
+        if (cull_none) raster.cullMode = VK_CULL_MODE_NONE;  // diagnostic only: the substituted variant's cull axis
         VkPipelineRasterizationConservativeStateCreateInfoEXT conservative{
             VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_CONSERVATIVE_STATE_CREATE_INFO_EXT};
         if (r.conservative) {
@@ -4813,8 +4920,8 @@ private:
         }
 
         VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &rendering};
-        info.stageCount = std::uint32_t(r.stages.size());
-        info.pStages = r.stages.data();
+        info.stageCount = stage_count;
+        info.pStages = stage_infos;
         info.pVertexInputState = r.mesh ? nullptr : &vertex_input;  // ignored with a mesh stage; null for clarity
         info.pInputAssemblyState = r.mesh ? nullptr : &r.assembly;
         info.pViewportState = &viewport;
@@ -4844,12 +4951,31 @@ private:
         return pipeline;
     }
 
+    // Diagnostic (docs/frame_capture.md): the same pipeline with `ps` as its pixel shader, built once per cull mode and
+    // kept until the PSO is released, like variant(). The frame dump's PS-only control is its only caller.
+    VkPipeline variant_with_ps(VkShaderModule ps, bool cull_none) {
+        std::lock_guard lock(variants_mutex_);
+        const std::uint32_t key = cull_none ? 1u : 0u;
+        if (const auto it = ps_variants_.find(key); it != ps_variants_.end()) return it->second;
+        if (ps_variant_failed_) return VK_NULL_HANDLE;
+        const VkPipeline pipeline = build(0, ps, cull_none);
+        if (!pipeline) {
+            ps_variant_failed_ = true;
+            log_once("the PS-only control pipeline could not be built from this recipe (no fragment stage?)", 0);
+            return VK_NULL_HANDLE;
+        }
+        ps_variants_.emplace(key, pipeline);
+        return pipeline;
+    }
+
     DeviceState& device_;
     palmetto::ComputePipeline pipeline_;
     palmetto::GraphicsPipeline graphics_;
     Recipe recipe_;
     std::mutex variants_mutex_;
     std::map<std::uint32_t, VkPipeline> variants_;
+    std::map<std::uint32_t, VkPipeline> ps_variants_;  // docs/frame_capture.md, the PS-only control by cull mode
+    bool ps_variant_failed_ = false;
     VkShaderModule module_ = VK_NULL_HANDLE;
     std::vector<VkShaderModule> modules_;
     VkDeviceSize code_base_ = 0;
@@ -5797,6 +5923,18 @@ public:
                 console_pull_table(table_va, max_descriptors);
             },
             [this](std::uint64_t arena_va, std::uint64_t bytes) { console_pull_arena(arena_va, bytes); });
+        // Diagnostic (docs/frame_capture.md): the frame dump's sampled-texture readback reads a draw's descriptor table
+        // from the console heap mirror and resolves its first T# to the layer image set 0 holds. Reads only.
+        state_.context->set_sampled_table_probe(
+            [this](std::uint64_t table_va, std::uint32_t max_descriptors, palmetto::SampledTable& out) {
+                return state_.sampled_table(table_va, max_descriptors, out);
+            });
+        // Diagnostic (docs/frame_capture.md): the constants read-through reads the title's own memory at the V# base a
+        // draw names. Reads only.
+        state_.context->set_title_memory_reader(
+            [this](std::uint64_t va, std::uint32_t bytes, std::uint8_t* out, std::uint32_t& read) {
+                return state_.read_title_memory(va, bytes, out, read);
+            });
         // A title-placed texture's page import (docs/texture_import.md): the queue calls this before it records a
         // submission, so the image holds the title's bytes before anything samples it.
         state_.context->set_placed_texture_import([this] { state_.import_placed_textures(); });

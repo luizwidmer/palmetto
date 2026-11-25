@@ -116,7 +116,25 @@ int main() {
     expect(frame_dump::command_writes(discard, 7), "a discard is listed with the writers of its resource");
     expect(kind_is(discard, "discard"), "a discard is a discard");
 
+    // The descriptor tables a draw's recorded root arguments name (docs/frame_capture.md, the sampled-texture readback):
+    // one 64-bit value per descriptor-table dword the pipeline's root signature marks, in dword order, bounded.
+    Draw tabled;
+    tabled.user_data[0] = 0x11111111u;
+    tabled.user_data[1] = 0x22222222u;  // window 0: a table
+    tabled.user_data[4] = 0x33333333u;
+    tabled.user_data[5] = 0x44444444u;  // window 4: a table
+    tabled.user_data[6] = 0x55555555u;
+    tabled.user_data[7] = 0x66666666u;  // window 6: not marked a table
+    const std::vector<std::uint64_t> tables =
+        frame_dump::descriptor_tables(tabled, (1u << 0) | (1u << 4), 8);
+    expect(tables.size() == 2, "two table windows give two tables");
+    expect(tables.size() == 2 && tables[0] == 0x2222222211111111ull, "a table's VA is its two dwords, low first");
+    expect(tables.size() == 2 && tables[1] == 0x4444444433333333ull, "the second table follows the first");
+    expect(frame_dump::descriptor_tables(tabled, 0).empty(), "no table windows give no tables");
+    const std::vector<std::uint64_t> one = frame_dump::descriptor_tables(tabled, (1u << 0) | (1u << 4), 1);
+    expect(one.size() == 1 && one[0] == 0x2222222211111111ull, "the table count is bounded");
+
     if (failures) return 1;
-    std::printf("frame_dump_test: command kinds and ordered writers exact\n");
+    std::printf("frame_dump_test: command kinds, ordered writers and table windows exact\n");
     return 0;
 }
