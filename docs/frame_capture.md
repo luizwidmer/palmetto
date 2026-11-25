@@ -284,6 +284,44 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### Root-data trace: the carrier search for the sibling pixel shader's user data
+
+Instrumentation added (bounded, presence classes and counts only): `PALMETTO_ROOT_DATA_TRACE=1` prints one line per
+draw with a root-constant parameter (plus a few others): the bound layout's parameters (type, console slot, dword count,
+non-zero count in the recorded block), the recorded block's s0..s31 zero/non-zero map, whether any argument was written
+since the signature bind, and how many non-zero dwords a later signature rebind cleared. A root-signature rebind that
+drops recorded arguments logs once, with the count.
+
+One boot with it resolves the three candidates:
+
+* **(a) cleared by a rebind - no.** The traced draws report `rebinds 0 (cleared 0 dword(s))`; no non-zero recorded
+  argument was ever dropped by a signature rebind.
+* **(b) written but not inherited - no.** Every traced draw reports `written since bind 1`, and the recorded block is
+  exactly the console feed's content for the signature's parameter.
+* **(c) the title never provides it as root arguments - yes.** The sibling pass's pipeline is bound to the same
+  one-parameter root signature the two FSPX pipelines use: `p0 t2 s8 dw1 nz1` (one descriptor table, one dword, at console
+  slot s8), and the recorded block is `s0..s31 = xx......x.......` - s0, s1 (the translated table pair) and s8 (the
+  table) non-zero, everything else zero. There is **no root-constant parameter** in that signature, so no colour
+  constants could travel through the root-argument system at all.
+
+The two other carriers are also negative:
+
+* **Slot 55 (CreateDerivedPipelineStateX)**: measured histogram over a boot: all 40,000 calls reached the PC
+  CreateGraphicsPipelineState with `S_OK`, 0 refused, and the only patch parts carried were 0 (depth-stencil) and
+  2 (blend). The decoder refuses any part id outside 0..3 with E_NOTIMPL (it is not silently dropped or ignored), so a
+  user-data patch part does not occur in this title's derivations.
+* **Slot 57 record**: the record's pairs are pointer/size pairs (program, blob, state blob, input layout); the stage-slot
+  pairs name program pointers, and the validated 0x108-byte region has no user-data field; the pipeline-creation path
+  never receives a user-data array.
+
+Conclusion: of the carriers this tree models, none holds the sibling pixel shader's user-data dwords; its only recorded
+input is the one-table root signature. The next question is therefore not "which carrier is missing" but "what is the
+sibling constant pass for": a zero-image-sample module whose colour chain is built from the user-data block it is given
+(with a one-table signature that block carries only the table pointer) may be a utility/flag pass rather than the
+content pass, and the visible frame may come from different draws/targets. The next instrumentation is to full-target
+scan the targets of the draws that present (which draws write the present plane resource across frames), not to forward
+more root arguments.
+
 ### Where the user data lives: the pixel-stage console pack is dropped before the draw
 
 The fix's reconnaissance (data path, no raw values):

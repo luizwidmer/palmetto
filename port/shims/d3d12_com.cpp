@@ -488,6 +488,7 @@ public:
         if (x > 65535 || y > 65535 || z > 65535 || std::uint64_t(x) * y * z > (1u << 22)) return check(false);
         if (!graphics_pipeline_ || !graphics_.layout) return check(false);
         if (!(viewport_.width > 0) || !(viewport_.height > 0)) return;  // as record_draw: nothing is rasterized
+        trace_root_data("mesh draw");
         palmetto::Draw draw{graphics_pipeline_, graphics_.data, draw_views(), depth_, {}, 0, viewport_,
                            scissor_, blend_factor_, front_stencil_ref_, back_stencil_ref_, false, x, y, z, 0, 0};
         draw.mesh = true;
@@ -1157,6 +1158,12 @@ private:
     struct RootState {
         const RootArgumentLayout* layout = nullptr;
         std::array<std::uint32_t, rt::rootsig::kMaxUserSgprs> data{};
+        // Diagnostic (docs/root_arguments.md): where the recorded user-data dwords came from, so a draw whose translated
+        // pixel shader reads a zero block can be told apart from one whose arguments were never written, or whose
+        // arguments were written and then cleared by a later root-signature rebind.
+        bool written_since_bind = false;
+        unsigned rebinds = 0;         // signature rebinds that reset data since the last write
+        unsigned cleared_dwords = 0;  // non-zero dwords dropped by those resets
     };
 
     // PALMETTO_GRAPHICS_CONSOLE_ROOT=1 (diagnostic, docs/root_arguments.md): also fill the console user-SGPR layout
@@ -1196,8 +1203,25 @@ private:
             return hold(signature);  // the bundle keeps it for as long as it can be executed
         if (layout && layout == state.layout) return;
         hold(signature);  // state.layout points into it
+        // Diagnostic (docs/root_arguments.md): a rebind that changes the layout resets the recorded arguments - count
+        // what it drops, so a draw reading a zero user-data block can be matched to this reset.
+        unsigned dropped = 0;
+        for (const std::uint32_t value : state.data)
+            if (value) ++dropped;
+        if (dropped) {
+            ++state.rebinds;
+            state.cleared_dwords += dropped;
+            static std::atomic<unsigned> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
+                std::fprintf(stderr,
+                             "[rt] d3d12: root data trace: a root-signature rebind cleared %u non-zero recorded "
+                             "argument dword(s); D3D12 leaves root arguments undefined after a signature change and "
+                             "the title is expected to re-record them before its draws\n",
+                             dropped);
+        }
         state.layout = layout;
         state.data = {};
+        state.written_since_bind = false;
         // CreateRootSignature accepted it for the other bind point only (its log line says why).
         if (layout && !(is_compute(state) ? layout->compute_ok : layout->graphics_ok)) {
             stub(is_compute(state) ? "SetComputeRootSignature(signature that does not fit the compute layout)"
@@ -1206,6 +1230,52 @@ private:
         }
     }
 
+    // Diagnostic (docs/root_arguments.md): per-draw summary of the recorded user-data block, so a pixel shader's zero
+    // block can be attributed - not written since the bind, written but cleared by a rebind, or written with the console
+    // feed's table pointers only. Presence classes and counts only, never raw values; bounded.
+    void trace_root_data(const char* what) {
+        static const bool on = [] {
+            char value[8] = {};
+            return GetEnvironmentVariableA("PALMETTO_ROOT_DATA_TRACE", value, sizeof(value)) > 0 && value[0] != '\0' &&
+                   value[0] != '0';
+        }();
+        if (!on) return;
+        const RootState& state = graphics_;
+        // Print the draws that carry root constants (the user-data consumers) and a few others for context; bounded.
+        bool has_constants = false;
+        if (state.layout) {
+            for (const RootArgumentLayout::Parameter& parameter : state.layout->parameters)
+                if (parameter.type == rt::rootsig::ParamType::Constants) has_constants = true;
+        }
+        static std::atomic<unsigned> lines{0};
+        const unsigned line = lines.fetch_add(1, std::memory_order_relaxed);
+        if (line >= 96 || (!has_constants && line >= 16)) return;
+        std::fprintf(stderr,
+                     "[rt] d3d12: root data trace: %s pipeline 0x%llx, layout %s, written since bind %d, rebinds %u "
+                     "(cleared %u dword(s)); parameters:",
+                     what, static_cast<unsigned long long>(graphics_pipeline_), state.layout ? "bound" : "none",
+                     state.written_since_bind ? 1 : 0, state.rebinds, state.cleared_dwords);
+        if (state.layout) {
+            for (std::size_t p = 0; p < state.layout->parameters.size() && p < 16; ++p) {
+                const RootArgumentLayout::Parameter& parameter = state.layout->parameters[p];
+                const std::uint32_t dwords = parameter.type == rt::rootsig::ParamType::Constants
+                                                 ? parameter.constant_count
+                                                 : (parameter.type == rt::rootsig::ParamType::Descriptor ? 2u : 1u);
+                unsigned nonzero = 0;
+                if (parameter.console_offset != rt::rootsig::kNoSgpr)
+                    for (std::uint32_t d = 0; d < dwords && parameter.console_offset + d < rt::rootsig::kMaxUserSgprs;
+                         ++d)
+                        if (state.data[parameter.console_offset + d]) ++nonzero;
+                std::fprintf(stderr, " p%zu t%u s%s%u dw%u nz%u", p, unsigned(parameter.type),
+                             parameter.console_offset == rt::rootsig::kNoSgpr ? "?" : "", parameter.console_offset,
+                             dwords, nonzero);
+            }
+        }
+        std::fprintf(stderr, "; s0..s31:");
+        for (unsigned i = 0; i < rt::rootsig::kMaxUserSgprs; ++i)
+            std::fprintf(stderr, "%c", state.data[i] ? 'x' : '.');
+        std::fprintf(stderr, "\n");
+    }
     bool is_compute(const RootState& state) const { return &state == &compute_; }
 
     // The parameter's first user-data dword at this bind point (RootArgumentLayout).
@@ -1225,9 +1295,10 @@ private:
 
     // Dwords beyond the 32 user registers are what the console spills to memory; that layout is still open.
     void write(RootState& state, std::uint32_t dword, std::uint32_t value) {
-        if (dword < rt::rootsig::kMaxUserSgprs)
+        if (dword < rt::rootsig::kMaxUserSgprs) {
             state.data[dword] = value;
-        else
+            state.written_since_bind = true;
+        } else
             stub("root arguments beyond 32 user-data dwords (spill not modelled)");
     }
 
@@ -1486,6 +1557,7 @@ private:
     void record_draw(bool indexed, UINT count, UINT instances, UINT first, INT base_vertex, UINT first_instance) {
         if (!graphics_pipeline_ || !graphics_.layout || !topology_) return check(false);
         note_direct_heap_indexing(graphics_.layout);
+        trace_root_data("draw");
         // No viewport (never set, or unbound with RSSetViewports(0)) or an empty one: D3D12 rasterizes nothing,
         // and Vulkan forbids a 0x0 viewport, so the draw is not recorded.
         if (!(viewport_.width > 0) || !(viewport_.height > 0)) return;
