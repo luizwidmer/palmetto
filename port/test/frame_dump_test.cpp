@@ -214,6 +214,16 @@ int main() {
     expect(push_constant_provenance(user_data, 0x3u, bare, 0).kind == kPushConstantTable,
            "the replay's table mask alone marks a table window");
 
+    // The console driver-block vertex-stream V# the geometry fix writes (docs/vertex_path.md): encode/decode round trip.
+    const gfx10::BufferWords stream = frame_dump::vertex_stream_descriptor(0x86df10, 24, 170);
+    gfx10::Buffer decoded_stream{};
+    expect(gfx10::decode(stream, decoded_stream), "the synthesised vertex-stream V# is a valid buffer descriptor");
+    expect(decoded_stream.address == 0x86df10, "the V# carries the view's arena-relative address");
+    expect(decoded_stream.stride == 24 && decoded_stream.num_records == 170,
+           "the V# carries the vertex stride and record count");
+    expect(decoded_stream.format == 0 && decoded_stream.swizzle == gfx10::identity_swizzle,
+           "the V# is a raw, identity-swizzled buffer");
+
     if (failures) return 1;
     std::printf("frame_dump_test: command kinds, ordered writers and table windows exact\n");
     return 0;

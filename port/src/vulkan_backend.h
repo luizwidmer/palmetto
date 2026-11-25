@@ -1587,6 +1587,17 @@ public:
         std::function<bool(std::uint64_t, std::uint32_t, std::uint8_t*, std::uint32_t&)> reader) {
         replay_.read_device_memory = std::move(reader);
     }
+    // Diagnostic (docs/vertex_path.md): the shim's writer for the console driver-block V# the geometry fix places in the
+    // arena mirror. Opt-in only (PALMETTO_VERTEX_STREAM_DESCRIPTOR).
+    void set_device_memory_writer(
+        std::function<bool(std::uint64_t, std::uint32_t, const std::uint8_t*)> writer) {
+        replay_.write_device_memory = std::move(writer);
+    }
+    // Diagnostic (docs/vertex_path.md): the shim's arena allocator for the per-pipeline driver block the geometry fix
+    // emits in s0/s1. Opt-in only.
+    void set_driver_block_allocator(std::function<bool(std::uint32_t, std::uint64_t&)> allocator) {
+        replay_.allocate_driver_block = std::move(allocator);
+    }
     // Diagnostic (docs/frame_capture.md): the project's constant-output pixel shader (fs_solid), created once from the
     // SPIR-V file PALMETTO_FRAME_DUMP_CONTROL_PS names. Null when it cannot be read; the caller logs and skips.
     VkShaderModule frame_dump_solid_module() {

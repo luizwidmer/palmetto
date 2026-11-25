@@ -1575,6 +1575,29 @@ struct DeviceState {
         return true;
     }
 
+    // Diagnostic (docs/vertex_path.md, the geometry fix): write the console driver-block V# into the arena mirror at an
+    // address a translated shader fetches it from. Opt-in only; bounds-checked; writes exactly `bytes` and nothing else.
+    bool write_device_memory(std::uint64_t address, std::uint32_t bytes, const std::uint8_t* data) {
+        if (!address || !bytes || !data || !context || !arena.mapped) return false;
+        const std::uint64_t base = context->heap_base();
+        if (address < base) return false;
+        const std::uint64_t offset = address - base;
+        if (offset >= arena.size || bytes > arena.size - offset) return false;
+        std::memcpy(arena.mapped + offset, data, std::size_t(bytes));
+        return true;
+    }
+
+    // Diagnostic (docs/vertex_path.md, the geometry fix): a small scratch range in the GPU address arena for a
+    // per-pipeline driver block, whose heap-relative address the geometry fix emits in the s0/s1 user-data pair.
+    bool allocate_driver_block(std::uint32_t bytes, std::uint64_t& address) {
+        address = 0;
+        if (!bytes || !context) return false;
+        VkDeviceSize offset = 0;
+        if (!arena_allocate(bytes, 256, offset, arena_buffer)) return false;
+        address = offset;
+        return true;
+    }
+
     // Gives the S# `words` a sampler in set 0 and an entry in the hash table, unless it has them.
     bool bind_sampler(const palmetto::gfx10::SamplerWords& words) {
         namespace g = palmetto::gfx10;
@@ -6220,6 +6243,16 @@ public:
         state_.context->set_device_memory_reader(
             [this](std::uint64_t address, std::uint32_t bytes, std::uint8_t* out, std::uint32_t& read) {
                 return state_.read_device_memory(address, bytes, out, read);
+            });
+        // Diagnostic (docs/vertex_path.md): the geometry fix writes the console driver-block vertex-stream V# into the
+        // arena mirror; opt-in only (PALMETTO_VERTEX_STREAM_DESCRIPTOR).
+        state_.context->set_device_memory_writer(
+            [this](std::uint64_t address, std::uint32_t bytes, const std::uint8_t* data) {
+                return state_.write_device_memory(address, bytes, data);
+            });
+        state_.context->set_driver_block_allocator(
+            [this](std::uint32_t bytes, std::uint64_t& address) {
+                return state_.allocate_driver_block(bytes, address);
             });
         // A title-placed texture's page import (docs/texture_import.md): the queue calls this before it records a
         // submission, so the image holds the title's bytes before anything samples it.

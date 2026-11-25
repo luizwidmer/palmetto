@@ -214,3 +214,34 @@ is the colour/sample path (`docs/texture_source.md`).
   device loss, 16,244 presents) whose fetch slots, provenance and PS-control readback are quoted in sections 4-6. The
   boot lock was acquired for each run and released after it; the control readback's own line is documented in
   `docs/frame_capture.md` section 6.
+
+## 8. The geometry fix, measured: the vertex-stream descriptor is filled, coverage is still absent
+
+The fix is opt-in (`PALMETTO_VERTEX_STREAM_DESCRIPTOR=1`, on top of `PALMETTO_GRAPHICS_CONSOLE_ROOT=1`): one scratch
+range per pipeline in the GPU address arena, the bound vertex stream's V# written there (`address` = the view's
+arena-relative VA, `stride` 24, `records` 170, format 0, identity swizzle), the block's heap-relative address emitted in
+the s0/s1 pair (which the module reads as the driver block), and - in the later variant - the same V# written into the
+s8 descriptor table's slot 0 (which the module reads as one of its two table V#s). Default path unchanged; every boot
+below is ALIVE 150 s with 0 exceptions, 0 failed/refused submissions and no device loss.
+
+| boot | what was written | fetch slots after the write | PS-control readback |
+|---|---|---|---|
+| `boot-vsdesc1` | s8 table slot 0 only | s8+0 = the V# (address 0x86df10, stride 24, records 170); s8+0x40 = constants V# | mean 0 0 0, 0/16384 |
+| `boot-vsdesc3` (no PS control) | s8 table slot 0 only | same | display readback: mean 0 0 0, 0/16384 |
+| `boot-vsdesc4` | driver block in s0/s1 (table left as the title wrote it) | s0/s1 = 0xd46e500 with the V#; s8+0 = zeros; s8+0x40 = constants V# | mean 0 0 0, 0/16384 |
+| `boot-vsdesc5` | driver block + s8 table slot 0 | both s0/s1 and s8+0 decode to the V# | mean 0 0 0, 0/16384 |
+| `boot-vsdesc6` | as 5 but with the V#'s OOB mode raw (word 3 = 0x30000fac, the constants V#'s shape) | as 5 | mean 0 0 0, 0/16384 |
+
+So every descriptor location the module's disassembly names now holds a descriptor that decodes the way the layer
+encodes one: the driver-block V# at the s0/s1 address, the same V# in the s8 table's first slot, and the title's
+constants V# at s8+0x40. Coverage is still absent, so the remaining wrong thing is **not a missing slot**: it is the
+content/encoding of the synthesized driver-block V# (which fields the shader's fetch reads as address/stride/records and
+whether the driver-block layout carries format/offset words beyond a gfx10 V#), or a data source the three fetches do not
+cover. That is the console driver-block layout question, which `docs/root_arguments.md`'s owner measured - the smallest
+next step is a joint review of this encoder against the module's fetch site (rootargs offered it in the same increment
+that defined the user-SGPR layout).
+
+The fix's instrumentation is kept for that review: it logs `vertex stream descriptor: pipeline 0x… driver block 0x…
+(emitted at s0/s1), table slot 0 filled: wrote V# address 0x… stride … records … format 0 (dwords …)` once per pipeline
+(bounded to 8 lines), writes nothing unless the switch is set, and the fetch-slot dump in sections 5b/6 shows both
+addresses and the table. No pixel is claimed: the PS-control readback is the acceptance, and it has not changed.

@@ -1075,6 +1075,14 @@ struct ReplayFunctions {
     // and never copies into the arena. False when the address is outside it.
     std::function<bool(std::uint64_t device_address, std::uint32_t bytes, std::uint8_t* out, std::uint32_t& read)>
         read_device_memory;
+    // Diagnostic (docs/vertex_path.md): write the console driver-block vertex-stream V# into the arena mirror at an
+    // address a translated shader fetches it from (heap_base + a push-constant value). Set by the shim; opt-in only.
+    std::function<bool(std::uint64_t device_address, std::uint32_t bytes, const std::uint8_t* data)>
+        write_device_memory;
+    // Diagnostic (docs/vertex_path.md): a small scratch range in the GPU address arena, so the geometry fix can give the
+    // translated shader a distinct driver-block address (the s0/s1 pair) instead of the descriptor table's own. Set by
+    // the shim; opt-in only.
+    std::function<bool(std::uint32_t bytes, std::uint64_t& arena_address)> allocate_driver_block;
     // Optional; a list that needs a missing one is rejected with ReplayResult::unsupported.
     PFN_vkCmdPipelineBarrier2 pipeline_barrier2 = nullptr;  // enhanced barriers
     VkPipelineStageFlags2 queue_stages = 0;
@@ -1316,6 +1324,35 @@ inline bool vertex_path_enabled() {
     return on;
 }
 
+// The geometry fix's opt-in switch (docs/vertex_path.md): PALMETTO_VERTEX_STREAM_DESCRIPTOR=1 has the replay synthesise
+// the console driver-block V# for a draw's bound vertex stream and write it into the descriptor-table slot the
+// translated shader fetches it from. Off by default: the default path records nothing extra and writes no memory.
+inline bool vertex_stream_descriptor_enabled() {
+    static const bool on = [] {
+        const char* value = std::getenv("PALMETTO_VERTEX_STREAM_DESCRIPTOR");
+        return value && *value && value[0] != '0' && value[0] != 'n';
+    }();
+    return on;
+}
+
+// Diagnostic (docs/vertex_path.md): the console driver-block vertex-stream V# for a bound vertex view, encoded the way
+// the layer encodes every buffer descriptor (src/gfx10_descriptors.h): the arena-relative address the shader adds
+// heap_base to, the vertex stride, the record count, and a raw (untyped) format with identity swizzle, because the
+// shader's own fetch decides the element layout. Pure; frame_dump_test pins the round trip through gfx10::decode.
+inline gfx10::BufferWords vertex_stream_descriptor(std::uint64_t arena_address, std::uint32_t stride,
+                                                   std::uint32_t records) {
+    gfx10::Buffer buffer{};
+    buffer.address = arena_address;
+    buffer.stride = stride;
+    buffer.num_records = records;
+    buffer.format = 0;  // raw: no typed element, the fetch's own offsets/format are the layout
+    buffer.swizzle = gfx10::identity_swizzle;
+    // Raw bounds: a vertex stream is addressed by byte offset, and the console driver block's own V# for it is measured
+    // with OOB_SELECT = raw (word 3's top bits, the shape the constants V# at slot 2 also has).
+    buffer.oob_select = gfx10::OobSelect::raw;
+    return gfx10::encode(buffer);
+}
+
 // Reads and prints the constants the draw's descriptor tables name: the first decodable V# of each table, bounded to one
 // 480-byte window, as byte statistics and every dword (up to 120), so a transform can be evaluated from the boot log.
 // Reads only (docs/vertex_path.md); `label` prefixes the lines.
@@ -1426,6 +1463,17 @@ inline void print_fetch_slot(const ReplayFunctions& vk, std::uint64_t heap_base,
     }
     const gfx10::Sampler sampler = gfx10::decode(gfx10::SamplerWords{words[0], words[1], words[2], words[3]});
     std::fprintf(stderr, " -> S# sampler (max anisotropy %u)\n", sampler.max_anisotropy);
+}
+
+// Diagnostic (docs/vertex_path.md): every 8-dword slot of a console descriptor table the shader can reach, decoded. The
+// table base is the arena-relative value the shader forms heap_base + base from; eight slots is the bounded bound.
+inline void print_fetch_slots_table(const ReplayFunctions& vk, std::uint64_t heap_base, const char* label,
+                                    std::uint64_t base) {
+    for (unsigned slot = 0; slot < 8; ++slot) {
+        char slot_label[48] = {};
+        std::snprintf(slot_label, sizeof(slot_label), "%s+0x%02x", label, slot * 0x20u);
+        print_fetch_slot(vk, heap_base, slot_label, base + slot * 0x20u);
+    }
 }
 
 }  // namespace frame_dump
@@ -1549,6 +1597,9 @@ struct PreparedDraw {
     VkIndexType index_type = VK_INDEX_TYPE_UINT16;
     VkExtent2D area{};
     std::uint32_t layers = 1;  // the fewest layers any bound attachment view has
+    // Diagnostic (docs/vertex_path.md): the arena-relative address of the driver-block V# the geometry fix filled for
+    // this draw's vertex stream; 0 when the fix is off. Emit puts it in the s0/s1 user-data pair.
+    std::uint64_t driver_block = 0;
 
     // Back to a new draw's state, keeping the vectors' storage.
     void reset() {
@@ -1565,6 +1616,7 @@ struct PreparedDraw {
         index_type = VK_INDEX_TYPE_UINT16;
         area = {};
         layers = 1;
+        driver_block = 0;
     }
 };
 
@@ -2802,6 +2854,69 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                 }
             }
         }
+        // Diagnostic (docs/vertex_path.md, the geometry fix's opt-in): the translated vertex shader reads the vertex-stream
+        // descriptor from the console driver block whose heap-relative address is in its s0/s1 user-data pair, and two more
+        // V#s from the descriptor table at s8. The draw carries the descriptor table's address in s0/s1 (the PC packing),
+        // so on this path the shader would read the table itself as its driver block. Give it a distinct driver block: one
+        // scratch range per pipeline, the vertex stream's V# written there, and that address emitted in s0/s1. The s8 table
+        // and its descriptors are not touched. Off by default; no memory is written unless the switch is set.
+        if (frame_dump::vertex_stream_descriptor_enabled() && vk.write_device_memory && vk.allocate_driver_block &&
+            !pipeline->mesh && (pipeline->vertex_slots & 1u) && draw.views && !draw.views->vertex_buffers.empty() &&
+            draw.views->vertex_buffers[0].va && draw.user_data[8]) {
+            const VertexBufferView& view = draw.views->vertex_buffers[0];
+            const std::uint32_t stride = view.stride;
+            if (stride && view.size >= stride) {
+                std::uint64_t arena_address = 0;
+                {
+                    VkBuffer resolved = VK_NULL_HANDLE;
+                    VkDeviceSize offset = 0;
+                    std::uint64_t size = view.size;
+                    if (vk.buffer_at && vk.buffer_at(view.va, size, resolved, offset)) arena_address = offset;
+                }
+                static std::mutex blocks_mutex;
+                static std::unordered_map<std::uintptr_t, std::uint64_t> blocks;
+                std::uint64_t block = 0;
+                {
+                    std::lock_guard lock(blocks_mutex);
+                    const auto found = blocks.find(draw.pipeline);
+                    if (found != blocks.end()) block = found->second;
+                }
+                if (!block && arena_address) {
+                    std::uint64_t fresh = 0;
+                    if (vk.allocate_driver_block(64, fresh) && fresh) {
+                        std::lock_guard lock(blocks_mutex);
+                        blocks.emplace(draw.pipeline, fresh);
+                        block = fresh;
+                    }
+                }
+                if (block && arena_address) {
+                    const std::uint32_t records = static_cast<std::uint32_t>(view.size / stride);
+                    const gfx10::BufferWords words =
+                        frame_dump::vertex_stream_descriptor(arena_address, stride, records);
+                    if (vk.write_device_memory(vk.heap_base + block, sizeof(words),
+                                               reinterpret_cast<const std::uint8_t*>(words.data()))) {
+                        p.driver_block = block;
+                        // The disassembly reads two more V#s from the s8 descriptor table at +0 and +0x40; the title's
+                        // table has the constants V# at +0x40 but leaves +0 empty, so fill that one 4-dword slot with
+                        // the same vertex-stream V# (what the console driver block would hold). Bounded to slot 0.
+                        const std::uint64_t table = std::uint64_t(draw.user_data[8]) & ~std::uint64_t(3);
+                        const bool table_filled =
+                            table != 0 && vk.write_device_memory(vk.heap_base + table, sizeof(words),
+                                                                 reinterpret_cast<const std::uint8_t*>(words.data()));
+                        static std::atomic<unsigned> logged{0};
+                        if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
+                            std::fprintf(stderr,
+                                         "[rt] replay: vertex stream descriptor: pipeline 0x%llx driver block 0x%llx "
+                                         "(emitted at s0/s1), table slot 0 %s: wrote V# address 0x%llx stride %u "
+                                         "records %u format 0 (dwords %08x %08x %08x %08x)\n",
+                                         static_cast<unsigned long long>(draw.pipeline),
+                                         static_cast<unsigned long long>(block), table_filled ? "filled" : "not filled",
+                                         static_cast<unsigned long long>(arena_address), stride, records, words[0],
+                                         words[1], words[2], words[3]);
+                    }
+                }
+            }
+        }
         // Diagnostic (docs/vertex_path.md): the vertex path of the armed draw. Prints the shader-corpus identity the PSO
         // resolved, the input layout bound to the Vulkan pipeline, the raw vertex and index bytes the draw reads (through
         // the title-memory hook) and the constants, so the translated vertex shader's inputs can be evaluated off the
@@ -2926,6 +3041,12 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                          blit_transform_degenerate(transform)
                              ? "degenerate: every vertex at (0,0,0,0), nothing rasterizes"
                              : "non-degenerate");
+            // The measured module does not use these push-constant dwords as the transform: it loads its own constants
+            // from the buffers its descriptors name and overwrites the same function slots before the position store, so
+            // the fetch slots and the readback are the acceptance for the descriptor fix (docs/vertex_path.md).
+            std::fprintf(stderr,
+                         "[rt] replay: vertex path: note: the module overwrites these four dwords with constants it "
+                         "fetches itself; the fetch slots and the readback are the coverage acceptance\n");
             // Where each of the 32 push-constant dwords comes from: the pipeline's root signature parameter table, the
             // replay's table-window mask, and the dword's own value. The acceptance inputs are the four dwords the FSPX
             // blit vertex shader uses as its clip-position transform (docs/vertex_path.md section 4).
@@ -2974,17 +3095,36 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                 }
             }
             // Diagnostic (docs/vertex_path.md): the descriptor fetch slots the translated shader reads itself. The
-            // measured module builds each address as heap_base + (a push-constant dword & ~3): the console table at
-            // s8, the dword pair at s0, and s8 + 0x40. Decoding what each address holds says which of the shader's
-            // fetches gets a real V#/T# anyway. The bound views' driver-block-shaped V# is printed after them, so a
-            // vertex-stream descriptor the shader expects can be looked for in both places.
+            // measured module builds each address as heap_base + (a value from its push constants): the console table
+            // from the s8/s9 pair and the same table through the s0/s1 pair, plus the +0x40 slot. The dwords printed here
+            // are the *emitted* ones (after the replay's title-VA rebase), because that is what the shader receives; the
+            // raw recorded pair above can be a title VA.
             if (vk.read_device_memory) {
                 const std::uint64_t heap = vk.heap_base;
-                const std::uint64_t s0 = std::uint64_t(draw.user_data[0]) & ~std::uint64_t(3);
-                const std::uint64_t s8 = std::uint64_t(draw.user_data[8]) & ~std::uint64_t(3);
-                frame_dump::print_fetch_slot(vk, heap, "s0", s0);
-                frame_dump::print_fetch_slot(vk, heap, "s8", s8);
-                frame_dump::print_fetch_slot(vk, heap, "s8+0x40", s8 + 0x40);
+                ShaderUserData emitted{};
+                std::copy(draw.user_data.begin(), draw.user_data.end(), emitted.s);
+                emitted.heap_base = vk.heap_base;
+                emitted.code_base = pipeline->code_base;
+                const unsigned rebased = rebase_user_data(vk, emitted, pipeline->table_windows);
+                if (p.driver_block) {  // the geometry fix's driver block is emitted in s0/s1 (see emit)
+                    emitted.s[0] = std::uint32_t(p.driver_block);
+                    emitted.s[1] = std::uint32_t(p.driver_block >> 32);
+                }
+                std::fprintf(stderr, "[rt] replay: vertex path: emitted user data (%u title VA(s) rebased)", rebased);
+                for (unsigned w = 0; w < 32; ++w)
+                    std::fprintf(stderr, "%s%08x", (w % 8) == 0 ? "\n  " : " ", emitted.s[w]);
+                std::fprintf(stderr, "\n");
+                const std::uint64_t pc_pair = (std::uint64_t(emitted.s[1]) << 32) |
+                                              (std::uint64_t(emitted.s[0]) & ~std::uint64_t(3));
+                const std::uint64_t console_pair = (std::uint64_t(emitted.s[9]) << 32) |
+                                                   (std::uint64_t(emitted.s[8]) & ~std::uint64_t(3));
+                std::fprintf(stderr,
+                             "[rt] replay: vertex path: fetch bases: s0/s1 pair 0x%llx, s8/s9 pair 0x%llx\n",
+                             static_cast<unsigned long long>(pc_pair),
+                             static_cast<unsigned long long>(console_pair));
+                const bool split = pc_pair != console_pair;
+                frame_dump::print_fetch_slots_table(vk, heap, split ? "driver(s0/s1)" : "table(s0)", pc_pair);
+                if (split) frame_dump::print_fetch_slots_table(vk, heap, "table(s8)", console_pair);
                 if (draw.views && vk.buffer_at) {
                     for (std::uint32_t slot = 0; slot < 32; ++slot) {
                         const VertexBufferView& view = draw.views->vertex_buffers[slot];
@@ -5670,6 +5810,12 @@ inline void emit(const PreparedList& prepared, VkCommandBuffer command_buffer, c
             data.heap_base = vk.heap_base;
             data.code_base = graphics.code_base;
             const unsigned rebased = rebase_user_data(vk, data, graphics.table_windows);
+            // Diagnostic (docs/vertex_path.md): the geometry fix's driver block goes in the s0/s1 pair, the two dwords
+            // the translated vertex shader reads as the driver block's heap-relative address (docs/root_arguments.md).
+            if (d.driver_block) {
+                data.s[0] = std::uint32_t(d.driver_block);
+                data.s[1] = std::uint32_t(d.driver_block >> 32);
+            }
             {
                 static std::atomic<unsigned> emitted{0};
                 if (emitted.fetch_add(1, std::memory_order_relaxed) < 8)

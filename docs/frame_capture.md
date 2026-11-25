@@ -180,7 +180,9 @@ boot that prints the control-draw line but no readback line would mean the one-s
 draw's prepare did not reach the colour-target arming); with the label the control's coverage axis is readable on its
 own, without confusing it with the frame's own (black) content. The measured PS-control line is therefore
 `frame dump PS control readback: ... mean 0 0 0, non-black 0/16384` for the title's pipeline - the axis is measured, and
-it says no coverage.
+it says no coverage. `docs/vertex_path.md` section 8 records the geometry fix's acceptance boots: the vertex-stream
+descriptor the module fetches is now filled and decodes as a V#, but the PS-control readback has not changed from black,
+so the coverage result stands.
 
 ## 7. The sampled textures: the first T# resolves to a 4K image that reads black
 
