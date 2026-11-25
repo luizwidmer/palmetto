@@ -92,6 +92,30 @@ report already there belongs to an earlier run.
 
 You can also invoke `python -I tooling/scripts/run_guest_scene.py` directly.
 
+
+## Environment switches for measurement
+
+These switches are opt-in and off by default unless stated; `PALMETTO_SHADERS`, `PALMETTO_D3D12`,
+`PALMETTO_SKIP_INT3` and `PALMETTO_SEED_GLOBAL` are the ones a normal boot sets.
+
+| Variable | Purpose |
+|---|---|
+| `PALMETTO_SHADERS` | Directory of the translated shader corpus the runtime resolves programs from. |
+| `PALMETTO_D3D12` | Selects the D3D12 backend (`vulkan` for the real device). |
+| `PALMETTO_SKIP_INT3` | Stepping policy for the loader's `int3` redirect sites. |
+| `PALMETTO_SEED_GLOBAL` | `addr:size` of a stand-in range the loader zeroes before the title reads it. |
+| `PALMETTO_CRASH_SAVE_DIR` | Where a crash report and its side files are written beside the faulting process. |
+| `PALMETTO_DS_ORDER` | Microseconds of console-faithful DirectStorage completion ordering (diagnostic and opt-in fix). |
+| `PALMETTO_DUMP_BYTES` | Hex RVAs whose image words are printed after the loader maps the image. |
+| `PALMETTO_DUMP_PIPELINES` | Directory that receives dumped pipeline program bytes and state for offline translation. |
+| `PALMETTO_POKE_LEA` | One shaped instruction to poke, for diagnosting a specific loader path. |
+| `PALMETTO_RESOLVE` | Hex address to describe (what lives there) for a call or store target outside the image. |
+| `PALMETTO_RNG_SEED` | Deterministic RNG seed (decimal or 0x hex) for reproducible runs. |
+| `PALMETTO_STOP_INT3` | Up to four `int3` sites that are not stepped over. |
+| `PALMETTO_TITLE_VA` | `0` disables rebasing the title's shader-visible VAs into the arena. |
+| `PALMETTO_TITLE_WATCH` | Hex RVAs of title memory to watch during a run (measurement only). |
+| `PALMETTO_TRACE_TLS` | Traces the loader's TLS redirect resolution. |
+
 ## Console vtable slot maps with Ghidra
 
 The console D3D12 objects are not in the Windows SDK order, so a slot number in a trace does not

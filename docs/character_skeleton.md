@@ -300,7 +300,7 @@ it does and why:
   `--no-root-motion` leaves it out). Other track types are counted, not exported. A clip entry
   plays its animation's `[start, end]` window at `rate`, so animation time `t` is clip time
   `(t − start) / rate`. `(end − start) / rate` equals the clip's `+0x78` duration for all 785,174
-  entries of all 61,505 dictionaries, to within 2.2e-4 relative (see [animation.md](animation.md#clip-dictionaries-are-rage-resources)).
+  entries of all 61,505 dictionaries, to within 2.2e-4 relative (see [animation.md](animation.md#clip-dictionaries-are-the-engine-resources)).
 - The whole skeleton sits under one node that turns the engine Z-up into glTF Y-up. Skinned mesh nodes
   sit at the scene root, because glTF ignores a skinned mesh node's own transform.
 

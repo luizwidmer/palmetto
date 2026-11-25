@@ -323,12 +323,12 @@ create_graphics, port/shims/d3d12_vulkan_device.cpp) classifies the pipeline's r
 placed parameters, and a 150 s boot (oot-sigclass1, ALIVE 150.1 s, no exception) printed exactly one shape for each
 pass:
 
-`
+```
 signature class fspx/lib_vs_00821+fspx/lib_ps_00820: 1 parameter(s): [type 2 (descriptor table), 0 constant value(s),
     console slot s8, 1 dword(s)] -> descriptor table at parameter 0 and NO 32-bit constant after it
 signature class fspx/lib_vs_00823+fspx/lib_ps_00822: 1 parameter(s): [type 2 (descriptor table), 0 constant value(s),
     console slot s8, 1 dword(s)] -> descriptor table at parameter 0 and NO 32-bit constant after it
-`
+```
 
 So the sibling PS's s9 is **beyond the signature span**: the console pixel base is s8, the only parameter is a
 descriptor table taking ONE dword at s8, and there is no constant parameter after it. On the console that dword is
