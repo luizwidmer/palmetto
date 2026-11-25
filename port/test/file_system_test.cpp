@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <clocale>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -253,7 +254,7 @@ void run_checks(const std::filesystem::path& root) {
     }
 
     // --trace: a failed open of a guest path is a "file_open_failed" event, a successful one is not, and with the
-    // trace off nothing is written.
+    // trace off nothing is written. PALMETTO_FILE_TRACE=1 records every open as a "file_open" event as well.
     {
         const std::wstring trace = (root / "open_trace.jsonl").wstring();
         const auto events = [&] {
@@ -267,6 +268,7 @@ void run_checks(const std::filesystem::path& root) {
             for (size_t at = hay.find(needle); at != std::string::npos; at = hay.find(needle, at + 1)) ++n;
             return n;
         };
+        _putenv_s("PALMETTO_FILE_TRACE", "");
         HANDLE h = create_w(L"GAME:\\data\\absent_off.txt", GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
         check(h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_FILE_NOT_FOUND, "a missing open fails with the trace off");
         check(rt::startup_trace::open(trace.c_str()), "open the startup trace file");
@@ -274,9 +276,18 @@ void run_checks(const std::filesystem::path& root) {
         check(h != INVALID_HANDLE_VALUE, "an open that succeeds");
         if (h != INVALID_HANDLE_VALUE) ::CloseHandle(h);
         check(count(events(), "file_open_failed") == 0, "a successful open writes no file_open_failed event");
+        check(count(events(), "\"kind\":\"file_open\"") == 0, "no file_open event while PALMETTO_FILE_TRACE is unset");
+        _putenv_s("PALMETTO_FILE_TRACE", "1");
+        h = create_w(L"GAME:\\data\\hello.txt", GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        check(h != INVALID_HANDLE_VALUE, "a successful open with the open trace on");
+        if (h != INVALID_HANDLE_VALUE) ::CloseHandle(h);
         h = create_w(L"GAME:\\data\\absent_on.txt", GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
         check(h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_FILE_NOT_FOUND,
               "a missing open still fails the same way with the trace on");
+        _putenv_s("PALMETTO_FILE_TRACE", "");
+        h = create_w(L"GAME:\\data\\hello.txt", GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        check(h != INVALID_HANDLE_VALUE, "an open after the open trace went off again");
+        if (h != INVALID_HANDLE_VALUE) ::CloseHandle(h);
         rt::startup_trace::close();
         const std::string log = events();
         check(count(log, "\"kind\":\"file_open_failed\"") == 1, "one file_open_failed event");
@@ -284,6 +295,12 @@ void run_checks(const std::filesystem::path& root) {
         check(log.find("\"error\":2,") != std::string::npos, "the event carries error 2");
         check(log.find("\"caller\":\"host:") != std::string::npos, "the event names a caller");
         check(count(log, "absent_off") == 0, "nothing was traced before the trace was opened");
+        check(count(log, "\"kind\":\"file_open\"") == 2, "two file_open events: one success and one failure");
+        check(log.find("\"path\":\"GAME:\\\\data\\\\hello.txt\",\"result\":\"ok\"") != std::string::npos,
+              "the successful open is recorded as ok");
+        check(log.find("\"path\":\"GAME:\\\\data\\\\absent_on.txt\",\"error\":2,") != std::string::npos,
+              "the failed open is recorded with its error");
+        check(count(log, "\"result\":\"ok\"") == 1, "the open after the switch went off again is not recorded");
     }
 
     // Attributes, wide and narrow.

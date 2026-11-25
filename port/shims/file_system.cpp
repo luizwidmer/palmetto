@@ -26,6 +26,7 @@
 #include <intrin.h>
 
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
@@ -685,20 +686,41 @@ std::filesystem::path overlay_dir() {
 // palmetto --trace FILE: a failed open of a guest path goes to the startup trace as a "file_open_failed" event (the
 // path the title passed, the Win32 error, the caller as module+RVA), so a boot that stops on a missing or refused
 // file names it. Failures only, and at most 256 of them, so a title probing many optional files can't fill the file.
-void note_open_failure(const char* api, LPCWSTR name, DWORD error, const void* caller) {
-    if (!rt::startup_trace::enabled()) return;
-    static std::atomic<int> left{256};
-    if (left.fetch_sub(1, std::memory_order_relaxed) <= 0) return;
+std::string utf8_text(LPCWSTR name) {
     std::string utf8;
     if (const int n = WideCharToMultiByte(CP_UTF8, 0, name, -1, nullptr, 0, nullptr, nullptr); n > 1) {
         utf8.resize(static_cast<size_t>(n) - 1);
         WideCharToMultiByte(CP_UTF8, 0, name, -1, utf8.data(), n, nullptr, nullptr);
     }
+    return utf8;
+}
+
+void note_open_failure(const char* api, LPCWSTR name, DWORD error, const void* caller) {
+    if (!rt::startup_trace::enabled()) return;
+    static std::atomic<int> left{256};
+    if (left.fetch_sub(1, std::memory_order_relaxed) <= 0) return;
     rt::startup_trace::event(
         "file_open_failed",
-        std::string("\"api\":\"") + api + "\",\"path\":" + rt::startup_trace::quote(utf8) +
+        std::string("\"api\":\"") + api + "\",\"path\":" + rt::startup_trace::quote(utf8_text(name)) +
             ",\"error\":" + std::to_string(error) + ",\"caller\":" +
             rt::startup_trace::quote(rt::startup_trace::where(reinterpret_cast<uint64_t>(caller))));
+}
+
+// palmetto --trace FILE with PALMETTO_FILE_TRACE=1: every open of a guest path goes to the startup trace as a
+// "file_open" event (the API, the path the title passed, whether it opened or why it did not, and the caller as
+// module+RVA). The failures-only event above answers "why did this file not open"; this one answers "which files does
+// the title open at all", which is how a boot names the archives and movies its loader touches. Bounded to the first
+// 1,024 opens; off by default, one relaxed load per call when it is.
+void note_open(const char* api, LPCWSTR name, DWORD error, const void* caller) {
+    if (!rt::startup_trace::enabled()) return;
+    const char* switch_value = std::getenv("PALMETTO_FILE_TRACE");
+    if (!switch_value || *switch_value == '0') return;
+    static std::atomic<int> left{1024};
+    if (left.fetch_sub(1, std::memory_order_relaxed) <= 0) return;
+    std::string fields = std::string("\"api\":\"") + api + "\",\"path\":" + rt::startup_trace::quote(utf8_text(name));
+    fields += error ? ",\"error\":" + std::to_string(error) : std::string(",\"result\":\"ok\"");
+    fields += ",\"caller\":" + rt::startup_trace::quote(rt::startup_trace::where(reinterpret_cast<uint64_t>(caller)));
+    rt::startup_trace::event("file_open", fields);
 }
 
 HANDLE WINAPI create_file_w(LPCWSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES attributes,
@@ -709,6 +731,7 @@ HANDLE WINAPI create_file_w(LPCWSTR name, DWORD access, DWORD share, LPSECURITY_
     }
     const Target t = open_target(name, access, disposition);
     if (t.error) {
+        note_open("CreateFileW", name, t.error, _ReturnAddress());
         note_open_failure("CreateFileW", name, t.error, _ReturnAddress());
         SetLastError(t.error);
         return INVALID_HANDLE_VALUE;
@@ -716,8 +739,11 @@ HANDLE WINAPI create_file_w(LPCWSTR name, DWORD access, DWORD share, LPSECURITY_
     const HANDLE h = ::CreateFileW(t.path.c_str(), access, share, attributes, disposition, flags, template_file);
     if (h == INVALID_HANDLE_VALUE) {
         const DWORD error = GetLastError();
+        note_open("CreateFileW", name, error, _ReturnAddress());
         note_open_failure("CreateFileW", name, error, _ReturnAddress());
         SetLastError(error);
+    } else {
+        note_open("CreateFileW", name, 0, _ReturnAddress());
     }
     return h;
 }
@@ -740,6 +766,7 @@ HANDLE WINAPI create_file2(LPCWSTR name, DWORD access, DWORD share, DWORD dispos
     }
     const Target t = open_target(name, access, disposition);
     if (t.error) {
+        note_open("CreateFile2", name, t.error, _ReturnAddress());
         note_open_failure("CreateFile2", name, t.error, _ReturnAddress());
         SetLastError(t.error);
         return INVALID_HANDLE_VALUE;
@@ -747,8 +774,11 @@ HANDLE WINAPI create_file2(LPCWSTR name, DWORD access, DWORD share, DWORD dispos
     const HANDLE h = ::CreateFile2(t.path.c_str(), access, share, disposition, params);
     if (h == INVALID_HANDLE_VALUE) {
         const DWORD error = GetLastError();
+        note_open("CreateFile2", name, error, _ReturnAddress());
         note_open_failure("CreateFile2", name, error, _ReturnAddress());
         SetLastError(error);
+    } else {
+        note_open("CreateFile2", name, 0, _ReturnAddress());
     }
     return h;
 }

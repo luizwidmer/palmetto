@@ -2,7 +2,7 @@
 
 One 600 s boot under the boot lock, with the timeline, loader-hook and DirectStorage trace switches on and a
 presenter capture every 60 s, measures what happens after the 130 s window we had been sampling. The public
-fork's own report (its `docs/linux_proton.md`, the "What a healthy boot looks like" table) places its story
+fork's own report (the "What a healthy boot looks like" table in its public story-load page, <https://github.com/ubiquitarianism/leonida/blob/main/docs/linux_proton.md>) places its story
 load at roughly 240-300 s after start and its end at roughly 540-630 s, so a 130 s boot is pre-load and this
 boot was meant to cross both checkpoints.
 

@@ -21,6 +21,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <limits>
@@ -65,15 +66,40 @@ void note_attributes(const char* api, uint64_t attributes, size_t size, const vo
     rt::startup_trace::event("xmem_attributes", fields);
 }
 
+// palmetto --trace FILE with PALMETTO_XMEM_CALLERS=1: the first call of each allocator entry point from each distinct
+// caller goes to the startup trace as an "xmem_caller" event (api, the caller as module+RVA). xmem_attributes above
+// dedupes on the attribute word, so a later call with a word already seen is invisible; this records the caller
+// instead, which is how a boot shows whether a separately mapped module that imports XMemAlloc/XMemFree (the package's
+// Bink 2 library, for one) runs any of its code at all. Bounded to 256 records; off by default, one relaxed load per
+// call when it is.
+void note_caller(const char* api, const void* caller) {
+    if (!rt::startup_trace::enabled()) return;
+    const char* switch_value = std::getenv("PALMETTO_XMEM_CALLERS");
+    if (!switch_value || *switch_value == '0') return;
+    const std::string where = rt::startup_trace::where(reinterpret_cast<uint64_t>(caller));
+    static std::mutex mutex;
+    static std::set<std::pair<std::string, std::string>> seen;
+    static int left = 256;
+    {
+        const std::lock_guard lock(mutex);
+        if (left <= 0 || !seen.insert({api, where}).second) return;
+        --left;
+    }
+    rt::startup_trace::event("xmem_caller", std::string("\"api\":\"") + api + "\",\"caller\":" +
+                                                  rt::startup_trace::quote(where));
+}
+
 void* allocate_block(size_t size) { return _aligned_malloc(size ? size : 1, kAlign); }
 
 void* __stdcall XMemAlloc(size_t size, uint64_t attributes) {
     note_attributes("XMemAlloc", attributes, size, _ReturnAddress());
+    note_caller("XMemAlloc", _ReturnAddress());
     return allocate_block(size);
 }
 
 void __stdcall XMemFree(void* p, uint64_t attributes) {
     note_attributes("XMemFree", attributes, kNoSize, _ReturnAddress());
+    note_caller("XMemFree", _ReturnAddress());
     _aligned_free(p);
 }
 
@@ -83,11 +109,13 @@ void __stdcall XMemFree(void* p, uint64_t attributes) {
 // released by either free.
 void* __stdcall XMemAllocDefault(size_t size, uint64_t attributes) {
     note_attributes("XMemAllocDefault", attributes, size, _ReturnAddress());
+    note_caller("XMemAllocDefault", _ReturnAddress());
     return allocate_block(size);
 }
 
 void __stdcall XMemFreeDefault(void* p, uint64_t attributes) {
     note_attributes("XMemFreeDefault", attributes, kNoSize, _ReturnAddress());
+    note_caller("XMemFreeDefault", _ReturnAddress());
     _aligned_free(p);
 }
 

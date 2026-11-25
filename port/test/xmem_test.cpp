@@ -17,6 +17,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -813,6 +814,78 @@ void test_attribute_trace(XMemAllocFn alloc, XMemFreeFn free_mem, XMemVirtualAll
     DeleteFileW(path.c_str());
 }
 
+// PALMETTO_XMEM_CALLERS=1: one "xmem_caller" event per (API, caller), none with the switch unset. Two call sites give
+// two callers per API, and a repeated call from the same site adds nothing.
+void caller_site_a(XMemAllocFn alloc, XMemFreeFn free_mem) {
+    void* p = alloc(32, 0x22);
+    free_mem(p, 0x22);
+}
+
+void caller_site_b(XMemAllocFn alloc, XMemFreeFn free_mem) {
+    void* p = alloc(48, 0x22);
+    free_mem(p, 0x22);
+}
+
+void test_caller_trace(XMemAllocFn alloc, XMemFreeFn free_mem) {
+    wchar_t temp[MAX_PATH];
+    GetTempPathW(MAX_PATH, temp);
+    const std::wstring path =
+        std::wstring(temp) + L"xmem_caller_test_" + std::to_wstring(GetCurrentProcessId()) + L".jsonl";
+    DeleteFileW(path.c_str());
+    const auto events = [&] {
+        std::ifstream in(path);
+        std::stringstream text;
+        text << in.rdbuf();
+        return text.str();
+    };
+    const auto count = [](const std::string& hay, const std::string& needle) {
+        int n = 0;
+        for (size_t at = hay.find(needle); at != std::string::npos; at = hay.find(needle, at + 1)) ++n;
+        return n;
+    };
+
+    check(rt::startup_trace::open(path.c_str()), "open the startup trace file for the caller test");
+    caller_site_a(alloc, free_mem);
+    rt::startup_trace::close();
+    check(count(events(), "\"kind\":\"xmem_caller\"") == 0, "no xmem_caller event while PALMETTO_XMEM_CALLERS is unset");
+    DeleteFileW(path.c_str());
+
+    _putenv_s("PALMETTO_XMEM_CALLERS", "1");
+    check(rt::startup_trace::open(path.c_str()), "open the startup trace file with the caller switch on");
+    caller_site_a(alloc, free_mem);
+    caller_site_a(alloc, free_mem);  // the same two sites again: no more events
+    caller_site_b(alloc, free_mem);
+    rt::startup_trace::close();
+    _putenv_s("PALMETTO_XMEM_CALLERS", "");
+    const std::string log = events();
+    std::vector<std::string> caller_lines;
+    {
+        std::istringstream lines(log);
+        for (std::string line; std::getline(lines, line);) {
+            if (line.find("\"kind\":\"xmem_caller\"") != std::string::npos) caller_lines.push_back(line);
+        }
+    }
+    int alloc_lines = 0;
+    int free_lines = 0;
+    int host_callers = 0;
+    std::set<std::string> unique_callers;
+    for (const std::string& line : caller_lines) {
+        if (line.find("\"api\":\"XMemAlloc\"") != std::string::npos) ++alloc_lines;
+        if (line.find("\"api\":\"XMemFree\"") != std::string::npos) ++free_lines;
+        const size_t at = line.find("\"caller\":\"");
+        const size_t end = at == std::string::npos ? std::string::npos : line.find('"', at + 10);
+        if (end == std::string::npos) continue;
+        const std::string caller = line.substr(at + 10, end - (at + 10));
+        if (caller.rfind("host:", 0) == 0) ++host_callers;
+        unique_callers.insert(caller);
+    }
+    check(caller_lines.size() >= 2, "the caller trace records the allocator entry points");
+    check(alloc_lines > 0 && free_lines > 0, "both XMemAlloc and XMemFree callers are recorded");
+    check(host_callers == static_cast<int>(caller_lines.size()), "every event names its caller as a module");
+    check(unique_callers.size() == caller_lines.size(), "no caller is recorded twice");
+    DeleteFileW(path.c_str());
+}
+
 // XMemTransferMemory moves budget between the console's title and system partitions; a PC has neither, so the shim
 // succeeds for every direction and size and moves (allocates) nothing. The XMEM_TRANSFER_TYPE values are not public,
 // so the directions here are just the first few enum values and one far outside any plausible range.
@@ -999,6 +1072,7 @@ int main() {
         test_virtual_alloc(virtual_alloc, get_write_watch, reset_write_watch);
     }
     test_attribute_trace(alloc, free_mem, virtual_alloc);
+    test_caller_trace(alloc, free_mem);
     if (transfer) {
         test_transfer_memory(transfer);
         test_transfer_trace(transfer);
