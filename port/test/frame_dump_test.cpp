@@ -134,6 +134,46 @@ int main() {
     const std::vector<std::uint64_t> one = frame_dump::descriptor_tables(tabled, (1u << 0) | (1u << 4), 1);
     expect(one.size() == 1 && one[0] == 0x2222222211111111ull, "the table count is bounded");
 
+    // The vertex-path helpers (docs/vertex_path.md): attribute byte sizes and input-layout problems.
+    expect(vertex_format_bytes(VK_FORMAT_R32G32B32_SFLOAT) == 12, "a 3-float attribute is 12 bytes");
+    expect(vertex_format_bytes(VK_FORMAT_R16G16_SFLOAT) == 4, "a 2-half attribute is 4 bytes");
+    expect(vertex_format_bytes(VK_FORMAT_R8G8B8A8_UNORM) == 4, "an RGBA8 attribute is 4 bytes");
+    expect(vertex_format_bytes(VK_FORMAT_R32G32_SFLOAT) == 8, "a 2-float attribute is 8 bytes");
+    expect(vertex_format_bytes(9999) == 0, "an unknown format has no size");
+    VertexPathInfo layout;
+    layout.binding_count = 1;
+    layout.binding[0] = VertexPathInfo::Binding{0, 24, VK_VERTEX_INPUT_RATE_VERTEX, 0};
+    layout.attribute_count = 2;
+    layout.attribute[0] = VertexPathInfo::Attribute{0, VK_FORMAT_R32G32B32_SFLOAT, 0, 0};
+    layout.attribute[1] = VertexPathInfo::Attribute{1, VK_FORMAT_R32G32B32_SFLOAT, 12, 0};
+    expect(vertex_layout_problems(layout) == 0, "an attribute ending exactly at the stride is fed");
+    layout.attribute[1].offset = 16;  // 16 + 12 = 28 > 24
+    expect((vertex_layout_problems(layout) & kVertexOverrunsStride) != 0, "an attribute past the stride is reported");
+    layout.attribute[1].offset = 0;
+    layout.attribute[1].location = 40;
+    expect((vertex_layout_problems(layout) & kVertexLocationOutOfRange) != 0, "a location past 31 is reported");
+    layout.attribute[1].location = 1;
+    layout.attribute[1].format = 9999;
+    expect((vertex_layout_problems(layout) & kVertexFormatUnknown) != 0, "an unknown format is reported");
+    layout.attribute[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    layout.binding[0].stride = 0;  // dynamic: set from the draw's view
+    layout.attribute[1].offset = 100;
+    expect(vertex_layout_problems(layout) == 0, "a dynamic stride is not judged at pipeline creation");
+
+    // The FSPX blit position transform (docs/vertex_path.md): the module's whole transform is four push-constant
+    // scalars; all zero is the measured state and collapses every vertex to (0,0,0,0).
+    std::uint32_t scalars[32] = {};
+    expect(blit_transform_degenerate(blit_transform(scalars)), "all-zero position scalars are degenerate");
+    scalars[28] = 0x3f800000;  // w = 1
+    expect(!blit_transform_degenerate(blit_transform(scalars)), "a non-zero w scalar is not degenerate");
+    expect(blit_transform(scalars).w == 1.0f, "s28 is the w scale");
+    scalars[8] = 0x40000000;  // x = 2
+    expect(blit_transform(scalars).x == 2.0f, "s8 is the x scale");
+    scalars[9] = 0xbf800000;  // z = -1
+    scalars[10] = 0x40400000;  // y = 3
+    const BlitTransform transform = blit_transform(scalars);
+    expect(transform.y == 3.0f && transform.z == -1.0f, "s10 is y and s9 is z");
+
     if (failures) return 1;
     std::printf("frame_dump_test: command kinds, ordered writers and table windows exact\n");
     return 0;

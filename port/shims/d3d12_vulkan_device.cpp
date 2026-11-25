@@ -4809,6 +4809,49 @@ public:
         }
         if (vk.vkCreatePipelineLayout(dev, &layout_info, nullptr, &graphics_.layout) != VK_SUCCESS) return E_FAIL;
 
+        // Diagnostic (docs/vertex_path.md): capture the vertex path the shim actually bound - the input layout and the
+        // resolved shader modules' corpus identity - for the replay's env-gated dump. Copies only; nothing on the draw
+        // path reads it.
+        {
+            const auto layout_attributes = attributes;
+            const auto layout_bindings = bindings;
+            const auto layout_divisors = divisors;
+            const std::string dir = library ? library->directory().string() : std::string();
+            const std::string vs_name = stages[0].entry ? stages[0].entry->name : std::string();
+            const std::string ps_name = stages[2].entry ? stages[2].entry->name : std::string();
+            graphics_.describe_vertex_path = [layout_attributes, layout_bindings, layout_divisors, dir, vs_name,
+                                              ps_name](palmetto::VertexPathInfo& out) {
+                out = palmetto::VertexPathInfo{};
+                const auto copy = [](char* destination, std::size_t capacity, const std::string& source) {
+                    if (capacity) std::snprintf(destination, capacity, "%s", source.c_str());
+                };
+                copy(out.vs_name, sizeof(out.vs_name), vs_name);
+                copy(out.ps_name, sizeof(out.ps_name), ps_name);
+                if (!dir.empty()) {
+                    copy(out.vs_path, sizeof(out.vs_path), dir + "\\" + vs_name + ".spv");
+                    copy(out.ps_path, sizeof(out.ps_path), dir + "\\" + ps_name + ".spv");
+                }
+                for (const auto& a : layout_attributes) {
+                    if (out.attribute_count >= std::size(out.attribute)) break;
+                    auto& entry = out.attribute[out.attribute_count++];
+                    entry.location = a.location;
+                    entry.format = a.format;
+                    entry.offset = a.offset;
+                    entry.binding = a.binding;
+                }
+                for (const auto& b : layout_bindings) {
+                    if (out.binding_count >= std::size(out.binding)) break;
+                    auto& entry = out.binding[out.binding_count++];
+                    entry.binding = b.binding;
+                    entry.stride = b.stride;
+                    entry.step_rate = b.inputRate;
+                    entry.divisor = 0;
+                }
+                for (const auto& d : layout_divisors)
+                    for (std::uint32_t i = 0; i < out.binding_count; ++i)
+                        if (out.binding[i].binding == d.binding) out.binding[i].divisor = d.divisor;
+            };
+        }
         // Kept for variants: a draw that leaves a slot unbound needs this pipeline with that format undefined.
         graphics_.mesh = mesh;
         recipe_.mesh = mesh;

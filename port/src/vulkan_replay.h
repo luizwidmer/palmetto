@@ -790,6 +790,9 @@ struct GraphicsPipeline {
     // vs degenerate-geometry question can be answered. Null when the shim did not offer it or the recipe has no
     // fragment stage; consumed only by the env-gated diagnostic.
     std::function<VkPipeline(VkShaderModule ps, bool cull_none)> with_ps;
+    // Diagnostic (docs/vertex_path.md): the vertex path of an armed draw - the shader-corpus identity the PSO resolved and
+    // the input layout actually bound to the Vulkan pipeline. Filled by the shim; read only by the env-gated dump.
+    std::function<void(struct VertexPathInfo& out)> describe_vertex_path;
     std::uint32_t samples = 1;  // rasterizationSamples; every bound attachment must have this count
     // Diagnostic (docs/page_content.md): what the translated pixel stage does with images, counted from its SPIR-V at
     // creation, so a black frame can be told apart from a texture-content gap. has_pixel_stage is false when the
@@ -806,6 +809,123 @@ struct ShaderUserData {
     std::uint64_t code_base;
 };
 static_assert(sizeof(ShaderUserData) == 144);
+
+// Diagnostic (docs/vertex_path.md): the vertex path of an armed draw, as the shim knows it - the shader-corpus module
+// identity the PSO resolved and the input layout actually bound to the Vulkan pipeline. Fixed-size so it can cross the
+// replay/shim boundary without allocation; read only by the env-gated dump.
+struct VertexPathInfo {
+    char vs_name[96]{};    // the translated module's corpus name (index entry name)
+    char vs_path[288]{};   // <shader dir>/<name>.spv, so the SPIR-V can be disassembled or evaluated
+    char ps_name[96]{};
+    char ps_path[288]{};
+    struct Attribute {
+        std::uint32_t location = 0;  // the Vulkan input location (the VS input's register index)
+        std::uint32_t format = 0;    // VkFormat of the attribute
+        std::uint32_t offset = 0;    // byte offset inside the vertex
+        std::uint32_t binding = 0;   // input slot
+    } attribute[16];
+    std::uint32_t attribute_count = 0;
+    struct Binding {
+        std::uint32_t binding = 0;
+        std::uint32_t stride = 0;    // 0: the stride is dynamic, given by the draw's vertex view
+        std::uint32_t step_rate = 0;  // VK_VERTEX_INPUT_RATE_VERTEX / INSTANCE
+        std::uint32_t divisor = 0;
+    } binding[16];
+    std::uint32_t binding_count = 0;
+};
+
+// The bytes one vertex attribute of `format` takes, or 0 for a format the layer does not bind as a vertex input. Pure
+// (port/test/frame_dump_test.cpp pins it).
+inline std::uint32_t vertex_format_bytes(std::uint32_t format) {
+    switch (format) {
+    case VK_FORMAT_R32_SFLOAT:
+    case VK_FORMAT_R32_UINT:
+    case VK_FORMAT_R32_SINT: return 4;
+    case VK_FORMAT_R32G32_SFLOAT:
+    case VK_FORMAT_R32G32_UINT:
+    case VK_FORMAT_R32G32_SINT: return 8;
+    case VK_FORMAT_R32G32B32_SFLOAT:
+    case VK_FORMAT_R32G32B32_UINT:
+    case VK_FORMAT_R32G32B32_SINT: return 12;
+    case VK_FORMAT_R32G32B32A32_SFLOAT:
+    case VK_FORMAT_R32G32B32A32_UINT:
+    case VK_FORMAT_R32G32B32A32_SINT: return 16;
+    case VK_FORMAT_R16G16_SFLOAT:
+    case VK_FORMAT_R16G16_UNORM:
+    case VK_FORMAT_R16G16_SNORM:
+    case VK_FORMAT_R16G16_UINT:
+    case VK_FORMAT_R16G16_SINT: return 4;
+    case VK_FORMAT_R16G16B16A16_SFLOAT:
+    case VK_FORMAT_R16G16B16A16_UNORM:
+    case VK_FORMAT_R16G16B16A16_SNORM:
+    case VK_FORMAT_R16G16B16A16_UINT:
+    case VK_FORMAT_R16G16B16A16_SINT: return 8;
+    case VK_FORMAT_R16_SFLOAT:
+    case VK_FORMAT_R16_UNORM:
+    case VK_FORMAT_R16_SNORM:
+    case VK_FORMAT_R16_UINT:
+    case VK_FORMAT_R16_SINT: return 2;
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_SNORM:
+    case VK_FORMAT_R8G8B8A8_UINT:
+    case VK_FORMAT_R8G8B8A8_SINT: return 4;
+    case VK_FORMAT_R8G8_UNORM:
+    case VK_FORMAT_R8G8_UINT:
+    case VK_FORMAT_R8G8_SINT: return 2;
+    case VK_FORMAT_R8_UNORM:
+    case VK_FORMAT_R8_UINT:
+    case VK_FORMAT_R8_SINT: return 1;
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+    case VK_FORMAT_A2B10G10R10_UINT_PACK32: return 4;
+    default: return 0;
+    }
+}
+
+// A bitmask of input-layout problems: a location past Vulkan's 32, an unknown format, or an attribute running past a
+// stride the pipeline itself declared. A dynamic (0) stride is checked at draw time and is not a problem here. Pure.
+inline constexpr std::uint32_t kVertexLocationOutOfRange = 1u << 0;
+inline constexpr std::uint32_t kVertexFormatUnknown = 1u << 1;
+inline constexpr std::uint32_t kVertexOverrunsStride = 1u << 2;
+inline std::uint32_t vertex_layout_problems(const VertexPathInfo& info) {
+    std::uint32_t problems = 0;
+    for (std::uint32_t i = 0; i < info.attribute_count && i < std::size(info.attribute); ++i) {
+        const VertexPathInfo::Attribute& a = info.attribute[i];
+        if (a.location >= 32) problems |= kVertexLocationOutOfRange;
+        const std::uint32_t bytes = vertex_format_bytes(a.format);
+        if (!bytes) {
+            problems |= kVertexFormatUnknown;
+            continue;
+        }
+        for (std::uint32_t b = 0; b < info.binding_count && b < std::size(info.binding); ++b) {
+            const VertexPathInfo::Binding& binding = info.binding[b];
+            if (binding.binding != a.binding || binding.stride == 0) continue;
+            if (a.offset + bytes > binding.stride) problems |= kVertexOverrunsStride;
+        }
+    }
+    return problems;
+}
+
+// The FSPX blit vertex shader measured in docs/vertex_path.md (module fspx/lib_vs_00823): it does not read the bound
+// input layout at all. It fetches its own vertex register and builds the clip position as x = s8 * vx, y = s10 * vx,
+// z = s9 * vx, w = s28 * vw from the push-constant block (dwords s0..s31), so the four scalars in s8/s9/s10/s28 are the
+// whole transform. All four zero collapses every vertex to the origin with w = 0 and nothing rasterizes. Pure.
+struct BlitTransform {
+    float x = 0;  // s8
+    float y = 0;  // s10
+    float z = 0;  // s9
+    float w = 0;  // s28
+};
+inline BlitTransform blit_transform(const std::uint32_t* s) {
+    const auto as_float = [](std::uint32_t bits) {
+        float value = 0;
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    };
+    return {as_float(s[8]), as_float(s[10]), as_float(s[9]), as_float(s[28])};
+}
+inline bool blit_transform_degenerate(const BlitTransform& transform) {
+    return transform.x == 0 && transform.y == 0 && transform.z == 0 && transform.w == 0;
+}
 
 // A host read of a small CPU-written input either succeeds, names no VA, or names GPU-written memory. The last is a
 // capability limit, not bad contents: DEFAULT and READBACK bytes may still be stale while replay prepares a command.
@@ -1122,6 +1242,79 @@ inline std::vector<std::uint64_t> descriptor_tables(const Draw& draw, std::uint3
         if (value) out.push_back(value);
     }
     return out;
+}
+
+// The vertex path (docs/vertex_path.md): PALMETTO_VERTEX_PATH=1 dumps the armed draw's shader-corpus identity, the input
+// layout bound to the Vulkan pipeline, the raw vertex/index bytes and the constants, so the translated vertex shader's
+// inputs can be evaluated off the boot. Diagnostic only and reads only.
+inline bool vertex_path_enabled() {
+    static const bool on = [] {
+        const char* value = std::getenv("PALMETTO_VERTEX_PATH");
+        return value && *value && value[0] != '0' && value[0] != 'n';
+    }();
+    return on;
+}
+
+// Reads and prints the constants the draw's descriptor tables name: the first decodable V# of each table, bounded to one
+// 480-byte window, as byte statistics and every dword (up to 120), so a transform can be evaluated from the boot log.
+// Reads only (docs/vertex_path.md); `label` prefixes the lines.
+inline void print_vertex_constants(const ReplayFunctions& vk, const Draw& draw, const GraphicsPipeline& pipeline,
+                                   const char* label) {
+    if (!vk.sampled_table) return;
+    for (const std::uint64_t table_va : descriptor_tables(draw, pipeline.table_windows)) {
+        SampledTable table;
+        if (!vk.sampled_table(table_va, 64, table)) continue;
+        std::fprintf(stderr, "[rt] replay: %s: table VA 0x%llx: %u slot(s), %u key(s):", label,
+                     static_cast<unsigned long long>(table_va), table.slots, table.keys);
+        for (std::uint32_t k = 0; k < table.keys; ++k) {
+            std::fprintf(stderr, " %s[", table.key[k].image ? "T#" : "S#/V#");
+            for (unsigned w = 0; w < 8; ++w)
+                std::fprintf(stderr, "%s%08x", w ? " " : "", table.key[k].words[w]);
+            std::fprintf(stderr, "]");
+        }
+        std::fprintf(stderr, "\n");
+        if (!vk.read_title_memory) continue;
+        for (std::uint32_t k = 0; k < table.keys; ++k) {
+            if (table.key[k].image) continue;
+            const gfx10::BufferWords words{table.key[k].words[0], table.key[k].words[1],
+                                          table.key[k].words[2], table.key[k].words[3]};
+            gfx10::Buffer buffer{};
+            if (!gfx10::decode(words, buffer) || !buffer.address) continue;
+            const std::uint64_t declared =
+                buffer.stride ? std::uint64_t(buffer.stride) * buffer.num_records : std::uint64_t(buffer.num_records);
+            if (!declared) continue;
+            constexpr std::uint32_t kMaxConstants = 480;
+            const std::uint32_t want =
+                static_cast<std::uint32_t>(std::min<std::uint64_t>(declared, kMaxConstants));
+            std::uint32_t got = 0;
+            std::uint8_t data[kMaxConstants] = {};
+            if (!vk.read_title_memory(buffer.address, want, data, got) || !got) {
+                std::fprintf(stderr, "[rt] replay: %s: V# base 0x%llx + 0x%llx is not readable\n", label,
+                             static_cast<unsigned long long>(buffer.address),
+                             static_cast<unsigned long long>(declared));
+                break;
+            }
+            std::uint64_t sum = 0, nonzero = 0, peak = 0;
+            for (std::uint32_t i = 0; i < got; ++i) {
+                sum += data[i];
+                if (data[i]) ++nonzero;
+                peak = std::max<std::uint64_t>(peak, data[i]);
+            }
+            std::fprintf(stderr,
+                         "[rt] replay: %s: constants at 0x%llx + 0x%llx, read %u: mean %llu, non-black %llu/%u, peak "
+                         "%llu; dwords",
+                         label, static_cast<unsigned long long>(buffer.address),
+                         static_cast<unsigned long long>(declared), got, sum / got, nonzero, got, peak);
+            const std::uint32_t dwords = std::min<std::uint32_t>(got / 4, 120);
+            for (std::uint32_t w = 0; w < dwords; ++w) {
+                std::uint32_t value = 0;
+                std::memcpy(&value, data + w * 4, sizeof(value));
+                std::fprintf(stderr, "%s%08x", (w % 15) == 0 ? "\n  " : " ", value);
+            }
+            std::fprintf(stderr, "\n");
+            break;
+        }
+    }
 }
 
 }  // namespace frame_dump
@@ -2495,6 +2688,150 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                                  key.title_va ? "" : "none (committed, not placed) ",
                                  static_cast<unsigned long long>(key.title_va));
                     vk.capture_sample(key.image_handle, key.format, key.extent);
+                }
+            }
+        }
+        // Diagnostic (docs/vertex_path.md): the vertex path of the armed draw. Prints the shader-corpus identity the PSO
+        // resolved, the input layout bound to the Vulkan pipeline, the raw vertex and index bytes the draw reads (through
+        // the title-memory hook) and the constants, so the translated vertex shader's inputs can be evaluated off the
+        // boot. Off unless PALMETTO_VERTEX_PATH is set; bounded and reads only.
+        if (seen == readback_at && frame_dump::vertex_path_enabled()) {
+            VertexPathInfo info;
+            if (pipeline->describe_vertex_path) pipeline->describe_vertex_path(info);
+            std::fprintf(stderr,
+                         "[rt] replay: vertex path: pipeline 0x%llx vs \"%s\" (%s) ps \"%s\" (%s); layout problems 0x%x\n",
+                         static_cast<unsigned long long>(draw.pipeline), info.vs_name, info.vs_path, info.ps_name,
+                         info.ps_path, vertex_layout_problems(info));
+            for (std::uint32_t b = 0; b < info.binding_count && b < std::size(info.binding); ++b)
+                std::fprintf(stderr, "[rt] replay: vertex path: binding %u stride %u step rate %s divisor %u\n",
+                             info.binding[b].binding, info.binding[b].stride,
+                             info.binding[b].step_rate == VK_VERTEX_INPUT_RATE_INSTANCE ? "instance" : "vertex",
+                             info.binding[b].divisor);
+            for (std::uint32_t a = 0; a < info.attribute_count && a < std::size(info.attribute); ++a) {
+                const VertexPathInfo::Attribute& attribute = info.attribute[a];
+                std::fprintf(stderr,
+                             "[rt] replay: vertex path: attribute location %u format %d (%u byte(s)) offset %u binding "
+                             "%u\n",
+                             attribute.location, static_cast<int>(attribute.format),
+                             vertex_format_bytes(attribute.format), attribute.offset, attribute.binding);
+            }
+            // The vertex views the draw binds, their resolved buffers/offsets, and the first 16 vertices' raw bytes.
+            if (draw.views) {
+                for (std::uint32_t slot = 0; slot < 32; ++slot) {
+                    const VertexBufferView& view = draw.views->vertex_buffers[slot];
+                    if (!view.va) continue;
+                    // Resolved through the same hook the binding loop uses (called again, read-only), so this line is
+                    // what the draw actually binds even though the binding loop runs later.
+                    VkBuffer resolved = VK_NULL_HANDLE;
+                    VkDeviceSize resolved_offset = 0;
+                    if (vk.buffer_at) {
+                        std::uint64_t resolved_size = view.size;
+                        if (!vk.buffer_at(view.va, resolved_size, resolved, resolved_offset)) resolved = VK_NULL_HANDLE;
+                    }
+                    const bool zero_step = (pipeline->zero_step_slots & (1u << slot)) != 0;
+                    std::fprintf(stderr,
+                                 "[rt] replay: vertex path: vb%u va 0x%llx size %u stride %u; resolved buffer 0x%llx "
+                                 "offset %llu stride-at-draw %u\n",
+                                 slot, static_cast<unsigned long long>(view.va), view.size, view.stride,
+                                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(resolved)),
+                                 static_cast<unsigned long long>(resolved_offset), zero_step ? 0 : view.stride);
+                    if (!vk.read_title_memory || !view.stride) continue;
+                    const std::uint32_t stride = view.stride;
+                    const std::uint32_t want = static_cast<std::uint32_t>(
+                        std::min<std::uint64_t>(std::uint64_t(stride) * 16, 4096));
+                    std::uint32_t got = 0;
+                    std::uint8_t bytes[4096] = {};
+                    if (!vk.read_title_memory(view.va, want, bytes, got) || !got) {
+                        std::fprintf(stderr, "[rt] replay: vertex path: vb%u is not readable through the layer\n",
+                                     slot);
+                        continue;
+                    }
+                    std::uint64_t nonzero = 0;
+                    for (std::uint32_t i = 0; i < got; ++i)
+                        if (bytes[i]) ++nonzero;
+                    std::fprintf(stderr,
+                                 "[rt] replay: vertex path: vb%u read %u byte(s), %llu non-zero; first vertices:\n", slot,
+                                 got, static_cast<unsigned long long>(nonzero));
+                    const std::uint32_t vertices = std::min<std::uint32_t>(16, got / stride);
+                    const std::uint32_t words_per_vertex = std::min<std::uint32_t>(stride / 4, 8);
+                    for (std::uint32_t v = 0; v < vertices; ++v) {
+                        std::fprintf(stderr, "[rt] replay: vertex path:   v%u", v);
+                        for (std::uint32_t w = 0; w < words_per_vertex; ++w) {
+                            std::uint32_t value = 0;
+                            std::memcpy(&value, bytes + v * stride + w * 4, sizeof(value));
+                            std::fprintf(stderr, " %08x", value);
+                        }
+                        std::fprintf(stderr, "\n");
+                    }
+                }
+            }
+            // The index view: its format, size and first 16 indices.
+            if (draw.indexed && draw.index.va) {
+                const bool wide = draw.index.format != 57;  // 57 is R16_UINT; the rest are R32_UINT
+                std::fprintf(stderr,
+                             "[rt] replay: vertex path: index va 0x%llx size %u format %u (%s); first indices:",
+                             static_cast<unsigned long long>(draw.index.va), draw.index.size, draw.index.format,
+                             wide ? "u32" : "u16");
+                if (vk.read_title_memory) {
+                    std::uint32_t got = 0;
+                    std::uint8_t bytes[128] = {};
+                    const std::uint32_t want = static_cast<std::uint32_t>(std::min<std::uint32_t>(draw.index.size, 64));
+                    if (vk.read_title_memory(draw.index.va, want, bytes, got) && got) {
+                        const std::uint32_t indices =
+                            std::min<std::uint32_t>(16, got / (wide ? 4u : 2u));
+                        for (std::uint32_t i = 0; i < indices; ++i) {
+                            std::uint32_t value = 0;
+                            if (wide) {
+                                std::memcpy(&value, bytes + i * 4, sizeof(value));
+                            } else {
+                                std::uint16_t half_word = 0;  // `small` is an rpcndr.h macro on Windows
+                                std::memcpy(&half_word, bytes + i * 2, sizeof(half_word));
+                                value = half_word;
+                            }
+                            std::fprintf(stderr, " %u", value);
+                        }
+                    } else {
+                        std::fprintf(stderr, " not readable through the layer");
+                    }
+                }
+                std::fprintf(stderr, "\n");
+            }
+            frame_dump::print_vertex_constants(vk, draw, *pipeline, "vertex path");
+            // The push constants the shader receives: the draw's 32 user-data dwords plus the heap/code bases the shader
+            // adds to every address it loads through (docs/d3d12_vulkan.md section 3.5). Every 64-bit pair that is
+            // readable through the layer is printed with its first dwords, so the addresses a shader fetches from can be
+            // told from plain scalars.
+            std::fprintf(stderr, "[rt] replay: vertex path: heap_base 0x%llx code_base 0x%llx; user data",
+                         static_cast<unsigned long long>(vk.heap_base),
+                         static_cast<unsigned long long>(pipeline->code_base));
+            for (unsigned w = 0; w < 32; ++w)
+                std::fprintf(stderr, "%s%08x", (w % 8) == 0 ? "\n  " : " ", draw.user_data[w]);
+            std::fprintf(stderr, "\n");
+            const BlitTransform transform = blit_transform(draw.user_data.data());
+            std::fprintf(stderr,
+                         "[rt] replay: vertex path: clip-position scalars x %.6g y %.6g z %.6g w %.6g -> %s\n",
+                         static_cast<double>(transform.x), static_cast<double>(transform.y),
+                         static_cast<double>(transform.z), static_cast<double>(transform.w),
+                         blit_transform_degenerate(transform)
+                             ? "degenerate: every vertex at (0,0,0,0), nothing rasterizes"
+                             : "non-degenerate");
+            if (vk.read_title_memory) {
+                unsigned shown = 0;
+                for (unsigned i = 0; i + 1 < 32 && shown < 8; ++i) {
+                    const std::uint64_t value =
+                        std::uint64_t(draw.user_data[i]) | (std::uint64_t(draw.user_data[i + 1]) << 32);
+                    if (!value) continue;
+                    std::uint32_t got = 0;
+                    std::uint8_t bytes[16] = {};
+                    if (!vk.read_title_memory(value, sizeof(bytes), bytes, got) || !got) continue;
+                    std::uint32_t dwords[4] = {};
+                    std::memcpy(dwords, bytes, std::min<std::uint32_t>(got, sizeof(dwords)));
+                    std::fprintf(stderr,
+                                 "[rt] replay: vertex path: user data %u+%u = 0x%llx readable +%u; dwords %08x %08x "
+                                 "%08x %08x\n",
+                                 i, i + 1, static_cast<unsigned long long>(value), got, dwords[0], dwords[1],
+                                 dwords[2], dwords[3]);
+                    ++shown;
                 }
             }
         }
