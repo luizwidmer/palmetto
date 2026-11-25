@@ -3599,6 +3599,10 @@ public:
                 free(device, allocation->memory, nullptr);
                 delete allocation;
             });
+        // Imported heaps are heaps of this device too: create_placed looks the address up through this registry, so
+        // without this insert an existing-heap placement falls into the "not a runtime heap" refusal instead of the
+        // address branch that handles it.
+        { std::lock_guard lock(heap_registry_mutex()); heap_registry_set().insert(this); }
     }
 
     // As the host reports it (measured against the PC runtime, d3d12_vulkan_device_test compare_heap_descs): the
