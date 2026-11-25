@@ -1341,6 +1341,17 @@ inline const std::vector<unsigned long long>& readback_draws() {
     }();
     return draws;
 }
+// Diagnostic (docs/frame_capture.md): PALMETTO_READBACK_FULL=1 copies the armed draw target in full (the whole
+// 3840x2160 subresource, one copy per draw) and reports statistics plus an 8x8 tile occupancy map, so content outside the
+// 128x128 origin window is not mistaken for a black target. Off by default (a full 4K RGBA copy is 33 MB per draw).
+inline bool full_target_enabled() {
+    static const bool on = [] {
+        const char* value = std::getenv("PALMETTO_READBACK_FULL");
+        return value && *value && value[0] != 48 && value[0] != 110;
+    }();
+    return on;
+}
+
 inline bool readback_armed_at(std::uint64_t draw) {
     for (const unsigned long long listed : readback_draws())
         if (listed == draw) return true;

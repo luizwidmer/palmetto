@@ -284,6 +284,33 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### Full-target readback: the display target is uniformly black, and the passes cover a half-screen triangle
+
+`PALMETTO_READBACK_FULL=1` copies the **whole** armed target (3840x2160, 8,294,400 pixels: one copy, no write control)
+and reports mean RGB/alpha, non-black count, peak and an 8x8 tile occupancy map. Measured across three boots:
+
+| boot | armed draws | target | full-target result |
+|---|---|---|---|
+| boot-full1 | 28000, 28001 | sibling 0x29928ea2fc0, compose 0x28b17047f70 | `mean 0 0 0, 0/8,294,400, peak 0`, alpha 0, **all 64 tiles 0** |
+| boot-full2 | 24000, 24001 | sibling 0x1e11b241370, compose 0x1d30c1186a0 | same: `0/8,294,400`, all 64 tiles 0 |
+| boot-full3 | 8000, 8001, 14000, 14001 | sibling 0x21a2190f990, compose 0x21a2196c100 | same: `0/8,294,400`, all 64 tiles 0 |
+
+So the black is **not** a 128x128 origin-window artefact: the entire 4K display target (present plane resource) and the
+sibling target carry no non-black pixel anywhere. The transient blue seen in an earlier boot's 128 window
+(`mean 14 28 57, 4,608/16,384` in boot-twopass4) is not reproducible with full-target scanning.
+
+The control axis at full resolution (boot-full4, PS-only substitution of the compose pipeline with fs_solid):
+the same full target then reads `mean 16 80 120, non-black 4,147,200/8,294,400, peak 240, alpha mean 127` with a
+**triangular tile map** (row 0: one 64,800 tile; row 1: 129,600 + 64,800; ... a half-screen lower-left triangle). So the
+compose pass's geometry covers roughly half the target in a triangle and the target can hold content - but with the
+title's own pixel shader the same target is uniformly zero, over that same coverage.
+
+Conclusion: the display target is uniformly black because **the title PS writes zeros over its covered triangle**, not
+because content lives outside the measured window or the target identity is wrong. The next falsifier is the already
+scoped substitution control: bind a known solid debug image (through the same `write_image_descriptor` hook) as the
+compose pass's sampled T#, then read the full target: output zero means the composition arithmetic has a zero weight,
+output equal to the debug colour means the sampled content was zero at those pixels and the arithmetic copies it.
+
 ### Pre-draw capture and pass order: the passes share one list, sibling first, compose second
 
 The readback-armed submission now prints its list/draw order and copies the compose pass's sampled texture at the list

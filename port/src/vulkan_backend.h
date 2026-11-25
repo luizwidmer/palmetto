@@ -3402,6 +3402,7 @@ private:
             context_.attachment_capture_count_ = 0;
             for (unsigned k = 0; k < attachment_count; ++k)
                 attachment_captures[k] = context_.attachment_captures_[k];
+            const bool full_target = frame_dump::full_target_enabled();
             VkDeviceSize total = 0;
             for (unsigned k = 0; k < attachment_count; ++k) {
                 const AttachmentCapture& capture = attachment_captures[k];
@@ -3416,8 +3417,10 @@ private:
                 default: texel = 4; break;
                 }
                 attachment_texels[k] = texel;
-                attachment_regions[k].width = std::min(128u, capture.extent.width);
-                attachment_regions[k].height = std::min(128u, capture.extent.height);
+                attachment_regions[k].width = full_target ? capture.extent.width
+                                                          : std::min(128u, capture.extent.width);
+                attachment_regions[k].height = full_target ? capture.extent.height
+                                                           : std::min(128u, capture.extent.height);
                 attachment_offsets[k] = {0, 0};
                 // Diagnostic (docs/frame_capture.md): PALMETTO_READBACK_CENTRE=1 copies a window at the target's centre
                 // instead of its origin, so a region that is only black in one corner is not mistaken for an empty target.
@@ -3428,7 +3431,7 @@ private:
                         static_cast<std::int32_t>((capture.extent.height - attachment_regions[k].height) / 2)};
                 attachment_windows[k] =
                     VkDeviceSize(attachment_regions[k].width) * attachment_regions[k].height * texel;
-                total += 2 * attachment_windows[k];
+                total += (full_target ? 1 : 2) * attachment_windows[k];
             }
             VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
             // Two windows per capture: the frame's own content, then a write control (the same target cleared by us to a
@@ -3488,7 +3491,7 @@ private:
                         bool sampled_input = false;
                         for (unsigned s = 0; s < std::min(context_.sample_capture_count_, max_sampled_keys); ++s)
                             if (context_.sample_captures_[s].image == capture.image) sampled_input = true;
-                        if (context_.vk.vkCmdClearColorImage && !sampled_input) {
+                        if (!full_target && context_.vk.vkCmdClearColorImage && !sampled_input) {
                             attachment_control_recorded[k] = true;
                             to.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
                             to.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -3521,7 +3524,7 @@ private:
                         context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr,
                                                          0, nullptr, 1, &to);
-                        base += 2 * attachment_windows[k];
+                        base += (full_target ? 1 : 2) * attachment_windows[k];
                     }
                 } else {
                     context_.vk.vkDestroyBuffer(context_.device(), capture_buffer, nullptr);
@@ -3684,6 +3687,7 @@ private:
                 if (context_.vk.vkMapMemory(context_.device(), capture_memory, 0, VK_WHOLE_SIZE, 0, &mapped) ==
                     VK_SUCCESS) {
                     const auto* attachment_bytes = static_cast<const std::uint8_t*>(mapped);
+                    const bool full_target = frame_dump::full_target_enabled();
                     VkDeviceSize base = 0;
                     for (unsigned k = 0; k < attachment_count; ++k) {
                         const AttachmentCapture& capture = attachment_captures[k];
@@ -3707,6 +3711,35 @@ private:
                             if (a) ++alpha_non_black;
                             peak = std::max<std::uint64_t>(peak, std::max(r, std::max(g, b)));
                             alpha_peak = std::max<std::uint64_t>(alpha_peak, a);
+                        }
+                        if (full_target) {
+                            const unsigned tile_w = (attachment_regions[k].width + 7) / 8;
+                            const unsigned tile_h = (attachment_regions[k].height + 7) / 8;
+                            std::uint64_t tile_non_black[64] = {};
+                            for (std::uint64_t i = 0; i < pixels; ++i) {
+                                const std::uint8_t* texel = bytes + i * std::size_t(capture_texel);
+                                const unsigned r = texel[0];
+                                const unsigned g = capture_texel > 1 ? texel[1] : 0;
+                                const unsigned b = capture_texel > 2 ? texel[2] : 0;
+                                if (!(r || g || b)) continue;
+                                const std::uint64_t x = i % attachment_regions[k].width;
+                                const std::uint64_t y = i / attachment_regions[k].width;
+                                const unsigned tx = std::min<unsigned>(7, unsigned(x) / (tile_w ? tile_w : 1));
+                                const unsigned ty = std::min<unsigned>(7, unsigned(y) / (tile_h ? tile_h : 1));
+                                ++tile_non_black[ty * 8 + tx];
+                            }
+                            std::fprintf(stderr,
+                                         "[rt] replay: full-target tile map [draw %llu target resource 0x%llx]: "
+                                         "8x8 non-black counts\n",
+                                         static_cast<unsigned long long>(capture.draw),
+                                         static_cast<unsigned long long>(capture.resource));
+                            for (unsigned ty = 0; ty < 8; ++ty) {
+                                std::fprintf(stderr, "[rt] replay: full-target tile row %u:", ty);
+                                for (unsigned tx = 0; tx < 8; ++tx)
+                                    std::fprintf(stderr, " %llu",
+                                                 static_cast<unsigned long long>(tile_non_black[ty * 8 + tx]));
+                                std::fprintf(stderr, "\n");
+                            }
                         }
                         // Diagnostic (docs/frame_capture.md): the copy runs after the frame's commands AND after any
                         // control draw, so when a control drew the window holds the control's output. Say which line this
@@ -3771,7 +3804,7 @@ private:
                                          static_cast<unsigned long long>(capture.draw),
                                          static_cast<unsigned long long>(capture.resource));
                         }
-                        base += 2 * attachment_windows[k];
+                        base += (full_target ? 1 : 2) * attachment_windows[k];
                     }
                     context_.vk.vkUnmapMemory(context_.device(), capture_memory);
                 }
