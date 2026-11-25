@@ -39,7 +39,7 @@ Auf keiner Plattform ist bisher etwas spielbar. Was heute wo läuft:
 - **AMD RDNA1 (RX 5000)**: ein unterstütztes Ziel, nah am RDNA2 der Konsole; seine 64 breiten Subgroups führen die
   Wave64-Shader nativ aus.
 
-GPU-Ergebnisse von allen Plattformen werden in [Issue #166](https://github.com/the original project/issues/166)
+GPU-Ergebnisse von allen Plattformen werden in den [Issues des Repositorys](https://github.com/luizwidmer/Palmetto/issues)
 gesammelt.
 
 ## Voraussetzungen
@@ -82,7 +82,7 @@ gesammelt.
 1. Installiere die Voraussetzungen oben.
 2. Klone das Repository **mit seinem Submodul**:
    ```powershell
-   git clone --recursive https://github.com/the original project
+   git clone https://github.com/luizwidmer/Palmetto
    ```
    Ein „Download ZIP“ von GitHub lässt `vendor/arc9-explorer` weg. Der Build holt es nach, wenn `git`
    installiert ist, und sagt dir sonst, was zu tun ist.
@@ -152,7 +152,7 @@ GPU der Runtime es kann, denn dieser Treiber kann bei emuliertem LDS-Code abstü
 ## Häufige Probleme
 
 - **Repository über „Download ZIP“ auf GitHub geladen**: Das ZIP enthält das Submodul `vendor/arc9-explorer`
-  nicht. Nimm `git clone --recursive` oder führe im Repository-Ordner `git submodule update --init --recursive` aus.
+  nicht. Nimm `git clone` oder führe im Repository-Ordner `git submodule update --init --recursive` aus.
 - **`llvm-mc` lehnt `gfx1013` / AMDGPU ab**: Du hast vermutlich den offiziellen LLVM-Installer für Windows. Nimm
   `tooling/scripts\build_llvm_mc.ps1` oder setze `LLVM_MC` auf das `llvm-mc` aus WSL (`llvm-21`).
 - **Fehler `D3D12_ROOT_SIGNATURE_DESC2` beim Bauen der Runtime**: Aktualisiere das Windows SDK auf `10.0.26100` oder
@@ -172,6 +172,6 @@ GPU der Runtime es kann, denn dieser Treiber kann bei emuliertem LDS-Code abstü
    [`CONTRIBUTING.md`](../../../CONTRIBUTING.md).
 
 Die [Anleitung zu den GPU-Tests](../../testing.md) zeigt, wie sie ohne Spieldateien laufen.
-Ergebnisse von GPU-Tests gehören in [Issue #166](https://github.com/the original project/issues/166).
+Ergebnisse von GPU-Tests gehören in die [Issues des Repositorys](https://github.com/luizwidmer/Palmetto/issues).
 
-[coord]: https://github.com/the original project/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22
+[coord]: https://github.com/luizwidmer/Palmetto/issues

@@ -61,7 +61,7 @@ El proyecto está en una fase inicial: **el juego todavía no arranca**.
 1. Instale los requisitos anteriores.
 2. Clone el repositorio **con su submódulo**:
    ```powershell
-   git clone --recursive https://github.com/the original project
+   git clone https://github.com/luizwidmer/Palmetto
    ```
 3. Haga doble clic en **`Build.bat`**.
 
@@ -121,7 +121,7 @@ esa capacidad en compute.
 
 Con el controlador de AMD para Windows, `auto` usa wave64 nativo en RDNA1 y RDNA2 si la GPU del runtime lo admite,
 aunque otra GPU use subgrupos de 32 o no esté disponible `vulkaninfo`. Así evita un fallo del controlador con
-código LDS emulado ([#857](https://github.com/the original project/issues/857)). En RDNA1 sin mesh nativo comprueba
+código LDS emulado (reportado upstream). En RDNA1 sin mesh nativo comprueba
 la capacidad de compute. Puede forzar la emulación con `--wave64-emulate on` o el modo nativo con
 `--wave64-emulate off`.
 
@@ -193,7 +193,7 @@ descomprimido. Así evita compilar el runtime; la misma opción funciona en Wind
 ## Problemas habituales
 
 - **Usó «Download ZIP» en GitHub**: el ZIP no contiene el submódulo `vendor/arc9-explorer`. Use
-  `git clone --recursive`, o ejecute `git submodule update --init --recursive` en la carpeta del repositorio.
+  `git clone`, o ejecute `git submodule update --init --recursive` en la carpeta del repositorio.
 - **`llvm-mc` rechaza `gfx1013` o el destino AMDGPU**: probablemente usa el instalador oficial de LLVM para
   Windows. Ejecute `tooling/scripts\build_llvm_mc.ps1`, o apunte `LLVM_MC` al `llvm-mc` de WSL (`llvm-21`).
 - **CMake se detiene en «needs the Windows SDK 10.0.26100 or newer»**, o MSVC indica que `Desc_1_2` no es miembro
@@ -217,7 +217,7 @@ descomprimido. Así evita compilar el runtime; la misma opción funciona en Wind
    [`CONTRIBUTING.md`](../../../CONTRIBUTING.md).
 
 La [guía de pruebas de GPU](../../testing.md) explica cómo ejecutarlas sin ningún archivo del juego. Publique sus
-resultados en la [issue #166](https://github.com/the original project/issues/166), un comentario por GPU y por
+resultados en los [issues del repositorio](https://github.com/luizwidmer/Palmetto/issues), un comentario por GPU y por
 controlador.
 
-[coord]: https://github.com/the original project/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22
+[coord]: https://github.com/luizwidmer/Palmetto/issues

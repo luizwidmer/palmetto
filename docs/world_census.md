@@ -111,41 +111,41 @@ is a signature audit of the data area rather than a full stream census; neither 
 The other eight have stream censuses with 33–98% accepted payload and audited gaps.
 
 Adding these archives does not change the measured total: **23,535 maps / 1,670,442 entities**, all
-in `levels.arc`. an open research project publishes 30,785 map files / 2,249,490 entities, leaving 7,250 maps / 579,048
+in `levels.arc`. An independent public census publishes 30,785 map files / 2,249,490 entities, leaving 7,250 maps / 579,048
 entities. The difference is not explained by maps outside `levels.arc` (zero found here) or by
 duplicates (the levels census reports zero byte-identical map payloads and zero duplicate map-name
 hashes). `levels.arc` also contains 138,839 `CMapData`-only metadata resources and 26,075 other `0x7a`
 metadata resources.
 
-### The an open research project difference, map by map
+### The difference against an independent public census, map by map
 
-A local an open research project `placements` run on the same package writes one file per map, keyed by the resource's
+A local run of an independent public project's `placements` step on the same package writes one file per map, keyed by the resource's
 stream offset, which is the `offset` of a census row. Matched by offset against a fresh census at
 48ad23f:
 
 | | Maps | Entities |
 |---|---:|---:|
 | in both | 23,528 | 1,669,203 (equal on every map) |
-| an open research project only: `CEntityDef` objects, `CMloArchetypeDef` (`10506455`) objects, no `CMapData` struct | 961 | 540,665 |
-| an open research project only: `CEntityDef` objects, one `35abc248` root object, no `CMapData` struct | 6,296 | 39,622 |
+| public census only: `CEntityDef` objects, `CMloArchetypeDef` (`10506455`) objects, no `CMapData` struct | 961 | 540,665 |
+| public census only: `CEntityDef` objects, one `35abc248` root object, no `CMapData` struct | 6,296 | 39,622 |
 | census only: entity table or schema past the first 64 KiB system page | 7 | 1,239 |
-| **an open research project total / census total** | **30,785 / 23,535** | **2,249,490 / 1,670,442** |
+| **public census total / this census total** | **30,785 / 23,535** | **2,249,490 / 1,670,442** |
 
-The two an open research project-only classes are the "other" metadata resources above. an open research project counts a `0x7a` resource
+The two public-census-only classes are the "other" metadata resources above. That census counts a `0x7a` resource
 as a map when it has at least one `CEntityDef` object. The census also requires a `CMapData` struct
 in the schema, and no resource in either class has one. Neither class is a world placement list:
 
 - The 961 interior resources hold `CMloArchetypeDef` objects (1,358 in total). Their entities lie
   within 173 m of the origin on every axis (median 5.9 m), so the coordinates are interior space.
   This is consistent with interior entity lists that get their world transform from an interior instance in a
-  map. an open research project's `interiors` step reads them that way.
+  map. The public census's `interiors` step reads them that way.
 - The 6,296 `35abc248` resources each have one root object and entities within 30.4 m of the
-  origin (median 0.9 m). an open research project's own source describes them as named, prefab-like entity groups in
+  origin (median 0.9 m). That project's own source describes them as named, prefab-like entity groups in
   group-local space, placed by nothing in the map data.
 
 The 7 census-only maps have a 65,536-byte first system page, and their `CEntityDef` block or the
 schema that the entity table needs lies in the continuation page. In 4 of them the continuation is a
-second zlib stream; in 3 it is a raw page. `world_census.assemble` joins that page. an open research project's output
+second zlib stream; in 3 it is a raw page. `world_census.assemble` joins that page. The public census's output
 has no file for these 7.
 
 The net difference is 7,257 − 7 = 7,250 maps and 580,287 − 1,239 = 579,048 entities, the whole

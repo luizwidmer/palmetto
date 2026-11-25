@@ -342,7 +342,7 @@ call: one `D3D12_BARRIER_GROUP` of type `D3D12_BARRIER_TYPE_GLOBAL` (0) holding 
 across seven functions. It counted 11 direct calls through the vtable entry and 18 calls through a register
 loaded from that entry. All 29 passed one global barrier group containing one `D3D12_GLOBAL_BARRIER` with
 the same compute-shading and unordered-access arguments described above. The counts cover the two
-enumerated dispatch forms in the builder's `.text`. [Static corroboration and coverage details](https://github.com/the original project/issues/1626)
+enumerated dispatch forms in the builder's `.text`. Corroboration and coverage details were posted upstream.
 
 The same two inner functions (`0x1d540` and `0x1d7c0`) contain the `+0x70`, `+0xc8`, `+0x108`,
 `+0x138`, `+0x168` and `+0x490` calls; the outer batched function contains the `+0xd0` barrier.
@@ -672,15 +672,15 @@ extensions. The parts relevant to this page:
 
 | Claim | Status | Detail |
 |---|---|---|
-| `PresentX` is an `ID3D12CommandQueue` method | **Prior art** | Class-attributed by a UMD validation message and by 367 call sites in the console SDK samples ([`d3d12-xs-wrapper.md:69-97`](a public prior-art project)). |
+| `PresentX` is an `ID3D12CommandQueue` method | **Prior art** | Class-attributed by a UMD validation message and by 367 call sites in the console SDK samples (`d3d12-xs-wrapper.md:69-97`). |
 | `PresentX` carries at most 2 planes and 8 views per plane | **Prior art** | `D3D12CONS_PRESENT_PLANES_MAX = 2`, `D3D12CONS_PRESENT_VIEWS_MAX = 8`; the UMD message names `pPlaneParameters[%d].ResourceCount <= 2`. |
 | Present flags `NONE`, `IMMEDIATE`, `PERSIST`, `UNIQUE_VIEW_RESOURCES` exist | **Prior art** | Names are recovered; the numeric values are **not** measured. `console_extensions.h` assigns `0x1/0x2/0x4` while `present_adapter.h` says the values are unknown and uses zero; the two contradict each other ([`d3d12_xs_surface.md §7`](d3d12_xs_surface.md)). |
 | `PresentX` signature and slot | **Open** | No signature, slot or call sequence is recovered. |
 | `SuspendX` / `ResumeX` are queue methods | **Prior art** | 122 sample call sites each; no signature or slot. |
 | `CreateCommandQueueX` is a device method | **Prior art** | UMD message ties it to `ID3D12Device`; the inferred shape is `(pDesc, pShaderQueueParams, riid, out)`; the UMD says a shader-based queue supports only `D3D12_COMMAND_LIST_TYPE_COMPUTE`; a public prior-art project returns `E_NOTIMPL`. Slot and parameter layout are **Open**. |
 | `ID3D12ConsDmaCommandList` IID `30bc77b9-8379-4b25-95de-b8588c42275d` | **Prior art** | Exported at ordinal 100; the DMA list rule is quoted from the UMD. `D3D12CONS_COMMAND_LIST_TYPE_DMA = 6` is **Derived** by appending to the PC enum, not measured. |
-| Command-list extension order | **Assumed** | the prior art's own header says the order within the appended block is not recovered; every appended slot logs its name and raw arguments ([`console_extensions.h:13-31`](a public prior-art project)). Do not copy it. |
-| `OMSetFrontAndBackStencilRef` is public GCL8 | **SDK fact, not an extension** | Same signature at `d3d12.h:32819`; the a public prior-art project catalogue's placement after GCL6 would land in the wrong slot ([`d3d12_xs_surface.md §5.1`](d3d12_xs_surface.md)). |
+| Command-list extension order | **Assumed** | the prior art's own header says the order within the appended block is not recovered; every appended slot logs its name and raw arguments (`console_extensions.h:13-31`). Do not copy it. |
+| `OMSetFrontAndBackStencilRef` is public GCL8 | **SDK fact, not an extension** | Same signature at `d3d12.h:32819`; that project's catalogue placement after GCL6 would land in the wrong slot ([`d3d12_xs_surface.md §5.1`](d3d12_xs_surface.md)). |
 
 The `DXGIXPresentArray`, `DXGIXSetFrameNotification`, `DXGIXSetVLineNotification` and
 `DXGIXGetFrameStatistics` names are **free functions** at ordinals 20/21/22/19, not queue
@@ -703,7 +703,7 @@ surface, not the command objects:
 Its own summary explicitly stops before **presentation (`PresentX` and plane parameters),
 command-list extensions, and queue/fence creation slots**
 ([`d3d12_vulkan.md §7`](d3d12_vulkan.md),
-[`PLATFORM_SURFACE.md`](a public prior-art project)).
+`PLATFORM_SURFACE.md`).
 So it adds **no** measured queue/list/fence slot to this page. The device slots it did measure
 are useful context: they are the reason a replacement cannot assume the whole device vtable is
 public order, and the reason the four creation slots 8/9/12/36 still need a trace.
@@ -948,9 +948,9 @@ the SDK; the console GUIDs are attributed to a public prior-art project in
   status.
 - the GPL-2.0-only and GPL-3.0-only provenance rules for the prior art cited below.
 - a public prior-art project, pinned at `d304fa26c0292e2f3ba76f23b15c9f30734bec02`:
-  [`docs/d3d12-xs-wrapper.md:69-97`](a public prior-art project),
-  [`components/extension-wrapper/console_extensions.h:13-31,45-72,84-191`](a public prior-art project),
-  [`docs/d3d12-xs-bridge.md:239-245`](a public prior-art project).
+  `docs/d3d12-xs-wrapper.md:69-97`,
+  `components/extension-wrapper/console_extensions.h:13-31,45-72,84-191`,
+  `docs/d3d12-xs-bridge.md:239-245`.
 - the public prior-art notes on the platform surface.
 - Windows SDK 10.0.26100.0:
   `um/d3d12.h:5193,5323,5477,6337,7216,7982,8701,9006,9011,9026,9178,20165,21255,30275,31123,31965,32816`.

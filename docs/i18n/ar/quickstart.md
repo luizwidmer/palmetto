@@ -39,7 +39,7 @@ Palmetto مشروع لإعادة ترجمة إصدار target console من the t
 بعد تثبيت المتطلبات، استنسخ المستودع مع وحدته الفرعية.
 
 ```powershell
-git clone --recursive https://github.com/the original project
+git clone https://github.com/luizwidmer/Palmetto
 cd Palmetto
 ```
 
@@ -89,8 +89,8 @@ python -I build_port.py --game "D:\path\to\package" --out "D:\Games\Palmetto" --
    واذكر أي مساعدة من الذكاء الاصطناعي.
 
 يوضح [دليل اختبارات GPU](../../testing.md) طريقة تشغيل الاختبارات من دون ملفات اللعبة.
-يمكن نشر النتائج في [مسألة الاختبارات رقم 166](https://github.com/the original project/issues/166).
+يمكن نشر النتائج في مسألة الاختبارات.
 
-[coord]: https://github.com/the original project/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22
+[coord]: https://github.com/luizwidmer/Palmetto/issues
 
 </div>

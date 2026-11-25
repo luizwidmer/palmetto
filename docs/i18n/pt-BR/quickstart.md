@@ -64,7 +64,7 @@ o estágio parecer concluído com zero shaders, e um link simbólico em `disasm`
 1. Instale os pré-requisitos acima.
 2. Clone o repositório **com o submódulo**:
    ```powershell
-   git clone --recursive https://github.com/the original project
+   git clone https://github.com/luizwidmer/Palmetto
    ```
 3. Abra a pasta `Palmetto` e dê duplo clique em **`Build.bat`**.
 
@@ -151,7 +151,7 @@ da instalação. No Windows, `--runtime-build` também permite reutilizar um bui
 
 ## Problemas comuns
 
-- **Baixou pelo botão "Download ZIP" do GitHub**: o ZIP não inclui o submódulo `vendor/arc9-explorer`. Use `git clone --recursive` ou execute `git submodule update --init --recursive` dentro da pasta do repositório.
+- **Baixou pelo botão "Download ZIP" do GitHub**: o ZIP não inclui o submódulo `vendor/arc9-explorer`. Use `git clone` ou execute `git submodule update --init --recursive` dentro da pasta do repositório.
 - **`llvm-mc` recusa `gfx1013` / AMDGPU**: você provavelmente está com o instalador oficial do LLVM para Windows. Siga um dos passos de configuração do LLVM acima.
 - **Erro de `D3D12_ROOT_SIGNATURE_DESC2` ao compilar o runtime**: atualize o Windows SDK para `10.0.26100` ou mais recente pelo Visual Studio Installer ou `winget install Microsoft.WindowsSDK.10.0.26100`, apague a pasta de build e reconfigure.
 - **Falha por falta de espaço no drive `C:`**: passe `--work "D:\palmetto-work"` para mover os arquivos
@@ -168,6 +168,6 @@ da instalação. No Windows, `--runtime-build` também permite reutilizar um bui
    isso no PR, conforme [`AGENTS.md`](../../../AGENTS.md).
 
 O [guia de testes em GPU](../../testing.md) mostra como executar os testes sem arquivos do jogo.
-Publique os resultados de GPU na [issue #166](https://github.com/the original project/issues/166).
+Publique os resultados de GPU nas [issues do repositório](https://github.com/luizwidmer/Palmetto/issues).
 
-[coord]: https://github.com/the original project/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22
+[coord]: https://github.com/luizwidmer/Palmetto/issues

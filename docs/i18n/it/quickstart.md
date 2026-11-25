@@ -65,7 +65,7 @@ Il progetto è in fase iniziale: **il gioco non si avvia ancora**.
 2. Scarica il progetto **con il suo sottomodulo**:
 
    ```powershell
-   git clone --recursive https://github.com/the original project
+   git clone https://github.com/luizwidmer/Palmetto
    ```
 
    Il «Download ZIP» di GitHub non include `vendor/arc9-explorer`. La build lo scarica da sola se `git` è
@@ -125,7 +125,7 @@ avvio non devono essere compilati. La traduzione degli shader è il passaggio pi
 ## Problemi comuni
 
 - **Hai scaricato con «Download ZIP» di GitHub**: lo ZIP non include il sottomodulo `vendor/arc9-explorer`.
-  Usa `git clone --recursive` oppure esegui `git submodule update --init --recursive` nella cartella del
+  Usa `git clone` oppure esegui `git submodule update --init --recursive` nella cartella del
   repository.
 - **`llvm-mc` rifiuta `gfx1013` / AMDGPU**: probabilmente hai l'installer ufficiale di LLVM per Windows. Segui
   una delle opzioni LLVM descritte nei prerequisiti.
@@ -151,6 +151,6 @@ avvio non devono essere compilati. La traduzione degli shader è il passaggio pi
 risultati (conteggi, esito dei test, classi di errore).
 
 La [guida ai test GPU](../../testing.md) spiega come eseguirli senza i file del gioco. I risultati dei test GPU
-vanno pubblicati nell'[issue #166](https://github.com/the original project/issues/166).
+vanno pubblicati nelle [issue del repository](https://github.com/luizwidmer/Palmetto/issues).
 
-[coord]: https://github.com/the original project/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22
+[coord]: https://github.com/luizwidmer/Palmetto/issues

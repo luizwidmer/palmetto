@@ -404,7 +404,7 @@ It holds no values. `--decode` prints one dictionary with its decoded values and
 
 Provenance: channel types 0–8 follow the TARGET V `crAnimation` channel set, as named by community tools such as
 CodeWalker's YCD reader (static, quantized, indirect-quantized and cached-quaternion channels). No code was taken
-from them. The resource framing, the target game-only channel type 10, the type 3 and type 8 rules below and every
+from them. The resource framing, the target-game-only channel type 10, the type 3 and type 8 rules below and every
 count in this section were measured on the local copy.
 
 ### Clip dictionaries are the engine resources

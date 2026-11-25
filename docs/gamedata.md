@@ -197,8 +197,7 @@ give `r <= 0.64`. The land masks (`MHIU > 23` and `PAMH max > 110`) overlap
 with **IoU 0.61**. Row 0 is therefore `bounds.min.y`, column 0 is
 `bounds.min.x`, and the linear Z formula above is the same for both.
 
-The HMAP header and row-table rules were cross-checked against the public
-[an open archive-format reader](an open archive-format reader) reader (`Unlicense`)
+The HMAP header and row-table rules were cross-checked against the output of an open archive-format reader (`Unlicense`)
 and an open heightmap reader (`MIT`); no code is
 copied. The MHIU field offsets, the span checks and the Z correlation are
 measured on this package.

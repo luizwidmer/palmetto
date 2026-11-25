@@ -59,7 +59,7 @@ faltam. Uma pasta `disasm` que seja uma ligação simbólica é recusada quando 
 1. Instale os pré-requisitos acima.
 2. Clone o repositório **com o submódulo**:
    ```powershell
-   git clone --recursive https://github.com/the original project
+   git clone https://github.com/luizwidmer/Palmetto
    ```
    Um *Download ZIP* do GitHub não inclui `vendor/arc9-explorer`.
 3. Abra a pasta `Palmetto` e faça duplo clique em **`Build.bat`**.
@@ -158,7 +158,7 @@ está em [`docs/d3d12_vulkan.md`](../../d3d12_vulkan.md) e os formatos de áudio
 ## Problemas comuns
 
 - **Usou o botão “Download ZIP” do GitHub**: o ZIP não inclui o submódulo `vendor/arc9-explorer`. Use
-  `git clone --recursive` ou `git submodule update --init --recursive`.
+  `git clone` ou `git submodule update --init --recursive`.
 - **`llvm-mc` recusa `gfx1013` / AMDGPU**: está provavelmente a usar o instalador oficial do LLVM para Windows.
   Siga uma das opções de `LLVM_MC` acima.
 - **Erro `D3D12_ROOT_SIGNATURE_DESC2` ao compilar o runtime**: atualize o Windows SDK para `10.0.26100` ou
@@ -177,6 +177,6 @@ está em [`docs/d3d12_vulkan.md`](../../d3d12_vulkan.md) e os formatos de áudio
    [`AGENTS.md`](../../../AGENTS.md).
 
 O [guia de testes GPU](../../testing.md) explica como executar os testes sem ficheiros do jogo. Publique os
-resultados na [issue #166](https://github.com/the original project/issues/166).
+resultados nas [issues do repositório](https://github.com/luizwidmer/Palmetto/issues).
 
-[coord]: https://github.com/the original project/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22
+[coord]: https://github.com/luizwidmer/Palmetto/issues

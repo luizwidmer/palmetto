@@ -62,7 +62,7 @@ Proje henüz erken aşamadadır: **oyun şu an açılmıyor**.
 1. Yukarıdaki gereksinimleri kurun.
 2. Depoyu **alt modülüyle birlikte** klonlayın:
    ```powershell
-   git clone --recursive https://github.com/the original project
+   git clone https://github.com/luizwidmer/Palmetto
    ```
 3. **`Build.bat`** dosyasına çift tıklayın.
 
@@ -105,7 +105,7 @@ Aşamalar şu sırayla çalışır: `check` → `shaders` → `assets` → `runt
 ## Sık Karşılaşılan Sorunlar
 
 - **GitHub'dan "Download ZIP" ile indirdiniz**: ZIP arşivi `vendor/arc9-explorer` alt modülünü içermez.
-  `git clone --recursive` kullanın veya depo klasöründe `git submodule update --init --recursive` çalıştırın.
+  `git clone` kullanın veya depo klasöründe `git submodule update --init --recursive` çalıştırın.
 - **`llvm-mc`, `gfx1013` veya AMDGPU hedefini reddediyor**: Büyük olasılıkla resmi Windows LLVM kurulumu kullanılıyor.
   `tooling/scripts\build_llvm_mc.ps1` ile yerel derleyin veya `LLVM_MC` değişkenini WSL içindeki `llvm-21` `llvm-mc` yoluna
   ayarlayın.
@@ -127,7 +127,7 @@ Aşamalar şu sırayla çalışır: `check` → `shaders` → `assets` → `runt
    [`CONTRIBUTING.md`](../../../CONTRIBUTING.md) dosyasına bakın.
 
 [GPU test rehberi](../../testing.md), oyun dosyası olmadan testlerin nasıl çalıştırılacağını açıklar. GPU test
-sonuçlarını [issue #166](https://github.com/the original project/issues/166) altında (GPU ve sürücü başına bir yorum)
+sonuçlarını [depo issue'ları](https://github.com/luizwidmer/Palmetto/issues) altında (GPU ve sürücü başına bir yorum)
 paylaşabilirsiniz.
 
-[coord]: https://github.com/the original project/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22
+[coord]: https://github.com/luizwidmer/Palmetto/issues

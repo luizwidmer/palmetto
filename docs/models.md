@@ -11,7 +11,7 @@ dropped valid models in three validation paths, all in `vendor/arc9-explorer` at
 
 ## Upstream status
 
-[Palmetto issue #29](https://github.com/the original project/issues/29) tracks this work. The decoder
+An upstream discussion tracks this work. The decoder
 fix in [arc9-explorer PR #1](https://github.com/breadbbbb/arc9-explorer/pull/1) is merged, and
 `vendor/arc9-explorer` is now pinned at upstream `e293917` (was `917e9b9`, originally
 `48557ea`). Commits up to `917e9b9` added the `packs.arc` drawable-dictionary roots (one drawable

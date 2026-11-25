@@ -7,7 +7,7 @@ rest of SDL's controller database. On a DualSense the impulse-trigger rumble bec
 the lightbar colour can be set.
 
 Without the shim the loader would bind `GameInputCreate` to the host's `GameInput.dll` if there is one
-([#279](https://github.com/the original project/pull/279)). That works for Xbox pads only, and gives no DualSense
+(reported upstream). That works for Xbox pads only, and gives no DualSense
 features. That path is tested without the game: `gameinput_host_test` (ctest `gameinput_host`) maps a synthetic DLL
 built against the SDK's `gameinput.lib` and checks that its `GameInput.dll` import binds to the host's copy, that
 `GameInputCreate` and `GetCurrentTimestamp` work from mapped code, and that `GetCurrentReading` answers; with a pad
@@ -554,7 +554,7 @@ These need the game executable or a test on hardware:
   a title that asks for a particular waveform gets intensity-only behaviour. Whether the game uses haptic motors at
   all — as opposed to `SetRumbleState` — is unknown.
 - **Raw HID on a real pad**: the synthetic tests, the XInput refusal and one DualSense over USB have run.
-  - What ran: an target console controller over Bluetooth on Windows 11 connects and plays normally, with no raw I/O,
+  - What ran: a target console controller over Bluetooth on Windows 11 connects and plays normally, with no raw I/O,
     and the log names the reason.
   - What ran: a DualSense (`054c:0ce6`) over USB on Windows 11 through `gameinput_probe`. Its descriptor gives 1
     input report (id 1, 63 bytes), 1 output report (id 2, 47 bytes) and 20 feature reports, and the raw input report

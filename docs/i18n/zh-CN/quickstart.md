@@ -30,7 +30,7 @@ Palmetto 是一个把 target console 版 the target game **静态重编译**到 
   （wave64 着色器以模拟方式运行），以及 MoltenVK 的浮点处理；详见 [`docs/testing.md`](../../testing.md)。
 - **AMD RDNA1（RX 5000）**：受支持的目标，接近主机的 RDNA2；它的 64 宽子组可原生运行 wave64 着色器。
 
-所有平台的 GPU 结果都汇总在 [issue #166](https://github.com/the original project/issues/166)。
+所有平台的 GPU 结果都汇总在仓库的 [issue](https://github.com/luizwidmer/Palmetto/issues) 中。
 
 ## 前置条件
 
@@ -61,7 +61,7 @@ Palmetto 是一个把 target console 版 the target game **静态重编译**到 
 2. **带子模块**克隆仓库：
 
    ```powershell
-   git clone --recursive https://github.com/the original project
+   git clone https://github.com/luizwidmer/Palmetto
    ```
 
    用 GitHub 的 “Download ZIP” 下载会缺少 `vendor/arc9-explorer`：装了 `git` 时构建会自动获取，否则会告诉你该怎么做。
@@ -135,7 +135,7 @@ commit 和 `tooling/arc9dump` 的源码）。其中任何一项改变时，只�
 ## 常见问题
 
 - **用 GitHub 的 “Download ZIP” 下载**：ZIP 不含 `vendor/arc9-explorer` 子模块。请用
-  `git clone --recursive`，或在仓库目录里执行 `git submodule update --init --recursive`。
+  `git clone`，或在仓库目录里执行 `git submodule update --init --recursive`。
 - **`llvm-mc` 拒绝 `gfx1013` / AMDGPU**：多半是用了 Windows 官方 LLVM 安装包。改用
   `tooling/scripts\build_llvm_mc.ps1`，或把 `LLVM_MC` 指向 WSL 里的 `llvm-mc`（`llvm-21`）。
 - **构建 runtime 时报 `D3D12_ROOT_SIGNATURE_DESC2` 错误**：把 Windows SDK 升级到 `10.0.26100` 或更新

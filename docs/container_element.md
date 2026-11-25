@@ -1,4 +1,4 @@
-# The null container element at the current stop
+# The null container element at the measured stop
 
 **Status: measured on one machine, 2026-11-24**, against the 1.0.2.1 target console executable, one `--run` of the
 Vulkan backend with `PALMETTO_D3D12=vulkan` and the shader corpus. This page answers the tracker's O7: what should

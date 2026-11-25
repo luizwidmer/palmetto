@@ -36,7 +36,7 @@ Windows. Процессор консоли x86-64, как у ПК, поэтом�
 - **AMD RDNA1 (RX 5000)**: поддерживаемая цель, близкая к RDNA2 консоли; её подгруппы шириной 64 выполняют
   шейдеры wave64 нативно.
 
-Результаты GPU со всех платформ собираются в [issue #166](https://github.com/the original project/issues/166).
+Результаты GPU со всех платформ собираются в [issues репозитория](https://github.com/luizwidmer/Palmetto/issues).
 
 ## Что нужно
 
@@ -77,7 +77,7 @@ Windows. Процессор консоли x86-64, как у ПК, поэтом�
 1. Установите всё из списка выше.
 2. Склонируйте проект **вместе с подмодулем**:
    ```powershell
-   git clone --recursive https://github.com/the original project
+   git clone https://github.com/luizwidmer/Palmetto
    ```
    Кнопка «Download ZIP» на GitHub оставляет за бортом `vendor/arc9-explorer`. Сборка подтянет его сама,
    если установлен `git`, иначе скажет, что сделать.
@@ -171,7 +171,7 @@ Windows этот же флаг пропускает сборку.
 ## Частые проблемы
 
 - **Скачали ZIP с GitHub**: в архиве нет подмодуля `vendor/arc9-explorer`. Используйте
-  `git clone --recursive` или выполните `git submodule update --init --recursive` в папке репозитория.
+  `git clone` или выполните `git submodule update --init --recursive` в папке репозитория.
 - **`llvm-mc` не знает `gfx1013` или цель AMDGPU**: скорее всего установлен официальный LLVM для Windows.
   Соберите свой через `tooling/scripts\build_llvm_mc.ps1` или укажите в `LLVM_MC` путь к `llvm-mc` из WSL (`llvm-21`).
 - **CMake пишет «needs the Windows SDK 10.0.26100 or newer»** или MSVC не находит `Desc_1_2` в
@@ -192,7 +192,7 @@ Windows этот же флаг пропускает сборку.
    версию драйвера. Отметьте, помогал ли вам ИИ. Все правила в [`CONTRIBUTING.md`](../../../CONTRIBUTING.md).
 
 [Руководство по тестам на видеокарте](../../testing.md) объясняет, как обойтись без файлов игры. Результаты
-складывают в [issue #166](https://github.com/the original project/issues/166), по одному комментарию на карту и
+складывают в [issues репозитория](https://github.com/luizwidmer/Palmetto/issues), по одному комментарию на карту и
 драйвер.
 
-[coord]: https://github.com/the original project/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22
+[coord]: https://github.com/luizwidmer/Palmetto/issues

@@ -66,7 +66,7 @@ Portu nie pobiera się gotowego. Buduje się go na Twoim komputerze z Twojej kop
 1. Zainstaluj wymagania powyżej.
 2. Pobierz projekt **razem z submodułem**:
    ```powershell
-   git clone --recursive https://github.com/the original project
+   git clone https://github.com/luizwidmer/Palmetto
    ```
    „Download ZIP” z GitHuba pomija `vendor/arc9-explorer`. Build pobierze go sam, jeśli masz `git`, a w
    przeciwnym razie powie, co zrobić.
@@ -143,7 +143,7 @@ albo tłumaczenie z zachowaniem wyodrębnionych wejść shaderów.
 ## Częste problemy
 
 - **Pobrałeś repozytorium przyciskiem „Download ZIP” na GitHubie**: archiwum ZIP nie zawiera submodułu
-  `vendor/arc9-explorer`. Użyj `git clone --recursive`; build pobierze submoduł sam, jeśli masz `git`, a jeśli
+  `vendor/arc9-explorer`. Użyj `git clone`; build pobierze submoduł sam, jeśli masz `git`, a jeśli
   nie — powie, co zrobić. Możesz też uruchomić `git submodule update --init --recursive` w folderze repozytorium.
 - **`llvm-mc` odrzuca `gfx1013` / AMDGPU**: najpewniej masz oficjalny instalator LLVM dla Windowsa. Użyj
   `tooling/scripts\build_llvm_mc.ps1` albo ustaw `LLVM_MC` na `llvm-mc` z WSL (`llvm-21`).
@@ -169,6 +169,6 @@ albo tłumaczenie z zachowaniem wyodrębnionych wejść shaderów.
 tylko wynikami (liczby, wyniki testów, klasy błędów).
 
 [Przewodnik po testach GPU](../../testing.md) pokazuje, jak uruchomić testy bez plików gry. Wyniki testów GPU
-publikuj w [issue #166](https://github.com/the original project/issues/166).
+publikuj w [issue repozytorium](https://github.com/luizwidmer/Palmetto/issues).
 
-[coord]: https://github.com/the original project/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22
+[coord]: https://github.com/luizwidmer/Palmetto/issues

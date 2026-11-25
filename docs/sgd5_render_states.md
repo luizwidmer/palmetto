@@ -1,6 +1,6 @@
 # SGD5 pass render-state indices
 
-In the Xbox 1.0.2.1 shader archive, bytes 6, 7 and 8 of a 24-byte pass select rows in the effect's rasterizer, depth/stencil and blend tables. These byte positions and state indices are zero-based. The six bytes immediately before them use one-based shader program selectors, with zero meaning unused. A renderer looking up a stored pass can therefore identify the three explicit state records alongside its shader programs. [Program lookup and effect boundaries](https://github.com/the original project/pull/2519)
+In the Xbox 1.0.2.1 shader archive, bytes 6, 7 and 8 of a 24-byte pass select rows in the effect's rasterizer, depth/stencil and blend tables. These byte positions and state indices are zero-based. The six bytes immediately before them use one-based shader program selectors, with zero meaning unused. A renderer looking up a stored pass can therefore identify the three explicit state records alongside its shader programs. Program lookup and effect boundaries
 
 | Pass byte | Effect-local table | Bytes per row | Stored rows across both databases | Effects with passes and at least two rows | Effects in which the pass byte selects every row |
 |---:|---|---:|---:|---:|---:|
@@ -12,7 +12,7 @@ All **28,798 passes** in the two databases satisfy the same rule. For a nonempty
 
 ## Reproduce on a local package
 
-Use the `shaders.arc` listed in the [Xbox 1.0.2.1 manifest](../profiles/xbox-1.0.2.1.json). The two SGD5 databases start at `0x9000` and `0x10287000`. They contain 910 and 22 effects. Use each effect's own six program lists and its own state tables. [Named-pass reader and package test](https://github.com/the original project/pull/3036)
+Use the `shaders.arc` listed in the [Xbox 1.0.2.1 manifest](../profiles/xbox-1.0.2.1.json). The two SGD5 databases start at `0x9000` and `0x10287000`. They contain 910 and 22 effects. Use each effect's own six program lists and its own state tables. Named-pass reader and package test
 
 1. From the end of the six program ordinal arrays, skip 80 bytes. For each row width in `(16, 24, 68, 36)`, read one little-endian u32 count, record the offset of the first row, and advance by `count * width`. The fourth table is needed to locate the techniques.
 2. Read the u32 technique count and skip four bytes per technique. The next u32 is the pass count. For every 24-byte pass, check offsets 6, 7 and 8 against counts 0, 1 and 2 respectively. For a nonempty table the selected row starts at `first_row + pass_byte * width`.
@@ -20,6 +20,6 @@ Use the `shaders.arc` listed in the [Xbox 1.0.2.1 manifest](../profiles/xbox-1.0
 
 ## Interpretation of the rows
 
-The state names are supported by comparison with the public SGD2 reader and measurements of the Xbox rows. The 16-byte rows have fill mode 3, cull mode in `1..3` and a one-byte front-face flag. In all 124 depth/stencil rows the enable flags and write mask are in `0..1`, and the comparison function is in `1..8`. All 398 blend rows have a four-byte prefix and eight eight-byte render-target entries. Their enable flag is in `0..1` and their write mask is in `0..15`. Individual enum values do not establish the rest of the Xbox state layout. [SGD2 format comparison](an open archive-format reader)
+The state names are supported by comparison with the public SGD2 reader and measurements of the Xbox rows. The 16-byte rows have fill mode 3, cull mode in `1..3` and a one-byte front-face flag. In all 124 depth/stencil rows the enable flags and write mask are in `0..1`, and the comparison function is in `1..8`. All 398 blend rows have a four-byte prefix and eight eight-byte render-target entries. Their enable flag is in `0..1` and their write mask is in `0..15`. Individual enum values do not establish the rest of the Xbox state layout. SGD2 format comparison
 
 The measurements identify the indices stored in the package. Runtime selection of a technique, application of overrides, and the resulting image still require execution evidence.

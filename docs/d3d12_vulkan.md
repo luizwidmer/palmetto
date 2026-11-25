@@ -31,7 +31,7 @@ of the open questions is not in it.
 
 ## 1. The job
 
-The game is an target console build (`game.exe`, `d3d12_xs.h` / `d3d12_xs.lib`). It was compiled
+The game is a target console build (`game.exe`, `d3d12_xs.h` / `d3d12_xs.lib`). It was compiled
 against the Xbox flavour of D3D12 and calls the console driver through COM interfaces. The layer must:
 
 1. **Intercept the D3D12 surface.** Free functions exported by `d3d12_xs.dll` (device creation, root-signature
@@ -58,7 +58,7 @@ call it accepts must behave like D3D12.
 | None of the other scanned non-CRT DLLs (`amd_fidelityfx_loader_xbox`, `Bink2Console`, `libHttpClient.GDK`, `XCurl`) imports `d3d12_xs`. | PE import scan; Appendix A | Verified |
 | The package layout lists `game.exe`, but the file is not in the package folder. | `layout_..._xs.xml`, chunk 1001; directory listing | Verified |
 | `gameos.xvd` is an XVD (`msft-xvd` at file offset 0x200, format version 3) with a high-entropy payload and no plaintext PE headers or D3D12 strings. Extracting `d3d12_xs.dll` from it would require keys, which this project does not do. | Entropy and string scan; Appendix A | Verified |
-| Prior art runs the package DLLs against a PC D3D12 device and measured the Xbox ABI: 6 Xbox-specific static imports across the 16 DLLs, `D3D12XboxCreateDevice`, device slots 62/76, descriptor-heap start handles in RAX, root-signature flags `0x03000000`, and the BVH builder's Xbox DXIL shaders. | [PLATFORM_SURFACE.md](a public prior-art project), [platform README](a public prior-art project) | Verified by the prior art (running the package DLLs / static imports; section 7) |
+| Prior art runs the package DLLs against a PC D3D12 device and measured the Xbox ABI: 6 Xbox-specific static imports across the 16 DLLs, `D3D12XboxCreateDevice`, device slots 62/76, descriptor-heap start handles in RAX, root-signature flags `0x03000000`, and the BVH builder's Xbox DXIL shaders. | PLATFORM_SURFACE.md, platform README | Verified by the prior art (running the package DLLs / static imports; section 7) |
 | The translator and its GPU tests already define the shader contract: set 0 bindings 0–19, 144-byte push constants, heap/code base, FNV-1a descriptor hash table, buffer device addresses. | [design.md](design.md#translator-status-and-runtime-contract); `port/test/vk_texture_test.cpp` | Verified |
 
 What this does **not** tell us: the full `d3d12_xs.dll` export list, the `D3D12XboxCreateDevice` params/flag
@@ -981,7 +981,7 @@ multisampled pipelines, several viewports, primitive restart; `requiredSubgroupS
 the game's present entry point (`PresentX`; the DXGI factory/swapchain and the presenter above are what it
 - **Subgroup size (compute and graphics PSOs).** A translated shader assumes one subgroup size, and a GPU whose
   default differs runs it inexact: a wave64 shader reads lanes 32-63 of a 32-wide subgroup, and a wave32 pixel
-  shader on a 64-wide default reads the other half's lanes (AnyPS5 #487 on RDNA4). `port/src/subgroup_size.h`
+  shader on a 64-wide default reads the other half's lanes (a public prior-art project, on RDNA4). `port/src/subgroup_size.h`
   decides, per stage, from the shader's index entry and what the device offers; the PSO chains the result.
   - **Index fields:** `wave64`, `subgroup_size` (64 for wave64, 32 otherwise, `null` when emulated) and
     `wave64_exchange` (present: translated with `--wave64-emulate`, exact on any size).
@@ -1023,11 +1023,11 @@ the game's present entry point (`PresentX`; the DXGI factory/swapchain and the p
     - Ryzen 7 9800X3D iGPU (RDNA2, gfx1036), Windows driver 32.0.21045.5002: COMPUTE only, sizes 32..64; RX 9070 XT
       (RDNA4, gfx1201), Windows driver 32.0.31041.1004: FRAGMENT | COMPUTE | TASK | MESH, sizes 32..64
       (@AC-Storm-YT, `vulkaninfoSDK` from Vulkan SDK 1.4.363.1,
-      [#313](https://github.com/the original project/issues/313#issuecomment-7086133354)). The same two lists on
+      an upstream discussion). The same two lists on
       AMD 26.11.2 (Windows drivers 32.0.21045.29003 and 32.0.32029.2010), where `ps_bitmask_perm` also shows the
       live fragment width: the gfx1036 iGPU gets the RX 6800's split (2,048 of 4,096 pixels read lane 32), the
       RX 9070 XT is exact on all 4,096 (@AC-Storm-YT,
-      [#3982](https://github.com/the original project/pull/3982#issuecomment-7088523396) and #4225).
+      an upstream discussion).
 
     Current Mesa RADV on GFX10+ lists COMPUTE | FRAGMENT | task/mesh (Mesa main at 152b9cde,
     `src/amd/vulkan/radv_physical_device.c`, `requiredSubgroupSizeStages`; older Mesa reported compute only), so
@@ -1682,7 +1682,7 @@ The layer's descriptor model:
   `d3d12_descriptor` accepts either rule for a fractional clamp (all texels of a view following the float or the
   floored minimum), and prints which one the driver used.
   See [Vulkan image-level selection](https://docs.vulkan.org/spec/latest/chapters/textures.html#textures-image-level-selection)
-  and the [Intel readbacks](https://github.com/the original project/pull/1015#issuecomment-7075135647).
+  and the Intel readbacks.
   If the logical device lacks the feature, the runtime logs the unsupported view
   and its descriptor resolves to the fallback. A clamp at or below the first mip needs no extension. Above the
   last mip, the view retains its dimensions and maps sampled channels to zero while preserving constant channels.
@@ -2397,7 +2397,7 @@ The trace will enumerate them.
     | 256x256x64 RGBA8 volume | 32x32x16 | 3 | 4 |
 
     An RDNA2 GPU (the Ryzen 7 9800X3D's, driver 32.0.21045.5002) gives the same splits as the RDNA4 one
-    ([#374](https://github.com/the original project/issues/374#issuecomment-7071869388)). With 30 more layouts that
+    (an upstream discussion). With 30 more layouts that
     probe the edges (a mip exactly at or just past half a tile, thin and tall textures, non-square 2D and volume
     tiles), the rule that fits all 47 on both GPUs is: **a mip stays standard while it is wider than half the tile or
     taller than the tile; depth does not count**. An earlier "every axis at most half the tile's largest side" fitted
@@ -3613,7 +3613,7 @@ Three consequences for the runtime and table layout (additional GPU measurements
 2. **`BindlessSet::create()` currently allocates PCIe `HOST_VISIBLE | HOST_COHERENT` system memory (`port/src/vulkan_bindless.h`):** once working sets exceed cache at 10k–100k entries, `host_visible` slows `uniform_tsharp_hit` by **16.5x–35.5x**, divergent T# hits by **210x–269x**, and 8-probe misses by **425x–879x** (`181,717 us / 1M` at 10k, `205,561` at 100k). `host_device_local` (ReBAR `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`) matches `device_local` within **1.4%** on every row here (largest delta 10k `divergent_miss`, `+1.4%`). Staging binding 2 to `DEVICE_LOCAL` (or preferring `DEVICE_LOCAL | HOST_VISIBLE` when small) avoids this cliff without touching the shader contract.
 3. **`bc8e604`'s bounded slot relocation keeps the table dense:** 100k settles at `524,288` slots (`19.07%` load, `20.00 MiB`, `max_probes=8`) instead of doubling to `2,097,152` on a 9-probe collision, so the large-table cost is bounded by the 8-probe window; the dominant divergent cost is the 8-probe miss (`483 us / 1M` at 100k).
 
-Raw CSV rows (297, 9 processes): [D3D-56 RTX 5080 report](https://github.com/the original project/issues/313#issuecomment-7084711283).
+Raw CSV rows (297, 9 processes): D3D-56 RTX 5080 report.
 
 **Measured (D3D-56, AMD RDNA3).** The same benchmark and 64-bit timestamps on an AMD Radeon RX 7900 XTX (discrete, `0x1002:0x744c`, subgroup 64, driver `AMD proprietary 26.10.1 (LLPC)`, Vulkan 1.4.359), Windows 11 build 26200, revision `2aed144`. Dispatches, iterations and reps match the NVIDIA run above, but the table code does not: this revision includes `bc8e604`'s bounded slot relocation, so at 100k it settles at `524,288` slots (`20.00 MiB`, `19.07%` load, `max_probes=8`), the same geometry as the refreshed RTX 5080 table above. The two tables now describe the same `DescriptorTable` code and their 100k rows are comparable; the remaining caveat is subgroup size (AMD `64` vs NVIDIA `32`).
 
@@ -3631,9 +3631,9 @@ On this GPU:
 1. **`device_local` is stable and cheap at every size.** Wave-uniform sweeps run `4.9–7.6 us / 1M` (the 100k `uniform_tsharp_hit` is `7.618`), divergent lookups `14.1–54.9 us / 1M`, and the 8-probe miss `50.5–290.3 us / 1M`. Repeating the 10k measurement keeps `divergent_miss` at `141–143 us / 1M` net, so this column is not noise.
 2. **`host_visible` falls off a cliff at 100k, and is unreliable below it.** At 100k it is `5.0x–6.3x` slower than `device_local` on wave-uniform sweeps, `41x–65x` on divergent hits and pairs, and `111x` on 8-probe misses. At 10k the same rows varied by up to 6x between runs (`divergent_miss` net `147–845 us / 1M` over five runs), so the 10k host row above is one representative run; the uniform rows moved much less (`6.1–8.7 us / 1M`). The conclusion does not change: `device_local` is stable, `host_visible` is not.
 3. **`host_device_local` (ReBAR) is a safe fallback on AMD.** It is within 1% of `device_local` at 100k and within 2% at 10k; at 1k it is within 1.5% on the divergent and miss rows, `uniform_pair_ts` is 6% faster (`5.36` vs `5.71 us / 1M`) and `uniform_tsharp_hit` is 41% slower (`8.78` vs `6.22 us / 1M`). The `DEVICE_LOCAL | HOST_VISIBLE` allocation succeeds and runs here; it is not guaranteed on every Windows driver.
-4. **At the shared `524,288`/8-probe geometry, the 100k rows are comparable across the tables.** The RX 7900 XTX `divergent_miss` (`290 us / 1M`) is below the refreshed RTX 5080 (`483`), with the RX 9070 XT (RDNA4) between at `422` ([#313](https://github.com/the original project/issues/313)); the RX 7900 XTX is also faster on 100k divergent T# hits (`54` vs `72`) but slower on wave-uniform sweeps (`7.6` vs `6.0 us / 1M`). The subgroup size differs (AMD `64`, NVIDIA `32`), so this is a device-plus-subgroup comparison, not a pure microarchitecture one.
+4. **At the shared `524,288`/8-probe geometry, the 100k rows are comparable across the tables.** The RX 7900 XTX `divergent_miss` (`290 us / 1M`) is below the refreshed RTX 5080 (`483`), with the RX 9070 XT (RDNA4) between at `422` (an upstream discussion); the RX 7900 XTX is also faster on 100k divergent T# hits (`54` vs `72`) but slower on wave-uniform sweeps (`7.6` vs `6.0 us / 1M`). The subgroup size differs (AMD `64`, NVIDIA `32`), so this is a device-plus-subgroup comparison, not a pure microarchitecture one.
 
-Raw CSV rows: [D3D-56 report](https://github.com/the original project/issues/313#issuecomment-7074181793), addendum with the repeatability runs: [same issue](https://github.com/the original project/issues/313#issuecomment-7074220711).
+Raw CSV rows: D3D-56 report, addendum with the repeatability runs: recorded upstream.
 
 **Measured (D3D-56, Intel integrated + RTX 5070 Ti Laptop).** These synthetic runs use `vk_descriptor_bench` from revision `f85582e`, Windows 11 Pro Insider Preview `10.0.29704`, MSVC 19.51, Vulkan SDK 1.4.363.0, and the exact `4096 x 64` invocations x `64` iterations (`16.78M` single / `33.55M` T#+S# pair lookups, median of 25 reps). NVIDIA runs used `--sizes 1000,1000,10000,100000 --warmup 200`; the Intel run additionally duplicated 100k (`--sizes 1000,1000,10000,100000,100000 --warmup 200`). The first 1k block is excluded because its `baseline_uniform` timing differed from the duplicate (Intel device-local: `0.771 ms` vs `0.594 ms`; NVIDIA device-local: `0.0555 ms` vs `0.0765 ms`). For Intel 100k, the second block is retained after the duplicate confirmed stable timing per allocation. Retained rows were not auto-scaled. Intel's device-local and host-visible placements ran together on the integrated GPU. NVIDIA device-local and ReBAR were measured in separate processes. The RTX 5070 Ti Laptop is `0x10de:0x2f58` (driver `621.01`, Vulkan `1.4.357`); Intel Graphics is `0x8086:0x7d67` (driver `32.0.101.8132`, Vulkan `1.4.325`).
 
@@ -3658,7 +3658,7 @@ On these devices:
 2. **NVIDIA ReBAR is close to device-local for uniform sweeps at 1k–10k and at 100k T#+S# pairs.** The 100k divergent and miss cases differ by workload (ReBAR is not uniformly faster or slower), so this run does not support a blanket placement ranking.
 3. **The NVIDIA host-visible run is omitted.** A separate full run returned `vkWaitForFences -> -4` while measuring the 10k host-visible cases; those partial timings are not reported. A safer capped profile is needed before drawing conclusions about PCIe system-memory lookup on this laptop.
 
-The run is synthetic and contains no game data. Raw retained rows and the corrected methodology are recorded in [the D3D-56 report on issue #313](https://github.com/the original project/issues/313#issuecomment-7078191651).
+The run is synthetic and contains no game data. Raw retained rows and the corrected methodology are recorded in the D3D-56 report.
 
 ### 5.2 Per-stage code base
 
@@ -3780,7 +3780,7 @@ minimum. The trace decides, not the milestone labels.
 
 ## 7. Prior art and measured Xbox ABI
 
-A GPL-2.0-only fork of AnyPS5 (`a public prior-art project`, a public fork branch) recompiles the same the target game target console
+A GPL-2.0-only public fork of a prior-art project recompiles the same target console
 shaders and has run the package's DLLs against a PC D3D12 device behind an Xbox-ABI proxy. Its measurements are
 prior art for this design. The findings below are paraphrased; no code or long passages are copied. They were
 verified there by running the package DLLs (`XS_TRACE=1`, per-slot hit counters) or by static import analysis, not
@@ -3793,14 +3793,14 @@ folded into the table below with the measurement basis noted per row; nothing is
 
 | Finding | Basis and link | Consequence for this design |
 |---|---|---|
-| Across the 16 package DLLs there are only 6 Xbox-specific static imports: `xmem.dll` → `XMemAlloc`, `XMemFree`, `XMemGetWorkingSetStatistics`, `XMemVirtualQuery`; `d3d12_xs.dll` → `D3D12SerializeVersionedRootSignature`, `D3D12CreateRootSignatureDeserializer`. Both `d3d12_xs` names exist with the same names in the PC `d3d12.dll`. The other 492 functions are standard Windows and 113 are shipped in the package. Argument shapes for the less common `xmem` calls come from caller disassembly; some attribute bits are inferred. | *Static imports* — [PLATFORM_SURFACE.md](a public prior-art project) | Confirms the middleware surface is tiny. The repo's `xmem` shim already covers all four; `d3d12_xs` still forwards only the two root-signature functions. The device/queue/command-list surface belongs to the executable. |
-| `D3D12XboxCreateDevice(adapter, params, riid, out)` returns a PC `ID3D12Device` behind the Xbox-ABI proxy. The params struct is 24 words and is only logged; the signature comes from public documentation, not a header. | *Run* — [platform README](a public prior-art project), [PLATFORM_SURFACE.md](a public prior-art project) | Corrects "device entry point unknown": the entry point is named. The params/flag layout remains **Open**. Do not assume `D3D12CreateDevice`. |
-| Xbox texture creation is device slot 76 (heap properties / heap flags / description / initial state / clear value / iid / out), not `CreateCommittedResource`. The description is 56 bytes plus extension words; its layout field is `0x101` (tiled) or `0x1` (row-major buffer), and the PC proxy forwards it to `CreateCommittedResource` slot 27 with a driver-chosen layout. The FidelityFX upscaler creates 10 default-heap resources this way. | *Run* — [PLATFORM_SURFACE.md](a public prior-art project) | Adds a required Xbox-specific device method and a non-public layout value. `0x101` must not be passed to the public layout enum; the tiled data layout/detile path remains **Open**. See section 4.2. |
-| Device slot 14 is the public `CreateDescriptorHeap`; the returned heap is wrapped because `GetCPUDescriptorHandleForHeapStart` / `GetGPUDescriptorHandleForHeapStart` (heap slots 9/10) return the 8-byte handle in RAX on the Xbox build. The PC call returns it through a hidden pointer in RDX, so the proxy special-cases the return. | *Run* — [PLATFORM_SURFACE.md](a public prior-art project) | Adds a return-convention quirk to the descriptor-heap ABI. A generic IDL/sret thunk will corrupt the handle. See section 3.4. |
-| Xbox root-signature descriptors carry flags `0x03000000`. The PC serializer rejects them with `E_INVALIDARG`; the proxy clears the high byte on a copy. The v1.0 `D3D12SerializeRootSignature` path keeps flags at +32, and `0x3000001` also fails on the PC runtime. | *Run* — [PLATFORM_SURFACE.md](a public prior-art project) | Narrows the root-signature reflection risk. Mask the high byte on a private copy; the meaning of the bits remains **Open**. See section 3.5. |
-| The BVH builder's constructor creates 53 compute pipelines through device slot 62, called with a compute-PSO shape (a plain `D3D12_COMPUTE_PIPELINE_STATE_DESC`, two zero words, iid, out). On the PC interface the prior art forwards to, slot 62 is `CreateStateObject` (wrong arity), so the proxy overrides it. | *Run* — [PLATFORM_SURFACE.md](a public prior-art project) | Corrects the assumption that the whole device vtable is public order. Slot 62 must be compute-PSO creation for the builder, not a state object. Slots 1/15/18/19/27/38 did match the desktop order. |
-| A reusable `xbox_device_proxy.h` forwards every slot to a PC object, counts hits per slot and logs first calls with `XS_TRACE=1`; the observed device slots include 1, 14, 15, 16, 18, 19, 27, 38, 62 and 76. Their `xgr` stand-in covers 48 of 398 methods; Xodus (LGPL-2.1) covers 152 of 396 via IDL-generated stubs. | *Run* — [platform README](a public prior-art project), [PLATFORM_SURFACE.md](a public prior-art project) | Confirms the trace-first approach and shows the long tail. We adopt the *method* (per-slot counters, first-call logging), not the code. |
-| The BVH builder's 53 compute shaders are Xbox DXIL with `@xbox.*` intrinsics; 44 of 53 fail the PC D3D12 shader compiler, 22 have been lowered to standard DXIL and accepted as pipelines, and 31 use raw 64-bit GPU addresses. | *Run* — [PLATFORM_SURFACE.md](a public prior-art project) | A separate translation path from the FSSM RDNA2 corpus when measured on the **bitcode**. See section 4.8 and the paragraph below. Measured later on the console `XBCH` record of the same containers: 52 programs, 51 pass `spirv-val` through the FSSM translator ([embedded_shaders.md](embedded_shaders.md)). 52 programs, 42 pass `spirv-val` through the FSSM translator ([embedded_shaders.md](embedded_shaders.md)). |
+| Across the 16 package DLLs there are only 6 Xbox-specific static imports: `xmem.dll` → `XMemAlloc`, `XMemFree`, `XMemGetWorkingSetStatistics`, `XMemVirtualQuery`; `d3d12_xs.dll` → `D3D12SerializeVersionedRootSignature`, `D3D12CreateRootSignatureDeserializer`. Both `d3d12_xs` names exist with the same names in the PC `d3d12.dll`. The other 492 functions are standard Windows and 113 are shipped in the package. Argument shapes for the less common `xmem` calls come from caller disassembly; some attribute bits are inferred. | *Static imports* — PLATFORM_SURFACE.md | Confirms the middleware surface is tiny. The repo's `xmem` shim already covers all four; `d3d12_xs` still forwards only the two root-signature functions. The device/queue/command-list surface belongs to the executable. |
+| `D3D12XboxCreateDevice(adapter, params, riid, out)` returns a PC `ID3D12Device` behind the Xbox-ABI proxy. The params struct is 24 words and is only logged; the signature comes from public documentation, not a header. | *Run* — platform README, PLATFORM_SURFACE.md | Corrects "device entry point unknown": the entry point is named. The params/flag layout remains **Open**. Do not assume `D3D12CreateDevice`. |
+| Xbox texture creation is device slot 76 (heap properties / heap flags / description / initial state / clear value / iid / out), not `CreateCommittedResource`. The description is 56 bytes plus extension words; its layout field is `0x101` (tiled) or `0x1` (row-major buffer), and the PC proxy forwards it to `CreateCommittedResource` slot 27 with a driver-chosen layout. The FidelityFX upscaler creates 10 default-heap resources this way. | *Run* — PLATFORM_SURFACE.md | Adds a required Xbox-specific device method and a non-public layout value. `0x101` must not be passed to the public layout enum; the tiled data layout/detile path remains **Open**. See section 4.2. |
+| Device slot 14 is the public `CreateDescriptorHeap`; the returned heap is wrapped because `GetCPUDescriptorHandleForHeapStart` / `GetGPUDescriptorHandleForHeapStart` (heap slots 9/10) return the 8-byte handle in RAX on the Xbox build. The PC call returns it through a hidden pointer in RDX, so the proxy special-cases the return. | *Run* — PLATFORM_SURFACE.md | Adds a return-convention quirk to the descriptor-heap ABI. A generic IDL/sret thunk will corrupt the handle. See section 3.4. |
+| Xbox root-signature descriptors carry flags `0x03000000`. The PC serializer rejects them with `E_INVALIDARG`; the proxy clears the high byte on a copy. The v1.0 `D3D12SerializeRootSignature` path keeps flags at +32, and `0x3000001` also fails on the PC runtime. | *Run* — PLATFORM_SURFACE.md | Narrows the root-signature reflection risk. Mask the high byte on a private copy; the meaning of the bits remains **Open**. See section 3.5. |
+| The BVH builder's constructor creates 53 compute pipelines through device slot 62, called with a compute-PSO shape (a plain `D3D12_COMPUTE_PIPELINE_STATE_DESC`, two zero words, iid, out). On the PC interface the prior art forwards to, slot 62 is `CreateStateObject` (wrong arity), so the proxy overrides it. | *Run* — PLATFORM_SURFACE.md | Corrects the assumption that the whole device vtable is public order. Slot 62 must be compute-PSO creation for the builder, not a state object. Slots 1/15/18/19/27/38 did match the desktop order. |
+| A reusable `xbox_device_proxy.h` forwards every slot to a PC object, counts hits per slot and logs first calls with `XS_TRACE=1`; the observed device slots include 1, 14, 15, 16, 18, 19, 27, 38, 62 and 76. Their `xgr` stand-in covers 48 of 398 methods; Xodus (LGPL-2.1) covers 152 of 396 via IDL-generated stubs. | *Run* — platform README, PLATFORM_SURFACE.md | Confirms the trace-first approach and shows the long tail. We adopt the *method* (per-slot counters, first-call logging), not the code. |
+| The BVH builder's 53 compute shaders are Xbox DXIL with `@xbox.*` intrinsics; 44 of 53 fail the PC D3D12 shader compiler, 22 have been lowered to standard DXIL and accepted as pipelines, and 31 use raw 64-bit GPU addresses. | *Run* — PLATFORM_SURFACE.md | A separate translation path from the FSSM RDNA2 corpus when measured on the **bitcode**. See section 4.8 and the paragraph below. Measured later on the console `XBCH` record of the same containers: 52 programs, 51 pass `spirv-val` through the FSSM translator ([embedded_shaders.md](embedded_shaders.md)). 52 programs, 42 pass `spirv-val` through the FSSM translator ([embedded_shaders.md](embedded_shaders.md)). |
 | On the console's own shader compiler, compute user parameters go into user SGPRs `s4`… in root-signature order while each fits whole (root constant = 1 dword, root descriptor = 2, descriptor table = 1 dword holding the 32-bit address of its first descriptor); `s0`..`s3` are the driver's. From the first parameter that does not fit, it and all after it go into a packed array addressed by a 40-bit pointer in `s[0:1]` (constant 4 B, descriptor 8 B, no alignment). Thread-group ids follow the user SGPRs. | *Console-compiler output, sibling layer* | Narrows question 3 for the compute stage: the inline-from-`s4` model matches this repo's census (lowest CS pointer SGPR `s4`), and the spill target is named (the array at `s[0:1]`), not guessed. VS/PS/MS bases were not measured there; verify against the game's own signatures. |
 | The command list's inline records: a `Dispatch` is `0x4002C400` followed by x, y, z (16 B); a 20-byte record `0x4003CC00` stands in for console slot 80; the pipeline record is a 28-byte copy of the PSO object's +0x10..+0x2B; a root parameter starts from the header word at list +0x344+4·i (the high half carries n−1 for a multi-constant write), then a descriptor is 12 B, one constant 8 B and n constants 4+4n B. | *Console-DLL run, sibling layer* | Supplies the record opcode for the "five-dword packet" this repo inferred at slot 80 and the header encoding for parameter groups; consistent with our own measurements of +0x18/+0x28/+0x30/+0x140/+0x344/+0x544. |
 | Mesh (NGG) inputs measured across the corpus: `s3[27:24]` = wave index in the group, `v5` = group·128 + thread, `s16`–`s24` = user data. | *Corpus measurement, sibling layer* | Confirms the `s16` mesh base of §3.5's census and the `v5` group numbering already used for the mesh stage. |
@@ -3874,7 +3874,7 @@ Correctness is still unverified on a GPU and the call sites need the executable 
 
 ### 7.3 Licence
 
-`a public prior-art project` / AnyPS5 is **GPL-2.0-only**. GPL-2.0-only is not compatible with this repository's
+The prior art is **GPL-2.0-only**. GPL-2.0-only is not compatible with this repository's
 GPL-3.0-or-later, so no code, headers, generated stubs or other implementation text from that tree may be copied
 into Palmetto. This section records ABI/format facts and links only; the designs in this document are independent.
 Xodus is LGPL-2.1 and is cited only for its coverage number, not as a code source. The same line holds for the
@@ -3969,10 +3969,10 @@ nothing is copied from their trees.
 
 Prior art (facts and links only; no code copied; GPL-2.0-only, see section 7.3):
 
-- [a public prior-art project, a public fork branch](a public prior-art project)
-- [PLATFORM_SURFACE.md: package import surface and measured device ABI](a public prior-art project)
-- [platform tools README: proxy, `XS_TRACE`, xgr, first-run workflow](a public prior-art project)
-- [GPL-2.0 license text](a public prior-art project)
+- a public prior-art project, a public fork branch
+- PLATFORM_SURFACE.md: package import surface and measured device ABI
+- platform tools README: proxy, `XS_TRACE`, xgr, first-run workflow
+- GPL-2.0 license text
 
 Public D3D12:
 

@@ -234,10 +234,10 @@ counts and archive offset recorded per tile. No geometry was kept.
 
 The `+4` word of a polygon packs `(index start << 4) | count`; the runs tile the index pool in order
 (`tooling/navmesh_decode.py --deep` checks it on all `124,768,148` polygons, 0 failures), which caps a polygon at 15
-vertices. an open research project independently reads the same packing. Its polygon `+0x28` bit 17 and `+0x18` bit 27
+vertices. An independent public project reads the same packing. Its polygon `+0x28` bit 17 and `+0x18` bit 27
 road/pavement labels were not adopted: a 1,027,984-polygon sample over 238 tiles sets both bits on 258 polygons, so
 they are not a partition, and in the lane-graph count [below](#polygon-flags-under-the-lane-graph) neither is under
-most lane nodes; `+0x18` bits 8 and 13 are. No an open research project code was copied; the repository has no licence.
+most lane nodes; `+0x18` bits 8 and 13 are. No code from that project was copied; its repository has no licence.
 
 ### Flags (`u32@0x10`) and 512 × 512 world grid
 
@@ -344,12 +344,12 @@ nodes stand on a polygon with the bit; "area" is the share of the plan area such
 
 | Word | Bit | Nodes | Polygons | Area | Reading |
 |---|---|---:|---:|---:|---|
-| `+0x18` | 13 (`0x2000`) | 57,559 (90.2%) | 3,357,132 | 12.0% | under nine in ten nodes; an open research project's "road surface" |
+| `+0x18` | 13 (`0x2000`) | 57,559 (90.2%) | 3,357,132 | 12.0% | under nine in ten nodes; a public prior-art project's "road surface" |
 | `+0x18` | 8 (`0x100`) | 58,528 (91.7%) | 251,917 | 2.6% | under nine in ten nodes, on a fifth of bit 13's area; not named |
 | `+0x18` | 12 (`0x1000`) | 787 (1.2%) | 18,746,182 | 33.6% | not road: a third of the area, almost no node |
 | `+0x18` | 19 (`0x80000`) | 3,980 (6.2%) | 3,263,052 | 23.6% | the water candidate above |
-| `+0x18` | 27 (`0x8000000`) | 5,526 (8.7%) | 2,489,161 | 3.2% | an open research project's label; under few nodes |
-| `+0x28` | 17 (`0x20000`) | 21,246 (33.3%) | 1,083,157 | 4.7% | an open research project's label; seven times its area share, but only a third of the nodes |
+| `+0x18` | 27 (`0x8000000`) | 5,526 (8.7%) | 2,489,161 | 3.2% | a public prior-art project's label; under few nodes |
+| `+0x28` | 17 (`0x20000`) | 21,246 (33.3%) | 1,083,157 | 4.7% | a public prior-art project's label; seven times its area share, but only a third of the nodes |
 
 No other bit of either word has more than 5% of the nodes, except `+0x28` bit 18 (4,520 nodes, 7.1%, on 1.6% of
 the area).

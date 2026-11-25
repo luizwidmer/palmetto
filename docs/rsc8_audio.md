@@ -66,7 +66,7 @@ invariant below was measured on that full population; the field names describe s
 `p`, `z`, `s`, `t` and the trailer stays a labelled hypothesis.
 
 `0x5a` — `{u32 12345678; N × 20-byte entries; f32 trailer}` (`(size − 8) % 20 == 0` always). The framing is
-@kotorvr's ([finding](https://github.com/the original project/issues/3232#issuecomment-7084750136)), recounted
+@kotorvr's (finding), recounted
 for ASSET-256; read 4 bytes later, as before, each entry paired one entry's fields with the next one's
 position, and the trailer became the last "counter":
 
@@ -153,7 +153,7 @@ The name word is 0 on 96 records (78 tags start with one); what a nameless recor
 
 - **The name is a joaat of a lowercase word.** Four of the stored values are the hashes of `beat` (`0xe89ae78c`,
   17,770 records), `trackid` (`0xa6d93246`, 1,042), `intro` (`0xda8f5f53`, 835) and `outro` (`0x5d40b28d`, 825),
-  as the [the target game-Asset-Info](a public emulator project target game-Asset-Info) byte reference reports
+  as an independent public project's byte reference reports
   (`structure/03-audio-awc.md`, commit `029e4c3`); the hashes were computed here, not copied. The names behind
   `0xE5C74063` (418,838 records, 402,357 of them on speech streams with a `0x5c` clip) and `0xdbedd43c` (330,756,
   all on such streams and all with `extra = 0`) are not known.

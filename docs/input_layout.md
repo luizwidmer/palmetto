@@ -158,7 +158,7 @@ boot says exactly which words (and which element positions) remain unmapped.
   element at 16 bytes builds, one at 12 refuses at `aligned_byte_offset`), and every refusal above.
 * `port/test/xs_proxy_mock_test.cpp`: the slot-57 element case now builds the measured element form with an
   unmeasured format word 7 and expects the same `E_NOTIMPL` refusal, so the branch's contract is unchanged.
-* Gates: `_setup\build_palmetto.cmd` -> `PALMETTO_OK`; `_setup\the test build script` -> `TESTS_BUILT`;
+* Gates: `the local build script` -> `PALMETTO_OK`; `the local test build script` -> `TESTS_BUILT`;
   `graphics_record_test`, `graphics_pso_test`, `xs_proxy_mock_test` and `unimplemented_policy_test` pass.
 
 ## 6. Boot measurement, before and after

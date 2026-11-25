@@ -116,7 +116,7 @@ address families to place:
    the new path records.
 
 Baseline defended on every bounded boot: ALIVE to timeout, 0 exceptions, 0 device-lost, 0 refused submits, 0 failed
-`Close`. Gates: `the runtime build script` -> `PALMETTO_OK`; `the test build script` -> `TESTS_BUILT`; existing tests pass.
+`Close`. Gates: `the local build script` -> `PALMETTO_OK`; `the local test build script` -> `TESTS_BUILT`; existing tests pass.
 
 ## 6. Note on repository identity
 

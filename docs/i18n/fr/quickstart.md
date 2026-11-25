@@ -38,7 +38,7 @@ Rien n'est jouable, sur aucune plateforme. Ce qui tourne aujourd'hui :
   exécutent les shaders wave64 nativement.
 
 Les résultats GPU de toutes les plateformes sont regroupés dans
-l'[issue #166](https://github.com/the original project/issues/166).
+les [issues du dépôt](https://github.com/luizwidmer/Palmetto/issues).
 
 ## Prérequis
 
@@ -80,7 +80,7 @@ l'[issue #166](https://github.com/the original project/issues/166).
 1. Installez les prérequis ci-dessus.
 2. Clonez le dépôt **avec son sous-module** :
    ```powershell
-   git clone --recursive https://github.com/the original project
+   git clone https://github.com/luizwidmer/Palmetto
    ```
    Un « Download ZIP » depuis GitHub n'inclut pas `vendor/arc9-explorer` : la compilation le récupère si `git`
    est installé, et sinon vous dit quoi faire.
@@ -152,7 +152,7 @@ encore ce cache.
 ## Problèmes courants
 
 - **Vous avez utilisé « Download ZIP » sur GitHub** : le ZIP ne contient pas le sous-module
-  `vendor/arc9-explorer`. Utilisez `git clone --recursive`, ou lancez `git submodule update --init --recursive`
+  `vendor/arc9-explorer`. Utilisez `git clone`, ou lancez `git submodule update --init --recursive`
   dans le dossier du dépôt.
 - **`llvm-mc` refuse `gfx1013` ou la cible AMDGPU** : vous utilisez probablement l'installateur officiel de LLVM pour
   Windows. Lancez `tooling/scripts\build_llvm_mc.ps1`, ou faites pointer `LLVM_MC` vers le `llvm-mc` de WSL (`llvm-21`).
@@ -177,7 +177,7 @@ encore ce cache.
    [`CONTRIBUTING.md`](../../../CONTRIBUTING.md).
 
 Le [guide des tests GPU](../../testing.md) explique comment lancer les tests sans aucun fichier du jeu. Publiez vos
-résultats dans l'[issue #166](https://github.com/the original project/issues/166), un commentaire par GPU et par
+résultats dans les [issues du dépôt](https://github.com/luizwidmer/Palmetto/issues), un commentaire par GPU et par
 pilote.
 
-[coord]: https://github.com/the original project/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22
+[coord]: https://github.com/luizwidmer/Palmetto/issues

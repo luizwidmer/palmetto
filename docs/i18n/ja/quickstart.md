@@ -57,7 +57,7 @@ RDNA2 GPU プログラムは Vulkan 向けの SPIR-V に翻訳され、モデル
 2. サブモジュール込みでリポジトリを取得します。
 
    ```powershell
-   git clone --recursive https://github.com/the original project
+   git clone https://github.com/luizwidmer/Palmetto
    ```
 
    GitHub の "Download ZIP" では `vendor/arc9-explorer` が含まれません。`git` があればビルドが自動で
@@ -116,7 +116,7 @@ python -I build_port.py --wave64-emulate off            # auto（既定）、on�
 ## よくある問題
 
 - **GitHub の "Download ZIP" を使った**: ZIP には `vendor/arc9-explorer` サブモジュールが含まれません。
-  `git clone --recursive` を使うか、リポジトリのフォルダーで `git submodule update --init --recursive` を
+  `git clone` を使うか、リポジトリのフォルダーで `git submodule update --init --recursive` を
   実行してください。
 - **`llvm-mc` が `gfx1013` や AMDGPU を拒否する**: Windows 版の公式 LLVM を使っている可能性が高いです。
   リポジトリのルートで `powershell -ExecutionPolicy Bypass -File tooling/scripts\build_llvm_mc.ps1` を実行するか、
@@ -133,6 +133,6 @@ python -I build_port.py --wave64-emulate off            # auto（既定）、on�
 ## コントリビュートと GPU テスト
 
 - GPU テストの手順（ゲームファイル不要）: [docs/testing.md](../../testing.md)。結果は
-  [#166](https://github.com/the original project/issues/166) に、GPU とドライバーごとに 1 コメントで投稿します。
+  [リポジトリの issue](https://github.com/luizwidmer/Palmetto/issues) に、GPU とドライバーごとに 1 コメントで投稿します。
 - コントリビュートのルール、ゲームデータを持ち込まない方針、作業の調整:
   [`CONTRIBUTING.md`](../../../CONTRIBUTING.md)。

@@ -160,7 +160,7 @@ extent triples), `0x21` f32 (`scaleXY`, `scaleZ`, `lodDist`, `childLodDist`), `0
 `parentInstance`), `0x15` u32 (`flags`, `numChildren`), `0x08` u64 (`entity id`), `0x60` an 8-bit enum
 (`lodLevel`, `priorityLevel`), `0x4A` a u32 name hash, `0x52` and `0x5C` the two array forms, and `0x05` a struct
 reference whose `extra` word is the referenced struct hash. `0x0C` is a 16-byte vector in the PSIN table but did
-not occur in these schemas. an open research project independently reads these members with the same codes; no code or table was
+not occur in these schemas. An independent public project reads these members with the same codes; no code or table was
 copied, and its repository has no licence.
 
 Every 0x7a header is checked the same way: the struct/instance table pointers must lie inside the stream, every
@@ -346,10 +346,10 @@ that was a lower bound, and the full pass settles the extrapolation. See
 [world_census.md](world_census.md) for the shard layout, the exactness condition and the 98.32% stream
 coverage.
 
-The full count is lower than an open research project's published 30,785 map files / 2,249,490 entities
-(an open research project), and the whole difference is now accounted for map by map (see
-[world_census.md](world_census.md#the-an open research project-difference-map-by-map)). The 23,528 maps both count agree
-on every entity count. an open research project also counts 7,257 `0x7a` resources that have `CEntityDef` objects but no
+The full count is lower than the 30,785 map files / 2,249,490 entities an independent public census publishes
+for the same package, and the whole difference is now accounted for map by map (see
+[world_census.md](world_census.md#the-difference-against-an-independent-public-census-map-by-map)). The 23,528 maps both count agree
+on every entity count. That census also counts 7,257 `0x7a` resources that have `CEntityDef` objects but no
 `CMapData` struct: 961 interior archetype resources (`CMloArchetypeDef`, 540,665 entities in interior
 space) and 6,296 `35abc248` entity groups (39,622 entities in group-local space). It misses 7 maps
 (1,239 entities) whose entity data is in a continuation page. 7,257 − 7 = 7,250 maps and 580,287 −
@@ -698,7 +698,7 @@ Checks:
   (4 random and the largest per tier).
 - The LOD-set build's 12,340 chunks pass the same structural check; 1,669,771 placements and 7,527,211,045 drawn
   triangles equal `world.json`.
-- On the downtown box, the conjugate of every stored rotation equals an open research project's independently derived world rotation:
+- On the downtown box, the conjugate of every stored rotation equals a public prior-art project's independently derived world rotation:
   |dot| ≥ 0.9999 on 29,124 of 29,125 entities matched by position and archetype, and the minimum is 0.99894.
   Scales are equal on all 29,125. The instance TRS equals that transform (see the tests).
 

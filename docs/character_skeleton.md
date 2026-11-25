@@ -8,8 +8,7 @@ drawables do not use this 597-name table.
 No game data is reproduced here. Offsets, counts, field layouts and a few short name/hash
 examples are enough to reproduce the measurements against a reader's own package.
 
-The fragment carries the skeleton and a **25-vertex / 32-triangle bounds grid**, not a skin mesh. A
-an open research project fragment-child walk finds no embedded drawables in any of the 2,865 `packs.arc` character
+The fragment carries the skeleton and a **25-vertex / 32-triangle bounds grid**, not a skin mesh. An independent public project's fragment-child walk finds no embedded drawables in any of the 2,865 `packs.arc` character
 fragments, while world fragments do have them; see
 [character_models.md](character_models.md#what-is-not-decoded).
 
@@ -254,9 +253,9 @@ on a deterministic sample (96 meshes per layout per archive; the census itself c
 This corrects the earlier reading of this section (semantic 20 as packed `(u16 bone, u16 weight)`
 pairs, semantic 21 as weights): semantic 21 is always index-typed, and the weights are the UNORM
 bytes of semantics 16/17. The earlier "16 bytes that do not form `(bone, weight)` pairs" note was
-the packed index layout above. [An independent measurement of the same layouts, over arc9-explorer
+the packed index layout above. An independent measurement of the same layouts, over arc9-explorer
 recovery with the bone-palette pull requests applied, was posted in
-#634](https://github.com/the original project/issues/634#issuecomment-7074504326); the counts there
+#634; the counts there
 are higher because that recovery also walks nested archives.
 
 ## Animated glTF export

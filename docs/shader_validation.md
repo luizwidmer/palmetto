@@ -2403,9 +2403,9 @@ modelled faithfully stays a reported skip; it is never approximated silently.
 
 The technique is described in another project's write-ups; no code from them is copied.
 
-- [target console shaders](a public prior-art project),
+- target console shaders,
   sections "Execution harness" and "A CPU reference for small real shaders".
-- [tooling/xbox README](a public prior-art project),
+- tooling/xbox README,
   which describes `exec` and the check against a Python reference.
 
 Their reported numbers, as a scale reference only: 183 of 872 compute shaders of 3,000 bytes or less

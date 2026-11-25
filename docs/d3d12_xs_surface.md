@@ -28,7 +28,7 @@ a public prior-art project identifies `d3d12_xs.dll` as a 51,576-byte, PE32+ x86
 (`FileVersion 10.0.26100.6247`, product string `... D3D12.CONSOLE Runtime Library for Offline
 PC`) that loads a user-mode driver at runtime. Its only non-CRT import is `KERNEL32.dll`. That is
 why 116 exports fit in 51 KB: the implementation is in the UMD, not in this DLL
-([`docs/d3d12_xs-findings.md:5-45`](a public prior-art project)).
+(`docs/d3d12_xs-findings.md:5-45`).
 For a replacement DLL, the export table is therefore the complete free-function contract.
 a public prior-art project de-brands platform names throughout, so its quoted strings use "console" where the vendor
 string would carry the platform name; §2.3 covers the consequence for export names.
@@ -45,7 +45,7 @@ exports 55 other standard GUIDs (D3D11, DXGI, `ID3D10Blob`, debug GUIDs). §3 ch
 ## 2. The export contract: 116 = 23 functions + 93 GUID data
 
 the prior art's plan records the composition as 23 functions and 93 GUID data exports
-([`docs/plans/2026-11-21-translation-layer-architecture.md:30`](a public prior-art project)).
+(`docs/plans/2026-11-21-translation-layer-architecture.md:30`).
 The 93 is internally consistent: 5 `DXGI_DEBUG_*` + `IID_ID3D10Blob` + 43 D3D11/DXGI IIDs at
 29–71 + 28 D3D12 IIDs at 72–99 + 16 IIDs at 100–115 = 93, and
 `components/runtime-bridge/src/iid_table.cpp:104` declares `scarab_iid_count = 93` with exactly
@@ -54,9 +54,9 @@ The 93 is internally consistent: 5 `DXGI_DEBUG_*` + `IID_ID3D10Blob` + 43 D3D11/
 ### 2.1 The 23 function exports
 
 Ordinals are documented in
-[`docs/d3d12-xs-bridge.md:99-113`](a public prior-art project)
+`docs/d3d12-xs-bridge.md:99-113`
 and the individual stubs in
-[`components/runtime-bridge/src/d3d12_xs_bridge.cpp`](a public prior-art project).
+`components/runtime-bridge/src/d3d12_xs_bridge.cpp`.
 "Palmetto today" describes `port/shims/d3d12_xs.cpp` at the time of writing.
 
 | # | Export (the prior art's spelling) | Kind | Palmetto today | Note |
@@ -93,7 +93,7 @@ on the runtime-imports branch) is the place to see it.
 ### 2.2 The 93 GUID data exports
 
 Ordinals 23–71 and 100–115 are documented per entry in
-[`components/extension-wrapper/src/iid_console.inc`](a public prior-art project).
+`components/extension-wrapper/src/iid_console.inc`.
 Ordinals 23–28 and 72–99 are derived in §2.4. Names are the prior art's; the 10 console-only GUIDs are in
 §4. "Std" marks a GUID that is also defined by the Windows SDK; all 83 were checked in §3. The
 order within 23–27 is inferred and immaterial: those are debug GUIDs, not interfaces a title QIs
@@ -206,10 +206,10 @@ vendor token:
 
 - `tooling/gen_def.py` derives the console-only token from the export table, then emits
   `EXPORTS <real-name>=<internal-name>` using `OUR_TOKEN = "Cons"`
-  ([`tooling/gen_def.py:2-24,38,149-183`](a public prior-art project)).
+  (`tooling/gen_def.py:2-24,38,149-183`).
   The generated `.def` is **not committed**; it is built from the user-supplied vendor DLL.
 - The bridge source defines `D3D12ConsCreateDevice` and `D3D12Cons*` symbols
-  ([`d3d12_xs_bridge.cpp:451-475`](a public prior-art project)).
+  (`d3d12_xs_bridge.cpp:451-475`).
 - The string `Xbox` does not occur anywhere in the prior art's tree, and the README contains the
   tell-tale "an console Series" — the tree was mechanically de-branded before the first commit.
 
@@ -234,7 +234,7 @@ deliberate exception:
   alphabetically at 76.
 - the prior art's own provenance correction says the IID at the runtime's table slot 47 is
   `IID_ID3D12Debug`, **exported at ordinal 76**
-  ([`components/extension-wrapper/iid_provenance.json:2`](a public prior-art project)).
+  (`components/extension-wrapper/iid_provenance.json:2`).
   Alphabetical placement of the 28 standard names puts `IID_ID3D12Debug` at 76. The anchor and the
   rule agree.
 - With `IID_ID3D12ConsDmaCommandList` pinned at 100, the remaining 15 names at 101–115 are again
@@ -354,7 +354,7 @@ have no row above and no ordinal:
 `ID3D12ConsComputeCommandList`, `...6`, `...8`, and `ID3D12ConsCopyCommandList6`. the prior art's
 provenance note says they are "NOT exported by the runtime and are NOT recovered" and that a
 `QueryInterface` for one is logged by the wrapper's audit hook
-([`iid_provenance.json:13`](a public prior-art project)).
+(`iid_provenance.json:13`).
 This 1.0.2.1 package's own DLL export tables do not contain them either: its root has the 16
 middleware/CRT DLLs and no D3D12 runtime DLL, its layout XML lists no `d3d12_xs.dll`, the
 executable that would call `QueryInterface` with them is absent, and `gameos.xvd` is an encrypted
@@ -368,14 +368,14 @@ logged and refused until a title trace or another artifact supplies the GUID.
 The DMA IID is the load-bearing one. the prior art's end-to-end test created a console DMA command list
 through a PC D3D12 device and got an object that served both `IID_ID3D12ConsDmaCommandList` and
 `IID_ID3D12GraphicsCommandList`
-([`docs/d3d12-xs-wrapper.md:134-162`](a public prior-art project)).
+(`docs/d3d12-xs-wrapper.md:134-162`).
 That is **Reported** (Wine, no GPU). It proves the wrapper's QI routing, not the game's use of DMA
 lists.
 
 ## 5. The extension method surface
 
 the prior art's catalogue has 105 rows labelled `method` and 106 labelled `enum`
-([`components/extension-wrapper/docs/console-extension-catalogue.tsv`](a public prior-art project)).
+(`components/extension-wrapper/docs/console-extension-catalogue.tsv`).
 The names were mined from the UMD's validation strings. Read the catalogue as a *name list for a
 trace filter*, not as an ABI:
 
@@ -390,7 +390,7 @@ trace filter*, not as an ABI:
   `iid_console.inc`. None of these is a measurement of the ABI; they are documentation drift.
 - Only 10 methods are class-attributed by a UMD message naming the interface, and 6 more by call
   sites in the console SDK samples
-  ([`docs/d3d12-xs-wrapper.md:69-97`](a public prior-art project)).
+  (`docs/d3d12-xs-wrapper.md:69-97`).
   The rest are unattributed, and the **order within the appended block is not recovered**.
 - the prior art's own honesty rule is right and worth keeping: every appended slot logs its name and raw
   arguments, and unknown slots log their index, so a wrong order is diagnosable.
@@ -398,7 +398,7 @@ trace filter*, not as an ABI:
 the prior art's wrapper class derives from the genuine `ID3D12Device4` and
 `ID3D12GraphicsCommandList6` interfaces and marks every forwarded method `override`, so the
 compiler proves **53 device and 76 command-list** signatures against the real `d3d12.h`
-([`docs/d3d12-xs-wrapper.md:53-63`](a public prior-art project)).
+(`docs/d3d12-xs-wrapper.md:53-63`).
 That proves the PC-side vtable layout of its wrapper; it says nothing about the appended console
 block, which is the part Palmetto must not copy.
 
@@ -444,13 +444,13 @@ The one measured console command-list rule, quoted from the UMD:
 > D3D12CONS_COMMAND_LIST_TYPE_DMA.`
 
 a public prior-art project records `D3D12CONS_COMMAND_LIST_TYPE_DMA = 6`
-([`console_extensions.h:45-47`](a public prior-art project)).
+(`console_extensions.h:45-47`).
 The *name* is evidence-backed; the value 6 is **Derived** from appending to the PC enum (0–5), not
 measured. It is a strong inference, but treat it as a hypothesis until the game's
 `CreateCommandList` call is traced.
 
 the prior art's interception logic
-([`wrap.cpp:279-326`](a public prior-art project)):
+(`wrap.cpp:279-326`):
 
 - if `type == 6`, map it to PC `D3D12_COMMAND_LIST_TYPE_COPY` and require the DMA IID;
 - otherwise create the list normally;
@@ -469,7 +469,7 @@ For Palmetto, the transferable facts are the rule and the IID, not the wrapper:
   list flag must not be passed to `vkCmd...` as if it were a D3D12 flag.
 - The console also has `ID3D12ConsComputeCommandList` (and 6/8 variants) and
   `ID3D12ConsCopyCommandList6`, plus `D3D12ConsRehydrateRaytracingAccelerationStructure`
-  ([`docs/d3d12-xs-bridge.md:239-245`](a public prior-art project)).
+  (`docs/d3d12-xs-bridge.md:239-245`).
   Their IIDs are not runtime exports according to a public prior-art project, so this package's export tables cannot
   supply them; the values and the layouts are **Open**.
 
@@ -488,18 +488,18 @@ What is evidence-backed:
 - `PresentX` is an `ID3D12CommandQueue` method. The UMD message is quoted as
   `ID3D12CommandQueue::PresentX - pPlaneParameters[%d].ResourceCount must currently be less than
   or equal to 2`, and the console SDK samples call it on the queue (367 sites)
-  ([`docs/d3d12-xs-wrapper.md:79-97`](a public prior-art project)).
+  (`docs/d3d12-xs-wrapper.md:79-97`).
 - Present flags are named `D3D12CONS_PRESENT_FLAG_NONE`, `_IMMEDIATE`, `_PERSIST`,
   `_UNIQUE_VIEW_RESOURCES`; `D3D12CONS_PRESENT_PLANES_MAX = 2` and
   `D3D12CONS_PRESENT_VIEWS_MAX = 8`
-  ([`console_extensions.h:62-72`](a public prior-art project)).
+  (`console_extensions.h:62-72`).
   The **values are not measured**: `console_extensions.h` assigns 0x1/0x2/0x4, while
   `present_adapter.h:38-44` says the values are unknown and sets them all to 0. The two headers
   contradict each other; use neither as an ABI.
 - `DXGIXPresentArray`, `DXGIXSetFrameNotification`, `DXGIXSetVLineNotification` and
   `DXGIXGetFrameStatistics` are **free functions** at ordinals 20, 21, 22 and 19 — not queue
   methods. the prior art's bridge implements them as recorded no-ops; `DXGIXGetFrameStatistics` zeroes
-  64 bytes ([`d3d12_xs_bridge.cpp:520-551`](a public prior-art project)).
+  64 bytes (`d3d12_xs_bridge.cpp:520-551`).
   No parameter layouts are recovered.
 - Device-side frame pacing names: `SetFrameIntervalX`, `ScheduleFrameEventX`, `WaitFrameEventX`,
   `GetFrameStatisticsX`. The first three are called on the device in the samples; the enum names
@@ -507,7 +507,7 @@ What is evidence-backed:
   Queue-side `SuspendX`/`ResumeX` exist. No signatures or slots.
 - the prior art's `present-adapter` is a seam only: its header proposes a swapchain registry and
   `D3DKMTWaitForVerticalBlankEvent` for vblank, and its flag enum is all zeroes
-  ([`present_adapter.h:11-66`](a public prior-art project)).
+  (`present_adapter.h:11-66`).
   Nothing is implemented.
 
 Public samples add the call shapes (not slots). From MIT/zlib code
@@ -548,16 +548,16 @@ Mesa are public code compiled against the GDK headers, and docs.xbox.com is Micr
 
 | Item | Public source and value | Verdict on this repository's provisional value |
 |---|---|---|
-| Queue `PresentX` slot | `a public runtime project` (GPL-2.0-only; facts only) dispatches `PresentX(planeCount, planes, params)` at queue slot **30** in the older runtime layout (XDefiant, Minecraft, Fortnite) and slot **32** in a newer one (Unicorn Overlord), with the same SDK version but two methods inserted before `Signal` ([`present.rs`](a public runtime project), [`real.rs`](a public runtime project), [`HANDOFF.md`](a public runtime project)). | **Confirms a slot, not one number.** The version moves it; trace the game's runtime, do not hard-code either value. |
+| Queue `PresentX` slot | a public runtime project (GPL-2.0-only; facts only) dispatches `PresentX(planeCount, planes, params)` at queue slot **30** in the older runtime layout (XDefiant, Minecraft, Fortnite) and slot **32** in a newer one (Unicorn Overlord), with the same SDK version but two methods inserted before `Signal` (`present.rs`, `real.rs`, `HANDOFF.md`). | **Confirms a slot, not one number.** The version moves it; trace the game's runtime, do not hard-code either value. |
 | Queue `SuspendX` / `ResumeX` slots | No public slot in XCL or the samples. The signatures are `SuspendX(UINT flags)` and `ResumeX()` from the Apache-2.0 ebiten C++ binding ([`api_microsoftgdk_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/api_microsoftgdk_windows.go)); the samples call `SuspendX(0)` and `ResumeX()`. | **Leaves provisional.** |
-| `D3D12XBOX_PRESENT_PLANE_PARAMETERS` | 0x48 bytes on x64: `Token` u64 @0x00, `ResourceCount` u32 @0x08, `ppResources` @0x10, `pSrcViewRects` @0x18, `pDestPlacementBase` @0x20 (four floats), `ColorSpace` int32 @0x28, `ScaleFilter` int32 @0x2C, `ExtendedDescCount` u32 @0x30, `pExtendedDescs` @0x38, `Flags` u32 @0x40. ebiten's Go mirror of the GDK struct ([`d3d12_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/d3d12_windows.go)); XCL independently reads token @0, count @8 and resource list @0x10 ([`present.rs`](a public runtime project)). | **Confirms** the field order, types and size in `xbox_present_types.h` and `xbox_present.h`. `ScaleFilter` and `Flags` values stay ours. |
+| `D3D12XBOX_PRESENT_PLANE_PARAMETERS` | 0x48 bytes on x64: `Token` u64 @0x00, `ResourceCount` u32 @0x08, `ppResources` @0x10, `pSrcViewRects` @0x18, `pDestPlacementBase` @0x20 (four floats), `ColorSpace` int32 @0x28, `ScaleFilter` int32 @0x2C, `ExtendedDescCount` u32 @0x30, `pExtendedDescs` @0x38, `Flags` u32 @0x40. ebiten's Go mirror of the GDK struct ([`d3d12_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/d3d12_windows.go)); XCL independently reads token @0, count @8 and resource list @0x10 (`present.rs`). | **Confirms** the field order, types and size in `xbox_present_types.h` and `xbox_present.h`. `ScaleFilter` and `Flags` values stay ours. |
 | `D3D12XBOX_PRESENT_PARAMETERS` | 0x20 bytes on x64: `ImmediateThresholdPercent` float @0x00, `ViewCount` u32 @0x04, `ExtendedDescCount` u32 @0x08, `pExtendedDescs` @0x10, `Flags` u32 @0x18. Mesa's MIT Xbox WGL backend sets `Flags = D3D12XBOX_PRESENT_FLAG_IMMEDIATE` for an immediate present ([`d3d12_wgl_framebuffer_xbox.cpp`](https://github.com/openbsd/xenocara/blob/f3893fcf57cec33c2bd4275edd8ca6d865e3adf2/lib/mesa/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer_xbox.cpp)); ebiten has the field order. The flag's numeric value is not public. | **Corrects** "at least this field": the repository's one-float struct is the first 4 bytes of a 0x20-byte object. Safe as a pointer prefix; never size a copy by it. |
-| Device frame calls | Slots **78** `SetFrameIntervalX`, **79** `ScheduleFrameEventX`, **80** `WaitFrameEventX`, **81** `GetFrameStatisticsX` (0-based, `QueryInterface` = 0). XCL's [`frame.rs`](a public runtime project) numbers the calls and documents the arguments; ebiten's `ID3D12Device` vtable has `SetFrameIntervalX`/`ScheduleFrameEventX`/`WaitFrameEventX` at 78/79/80 and leaves 81 unnamed ([`d3d12_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/d3d12_windows.go)). | **Confirms** all four slots, two independent public sources. |
-| `D3D12XBOX_FRAME_STATISTICS` | The MIT FramePacing sample names `Type`, `Interval`, `Event`, `Render`/`Present`/`Display` with `PlaneIndex`, and `Display.PercentScanned`; it treats `S_FALSE` or a count below the request as "not available yet" ([`FramePacing.cpp`](https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Samples/Graphics/FramePacing/FramePacing.cpp)). XCL's implementation writes `Type` at +0, origin at +0x10 and flip at +0x18, so its record is at least 0x20 bytes ([`frame.rs`](a public runtime project)). | **Partly confirms** the field meanings and the two timestamp offsets; the full record layout and the union members stay unmeasured. |
+| Device frame calls | Slots **78** `SetFrameIntervalX`, **79** `ScheduleFrameEventX`, **80** `WaitFrameEventX`, **81** `GetFrameStatisticsX` (0-based, `QueryInterface` = 0). XCL's `frame.rs` numbers the calls and documents the arguments; ebiten's `ID3D12Device` vtable has `SetFrameIntervalX`/`ScheduleFrameEventX`/`WaitFrameEventX` at 78/79/80 and leaves 81 unnamed ([`d3d12_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/d3d12_windows.go)). | **Confirms** all four slots, two independent public sources. |
+| `D3D12XBOX_FRAME_STATISTICS` | The MIT FramePacing sample names `Type`, `Interval`, `Event`, `Render`/`Present`/`Display` with `PlaneIndex`, and `Display.PercentScanned`; it treats `S_FALSE` or a count below the request as "not available yet" ([`FramePacing.cpp`](https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Samples/Graphics/FramePacing/FramePacing.cpp)). XCL's implementation writes `Type` at +0, origin at +0x10 and flip at +0x18, so its record is at least 0x20 bytes (`frame.rs`). | **Partly confirms** the field meanings and the two timestamp offsets; the full record layout and the union members stay unmeasured. |
 | Token and timeout | `D3D12XBOX_FRAME_PIPELINE_TOKEN` is a 64-bit integer with 0 as `..._NULL` (ebiten). Microsoft's Game Streaming page says `WaitFrameEventX` returns the token at frame start and `PresentX` sends it with the frame to the client ([Learn](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/game-streaming/game-streaming-latency-compensation-deep-dive)). XCL's implementation issues 48-bit nonzero tokens (mask `0xFFFF_FFFF_FFFF`), i.e. it leaves the top 16 bits unused, returns `S_FALSE` on a finite timeout, writes the token on timeout only with flag 2, and returns `E_INVALIDARG` for an unscheduled event; `ScheduleFrameEventX` returns `S_FALSE` or `0x10000000` when it starts the clock. | **Confirms** the 64-bit storage and the `0` null. **Contradicts** this layer's `HRESULT_FROM_WIN32(WAIT_TIMEOUT)` on timeout (XCL: `S_FALSE`) and `ERROR_INVALID_STATE` for an unscheduled event (XCL: `E_INVALIDARG`); both are recorded here, not changed in this PR. The 48-bit range is XCL's implementation choice, not a documented mask. |
 | `D3D12XBOX_CREATE_DEVICE_PARAMETERS` | Public field names and (for ebiten's version) x64 offsets: `Version` @0, `ProcessDebugFlags` @4, `GraphicsCommandQueueRingSizeBytes` @8, `pOffchipTessellationBuffer` @0x10, `GraphicsScratchMemorySizeBytes` @0x18, `ComputeScratchMemorySizeBytes` @0x1C, `DisableGeometryShaderAllocations` @0x20, `DisableTessellationShaderAllocations` @0x24, `DisableDXR` @0x28, `DisableAutomaticDPBBBreakBatchEvents` @0x2C, `pDXRStackBuffer` @0x30, `DXRStackBufferOverrideSizeBytes` @0x38, `CreateDeviceFlags` @0x3C, `AutoHDRPaperWhiteLevelNits` @0x40, `DisableAutomaticCommandSegmentChaining` @0x44 ([`d3d12_windows.go`](https://github.com/hajimehoshi/ebiten/blob/d438df689b19544c82543ad522b36be86a5a60b7/internal/graphicsdriver/directx/d3d12_windows.go)). The MIT samples add `AmplificationShaderIndirectArgsBufferSize` and `AmplificationShaderPayloadBufferSize` by name ([`SimpleDeviceAndSwapChain.cpp`](https://github.com/microsoft/Xbox-GDK-Samples/blob/b1e77b6ac10f95b07296025fda171ca2ddc42dbe/Samples/IntroGraphics/SimpleDeviceAndSwapChain/SimpleDeviceAndSwapChain.cpp)). | **Partly confirms.** Seventeen named fields cover the first 18 words (word 3 is the x64 alignment pad at 0x0C); the samples name two more fields without a public layout. A 24-word (96-byte) block still has at least four words with no public name or meaning. |
 | Root-signature flags `0x03000000` | Not documented: the [graphics index](https://docs.xbox.com/_llms/en/apis/gdk-apis/graphics-api-reference.txt) has no `D3D12_ROOT_SIGNATURE_FLAGS` entry, and both URL forms under `docs.xbox.com/reference/graphics/` (`d3d12` and `d3d12_xs`) return 404. | **Leaves provisional.** Keep masking the byte on a copy; no public bit meaning. |
-| `CheckFeatureSupport(D3D12_OPTIONS)` with 0x40 bytes | Microsoft publishes the 15-field PC structure, 0x3C bytes, with no extra member ([`D3D12_FEATURE_DATA_D3D12_OPTIONS`](https://docs.xbox.com/reference/graphics/d3d12/structs/d3d12_feature_data_d3d12_options_public.md)); its `CheckFeatureSupport` page says a size mismatch is `E_INVALIDARG` ([`CheckFeatureSupport`](https://docs.xbox.com/reference/graphics/d3d12/interfaces/id3d12device/methods/id3d12device_checkfeaturesupport_public.md)). XCL measured XDefiant asking 0x40 and retries with 0x3C, zeroing the tail ([`HANDOFF.md`](a public runtime project), [`real.rs`](a public runtime project)). | **Confirms the 0x40 request size; leaves the extra 4 bytes unknown.** The measurement fixes the size, not the field. No public source names them; `MaxGPUVirtualAddressBitsPerProcess` is a member of the separate `D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT`, not a published member of `D3D12_OPTIONS`. The repository's accept-and-zero-tail behaviour matches the observed failure and is safe. |
+| `CheckFeatureSupport(D3D12_OPTIONS)` with 0x40 bytes | Microsoft publishes the 15-field PC structure, 0x3C bytes, with no extra member ([`D3D12_FEATURE_DATA_D3D12_OPTIONS`](https://docs.xbox.com/reference/graphics/d3d12/structs/d3d12_feature_data_d3d12_options_public.md)); its `CheckFeatureSupport` page says a size mismatch is `E_INVALIDARG` ([`CheckFeatureSupport`](https://docs.xbox.com/reference/graphics/d3d12/interfaces/id3d12device/methods/id3d12device_checkfeaturesupport_public.md)). XCL measured XDefiant asking 0x40 and retries with 0x3C, zeroing the tail (`HANDOFF.md`, `real.rs`). | **Confirms the 0x40 request size; leaves the extra 4 bytes unknown.** The measurement fixes the size, not the field. No public source names them; `MaxGPUVirtualAddressBitsPerProcess` is a member of the separate `D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT`, not a published member of `D3D12_OPTIONS`. The repository's accept-and-zero-tail behaviour matches the observed failure and is safe. |
 
 The call shapes are the samples' (and XCL's) shapes: `SetFrameIntervalX(output, interval_us, period, flags)`,
 `ScheduleFrameEventX(type, offset_us, ancillary, flags)`,
@@ -617,7 +617,7 @@ out-of-order token.
 
 the prior art's `memory-adapter` is also a seam only: every flag is declared with value 0 and the header
 says the numeric values are not recovered
-([`memory_adapter.h:21-57`](a public prior-art project)).
+(`memory_adapter.h:21-57`).
 The catalogue contributes **names**, which are useful as a checklist:
 
 - Resource flags: `ALLOW_DCC`, `FORCE_DCC_TEXTURE_COMPATIBILITY`, `FORCE_FMASK_TEXTURE_COMPATIBILITY`,
@@ -737,8 +737,7 @@ hold as files, subject to the name caveat.
 a public prior-art project is **GPL-3.0-only**: its README says so and every first-party file carries
 `SPDX-License-Identifier: GPL-3.0-only`. Palmetto is GPL-3.0-or-later. The two are compatible in the
 direction that matters — GPL-3.0-only code can be combined into a GPL-3.0 work — but the combined
-work cannot be relicensed as "or later" for the a public prior-art project-derived part. This page copies **no a public prior-art project
-code**. It records interface names, ordinal numbers and 16-byte GUIDs, which are ABI facts, with
+work cannot be relicensed as "or later" for the part derived from that project. This page copies **no code from it**. It records interface names, ordinal numbers and 16-byte GUIDs, which are ABI facts, with
 the source file and line cited. The 28 standard GUIDs are also facts from the Windows SDK; the 10
 console GUIDs are reported from the vendor runtime and are attributed to a public prior-art project.
 
@@ -746,7 +745,7 @@ The public sources in §7.1 are used as facts only: XCL is GPL-2.0-only (no code
 the Mesa WGL file is MIT, and the Microsoft samples are MIT. Only names, numbers, field offsets and slot indices
 are taken from them; no code or prose is copied.
 
-If any code is later adapted from a public prior-art project, it must carry the a public prior-art project copyright and
+If any code is later adapted from a public prior-art project, it must carry that project's copyright and
 `GPL-3.0-only` notice, and the file must say exactly which a public prior-art project file it came from. The checker
 in `tooling/d3d12_xs_surface.py` is original code written for this repository; it reads only the
 tables above and, optionally, a local SDK or a public prior-art project checkout.

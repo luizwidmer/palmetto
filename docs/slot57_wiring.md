@@ -151,8 +151,8 @@ docs/input_layout.md section 5.
 Gates run for this change:
 
 ```
-_setup\build_palmetto.cmd  -> PALMETTO_OK
-_setup\the test build script   -> TESTS_BUILT
+the local build script  -> PALMETTO_OK
+the local test build script   -> TESTS_BUILT
 xs_proxy_mock_test       -> PASS (9 allocations refused on purpose)
 unimplemented_policy_test -> 98 checks, 0 failed
 graphics_record_test     -> 117 checks passed

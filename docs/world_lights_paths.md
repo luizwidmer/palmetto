@@ -117,17 +117,17 @@ node, and lists entrances (`CJunctionEntrance`, with `bIsStop`/`bIsYield` and th
 | lanes per direction (links) | 0: 30,400 · 1: 108,396 · 2: 5,742 · 3: 879 · 4: 94 · 5: 7 |
 | link length | median 12 m, max 1,483 m |
 
-## Cross-check with an open research project
+## Cross-check with an independent public project
 
-[an open research project](an open research project) decodes the same records independently, and its output for the
+An independent public project decodes the same records, and its output for the
 same package was compared resource by resource.
 
 - **Lane graph:** identical on every count above (nodes, links, junctions, signalised junctions, phases,
   entrances, turns).
-- **Lights:** 280,105 here against an open research project's 274,820. All 5,285 extra lights are on this side, and an open research project has no
-  light this tool lacks. an open research project resolves a pointer as a `0x5xxxxxxx` system pointer (or, in two-page resources, a
+- **Lights:** 280,105 here against that project's 274,820. All 5,285 extra lights are on this side, and the other has no
+  light this tool lacks. That project resolves a pointer as a `0x5xxxxxxx` system pointer (or, in two-page resources, a
   `0x6xxxxxxx` graphics pointer) before trying the pool form, so pool references with an offset of
-  `0x500`..`0x6ff` that also land inside the resource are misread and their effects are dropped. Rereading every light with an open research project's order gives equal counts on 8,434 of 8,576
-  light resources. Of the 5,285, 208 lights are in 9 map resources for which an open research project writes no light set at all.
-- **Placed lights:** an open research project places 774,847, including archetype lights inside interiors (MLO instances), which
+  `0x500`..`0x6ff` that also land inside the resource are misread and their effects are dropped. Rereading every light in that project's order gives equal counts on 8,434 of 8,576
+  light resources. Of the 5,285, 208 lights are in 9 map resources for which that project writes no light set at all.
+- **Placed lights:** That project places 774,847, including archetype lights inside interiors (MLO instances), which
   this tool leaves in interior space.

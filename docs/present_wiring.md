@@ -216,7 +216,7 @@ null), and the `[rt] present:` lines name which one happened.
 
 run: `palmetto.exe --run <title> --game-dir <package> --overlay <overlay-dir> --trace <out>/boot.jsonl
 --trace-d3d12` through `tooling/boot_report.py` (env: `PALMETTO_SHADERS=<shaders-dir>`,
-`PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`), 150 s timeout, retired image
+`PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`), 150 s timeout, retail image
 1.0.2.1. The surface fix (console device slot 127) was in the same binary. The boot log lines, in order:
 
 ```
@@ -285,7 +285,7 @@ same pixels.
 
 Results: all of the above passes (`xbox_present_test: all cases pass`), and `xs_proxy_mock_test` passes with its slot-32
 expectation updated to the hook's `ERROR_INVALID_STATE` (that file is also compiled GPU-free and has no presentation
-registered). The gates are `build_palmetto.cmd` -> `PALMETTO_OK` and `the test build script` -> `TESTS_BUILT`; the known
+registered). The gates are `the local build script` -> `PALMETTO_OK` and `the local test build script` -> `TESTS_BUILT`; the known
 pre-existing failure `d3d12_fence_timing_test` is untouched.
 
 While making the existing presentation cases runnable again, one pre-existing test-side defect had to be fixed outside

@@ -58,7 +58,7 @@ All 16 DLLs in the package map at their preferred base `0x180000000` with no rel
 | `vcruntime140.dll` | 110,592 | `0xf890` | 3 | 38 | 0 | 0 | exit 0 |
 | `vcruntime140_1.dll` | 49,152 | `0x3e90` | 1 | 33 | 0 | 0 | exit 0 |
 
-The 12 Microsoft-signed DLLs in this table (the 10 VC++ runtime DLLs, `XCurl.dll` and `libHttpClient.GDK.dll`) report an Authenticode hash mismatch as shipped, because the Xbox packaging fills the load-config `CodeIntegrity` field of all 16 DLLs after signing; this is expected in every copy of the package and is not a sign of tampering ([jasontheminions's finding](https://github.com/the original project/issues/8504#issuecomment-7110985774)).
+The 12 Microsoft-signed DLLs in this table (the 10 VC++ runtime DLLs, `XCurl.dll` and `libHttpClient.GDK.dll`) report an Authenticode hash mismatch as shipped, because the Xbox packaging fills the load-config `CodeIntegrity` field of all 16 DLLs after signing; this is expected in every copy of the package and is not a sign of tampering (jasontheminions's finding).
 
 Since the library-loader shims (`port/shims/library_loader.cpp`), a module's `LoadLibrary*`, `GetModuleHandle*`, `GetProcAddress` and `FreeLibrary` imports count as shim, through `kernel32`, `kernelbase` or the `api-ms-win-core-libraryloader-*` set it names. That is why every image above has a few more shim and fewer host imports than before; the Xbox-specific imports below are unchanged. `DisableThreadLibraryCalls` is served the same way: a mapped module gets `TRUE` (the real function refuses a module the Windows loader did not map, which failed the `DllMain` of the four `msvcp140_*` satellite DLLs), and any other handle goes to the real function.
 
@@ -97,7 +97,7 @@ The video path (`Bink2Console.dll`), the BVH builder and the FidelityFX upscaler
 two shim DLLs that already exist. `libHttpClient.GDK.dll` and `XCurl.dll` import only desktop APIs.
 
 `xmem.dll!XMemTransferMemory` is not imported by any of these DLLs, but a Series executable calls it during startup
-(reported in [#5934](https://github.com/the original project/issues/5934#issuecomment-7101779516)). Its GDK reference
+(reported in an upstream discussion). Its GDK reference
 page is an NDA topic, but Microsoft's public [NetRumble](https://github.com/microsoft/XBOX-MonoGame-NetRumble/blob/203255e785f2ab2671a9d83b724eaa14d5b07414/console/NetRumble.Bootstrap/Main.cpp#L135-L145)
 sample and FNA's [NativeAOT-Xbox](https://github.com/FNA-XNA/NativeAOT-Xbox/blob/b9dc547afd0e05f45764d670ec49e0ac7997a301/Bootstrap/Main.cpp#L117-L124)
 bootstrap call it as `if (!XMemTransferMemory(XMemTransferTitleToSystem, size))` with a `size_t` in multiples of
