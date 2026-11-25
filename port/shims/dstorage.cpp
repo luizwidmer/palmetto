@@ -932,6 +932,9 @@ void count_error() {
 // A request names its file and a status entry its array by pointer. Only objects this shim made and that are still
 // alive are used; anything else is an error in the request, never a call through a stranger's vtable.
 
+void ds_arrays_dump_start();  // PALMETTO_DS_ARRAYS: the status-array state dump (defined after the StatusArray class)
+bool ds_arrays_enabled();
+
 std::mutex& live_mutex() {
     static auto* m = new std::mutex;
     return *m;
@@ -956,13 +959,20 @@ bool add_ref_if_live(std::atomic<ULONG>& refs) {
 
 // ---- Status arrays ------------------------------------------------------------------------------------------------
 
+std::atomic<std::uint64_t> g_ds_array_ids{0};
+
 class StatusArray final : public IDStorageStatusArrayX {
 public:
     StatusArray(uint32_t capacity, std::unique_ptr<std::atomic<HRESULT>[]> entries)
         : capacity_(capacity), entries_(std::move(entries)) {
         for (uint32_t i = 0; i < capacity_; ++i) entries_[i].store(S_OK, std::memory_order_relaxed);
-        std::lock_guard lock(live_mutex());
-        live_status_arrays().insert(static_cast<IDStorageStatusArrayX*>(this));
+        id_ = g_ds_array_ids.fetch_add(1, std::memory_order_relaxed) + 1;
+        created_us_ = ds_order_now_us();
+        {
+            std::lock_guard lock(live_mutex());
+            live_status_arrays().insert(static_cast<IDStorageStatusArrayX*>(this));
+        }
+        ds_arrays_dump_start();
     }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
@@ -1016,6 +1026,7 @@ public:
     std::uint64_t poll_count() const { return polls_.load(std::memory_order_relaxed); }
     HRESULT STDMETHODCALLTYPE GetHResult(UINT32 index) override {
         const HRESULT hr = index >= capacity_ ? E_DSTORAGE_INDEX_BOUND : entries_[index].load(std::memory_order_acquire);
+        if (ds_arrays_enabled()) note_poll(hr);
         if (ds_load_visible()) {
             void* const caller = _ReturnAddress();
             const std::uint64_t polls = g_ds_load.status_polls.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1045,9 +1056,56 @@ public:
     }
 
     uint32_t capacity() const { return capacity_; }
-    void set_pending(uint32_t index) { entries_[index].store(E_PENDING, std::memory_order_release); }
-    void complete(uint32_t index, HRESULT hr) { entries_[index].store(hr, std::memory_order_release); }
+    void set_pending(uint32_t index) {
+        entries_[index].store(E_PENDING, std::memory_order_release);
+        pending_.fetch_add(1, std::memory_order_relaxed);
+        last_pending_us_.store(ds_order_now_us(), std::memory_order_relaxed);
+    }
+    void complete(uint32_t index, HRESULT hr) {
+        entries_[index].store(hr, std::memory_order_release);
+        pending_.fetch_sub(1, std::memory_order_relaxed);
+        completions_.fetch_add(1, std::memory_order_relaxed);
+        last_complete_us_.store(ds_order_now_us(), std::memory_order_relaxed);
+    }
     std::atomic<ULONG>& refs() { return refs_; }
+
+    // ---- PALMETTO_DS_ARRAYS: the status-array state dump's view ---------------------------------------------------
+    std::uint64_t id() const { return id_; }
+    std::uint64_t created_us() const { return created_us_; }
+    std::uint64_t pending_count() const { return pending_.load(std::memory_order_relaxed); }
+    std::uint64_t enqueue_count() const { return enqueues_.load(std::memory_order_relaxed); }
+    std::uint64_t completion_count() const { return completions_.load(std::memory_order_relaxed); }
+    std::uint64_t last_pending_us() const { return last_pending_us_.load(std::memory_order_relaxed); }
+    std::uint64_t last_complete_us() const { return last_complete_us_.load(std::memory_order_relaxed); }
+    std::uint64_t last_enqueue_us() const { return last_enqueue_us_.load(std::memory_order_relaxed); }
+    std::uint64_t last_enqueue_caller() const { return last_enqueue_caller_.load(std::memory_order_relaxed); }
+    HRESULT last_polled_value() const { return last_hr_.load(std::memory_order_relaxed); }
+    HRESULT entry_value(uint32_t index) const {
+        return index < capacity_ ? entries_[index].load(std::memory_order_acquire) : E_DSTORAGE_INDEX_BOUND;
+    }
+    void note_enqueue(std::uint64_t at_us, void* caller) {
+        enqueues_.fetch_add(1, std::memory_order_relaxed);
+        last_enqueue_us_.store(at_us, std::memory_order_relaxed);
+        last_enqueue_caller_.store(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(caller)),
+                                   std::memory_order_relaxed);
+    }
+    void note_poll(HRESULT hr) {
+        last_hr_.store(hr, std::memory_order_relaxed);
+        note_poll_tid(static_cast<unsigned long>(GetCurrentThreadId()));
+    }
+    // The threads that polled this array (up to 4): two polling threads at once would mean two concurrent spinner
+    // invocations sharing the loader object, which is the section 6d contradiction's likely mechanism.
+    void note_poll_tid(unsigned long tid) {
+        const unsigned long known = poll_tid_count_.load(std::memory_order_relaxed);
+        for (unsigned i = 0; i < known && i < 4; ++i)
+            if (poll_tids_[i].load(std::memory_order_relaxed) == tid) return;
+        const unsigned index = poll_tid_count_.fetch_add(1, std::memory_order_relaxed);
+        if (index < 4) poll_tids_[index].store(tid, std::memory_order_relaxed);
+    }
+    unsigned poll_tid_count() const { return std::min(poll_tid_count_.load(std::memory_order_relaxed), 4u); }
+    unsigned long poll_tid(unsigned index) const {
+        return index < 4 ? poll_tids_[index].load(std::memory_order_relaxed) : 0;
+    }
 
 private:
     std::atomic<ULONG> refs_{1};
@@ -1055,7 +1113,128 @@ private:
     std::unique_ptr<std::atomic<HRESULT>[]> entries_;
     std::atomic<std::uint64_t> polls_{0};          // IsComplete observations (ordering trace)
     std::atomic<std::uint64_t> seen_submits_{0};   // last submit count the trace has logged a first poll for
+    std::uint64_t id_ = 0;
+    std::uint64_t created_us_ = 0;
+    std::atomic<std::uint64_t> pending_{0};
+    std::atomic<std::uint64_t> enqueues_{0};
+    std::atomic<std::uint64_t> completions_{0};
+    std::atomic<std::uint64_t> last_pending_us_{0};
+    std::atomic<std::uint64_t> last_complete_us_{0};
+    std::atomic<std::uint64_t> last_enqueue_us_{0};
+    std::atomic<std::uint64_t> last_enqueue_caller_{0};
+    std::atomic<HRESULT> last_hr_{S_OK};
+    std::atomic<unsigned> poll_tid_count_{0};
+    std::atomic<unsigned long> poll_tids_[4];
 };
+
+// ---- PALMETTO_DS_ARRAYS: the status-array state dump -------------------------------------------------------------
+//
+// docs/streamed_consumer.md section 6d. The loader spinner can only stall on a status array whose entry stays
+// E_PENDING, so this prints every live status array's state - capacity, pending/completed/enqueue/poll counts, the last
+// polled value and each entry's value - plus the loader object's [obj+0x30] owner, the owner's vtable and the exact
+// function the completion path would call (owner vtable+0x18) and whether the owner is one of our arrays. Off by
+// default; bounded to ~1,600 lines; no runtime change.
+
+bool ds_arrays_enabled() {
+    static const bool on = [] {
+        char value[8] = {};
+        size_t length = 0;
+        return getenv_s(&length, value, "PALMETTO_DS_ARRAYS") == 0 && length > 1 && value[0] != '0' &&
+               value[0] != 'n';
+    }();
+    return on;
+}
+
+std::atomic<std::uint64_t> g_ds_arrays_lines{0};
+
+void ds_arrays_dump_once() {
+    if (!ds_arrays_enabled()) return;
+    if (g_ds_arrays_lines.fetch_add(1, std::memory_order_relaxed) >= 1600) return;
+    const double at = static_cast<double>(ds_order_now_us()) / 1.0e6;
+    std::lock_guard lock(log_mutex());
+    std::lock_guard live(live_mutex());
+    std::fprintf(stderr, "[rt] ds arrays +%.3fs arrays:\n", at);
+    for (const void* pointer : live_status_arrays()) {
+        const auto* array = static_cast<const StatusArray*>(reinterpret_cast<const IDStorageStatusArrayX*>(pointer));
+        char entries[224];
+        int used = 0;
+        const unsigned shown = std::min(array->capacity(), 8u);
+        for (unsigned i = 0; i < shown && used < static_cast<int>(sizeof entries) - 16; ++i)
+            used += std::snprintf(entries + used, sizeof entries - static_cast<size_t>(used), " %08lx",
+                                  static_cast<unsigned long>(array->entry_value(i)));
+        char poll_tids[64] = {};
+        int tid_used = 0;
+        for (unsigned i = 0; i < array->poll_tid_count(); ++i)
+            tid_used += std::snprintf(poll_tids + tid_used, sizeof poll_tids - static_cast<size_t>(tid_used), " %lu",
+                                      array->poll_tid(i));
+        std::fprintf(stderr,
+                     "[rt] ds arrays +%.3fs array #%llu 0x%llx cap %u pending %llu completed %llu enqueues %llu "
+                     "polls %llu last_poll %08lx created +%.3fs last_enqueue +%.3fs by %s last_complete +%.3fs "
+                     "entries%s poll_tids %u:%s\n",
+                     at, static_cast<unsigned long long>(array->id()),
+                     static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(pointer)), array->capacity(),
+                     static_cast<unsigned long long>(array->pending_count()),
+                     static_cast<unsigned long long>(array->completion_count()),
+                     static_cast<unsigned long long>(array->enqueue_count()),
+                     static_cast<unsigned long long>(array->poll_count()),
+                     static_cast<unsigned long>(array->last_polled_value()),
+                     static_cast<double>(array->created_us()) / 1.0e6,
+                     static_cast<double>(array->last_enqueue_us()) / 1.0e6,
+                     array->last_enqueue_caller()
+                         ? rt::shims::module_offset(array->last_enqueue_caller()).c_str()
+                         : "(none)",
+                     static_cast<double>(array->last_complete_us()) / 1.0e6, entries, array->poll_tid_count(),
+                     poll_tids);
+    }
+    // The loader object and the completion path the spinner would call: owner = [obj+0x30], target = owner's
+    // vtable+0x18, and whether the owner (or a word in its first 128 bytes) is one of our arrays.
+    const std::uint64_t base = g_title_image_base.load(std::memory_order_relaxed);
+    if (base == 0) return;
+    std::uint64_t object = 0;
+    if (palmetto_mem_read(base + 0x79F6D70ull, &object, sizeof object) != sizeof object || object == 0) return;
+    std::uint64_t fields[16] = {};
+    if (palmetto_mem_read(object, fields, sizeof fields) != sizeof fields) return;
+    const unsigned armed = static_cast<unsigned>(fields[15] & 0xffu);
+    const unsigned inflight = static_cast<unsigned>((fields[12] >> 32) & 0xffffffffu);
+    const std::uint64_t owner = fields[6];
+    std::uint64_t owner_words[16] = {};
+    bool owner_readable = owner != 0 && palmetto_mem_read(owner, owner_words, sizeof owner_words) == sizeof owner_words;
+    std::uint64_t vtable = owner_readable ? owner_words[0] : 0;
+    std::uint64_t target = 0;
+    if (vtable != 0) palmetto_mem_read(vtable + 0x18, &target, sizeof target);
+    char match[64] = "none";
+    for (const void* pointer : live_status_arrays()) {
+        if (pointer == reinterpret_cast<const void*>(owner)) {
+            std::snprintf(match, sizeof match, "owner");
+            break;
+        }
+        if (!owner_readable) continue;
+        bool found = false;
+        for (unsigned w = 0; w < 16 && !found; ++w)
+            if (owner_words[w] == reinterpret_cast<std::uint64_t>(pointer)) {
+                std::snprintf(match, sizeof match, "owner word %u", w);
+                found = true;
+            }
+        if (found) break;
+    }
+    std::fprintf(stderr,
+                 "[rt] ds arrays +%.3fs loader 0x%llx armed %u inflight %u owner 0x%llx owner_vtable 0x%llx "
+                 "vtable+0x18 -> %s owner_match %s\n",
+                 at, static_cast<unsigned long long>(object), armed, inflight,
+                 static_cast<unsigned long long>(owner), static_cast<unsigned long long>(vtable),
+                 target != 0 ? rt::shims::module_offset(target).c_str() : "(unreadable)", match);
+}
+
+void ds_arrays_dump_start() {
+    static std::atomic<bool> started{false};
+    if (!ds_arrays_enabled() || started.exchange(true, std::memory_order_relaxed)) return;
+    std::thread([] {
+        for (unsigned tick = 0; tick < 150; ++tick) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(tick < 100 ? 250 : 1000));
+            ds_arrays_dump_once();
+        }
+    }).detach();
+}
 
 // ---- Files --------------------------------------------------------------------------------------------------------
 
@@ -1343,6 +1522,19 @@ public:
             e.status->set_pending(index);  // polling after this call sees E_PENDING until the entry is reached
             const std::uint64_t grace = ds_order_grace_us();
             if (grace != 0) e.order_not_before_us = ds_order_now_us() + grace;
+            e.status->note_enqueue(ds_order_now_us(), _ReturnAddress());
+            if (ds_arrays_enabled()) {
+                char b[160];
+                std::snprintf(b, sizeof b, "status array #%llu index %u enqueued, pending now %llu",
+                              static_cast<unsigned long long>(e.status->id()), index,
+                              static_cast<unsigned long long>(e.status->pending_count()));
+                std::lock_guard lock(log_mutex());
+                std::fprintf(stderr, "[rt] ds arrays +%.3fs enqueue: %s caller %s\n",
+                             static_cast<double>(ds_order_now_us()) / 1.0e6, b,
+                             rt::shims::module_offset(static_cast<std::uint64_t>(
+                                                          reinterpret_cast<std::uintptr_t>(_ReturnAddress())))
+                                 .c_str());
+            }
         }
         {
             std::lock_guard lock(stats().mutex);
@@ -1985,6 +2177,14 @@ public:
         auto* a = new (std::nothrow) StatusArray(capacity, std::move(entries));
         if (!a) return E_OUTOFMEMORY;
         *ppv = static_cast<IDStorageStatusArrayX*>(a);
+        if (ds_arrays_enabled()) {
+            std::lock_guard lock(log_mutex());
+            std::fprintf(stderr, "[rt] ds arrays array #%llu created: capacity %u caller %s\n",
+                         static_cast<unsigned long long>(a->id()), capacity,
+                         rt::shims::module_offset(static_cast<std::uint64_t>(
+                                                      reinterpret_cast<std::uintptr_t>(_ReturnAddress())))
+                             .c_str());
+        }
         if (ds_load_visible()) {
             ds_load_heartbeat_start();
             palmetto_load_tid_note(static_cast<unsigned long>(GetCurrentThreadId()));

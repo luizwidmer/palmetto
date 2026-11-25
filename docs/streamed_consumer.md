@@ -47,6 +47,9 @@ boolean and no guard, handler or range is created):
   values, and a 1 s heartbeat for the first 20 s keeps cumulative requests, completions, submits, poll counts,
   `E_PENDING` counts and the last poll after the window. Bounded (2,000 window lines, 64 late lines, 20 heartbeat lines);
   off by default, changes no call;
+* `PALMETTO_DS_ARRAYS=1` (section 6d): prints every live status array's state, the loader object's `[obj+0x30]` owner, the
+  owner's vtable and the function at vtable+0x18, and the threads polling each array. Off by default; bounded to 1,600
+  lines; no runtime change.
 * the queue and fence proxies get the same window trace from the device side (`PALMETTO_LOAD_TRACE=<from_s>,<to_s>`,
   see below), so a poll that never satisfies, a second batch and a GPU wait are all visible in one boot.
 
@@ -359,6 +362,39 @@ guaranteed first poll) changes *when* the loader stops but not *that* it stops, 
 population nor the presented image. The default stays as it was (no grace; `PALMETTO_DS_ORDER` off), and the remaining
 target is the producer/stage logic that stops posting batches after the last small one (the disarmed-array wait above is
 its signature: the wait is set up for a job that the stage never arms).
+## 6d. The status-array state during the stall: complete arrays, a correct call target, and four polling threads
+
+`PALMETTO_DS_ARRAYS=1` (off by default) prints, every 250 ms for 25 s and then at 1 Hz, every live status array's state:
+capacity, pending and completed counts, enqueue count, poll count, the last polled value, each entry's value, creation
+time, the last `EnqueueStatus` time and caller, the last completion time, and the threads that polled it; it also prints
+the loader object, its `[obj+0x30]` owner, the owner's vtable and the exact function the completion path would call
+(owner vtable+0x18), and whether the owner is one of our arrays. One 130 s boot (`boot-arr2`, ALIVE, 0 exceptions).
+
+| time | loader armed / inflight | array #17 (the owner) | entries | poll tids |
+|---|---|---|---|---|
+| +5.02 s | 0 / 0 | cap 1, pending **0**, completed 5, enqueues 5, polls 17,904,127, last_poll `S_OK` | `00000000` | 1 (47656) |
+| +10.04 s | 0 / 0 | cap 1, pending **0**, completed 6, enqueues 6, polls 17,904,129, last_poll `S_OK` | `00000000` | 2 (47656, 48020) |
+| +15.06 s | 0 / 0 | cap 1, pending **0**, completed 18, enqueues 18, polls 17,913,883, last_poll `S_OK` | `00000000` | 4 (47656, 48020, 29832, 60864) |
+| +20/+40/+70 s | 0 / 0 | unchanged (completed 18, last enqueue +13.556 s, last completion +13.558 s) | `00000000` | 4 |
+
+* **The loader's owner is our array, and the completion path calls our entry point.** `[obj+0x30]` equals the
+  `StatusArray` object (owner_match `owner`); its vtable is our shim's vtable and vtable+0x18 is
+  `host:palmetto.exe+0xEC6C0`, i.e. our `IsComplete`. The wrapper's call is `IsComplete(0)` on that object (capacity 1,
+  only index 0 is valid). There is **no unmodelled array and no phantom index**.
+* **No entry is ever pending during the stall.** Array #17's entry is `S_OK` at every sample; `pending` is 0; the queue
+  signalled completion for every enqueue (`completed` tracks `enqueues` 5->6->18 and completion times land 1-2 ms after
+  the matching enqueue). The 16 other arrays (#1-#16) are created at boot and never enqueued or polled; array #3 received
+  one batch at +13.557 s and is complete. So there is no entry pending for a completed request, and no request count we
+  never enqueued: the arrays are all complete.
+* **The title runs the spinner on the same loader object from several threads.** Array #17 was polled by four distinct
+  threads (47656, 48020, 29832, 60864) while the loader object's armed byte read 0 at every single sample from 5 s to
+  70 s. The wrapper's pre-check is `if [obj+0x78] != 1 return 0`, so with a complete array and armed=0 it returns 0 and
+  the spinner loops forever - and our status array is not the thing that keeps it false.
+
+**Conclusion:** the precise contradiction is resolved on our side of the boundary: our emulation reports the array
+complete and the wrapper's call target, object and index are exactly the ones measured. The stalled wait is the title's
+own armed-flag lifecycle across the threads that share the loader object (the array state cannot produce it, and no
+pending entry exists to fix). No shim change is warranted; `PALMETTO_DS_ARRAYS` stays off by default.
 ## 7. The answer: where the GPU-side step is missing
 
 * **Do the streamed bytes reach a texture?** No. They reach a title CPU deserializer and, in the whole 130 s window, no
@@ -416,6 +452,10 @@ its signature: the wait is set up for a job that the stage never arms).
     deterministic 0.51-2.29 s completion delay rather than 5 s; that is still far beyond console DMA latency (microseconds
     to milliseconds), so it is a strict test of the ordering hypothesis. Both ordering runs are 130 s/300 s, so a change
     that only appears after 300 s would not be seen.
+12. `PALMETTO_DS_ARRAYS` samples at 250 ms for 25 s and 1 Hz after; an array that was created, enqueued and completed
+    between two samples appears in the counts but not its intermediate pending state. The four polling thread ids are the
+    threads that ever polled the array over the whole boot, not simultaneous pollers; the concurrency claim rests on the
+    armed=0 samples (250 ms apart) combined with those four threads.
 
 ## 9. Gates, files and the next falsifier
 
@@ -429,13 +469,13 @@ gate-naming boot) and `boot-poll1`, `boot-peek1`, `boot-peek3`, `boot-peek4` (th
 Next, smallest honest first - the stream itself and DirectStorage emulation are closed, and the state machine's own
 poll loop is now measured; the dispatcher above it is the target:
 
-1. **Find the batch producer above the streaming job (needs a producer-side observable, 13-20 s).** Section 6c narrows the
-   stall to the last small batch: the title sets up a wait on a fresh status array while the loader object is disarmed,
-   i.e. the stage logic stops posting batches after the pipeline precompile. The next observable is the thread that posts
-   those small batches (13-20 s): capture every thread's title-side stack at 13,14,...,21 s (`PALMETTO_THREAD_STACKS`,
-   `port/src/main.cpp`, already exists) and, when a posting thread is named, watch its stage word with
-   `PALMETTO_TITLE_PEEK`/`PALMETTO_WATCH_GLOBAL`. The two batch submit callers already known are the enqueue helper
-   `game+0x28C9A0E` and the locked submit wrapper `game+0x28CFA70`; naming their caller at 13-20 s names the producer.
+1. **Name the loader object's armed-flag lifecycle (the one remaining contradiction).** Section 6d shows the array is
+   complete and the completion call is correct, so the stall is the title's own `[obj+0x78]` lifecycle across the four
+   threads that poll the same loader object. The direct instrument is the existing `PALMETTO_LOADER_WATCH` hardware watch,
+   re-armed from the first device call instead of at ~3 s, so it captures the initial arm and every later clear, with the
+   writer's title stack. If hardware watchpoints prove unavailable in this host, a page-guard watch on the page holding the
+   loader object gives the same writer RVAs (`PALMETTO_LOADER_WATCH`'s documented fallback). Both are diagnostics in
+   `port/src/main.cpp`; the next increment should request that file.
 2. **Test the input gate if a virtual pad appears.** `docs/input_gate.md` measures the whole input surface: one
    `GameInputCreate` and one `RegisterDeviceCallback`, no read/dispatch call in 300 s, so the loading loop has no input
    poll at all; a keyboard/window-message button test is also measurable on the shim-bound build by whoever owns that
