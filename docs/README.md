@@ -10,6 +10,7 @@ method, scope and caveats. No game data is included.
 |---|---|
 | [design.md](design.md) | Overall project design, asset status, translator contract and open blockers. |
 | [upstream_port.md](upstream_port.md) | The porting policy for applying advances from the public prior-art fork: measure first, our own implementation, a recorded cross-check, attribution, honest limits, an A/B boot, gates green, no game data, the lead commits; the first slice under it is the audio shims. |
+| [remaining_mechanisms.md](remaining_mechanisms.md) | The ranked inventory of upstream mechanisms this port still lacks (page-list resolver, bindless degradation, title-VA windows and write watch, translator fixes, directly indexed heaps, mesh stages, compile workers, pacing), each with the upstream commits/files as evidence, our mapped files, the measured symptom, effort and the three next slices with dependencies. |
 | [issues.md](issues.md) | The tracked-findings ledger: incoming reports, our findings open/done/superseded, one evidence page and the next measurement per row. |
 | [arc.md](arc.md) | ARC9 archive layout, the carve tools and the unreadable encrypted TOC. |
 | [testing.md](testing.md) | Running the GPU tests on your own GPU: setup per OS, wave64 emulation, running without a GPU on Mesa llvmpipe, known problems, and the full Windows build (237 targets, its three known failures and the unblock for each). |
