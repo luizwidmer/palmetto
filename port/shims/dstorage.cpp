@@ -10,8 +10,12 @@
 //     signal or event runs when every entry before it has. Completion is therefore in queue order, as the API
 //     guarantees.
 //   - A request's zlib stage (the reference's ZlibDecompress, RFC 1950) runs here: its compressed source is inflated
-//     with the runtime's own inflate (src/shader_library.h) into the destination the request names. BCPack, swizzle and
-//     physical-page requests still fail with E_NOTIMPL (later PRs: they become the stages after the zlib stage).
+//     with the runtime's own inflate (src/shader_library.h) into the destination the request names. The advanced
+//     stages have an opt-in slice behind PALMETTO_DS_* switches (docs/directstorage_advanced.md): a bounded staging
+//     area, pinning of write-watched destinations, the physical page-list plan, the swizzle/macro-unshuffle stage and
+//     the local BCPack predictor file. Off by default, so a boot without the switches behaves exactly as before;
+//     BCPack block decode and live page-list resolve are refused by named limitations (they need the block decoder and
+//     the xmem page table respectively).
 // Nothing here goes online or touches the GPU.
 #include <windows.h>
 #include <intrin.h>
@@ -35,6 +39,7 @@
 #include <vector>
 
 #include "../src/shader_library.h"  // palmetto::zlib_inflate: the runtime's own RFC 1950/1951 inflate
+#include "dstorage_advanced.h"     // staging, destination pinning, page-list plan, predictor file, unshuffle
 #include "dstorage_xs_abi.h"
 #include "shims.h"
 
@@ -145,6 +150,129 @@ const char* size_band(uint32_t bytes) {
     if (bytes <= (8u << 20)) return "over 1 MiB, up to 8 MiB";
     if (bytes <= kMax4kPageDestinationSize) return "over 8 MiB, up to 32 MiB";
     return "over 32 MiB";
+}
+
+// ---- Advanced request mechanisms (opt-in; docs/directstorage_advanced.md) ------------------------------------------
+//
+// The measured boot asks for zlib file requests only (docs/wait_state.md section 3), so none of these mechanisms is on
+// the boot's critical path today. Each one is behind its own switch, off by default, and the default path stays
+// byte-identical: no extra line, no extra allocation, no extra call. A boot with the switches on reports the same
+// counts in the trace, so the measurement is a comparison of the same instrumentation.
+
+struct AdvancedConfig {
+    std::size_t staging_cap = 0;      // PALMETTO_DS_STAGING: bytes; 0 = off
+    bool pin = false;                 // PALMETTO_DS_PIN: hand a write-watched destination back to the consumer
+    bool pin_resident = false;        // PALMETTO_DS_PIN_RESIDENT: VirtualLock the destination for the write
+    bool pages = false;               // PALMETTO_DS_PAGES: answer a page-list request through the plan (refused: no resolver)
+    bool unshuffle = false;           // PALMETTO_DS_UNSHUFFLE: run a swizzle request's macro-unshuffle stage
+    bool bcpack = false;              // PALMETTO_DS_BCPACK: load the predictor file and refuse by named limitation
+    std::wstring predictor;           // PALMETTO_DS_BCPACK_PREDICTOR: the local predictor path (outside the repository)
+};
+
+const AdvancedConfig& advanced_config() {
+    static const AdvancedConfig config = [] {
+        AdvancedConfig c;
+        c.staging_cap = palmetto::dstorage::env_size("PALMETTO_DS_STAGING");
+        c.pin = palmetto::dstorage::env_switch("PALMETTO_DS_PIN");
+        c.pin_resident = c.pin && palmetto::dstorage::env_switch("PALMETTO_DS_PIN_RESIDENT");
+        c.pages = palmetto::dstorage::env_switch("PALMETTO_DS_PAGES");
+        c.unshuffle = palmetto::dstorage::env_switch("PALMETTO_DS_UNSHUFFLE");
+        c.bcpack = palmetto::dstorage::env_switch("PALMETTO_DS_BCPACK");
+        wchar_t path[32768] = {};
+        const DWORD capacity = static_cast<DWORD>(sizeof path / sizeof path[0]);
+        const DWORD n = GetEnvironmentVariableW(L"PALMETTO_DS_BCPACK_PREDICTOR", path, capacity);
+        if (n > 0 && n < capacity) c.predictor.assign(path, n);
+        return c;
+    }();
+    return config;
+}
+
+// Counters for the periodic trace line: what shapes the title asked for and what the mechanisms did. Atomics because
+// several queues (each with a worker) share them.
+struct AdvancedCounters {
+    std::atomic<std::uint64_t> requests{0}, file_source{0}, memory_source{0}, zlib{0}, bcpack{0}, swizzle{0},
+        destination_pages{0}, source_pages{0};
+    std::atomic<std::uint64_t> staging_hits{0}, staging_fallbacks{0}, staging_bytes{0};
+    std::atomic<std::uint64_t> pins{0}, pinned_pages{0}, write_watched{0}, pin_refusals{0}, pin_lock_failures{0};
+    std::atomic<std::uint64_t> unshuffle_ok{0}, unshuffle_refused{0};
+    std::atomic<std::uint64_t> bcpack_refused{0}, pages_planned{0}, pages_refused{0};
+};
+AdvancedCounters g_advanced;
+
+// One bounded line per request kind (the first few of each) plus the counters the periodic line prints.
+void note_request_shape(const DSTORAGE_REQUEST& r) {
+    const std::uint64_t o = r.Options.AsUINT64;
+    ++g_advanced.requests;
+    const bool memory = options::source_type(o) == DSTORAGE_REQUEST_SOURCE_MEMORY;
+    (memory ? g_advanced.memory_source : g_advanced.file_source).fetch_add(1, std::memory_order_relaxed);
+    if (options::zlib(o)) g_advanced.zlib.fetch_add(1, std::memory_order_relaxed);
+    if (options::bcpack(o)) g_advanced.bcpack.fetch_add(1, std::memory_order_relaxed);
+    if (options::swizzle(o)) g_advanced.swizzle.fetch_add(1, std::memory_order_relaxed);
+    if (o & options::kDestinationPages) g_advanced.destination_pages.fetch_add(1, std::memory_order_relaxed);
+    if (o & options::kSourcePages) g_advanced.source_pages.fetch_add(1, std::memory_order_relaxed);
+    static std::atomic<unsigned> printed{0};
+    if (printed.fetch_add(1, std::memory_order_relaxed) >= 6) return;
+    std::string line = std::string("shape: source=") + (memory ? "memory" : "file") + " zlib=" +
+                       (options::zlib(o) ? "1" : "0") + " bcpack=" + std::to_string(options::bcpack(o)) +
+                       " swizzle=" + std::to_string(options::swizzle(o)) + " destination=" +
+                       ((o & options::kDestinationPages) ? "pages" : "buffer") + " source-pages=" +
+                       ((o & options::kSourcePages) ? "1" : "0") + " source " + size_band(r.SourceSize) +
+                       ", destination " + size_band(r.DestinationSize);
+    storage_trace(line);
+}
+
+// Per-queue staging stats, folded into the process counters when a request finishes.
+void note_staging(const palmetto::dstorage::StagingStats& before, const palmetto::dstorage::StagingStats& after) {
+    g_advanced.staging_hits.fetch_add(after.hits - before.hits, std::memory_order_relaxed);
+    g_advanced.staging_fallbacks.fetch_add(after.fallbacks - before.fallbacks, std::memory_order_relaxed);
+    g_advanced.staging_bytes.fetch_add(after.bytes - before.bytes, std::memory_order_relaxed);
+}
+
+void note_pin(const palmetto::dstorage::PinStats& stats) {
+    g_advanced.pins.fetch_add(stats.pinned, std::memory_order_relaxed);
+    g_advanced.pinned_pages.fetch_add(stats.pages, std::memory_order_relaxed);
+    g_advanced.write_watched.fetch_add(stats.write_watched, std::memory_order_relaxed);
+    g_advanced.pin_refusals.fetch_add(stats.refusals, std::memory_order_relaxed);
+    g_advanced.pin_lock_failures.fetch_add(stats.lock_failures, std::memory_order_relaxed);
+}
+
+// The predictor file is loaded once, on the first BCPack request, and its state is what the request is refused with.
+// A missing path, an unreadable file and an invalid table are distinct named refusals; the values are validated and
+// counted but not retained (this slice has no block decoder to consume them).
+struct PredictorState {
+    palmetto::dstorage::PredictorError error = palmetto::dstorage::PredictorError::missing;
+    palmetto::dstorage::PredictorReport report;
+};
+const PredictorState& predictor_state() {
+    static const PredictorState state = [] {
+        PredictorState result;
+        result.error = palmetto::dstorage::load_dstorage_predictor(advanced_config().predictor.c_str(), result.report);
+        if (result.error == palmetto::dstorage::PredictorError::ok) {
+            std::string counts = "loaded (";
+            if (result.report.bc6h)
+                counts += "BC6H endpoints " + std::to_string(result.report.bc6h_endpoint_rows) + "/256, indices " +
+                          std::to_string(result.report.bc6h_index_rows) + "/256";
+            if (result.report.bc6h && result.report.bc7) counts += "; ";
+            if (result.report.bc7)
+                counts += "BC7 endpoints " + std::to_string(result.report.bc7_endpoint_rows) + "/256, indices " +
+                          std::to_string(result.report.bc7_index_rows) + "/256";
+            counts += ")";
+            log_once("predictor-ok", "the local BCPack predictor file " + counts);
+        } else {
+            log_once(std::string("predictor-") + palmetto::dstorage::predictor_error_name(result.error),
+                     std::string("the local BCPack predictor file is ") +
+                         palmetto::dstorage::predictor_error_name(result.error) +
+                         " (PALMETTO_DS_BCPACK_PREDICTOR names a path outside the repository, written by "
+                         "tooling/bcpack_history_calib.py)");
+        }
+        return result;
+    }();
+    return state;
+}
+
+const char* predictor_state_name() {
+    if (!advanced_config().bcpack) return "off";
+    return palmetto::dstorage::predictor_error_name(predictor_state().error);
 }
 
 // ---- Load-window trace (measurement only; PALMETTO_DS_LOAD_TRACE=<from_s>,<to_s>) -----------------------------------
@@ -1467,6 +1595,7 @@ public:
         } else {
             e.request = *request;  // the title may reuse its structure as soon as this returns
             e.caller = _ReturnAddress();  // PALMETTO_STREAM_CONSUMER names the title image from this return address
+            if (storage_trace_enabled()) note_request_shape(e.request);  // the advanced counters are trace-only
             const uint64_t o = e.request.Options.AsUINT64;
             if (options::source_type(o) == DSTORAGE_REQUEST_SOURCE_FILE &&
                 desc_.SourceType == DSTORAGE_REQUEST_SOURCE_FILE && e.request.File) {
@@ -1798,6 +1927,36 @@ private:
                       static_cast<unsigned long long>(now_requests), double(now_bytes) / double(1 << 20), seconds,
                       seconds > 0.0 ? double(now_bytes) / double(1 << 20) / seconds : 0.0);
         storage_trace(b);
+        // The advanced slice's counters: the request shapes the title asks for (so a negative is measured, not assumed)
+        // and what the opt-in mechanisms did. Every switch is off by default, so these are the shapes the default boot
+        // already had; with a switch on the same line shows its work.
+        char advanced[512];
+        std::snprintf(advanced, sizeof advanced,
+                      "advanced: shapes file=%llu memory=%llu zlib=%llu bcpack=%llu swizzle=%llu dest-pages=%llu "
+                      "source-pages=%llu | staging hits=%llu fallbacks=%llu bytes=%llu | pins=%llu pages=%llu "
+                      "write-watched=%llu lock-failures=%llu refusals=%llu | unshuffle ok=%llu refused=%llu | "
+                      "bcpack refused=%llu | pages planned=%llu refused=%llu | predictor=%s",
+                      static_cast<unsigned long long>(g_advanced.file_source.load()),
+                      static_cast<unsigned long long>(g_advanced.memory_source.load()),
+                      static_cast<unsigned long long>(g_advanced.zlib.load()),
+                      static_cast<unsigned long long>(g_advanced.bcpack.load()),
+                      static_cast<unsigned long long>(g_advanced.swizzle.load()),
+                      static_cast<unsigned long long>(g_advanced.destination_pages.load()),
+                      static_cast<unsigned long long>(g_advanced.source_pages.load()),
+                      static_cast<unsigned long long>(g_advanced.staging_hits.load()),
+                      static_cast<unsigned long long>(g_advanced.staging_fallbacks.load()),
+                      static_cast<unsigned long long>(g_advanced.staging_bytes.load()),
+                      static_cast<unsigned long long>(g_advanced.pins.load()),
+                      static_cast<unsigned long long>(g_advanced.pinned_pages.load()),
+                      static_cast<unsigned long long>(g_advanced.write_watched.load()),
+                      static_cast<unsigned long long>(g_advanced.pin_lock_failures.load()),
+                      static_cast<unsigned long long>(g_advanced.pin_refusals.load()),
+                      static_cast<unsigned long long>(g_advanced.unshuffle_ok.load()),
+                      static_cast<unsigned long long>(g_advanced.unshuffle_refused.load()),
+                      static_cast<unsigned long long>(g_advanced.bcpack_refused.load()),
+                      static_cast<unsigned long long>(g_advanced.pages_planned.load()),
+                      static_cast<unsigned long long>(g_advanced.pages_refused.load()), predictor_state_name());
+        storage_trace(advanced);
     }
 
     // Runs on the worker. since_notify_ is the first failure since the last status entry or fence signal: the
@@ -1897,6 +2056,20 @@ private:
         }
     }
 
+    // PALMETTO_DS_PIN: run one destination write with its range pinned for the duration of the write (the console's
+    // pinned destination). With the switch off the call is the write itself, so the default path adds nothing.
+    template <typename Write>
+    HRESULT write_pinned(void* destination, std::size_t bytes, Write write) {
+        if (!advanced_config().pin) return write();
+        palmetto::dstorage::DestinationPinner pin;
+        pin.set_residency(advanced_config().pin_resident);
+        pin.pin(destination, bytes);
+        const HRESULT hr = write();
+        pin.unpin();
+        note_pin(pin.stats());
+        return hr;
+    }
+
     HRESULT execute_request(const Entry& e) {
         const DSTORAGE_REQUEST& r = e.request;
         const uint64_t o = r.Options.AsUINT64;
@@ -1905,13 +2078,18 @@ private:
         if (options::bcpack(o) > DSTORAGE_BCPACK_MODE_BC7) return E_DSTORAGE_INVALID_BCPACK_MODE;
         if (options::swizzle(o) > DSTORAGE_SWIZZLE_MODE_4K_12K_4K_12K) return E_DSTORAGE_INVALID_SWIZZLE_MODE;
         if (o & (options::kDestinationPages | options::kSourcePages)) {
+            if (advanced_config().pages) return page_list_request(e);
             log_once("pages", "physical-page requests are not implemented yet (E_NOTIMPL)");
             return E_NOTIMPL;
         }
-        // BCPack and swizzle are still not implemented, alone or on top of zlib (the reference applies zlib, then
-        // BCPack, then swizzle). A request that names either fails whole, before any read, so no partial intermediate
-        // or unswizzled data is left in its destination.
-        if (options::bcpack(o) != 0 || options::swizzle(o) != 0) {
+        // The advanced stages. With their switches unset the branches below refuse exactly as before (same line, same
+        // order); with a switch on the request goes to the opt-in mechanism, which either runs it or refuses it with a
+        // named limitation of its own (docs/directstorage_advanced.md).
+        const unsigned bcpack_mode = static_cast<unsigned>(options::bcpack(o));
+        const unsigned swizzle_mode = static_cast<unsigned>(options::swizzle(o));
+        if (bcpack_mode != 0 || swizzle_mode != 0) {
+            if (bcpack_mode != 0 && advanced_config().bcpack) return bcpack_request(e);
+            if (bcpack_mode == 0 && advanced_config().unshuffle) return unshuffle_request(e);
             log_once("bcpack-swizzle",
                      std::string("BCPack and swizzle requests are not implemented yet (E_NOTIMPL; command type ") +
                          std::to_string(static_cast<int>(DSTORAGE_COMMAND_TYPE_REQUEST)) + "; BCPack mode " +
@@ -1938,8 +2116,10 @@ private:
             if (!e.file_counted) return E_DSTORAGE_FILE_NOT_OPEN;
         }
         if (r.SourceSize == 0) return S_OK;  // nothing to move; the reference does not say this fails
-        if (memory) return guarded_move(r.Destination, r.Source, r.SourceSize) ? S_OK : E_DSTORAGE_ACCESS_VIOLATION;
-        return read_file_range(e.file->handle(), r.FileOffset, r.Destination, r.SourceSize);
+        return write_pinned(r.Destination, r.SourceSize, [&]() -> HRESULT {
+            if (memory) return guarded_move(r.Destination, r.Source, r.SourceSize) ? S_OK : E_DSTORAGE_ACCESS_VIOLATION;
+            return read_file_range(e.file->handle(), r.FileOffset, r.Destination, r.SourceSize);
+        });
     }
 
     // The zlib stage of a request. The compressed source is read exactly as an uncompressed request reads its source
@@ -1979,24 +2159,242 @@ private:
             if (r.FileOffset % 16) return fail(E_DSTORAGE_INVALID_FILE_OFFSET, "a file offset not 16-byte aligned");
         }
         if (r.SourceSize == 0) return S_OK;  // nothing to inflate; mirrors the uncompressed path
-        std::vector<uint8_t> compressed(r.SourceSize);
+        // PALMETTO_DS_STAGING: the compressed source and the inflated buffer come from the queue's reusable staging
+        // area when they fit its cap, else from owned allocations (the default). The bytes read, the inflate and every
+        // failure report are the same either way; only where the memory comes from changes.
+        const palmetto::dstorage::StagingStats source_before = source_scratch_.stats();
+        const palmetto::dstorage::StagingStats output_before = output_scratch_.stats();
+        const bool staging_on = source_scratch_.enabled() || output_scratch_.enabled();
+        const auto note = [&] {
+            if (staging_on) {
+                note_staging(source_before, source_scratch_.stats());
+                note_staging(output_before, output_scratch_.stats());
+            }
+        };
+        std::vector<uint8_t> owned_compressed;
+        std::span<uint8_t> staged_source;
+        if (source_scratch_.enabled()) staged_source = source_scratch_.borrow(r.SourceSize);
+        uint8_t* compressed = nullptr;
+        if (staged_source.empty()) {
+            owned_compressed.resize(r.SourceSize);
+            compressed = owned_compressed.data();
+        } else {
+            compressed = staged_source.data();
+        }
         if (memory) {
-            if (!guarded_move(compressed.data(), r.Source, r.SourceSize))
+            if (!guarded_move(compressed, r.Source, r.SourceSize)) {
+                note();
                 return fail(E_DSTORAGE_ACCESS_VIOLATION, "an inaccessible source");
-        } else if (const HRESULT hr = read_file_range(e.file->handle(), r.FileOffset, compressed.data(), r.SourceSize);
+            }
+        } else if (const HRESULT hr = read_file_range(e.file->handle(), r.FileOffset, compressed, r.SourceSize);
                    FAILED(hr)) {
+            note();
             return hr;  // E_DSTORAGE_END_OF_FILE or the Win32 error, as an uncompressed request reports it
         }
-        std::vector<uint8_t> decompressed;
-        if (!palmetto::zlib_inflate(compressed, decompressed, r.DestinationSize) ||
-            decompressed.size() != static_cast<size_t>(r.DestinationSize))
+        // The runtime's inflate appends into a std::vector, so the staged form is the queue's reusable output vector;
+        // its allocation survives between requests, and a request above the cap uses an owned vector.
+        std::vector<uint8_t> owned_decompressed;
+        std::vector<uint8_t>* decompressed = &owned_decompressed;
+        if (output_scratch_.enabled() && r.DestinationSize <= output_scratch_.capacity())
+            decompressed = &output_scratch_.vector();
+        if (!palmetto::zlib_inflate(std::span<const std::uint8_t>(compressed, r.SourceSize), *decompressed,
+                                    r.DestinationSize) ||
+            decompressed->size() != static_cast<size_t>(r.DestinationSize)) {
+            note();
             return fail(kDecompressionError, "a malformed stream or a decompressed size that does not match");
-        if (!guarded_move(r.Destination, decompressed.data(), decompressed.size()))
-            return fail(E_DSTORAGE_ACCESS_VIOLATION, "an inaccessible destination");
+        }
+        const HRESULT written = write_pinned(r.Destination, decompressed->size(), [&]() -> HRESULT {
+            return guarded_move(r.Destination, decompressed->data(), decompressed->size()) ? S_OK
+                                                                                           : E_DSTORAGE_ACCESS_VIOLATION;
+        });
+        note();
+        if (FAILED(written)) return fail(written, "an inaccessible destination");
         log_once("zlib-ok", std::string("a zlib request decompressed (command type ") +
                                 std::to_string(static_cast<int>(DSTORAGE_COMMAND_TYPE_REQUEST)) + "; source " +
                                 size_band(r.SourceSize) + ", destination " + size_band(r.DestinationSize) + ")");
         return S_OK;
+    }
+
+    // PALMETTO_DS_UNSHUFFLE: a swizzle request's macro-unshuffle stage (the ABI's swizzle modes 1-4; the layout and its
+    // provenance are in docs/directstorage_advanced.md). With zlib on, the inflated bytes are the shuffled intermediate
+    // and the destination is the unshuffled result; without it the source is the intermediate and SourceSize must equal
+    // DestinationSize. The destination is written once the stage has succeeded, so a failed request leaves no partial
+    // unswizzled data behind.
+    HRESULT unshuffle_request(const Entry& e) {
+        const DSTORAGE_REQUEST& r = e.request;
+        const uint64_t o = r.Options.AsUINT64;
+        const bool memory = desc_.SourceType == DSTORAGE_REQUEST_SOURCE_MEMORY;
+        const bool zlib = options::zlib(o);
+        const unsigned mode = static_cast<unsigned>(options::swizzle(o));
+        const auto fail = [&r, mode, zlib](HRESULT hr, const char* why) {
+            g_advanced.unshuffle_refused.fetch_add(1, std::memory_order_relaxed);
+            log_once(std::string("unshuffle") + hr_text(hr) + why,
+                     std::string("a swizzle request failed: ") + why + " (" + hr_text(hr) + "; swizzle mode " +
+                         std::to_string(mode) + ", zlib " + (zlib ? "on" : "off") + "; source " +
+                         size_band(r.SourceSize) + ", destination " + size_band(r.DestinationSize) + ")");
+            return hr;
+        };
+        if (r.IntermediateSize != 0) return fail(E_DSTORAGE_INVALID_INTERMEDIATE_SIZE, "an intermediate size without BCPack");
+        palmetto::dstorage::SwizzleLayout layout;
+        if (!palmetto::dstorage::swizzle_layout(mode, layout) || r.DestinationSize % layout.group_bytes != 0)
+            return fail(E_DSTORAGE_INVALID_DESTINATION_SIZE, "a destination that is not whole swizzle groups");
+        if (zlib) {
+            if (r.DestinationSize <= r.SourceSize)
+                return fail(E_DSTORAGE_INVALID_DESTINATION_SIZE, "a destination no larger than the compressed source");
+        } else if (r.DestinationSize != r.SourceSize) {
+            return fail(E_DSTORAGE_INVALID_DESTINATION_SIZE, "a destination that does not match the source size");
+        }
+        const uint64_t total = static_cast<uint64_t>(r.DestinationSize) + (memory ? r.SourceSize : 0u);
+        if (total > kMaxRequestBytes) return fail(E_DSTORAGE_REQUEST_TOO_LARGE, "source and destination over 1 GiB");
+        if (r.DestinationSize > kMax4kPageDestinationSize)
+            return fail(E_DSTORAGE_REQUEST_TOO_LARGE, "a linear destination over 32 MiB");
+        if (!r.Destination) return fail(E_INVALIDARG, "a null destination");
+        if (memory) {
+            if (!r.Source) return fail(E_INVALIDARG, "a null source");
+        } else {
+            if (!r.File) return fail(E_INVALIDARG, "a null file");
+            if (!e.file_counted) return fail(E_DSTORAGE_FILE_NOT_OPEN, "a file that is not open");
+            if (zlib && r.FileOffset % 16) return fail(E_DSTORAGE_INVALID_FILE_OFFSET, "a file offset not 16-byte aligned");
+        }
+        if (r.SourceSize == 0) return S_OK;
+        const palmetto::dstorage::StagingStats source_before = source_scratch_.stats();
+        const palmetto::dstorage::StagingStats output_before = output_scratch_.stats();
+        const bool staging_on = source_scratch_.enabled() || output_scratch_.enabled();
+        const auto note = [&] {
+            if (staging_on) {
+                note_staging(source_before, source_scratch_.stats());
+                note_staging(output_before, output_scratch_.stats());
+            }
+        };
+        std::vector<uint8_t> owned_source;
+        std::span<uint8_t> staged_source;
+        if (source_scratch_.enabled()) staged_source = source_scratch_.borrow(r.SourceSize);
+        uint8_t* source = nullptr;
+        if (staged_source.empty()) {
+            owned_source.resize(r.SourceSize);
+            source = owned_source.data();
+        } else {
+            source = staged_source.data();
+        }
+        if (memory) {
+            if (!guarded_move(source, r.Source, r.SourceSize)) {
+                note();
+                return fail(E_DSTORAGE_ACCESS_VIOLATION, "an inaccessible source");
+            }
+        } else if (const HRESULT hr = read_file_range(e.file->handle(), r.FileOffset, source, r.SourceSize);
+                   FAILED(hr)) {
+            note();
+            return hr;
+        }
+        std::vector<uint8_t> owned_inflated;
+        const std::uint8_t* shuffled = source;
+        if (zlib) {
+            std::vector<uint8_t>* inflated = &owned_inflated;
+            if (output_scratch_.enabled() && r.DestinationSize <= output_scratch_.capacity())
+                inflated = &output_scratch_.vector();
+            if (!palmetto::zlib_inflate(std::span<const std::uint8_t>(source, r.SourceSize), *inflated,
+                                        r.DestinationSize) ||
+                inflated->size() != static_cast<size_t>(r.DestinationSize)) {
+                note();
+                return fail(kDecompressionError, "a malformed stream or a decompressed size that does not match");
+            }
+            shuffled = inflated->data();
+        }
+        const HRESULT written = write_pinned(r.Destination, r.DestinationSize, [&]() -> HRESULT {
+            return palmetto::dstorage::unshuffle(mode, shuffled, r.DestinationSize,
+                                                 static_cast<std::uint8_t*>(r.Destination), r.DestinationSize)
+                       ? S_OK
+                       : E_DSTORAGE_INVALID_DESTINATION_SIZE;
+        });
+        note();
+        if (FAILED(written)) return fail(written, "a destination the macro-unshuffle could not fill");
+        g_advanced.unshuffle_ok.fetch_add(1, std::memory_order_relaxed);
+        log_once("unshuffle-ok", std::string("a swizzle request unshuffled (mode ") + std::to_string(mode) +
+                                     "; source " + size_band(r.SourceSize) + ", destination " +
+                                     size_band(r.DestinationSize) + ", zlib " + (zlib ? "on" : "off") + ")");
+        return S_OK;
+    }
+
+    // PALMETTO_DS_BCPACK: the BCPack stage's predictor policy. The predictor file is local and game-derived (it must
+    // live outside the repository; PALMETTO_DS_BCPACK_PREDICTOR names it) and its tables are validated by the bounded
+    // loader. This slice has no rANS/block decoder to consume them, so a BCPack request is refused with the named
+    // missing stage and the predictor's state: a missing/invalid file is a different refusal from a valid one.
+    HRESULT bcpack_request(const Entry& e) {
+        const DSTORAGE_REQUEST& r = e.request;
+        const uint64_t o = r.Options.AsUINT64;
+        const bool zlib = options::zlib(o);
+        const unsigned mode = static_cast<unsigned>(options::bcpack(o));
+        const auto refuse = [&r, mode, zlib](HRESULT hr, const std::string& why) {
+            g_advanced.bcpack_refused.fetch_add(1, std::memory_order_relaxed);
+            log_once("bcpack" + std::to_string(mode) + hr_text(hr) + why.substr(0, 16),
+                     "a BCPack request is refused: " + why + " (" + hr_text(hr) + "; BCPack mode " +
+                         std::to_string(mode) + ", zlib " + (zlib ? "on" : "off") + "; source " +
+                         size_band(r.SourceSize) + ", destination " + size_band(r.DestinationSize) + ")");
+            return hr;
+        };
+        if (mode > DSTORAGE_BCPACK_MODE_BC7) return refuse(E_DSTORAGE_INVALID_BCPACK_MODE, "a BCPack mode out of range");
+        // The reference has no BCPack block decoder for BC2; this runtime has none for any mode yet.
+        if (mode == DSTORAGE_BCPACK_MODE_BC2) return refuse(E_NOTIMPL, "BC2 has no known BCPack block decoder");
+        if (r.IntermediateSize > kMaxRequestBytes)
+            return refuse(E_DSTORAGE_INVALID_INTERMEDIATE_SIZE, "an intermediate size over 1 GiB");
+        const unsigned block = (mode == DSTORAGE_BCPACK_MODE_BC1 || mode == DSTORAGE_BCPACK_MODE_BC4) ? 8u : 16u;
+        if (mode != 0 && r.DestinationSize % block != 0)
+            return refuse(E_DSTORAGE_INVALID_DESTINATION_SIZE, "a destination that is not whole BC blocks");
+        if (!advanced_config().bcpack) return refuse(E_NOTIMPL, "the BCPack stage is off (PALMETTO_DS_BCPACK)");
+        const PredictorState& state = predictor_state();
+        if (state.error == palmetto::dstorage::PredictorError::missing)
+            return refuse(E_NOTIMPL, "no local predictor file (set PALMETTO_DS_BCPACK_PREDICTOR to the "
+                                     "tooling/bcpack_history_calib.py output path, outside the repository)");
+        if (state.error != palmetto::dstorage::PredictorError::ok)
+            return refuse(E_NOTIMPL, std::string("the local predictor file is ") +
+                                         palmetto::dstorage::predictor_error_name(state.error));
+        return refuse(E_NOTIMPL, "the local predictor file loaded (" + std::to_string(state.report.source_files) +
+                                     " file(s), BC6H rows " + std::to_string(state.report.bc6h_endpoint_rows) +
+                                     ", BC7 rows " + std::to_string(state.report.bc7_endpoint_rows) +
+                                     ") but this slice has no BCPack rANS/block decoder; decode offline with "
+                                     "tooling/bcpack.py");
+    }
+
+    // PALMETTO_DS_PAGES: a physical-page request's plan. The plan and copy math are implemented and tested, but the
+    // runtime has no page resolver (xmem keeps its page table private), so a live page-list request is refused by name
+    // after the page numbers have been read and the plan counted - never half-filled into title memory.
+    HRESULT page_list_request(const Entry& e) {
+        const DSTORAGE_REQUEST& r = e.request;
+        const uint64_t o = r.Options.AsUINT64;
+        const bool destination = (o & options::kDestinationPages) != 0;
+        const ULONG_PTR* const pages = destination ? r.DestinationPageArray : r.SourcePageArray;
+        const uint16_t page_offset = destination ? r.DestinationPageOffset : r.SourcePageOffset;
+        const std::size_t bytes = destination ? r.DestinationSize : r.SourceSize;
+        const auto refuse = [destination, page_offset, &r](HRESULT hr, const std::string& why) {
+            g_advanced.pages_refused.fetch_add(1, std::memory_order_relaxed);
+            log_once("pages" + hr_text(hr) + why.substr(0, 12),
+                     "a physical-page request is refused: " + why + " (" + hr_text(hr) + "; " +
+                         (destination ? "destination" : "source") + " page list, page offset " +
+                         std::to_string(page_offset) + ", " + (destination ? "destination " : "source ") +
+                         size_band(destination ? r.DestinationSize : r.SourceSize) + ")");
+            return hr;
+        };
+        if (pages == nullptr) return refuse(E_INVALIDARG, "a null page array");
+        if (bytes == 0) return refuse(E_DSTORAGE_INVALID_DESTINATION_SIZE, "a page-list buffer of 0 bytes");
+        // Read only the page numbers the transfer needs, bounded by the plan's fixed span table (+1 so an over-long
+        // transfer is refused as too many pages rather than attributed to a short list).
+        const std::size_t needed =
+            1 + (static_cast<std::size_t>(page_offset) + bytes - 1) / palmetto::dstorage::kPageListPageBytes;
+        const std::size_t count = (std::min)(needed, static_cast<std::size_t>(palmetto::dstorage::PagePlan::kMaxSpans) + 1);
+        std::uint64_t numbers[palmetto::dstorage::PagePlan::kMaxSpans + 1] = {};
+        if (!guarded_move(numbers, pages, count * sizeof(std::uint64_t)))
+            return refuse(E_DSTORAGE_ACCESS_VIOLATION, "an inaccessible page array");
+        palmetto::dstorage::PagePlan plan;
+        const palmetto::dstorage::PagePlanError error =
+            palmetto::dstorage::plan_page_transfer(numbers, count, page_offset, bytes, plan);
+        if (error != palmetto::dstorage::PagePlanError::ok)
+            return refuse(E_DSTORAGE_INVALID_DESTINATION_SIZE,
+                          std::string("the page plan failed: ") + palmetto::dstorage::page_plan_error_name(error));
+        g_advanced.pages_planned.fetch_add(1, std::memory_order_relaxed);
+        return refuse(E_NOTIMPL,
+                      "the page plan is implemented (planned " + std::to_string(plan.count) + " span(s) over " +
+                          std::to_string(plan.bytes) + " bytes) but the xmem page table is not exposed, so there is "
+                          "no page resolver for a live request");
     }
 
     void set_pending(int delta) {
@@ -2080,6 +2478,10 @@ private:
     bool in_flight_ = false;
     bool closing_ = false;
     bool closed_ = false;
+    // PALMETTO_DS_STAGING: one reusable buffer per transform stage, per queue (its worker is single-threaded). Both
+    // hold no allocation until the first request borrows from them.
+    palmetto::dstorage::BoundedScratch source_scratch_{advanced_config().staging_cap};
+    palmetto::dstorage::BoundedScratch output_scratch_{advanced_config().staging_cap};
     std::thread worker_;
     HRESULT since_notify_ = S_OK;  // worker only
     std::mutex error_mutex_;
