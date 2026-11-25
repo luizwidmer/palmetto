@@ -62,3 +62,10 @@ untime/shims/d3d12_geometry_views.h,
 untime/shims/d3d12_xs_pso_stream.* and the translator work at commits db19bbd34 (Rain156), 273b3bdf9/a626820e
 (Moriz82) and 154e4ec03 (Jan Trencansky), plus the peer ports' published stage tables. No code is copied; the stream
 builder and the recorded shapes are our own measurements.
+
+### Root-signature packing evidence (reference only)
+
+The root-signature packing slice ([docs/root_packing.md](docs/root_packing.md)) cross-checked the directly-indexed heap and
+spill mechanisms against the public reference fork (GPL-3.0): files in its root-signature, D3D12 COM and root-signature
+serializer sources, at the commits the page cites. No code is copied; the planner, the measured shapes and the tests are
+our own work.
