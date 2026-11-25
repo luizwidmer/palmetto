@@ -31,6 +31,7 @@
 #include <mutex>
 #include <string>
 #include <system_error>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -130,14 +131,140 @@ void print_guid(char (&out)[40], const GUID* g) {
 constexpr GUID kThreadingClass = {0x073b7dcb, 0x1fcf, 0x4030, {0x94, 0xbe, 0xe3, 0xc9, 0xeb, 0x62, 0x34, 0x28}};
 constexpr GUID kErrorClass = {0x8ca467f7, 0x22e8, 0x4096, {0x84, 0x56, 0xbb, 0x8a, 0xa1, 0x3f, 0x79, 0xd8}};
 
+// What PALMETTO_USER_TRACE adds for this class: the title reaches XThreadingImpl through one generic thunk helper
+// (game+0x55DE08C), so the QueryApiImpl line names the class but not which of the 28 methods ran. The wrappers below
+// print slot, thread, caller RVA and up to five scalar arguments on entry and the answer on return, which is the
+// measured call table the task-queue parity slice needs, and which also shows a call that never returns (entry line
+// with no return line). Bounded per slot the way platform_trace.h bounds the served slots: the first eight calls and
+// then the tenth, hundredth, ... so a title polling a slot cannot flood the log. Off by default and byte-identical
+// when unset: the wrapper only calls platform_trace_enabled() (a cached environment read) before forwarding.
+const char* threading_slot_name(int slot) {
+    switch (slot) {
+        case 3: return "XAsyncGetStatus";
+        case 4: return "XAsyncGetResultSize";
+        case 5: return "XAsyncCancel";
+        case 6: return "XAsyncRun";
+        case 7: return "XAsyncBegin";
+        case 8: return "XAsyncBeginAlloc";
+        case 9: return "XAsyncSchedule";
+        case 10: return "XAsyncComplete";
+        case 11: return "XAsyncGetResult";
+        case 12: return "XTaskQueueCreate";
+        case 13: return "XTaskQueueCreateComposite";
+        case 14: return "XTaskQueueGetPort";
+        case 15: return "XTaskQueueDuplicateHandle";
+        case 16: return "XTaskQueueDispatch";
+        case 17: return "XTaskQueueCloseHandle";
+        case 18: return "XTaskQueueSubmitCallback";
+        case 19: return "XTaskQueueSubmitDelayedCallback";
+        case 20: return "XTaskQueueRegisterWaiter";
+        case 21: return "XTaskQueueUnregisterWaiter";
+        case 22: return "XTaskQueueTerminate";
+        case 23: return "XTaskQueueRegisterMonitor";
+        case 24: return "XTaskQueueUnregisterMonitor";
+        case 25: return "XTaskQueueGetCurrentProcessTaskQueue";
+        case 26: return "XTaskQueueSetCurrentProcessTaskQueue";
+        case 27: return "XThreadSetTimeSensitive";
+        case 28: return "XTaskQueueIsEmpty (private)";
+        case 29: return "XThreadAssertNotTimeSensitive";
+        case 30: return "XThreadIsTimeSensitive";
+        default: return "private";
+    }
+}
+
+// One scalar argument as the trace prints it: a pointer, an enum or an integer. The one struct argument in this
+// interface (XTaskQueueRegistrationToken, slots 21/24) has no scalar reading and is printed as 0.
+template <class T> std::uint64_t threading_trace_word(const T& value) {
+    if constexpr (std::is_pointer_v<T>) return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(value));
+    else if constexpr (std::is_enum_v<T>) return static_cast<std::uint64_t>(static_cast<std::underlying_type_t<T>>(value));
+    else if constexpr (std::is_integral_v<T>) return static_cast<std::uint64_t>(value);
+    else {
+        (void)value;
+        return 0;
+    }
+}
+
+// Prints one slot's entry line when this call is one to log and returns whether it did, so the return line matches.
+template <int Slot, class... A> bool threading_trace_enter(void* caller, const A&... a) {
+    if (!rt::shims::platform_trace_enabled()) return false;
+    const std::uint64_t n = rt::shims::platform_trace_tick(0x54485244534C4F54ull + Slot);   // "THRDSLOT"
+    if (!n) return false;
+    std::uint64_t words[5] = {};
+    std::size_t count = 0;
+    const auto take = [&](const auto& value) {
+        if (count < 5) words[count] = threading_trace_word(value);
+        ++count;
+    };
+    (take(a), ...);
+    const std::string where = rt::shims::module_offset(reinterpret_cast<std::uint64_t>(caller));
+    std::fprintf(stderr,
+                 "[rt] user trace: +%.2fs XThreadingImpl slot %d %s tid %lu a0 0x%llx a1 0x%llx a2 0x%llx a3 0x%llx "
+                 "a4 0x%llx from %s #%llu\n",
+                 rt::shims::platform_trace_seconds(), Slot, threading_slot_name(Slot),
+                 static_cast<unsigned long>(GetCurrentThreadId()), static_cast<unsigned long long>(words[0]),
+                 static_cast<unsigned long long>(words[1]), static_cast<unsigned long long>(words[2]),
+                 static_cast<unsigned long long>(words[3]), static_cast<unsigned long long>(words[4]), where.c_str(),
+                 static_cast<unsigned long long>(n));
+    return true;
+}
+
+void threading_trace_exit(int slot, std::uint64_t value, bool has_value) {
+    if (has_value)
+        std::fprintf(stderr, "[rt] user trace: +%.2fs XThreadingImpl slot %d %s returned 0x%llx tid %lu\n",
+                     rt::shims::platform_trace_seconds(), slot, threading_slot_name(slot),
+                     static_cast<unsigned long long>(value), static_cast<unsigned long>(GetCurrentThreadId()));
+    else
+        std::fprintf(stderr, "[rt] user trace: +%.2fs XThreadingImpl slot %d %s returned (void) tid %lu\n",
+                     rt::shims::platform_trace_seconds(), slot, threading_slot_name(slot),
+                     static_cast<unsigned long>(GetCurrentThreadId()));
+}
+
 // A function's arguments after `this`, forwarded unchanged (x64 has one calling convention).
 // Specialised on the function's exact type, so a noexcept function matches only one form.
-template <auto F, class T = decltype(F)> struct Method;
-template <auto F, class R, class... A> struct Method<F, R (*)(A...)> {
-    static R STDMETHODCALLTYPE call(void*, A... a) { return F(a...); }
+template <int Slot, auto F, class T = decltype(F)> struct SlotMethod;
+template <int Slot, auto F, class R, class... A> struct SlotMethod<Slot, F, R (*)(A...)> {
+    static R STDMETHODCALLTYPE call(void*, A... a) {
+        const bool traced = threading_trace_enter<Slot>(_ReturnAddress(), a...);
+        if constexpr (std::is_void_v<R>) {
+            F(a...);
+            if (traced) threading_trace_exit(Slot, 0, false);
+        } else {
+            const R result = F(a...);
+            if (traced) threading_trace_exit(Slot, threading_trace_word(result), true);
+            return result;
+        }
+    }
 };
-template <auto F, class R, class... A> struct Method<F, R (*)(A...) noexcept> {
-    static R STDMETHODCALLTYPE call(void*, A... a) noexcept { return F(a...); }
+template <int Slot, auto F, class R, class... A> struct SlotMethod<Slot, F, R (*)(A...) noexcept> {
+    static R STDMETHODCALLTYPE call(void*, A... a) noexcept {
+        const bool traced = threading_trace_enter<Slot>(_ReturnAddress(), a...);
+        if constexpr (std::is_void_v<R>) {
+            F(a...);
+            if (traced) threading_trace_exit(Slot, 0, false);
+        } else {
+            const R result = F(a...);
+            if (traced) threading_trace_exit(Slot, threading_trace_word(result), true);
+            return result;
+        }
+    }
+};
+
+// The vtable functions this file writes itself take `this` as their own first parameter (unlike the vendor
+// functions, whose first parameter is the function's first argument and whose vtable entry adds `this`), so they get
+// their own traced wrapper: the arguments after `this` are the ones the trace prints.
+template <int Slot, auto F, class T = decltype(F)> struct SelfMethod;
+template <int Slot, auto F, class R, class... A> struct SelfMethod<Slot, F, R (*)(void*, A...)> {
+    static R STDMETHODCALLTYPE call(void* self, A... a) {
+        const bool traced = threading_trace_enter<Slot>(_ReturnAddress(), a...);
+        if constexpr (std::is_void_v<R>) {
+            F(self, a...);
+            if (traced) threading_trace_exit(Slot, 0, false);
+        } else {
+            const R result = F(self, a...);
+            if (traced) threading_trace_exit(Slot, threading_trace_word(result), true);
+            return result;
+        }
+    }
 };
 
 constexpr GUID kIUnknown = {0x00000000, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
@@ -200,40 +327,42 @@ HRESULT STDMETHODCALLTYPE thread_set_time_sensitive(void*, bool value) {
 void STDMETHODCALLTYPE thread_assert_not_time_sensitive(void*) {}
 bool STDMETHODCALLTYPE thread_is_time_sensitive(void*) { return t_time_sensitive; }
 
-#define XM(fn) reinterpret_cast<const void*>(&Method<&fn>::call)
+#define ST(slot, fn) reinterpret_cast<const void*>(&SlotMethod<slot, &fn>::call)
+#define SM(slot, fn) reinterpret_cast<const void*>(&SelfMethod<slot, &fn>::call)
 const void* const kThreadingVtable[] = {
     reinterpret_cast<const void*>(&object_query_interface), reinterpret_cast<const void*>(&object_add_ref),
     reinterpret_cast<const void*>(&object_release),
-    XM(XAsyncGetStatus),                    // 3
-    XM(XAsyncGetResultSize),                // 4
-    XM(XAsyncCancel),                       // 5
-    XM(XAsyncRun),                          // 6
-    XM(XAsyncBegin),                        // 7
-    reinterpret_cast<const void*>(&begin_alloc_not_provided),  // 8  XAsyncBeginAlloc (private, not called by the package)
-    XM(XAsyncSchedule),                     // 9
-    XM(XAsyncComplete),                     // 10
-    XM(XAsyncGetResult),                    // 11
-    XM(XTaskQueueCreate),                   // 12
-    XM(XTaskQueueCreateComposite),          // 13
-    XM(XTaskQueueGetPort),                  // 14
-    XM(XTaskQueueDuplicateHandle),          // 15
-    XM(XTaskQueueDispatch),                 // 16
-    XM(XTaskQueueCloseHandle),              // 17
-    XM(XTaskQueueSubmitCallback),           // 18
-    XM(XTaskQueueSubmitDelayedCallback),    // 19
-    XM(XTaskQueueRegisterWaiter),           // 20
-    XM(XTaskQueueUnregisterWaiter),         // 21
-    XM(XTaskQueueTerminate),                // 22
-    XM(XTaskQueueRegisterMonitor),          // 23
-    XM(XTaskQueueUnregisterMonitor),        // 24
-    XM(XTaskQueueGetCurrentProcessTaskQueue),  // 25
-    XM(XTaskQueueSetCurrentProcessTaskQueue),  // 26
-    reinterpret_cast<const void*>(&thread_set_time_sensitive),         // 27
-    reinterpret_cast<const void*>(&private_slot<28>),                  // 28 XTaskQueueIsEmpty (private; no arguments)
-    reinterpret_cast<const void*>(&thread_assert_not_time_sensitive),  // 29
-    reinterpret_cast<const void*>(&thread_is_time_sensitive),          // 30
+    ST(3, XAsyncGetStatus),                    // 3
+    ST(4, XAsyncGetResultSize),                // 4
+    ST(5, XAsyncCancel),                       // 5
+    ST(6, XAsyncRun),                          // 6
+    ST(7, XAsyncBegin),                        // 7
+    SM(8, begin_alloc_not_provided),           // 8  XAsyncBeginAlloc (private, not called by the package)
+    ST(9, XAsyncSchedule),                     // 9
+    ST(10, XAsyncComplete),                    // 10
+    ST(11, XAsyncGetResult),                   // 11
+    ST(12, XTaskQueueCreate),                  // 12
+    ST(13, XTaskQueueCreateComposite),         // 13
+    ST(14, XTaskQueueGetPort),                 // 14
+    ST(15, XTaskQueueDuplicateHandle),         // 15
+    ST(16, XTaskQueueDispatch),                // 16
+    ST(17, XTaskQueueCloseHandle),             // 17
+    ST(18, XTaskQueueSubmitCallback),          // 18
+    ST(19, XTaskQueueSubmitDelayedCallback),   // 19
+    ST(20, XTaskQueueRegisterWaiter),          // 20
+    ST(21, XTaskQueueUnregisterWaiter),        // 21
+    ST(22, XTaskQueueTerminate),               // 22
+    ST(23, XTaskQueueRegisterMonitor),         // 23
+    ST(24, XTaskQueueUnregisterMonitor),       // 24
+    ST(25, XTaskQueueGetCurrentProcessTaskQueue),  // 25
+    ST(26, XTaskQueueSetCurrentProcessTaskQueue),  // 26
+    SM(27, thread_set_time_sensitive),         // 27
+    SM(28, private_slot<28>),                  // 28 XTaskQueueIsEmpty (private; no arguments)
+    SM(29, thread_assert_not_time_sensitive),  // 29
+    SM(30, thread_is_time_sensitive),          // 30
 };
-#undef XM
+#undef ST
+#undef SM
 static_assert(std::size(kThreadingVtable) == 31, "IUnknown + IXThreadingImpl's 28 methods");
 
 // IXErrorImpl: XErrorReport(HRESULT, const char*) at slot 3 (the docs' "_unknown_"; XCurl calls it with an HRESULT

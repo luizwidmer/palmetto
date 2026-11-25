@@ -391,6 +391,61 @@ void check_run_time_load() {
                   reinterpret_cast<SetSensitive>(slot(t, 27))(t, false) == S_OK &&
                   !reinterpret_cast<IsSensitive>(slot(t, 30))(t),
               "slots 27 and 30 set and read this thread's time-sensitive flag");
+        // The call surface the retail executable really uses, measured over one 130 s boot (docs/task_queue_parity.md):
+        // XThreadAssertNotTimeSensitive ten times across its threads, two ThreadPool/ThreadPool queue creates, the
+        // default process queue queried, a duplicate -> Work port -> composite(same port twice) sequence three times,
+        // and libHttpClient.GDK.dll's Immediate/Immediate queue. Driven here with the measured arguments; every answer
+        // is the one the boot received. Nothing in that boot ever submits to, dispatches, terminates or waits on a
+        // queue, which is why this test cannot exercise a callback on the title's own queues - that is a measured
+        // negative, not an untested path.
+        using Assert = void(STDMETHODCALLTYPE*)(void*);
+        reinterpret_cast<Assert>(slot(t, 29))(t);
+        check(!reinterpret_cast<IsSensitive>(slot(t, 30))(t),
+              "slot 29 (XThreadAssertNotTimeSensitive, the title's hottest threading call) leaves the thread's "
+              "time-sensitive flag clear");
+        XTaskQueueHandle title_queue = nullptr, title_queue2 = nullptr;
+        check(reinterpret_cast<Create>(slot(t, 12))(t, XTaskQueueDispatchMode::ThreadPool,
+                                                    XTaskQueueDispatchMode::ThreadPool, &title_queue) == S_OK &&
+                  title_queue,
+              "slot 12: the title's measured ThreadPool/ThreadPool queue (modes 1/1)");
+        check(reinterpret_cast<Create>(slot(t, 12))(t, XTaskQueueDispatchMode::ThreadPool,
+                                                    XTaskQueueDispatchMode::ThreadPool, &title_queue2) == S_OK &&
+                  title_queue2 && title_queue2 != title_queue,
+              "slot 12: the second measured create is a distinct second queue");
+        XTaskQueueHandle immediate = nullptr;
+        check(reinterpret_cast<Create>(slot(t, 12))(t, XTaskQueueDispatchMode::Immediate,
+                                                    XTaskQueueDispatchMode::Immediate, &immediate) == S_OK &&
+                  immediate,
+              "slot 12: libHttpClient.GDK.dll's measured Immediate/Immediate queue (modes 3/3)");
+        using ProcessQueue = bool(STDMETHODCALLTYPE*)(void*, XTaskQueueHandle*);
+        XTaskQueueHandle process_queue = nullptr;
+        check(reinterpret_cast<ProcessQueue>(slot(t, 25))(t, &process_queue) && process_queue,
+              "slot 25: the default process task queue exists (GDK: thread pool for both ports)");
+        using GetPort = HRESULT(STDMETHODCALLTYPE*)(void*, XTaskQueueHandle, XTaskQueuePort, XTaskQueuePortHandle*);
+        using Composite =
+            HRESULT(STDMETHODCALLTYPE*)(void*, XTaskQueuePortHandle, XTaskQueuePortHandle, XTaskQueueHandle*);
+        XTaskQueueHandle dup_handle = nullptr, composite_handle = nullptr;
+        XTaskQueuePortHandle port = nullptr;
+        check(reinterpret_cast<Dup>(slot(t, 15))(t, title_queue, &dup_handle) == S_OK && dup_handle &&
+                  reinterpret_cast<GetPort>(slot(t, 14))(t, title_queue, XTaskQueuePort::Work, &port) == S_OK && port &&
+                  reinterpret_cast<Composite>(slot(t, 13))(t, port, port, &composite_handle) == S_OK && composite_handle,
+              "slots 13/14/15: the measured duplicate -> Work port -> composite, with the same port for both ports");
+        static std::atomic<int> s_immediate_ran{0};
+        static std::atomic<DWORD> s_immediate_tid{0};
+        XTaskQueueCallback* immediate_cb = [](void* ctx, bool canceled) {
+            s_immediate_tid = GetCurrentThreadId();
+            if (!canceled) static_cast<std::atomic<int>*>(ctx)->fetch_add(1);
+        };
+        check(reinterpret_cast<Submit>(slot(t, 18))(t, immediate, XTaskQueuePort::Work, &s_immediate_ran,
+                                                    immediate_cb) == S_OK &&
+                  s_immediate_ran.load() == 1 && s_immediate_tid.load() == GetCurrentThreadId(),
+              "slot 18 on the Immediate queue: the callback ran on the submitting thread before the submit returned");
+        reinterpret_cast<Close>(slot(t, 17))(t, dup_handle);
+        reinterpret_cast<Close>(slot(t, 17))(t, composite_handle);
+        reinterpret_cast<Close>(slot(t, 17))(t, immediate);
+        reinterpret_cast<Close>(slot(t, 17))(t, process_queue);
+        reinterpret_cast<Close>(slot(t, 17))(t, title_queue);
+        reinterpret_cast<Close>(slot(t, 17))(t, title_queue2);
         // Slot 8 (XAsyncBeginAlloc, private, signature not measured) must not report a begun call whose provider
         // never received XAsyncOp::Begin: either it refuses, or the provider saw Begin exactly once.
         static std::atomic<int> s_begins{0};
