@@ -623,3 +623,178 @@ jobs in 12.4's d1 column): off by default, no thread starts unless the variable 
 
 Same attribution and policy as section 10: this slice was implemented from this project's own measurements, no upstream
 code or behaviour claim is used, and no git writes were made by this slice.
+
+## 13. Ready-set resolution (follow-up): the five ready ids, the one unreleased claim, and the unposted work item
+
+**Status: measured; the ready ids are resolved and the stall is a title-side lost work item, not a missing pump wake.**
+Section 12 left one question open: which title-side dispatch posts the work item that would drain the ready set, and
+what the ready ids `83`, `91`, `92` and `152` are. A new opt-in probe (`PALMETTO_STAGE2_READY`) resolves the ready
+bitmask through the scheduler's own id-to-job table: all five ids it observes (`83`, `88`, `91`, `92`, `152`) are
+**lane 0, class 0** scheduler jobs of the same stage batch. The queue's class-lane accounting (`queue+0x11F0`, the
+aggregate of seven bit-sliced counter planes) has the bit of every one of them set, and that aggregate is
+**byte-for-byte the claim mask of one job, id `97` (hash `0x7325b9`)**. Job 97's claim was taken by the dispatcher and
+never released: its work item exists (`job+0x68`, executor `game+0x4EAA040`) but its job state is still `2` (queued)
+and no task-pool ring holds it. The dispatcher selects `~aggregate & ready`, so with those bits set **no pump entry can
+dispatch the ready ids at all** - a wake would not help. The release path is `FUN_144E53AD0`, called only by the run item
+`FUN_144E53470` for the job the run state carries, so the lost item is the missing dispatch. No runtime answer is
+missing; this section is a **measured negative**: no shim change, no fix, stage 3 is still never requested.
+
+### 13.1 What ran
+
+| | |
+|---|---|
+| Tree | `D:\leonida` working tree with other slices' uncommitted files present; this slice's source change is the opt-in `PALMETTO_STAGE2_READY` probe in `port/src/main.cpp` (off by default; no thread starts unless set) plus this page |
+| Binaries | four probe builds of `port\build\palmetto.exe`, one per boot as the probe grew (`boot-r4` ran SHA-256 `C54DD5F9475D267EC5FE2388CB64600F70D184EFF6D8B07F2E5578CF530A7EEA`); the gate build of this tree is SHA-256 `043EACBB83C0BC19BEA6AFDCAD7F2200D61FE9877F1199153BA8228473287B95` |
+| Boots | four 130 s boots under the shared boot lock, one at a time: `boot-r1` (ready-set/aggregate dump at the wait and 6/18 s later), `boot-r2` (adds a per-job claim-mask XOR census), `boot-r3` (adds the holder's work-item header and the task-pool rings) and `boot-r4` (adds the job context words; the final numbers) |
+| Harness | `tooling/boot_report.py --timeout 130`, captures outside the repository in `D:\leonida-work\readyids\boot-rN\` |
+| Environment | `PALMETTO_SHADERS`, `PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`, `PALMETTO_STATE_TRACE=2,130` and `PALMETTO_STAGE2_READY=1` |
+| Measure points | tracker global `image+0x9844898`; queue `tracker+0xB8`; ready bitmask `+0x1870`; ready id array `+0x1868`/count `+0x1864`; id->job table `+0x1AB0`; per-id claim masks `+0x1AA0 + id*0x220`; counter planes `+0x310`, `+0x530`, `+0x750`, `+0x970`, `+0xB90`, `+0xDB0`, `+0xFD0`; aggregate `+0x11F0`; published filter `+0x1410`; pending aggregate `+0x1630`; default class `+0x1B38`; job fields `+0x50`, `+0x68`, `+0x73`, `+0x74`, `+0x9x`, `+0xC8`, `+0xCA`..`+0xCE`, `+0xD8`, `+0xE0`..`+0xF8`; tracker job table `+0x628`/`+0x62C`/`+0x630`; task-pool streams `image+0x71BFD00 + lane*0x40` and their per-class rings |
+
+The state word moved as before in every measured boot: `init 2`, `loading 1`, machine `current 2 / next 2` to the kill;
+`boot-r4` changed at 24.0 s. No boot requested stage 3.
+
+### 13.2 The ready ids, resolved
+
+`boot-r4`, second sample (+63.562 s), with the section-12 accounting fields:
+
+| field | value | meaning |
+|---|---|---|
+| ready id array `+0x1864` | 0 | the staging array is empty; the ids live only in the bitmask, as in section 12 |
+| ready bit count `+0x1A94` | 5 | `83`, `88`, `91`, `92`, `152` |
+| aggregate `+0x11F0` | 21 ids | `81,82,83,88,91,92,96,97,100,101,133,142,143,144,151,152,154,162,172,180,239` |
+| published filter `+0x1410` | 0 | the pending aggregate was already folded in and `+0x1850 = 1` |
+| pending aggregate `+0x1630` | 0 | no ready mark is outstanding |
+| planes 1..6 | 0 | every nonzero counter is exactly 1 (plane 0 is the odd/even plane) |
+| ready min/max `+0x1A90/+0x1A92` | 0 / 247 | the id range, as section 12 |
+
+Each id through the id->job table (`queue+0x1AB0 + id*8`), after the job's own fields:
+
+| id | hash `job+0xDC` | lane `+0x73` | class `+0x74`/`+0xC8` | class masks `+0xE1`/`+0xE2`/`+0xE4` | dep callback `+0xE8` | state `+0xE0` / scheduler `+0xF0` | work function `+0x50` | body |
+|---|---|---|---|---|---|---|---|---|
+| `83` | `0x86c60c95` | 0 | 0 / 0 | 1 / 0 / 0 | 0 | 0 / 0 | `game+0x95EB60` | generic stage invoker `(*(code*)*job)(job)`; the stage function is the job's first word `game+0x5A67E40` |
+| `88` | `0xd5e9ea68` | 0 | 0 / 0 | 1 / 0 / 0 | 0 | 0 / 0 | `game+0x95EB60` | same generic stage invoker; stage function `game+0x5AAFC30` |
+| `91` | `0x260f14aa` | 0 | 0 / 0 | 1 / 0 / 0 | 0 | 0 / 0 | `game+0x5C1A960` | `FUN_141E09DC0(2)`: mode-2 stage init, four record registrations and a callback table |
+| `92` | `0x5fdc36d5` | 0 | 0 / 0 | 1 / 0 / 0 | 0 | 0 / 4 | `game+0x3750CE0` | `FUN_14593BD40`: render-state/registration table init (`FUN_1408E8930` hash slots) |
+| `152` | `0x3c819f1` | 0 | 0 / 0 | 1 / 0 / 0 | 0 | 0 / 2 | `game+0x5BDD700` | `FUN_141DDA290`: walk of a global 0xC0-byte record table, sets `0x1477BCA88 = 3` |
+
+**The class lane is lane 0, class 0 for every ready id.** The lane byte `job+0x73` is the worker-pool lane (the pool
+streams are at `image+0x71BFD00 + lane*0x40`; the pump's out-list posting filters lane 0 and lane 1) and the class byte
+`job+0x74`/`+0xC8` is the per-lane class ring. `boot-r1` and `boot-r4` both show five ids in the frozen state; section
+12's `boot-c4` snapshot at 82 s showed four (`83`, `91`, `92`, `152`) - `88` is in the same lane/class and both runs
+have five at the later samples, so the set is stable and the count difference is sample timing, not a different stall.
+
+### 13.3 The claim accounting: why no pump dispatches them
+
+The dispatcher `FUN_144E53EF0` picks `~mask & ready-bits`, where `mask` is `queue+0x1410` when the two published flags
+are both 1 and `queue+0x11F0` otherwise (`+0x1850 = 0x1` at the samples, so the aggregate is the mask). Every ready id's
+bit is set in that mask, so the scan finds nothing and returns - it does not skip them and dispatch others, it dispatches
+**nothing**. The accounting is bit-sliced: seven 7-bit counter planes over job ids, where
+
+- `FUN_144E53EF0` **adds** the dispatched job's per-id claim mask (`queue+0x1AA0 + id*0x220`) to the planes at the moment
+  it dispatches that job (the same code that sets `job+0x74` and appends `job+0x68` to the out list);
+- `FUN_144E53AD0(queue, id)` **subtracts** one job's mask from the planes, and it is called only from the run item
+  `FUN_144E53470` for the job the run state carries at `+0xA88` - i.e. the release of a dispatch happens at the next run
+  item, not at the job's completion.
+
+The measured mask equals exactly one registered job's mask: **id `97`, hash `0x7325b9`** (21 bits, XOR against
+`queue+0x11F0` = 0; every other job's mask is either empty - most jobs - or differs by at least one bit). Job 97 is lane 0,
+class 0, state `+0xE0 = 0`, scheduler state `+0xF0 = 2`, work function `game+0x263CDF0` -> `FUN_145A58E10(2)`
+(a lazy-singleton mode-2 subsystem init, vtable `image+0x62041E0`). Its work item at `job+0x68` has the job executor
+`game+0x4EAA040` as its first word, zero children, lane 0, class 0 and weight 16. The claim's id set contains every ready
+id, so those five cannot be selected while job 97's claim stands.
+
+Between the `wait` sample (+25.252 s, aggregate with id `94` and not `101`) and the `steady` sample (+31.323 s, aggregate
+with id `101` and not `94`) the aggregate changed: the previous claim was released and job 97's claim was taken in that
+window, i.e. the stage chain ran on after the wait and ended with job 97 dispatched. From then to +63.562 s nothing moved.
+
+### 13.4 The lost work item
+
+Job 97's item was built and claimed but never executed:
+
+| check | measured |
+|---|---|
+| job state `+0xF0` | `2` (set by `FUN_14509B890` when the job is queued into the run state; the executor `game+0x4EAA040` sets `4` before running the body) |
+| item header | `job+0x68`: first word `game+0x4EAA040`, `+0x8 = 0`, children `+0xA = 0`, lane `+0xB = 0`, class `+0xC = 0`, weight `+0xD = 16` |
+| lane-0 stream (`image+0x71BFD00`, ring pointer at `+8`) | class-0 ring head 426, `slot[head&0x7FF] == head` -> **empty**; class-4 ring empty |
+| lane-1 stream (`image+0x71BFD40`) | class-0 ring empty |
+| task-pool post | `FUN_144DA40E0` -> `FUN_144DA41A0` per item into the lane/class ring; `FUN_144DA4200` sets the wake count |
+
+So the item is in no ring and its job never ran. Since the pump's out-list posting block (`FUN_144DA40E0` call site in
+`FUN_1400560B0`) is the only path that could have put it there, the **missing dispatch is that post: the pump build of job
+97's work item into the lane-0/class-0 task stream**. Its follow-on is the release `FUN_144E53AD0(queue, 97)` at the next
+run item, which would clear the aggregate bits and let `FUN_144E53EF0` dispatch `83`, `88`, `91`, `92` and `152`.
+
+### 13.5 The named missing post, and its owner
+
+- **Post that should carry the ready ids:** the out-list posting block of the pump `FUN_1400560B0` -> `FUN_144DA40E0`
+  -> the task-pool stream `image+0x71BFD00 + (item+0xB)*0x40`, class ring `(item+0xC)*0x6008`. For the ready ids that is
+  **lane 0, class 0**; the one item that is missing is job 97's (`job+0x68`, executor `game+0x4EAA040`).
+- **Release that would follow:** `FUN_144E53AD0(queue, 97)` in the next run item `FUN_144E53470`; then
+  `FUN_144E53EF0` dispatches the five ready ids.
+- **Owner:** the title's own job scheduler / loader-batch dispatch - lane 0 is the general worker-pool lane, and the
+  ready jobs are the same stage batch `streamed_consumer.md` sections 6a/6b measured stopping after the pipeline
+  precompile. No title subsystem call crosses the runtime boundary for either step.
+
+Comparison with the streamed-consumer dead chain: the shape is the same title-side stop, but the mechanism is now named:
+the stage chain's **last dispatched job's claim is held by the scheduler** because its work item never reached a worker;
+it is not a DirectStorage answer, not a GPU completion and not a missing event.
+
+### 13.6 Runtime dependency verdict
+
+Measured: **no runtime answer is missing.** The dispatch, claim, release and post code is title code; the only OS calls
+on the path are the pool's worker wake (`image+0x5930` SetEvent wrapper) and the wait helpers, and no wake is
+outstanding (the rings are empty and the section-12 cdb dump already showed the workers parked with no shim call
+pending). There is no GPU call in the path, no DirectStorage request pending (section 11.5: all completed `S_OK`) and no
+device/queue call the runtime drops or never completes. A runtime change cannot create the missing item or the missing
+release: the item, the claim mask and the counter planes are title memory with no runtime counterpart, and a bare wake
+was already measured to fault (section 4). The section-11.6 falsifier list is therefore answered for this path: the
+scheduler's own claim accounting is the blocker, and the next measurement is a debugger breakpoint on `FUN_144DA40E0`
+to see whether job 97's item ever enters the post call.
+
+### 13.7 Boot numbers
+
+| boot | verdict | d3d12 calls | stage | ready set | aggregate / filter / pending | extra |
+|---|---|---|---|---|---|---|
+| `boot-r1` | ALIVE 130.4 s, 0 exceptions, killed by the 130 s timeout | 237,951 | 2 at 26.0 s, 2/2 to the kill | `83, 88, 91, 92, 152` | 21 ids / 0 / 0 | first ready-set probe: id->job resolution works; holder not analysed yet |
+| `boot-r2` | ALIVE 130.4 s, 0 exceptions | 260,809 | 2 at 18.0 s, 2/2 | `83, 88, 91, 92, 152` | 21 ids / 0 / 0 | claim-mask XOR census: only id 97 matches the aggregate (all other jobs empty or off by >= 1 bit) |
+| `boot-r3` | ALIVE 130.4 s, 0 exceptions | 270,331 | 2 at 22.0 s, 2/2 | `83, 88, 91, 92, 152` | 21 ids / 0 / 0 | holder item `game+0x4EAA040`, 0 children, state 2; lane-0 class-0 ring empty |
+| `boot-r4` | ALIVE 130.4 s, 0 exceptions | 263,704 | 2 at 24.0 s, 2/2 | `83, 88, 91, 92, 152` | 21 ids / 0 / 0 | job context words (stage functions of `83`/`88`); stage-3 request at `0x81B2EF` still never reached |
+
+No frame capture was made in these boots (measurement boots, not a fix A/B pair), so no non-black frame is claimed;
+loader/streaming activity after the stall is the same quiet state `streamed_consumer.md` sections 6a/6b and
+`stage2_blocker.md` section 12 recorded.
+
+### 13.8 Tests and gates (this section)
+
+This section's runtime change is the opt-in `PALMETTO_STAGE2_READY` probe in `port/src/main.cpp`: off by default, no
+thread starts and no title read happens unless the variable names a second.
+
+| gate | result |
+|---|---|
+| `_setup\build_gta6rt.cmd` | `PALMETTO_OK` |
+| `_setup\build_tests.cmd` | `TESTS_BUILT` |
+| slice test | none added: the change is a diagnostic switch on the default path; the defect it measures is title-side and the slice makes no behaviour change to test (section 12's precedent) |
+| test subset (`port/build`) | `frame_dump_test`, `unimplemented_policy_test`, `xbox_present_test`, `xs_proxy_mock_test`, `graphics_record_test`, `graphics_pso_test`, `buffer_va_index_test`, `dstorage_test`, `xapu_chad_test` exit 0; `d3d12_fence_timing_test` exits `0xC0000005`, the same pre-existing failure section 9 records in a tree that carries another slice's in-flight `vulkan_replay.h`/`d3d12_vulkan_device.cpp` changes |
+| docs checks (`tests/test_docs_*.py`, run with the session's `GIT_CONFIG_*` variables cleared) | `test_docs_links`, `_list_items`, `_table_rows`, `_table_ids`, `_repo_paths`, `_encoding`, `_design_rows`, `_repeated_lines`, `_pr_template`, `_python_deps` and `_env_vars` pass; `test_docs_cli_flags` fails on four other slices' untracked rows (`docs/frame_first_light.md:318`, `docs/memory_growth.md:265`, `docs/raster_state.md:212`, `docs/slot70_publication.md:234`), none from this page |
+| default path | `PALMETTO_STAGE2_READY` unset: no probe thread and no extra read |
+
+### 13.9 Limits (this section)
+
+- The ids are job ids in the tracked stage graph; the hashes are the graph's registration keys and the work functions
+  are RVAs. The four ready jobs' subsystem *names* are not recovered (the image carries no symbols for them); they are
+  identified by RVA and by their mode-2 stage-init / registration-fan-out shape, and they sit in the same batch as the
+  loader stages. Job 97 is named by hash and RVA only.
+- The aggregate is read, not traced: the equality of job 97's mask with `+0x11F0` is exact at the sampled instants, and
+  planes 1..6 are zero, so the counters are 1 where set. The claim could have been taken by a dispatch that is not the
+  one that built the item in the same pump, so the post loss is inferred from state 2 + empty rings + held claim, not
+  from a trace of the post call; a cdb breakpoint on `FUN_144DA40E0` is the next falsifier.
+- The per-job mask census covers ids `0..255`; the aggregate's top sampled bit is `239`, so this is the whole ready
+  graph as seen through the id->job table. The tracker job table is a 128-slot hash table (70 used slots in the
+  samples), not the id space.
+- No frame capture: measurement boots, not a fix A/B pair; no non-black frame is claimed. No game data: this section
+  carries RVAs, hashes, field offsets, ids, counts and outcomes only.
+
+### 13.10 Attribution (this section)
+
+Same attribution and policy as section 10: this slice was implemented from this project's own measurements, no upstream
+code or behaviour claim is used, and no git writes were made by this slice.

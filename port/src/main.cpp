@@ -2233,6 +2233,446 @@ void start_stage2_dispatch_probe(std::uintptr_t image_base, std::uintptr_t image
     }).detach();
 }
 
+// ---- Stage-2 ready-set class-lane probe (PALMETTO_STAGE2_READY) -----------------------------------------------
+// Section 12 of docs/stage2_blocker.md measured four job ids ready in the scheduler's ready bitmask that no pump
+// dispatches. This probe resolves each ready id through the queue's id->job table (queue+0x1AB0) and prints the
+// job's class-lane fields (lane +0x73, class +0x74/+0xC8), dependency state (+0xCA..+0xCD, dependents +0x90/+0x98,
+// wait objects +0x72/+0x78), work function (+0x50), executor (+0x68) and the queue's class-lane masks: the
+// bit-sliced accounting at queue+0x310..0x11F0 (see the dispatcher FUN_144E53EF0), the published filter at
+// +0x1410, the pending aggregate +0x1630 that the ready mark FUN_14003F470 builds, and the per-id request mask at
+// queue+0x1AA0 + id*0x220. It also dumps the tracker's registered job table (capacity +0x628, count +0x62C,
+// 16-byte records at +0x630: hash, job pointer) so ids can be named by their work functions. It only reads
+// committed memory and never writes title state; RVAs, ids, field values and counts only, no game data.
+struct Stage2ReadyView {
+    std::uintptr_t queue = 0;
+    std::uintptr_t job_array = 0;
+    std::uintptr_t mask_array = 0;
+    std::uint32_t flags_1850 = 0;
+    std::uint32_t default_class = 0;
+    std::uint32_t ready_capacity = 0;
+    std::uint32_t ready_count = 0;
+    std::uint32_t ready_min = 0;
+    std::uint32_t ready_max = 0;
+    std::uint32_t ready_bits = 0;
+};
+
+Stage2ReadyView stage2_ready_view(std::uintptr_t queue) {
+    Stage2ReadyView view;
+    view.queue = queue;
+    if (queue == 0 || (queue & 7) != 0 || !title_address_readable(queue + 0x1B38)) return view;
+    view.job_array = stage2_read_qword(queue + 0x1AB0);
+    view.mask_array = stage2_read_qword(queue + 0x1AA0);
+    view.flags_1850 = stage2_read_u16(queue + 0x1850);
+    view.default_class = stage2_read_u8(queue + 0x1B38);
+    view.ready_capacity = stage2_read_u32(queue + 0x1860);
+    view.ready_count = stage2_read_u32(queue + 0x1864);
+    view.ready_min = stage2_read_u16(queue + 0x1A90);
+    view.ready_max = stage2_read_u16(queue + 0x1A92);
+    view.ready_bits = stage2_read_u16(queue + 0x1A94);
+    return view;
+}
+
+bool stage2_mask_bit(std::uintptr_t base, std::uint32_t id) {
+    const std::uintptr_t at = base + static_cast<std::uintptr_t>(id >> 6) * 8;
+    return title_address_readable(at) && ((stage2_read_qword(at) >> (id & 0x3F)) & 1) != 0;
+}
+
+// Nonzero qwords of one 0x220-byte mask; enough to compare the published filter against the pending aggregate.
+void stage2_mask_dump(const char* label, std::uintptr_t base, std::uint32_t bytes) {
+    std::string text;
+    unsigned nonzero = 0;
+    for (std::uint32_t off = 0; off + 8 <= bytes; off += 8) {
+        if (!title_address_readable(base + off)) break;
+        const std::uint64_t value = stage2_read_qword(base + off);
+        if (value == 0) continue;
+        ++nonzero;
+        if (nonzero <= 40) {
+            char one[40];
+            std::snprintf(one, sizeof one, " +0x%x=%016llx", off, static_cast<unsigned long long>(value));
+            text += one;
+        }
+    }
+    std::fprintf(stderr, "[rt] stage2 ready mask %s: nz %u%s\n", label, nonzero, text.c_str());
+}
+
+std::string stage2_ready_ids(std::uintptr_t queue) {
+    std::string text;
+    unsigned count = 0;
+    for (std::uint32_t qword = 0; qword < 64; ++qword) {
+        if (!title_address_readable(queue + 0x1870 + qword * 8)) break;
+        std::uint64_t bits = stage2_read_qword(queue + 0x1870 + qword * 8);
+        while (bits) {
+            unsigned long index = 0;
+            _BitScanForward64(&index, bits);
+            bits &= bits - 1;
+            const std::uint32_t id = qword * 64 + index;
+            char one[16];
+            std::snprintf(one, sizeof one, " %u", id);
+            text += one;
+            if (++count >= 64) return text;
+        }
+    }
+    return text;
+}
+
+void stage2_ready_probe_dump(std::uintptr_t image_base, std::uintptr_t image_size, std::uintptr_t tracker,
+                             const char* label, double at_seconds, bool with_table) {
+    const std::uintptr_t queue = stage2_read_qword(tracker + 0xB8);
+    const Stage2ReadyView view = stage2_ready_view(queue);
+    std::fprintf(stderr,
+                 "[rt] stage2 ready %s +%.3f s: tracker 0x%llx queue 0x%llx b0 0x%x b4 0x%x 5e 0x%x 70 0x%x "
+                 "armed 0x%x flags1850 0x%x dfltclass 0x%x jobs 0x%llx masks 0x%llx ready %u/%u bits %u min %u max %u "
+                 "ids%s\n",
+                 label, at_seconds, static_cast<unsigned long long>(tracker),
+                 static_cast<unsigned long long>(queue), stage2_read_u32(tracker + 0xB0),
+                 stage2_read_u32(tracker + 0xB4), stage2_read_u16(tracker + 0x5E), stage2_read_u8(tracker + 0x70),
+                 stage2_read_u32(tracker + 0x608), view.flags_1850, view.default_class,
+                 static_cast<unsigned long long>(view.job_array),
+                 static_cast<unsigned long long>(view.mask_array), view.ready_count, view.ready_capacity,
+                 view.ready_bits, view.ready_min, view.ready_max, stage2_ready_ids(queue).c_str());
+    if (queue == 0 || view.job_array == 0 || (view.job_array & 7) != 0) return;
+    const std::uintptr_t filter = queue + 0x1410;
+    const std::uintptr_t aggregate = queue + 0x11F0;
+    const std::uintptr_t pending = queue + 0x1630;
+    stage2_mask_dump("aggregate(11f0)", aggregate, 0x220);
+    stage2_mask_dump("filter(1410)", filter, 0x220);
+    stage2_mask_dump("pending(1630)", pending, 0x220);
+    for (std::uint32_t lane = 0; lane < 7; ++lane) {
+        char name[32];
+        std::snprintf(name, sizeof name, "plane%u(%x)", lane, 0x310 + lane * 0x220);
+        stage2_mask_dump(name, queue + 0x310 + lane * 0x220, 0x220);
+    }
+    // Resolve the ready ids: bit position -> job pointer -> class-lane fields and the per-id request mask.
+    for (std::uint32_t qword = 0; qword < 64; ++qword) {
+        if (!title_address_readable(queue + 0x1870 + qword * 8)) break;
+        std::uint64_t bits = stage2_read_qword(queue + 0x1870 + qword * 8);
+        while (bits) {
+            unsigned long index = 0;
+            _BitScanForward64(&index, bits);
+            bits &= bits - 1;
+            const std::uint32_t id = qword * 64 + index;
+            const std::uintptr_t slot = view.job_array + static_cast<std::uintptr_t>(id) * 8;
+            if (!title_address_readable(slot)) continue;
+            const std::uintptr_t job = stage2_read_qword(slot);
+            if (job == 0 || (job & 7) != 0 || !title_address_readable(job + 0xF8)) {
+                std::fprintf(stderr, "[rt] stage2 ready id %u: job slot 0x%llx unreadable\n", id,
+                             static_cast<unsigned long long>(job));
+                continue;
+            }
+            auto u8 = [&](std::uint32_t rva) { return static_cast<unsigned>(stage2_read_u8(job + rva)); };
+            auto u16 = [&](std::uint32_t rva) { return static_cast<unsigned>(stage2_read_u16(job + rva)); };
+            auto u32 = [&](std::uint32_t rva) { return static_cast<unsigned long long>(stage2_read_u32(job + rva)); };
+            std::fprintf(stderr,
+                         "[rt] stage2 ready id %u job 0x%llx hash 0x%x jid %u lane %u class %u c8 %u e0 %u "
+                         "e1 %u e2 %u e4 0x%x e8 %s d8 0x%x f0 %d f4 %u f5 %u f7 %u f8 %u "
+                         "ca %u cb %u cc %u cd %u work %s item %s exec %s tracker %s deps %u/%s ctx %s %s %s\n",
+                         id, static_cast<unsigned long long>(job), stage2_read_u32(job + 0xDC),
+                         stage2_read_u16(job + 0xCE), u8(0x73), u8(0x74), u8(0xC8), u8(0xE0), u8(0xE1), u8(0xE2),
+                         u16(0xE4),
+                         stage2_pointer_text(image_base, image_size, stage2_read_qword(job + 0xE8)).c_str(),
+                         u32(0xD8), static_cast<int>(stage2_read_u32(job + 0xF0)), u8(0xF4), u8(0xF5), u8(0xF7),
+                         u8(0xF8), u8(0xCA), u8(0xCB), u8(0xCC), u8(0xCD),
+                         stage2_pointer_text(image_base, image_size, stage2_read_qword(job + 0x50)).c_str(),
+                         stage2_pointer_text(image_base, image_size, job + 0x68).c_str(),
+                         stage2_pointer_text(image_base, image_size, stage2_read_qword(job + 0x68)).c_str(),
+                         stage2_pointer_text(image_base, image_size, stage2_read_qword(job + 0x80)).c_str(),
+                         u16(0x98),
+                         stage2_pointer_text(image_base, image_size, stage2_read_qword(job + 0x90)).c_str(),
+                         stage2_pointer_text(image_base, image_size, stage2_read_qword(job)).c_str(),
+                         stage2_pointer_text(image_base, image_size, stage2_read_qword(job + 8)).c_str(),
+                         stage2_pointer_text(image_base, image_size, stage2_read_qword(job + 0x10)).c_str());
+            std::fprintf(stderr,
+                         "[rt] stage2 ready id %u bits: ready %u filter %u aggregate %u pending %u plane0 %u "
+                         "plane1 %u plane2 %u plane3 %u plane4 %u plane5 %u plane6 %u\n",
+                         id, stage2_mask_bit(queue + 0x1870, id), stage2_mask_bit(filter, id),
+                         stage2_mask_bit(aggregate, id), stage2_mask_bit(pending, id),
+                         stage2_mask_bit(queue + 0x310, id), stage2_mask_bit(queue + 0x530, id),
+                         stage2_mask_bit(queue + 0x750, id), stage2_mask_bit(queue + 0x970, id),
+                         stage2_mask_bit(queue + 0xB90, id), stage2_mask_bit(queue + 0xDB0, id),
+                         stage2_mask_bit(queue + 0xFD0, id));
+            // The id's own request mask (what the dispatcher would subtract from the lane counters when it runs).
+            if (view.mask_array != 0 && (view.mask_array & 7) == 0) {
+                const std::uintptr_t block =
+                    view.mask_array + static_cast<std::uintptr_t>(id) * 0x220;
+                if (title_address_readable(block + 0x21F)) stage2_mask_dump("id_mask", block, 0x220);
+                else std::fprintf(stderr, "[rt] stage2 ready id %u: request mask unreadable at 0x%llx\n", id,
+                                  static_cast<unsigned long long>(block));
+            }
+            // Dependent jobs and wait objects, by id, so the ready set's own graph is visible.
+            const std::uint32_t dependents = u16(0x98);
+            const std::uintptr_t dependents_array = stage2_read_qword(job + 0x90);
+            std::string ids;
+            for (std::uint32_t i = 0; i < dependents && i < 32; ++i) {
+                const std::uintptr_t at_ptr = dependents_array + static_cast<std::uintptr_t>(i) * 8;
+                if (dependents_array == 0 || !title_address_readable(at_ptr)) break;
+                const std::uintptr_t dependent = stage2_read_qword(at_ptr);
+                if (dependent == 0 || (dependent & 7) != 0 || !title_address_readable(dependent + 0xCE)) continue;
+                char one[64];
+                std::snprintf(one, sizeof one, " %u(lane%u,e0%u)", stage2_read_u16(dependent + 0xCE),
+                              static_cast<unsigned>(stage2_read_u8(dependent + 0x73)),
+                              static_cast<unsigned>(stage2_read_u8(dependent + 0xE0)));
+                ids += one;
+            }
+            const std::uint32_t wait_objects = u8(0x72);
+            const std::uintptr_t wait_array = stage2_read_qword(job + 0x78);
+            std::string waits;
+            for (std::uint32_t i = 0; i < wait_objects && i < 8; ++i) {
+                const std::uintptr_t at_ptr = wait_array + static_cast<std::uintptr_t>(i) * 8;
+                if (wait_array == 0 || !title_address_readable(at_ptr)) break;
+                const std::uintptr_t object = stage2_read_qword(at_ptr);
+                if (object == 0 || !title_address_readable(object + 0x10)) continue;
+                char one[64];
+                std::snprintf(one, sizeof one, " 0x%llx(+8 %u)", static_cast<unsigned long long>(object),
+                              static_cast<unsigned>(stage2_read_u16(object + 8)));
+                waits += one;
+            }
+            std::fprintf(stderr, "[rt] stage2 ready id %u graph: dependents %u%s waitobjs %u%s\n", id, dependents,
+                         ids.c_str(), wait_objects, waits.c_str());
+        }
+    }
+    // The registered job table: hash and pointer per slot. The hash names the factory definition; the work
+    // function names the subsystem.
+    if (!with_table) return;
+    // Which job's claim mask accounts for the aggregate? If exactly one job's mask equals the aggregate, that job was
+    // dispatched but its claim was never released (FUN_144E53AD0 runs only at the start of the next run item). Dump
+    // the holder's work-item header and children, and the class-lane task streams (the pool the pump posts to:
+    // stream object at image+0x71BFD00 + lane*0x40, ring queue pointer at +8, wake counters at +0x14/+0x1C, the
+    // queue's class ring at queue + class*0x6008 with 0x800 slots and 16-byte payloads from +0x4010) so a lost item
+    // is visible as an occupied ring slot.
+    if (view.mask_array != 0 && (view.mask_array & 7) == 0) {
+        constexpr std::uint32_t kMaskBytes = 0x220;
+        for (std::uint32_t id = 0; id < 256; ++id) {
+            const std::uintptr_t block = view.mask_array + static_cast<std::uintptr_t>(id) * kMaskBytes;
+            if (!title_address_readable(block + kMaskBytes - 1)) continue;
+            bool equal = true, any = false;
+            for (std::uint32_t off = 0; off + 8 <= kMaskBytes && equal; off += 8) {
+                const std::uint64_t mine = stage2_read_qword(block + off);
+                if (mine != 0) any = true;
+                if (mine != stage2_read_qword(queue + 0x11F0 + off)) equal = false;
+            }
+            if (!equal || !any) continue;
+            const std::uintptr_t holder = stage2_read_qword(view.job_array + static_cast<std::uintptr_t>(id) * 8);
+            if (holder == 0 || !title_address_readable(holder + 0xF8)) continue;
+            const std::uintptr_t item = holder + 0x68;
+            const std::uint32_t children = stage2_read_u8(item + 0xA);
+            std::fprintf(stderr,
+                         "[rt] stage2 ready holder id %u job 0x%llx hash 0x%x item exec %s flags8 %u children %u "
+                         "lane %u class %u weight %u e0 %u f0 %d\n",
+                         id, static_cast<unsigned long long>(holder), stage2_read_u32(holder + 0xDC),
+                         stage2_pointer_text(image_base, image_size, stage2_read_qword(item)).c_str(),
+                         static_cast<unsigned>(stage2_read_u16(item + 8)), children,
+                         static_cast<unsigned>(stage2_read_u8(item + 0xB)),
+                         static_cast<unsigned>(stage2_read_u8(item + 0xC)),
+                         static_cast<unsigned>(stage2_read_u8(item + 0xD)),
+                         static_cast<unsigned>(stage2_read_u8(holder + 0xE0)),
+                         static_cast<int>(stage2_read_u32(holder + 0xF0)));
+            std::string kid_text;
+            for (std::uint32_t i = 0; i < children && i < 32; ++i) {
+                const std::uintptr_t child = stage2_read_qword(item + 0x10 + static_cast<std::uintptr_t>(i) * 8);
+                if (child == 0 || !title_address_readable(child + 0x10)) continue;
+                const std::uintptr_t child_job = child - 0x68;
+                char one[96];
+                if (child_job > 0x1000 && title_address_readable(child_job + 0xE8))
+                    std::snprintf(one, sizeof one, " %u(lane%u,class%u,ref%u,weight%u)", stage2_read_u16(child_job + 0xCE),
+                                  static_cast<unsigned>(stage2_read_u8(child + 0xB)),
+                                  static_cast<unsigned>(stage2_read_u8(child + 0xC)),
+                                  static_cast<unsigned>(stage2_read_u16(child + 8)),
+                                  static_cast<unsigned>(stage2_read_u8(child + 0xD)));
+                else
+                    std::snprintf(one, sizeof one, " 0x%llx", static_cast<unsigned long long>(child));
+                kid_text += one;
+            }
+            std::fprintf(stderr, "[rt] stage2 ready holder id %u children:%s\n", id, kid_text.c_str());
+        }
+        for (std::uint32_t lane = 0; lane < 7; ++lane) {
+            const std::uintptr_t stream = image_base + 0x71BFD00 + static_cast<std::uintptr_t>(lane) * 0x40;
+            if (!title_address_readable(stream + 0x30)) break;
+            const std::uintptr_t ring = stage2_read_qword(stream + 8);
+            std::fprintf(stderr,
+                         "[rt] stage2 ready pool lane %u: stream 0x%llx ring 0x%llx counts %u/%u/%u/%u pool 0x%llx "
+                         "workers %u\n",
+                         lane, static_cast<unsigned long long>(stream), static_cast<unsigned long long>(ring),
+                         stage2_read_u32(stream + 0x10), stage2_read_u32(stream + 0x14),
+                         stage2_read_u32(stream + 0x18), stage2_read_u32(stream + 0x1C),
+                         static_cast<unsigned long long>(stage2_read_qword(stream + 0x28)),
+                         ring ? stage2_read_u32(ring + 0x18) : 0);
+            if (ring == 0 || (ring & 7) != 0 || !title_address_readable(ring + 0x18)) continue;
+            std::string classes;
+            for (std::uint32_t cls = 0; cls < 8; ++cls) {
+                const std::uintptr_t sub = ring + static_cast<std::uintptr_t>(cls) * 0x6008;
+                if (!title_address_readable(sub + 0x4010)) break;
+                const std::uint32_t head = stage2_read_u32(sub);
+                const std::uint32_t slot =
+                    stage2_read_u32(sub + 8 + static_cast<std::uintptr_t>(head & 0x7FF) * 4);
+                const bool empty = slot == head;
+                char one[96];
+                std::snprintf(one, sizeof one, " c%u head %u %s", cls, head, empty ? "empty" : "BUSY");
+                classes += one;
+                if (!empty) {
+                    for (std::uint32_t back = 1; back <= 4; ++back) {
+                        const std::uint32_t index = (head - back) & 0x7FF;
+                        const std::uintptr_t payload =
+                            sub + 0x4010 + static_cast<std::uintptr_t>(index) * 16;
+                        if (!title_address_readable(payload + 8)) break;
+                        const std::uintptr_t queued = stage2_read_qword(payload);
+                        if (queued == 0 || !title_address_readable(queued + 0x10)) continue;
+                        const std::uintptr_t queued_job = queued - 0x68;
+                        if (queued_job > 0x1000 && title_address_readable(queued_job + 0xE8))
+                            std::snprintf(one, sizeof one, " item id %u lane %u class %u weight %u",
+                                          stage2_read_u16(queued_job + 0xCE), static_cast<unsigned>(stage2_read_u8(queued + 0xB)),
+                                          static_cast<unsigned>(stage2_read_u8(queued + 0xC)),
+                                          static_cast<unsigned>(stage2_read_u8(queued + 0xD)));
+                        else
+                            std::snprintf(one, sizeof one, " item 0x%llx", static_cast<unsigned long long>(queued));
+                        classes += one;
+                    }
+                }
+            }
+            std::fprintf(stderr, "[rt] stage2 ready pool lane %u classes:%s\n", lane, classes.c_str());
+        }
+    }
+    // Print every job's mask bit count and its XOR difference against the aggregate: the closest job is the holder.
+    if (view.mask_array != 0 && (view.mask_array & 7) == 0 && view.job_array != 0) {
+        constexpr std::uint32_t kMaskBytes = 0x220;
+        auto mask_count = [](std::uintptr_t base) {
+            unsigned bits = 0;
+            for (std::uint32_t off = 0; off + 8 <= kMaskBytes; off += 8) {
+                if (!title_address_readable(base + off)) break;
+                std::uint64_t value = stage2_read_qword(base + off);
+                while (value) {
+                    value &= value - 1;
+                    ++bits;
+                }
+            }
+            return bits;
+        };
+        for (std::uint32_t id = 0; id < 256; ++id) {
+            const std::uintptr_t slot = view.job_array + static_cast<std::uintptr_t>(id) * 8;
+            if (!title_address_readable(slot)) break;
+            const std::uintptr_t job = stage2_read_qword(slot);
+            if (job == 0 || (job & 7) != 0 || !title_address_readable(job + 0xF8)) continue;
+            const std::uintptr_t block = view.mask_array + static_cast<std::uintptr_t>(id) * kMaskBytes;
+            unsigned over = 0, under = 0;
+            std::string diff;
+            if (title_address_readable(block + kMaskBytes - 1)) {
+                for (std::uint32_t off = 0; off + 8 <= kMaskBytes; off += 8) {
+                    const std::uint64_t mine = stage2_read_qword(block + off);
+                    const std::uint64_t aggr = stage2_read_qword(queue + 0x11F0 + off);
+                    std::uint64_t extra = mine & ~aggr;
+                    std::uint64_t missing = aggr & ~mine;
+                    while (extra) {
+                        unsigned long bit = 0;
+                        _BitScanForward64(&bit, extra);
+                        extra &= extra - 1;
+                        if (++over <= 24) {
+                            char one[16];
+                            std::snprintf(one, sizeof one, " +%u", off * 8 + bit);
+                            diff += one;
+                        }
+                    }
+                    while (missing) {
+                        unsigned long bit = 0;
+                        _BitScanForward64(&bit, missing);
+                        missing &= missing - 1;
+                        ++under;
+                    }
+                }
+            }
+            std::fprintf(stderr,
+                         "[rt] stage2 ready cand id %u job 0x%llx hash 0x%x lane %u class %u e0 %u f0 %d "
+                         "f4 %u f5 %u f7 %u f8 %u maskbits %u xorAggr over %u under %u%s work %s\n",
+                         id, static_cast<unsigned long long>(job), stage2_read_u32(job + 0xDC),
+                         static_cast<unsigned>(stage2_read_u8(job + 0x73)),
+                         static_cast<unsigned>(stage2_read_u8(job + 0x74)),
+                         static_cast<unsigned>(stage2_read_u8(job + 0xE0)),
+                         static_cast<int>(stage2_read_u32(job + 0xF0)),
+                         static_cast<unsigned>(stage2_read_u8(job + 0xF4)),
+                         static_cast<unsigned>(stage2_read_u8(job + 0xF5)),
+                         static_cast<unsigned>(stage2_read_u8(job + 0xF7)),
+                         static_cast<unsigned>(stage2_read_u8(job + 0xF8)),
+                         mask_count(block), over, under, diff.c_str(),
+                         stage2_pointer_text(image_base, image_size, stage2_read_qword(job + 0x50)).c_str());
+        }
+    }
+    const std::uint32_t capacity = stage2_read_u32(tracker + kTitleStage2TrackerJobTableCapacity);
+    const std::uint32_t count = stage2_read_u32(tracker + kTitleStage2TrackerJobTableCount);
+    const std::uintptr_t records = stage2_read_qword(tracker + kTitleStage2TrackerJobTable);
+    std::fprintf(stderr, "[rt] stage2 ready table: cap %u count %u records 0x%llx\n", capacity, count,
+                 static_cast<unsigned long long>(records));
+    if (records == 0 || capacity > 1024 || !title_address_readable(records)) return;
+    for (std::uint32_t i = 0; i < capacity; ++i) {
+        const std::uintptr_t record = records + static_cast<std::uintptr_t>(i) * 16;
+        if (!title_address_readable(record + 8)) break;
+        const std::uint32_t hash = stage2_read_u32(record);
+        const std::uintptr_t job = stage2_read_qword(record + 8);
+        if (hash == 0 || job == 0 || (job & 7) != 0 || !title_address_readable(job + 0xF8)) continue;
+        const std::uint32_t id = stage2_read_u16(job + 0xCE);
+        std::fprintf(stderr,
+                     "[rt] stage2 ready rec %u hash 0x%x job 0x%llx id %u lane %u class %u c8 %u e0 %u f0 %d "
+                     "f8 %u ready %u work %s\n",
+                     i, hash, static_cast<unsigned long long>(job), id,
+                     static_cast<unsigned>(stage2_read_u8(job + 0x73)),
+                     static_cast<unsigned>(stage2_read_u8(job + 0x74)),
+                     static_cast<unsigned>(stage2_read_u8(job + 0xC8)),
+                     static_cast<unsigned>(stage2_read_u8(job + 0xE0)),
+                     static_cast<int>(stage2_read_u32(job + 0xF0)),
+                     static_cast<unsigned>(stage2_read_u8(job + 0xF8)), stage2_mask_bit(queue + 0x1870, id),
+                     stage2_pointer_text(image_base, image_size, stage2_read_qword(job + 0x50)).c_str());
+    }
+}
+
+// Starts the ready-set class-lane probe when PALMETTO_STAGE2_READY names a start second. Detached; off when unset.
+void start_stage2_ready_probe(std::uintptr_t image_base, std::uintptr_t image_size, double at_seconds) {
+    std::thread([image_base, image_size, at_seconds] {
+        const auto started = sampler_epoch();
+        auto elapsed = [&] {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        };
+        std::this_thread::sleep_until(started +
+                                      std::chrono::milliseconds(static_cast<long long>(at_seconds * 1000.0)));
+        std::uintptr_t tracker = 0;
+        bool found = false;
+        for (int poll = 0; poll < 120000; ++poll) {
+            if (title_read_pointer_at(image_base + kTitleStage2TrackerRva, tracker) && tracker != 0 &&
+                (tracker & 7) == 0) {
+                found = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (!found) {
+            std::fprintf(stderr, "[rt] stage2 ready: no tracker within 120 s of %.1f s\n", at_seconds);
+            return;
+        }
+        // Section 12's steady state is reached after the dispatch burst and the section-2.1 wait: wait for the armed
+        // dword to turn into 0x80000001, then sample the ready set immediately and twice more while it is frozen.
+        bool wait_seen = false;
+        for (int poll = 0; poll < 180000; ++poll) {
+            if (!title_address_readable(tracker + 0x608)) break;
+            const std::uint32_t armed = stage2_read_u32(tracker + 0x608);
+            if (armed == 0x80000001 || armed == 0x80000000) {
+                wait_seen = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (!wait_seen)
+            std::fprintf(stderr, "[rt] stage2 ready: the wait state was not seen; sampling anyway at %.3f s\n",
+                         elapsed());
+        stage2_ready_probe_dump(image_base, image_size, tracker, "wait", elapsed(), false);
+        std::this_thread::sleep_for(std::chrono::seconds(6));
+        if (title_address_readable(tracker + 0xB8)) {
+            stage2_ready_probe_dump(image_base, image_size, tracker, "steady", elapsed(), true);
+            std::fprintf(stderr, "[rt] stage2 ready: census %s\n", stage2_job_census(tracker).c_str());
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(12));
+        if (title_address_readable(tracker + 0xB8)) {
+            stage2_ready_probe_dump(image_base, image_size, tracker, "steady2", elapsed(), false);
+            std::fprintf(stderr, "[rt] stage2 ready: census %s\n", stage2_job_census(tracker).c_str());
+        }
+    }).detach();
+}
+
 // Starts the sampler thread named by PALMETTO_STATE_TRACE ("<interval>[,<seconds>]"; "1" means 2 s to process end).
 // Detached: it ends with the process. Off when the variable is unset, so the default path is unchanged.
 void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_size, const char* spec) {
@@ -2744,6 +3184,16 @@ int wmain(int argc, wchar_t** argv) {
             if (at_seconds >= 0.0)
                 start_stage2_dispatch_probe(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size,
                                             at_seconds);
+        }
+        // PALMETTO_STAGE2_READY=<seconds>: resolve the ready-set job ids through the queue's id->job table to their
+        // class lane, class, dependency graph, work function and per-id request mask, dump the queue's class-lane
+        // masks and the tracker's registered job table once at the named second and again 8 s later (diagnostic; see
+        // the ready-set probe above). Off when unset.
+        if (const char* spec = std::getenv("PALMETTO_STAGE2_READY"); spec && *spec) {
+            const double at_seconds = std::strtod(spec, nullptr);
+            if (at_seconds >= 0.0)
+                start_stage2_ready_probe(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size,
+                                         at_seconds);
         }
         // PALMETTO_LOADER_HOOK=1: inline entry detours on the loader begin/end/re-init, with per-call records
         // (diagnostic; see the loader entry detours above). Off by default.
