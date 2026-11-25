@@ -17,6 +17,8 @@
 // slot; those still log once when called.
 #include <windows.h>
 
+#include <intrin.h>
+
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -26,10 +28,13 @@
 #include <mutex>
 #include <set>
 #include <unordered_set>
+#include <vector>
 
 #include <XAsync.h>
 #include <XAsyncProvider.h>
 #include <XTaskQueue.h>
+
+#include "platform_trace.h"
 
 namespace {
 
@@ -407,6 +412,147 @@ HRESULT STDMETHODCALLTYPE user_get_gamertag(void*, XUserHandle user, XUserGamert
     return S_OK;
 }
 
+// ---- PALMETTO_USER_TRACE: per-slot trace ----
+//
+// The permanent vtable entries stay what they are; with PALMETTO_USER_TRACE=1 the vtable of the traced build's user
+// object points at these one-line wrappers instead. Each wrapper captures the title's return address (the thunk for
+// that function), calls the real slot, and hands its value to the bounded trace: first call and every tenth-power
+// call, with the caller as module+RVA. This is the measurement of what the loading loop polls: which XUser* function
+// it calls continuously and what the shim answers. Off by default, and it never changes an answer.
+//
+// The wrapped slots are exactly the IXUserImpl/IXUserGamertagImpl slots the retail executable links thunks for
+// (tooling/gdk_runtime_calls.py: IXUserImpl 3-5, 7-14, 19-25, 33-34 and IXUserGamertagImpl 3).
+HRESULT STDMETHODCALLTYPE trace_user_duplicate(void* self, XUserHandle handle, XUserHandle* dup) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = user_duplicate(self, handle, dup);
+    rt::shims::platform_trace("XUserDuplicateHandle", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+void STDMETHODCALLTYPE trace_user_close(void* self, XUserHandle user) {
+    void* const caller = _ReturnAddress();
+    user_close(self, user);
+    rt::shims::platform_trace("XUserCloseHandle", caller, 0);
+}
+int32_t STDMETHODCALLTYPE trace_user_compare(void* self, XUserHandle a, XUserHandle b) {
+    void* const caller = _ReturnAddress();
+    const int32_t result = user_compare(self, a, b);
+    rt::shims::platform_trace("XUserCompare", caller, static_cast<std::uint64_t>(static_cast<int64_t>(result)));
+    return result;
+}
+HRESULT STDMETHODCALLTYPE trace_user_add_async(void* self, XUserAddOptions options, XAsyncBlock* async) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = user_add_async(self, options, async);
+    rt::shims::platform_trace("XUserAddAsync", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE trace_user_add_result(void* self, XAsyncBlock* async, XUserHandle* user) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = user_add_result(self, async, user);
+    rt::shims::platform_trace("XUserAddResult", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE trace_user_get_local_id(void* self, XUserHandle user, XUserLocalId* id) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = user_get_local_id(self, user, id);
+    rt::shims::platform_trace("XUserGetLocalId", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE trace_user_find_by_local_id(void* self, XUserLocalId id, XUserHandle* handle) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = user_find_by_local_id(self, id, handle);
+    rt::shims::platform_trace("XUserFindUserByLocalId", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE trace_user_get_id(void* self, XUserHandle user, uint64_t* id) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = user_get_id(self, user, id);
+    rt::shims::platform_trace("XUserGetId", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE trace_user_find_by_id(void* self, uint64_t id, XUserHandle* handle) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = user_find_by_id(self, id, handle);
+    rt::shims::platform_trace("XUserFindUserById", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE trace_user_get_is_guest(void* self, XUserHandle user, bool* guest) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = user_get_is_guest(self, user, guest);
+    rt::shims::platform_trace("XUserGetIsGuest", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE trace_user_get_state(void* self, XUserHandle user, XUserState* state) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = user_get_state(self, user, state);
+    rt::shims::platform_trace("XUserGetState", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE trace_user_get_age_group(void* self, XUserHandle user, XUserAgeGroup* group) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = user_get_age_group(self, user, group);
+    rt::shims::platform_trace("XUserGetAgeGroup", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE trace_user_check_privilege(void* self, XUserHandle user, uint32_t options, uint32_t privilege,
+                                                     bool* has, XUserPrivilegeDenyReason* reason) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = user_check_privilege(self, user, options, privilege, has, reason);
+    rt::shims::platform_trace("XUserCheckPrivilege", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE trace_user_resolve_privilege_async(void* self, XUserHandle user, uint32_t options,
+                                                             uint32_t privilege, XAsyncBlock* async) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = user_resolve_privilege_async(self, user, options, privilege, async);
+    rt::shims::platform_trace("XUserResolvePrivilegeWithUiAsync", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE trace_user_resolve_privilege_result(void* self, XAsyncBlock* async) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = user_resolve_privilege_result(self, async);
+    rt::shims::platform_trace("XUserResolvePrivilegeWithUiResult", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE trace_user_get_token(void* self) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = offline_failure<23, E_GAMEUSER_FAILED_TO_GET_TOKEN>(self);
+    rt::shims::platform_trace("XUserGetTokenAndSignatureAsync", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE trace_user_get_token_size(void* self) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = offline_failure<24, E_GAMEUSER_FAILED_TO_GET_TOKEN>(self);
+    rt::shims::platform_trace("XUserGetTokenAndSignatureResultSize", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE trace_user_get_token_result(void* self) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = offline_failure<25, E_GAMEUSER_FAILED_TO_GET_TOKEN>(self);
+    rt::shims::platform_trace("XUserGetTokenAndSignatureResult", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE trace_user_register_change(void* self, XTaskQueueHandle queue, void* context,
+                                                     XUserChangeEventCallback callback,
+                                                     XTaskQueueRegistrationToken* token) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = user_register_change(self, queue, context, callback, token);
+    rt::shims::platform_trace("XUserRegisterForChangeEvent", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+bool STDMETHODCALLTYPE trace_user_unregister_change(void* self, XTaskQueueRegistrationToken token, bool wait) {
+    void* const caller = _ReturnAddress();
+    const bool done = user_unregister_change(self, token, wait);
+    rt::shims::platform_trace("XUserUnregisterForChangeEvent", caller, done ? 1 : 0);
+    return done;
+}
+HRESULT STDMETHODCALLTYPE trace_user_get_gamertag(void* self, XUserHandle user, XUserGamertagComponent component,
+                                                  size_t size, char* out, size_t* used) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = user_get_gamertag(self, user, component, size, out, used);
+    rt::shims::platform_trace("XUserGetGamertag", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+
 // ---- The object: one vtable for the IXUserImpl..IXUserImpl6 chain, one for IXUserGamertagImpl ----
 
 constexpr GUID kUserClass = {0x01acd177, 0x91f9, 0x4763, {0xa3, 0x8e, 0xcc, 0xbb, 0x55, 0xce, 0x32, 0xe0}};
@@ -515,8 +661,54 @@ const void* const kGamertagVtable[] = {
 
 #undef FN
 
+// The traced face of the same vtables, for PALMETTO_USER_TRACE: a copy of the permanent vtable with only the slots the
+// executable imports replaced by their wrapper (the wrappers above). The object picks one face once, when it is first
+// asked for, so with the switch unset the object is the untouched vtable - the default path changes nothing at all.
+const void* const* traced_user_vtable() {
+    static const std::vector<const void*> table = [] {
+        std::vector<const void*> t(std::begin(kUserVtable), std::end(kUserVtable));
+        t[3] = reinterpret_cast<const void*>(&trace_user_duplicate);
+        t[4] = reinterpret_cast<const void*>(&trace_user_close);
+        t[5] = reinterpret_cast<const void*>(&trace_user_compare);
+        t[7] = reinterpret_cast<const void*>(&trace_user_add_async);
+        t[8] = reinterpret_cast<const void*>(&trace_user_add_result);
+        t[9] = reinterpret_cast<const void*>(&trace_user_get_local_id);
+        t[10] = reinterpret_cast<const void*>(&trace_user_find_by_local_id);
+        t[11] = reinterpret_cast<const void*>(&trace_user_get_id);
+        t[12] = reinterpret_cast<const void*>(&trace_user_find_by_id);
+        t[13] = reinterpret_cast<const void*>(&trace_user_get_is_guest);
+        t[14] = reinterpret_cast<const void*>(&trace_user_get_state);
+        t[19] = reinterpret_cast<const void*>(&trace_user_get_age_group);
+        t[20] = reinterpret_cast<const void*>(&trace_user_check_privilege);
+        t[21] = reinterpret_cast<const void*>(&trace_user_resolve_privilege_async);
+        t[22] = reinterpret_cast<const void*>(&trace_user_resolve_privilege_result);
+        t[23] = reinterpret_cast<const void*>(&trace_user_get_token);
+        t[24] = reinterpret_cast<const void*>(&trace_user_get_token_size);
+        t[25] = reinterpret_cast<const void*>(&trace_user_get_token_result);
+        t[33] = reinterpret_cast<const void*>(&trace_user_register_change);
+        t[34] = reinterpret_cast<const void*>(&trace_user_unregister_change);
+        return t;
+    }();
+    return table.data();
+}
+const void* const* traced_gamertag_vtable() {
+    static const std::vector<const void*> table = [] {
+        std::vector<const void*> t(std::begin(kGamertagVtable), std::end(kGamertagVtable));
+        t[3] = reinterpret_cast<const void*>(&trace_user_get_gamertag);
+        return t;
+    }();
+    return table.data();
+}
+
 UserObject* user_object() {
-    static UserObject o{kUserVtable, kGamertagVtable};
+    static UserObject o = [] {
+        UserObject object{kUserVtable, kGamertagVtable};
+        if (rt::shims::platform_trace_enabled()) {
+            object.vtable = traced_user_vtable();
+            object.gamertag_vtable = traced_gamertag_vtable();
+        }
+        return object;
+    }();
     return &o;
 }
 

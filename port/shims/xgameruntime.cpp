@@ -13,6 +13,8 @@
 // occurs in the image as a UTF-16 string, which would be a run-time load.
 #include <windows.h>
 
+#include <intrin.h>
+
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -35,6 +37,7 @@
 #include <XTaskQueue.h>
 
 #include "file_system.h"
+#include "platform_trace.h"
 #include "shims.h"
 
 namespace rt::shims {
@@ -623,12 +626,45 @@ bool class_served(const GUID& class_id) {
     return true;
 }
 
+// A class id's name for the PALMETTO_USER_TRACE line below (defined with the class ids further down).
+const char* class_name(const GUID& class_id);
+
+// PALMETTO_USER_TRACE: one line per QueryApiImpl entry point (first call, then every tenth-power call), naming the
+// class it was asked for, the interface id, and the HRESULT answered. This is how a title that polls a platform
+// service shows up: a class requested continuously whose answer never changes (e.g. E_NOINTERFACE for an interface
+// version the shim does not serve, or E_NOTIMPL from a slot). Off by default.
+void trace_query(const GUID* class_id, REFIID interface_id, void* caller, HRESULT hr) {
+    if (!class_id || !rt::shims::platform_trace_enabled()) return;
+    // One counter per (class, interface): the key hashes both ids, so a later interface version of the same class
+    // counts on its own line instead of hiding inside the class id's count.
+    std::uint64_t key = 1469598103934665603ull;   // FNV-1a over the two 16-byte ids
+    for (const auto* bytes = reinterpret_cast<const unsigned char*>(class_id); bytes != reinterpret_cast<const unsigned char*>(class_id) + sizeof(GUID); ++bytes)
+        key = (key ^ *bytes) * 1099511628211ull;
+    for (const auto* bytes = reinterpret_cast<const unsigned char*>(&interface_id); bytes != reinterpret_cast<const unsigned char*>(&interface_id) + sizeof(GUID); ++bytes)
+        key = (key ^ *bytes) * 1099511628211ull;
+    const std::uint64_t n = rt::shims::platform_trace_tick(key);
+    if (!n) return;
+    char cls[40], iid[40], what[96];
+    print_guid(cls, class_id);
+    print_guid(iid, &interface_id);
+    const char* name = class_name(*class_id);
+    if (name)
+        std::snprintf(what, sizeof what, "QueryApiImpl %s iid %s", name, iid);
+    else
+        std::snprintf(what, sizeof what, "QueryApiImpl class %s iid %s", cls, iid);
+    rt::shims::platform_trace_emit(what, n, caller, static_cast<std::uint64_t>(hr));
+}
+
 HRESULT WINAPI QueryApiImpl(const GUID* class_id, REFIID interface_id, void** out) {
     if (out) *out = nullptr;
     if (class_id && out) {
         HRESULT hr = S_OK;
-        if (query_served(*class_id, interface_id, out, &hr)) return hr;
+        if (query_served(*class_id, interface_id, out, &hr)) {
+            trace_query(class_id, interface_id, _ReturnAddress(), hr);
+            return hr;
+        }
     }
+    trace_query(class_id, interface_id, _ReturnAddress(), kClassNotProvided);
     char cls[40], iid[40];
     print_guid(cls, class_id);
     print_guid(iid, &interface_id);
@@ -1000,18 +1036,244 @@ constexpr GUID kPackageClass = {0xaf406016, 0xe850, 0x4aa8, {0xa8, 0x8d, 0x2f, 0
 constexpr GUID kPackage1 = {0x3720de07, 0xe8e4, 0x44a3, {0xad, 0x32, 0xb3, 0x59, 0xe8, 0xad, 0xbe, 0x55}};
 constexpr GUID kPackage2 = {0xf92d8712, 0x2b27, 0x4d8a, {0xbf, 0x01, 0x11, 0xa6, 0xf8, 0xe3, 0xeb, 0x42}};
 constexpr GUID kPackage3 = {0xe2a4734b, 0x2f4a, 0x456d, {0xaa, 0x8f, 0xd0, 0x65, 0xe0, 0x4f, 0xb2, 0x09}};
-const GUID* const kPackageIids[] = {&kPackage1, &kPackage2, &kPackage3, nullptr};
+// IXPackageImpl4 : IXPackageImpl3 adds one method, XPackageGetPackageKind, at slot 41 (xgameruntime-docs' layout;
+// tooling/gdk_runtime_classes.json). The retail executable's XPackage thunks were linked against this version and ask
+// QueryApiImpl for this id (tooling/gdk_runtime_calls.py: "interface IXPackageImpl4 ... slots 3-7, 9, 12, 14, 16-19,
+// 25-26, 34, 37-39"). Its calls are all at slot 40 or below, where v4's layout is v3's, so answering this id hands out
+// the same 41-entry vtable. Derived-interface compatibility: a caller asking for v4 may call v4's one added slot, which
+// this vtable does not have - it stays refused by the switch's default OFF; enabled, only the slots above exist.
+//
+// PALMETTO_PACKAGE_V4=1 accepts IXPackageImpl4's id (OFF by default, so the default answer is byte-identical: an
+// E_NOINTERFACE for that id). Measured on the retail boot: without it, a title that uses XPackage cannot call any of
+// its functions (docs/loading_gate.md).
+constexpr GUID kPackage4 = {0x0b9d556e, 0xab70, 0x43f4, {0xba, 0xa0, 0x99, 0x99, 0xac, 0x4c, 0xb0, 0x40}};
+std::atomic<int> g_package_v4_override{-1};   // test seam: -1 follows the environment, 0/1 force OFF/ON
+bool package_interface4_enabled() {
+    const int forced = g_package_v4_override.load();
+    if (forced >= 0) return forced != 0;
+    char value[8] = {};
+    const DWORD n = GetEnvironmentVariableA("PALMETTO_PACKAGE_V4", value, sizeof value);
+    return n > 0 && n < sizeof value && std::strcmp(value, "0") != 0 && _stricmp(value, "off") != 0;
+}
+const GUID* const* package_interface_ids() {
+    static const GUID* const kWithout[] = {&kPackage1, &kPackage2, &kPackage3, nullptr};
+    static const GUID* const kWith[] = {&kPackage1, &kPackage2, &kPackage3, &kPackage4, nullptr};
+    return package_interface4_enabled() ? kWith : kWithout;
+}
+
+// PALMETTO_PACKAGE_READY=1: answer the two package-readiness calls the loading stage makes on a console whose package
+// is installed, instead of the default E_NOTIMPL (docs/loading_gate.md). It only matters together with
+// PALMETTO_PACKAGE_V4, because without that id the title cannot reach an XPackage slot at all. Off by default, and the
+// default answer is unchanged: E_NOTIMPL, with the same one-time log as the generic stub.
+std::atomic<int> g_package_ready_override{-1};   // test seam: -1 follows the environment, 0/1 force OFF/ON
+bool package_ready_enabled() {
+    const int forced = g_package_ready_override.load();
+    if (forced >= 0) return forced != 0;
+    char value[8] = {};
+    const DWORD n = GetEnvironmentVariableA("PALMETTO_PACKAGE_READY", value, sizeof value);
+    return n > 0 && n < sizeof value && std::strcmp(value, "0") != 0 && _stricmp(value, "off") != 0;
+}
+
+// A caller-supplied output pointer is only written after this proves the whole range committed and writable: the
+// slots below receive console-ABI pointers, and writing a pointer the caller did not map would be corruption, not an
+// offline answer.
+bool writable_range(const void* pointer, size_t size) {
+    if (!pointer || size == 0) return false;
+    const auto page_writable = [](const void* address) {
+        MEMORY_BASIC_INFORMATION page{};
+        if (VirtualQuery(address, &page, sizeof page) != sizeof page) return false;
+        constexpr DWORD kProtected = PAGE_NOACCESS | PAGE_GUARD;
+        constexpr DWORD kWrite = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        return page.State == MEM_COMMIT && (page.Protect & kProtected) == 0 && (page.Protect & kWrite) != 0;
+    };
+    return page_writable(pointer) && page_writable(static_cast<const unsigned char*>(pointer) + size - 1);
+}
 
 template <int Slot> HRESULT STDMETHODCALLTYPE package_not_implemented(void*) {
     static std::atomic<bool> s_logged{false};
     if (!s_logged.exchange(true))
         std::fprintf(stderr, "[rt] xgameruntime: XPackageImpl slot %d not implemented offline (E_NOTIMPL)\n", Slot);
+    static const char kSlotKey = 0;   // one trace counter per instantiation
+    char what[64];
+    std::snprintf(what, sizeof what, "XPackageImpl slot %d", Slot);
+    rt::shims::platform_trace_keyed(reinterpret_cast<std::uint64_t>(&kSlotKey), what, _ReturnAddress(),
+                                    static_cast<std::uint64_t>(E_NOTIMPL));
     return E_NOTIMPL;
 }
-HRESULT STDMETHODCALLTYPE pkg_identifier(void*, size_t size, char* buffer) {
-    return XPackageGetCurrentProcessPackageIdentifier(size, buffer);
+// ---- the two package-readiness slots (PALMETTO_PACKAGE_READY) ----
+//
+// On a console that runs from an installed package, the loading stage creates an installation monitor for the
+// package's chunks and enumerates the additional packages; both succeed with the package fully installed. Offline the
+// two slots were E_NOTIMPL, so the title's package-readiness step could never become ready (docs/loading_gate.md).
+// The switch answers them the console way; the default keeps the E_NOTIMPL and its one-time log unchanged.
+
+// XPackageInstallationMonitor is an opaque handle. One offline package and one monitor: the value is never read by
+// the shim (XPackageGetInstallationProgress's answer is already "installed, launchable, completed"), only compared
+// and passed back, and CloseInstallationMonitorHandle has no work to do. It keeps the queue and cadence the title
+// asked for so the progress-changed registration can be delivered through the queue the title created it with.
+struct InstallationMonitor {
+    XTaskQueueHandle queue = nullptr;
+    uint32_t interval_ms = 0;
+};
+InstallationMonitor g_installation_monitor{};
+
+// The installation-progress registration (slot 9), and the one notification an installed package delivers: the
+// monitor's first snapshot is "complete", which is a progress reading the title's callback may act on (the GDK
+// reference's own sample does exactly that: callback -> XPackageGetInstallationProgress -> if completed, close the
+// monitor). The callback is delivered on the monitor's queue, at the interval the title asked for.
+std::mutex g_package_progress_mutex;
+std::atomic<uint64_t> g_package_progress_token{0};
+struct PackageProgressRegistration {
+    void* context = nullptr;
+    void (CALLBACK* callback)(void*, void*) = nullptr;
+    XTaskQueueRegistrationToken token{};
+    bool registered = false;
+    bool delivered = false;
+};
+PackageProgressRegistration g_package_progress;
+
+void CALLBACK package_progress_changed(void* /*context*/, bool canceled) {
+    void* title_context = nullptr;
+    void (CALLBACK* title_callback)(void*, void*) = nullptr;
+    {
+        std::lock_guard lock(g_package_progress_mutex);
+        if (canceled || g_package_progress.delivered) return;
+        g_package_progress.delivered = true;
+        title_context = g_package_progress.context;
+        title_callback = g_package_progress.callback;
+    }
+    std::fprintf(stderr, "[rt] xgameruntime: XPackage installation-progress notification delivered to the title's "
+                         "callback (PALMETTO_PACKAGE_READY=1)\n");
+    if (title_callback) title_callback(title_context, &g_installation_monitor);
 }
-bool STDMETHODCALLTYPE pkg_is_packaged(void*) { return XPackageIsPackagedProcess(); }
+
+// Slot 5: HRESULT XPackageCreateInstallationMonitor(const char* packageIdentifier, uint32_t selectorCount,
+//     const XPackageChunkSelector* selectors, uint32_t minimumUpdateIntervalMs, XTaskQueueHandle queue,
+//     XPackageInstallationMonitorHandle* monitor). The six arguments after `this` in the documented order are
+// measured from the title's own thunk (game+0x55E00A4: packageIdentifier in rdx, count in r8, selectors in r9,
+// interval/queue/monitor on the stack in that order) - see the file's XPackage section in docs/loading_gate.md.
+HRESULT STDMETHODCALLTYPE pkg_create_installation_monitor(void*, const char*, uint32_t, const void*, uint32_t interval,
+                                                          XTaskQueueHandle queue, void** monitor) {
+    void* const caller = _ReturnAddress();
+    if (!package_ready_enabled()) {
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true))
+            std::fprintf(stderr, "[rt] xgameruntime: XPackageImpl slot 5 not implemented offline (E_NOTIMPL)\n");
+        rt::shims::platform_trace("XPackageCreateInstallationMonitor", caller, static_cast<std::uint64_t>(E_NOTIMPL));
+        return E_NOTIMPL;
+    }
+    if (!writable_range(monitor, sizeof *monitor)) return E_INVALIDARG;
+    g_installation_monitor.queue = queue;
+    g_installation_monitor.interval_ms = interval;
+    *monitor = &g_installation_monitor;
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true))
+        std::fprintf(stderr, "[rt] xgameruntime: XPackageCreateInstallationMonitor: the offline package is installed, "
+                             "so the monitor starts complete (PALMETTO_PACKAGE_READY=1)\n");
+    rt::shims::platform_trace("XPackageCreateInstallationMonitor", caller, static_cast<std::uint64_t>(S_OK));
+    return S_OK;
+}
+
+// Slot 6: XPackageCloseInstallationMonitorHandle(monitor), a void call: closing unregisters the monitor's
+// notifications (GDK reference). The one offline monitor is static, so the close only drops the registration.
+HRESULT STDMETHODCALLTYPE pkg_close_installation_monitor(void*, void* monitor) {
+    void* const caller = _ReturnAddress();
+    if (!package_ready_enabled()) {
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true))
+            std::fprintf(stderr, "[rt] xgameruntime: XPackageImpl slot 6 not implemented offline (E_NOTIMPL)\n");
+        rt::shims::platform_trace("XPackageCloseInstallationMonitorHandle", caller, static_cast<std::uint64_t>(E_NOTIMPL));
+        return E_NOTIMPL;
+    }
+    if (monitor == &g_installation_monitor) {
+        std::lock_guard lock(g_package_progress_mutex);
+        g_package_progress.registered = false;
+    }
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true))
+        std::fprintf(stderr, "[rt] xgameruntime: XPackageCloseInstallationMonitorHandle: monitor closed "
+                             "(PALMETTO_PACKAGE_READY=1)\n");
+    rt::shims::platform_trace("XPackageCloseInstallationMonitorHandle", caller, static_cast<std::uint64_t>(S_OK));
+    return S_OK;
+}
+
+// Slot 9: HRESULT XPackageRegisterInstallationProgressChanged(monitor, context, callback, token) (measured from the
+// title's thunk game+0x55E0230: monitor in rdx, context in r8, callback in r9, token on the stack). The registered
+// callback is invoked once, through the queue the monitor was created with, with the monitor's first snapshot
+// ("complete"); on a console the package is installed, so that is the progress reading the title would start with.
+HRESULT STDMETHODCALLTYPE pkg_register_progress_changed(void*, void* monitor, void* context, void* callback,
+                                                        XTaskQueueRegistrationToken* token) {
+    void* const caller = _ReturnAddress();
+    if (!package_ready_enabled()) {
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true))
+            std::fprintf(stderr, "[rt] xgameruntime: XPackageImpl slot 9 not implemented offline (E_NOTIMPL)\n");
+        rt::shims::platform_trace("XPackageRegisterInstallationProgressChanged", caller,
+                                  static_cast<std::uint64_t>(E_NOTIMPL));
+        return E_NOTIMPL;
+    }
+    if (!writable_range(token, sizeof *token)) return E_INVALIDARG;
+    if (monitor != &g_installation_monitor || !callback) return E_INVALIDARG;
+    XTaskQueueHandle queue = g_installation_monitor.queue;
+    XTaskQueueHandle process_queue = nullptr;
+    if (!queue && XTaskQueueGetCurrentProcessTaskQueue(&process_queue)) queue = process_queue;
+    if (!queue) return HRESULT_FROM_WIN32(ERROR_NO_TASK_QUEUE);
+    {
+        std::lock_guard lock(g_package_progress_mutex);
+        g_package_progress.context = context;
+        g_package_progress.callback = reinterpret_cast<void (CALLBACK*)(void*, void*)>(callback);
+        g_package_progress.token.token = g_package_progress_token.fetch_add(1) + 1;
+        g_package_progress.registered = true;
+        *token = g_package_progress.token;
+    }
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true))
+        std::fprintf(stderr, "[rt] xgameruntime: XPackageRegisterInstallationProgressChanged: one initial "
+                             "\"complete\" notification for the installed package, through the monitor's queue "
+                             "(PALMETTO_PACKAGE_READY=1)\n");
+    // Delivered at the cadence the title asked the monitor for; 0 (or absent) means as soon as the queue runs.
+    const HRESULT hr = XTaskQueueSubmitDelayedCallback(queue, XTaskQueuePort::Completion,
+                                                       g_installation_monitor.interval_ms, nullptr,
+                                                       &package_progress_changed);
+    if (process_queue) XTaskQueueCloseHandle(process_queue);
+    rt::shims::platform_trace("XPackageRegisterInstallationProgressChanged", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+
+// Slot 39: IXPackageImpl3's XPackageEnumeratePackages overload. The title's thunk (game+0x55E0684) passes four
+// arguments: a 32-bit package kind, a 32-bit enumeration scope, a callback pointer and a context pointer. Offline no
+// package beyond the one this process runs from is installed, so the honest answer is S_OK with the callback never
+// invoked ("no additional packages"); the callback's ABI is therefore not guessed.
+HRESULT STDMETHODCALLTYPE pkg_enumerate_packages3(void*, uint32_t, uint32_t, void*, void*) {
+    void* const caller = _ReturnAddress();
+    if (!package_ready_enabled()) {
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true))
+            std::fprintf(stderr, "[rt] xgameruntime: XPackageImpl slot 39 not implemented offline (E_NOTIMPL)\n");
+        rt::shims::platform_trace("XPackageEnumeratePackages (IXPackageImpl3)", caller,
+                                  static_cast<std::uint64_t>(E_NOTIMPL));
+        return E_NOTIMPL;
+    }
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true))
+        std::fprintf(stderr, "[rt] xgameruntime: XPackageEnumeratePackages: no additional package is installed "
+                             "(PALMETTO_PACKAGE_READY=1)\n");
+    rt::shims::platform_trace("XPackageEnumeratePackages (IXPackageImpl3)", caller, static_cast<std::uint64_t>(S_OK));
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE pkg_identifier(void*, size_t size, char* buffer) {
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = XPackageGetCurrentProcessPackageIdentifier(size, buffer);
+    rt::shims::platform_trace("XPackageGetCurrentProcessPackageIdentifier", caller, static_cast<std::uint64_t>(hr));
+    return hr;
+}
+bool STDMETHODCALLTYPE pkg_is_packaged(void*) {
+    void* const caller = _ReturnAddress();
+    const bool packaged = XPackageIsPackagedProcess();
+    rt::shims::platform_trace("XPackageIsPackagedProcess", caller, packaged ? 1 : 0);
+    return packaged;
+}
 // The package's MicrosoftGame.Config as text, from the game folder (PALMETTO_GAME_DIR, else --game-dir); empty when
 // there is no folder or no config. Wide on purpose: a game folder named outside the ANSI code page must reach the file
 // intact.
@@ -1075,41 +1337,59 @@ std::vector<std::string> package_locales() {
 // information is declared for the package, this function succeeds but does not return a user locale". The host's
 // locale is never handed out as the package's.
 HRESULT STDMETHODCALLTYPE pkg_user_locale(void*, size_t size, char* locale) {
-    if (!locale || !size) return E_INVALIDARG;
-    const std::vector<std::string> declared = package_locales();
-    if (declared.empty()) {
-        locale[0] = '\0';
-        return S_OK;
-    }
-    wchar_t wide[LOCALE_NAME_MAX_LENGTH] = {};
-    char user[LOCALE_NAME_MAX_LENGTH * 4] = "";
-    if (GetUserDefaultLocaleName(wide, LOCALE_NAME_MAX_LENGTH) > 0)
-        WideCharToMultiByte(CP_UTF8, 0, wide, -1, user, static_cast<int>(sizeof(user)), nullptr, nullptr);
-    const auto language = [](const std::string& name) { return name.substr(0, name.find('-')); };
-    const auto same = [](const std::string& a, const std::string& b) { return _stricmp(a.c_str(), b.c_str()) == 0; };
-    const std::string* pick = &declared.front();
-    bool exact = false;
-    for (const std::string& d : declared)
-        if (same(d, user)) { pick = &d; exact = true; break; }
-    if (!exact)
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = [&]() -> HRESULT {
+        if (!locale || !size) return E_INVALIDARG;
+        const std::vector<std::string> declared = package_locales();
+        if (declared.empty()) {
+            locale[0] = '\0';
+            return S_OK;
+        }
+        wchar_t wide[LOCALE_NAME_MAX_LENGTH] = {};
+        char user[LOCALE_NAME_MAX_LENGTH * 4] = "";
+        if (GetUserDefaultLocaleName(wide, LOCALE_NAME_MAX_LENGTH) > 0)
+            WideCharToMultiByte(CP_UTF8, 0, wide, -1, user, static_cast<int>(sizeof(user)), nullptr, nullptr);
+        const auto language = [](const std::string& name) { return name.substr(0, name.find('-')); };
+        const auto same = [](const std::string& a, const std::string& b) { return _stricmp(a.c_str(), b.c_str()) == 0; };
+        const std::string* pick = &declared.front();
+        bool exact = false;
         for (const std::string& d : declared)
-            if (same(language(d), language(user))) { pick = &d; break; }
-    if (size < pick->size() + 1) return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
-    std::memcpy(locale, pick->c_str(), pick->size() + 1);
-    return S_OK;
+            if (same(d, user)) { pick = &d; exact = true; break; }
+        if (!exact)
+            for (const std::string& d : declared)
+                if (same(language(d), language(user))) { pick = &d; break; }
+        if (size < pick->size() + 1) return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+        std::memcpy(locale, pick->c_str(), pick->size() + 1);
+        return S_OK;
+    }();
+    rt::shims::platform_trace("XPackageGetUserLocale", caller, static_cast<std::uint64_t>(hr));
+    return hr;
 }
 // Slots 23-26 forward to the named exports' content-package mounts (XPackageMount and its handle registry), so the two
 // ways in behave the same. XPackageMountHandle is one u64, passed in a register like the named exports take it.
 HRESULT STDMETHODCALLTYPE pkg_mount(void*, const char* package_identifier, XPackageMountHandle* mount) {
-    return XPackageMount(package_identifier, mount);
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = XPackageMount(package_identifier, mount);
+    rt::shims::platform_trace("XPackageMount", caller, static_cast<std::uint64_t>(hr));
+    return hr;
 }
 HRESULT STDMETHODCALLTYPE pkg_mount_path_size(void*, XPackageMountHandle mount, size_t* size) {
-    return XPackageGetMountPathSize(mount, size);
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = XPackageGetMountPathSize(mount, size);
+    rt::shims::platform_trace("XPackageGetMountPathSize", caller, static_cast<std::uint64_t>(hr));
+    return hr;
 }
 HRESULT STDMETHODCALLTYPE pkg_mount_path(void*, XPackageMountHandle mount, size_t size, char* path) {
-    return XPackageGetMountPath(mount, size, path);
+    void* const caller = _ReturnAddress();
+    const HRESULT hr = XPackageGetMountPath(mount, size, path);
+    rt::shims::platform_trace("XPackageGetMountPath", caller, static_cast<std::uint64_t>(hr));
+    return hr;
 }
-void STDMETHODCALLTYPE pkg_close_mount(void*, XPackageMountHandle mount) { XPackageCloseMountHandle(mount); }
+void STDMETHODCALLTYPE pkg_close_mount(void*, XPackageMountHandle mount) {
+    void* const caller = _ReturnAddress();
+    XPackageCloseMountHandle(mount);
+    rt::shims::platform_trace("XPackageCloseMountHandle", caller, 0);
+}
 
 // XPackageInstallationProgress: totalBytes, installedBytes, launchBytes (u64), launchable, completed (bool).
 struct InstallationProgress {
@@ -1120,15 +1400,33 @@ static_assert(sizeof(InstallationProgress) == 32, "XPackageInstallationProgress 
 // void XPackageGetInstallationProgress(monitor, XPackageInstallationProgress*): an offline package is installed,
 // launchable and completed, every byte present.
 void STDMETHODCALLTYPE pkg_installation_progress(void*, void*, InstallationProgress* progress) {
+    void* const caller = _ReturnAddress();
     if (progress) *progress = {0, 0, 0, true, true};
+    rt::shims::platform_trace("XPackageGetInstallationProgress", caller, progress ? 1 : 0);
 }
 // The bool methods with no offline work, as Microsoft documents them: XPackageUpdateInstallationMonitor is false
 // (nothing changed), the two Unregister* calls are true (nothing pending), XPackageUninstallPackage is false (not
 // uninstalled). A generic E_NOTIMPL stub would read as true in al.
-bool STDMETHODCALLTYPE pkg_update_monitor(void*, void*) { return false; }
-bool STDMETHODCALLTYPE pkg_unregister_progress(void*, void*, XTaskQueueRegistrationToken, bool) { return true; }
-bool STDMETHODCALLTYPE pkg_unregister_installed(void*, XTaskQueueRegistrationToken, bool) { return true; }
-bool STDMETHODCALLTYPE pkg_uninstall_package(void*, const char*) { return false; }
+bool STDMETHODCALLTYPE pkg_update_monitor(void*, void*) {
+    void* const caller = _ReturnAddress();
+    rt::shims::platform_trace("XPackageUpdateInstallationMonitor", caller, 0);
+    return false;
+}
+bool STDMETHODCALLTYPE pkg_unregister_progress(void*, void*, XTaskQueueRegistrationToken, bool) {
+    void* const caller = _ReturnAddress();
+    rt::shims::platform_trace("XPackageUnregisterInstallationProgressChanged", caller, 1);
+    return true;
+}
+bool STDMETHODCALLTYPE pkg_unregister_installed(void*, XTaskQueueRegistrationToken, bool) {
+    void* const caller = _ReturnAddress();
+    rt::shims::platform_trace("XPackageUnregisterPackageInstalled", caller, 1);
+    return true;
+}
+bool STDMETHODCALLTYPE pkg_uninstall_package(void*, const char*) {
+    void* const caller = _ReturnAddress();
+    rt::shims::platform_trace("XPackageUninstallPackage", caller, 0);
+    return false;
+}
 
 #define PN(n) reinterpret_cast<const void*>(&package_not_implemented<n>)
 const void* const kPackageVtable[] = {
@@ -1136,10 +1434,11 @@ const void* const kPackageVtable[] = {
     reinterpret_cast<const void*>(&object_release),
     reinterpret_cast<const void*>(&pkg_identifier),   // 3  XPackageGetCurrentProcessPackageIdentifier
     reinterpret_cast<const void*>(&pkg_is_packaged),  // 4  XPackageIsPackagedProcess
-    PN(5), PN(6),                                     // 5-6 installation monitor: create, close
+    reinterpret_cast<const void*>(&pkg_create_installation_monitor),   // 5 XPackageCreateInstallationMonitor
+    reinterpret_cast<const void*>(&pkg_close_installation_monitor),    // 6 XPackageCloseInstallationMonitorHandle
     reinterpret_cast<const void*>(&pkg_installation_progress),  // 7  XPackageGetInstallationProgress (void, writes)
     reinterpret_cast<const void*>(&pkg_update_monitor),         // 8  XPackageUpdateInstallationMonitor (bool)
-    PN(9),                                                      // 9  XPackageRegisterInstallationProgressChanged
+    reinterpret_cast<const void*>(&pkg_register_progress_changed),  // 9 XPackageRegisterInstallationProgressChanged
     reinterpret_cast<const void*>(&pkg_unregister_progress),    // 10 ...UnregisterInstallationProgressChanged (bool)
     reinterpret_cast<const void*>(&pkg_user_locale),  // 11 XPackageGetUserLocale
     PN(12), PN(13), PN(14), PN(15), PN(16), PN(17),   // 12-19 chunks: find / enumerate availability, change order,
@@ -1156,13 +1455,14 @@ const void* const kPackageVtable[] = {
     reinterpret_cast<const void*>(&pkg_uninstall_package),     // 34 XPackageUninstallPackage (bool)
     PN(35), PN(36), PN(37), PN(38),                   // IXPackageImpl2: EnumeratePackages, RegisterPackageInstalled,
                                                       //   MountWithUiAsync, MountWithUiResult
-    PN(39), PN(40),                                   // IXPackageImpl3: EnumeratePackages, RegisterPackageInstalled
+    reinterpret_cast<const void*>(&pkg_enumerate_packages3),  // 39 IXPackageImpl3: EnumeratePackages
+    PN(40),                                   // IXPackageImpl3: RegisterPackageInstalled
 };
 #undef PN
 static_assert(std::size(kPackageVtable) == 41, "IUnknown + IXPackageImpl's 32 + IXPackageImpl2's 4 + IXPackageImpl3's 2");
 
 RuntimeObject& package_object() {
-    static RuntimeObject object{kPackageVtable, &kPackageClass, kPackageIids};
+    static RuntimeObject object{kPackageVtable, &kPackageClass, package_interface_ids()};
     return object;
 }
 
@@ -1304,6 +1604,39 @@ constexpr GUID kLauncherClassId = {0x1b339674, 0x328d, 0x4283, {0xa2, 0x00, 0x31
 constexpr GUID kStoreClassId = {0x0dd112ac, 0x7c24, 0x448c, {0xb9, 0x2b, 0x39, 0x60, 0xfb, 0x5b, 0xd3, 0x0c}};
 constexpr GUID kUserClassId = {0x01acd177, 0x91f9, 0x4763, {0xa3, 0x8e, 0xcc, 0xbb, 0x55, 0xce, 0x32, 0xe0}};
 
+// The class ids the platform services a title can poll answer to, for the PALMETTO_USER_TRACE line in QueryApiImpl.
+const char* class_name(const GUID& class_id) {
+    struct Named {
+        const GUID* id;
+        const char* name;
+    };
+    static const Named kNames[] = {
+        {&kThreadingClass, "XThreadingImpl"},
+        {&kErrorClass, "XErrorImpl"},
+        {&kNetworkingClass, "XNetworkingImpl"},
+        {&kPersistentStorageClass, "XPersistentLocalStorageImpl"},
+        {&kSystemClass, "XSystemImpl"},
+        {&kPackageClass, "XPackageImpl"},
+        {&kGameClass, "XGameImpl"},
+        {&kGameRuntimeFeatureClass, "XGameRuntimeFeatureImpl"},
+        {&kSystemAnalyticsClass, "XSystemAnalyticsImpl"},
+        {&kAccessibilityClassId, "XAccessibilityImpl"},
+        {&kAppCaptureClassId, "XAppCaptureImpl"},
+        {&kDisplayClassId, "XDisplayImpl"},
+        {&kGameEventClassId, "XGameEventImpl"},
+        {&kGameInviteClassId, "XGameInviteImpl"},
+        {&kGameSaveClassId, "XGameSaveImpl"},
+        {&kGameStreamingClassId, "XGameStreamingImpl"},
+        {&kGameUiClassId, "XGameUiImpl"},
+        {&kLauncherClassId, "XLauncherImpl"},
+        {&kStoreClassId, "XStoreImpl"},
+        {&kUserClassId, "XUserImpl"},
+    };
+    for (const Named& n : kNames)
+        if (class_id == *n.id) return n.name;
+    return nullptr;
+}
+
 struct RuntimeFeature {
     const GUID* class_id;  // the class the feature's functions go through
     bool console_only;     // documented for the Xbox consoles only
@@ -1357,6 +1690,27 @@ RuntimeObject* const* measured_objects() {
 #define XGR(name) {"xgameruntime.dll", #name, reinterpret_cast<void*>(&name)}
 
 }  // namespace
+
+namespace rt::shims {
+
+// Test seam for PALMETTO_PACKAGE_V4 (docs/loading_gate.md): forces the IXPackageImpl4 answer and returns the previous
+// state. The live class object is updated in place, so a caller that already queried XPackageImpl sees the new answer;
+// this is what lets one test process check both faces without an environment variable changing mid-run.
+bool xgameruntime_set_package_interface4(bool on) {
+    const bool previous = package_interface4_enabled();
+    g_package_v4_override.store(on ? 1 : 0);
+    package_object().interface_ids = package_interface_ids();
+    return previous;
+}
+
+// Test seam for PALMETTO_PACKAGE_READY: forces the two package-readiness slots' answer, returning the previous state.
+bool xgameruntime_set_package_ready(bool on) {
+    const bool previous = package_ready_enabled();
+    g_package_ready_override.store(on ? 1 : 0);
+    return previous;
+}
+
+}  // namespace rt::shims
 
 SHIM_TABLE(xgameruntime,
     // what xgameruntime.lib's thunks GetProcAddress (library_loader.cpp serves the LoadLibrary before it)

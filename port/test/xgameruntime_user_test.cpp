@@ -6,6 +6,7 @@
 //   xgameruntime_user_test --expect-gamertag TAG    the same, run with PALMETTO_GAMERTAG=TAG
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -18,6 +19,8 @@
 
 namespace rt::shims {
 long xgameruntime_user_open_handles();
+bool xgameruntime_set_package_interface4(bool on);
+bool xgameruntime_set_package_ready(bool on);
 }
 
 namespace {
@@ -53,6 +56,11 @@ template <class F> F at(void* obj, int index) { return reinterpret_cast<F>(slot(
 
 // Waits for an XAsyncBlock on the process queue, as a title polling XAsyncGetStatus(wait = true) does.
 bool finished(XAsyncBlock* async) { return XAsyncGetStatus(async, true) != E_PENDING; }
+
+// XPackageInstallationProgressCallback's shape (GDK reference: void CALLBACK(void* context, monitor)).
+void CALLBACK count_progress_changed(void* context, void* /*monitor*/) {
+    static_cast<std::atomic<int>*>(context)->fetch_add(1);
+}
 
 }  // namespace
 
@@ -221,6 +229,89 @@ int main(int argc, char** argv) {
     at<Close>(user, 4)(user, h);   // a double close: the handle is looked up, not read, so this is a no-op
     check(rt::shims::xgameruntime_user_open_handles() == 0 && at<GetBool>(user, 13)(user, h, &guest) == E_INVALIDARG,
           "a closed handle is refused and closing it again does nothing");
+
+    // ---- XPackageImpl: the loading schedule's readiness calls and the two opt-in switches (docs/loading_gate.md) ----
+    // The retail executable asks QueryApiImpl for XPackageImpl with IXPackageImpl4's id, which defaults to
+    // E_NOINTERFACE; PALMETTO_PACKAGE_V4 answers it. The two package-readiness slots it then reaches
+    // (XPackageCreateInstallationMonitor, IXPackageImpl3's XPackageEnumeratePackages) default to E_NOTIMPL;
+    // PALMETTO_PACKAGE_READY answers them the console way. This test drives both faces through the same seams.
+    constexpr GUID kPackageClass = {0xaf406016, 0xe850, 0x4aa8, {0xa8, 0x8d, 0x2f, 0x3d, 0xcb, 0x9d, 0xac, 0x7e}};
+    constexpr GUID kPackage3 = {0xe2a4734b, 0x2f4a, 0x456d, {0xaa, 0x8f, 0xd0, 0x65, 0xe0, 0x4f, 0xb2, 0x09}};
+    constexpr GUID kPackage4 = {0x0b9d556e, 0xab70, 0x43f4, {0xba, 0xa0, 0x99, 0x99, 0xac, 0x4c, 0xb0, 0x40}};
+    using CreateMonitor = HRESULT(STDMETHODCALLTYPE*)(void*, const char*, uint32_t, const void*, uint32_t,
+                                                      XTaskQueueHandle, void**);
+    using EnumeratePackages = HRESULT(STDMETHODCALLTYPE*)(void*, uint32_t, uint32_t, void*, void*);
+
+    void* package = nullptr;
+    check(query(&kPackageClass, kPackage4, &package) == E_NOINTERFACE && !package,
+          "IXPackageImpl4 is E_NOINTERFACE by default (byte-identical default answer)");
+    check(!rt::shims::xgameruntime_set_package_interface4(true), "the v4 seam reports the switch was off");
+    check(query(&kPackageClass, kPackage4, &package) == S_OK && package,
+          "with the v4 switch on, IXPackageImpl4 gets the package object");
+    void* package3 = nullptr;
+    check(query(&kPackageClass, kPackage3, &package3) == S_OK && package3 == package,
+          "the same vtable still answers IXPackageImpl3");
+    if (package) {
+        void* monitor = reinterpret_cast<void*>(1);
+        check(at<CreateMonitor>(package, 5)(package, "offline-package", 1, nullptr, 1000, nullptr, &monitor) ==
+                      E_NOTIMPL &&
+                  monitor == reinterpret_cast<void*>(1),
+              "XPackageCreateInstallationMonitor is E_NOTIMPL and writes nothing by default");
+        check(at<EnumeratePackages>(package, 39)(package, 0, 0, nullptr, nullptr) == E_NOTIMPL,
+              "XPackageEnumeratePackages (IXPackageImpl3) is E_NOTIMPL by default");
+        using RegisterDefault = HRESULT(STDMETHODCALLTYPE*)(void*, void*, void*, void*, XTaskQueueRegistrationToken*);
+        check(at<RegisterDefault>(package, 9)(package, nullptr, nullptr, nullptr, nullptr) == E_NOTIMPL,
+              "XPackageRegisterInstallationProgressChanged is E_NOTIMPL by default");
+
+        check(!rt::shims::xgameruntime_set_package_ready(true), "the ready seam reports the switch was off");
+        void* created = nullptr;
+        check(at<CreateMonitor>(package, 5)(package, "offline-package", 1, nullptr, 1000, nullptr, &created) == S_OK &&
+                  created != nullptr,
+              "with the ready switch on, the installation monitor is created for the installed package");
+        check(at<CreateMonitor>(package, 5)(package, "offline-package", 1, nullptr, 1000, nullptr, nullptr) ==
+                  E_INVALIDARG,
+              "a null monitor pointer is refused rather than written");
+        // An output pointer into a read-only page must be refused, not written: the slot proves the range first.
+        void* read_only_page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+        check(read_only_page != nullptr &&
+                  at<CreateMonitor>(package, 5)(package, "offline-package", 1, nullptr, 1000, nullptr,
+                                                reinterpret_cast<void**>(read_only_page)) == E_INVALIDARG,
+              "a read-only monitor pointer is refused rather than written");
+        if (read_only_page) VirtualFree(read_only_page, 0, MEM_RELEASE);
+        check(at<EnumeratePackages>(package, 39)(package, 0, 0, nullptr, nullptr) == S_OK,
+              "with the ready switch on, enumerating additional packages succeeds with none installed");
+
+        // Slot 9 and slot 6: the progress-changed registration is delivered once through the queue the monitor was
+        // created with, and the monitor closes.
+        XTaskQueueHandle queue = nullptr;
+        if (XTaskQueueCreate(XTaskQueueDispatchMode::ThreadPool, XTaskQueueDispatchMode::ThreadPool, &queue) == S_OK &&
+            queue) {
+            void* monitored = nullptr;
+            check(at<CreateMonitor>(package, 5)(package, "offline-package", 1, nullptr, 0, queue, &monitored) == S_OK &&
+                      monitored,
+                  "the installation monitor is created with the title's queue and cadence");
+            std::atomic<int> notifications{0};
+            XTaskQueueRegistrationToken progress_token{};
+            using RegisterProgress = HRESULT(STDMETHODCALLTYPE*)(void*, void*, void*, void*, XTaskQueueRegistrationToken*);
+            check(at<RegisterProgress>(package, 9)(package, monitored, &notifications,
+                                           reinterpret_cast<void*>(&count_progress_changed), &progress_token) == S_OK &&
+                      progress_token.token != 0,
+                  "XPackageRegisterInstallationProgressChanged succeeds with a token on the monitor's queue");
+            for (int i = 0; i < 200 && notifications.load() == 0; ++i) Sleep(10);
+            check(notifications.load() == 1,
+                  "the registered callback is invoked once with the installed package's complete snapshot");
+            using CloseMonitor = HRESULT(STDMETHODCALLTYPE*)(void*, void*);
+            check(at<CloseMonitor>(package, 6)(package, monitored) == S_OK,
+                  "XPackageCloseInstallationMonitorHandle succeeds");
+            XTaskQueueTerminate(queue, true, nullptr, nullptr);
+            XTaskQueueCloseHandle(queue);
+        } else {
+            check(false, "a task queue for the progress-changed test could not be created");
+        }
+
+        rt::shims::xgameruntime_set_package_ready(false);
+        rt::shims::xgameruntime_set_package_interface4(false);
+    }
 
     std::printf("xgameruntime_user_test: %d of %d checks failed\n", g_failures, g_checks);
     return g_failures ? 1 : 0;
