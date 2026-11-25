@@ -242,6 +242,46 @@ therefore a hybrid tree for the pipeline counts. The stationary loop itself is n
 300/600 s boots (`docs/frame_capture.md`) showed the same loop before those edits. The counts above (blocks, polls,
 threads, waits, submits) are shim-side and unaffected.
 
+## 6a. The gate-naming boot: the late block is never read, the pipeline workers stop at ~7 s, the frame loop keeps running
+
+One more 130 s boot (`boot-gate1`: ALIVE 130.2 s, 0 exceptions, 565,799 recorded d3d12 calls) added the late-block guard,
+a loader-thread-filtered device trace (`PALMETTO_LOAD_TRACE=5,25` logs device calls only from threads that polled/enqueued
+DirectStorage or first-touched a streamed block, plus the first four queue/fence calls per slot), `PALMETTO_XS_CALLERS=1`
+with the caller profile, and wait samples at 20/25/30/45/60/90 s.
+
+* **The late block is not read.** The first 50 blocks are read again (#0-#48 on thread 47652, #49 on thread 13368 through
+  a host-DLL memcpy path); blocks #50-#64 and every tracked destination in requests 4,060-4,096 (including request 4,074,
+  the block the frame loop keeps in a caller-frame word) are **never touched** in the 130 s window. So the frame loop does
+  not read the streamed data it keeps a pointer to.
+* **The pipeline workers stop at ~7 s and never wake again.** The loader-tid filter shows the only worker thread that was
+  registered by a streamed-block touch (13368) creating slot-57 graphics records from +5.0 s to +7.13 s and then making no
+  further call. The caller profile snapshots are decisive: by the first snapshot (~15 s) the counts are device slot 57 =
+  **10,241** (the whole graphics record set), slot 55 = 22,843, slot 86 = 22,393; the last snapshot (~120 s) has the same
+  three counts **unchanged**, while every frame-loop site scaled with time. So loading's pipeline precompile finished
+  ~15 s, and after that the loader performs no device work at all.
+* **The frame loop is a self-driving thread, and its per-frame fence waits work.** The hottest frame sites and their title
+  callers: queue slot 35 submit at `game+0x24821E3` / `game+0x248268F`; queue slot 16 signal at `game+0x248260E`; queue
+  slot 32 `PresentX` at `game+0x24824C7`; device slot 80 `WaitFrameEventX` at `game+0x248240B` / `game+0x248244E`;
+  console fence slot 12 at `game+0x4FB0AEF` (a generic condition-wait helper, function `game+0x4FB0AD0`, which freezes
+  the tick when a predicate callback says stop and otherwise waits with a timer); per-frame views: slot 17 at
+  `game+0x4DA8F63` / `game+0x4D9F627`, slot 70 at `game+0x4D9F369`; device slot 78 `SetFrameIntervalX` at
+  `game+0x247ABDE`; slot 79 `ScheduleFrameEventX` at `game+0x247AC02` / `game+0x2478DEA`. The fence slot-12 values in
+  the trace grow monotonically (target 0x2 ... 0xEE6 by ~25 s) and are satisfied, so the loop is not stuck on a GPU
+  fence: it is running the loading screen at frame rate.
+* **No thread spins on a loader condition.** At 20-90 s the process has 86-88 threads, 74-76 in waits (ntdll waits, the
+  pool's `NtWaitForAlertByThreadId` workers, `NtWaitForWorkViaWorkerFactory`, the audio semaphore). The only title-code
+  sites the sampler catches are transient cache-line zeroing loops (`game+0x4E8AAB3`), not a poll loop.
+* **The load submit chain dead-ends at an indirect dispatch.** The DirectStorage request submission helper is
+  `game+0x28C97C0` (called from `game+0x28C9680`, which is called from `game+0x28C9874`); that function has no direct
+  `call` site - its address is an entry of an interface/dispatch table in `.rdata` (RVA `0x62FC780`), next to the
+  console DirectStorage interface ids used by `game+0x28C950B` / `game+0x28C9579`. So the next loading stage would be
+  dispatched through that table by the loading manager, and after the precompile the manager does not dispatch it.
+
+**Diagnosis after this boot:** the gate is title-side (c); no shim primitive is named. The observable is that the loading
+manager stops dispatching load jobs after the pipeline precompile while the present thread keeps the loading screen at
+frame rate. What the manager itself waits for is not visible in the shim-visible APIs; the next measurement is a stack
+scan at the loader-side calls (see section 9).
+
 ## 7. The answer: where the GPU-side step is missing
 
 * **Do the streamed bytes reach a texture?** No. They reach a title CPU deserializer and, in the whole 130 s window, no
@@ -269,9 +309,10 @@ threads, waits, submits) are shim-side and unaffected.
 
 ## 8. Limits of this measurement
 
-1. Guard sampling: the first 64 destinations are proven read or unread one by one (blocks #0-#49 read, #50-#64 not), the
-   eight sampled later destinations (requests 512, 1024, ... 4096) are proven untouched; requests 65-511 and 4097+ are
-   unobserved. The block #49 read on thread `54600` shows the consumer also runs on a second pool thread.
+1. Guard sampling: in the gate-naming boot the first 64 destinations and requests 4,060-4,096 were tracked one by one:
+   blocks #0-#49 read, #50-#64 and the 4,060-4,096 range **not** read; the eight sampled later destinations (requests
+   512, 1024, ... 4096) are proven untouched; requests 65-511 and 4,097+ are unobserved. The block #49 read on a second
+   thread shows the consumer also runs on that thread (through a host memcpy).
 2. `PAGE_GUARD` covers only pages wholly inside a block; a consumer touching only a block's first or last partial page
    would not fault. The observed consumer walk crosses the first guarded page, so this did not hide it here.
 3. The load-stall boot is 130 s; the title's pipeline precompile itself runs past the load trace's 7 s window end, so the
@@ -294,19 +335,22 @@ threads, waits, submits) are shim-side and unaffected.
 ## 9. Gates, files and the next falsifier
 
 Gates: `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT` (both on the binary the
-load-stall boot ran). All switches are off by default and alter no answer. Files touched: `port/shims/dstorage.cpp`,
-`port/shims/d3d12_xs_device.cpp`, this page. Evidence boots on disk (outside the repository): `boot-shape1`,
-`boot-shape2`, `boot-shape3` (the call-shape increment) and `boot-load1` (the load-stall increment), each with
-`stderr.log` and `summary.txt`.
+load-stall and gate-naming boots ran). All switches are off by default and alter no answer. Files touched:
+`port/shims/dstorage.cpp`, `port/shims/d3d12_xs_device.cpp`, this page. Evidence boots on disk (outside the
+repository): `boot-shape1`, `boot-shape2`, `boot-shape3` (the call-shape increment), `boot-load1` (the load-stall
+increment) and `boot-gate1` (the gate-naming boot), each with `stderr.log` and `summary.txt`.
 
 Next, smallest honest first - the stream itself and DirectStorage emulation are closed, so the loader gate is the target:
 
-1. **Name the gate after pipeline precompile (needs one more 130 s boot).** Extend the window past the first submit
-   (`PALMETTO_LOAD_TRACE=5,25`), keep wait samples at 20, 25, 30, 45, 60 and 90 s, and add `PALMETTO_XS_CALLERS=1` so
-   the title caller of the loading-screen loop's `PresentX`/frame-event calls is printed. That caller is the loading
-   state machine; disassemble the loop's exit condition and its state word, then watch that word (title image base is
-   known from the stream registry) across the boot to see which expected transition never happens. If the loop is the
-   6-image blit and the gate is a job counter, the counter is the next observable.
+1. **Stack-scan the loader-side calls (needs one 130 s boot; the smallest unblock).** The gate-naming boot showed the
+   direct-call chain of the DirectStorage submit helper dead-ending at an indirect dispatch (`game+0x28C97C0` is an entry
+   of the `.rdata` table at RVA `0x62FC780`), so the loading manager must be reached through an indirect frame. Two cheap
+   additions close that: (a) in `GetHResult`, record `_ReturnAddress()` from `IsComplete` itself (today the recorded
+   caller is the shim's own inlined `GetHResult`, `palmetto.exe+0xDD619`), which yields the *title polling loop* RVA; and
+   (b) scan the calling thread's stack for title RVAs on the first few status polls and request enqueues, which yields the
+   indirect frames above the polling loop. Then disassemble that loop's exit condition and state word, and watch the word
+   (title base is known) across a boot to name the transition that never happens. Nothing about the runtime needs to
+   change for this; it is instrumentation only.
 2. **Test the input gate if a virtual pad appears.** The observed loop is a loading screen with a blue element
    (`docs/frame_capture.md` section 7); a "press a button" gate cannot be driven here because the GameInput shim reads
    SDL3 gamepads and no pad is attached, so this is untestable on this host as-is. If a virtual gamepad is available,

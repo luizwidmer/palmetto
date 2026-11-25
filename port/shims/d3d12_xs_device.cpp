@@ -217,6 +217,32 @@ extern "C" unsigned palmetto_streamed_block_count() {
     return streamed_blocks::g_count.load(std::memory_order_relaxed);
 }
 
+// Loader thread ids, reported by the DirectStorage shim (dstorage.cpp) and by the streamed-block guard. The load-window
+// trace logs every device call from these threads (the loading threads), while the frame loop's device calls are
+// filtered out; queue/fence calls are logged for the first four per slot so the frame loop's call shapes stay visible
+// once. Plain atomics: the guard's fault handler registers a tid too, so nothing here may lock or allocate.
+namespace load_tids {
+constexpr unsigned kMax = 64;
+std::atomic<unsigned long> g_tids[kMax];
+std::atomic<unsigned> g_count{0};
+
+bool contains(unsigned long tid) {
+    if (tid == 0) return false;
+    const unsigned count = g_count.load(std::memory_order_relaxed);
+    for (unsigned i = 0; i < count && i < kMax; ++i)
+        if (g_tids[i].load(std::memory_order_relaxed) == tid) return true;
+    return false;
+}
+
+void note(unsigned long tid) {
+    if (tid == 0 || contains(tid)) return;
+    const unsigned index = g_count.fetch_add(1, std::memory_order_relaxed);
+    if (index < kMax) g_tids[index].store(tid, std::memory_order_relaxed);
+}
+}  // namespace load_tids
+
+extern "C" void palmetto_load_tid_note(unsigned long tid) { load_tids::note(tid); }
+
 namespace rt::d3d12_xs {
 namespace {
 
@@ -1796,7 +1822,7 @@ void load_trace_note(const char* kind, unsigned slot, const void* caller, const 
     const double at = load_trace_seconds();
     const LoadTraceWindow& window = load_trace_window();
     if (at < window.from || at >= window.to) return;
-    if (g_load_trace_lines.fetch_add(1, std::memory_order_relaxed) >= 20000) return;
+    if (g_load_trace_lines.fetch_add(1, std::memory_order_relaxed) >= 60000) return;
     char where[64];
     streamed_blocks::caller_text(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(caller)), where,
                                  sizeof where);
@@ -2599,9 +2625,15 @@ std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_
     if (callers_enabled()) note_caller(caller_kind, Slot, _ReturnAddress(), a1, a2, a3, a4);
     if constexpr (K == ChildKind::queue || K == ChildKind::fence) {
         if (load_trace_window().on) {
-            const std::uint64_t load_words[3] = {a1, a2, a3};
-            load_trace_note(K == ChildKind::queue ? "queue" : "fence", Slot, _ReturnAddress(), load_words, 3, 0,
-                            false);
+            // Queue/fence calls: the first four of each slot (so the frame loop's call shapes are visible) plus every
+            // call from a loader thread.
+            static std::atomic<unsigned> first_calls{0};
+            const unsigned n = first_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 4 || load_tids::contains(static_cast<unsigned long>(GetCurrentThreadId()))) {
+                const std::uint64_t load_words[3] = {a1, a2, a3};
+                load_trace_note(K == ChildKind::queue ? "queue" : "fence", Slot, _ReturnAddress(), load_words, 3, 0,
+                                false);
+            }
         }
     }
     if constexpr (Slot == 0) {
@@ -5617,7 +5649,7 @@ std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64
                                                             a8,  a9,  a10, a11, a12, a13, a14};
         view_shape_probe(Slot, _ReturnAddress(), shape_words);
     }
-    if (load_trace_window().on) {
+    if (load_trace_window().on && load_tids::contains(static_cast<unsigned long>(GetCurrentThreadId()))) {
         const std::uint64_t load_words[4] = {a1, a2, a3, a4};
         load_trace_note("device", Slot, _ReturnAddress(), load_words, 4, 0, false);
     }

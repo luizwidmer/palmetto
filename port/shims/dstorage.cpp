@@ -45,6 +45,9 @@ using namespace dsx;
 // PALMETTO_STREAM_CONSUMER is off.
 extern "C" void palmetto_stream_block_completed(void* va, size_t bytes);
 extern "C" void palmetto_stream_set_title_base(std::uint64_t base);
+// Defined in d3d12_xs_device.cpp: register a loading thread id, so the load-window trace there can filter the frame
+// loop's device calls out and keep the loading threads' calls. Cheap (a short atomic scan); safe from the guard handler.
+extern "C" void palmetto_load_tid_note(unsigned long tid);
 
 namespace {
 
@@ -366,7 +369,7 @@ struct TrackedDestination {
 // The load-stall increment (docs/streamed_consumer.md): the first 64 destinations are guarded so the exact block at
 // which the consumer stops is measured, not bracketed; eight later destinations (every 512th request) keep the
 // whole-stream sample.
-constexpr unsigned kTrackedDestinations = 72;
+constexpr unsigned kTrackedDestinations = 160;
 
 // A destination's interior pages under PAGE_GUARD. The fault handler runs on whichever thread touched them, so these
 // fields are atomic; the handler clears `armed` before it resumes the access.
@@ -378,7 +381,7 @@ struct GuardedBlock {
     std::atomic<unsigned> faults{0};
     std::atomic<bool> armed{false};
 };
-constexpr unsigned kGuardSlots = 96;
+constexpr unsigned kGuardSlots = 192;
 GuardedBlock g_guards[kGuardSlots];
 std::atomic<unsigned> g_fault_lines{0};
 
@@ -435,6 +438,7 @@ LONG CALLBACK stream_guard_handler(EXCEPTION_POINTERS* info) {
         guard.armed.store(false, std::memory_order_release);
         if (!first) return EXCEPTION_CONTINUE_EXECUTION;
         guard.faults.fetch_add(1, std::memory_order_relaxed);
+        palmetto_load_tid_note(static_cast<unsigned long>(GetCurrentThreadId()));  // the consumer thread
         if (g_fault_lines.fetch_add(1, std::memory_order_relaxed) < 128) {
             char where[80];
             std::uintptr_t rva = 0;
@@ -539,9 +543,11 @@ void stream_note_completed(void* destination, size_t bytes, void* caller) {
             tracked = &g_tracked[i];
             break;
         }
-    // The load-stall increment: the first 64 requests are tracked one by one, so the exact block at which the consumer
-    // stops is measured rather than bracketed between 16 and 256; every 512th request then samples the whole stream.
-    if (!tracked && g_tracked_count < kTrackedDestinations && (requests <= 64 || requests % 512 == 0)) {
+    // The loader-gate increment: the first 64 requests are tracked one by one (the consumer's stop block), the block at
+    // request ~4,074 (the one the frame loop keeps a pointer into, docs/streamed_consumer.md section 6) in the window
+    // 4,060-4,096, and every 512th request samples the whole stream.
+    if (!tracked && g_tracked_count < kTrackedDestinations &&
+        (requests <= 64 || (requests >= 4060 && requests <= 4096) || requests % 512 == 0)) {
         tracked = &g_tracked[g_tracked_count];
         const unsigned index = g_tracked_count++;
         tracked->base = base;
@@ -802,6 +808,7 @@ public:
         if (ds_load_visible()) {
             void* const caller = _ReturnAddress();
             const std::uint64_t polls = g_ds_load.status_polls.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (polls == 1) palmetto_load_tid_note(static_cast<unsigned long>(GetCurrentThreadId()));  // polling thread
             if (hr == E_PENDING) g_ds_load.pending_polls.fetch_add(1, std::memory_order_relaxed);
             g_ds_load.last_poll_index.store(index, std::memory_order_relaxed);
             g_ds_load.last_poll_value.store(static_cast<std::uint32_t>(hr), std::memory_order_relaxed);
@@ -1090,6 +1097,7 @@ public:
         }
         if (ds_load_visible() && request) {
             const std::uint64_t n = g_ds_load.requests_enqueued.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n == 1) palmetto_load_tid_note(static_cast<unsigned long>(GetCurrentThreadId()));  // enqueueing thread
             const bool in_window = n <= 3 || n % 1024 == 0;
             const bool late = n > 4096;  // beyond the initial 4,096-request burst
             if (in_window || late) {
@@ -1187,6 +1195,7 @@ public:
             }
             if (ds_load_visible()) {
                 const std::uint64_t n = g_ds_load.submits.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n == 1) palmetto_load_tid_note(static_cast<unsigned long>(GetCurrentThreadId()));  // submitting thread
                 char detail[96];
                 std::snprintf(detail, sizeof detail, "submit #%llu: %zu entr(ies), %zu submitted before",
                               static_cast<unsigned long long>(n), entries_.size(), submitted_);
@@ -1724,6 +1733,7 @@ public:
         *ppv = static_cast<IDStorageStatusArrayX*>(a);
         if (ds_load_visible()) {
             ds_load_heartbeat_start();
+            palmetto_load_tid_note(static_cast<unsigned long>(GetCurrentThreadId()));
             char detail[96];
             std::snprintf(detail, sizeof detail, "create status array capacity %u", capacity);
             ds_load_note("status-array", detail, _ReturnAddress());
