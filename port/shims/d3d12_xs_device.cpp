@@ -24,6 +24,7 @@
 // behind the device before a presenter exists, so WaitFrameEventX returns at once with a fresh non-zero token.
 #include "d3d12_xs_device.h"
 #include "d3d12_trace.h"
+#include <tlhelp32.h>
 // docs/present_wiring.md: the presentation core (xbox_present.cpp) publishes the console PresentX path through this
 // header's registration hook. Only its hook-only layer is included, so this translation unit - which is also compiled
 // into the GPU-free proxy test binaries that link neither Vulkan nor xbox_present.cpp - stays free of the Vulkan layer;
@@ -242,6 +243,95 @@ void note(unsigned long tid) {
 }  // namespace load_tids
 
 extern "C" void palmetto_load_tid_note(unsigned long tid) { load_tids::note(tid); }
+
+// ---- PALMETTO_PIPELINE_TIMELINE: the pipeline-conversion traffic as a time series ----------------------------------
+//
+// docs/streamed_consumer.md section 6e. One line every N seconds (PALMETTO_PIPELINE_TIMELINE=<seconds>, off by default)
+// with wall time and cumulative counters: slot-57 record calls / converted / refused, slot-55 derived calls, graphics
+// and compute pipelines created, submissions, presents, the console-call total, the process thread count and the last
+// slot-57 caller. Counters only (no game data); bounded to 240 lines; changes no call.
+std::atomic<std::uint64_t> g_pl_slot57_calls{0};
+std::atomic<std::uint64_t> g_pl_slot57_converted{0};
+std::atomic<std::uint64_t> g_pl_slot57_refused{0};
+std::atomic<std::uint64_t> g_pl_slot55_calls{0};
+std::atomic<std::uint64_t> g_pl_graphics_created{0};
+std::atomic<std::uint64_t> g_pl_compute_calls{0};
+std::atomic<std::uint64_t> g_pl_compute_created{0};
+std::atomic<std::uint64_t> g_pl_submits{0};
+std::atomic<std::uint64_t> g_pl_presents{0};
+std::atomic<std::uint64_t> g_pl_console_calls{0};
+std::atomic<std::uint64_t> g_pl_last_slot57_caller{0};
+std::atomic<std::uint64_t> g_pl_last_event_us{0};
+
+double pipeline_timeline_period() {
+    static const double seconds = [] {
+        char value[32] = {};
+        if (GetEnvironmentVariableA("PALMETTO_PIPELINE_TIMELINE", value, sizeof value) == 0 || value[0] == '\0')
+            return 0.0;
+        char* end = nullptr;
+        const double parsed = std::strtod(value, &end);
+        return end != value && parsed > 0.0 ? parsed : 0.0;
+    }();
+    return seconds;
+}
+
+std::uint64_t pipeline_timeline_us() {
+    static const auto origin = std::chrono::steady_clock::now();
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - origin).count());
+}
+
+void pipeline_timeline_note_event() { g_pl_last_event_us.store(pipeline_timeline_us(), std::memory_order_relaxed); }
+
+unsigned process_thread_count() {
+    unsigned count = 0;
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return 0;
+    THREADENTRY32 entry{};
+    entry.dwSize = sizeof entry;
+    const DWORD self = GetCurrentProcessId();
+    if (Thread32First(snapshot, &entry)) {
+        do {
+            if (entry.th32OwnerProcessID == self) ++count;
+        } while (Thread32Next(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return count;
+}
+
+void pipeline_timeline_start() {
+    static std::atomic<bool> started{false};
+    const double every = pipeline_timeline_period();
+    if (every <= 0.0 || started.exchange(true, std::memory_order_relaxed)) return;
+    std::thread([every] {
+        const auto began = std::chrono::steady_clock::now();
+        for (unsigned line = 1; line <= 240; ++line) {
+            const auto due = began + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                         std::chrono::duration<double>(every * line));
+            std::this_thread::sleep_until(due);
+            const std::uint64_t caller = g_pl_last_slot57_caller.load(std::memory_order_relaxed);
+            char caller_text[96] = "(none)";
+            if (caller) {
+                streamed_blocks::caller_text(caller, caller_text, sizeof caller_text);
+            }
+            std::fprintf(stderr,
+                         "[rt] pipeline timeline +%.1fs: slot57 calls %llu converted %llu refused %llu; slot55 calls "
+                         "%llu; graphics created %llu; compute calls %llu created %llu; submits %llu; presents %llu; "
+                         "console calls %llu; threads %u; last slot57 caller %s\n",
+                         every * line, static_cast<unsigned long long>(g_pl_slot57_calls.load()),
+                         static_cast<unsigned long long>(g_pl_slot57_converted.load()),
+                         static_cast<unsigned long long>(g_pl_slot57_refused.load()),
+                         static_cast<unsigned long long>(g_pl_slot55_calls.load()),
+                         static_cast<unsigned long long>(g_pl_graphics_created.load()),
+                         static_cast<unsigned long long>(g_pl_compute_calls.load()),
+                         static_cast<unsigned long long>(g_pl_compute_created.load()),
+                         static_cast<unsigned long long>(g_pl_submits.load()),
+                         static_cast<unsigned long long>(g_pl_presents.load()),
+                         static_cast<unsigned long long>(g_pl_console_calls.load()), process_thread_count(),
+                         caller_text);
+        }
+    }).detach();
+}
 
 // A guarded read of any committed, readable address in this process. Exported for the DirectStorage shim's loader-state
 // snapshot (docs/streamed_consumer.md section 6c): the loader object is a host-heap object whose fields the title's load
@@ -2789,6 +2879,9 @@ std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_
     constexpr CallerKind caller_kind = K == ChildKind::queue   ? CallerKind::queue
                                        : K == ChildKind::fence ? CallerKind::fence
                                                                : CallerKind::allocator;
+    g_pl_console_calls.fetch_add(1, std::memory_order_relaxed);
+    if constexpr (K == ChildKind::queue && Slot == 32) g_pl_presents.fetch_add(1, std::memory_order_relaxed);
+    if constexpr (K == ChildKind::queue && Slot == 35) g_pl_submits.fetch_add(1, std::memory_order_relaxed);
     if (callers_enabled()) note_caller(caller_kind, Slot, _ReturnAddress(), a1, a2, a3, a4);
     if constexpr (K == ChildKind::queue || K == ChildKind::fence) {
         if (load_trace_window().on) {
@@ -4990,6 +5083,17 @@ void print_slot57_summary_locked(Slot57Stats& stats) {
 // Counts one call, logs the first occurrence of a reason / a result, and prints the interval summary.
 void note_slot57(Slot57Call& call) {
     Slot57Stats& stats = slot57_stats();
+    // PALMETTO_PIPELINE_TIMELINE: the conversion traffic as counters, independent of the histogram's lock.
+    g_pl_slot57_calls.fetch_add(1, std::memory_order_relaxed);
+    if (call.reached_create) {
+        g_pl_slot57_converted.fetch_add(1, std::memory_order_relaxed);
+        if (SUCCEEDED(call.result)) {
+            g_pl_graphics_created.fetch_add(1, std::memory_order_relaxed);
+            pipeline_timeline_note_event();
+        }
+    } else {
+        g_pl_slot57_refused.fetch_add(1, std::memory_order_relaxed);
+    }
     const std::lock_guard lock(stats.mutex);
     ++stats.calls;
     if (call.digest) stats.records.insert(call.digest);
@@ -5809,6 +5913,8 @@ std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64
                                 std::uint64_t a8, std::uint64_t a9, std::uint64_t a10, std::uint64_t a11,
                                 std::uint64_t a12, std::uint64_t a13, std::uint64_t a14) {
     g_device_call_index.fetch_add(1, std::memory_order_relaxed);
+    g_pl_console_calls.fetch_add(1, std::memory_order_relaxed);
+    pipeline_timeline_start();
     if (callers_enabled()) note_caller(CallerKind::device, Slot, _ReturnAddress(), a1, a2, a3, a4);
     if (streamed_blocks::active()) stream_note_device_call(Slot, _ReturnAddress(), a1, a2, a3, a4, a5, a6);
     if (view_shape_enabled()) {
@@ -5902,20 +6008,41 @@ std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64
     } else if constexpr (Slot == 55) {
         // Console #55 is CreateDerivedPipelineStateX, not PC #55 CreateReservedResource1: (base, count, patches, riid,
         // out), with the out pointer in the fifth position (docs/device_slot55.md).
-        return hr_to_u64(proxy_create_derived_pipeline_state(
-            self, a1, a2, a3, reinterpret_cast<const IID*>(a4), reinterpret_cast<void**>(a5)));
+        g_pl_slot55_calls.fetch_add(1, std::memory_order_relaxed);
+        const HRESULT hr = proxy_create_derived_pipeline_state(
+            self, a1, a2, a3, reinterpret_cast<const IID*>(a4), reinterpret_cast<void**>(a5));
+        if (SUCCEEDED(hr)) {
+            g_pl_graphics_created.fetch_add(1, std::memory_order_relaxed);
+            pipeline_timeline_note_event();
+        }
+        return hr_to_u64(hr);
     } else if constexpr (Slot == 57) {
+        g_pl_last_slot57_caller.store(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(_ReturnAddress())),
+                                      std::memory_order_relaxed);
+        pipeline_timeline_note_event();
         return hr_to_u64(proxy_create_graphics_pipeline_probe(
             self, reinterpret_cast<const void*>(a1), reinterpret_cast<const IID*>(a2),
             reinterpret_cast<void**>(a3)));
     } else if constexpr (Slot == 62) {
-        return hr_to_u64(proxy_create_compute_pipeline_state(
+        g_pl_compute_calls.fetch_add(1, std::memory_order_relaxed);
+        const HRESULT hr = proxy_create_compute_pipeline_state(
             self, reinterpret_cast<const D3D12_COMPUTE_PIPELINE_STATE_DESC*>(a1), a2, a3,
-            reinterpret_cast<const IID*>(a4), reinterpret_cast<void**>(a5)));
+            reinterpret_cast<const IID*>(a4), reinterpret_cast<void**>(a5));
+        if (SUCCEEDED(hr) && a5 && *reinterpret_cast<void**>(a5)) {
+            g_pl_compute_created.fetch_add(1, std::memory_order_relaxed);
+            pipeline_timeline_note_event();
+        }
+        return hr_to_u64(hr);
     } else if constexpr (Slot == 67) {
-        return hr_to_u64(proxy_create_compute_pipeline_from_native_code(
+        g_pl_compute_calls.fetch_add(1, std::memory_order_relaxed);
+        const HRESULT hr = proxy_create_compute_pipeline_from_native_code(
             self, reinterpret_cast<const void*>(a1), reinterpret_cast<const IID*>(a2),
-            reinterpret_cast<void**>(a3)));
+            reinterpret_cast<void**>(a3));
+        if (SUCCEEDED(hr) && a3 && *reinterpret_cast<void**>(a3)) {
+            g_pl_compute_created.fetch_add(1, std::memory_order_relaxed);
+            pipeline_timeline_note_event();
+        }
+        return hr_to_u64(hr);
     } else if constexpr (Slot == 133) {
         return hr_to_u64(proxy_create_placed_resource_x(self, reinterpret_cast<void*>(a1),
                                                         reinterpret_cast<const D3D12_RESOURCE_DESC*>(a2),

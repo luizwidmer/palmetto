@@ -573,6 +573,26 @@ void start_loader_watch_control() {
 }
 
 std::uintptr_t loader_watch_image_base = 0, loader_watch_image_size = 0;
+std::atomic<std::uintptr_t> loader_begin_address{0}, loader_end_address{0};
+std::atomic<int> loader_spinners{0};   // begin-minus-end nesting; >1 means two spinners overlap
+std::atomic<unsigned> loader_spinner_depth{0};
+std::atomic<std::uint64_t> loader_spinner_last_object{0};
+std::atomic<unsigned long> loader_spinner_last_tid{0};
+struct LoaderRaceEntry {
+    std::uint64_t object = 0;
+    unsigned long arm_tid = 0;
+    unsigned begin = 0, end = 0, cross = 0;
+    unsigned last_armed = 0;
+};
+LoaderRaceEntry g_loader_race[16];
+std::mutex g_loader_race_mutex;
+std::atomic<std::uintptr_t> loader_reinit_address{0};
+std::atomic<std::uintptr_t> loader_poll_address{0};  // execution-breakpoint control: the DS poll loop
+std::atomic<std::uintptr_t> loader_global_slot{0};  // [[game+0x79F6D70]]: the loader object pointer
+std::mutex loader_objects_mutex;
+std::map<std::uint64_t, std::pair<unsigned, unsigned>> loader_objects;  // object -> (begin hits, end hits)
+std::map<std::uint64_t, unsigned> loader_reinits;                       // object installed -> re-init hits
+
 // Title-image frames only, from the faulting thread's stack at the moment of the store. LoaderWatch values are atomics
 // only; the walker is the same fault-tolerant page scan the samplers use. Called from the VEH, so it prints directly.
 void loader_watch_record(const CONTEXT& context, const char* field, std::uint32_t old_value, std::uint32_t new_value,
@@ -599,6 +619,79 @@ LONG CALLBACK loader_watch_exception(EXCEPTION_POINTERS* info) {
     if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
     LoaderWatch& watch = loader_watch();
     if (!watch.ready.load(std::memory_order_relaxed)) return EXCEPTION_CONTINUE_SEARCH;
+    const std::uintptr_t begin_address = loader_begin_address.load(std::memory_order_relaxed);
+    const std::uintptr_t end_address = loader_end_address.load(std::memory_order_relaxed);
+    const std::uintptr_t reinit_address = loader_reinit_address.load(std::memory_order_relaxed);
+    const std::uintptr_t poll_address = loader_poll_address.load(std::memory_order_relaxed);
+    if (poll_address && info->ContextRecord->Rip == poll_address) {
+        static std::atomic<unsigned> poll_hits{0};
+        const unsigned hit = poll_hits.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (hit <= 8)
+            std::fprintf(stderr, "[rt] poll exec control: fired (%u), tid %lu (execution breakpoints work)\\n", hit,
+                         static_cast<unsigned long>(GetCurrentThreadId()));
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (reinit_address && info->ContextRecord->Rip == reinit_address) {
+        const std::uint64_t owner = info->ContextRecord->Rcx;
+        const std::uintptr_t global_slot = loader_global_slot.load(std::memory_order_relaxed);
+        const std::uint64_t installed = global_slot ? *reinterpret_cast<const std::uint64_t*>(global_slot) : 0;
+        static std::atomic<unsigned> reinit_records{0};
+        {
+            std::lock_guard lock(loader_objects_mutex);
+            ++loader_reinits[installed];
+        }
+        if (reinit_records.fetch_add(1, std::memory_order_relaxed) < 64)
+            std::fprintf(stderr, "[rt] loader re-init: tid %lu owner 0x%llx, global now 0x%llx\n",
+                         static_cast<unsigned long>(GetCurrentThreadId()), static_cast<unsigned long long>(owner),
+                         static_cast<unsigned long long>(installed));
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (begin_address && (info->ContextRecord->Rip == begin_address || info->ContextRecord->Rip == end_address)) {
+        const bool is_begin = info->ContextRecord->Rip == begin_address;
+        const int depth = loader_spinners.fetch_add(is_begin ? 1 : -1, std::memory_order_relaxed) + (is_begin ? 1 : 0);
+        static std::atomic<unsigned> begin_records{0};
+        if (begin_records.fetch_add(1, std::memory_order_relaxed) < 256) {
+            WaitSampleModules modules;
+            modules.image_base = loader_watch_image_base;
+            modules.image_end = loader_watch_image_base + loader_watch_image_size;
+            std::uint64_t frames[16] = {};
+            const unsigned found = scan_stack_words_deep(info->ContextRecord->Rsp, frames, 16, modules, 32);
+            std::string title;
+            unsigned shown = 0;
+            for (unsigned i = 0; i < found && shown < 10; ++i) {
+                if (frames[i] < modules.image_base || frames[i] >= modules.image_end) continue;
+                title += " " + rt::shims::module_offset(frames[i]);
+                ++shown;
+            }
+            const std::uint64_t object_argument = info->ContextRecord->Rdx;
+            const std::uintptr_t global_slot = loader_global_slot.load(std::memory_order_relaxed);
+            const std::uint64_t global_object = global_slot ? *reinterpret_cast<const std::uint64_t*>(global_slot) : 0;
+            const auto state_of = [](std::uint64_t object, unsigned& armed, unsigned& inflight) {
+                armed = inflight = 0xFFFFFFFFu;
+                if (!object) return;
+                armed = *reinterpret_cast<const std::uint8_t*>(object + 0x78);
+                inflight = *reinterpret_cast<const std::uint32_t*>(object + 0x64);
+            };
+            unsigned argument_armed = 0, argument_inflight = 0, global_armed = 0, global_inflight = 0;
+            state_of(object_argument, argument_armed, argument_inflight);
+            state_of(global_object, global_armed, global_inflight);
+            {
+                std::lock_guard lock(loader_objects_mutex);
+                auto& counts = loader_objects[object_argument];
+                ++(is_begin ? counts.first : counts.second);
+            }
+            std::fprintf(stderr,
+                         "[rt] loader begin/end: %s tid %lu depth %d%s, entry %s, object 0x%llx (armed %u in-flight %u), "
+                         "global 0x%llx (armed %u in-flight %u)%s, title stack%s\n",
+                         is_begin ? "begin" : "end", static_cast<unsigned long>(GetCurrentThreadId()), depth,
+                         depth > 1 ? " (overlap)" : "", rt::shims::module_offset(info->ContextRecord->Rip).c_str(),
+                         static_cast<unsigned long long>(object_argument), argument_armed, argument_inflight,
+                         static_cast<unsigned long long>(global_object), global_armed, global_inflight,
+                         object_argument != global_object ? " (OBJECT != GLOBAL)" : "",
+                         title.empty() ? " (none)" : title.c_str());
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     if ((info->ContextRecord->Dr6 & 0x4u) != 0) {  // DR2: the control slot
         LoaderWatch& watch = loader_watch();
         const unsigned events = watch.control_events.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -636,32 +729,87 @@ LONG CALLBACK loader_watch_exception(EXCEPTION_POINTERS* info) {
 void start_loader_watch(std::uintptr_t image_base, std::size_t image_size, std::uint64_t loader_global_rva) {
     loader_watch_image_base = image_base;
     loader_watch_image_size = image_size;
+    {
+        char beginend_value[16] = {};
+        if (GetEnvironmentVariableA("PALMETTO_LOADER_BEGINEND", beginend_value, sizeof(beginend_value)) > 0 &&
+            beginend_value[0] != '\0' && beginend_value[0] != '0') {
+            // Diagnostic (docs/frame_capture.md): the RVA constants the begin/end mode arms may be vtable entries or
+            // thunks rather than function starts. Print the loader vtable's +0x240/+0x248 pointers and the first bytes
+            // at each arm target, so a mismatch is visible in one boot.
+            {
+                const auto* vtable_base = reinterpret_cast<const std::uint64_t*>(image_base + 0x62FC550);
+                const std::uint64_t slot_240 = vtable_base[0x240 / 8];
+                const std::uint64_t slot_248 = vtable_base[0x248 / 8];
+                const auto* begin_bytes = reinterpret_cast<const std::uint8_t*>(image_base + 0xE88F0);
+                const auto* end_bytes = reinterpret_cast<const std::uint8_t*>(image_base + 0xE8960);
+                const auto* reinit_bytes = reinterpret_cast<const std::uint8_t*>(image_base + 0x5CD3F50);
+                std::fprintf(stderr,
+                             "[rt] loader watch map: vtable+0x240 -> 0x%llx, vtable+0x248 -> 0x%llx; bytes at +0xE88F0"
+                             " %02x %02x, at +0xE8960 %02x %02x, at +0x5CD3F50 %02x %02x\n",
+                             static_cast<unsigned long long>(slot_240), static_cast<unsigned long long>(slot_248),
+                             begin_bytes[0], begin_bytes[1], end_bytes[0], end_bytes[1], reinit_bytes[0],
+                             reinit_bytes[1]);
+            }
+            loader_begin_address.store(image_base + 0xE88F0, std::memory_order_relaxed);            loader_reinit_address.store(image_base + 0x5CD3F50, std::memory_order_relaxed);
+            { char poll_value[8] = {}; if (GetEnvironmentVariableA("PALMETTO_LOADER_POLLBP", poll_value, sizeof(poll_value)) > 0 && poll_value[0] != '0') loader_poll_address.store(image_base + 0x4F6584A, std::memory_order_relaxed); }
+            loader_global_slot.store(image_base + 0x79F6D70, std::memory_order_relaxed);
+            loader_end_address.store(image_base + 0xE8960, std::memory_order_relaxed);
+        }
+    }
     start_loader_watch_control();
     AddVectoredExceptionHandler(1, loader_watch_exception);
     std::thread([image_base, loader_global_rva] {
-        const auto* global = reinterpret_cast<const std::uint64_t*>(image_base + loader_global_rva);
+        const bool beginend = loader_begin_address.load(std::memory_order_relaxed) != 0;
         std::uintptr_t object = 0;
-        for (unsigned wait = 0; wait < 2000 && !object; ++wait) {
-            object = static_cast<std::uintptr_t>(*global);
-            if (!object) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if (!beginend) {
+            const auto* global = reinterpret_cast<const std::uint64_t*>(image_base + loader_global_rva);
+            for (unsigned wait = 0; wait < 2000 && !object; ++wait) {
+                object = static_cast<std::uintptr_t>(*global);
+                if (!object) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            if (!object) {
+                std::fprintf(stderr, "[rt] loader watch: the loader global stayed zero; not armed\n");
+                return;
+            }
         }
-        if (!object) {
-            std::fprintf(stderr, "[rt] loader watch: the loader global stayed zero; not armed\n");
-            return;
-        }
-        const std::uintptr_t armed = object + 0x78;
-        const std::uintptr_t inflight = object + 0x64;
+        const std::uintptr_t armed = beginend ? 0 : object + 0x78;
+        const std::uintptr_t inflight = beginend ? 0 : object + 0x64;
         LoaderWatch& watch = loader_watch();
         watch.armed_address.store(armed, std::memory_order_relaxed);
         watch.inflight_address.store(inflight, std::memory_order_relaxed);
-        watch.armed_last.store(*reinterpret_cast<const std::uint8_t*>(armed), std::memory_order_relaxed);
-        watch.inflight_last.store(*reinterpret_cast<const std::uint32_t*>(inflight), std::memory_order_relaxed);
+        if (!beginend) {
+            watch.armed_last.store(*reinterpret_cast<const std::uint8_t*>(armed), std::memory_order_relaxed);
+            watch.inflight_last.store(*reinterpret_cast<const std::uint32_t*>(inflight), std::memory_order_relaxed);
+        }
         watch.ready.store(true, std::memory_order_relaxed);
-        std::fprintf(stderr,
-                     "[rt] loader watch: armed on object %p, byte +0x78 (%p) and dword +0x64 (%p); initial 0x%x / 0x%x\n",
-                     reinterpret_cast<void*>(object), reinterpret_cast<void*>(armed),
-                     reinterpret_cast<void*>(inflight), *reinterpret_cast<const std::uint8_t*>(armed),
-                     *reinterpret_cast<const std::uint32_t*>(inflight));
+        if (!beginend)
+            std::fprintf(stderr,
+                         "[rt] loader watch: armed on object %p, byte +0x78 (%p) and dword +0x64 (%p); initial 0x%x / 0x%x\n",
+                         reinterpret_cast<void*>(object), reinterpret_cast<void*>(armed),
+                         reinterpret_cast<void*>(inflight), *reinterpret_cast<const std::uint8_t*>(armed),
+                         *reinterpret_cast<const std::uint32_t*>(inflight));
+        else
+            std::fprintf(stderr, "[rt] loader begin/end: execution breakpoints armed from boot-0 (no object wait)\n");
+        std::thread([] {
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::seconds(15));
+                std::lock_guard lock(loader_objects_mutex);
+                const std::uintptr_t global_slot = loader_global_slot.load(std::memory_order_relaxed);
+                const std::uint64_t global_object = global_slot ? *reinterpret_cast<const std::uint64_t*>(global_slot) : 0;
+                std::fprintf(stderr, "[rt] loader objects at 15 s: global 0x%llx; %zu object(s) seen\n",
+                             static_cast<unsigned long long>(global_object), loader_objects.size());
+                unsigned shown = 0;
+                for (const auto& [object, counts] : loader_objects) {
+                    if (shown++ == 8) break;
+                    std::fprintf(stderr, "[rt]   object 0x%llx: begin %u, end %u%s\n",
+                                 static_cast<unsigned long long>(object), counts.first, counts.second,
+                                 object == global_object ? " (the current global)" : "");
+                }
+                for (const auto& [object, hits] : loader_reinits)
+                    std::fprintf(stderr, "[rt]   re-init installed 0x%llx: %u hit(s)\n",
+                                 static_cast<unsigned long long>(object), hits);
+            }
+        }).detach();
         std::set<DWORD> configured;
         for (;;) {
             const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
@@ -679,10 +827,18 @@ void start_loader_watch(std::uintptr_t image_base, std::size_t image_size, std::
                             CONTEXT context{};
                             context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
                             if (GetThreadContext(thread, &context)) {
-                                context.Dr0 = armed;
-                                context.Dr1 = inflight;
+                                const bool beginend_mode = loader_begin_address.load(std::memory_order_relaxed) != 0;
+                                context.Dr0 = beginend_mode ? loader_begin_address.load(std::memory_order_relaxed) : armed;
+                                context.Dr1 = beginend_mode ? loader_end_address.load(std::memory_order_relaxed) : inflight;
                                 context.Dr2 = reinterpret_cast<std::uintptr_t>(&loader_watch_control);
+                                context.Dr3 = beginend_mode ? loader_reinit_address.load(std::memory_order_relaxed) : 0;
+                                const std::uintptr_t poll_address = loader_poll_address.load(std::memory_order_relaxed);
+                                if (beginend_mode && poll_address) context.Dr2 = poll_address;
                                 context.Dr6 = 0;
+                                if (beginend_mode)
+                                    context.Dr7 = loader_poll_address.load(std::memory_order_relaxed)
+                                                       ? (0x1u | (0x1u << 2) | (0x1u << 4) | (0x1u << 6))
+                                                       : (0x1u | (0x1u << 2) | (0x1u << 4) | (0x1u << 6) | (0x1u << 24) | (0x3u << 26));
                                 // L0 = 1, RW0 = 01 (write), LEN0 = 00 (1 byte); L1 = 1, RW1 = 01, LEN1 = 11 (4 bytes).
                                 context.Dr7 = 0x1u | (0x1u << 2) | (0x1u << 4) | (0x1u << 16) | (0x1u << 20) | (0x3u << 22) | (0x1u << 24) | (0x3u << 26);
                                 SetThreadContext(thread, &context);
@@ -809,6 +965,461 @@ void start_rip_histogram(std::uintptr_t image_base, std::uintptr_t image_size, c
             char label[48];
             std::snprintf(label, sizeof label, "%u (%.0f-%.0fs)", ++index, window.first, window.second);
             rip_histogram_window(image_base, image_size, window.first, window.second, label);
+        }
+    }).detach();
+}
+
+// ---- Loader entry detours (PALMETTO_LOADER_HOOK): inline hot-patch on begin/end/re-init ------------------------------
+// Debug-register delivery is unreliable in this environment (measured), so the loader's begin (game+0xE88F0), end
+// (game+0xE8960) and re-init (game+0x5CD3F50) are detoured by overwriting their first instruction(s) with a 5-byte E9 jump
+// into a per-site trampoline: the trampoline logs the call (site, tid, object argument, loader global, armed/in-flight of
+// both objects, top title frames of the caller's stack), executes the overwritten bytes and jumps back. Opt-in
+// (PALMETTO_LOADER_HOOK=1); the prologue is verified before patching and a mismatch is logged, never patched. Bounded
+// records, RVAs/counts only.
+struct LoaderHookSite {
+    const char* name;
+    std::uint64_t rva;
+    std::uintptr_t target = 0;
+    unsigned char original[16] = {};
+    unsigned length = 0;
+    unsigned char* trampoline = nullptr;
+    std::atomic<unsigned> calls{0};
+};
+
+LoaderHookSite g_loader_hooks[9] = {{"begin", 0xE88F0}, {"end", 0xE8960}, {"re-init", 0x5CD3F50}, {"completion", 0x4F65820}, {"spinner", 0x4F657A0}};
+
+// Length of the instruction at `code` for the handful of prologue forms these functions use (push/REX/sub/mov/lea); 0 when
+// it is not one this simple reader knows, which makes the site skipped rather than mis-patched.
+unsigned prologue_instruction_length(const unsigned char* code) {
+    unsigned at = 0;
+    bool rex = false;
+    if ((code[0] & 0xF0) == 0x40) {
+        rex = true;
+        at = 1;
+    }
+    const unsigned char op = code[at];
+    if (op >= 0x50 && op <= 0x57) return at + 1;                         // push r64
+    if (op == 0x55 || op == 0x53 || op == 0x56 || op == 0x57) return at + 1;
+    if (op == 0x83) return at + 3;                                        // group 1, imm8
+    if (op == 0x81) return at + 6;                                        // group 1, imm32
+    if (op == 0x89 || op == 0x8B || op == 0x8D) {                         // mov/lea r/m
+        const unsigned char modrm = code[at + 1];
+        const unsigned rm = modrm & 7;
+        unsigned extra = 0;
+        if ((modrm >> 6) == 1) extra = 1;
+        else if ((modrm >> 6) == 2) extra = 4;
+        else if (rm == 5) extra = 4;
+        return at + 2 + extra;
+    }
+    if (op == 0xEC || op == 0xE8) return at + 1;
+    (void)rex;
+    return 0;
+}
+
+void loader_hook_record(unsigned site, std::uintptr_t caller_rsp, std::uint64_t object_argument, std::uint64_t third) {
+    LoaderHookSite& hook = g_loader_hooks[site];
+    const unsigned call = hook.calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (site == 3 || site == 2) {  // completion and re-init: pointers/counters only, never call the owner
+        if (call > 20 && (call % 100) != 0) return;
+        const std::uintptr_t global_slot = loader_global_slot.load(std::memory_order_relaxed);
+        const std::uint64_t global_object = global_slot ? *reinterpret_cast<const std::uint64_t*>(global_slot) : 0;
+        std::fprintf(stderr,
+                     "[rt] loader hook: completion hit %u tid %lu, arg2 0x%llx arg3 0x%llx, caller %s, global 0x%llx\n",
+                     call, static_cast<unsigned long>(GetCurrentThreadId()),
+                     static_cast<unsigned long long>(object_argument), static_cast<unsigned long long>(third),
+                     rt::shims::module_offset(*reinterpret_cast<const std::uint64_t*>(caller_rsp)).c_str(),
+                     static_cast<unsigned long long>(global_object));
+        return;
+    }
+    if (site == 4) {  // spinner entry: depth and last spinner record (first 40 hits)
+        loader_spinner_depth.fetch_add(1, std::memory_order_relaxed);
+        loader_spinner_last_object.store(object_argument, std::memory_order_relaxed);
+        loader_spinner_last_tid.store(static_cast<unsigned long>(GetCurrentThreadId()), std::memory_order_relaxed);
+        if (call <= 40)
+            std::fprintf(stderr, "[rt] loader hook: spinner enter %u tid %lu, object 0x%llx\n", call,
+                         static_cast<unsigned long>(GetCurrentThreadId()),
+                         static_cast<unsigned long long>(object_argument));
+        return;
+    }
+    {
+        std::lock_guard lock(g_loader_race_mutex);
+        LoaderRaceEntry* entry = nullptr;
+        for (LoaderRaceEntry& candidate : g_loader_race)
+            if (candidate.object == object_argument) { entry = &candidate; break; }
+        if (!entry)
+            for (LoaderRaceEntry& candidate : g_loader_race)
+                if (!candidate.object) { candidate.object = object_argument; entry = &candidate; break; }
+        if (entry) {
+            if (site == 0) {
+                entry->arm_tid = static_cast<unsigned long>(GetCurrentThreadId());
+                ++entry->begin;
+                entry->last_armed = 0;
+            } else if (site == 1) {
+                ++entry->end;
+                if (entry->object >= 0x10000) entry->last_armed = *reinterpret_cast<const std::uint8_t*>(entry->object + 0x78);
+                const unsigned long tid = static_cast<unsigned long>(GetCurrentThreadId());
+                if (entry->last_armed && entry->arm_tid && tid != entry->arm_tid) {
+                    ++entry->cross;
+                    if (entry->cross <= 24)
+                        std::fprintf(stderr,
+                                     "[rt] loader cross-thread end: object 0x%llx, arm tid %lu, end tid %lu, "
+                                     "armed %u in-flight %u, global %s, spinner depth %u\n",
+                                     static_cast<unsigned long long>(entry->object), entry->arm_tid, tid,
+                                     entry->last_armed, 0u,
+                                     entry->object == loader_spinner_last_object.load(std::memory_order_relaxed)
+                                         ? "this object"
+                                         : "other",
+                                     loader_spinner_depth.load(std::memory_order_relaxed));
+                }
+            }
+        }
+    }
+    if (call > 200) return;
+    const std::uintptr_t global_slot = loader_global_slot.load(std::memory_order_relaxed);
+    const std::uint64_t global_object = global_slot ? *reinterpret_cast<const std::uint64_t*>(global_slot) : 0;
+    const auto state_of = [](std::uint64_t object, unsigned& armed, unsigned& inflight) {
+        armed = inflight = 0xFFFFFFFFu;
+        if (!object) return;
+        armed = *reinterpret_cast<const std::uint8_t*>(object + 0x78);
+        inflight = *reinterpret_cast<const std::uint32_t*>(object + 0x64);
+    };
+    unsigned argument_armed = 0, argument_inflight = 0, global_armed = 0, global_inflight = 0;
+    state_of(object_argument, argument_armed, argument_inflight);
+    state_of(global_object, global_armed, global_inflight);
+    WaitSampleModules modules;
+    modules.image_base = loader_watch_image_base;
+    modules.image_end = loader_watch_image_base + loader_watch_image_size;
+    std::uint64_t frames[16] = {};
+    const std::uint64_t return_address = caller_rsp ? *reinterpret_cast<const std::uint64_t*>(caller_rsp) : 0;
+    if (return_address >= modules.image_base && return_address < modules.image_end)
+        std::fprintf(stderr, "[rt] loader hook: %s caller return %s\n", hook.name,
+                     rt::shims::module_offset(return_address).c_str());
+    const unsigned found = scan_stack_words_deep(caller_rsp + 8, frames, 16, modules, 32);
+    std::string title;
+    unsigned shown = 0;
+    for (unsigned i = 0; i < found && shown < 10; ++i) {
+        if (frames[i] < modules.image_base || frames[i] >= modules.image_end) continue;
+        title += " " + rt::shims::module_offset(frames[i]);
+        ++shown;
+    }
+    std::fprintf(stderr,
+                 "[rt] loader hook: %s tid %lu, object 0x%llx (armed %u in-flight %u), global 0x%llx (armed %u "
+                 "in-flight %u)%s, third 0x%llx, caller stack%s\n",
+                 hook.name, static_cast<unsigned long>(GetCurrentThreadId()),
+                 static_cast<unsigned long long>(object_argument), argument_armed, argument_inflight,
+                 static_cast<unsigned long long>(global_object), global_armed, global_inflight,
+                 object_argument != global_object ? " (OBJECT != GLOBAL)" : "", static_cast<unsigned long long>(third),
+                 title.empty() ? " (none)" : title.c_str());
+}
+
+// The trampoline's C side: rcx = site, rdx = caller rsp, r8 = second argument (object), r9 = third argument.
+extern "C" void loader_hook_bridge(std::uint64_t site, std::uintptr_t caller_rsp, std::uint64_t object_argument,
+                                   std::uint64_t third) {
+    if (site < 3) loader_hook_record(static_cast<unsigned>(site), caller_rsp, object_argument, third);
+}
+
+// Writes a 64-bit absolute jump (mov rax,imm64; jmp rax) at `at`.
+void write_absolute_jump(unsigned char* at, const void* target) {
+    at[0] = 0x48;
+    at[1] = 0xB8;
+    std::memcpy(at + 2, &target, sizeof(target));
+    at[10] = 0xFF;
+    at[11] = 0xE0;
+}
+
+bool install_loader_hook(LoaderHookSite& hook, std::uintptr_t image_base) {
+    hook.target = image_base + hook.rva;
+    std::memcpy(hook.original, reinterpret_cast<const void*>(hook.target), sizeof(hook.original));
+    unsigned length = 0;
+    while (length < 5) {
+        const unsigned step = prologue_instruction_length(hook.original + length);
+        if (!step || length + step > sizeof(hook.original)) {
+            std::fprintf(stderr,
+                         "[rt] loader hook: %s prologue at +0x%llx is not a known form (bytes %02x %02x %02x %02x), "
+                         "skipping the hook\n",
+                         hook.name, static_cast<unsigned long long>(hook.rva), hook.original[0], hook.original[1],
+                         hook.original[2], hook.original[3]);
+            return false;
+        }
+        length += step;
+    }
+    hook.length = length;
+    // Allocate the trampoline within +/-2 GiB of the target so the E9 relative jump reaches it.
+    std::uintptr_t base = (hook.target & ~std::uintptr_t(0xFFFF)) - 0x10000;
+    unsigned char* trampoline = nullptr;
+    for (unsigned attempt = 0; attempt < 8192 && !trampoline; ++attempt, base -= 0x10000) {
+        trampoline = static_cast<unsigned char*>(VirtualAlloc(reinterpret_cast<void*>(base), 0x1000,
+                                                              MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+        const std::int64_t distance = trampoline ? static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(trampoline)) - static_cast<std::int64_t>(hook.target) : 0;
+    if (trampoline && (distance <= -2147483648ll || distance >= 2147483647ll)) {
+            VirtualFree(trampoline, 0, MEM_RELEASE);
+            trampoline = nullptr;
+        }
+    }
+    if (!trampoline) {
+        std::fprintf(stderr, "[rt] loader hook: %s trampoline allocation failed, skipping the hook\n", hook.name);
+        return false;
+    }
+    hook.trampoline = trampoline;
+    // Trampoline: save volatile registers, pass (site, caller rsp, object, third), call the bridge, restore, run the
+    // overwritten bytes, jump back past them.
+    unsigned char* at = trampoline;
+    const unsigned char save[] = {0x50, 0x51, 0x52, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53};
+    std::memcpy(at, save, sizeof(save));
+    at += sizeof(save);
+    // rcx = site
+    *at++ = 0x48;
+    *at++ = 0xC7;
+    *at++ = 0xC1;
+    const std::uint32_t site = static_cast<std::uint32_t>(&hook - g_loader_hooks);
+    std::memcpy(at, &site, sizeof(site));
+    at += sizeof(site);
+    // rdx = caller rsp = current rsp + (11 pushes + return address already accounted): after the 11 pushes rsp points at
+    // the saved r11; the return address of the original caller sits at rsp + 88.
+    *at++ = 0x48;
+    *at++ = 0x8B;
+    *at++ = 0xD4;  // mov rdx, rsp
+    *at++ = 0x48;
+    *at++ = 0x81;
+    *at++ = 0xC2;
+    const std::uint32_t stack_bias = 56;
+    std::memcpy(at, &stack_bias, sizeof(stack_bias));
+    at += sizeof(stack_bias);
+    // r8 = saved original rdx (the object argument): [rsp + 16] (after rax,rcx pushes).
+    *at++ = 0x4C;
+    *at++ = 0x8B;
+    *at++ = 0x44;
+    *at++ = 0x24;
+    *at++ = 0x20;  // mov r8, [rsp+0x20] (original rdx)
+    *at++ = 0x4C;
+    *at++ = 0x8B;
+    *at++ = 0x4C;
+    *at++ = 0x24;
+    *at++ = 0x20;  // mov r9, [rsp+0x20]
+    *at++ = 0x48;
+    *at++ = 0x83;
+    *at++ = 0xEC;
+    *at++ = 0x20;  // sub rsp, 0x20
+    *at++ = 0x48;
+    *at++ = 0xB8;
+    const void* bridge = reinterpret_cast<const void*>(&loader_hook_bridge);
+    std::memcpy(at, &bridge, sizeof(bridge));
+    at += sizeof(bridge);
+    *at++ = 0xFF;
+    *at++ = 0xD0;  // call rax
+    *at++ = 0x48;
+    *at++ = 0x83;
+    *at++ = 0xC4;
+    *at++ = 0x20;  // add rsp, 0x20
+    const unsigned char restore[] = {0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x5A, 0x59, 0x58};
+    std::memcpy(at, restore, sizeof(restore));
+    at += sizeof(restore);
+    std::memcpy(at, hook.original, length);
+    at += length;
+    // jmp target + length
+    *at++ = 0xE9;
+    const std::int32_t back = static_cast<std::int32_t>(hook.target + length - reinterpret_cast<std::uintptr_t>(at + 4));
+    std::memcpy(at, &back, sizeof(back));
+    at += sizeof(back);
+
+    DWORD old_protection = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(hook.target), 16, PAGE_EXECUTE_READWRITE, &old_protection)) {
+        std::fprintf(stderr, "[rt] loader hook: %s target page is not writable, skipping the hook\n", hook.name);
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        hook.trampoline = nullptr;
+        return false;
+    }
+    std::uint8_t patch[16] = {};
+    std::memcpy(patch, hook.original, 16);
+    patch[0] = 0xE9;
+    const std::int32_t forward = static_cast<std::int32_t>(reinterpret_cast<std::uintptr_t>(trampoline) - (hook.target + 5));
+    std::memcpy(patch + 1, &forward, sizeof(forward));
+    std::memcpy(reinterpret_cast<void*>(hook.target), patch, 16);
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(hook.target), 16);
+    DWORD ignored = 0;
+    VirtualProtect(reinterpret_cast<void*>(hook.target), 16, old_protection, &ignored);
+    return true;
+}
+
+void loader_race_summary(const char* when) {
+    std::lock_guard lock(g_loader_race_mutex);
+    std::fprintf(stderr, "[rt] loader race summary %s: spinner depth %u, last spinner tid %lu object 0x%llx\n", when,
+                 loader_spinner_depth.load(std::memory_order_relaxed),
+                 loader_spinner_last_tid.load(std::memory_order_relaxed),
+                 static_cast<unsigned long long>(loader_spinner_last_object.load(std::memory_order_relaxed)));
+    for (const LoaderRaceEntry& entry : g_loader_race) {
+        if (!entry.object) continue;
+        std::fprintf(stderr,
+                     "[rt]   object 0x%llx: begin %u, end %u, cross-thread end %u, last armed %u, arm tid %lu\n",
+                     static_cast<unsigned long long>(entry.object), entry.begin, entry.end, entry.cross,
+                     entry.last_armed, entry.arm_tid);
+    }
+}
+
+void loader_hook_verify(const char* when) {
+    for (const LoaderHookSite& hook : g_loader_hooks) {
+        if (!hook.target) continue;
+        MEMORY_BASIC_INFORMATION info{};
+        const bool queried = VirtualQuery(reinterpret_cast<const void*>(hook.target), &info, sizeof(info)) == sizeof(info);
+        const auto* bytes = reinterpret_cast<const std::uint8_t*>(hook.target);
+        char hex[64] = {};
+        for (unsigned i = 0; i < 8; ++i) std::snprintf(hex + i * 3, 4, "%02x ", bytes[i]);
+        std::fprintf(stderr,
+                     "[rt] loader verify %s: %s at 0x%llx (rva +0x%llx) bytes %s, page %s/%s, jumper %s\n", when,
+                     hook.name, static_cast<unsigned long long>(hook.target),
+                     static_cast<unsigned long long>(hook.target - loader_watch_image_base), hex,
+                     queried && (info.Protect & PAGE_EXECUTE) ? "exec" : "noexec",
+                     queried && (info.Protect & PAGE_READWRITE) ? "writable" : "readonly",
+                     bytes[0] == 0xE9 ? "E9 present" : "E9 MISSING");
+    }
+}
+
+void loader_raw_rip_sample(std::uintptr_t image_base) {
+    std::map<std::uint64_t, unsigned> hits;
+    std::vector<DWORD> tids;
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        THREADENTRY32 entry{};
+        entry.dwSize = sizeof(entry);
+        const DWORD pid = GetCurrentProcessId();
+        if (Thread32First(snapshot, &entry))
+            do {
+                if (entry.th32OwnerProcessID == pid && tids.size() < 256) tids.push_back(entry.th32ThreadID);
+            } while (Thread32Next(snapshot, &entry));
+        CloseHandle(snapshot);
+    }
+    for (unsigned round = 0; round < 300; ++round) {
+        for (const DWORD tid : tids) {
+            const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, tid);
+            if (!thread) continue;
+            if (SuspendThread(thread) == (DWORD)-1) { CloseHandle(thread); continue; }
+            CONTEXT context{};
+            context.ContextFlags = CONTEXT_CONTROL;
+            if (GetThreadContext(thread, &context) && context.Rip >= image_base &&
+                context.Rip < image_base + 0x10000000ull)
+                ++hits[context.Rip];
+            ResumeThread(thread);
+            CloseHandle(thread);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    std::vector<std::pair<std::uint64_t, unsigned>> rows(hits.begin(), hits.end());
+    std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    std::fprintf(stderr, "[rt] raw rip sample: loader base 0x%llx; %zu title RIP site(s)\n",
+                 static_cast<unsigned long long>(image_base), rows.size());
+    for (std::size_t i = 0; i < rows.size() && i < 12; ++i)
+        std::fprintf(stderr, "[rt]   raw 0x%llx -> rva +0x%llx, hits %u\n",
+                     static_cast<unsigned long long>(rows[i].first),
+                     static_cast<unsigned long long>(rows[i].first - image_base), rows[i].second);
+}
+
+// Late vtable resolution (docs/frame_capture.md): the loader global is zero at process start, so the owner vtable is
+// resolved by polling for it and the four method pointers are then hooked at their ACTUAL targets (the slots are left
+// untouched; the target's entry jumps to the logging trampoline, so a copy would be logged too because the call goes
+// through the slot's pointer). Prints the pointers with RVA and match/mismatch against the expected RVAs.
+void start_loader_vtable_hooks(std::uintptr_t image_base) {
+    std::thread([image_base] {
+        std::uint64_t loader_object = 0;
+        const std::uintptr_t global_slot = loader_watch_image_base + 0x79F6D70;
+        for (unsigned wait = 0; wait < 2000 && !loader_object; ++wait) {
+            loader_object = *reinterpret_cast<const std::uint64_t*>(global_slot);
+            if (!loader_object) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (!loader_object) {
+            std::fprintf(stderr, "[rt] loader vtable: the global stayed zero; no vtable slots to resolve\n");
+            return;
+        }
+        std::uint64_t owner = *reinterpret_cast<const std::uint64_t*>(static_cast<std::uintptr_t>(loader_object) + 0x10);
+        if (!owner) {
+            std::fprintf(stderr, "[rt] loader vtable: owner sub-object is zero\n");
+            return;
+        }
+        std::uint64_t vtable = *reinterpret_cast<const std::uint64_t*>(static_cast<std::uintptr_t>(owner));
+        std::fprintf(stderr, "[rt] loader vtable: object 0x%llx, owner 0x%llx, vtable 0x%llx\n",
+                     static_cast<unsigned long long>(loader_object), static_cast<unsigned long long>(owner),
+                     static_cast<unsigned long long>(vtable));
+        const struct { unsigned site; std::uint64_t slot; std::uint64_t expected; } slots[] = {
+            {5, 0x240, 0xE88F0}, {6, 0x248, 0xE8960}, {7, 0x260, 0x4F65820}, {8, 0x230, 0}};
+        unsigned resolved = 0;
+        for (const auto& entry : slots) {
+            const std::uint64_t target =
+                *reinterpret_cast<const std::uint64_t*>(static_cast<std::uintptr_t>(vtable) + entry.slot);
+            const std::uint64_t rva = target >= image_base ? target - image_base : 0;
+            std::fprintf(stderr, "[rt] loader vtable slot +0x%llx -> 0x%llx (rva +0x%llx)%s\n", entry.slot,
+                         static_cast<unsigned long long>(target), static_cast<unsigned long long>(rva),
+                         entry.expected ? (rva == entry.expected ? " MATCHES expected" : " MISMATCH") : "");
+            if (target >= image_base && target < image_base + 0x10000000ull) {
+                LoaderHookSite& hook = g_loader_hooks[entry.site];
+                hook.rva = rva;
+                if (install_loader_hook(hook, image_base)) ++resolved;
+            }
+        }
+        std::fprintf(stderr, "[rt] loader vtable: %u resolved method(s) hooked at their actual targets\n", resolved);
+    }).detach();
+}
+
+void start_loader_hooks(std::uintptr_t image_base) {
+    loader_watch_image_base = image_base;
+    loader_watch_image_size = 0x10000000ull;  // the title image window the stack filter uses
+    loader_global_slot.store(image_base + 0x79F6D70, std::memory_order_relaxed);
+    // Vtable-slot resolution: read the loader global, its owner sub-object and the owner's vtable, compare the four
+    // interesting slot targets with the expected RVAs and hook the actual method pointers.
+    unsigned resolved = 0;
+    std::uint64_t loader_object = 0;
+    const std::uintptr_t global_slot = loader_global_slot.load(std::memory_order_relaxed);
+    if (global_slot) loader_object = *reinterpret_cast<const std::uint64_t*>(global_slot);
+    std::uint64_t owner = 0;
+    std::uint64_t vtable = 0;
+    if (loader_object) {
+        owner = *reinterpret_cast<const std::uint64_t*>(static_cast<std::uintptr_t>(loader_object) + 0x10);
+        if (owner) vtable = *reinterpret_cast<const std::uint64_t*>(static_cast<std::uintptr_t>(owner));
+    }
+    std::fprintf(stderr, "[rt] loader vtable: object 0x%llx, owner 0x%llx, vtable 0x%llx\n",
+                 static_cast<unsigned long long>(loader_object), static_cast<unsigned long long>(owner),
+                 static_cast<unsigned long long>(vtable));
+    const struct { unsigned site; std::uint64_t slot; std::uint64_t expected; } vtable_slots[] = {
+        {5, 0x240, 0xE88F0}, {6, 0x248, 0xE8960}, {7, 0x260, 0x4F65820}, {8, 0x230, 0}};
+    for (const auto& entry : vtable_slots) {
+        if (!vtable) break;
+        const std::uint64_t target =
+            *reinterpret_cast<const std::uint64_t*>(static_cast<std::uintptr_t>(vtable) + entry.slot);
+        const std::uint64_t rva = target >= image_base ? target - image_base : 0;
+        std::fprintf(stderr, "[rt] loader vtable slot +0x%llx -> 0x%llx (rva +0x%llx)%s\n", entry.slot,
+                     static_cast<unsigned long long>(target), static_cast<unsigned long long>(rva),
+                     entry.expected ? (rva == entry.expected ? " MATCHES expected" : " MISMATCH") : "");
+        if (target >= image_base && target < image_base + 0x10000000ull) {
+            LoaderHookSite& hook = g_loader_hooks[entry.site];
+            hook.rva = rva;
+            ++resolved;
+        }
+    }
+    unsigned installed = 0;
+    for (LoaderHookSite& hook : g_loader_hooks)
+        if (hook.rva && install_loader_hook(hook, image_base)) ++installed;
+    std::fprintf(stderr, "[rt] loader hook: %u detour(s) installed (%u vtable slots resolved)\n", installed,
+                 resolved);
+    for (const LoaderHookSite& hook : g_loader_hooks) {
+        if (!hook.target) continue;
+        const auto* bytes = reinterpret_cast<const std::uint8_t*>(hook.target);
+        char hex[64] = {};
+        for (unsigned i = 0; i < 8; ++i) std::snprintf(hex + i * 3, 4, "%02x ", bytes[i]);
+        std::fprintf(stderr, "[rt] loader install: %s at 0x%llx bytes %s\n", hook.name,
+                     static_cast<unsigned long long>(hook.target), hex);
+    }
+    std::thread([image_base] {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        loader_hook_verify("at 5 s");
+        loader_raw_rip_sample(image_base);
+        std::this_thread::sleep_for(std::chrono::seconds(55));
+        loader_hook_verify("at 60 s");
+    }).detach();
+    start_loader_vtable_hooks(image_base);
+    std::thread([] {
+        for (const double at : {30.0, 60.0, 90.0, 120.0}) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<long long>(at * 1000.0)));
+            char label[16];
+            std::snprintf(label, sizeof label, "at %.0f s", at);
+            loader_race_summary(label);
         }
     }).detach();
 }
@@ -1173,6 +1784,11 @@ int wmain(int argc, wchar_t** argv) {
         // full thread-stack sampler above). Off when unset.
         if (const char* spec = std::getenv("PALMETTO_THREAD_STACKS"); spec && *spec)
             start_thread_stack_sampler(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, spec);
+        // PALMETTO_LOADER_HOOK=1: inline entry detours on the loader begin/end/re-init, with per-call records
+        // (diagnostic; see the loader entry detours above). Off by default.
+        if (const char* hook_switch = std::getenv("PALMETTO_LOADER_HOOK"); hook_switch && *hook_switch &&
+            *hook_switch != '0')
+            start_loader_hooks(reinterpret_cast<std::uintptr_t>(main_module.base));
         std::printf("running %s\n", main_module.name.c_str());
         std::fflush(stdout);
         // PALMETTO_WATCH_GLOBAL=<hex rva> logs every change of a mapped image's 8-byte global with the millisecond it

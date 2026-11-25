@@ -119,6 +119,250 @@ These switches are opt-in and off by default unless stated; `PALMETTO_SHADERS`, 
 | `PALMETTO_TITLE_VA` | `0` disables rebasing the title's shader-visible VAs into the arena. |
 | `PALMETTO_TITLE_WATCH` | Hex RVAs of title memory to watch during a run (measurement only). |
 | `PALMETTO_TRACE_TLS` | Traces the loader's TLS redirect resolution. |
+| `PALMETTO_AGGREGATE_DEVICE_ID` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_ANALYTICS_FORM` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_ARENA_LOG` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_ARENA_MB` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_ARGV_SEQUENCE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_AUDIO_FRAMES` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_AUDIO_NO_SLEEP` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_AUDIO_TRACE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_AUDIO_TRACK` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_BACK_IMAGES` | Keeps a back-image copy for the presentation path (diagnostic). |
+| `PALMETTO_BASE_RESERVED` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_BINDLESS_FUNCTIONS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_BINDLESS_IDLE_WAIT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_BINDLESS_LOAD` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_BINDLESS_MEMBER` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_BINK_INDEX` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_BINK_LIMIT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_BVH_DEVICE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_BVH_DXIL` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_BVH_FLAG` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_BVH_HARDWARE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_BVH_RECORD62` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_BVH_WARP` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_CAPTURE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_CAPTURE_EVERY` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_CAPTURE_LIMIT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_COMPAT_DIR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_CONSERVATIVE_PS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_CONSERVATIVE_TIER2_PS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_CONSERVATIVE_TIER2_VS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_CONSERVATIVE_TIER3_PS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_CONSERVATIVE_VS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_CONTENT_PACKAGES` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_CRASH_REPORT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_D3D49_DUMP` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_D3D49_VERBOSE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_DEPTH24_FUNCTIONS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_DEPTH24_LOAD` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_DEPTH24_MEMBER` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_DEPTH_EDGE_VS_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_DEVICE_FN` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_DEVICE_TYPE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_DSTORAGE_TRACE` | Logs DirectStorage requests, completions and polls. |
+| `PALMETTO_DS_ARRAYS` | Dumps every live status array (capacity, entry states, polls, threads). |
+| `PALMETTO_DS_LIGHTBAR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_DS_LOAD_TRACE` | Traces the load-window DirectStorage calls. |
+| `PALMETTO_DS_STACK` | Captures the caller stack of DirectStorage status polls. |
+| `PALMETTO_DS_TRIGGERS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_DS_TRIGGER_FREQ` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_DS_TRIGGER_GAIN` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_DUMP_REGS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FAKE_INPUT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FAULT_MEM` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FAULT_MEM_RVA` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FIRST_LIGHT_DIR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FRAME_DUMP` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FRAME_DUMP_AT_DRAW` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FRAME_DUMP_CONTROL` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FRAME_DUMP_CONTROL_PS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FRAME_DUMP_CONTROL_VS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FRAME_DUMP_PS_CONTROL` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FRAME_DUMP_PS_CONTROL_CULL_NONE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FRAME_DUMP_SAMPLE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FRAME_DUMP_WINDOW` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FSR_DEVICE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FSR_NO_STANDIN` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_FSR_WARP` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_GAMEINPUT_THREAD` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_GAMERTAG` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_GAME_DIR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_GOTO` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_GRAPHICS_CONSOLE_ROOT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_HAVE_ABI_PROBE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_HDR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_HOST_ADAPTER` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_INPUT_TRACE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_INSTANCE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_INSTANCE_FN` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_KEYBOARD_PAD` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_LIST_SLOT_TRACE` | Traces the console command-list recording slots the recorder calls. |
+| `PALMETTO_LOADER_BEGINEND` | Logs the loader begin/end entry calls with thread and object state. |
+| `PALMETTO_LOADER_FUZZ_ITERS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_LOADER_FUZZ_SECONDS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_LOADER_FUZZ_SEED` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_LOADER_HOOK` | Installs entry detours on the loader begin/end/re-init/completion entries. |
+| `PALMETTO_LOADER_POLLBP` | Breakpoint control for the loader poll loop (diagnostic). |
+| `PALMETTO_LOADER_WATCH` | Hardware-watch the loader object's armed byte and in-flight count. |
+| `PALMETTO_LOAD_TRACE` | Logs device/queue/fence calls in a time window during the load. |
+| `PALMETTO_LOG_GAME_EVENTS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_M15_GUEST` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_MOUSE_SENSITIVITY` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_MOVIE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_MOVIE_AUDIO` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_MOVIE_FRAME` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_NO_SUCH_ALG` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_ORACLE_DUMP` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_PACKAGED` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_PACKAGE_ID` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_PACKAGE_READY` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_PACKAGE_V4` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_PAGE_PULL` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_PC_TAIL_UBO` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_PIPELINE_TIMELINE` | Prints a periodic summary of pipeline creation and submission counters. |
+| `PALMETTO_POKE_HOST` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_POKE_LOG` | Logs the one shaped loader poke (diagnostic). |
+| `PALMETTO_PRESENT_ADOPT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_PRESENT_HEIGHT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_PRESENT_NO_TEAR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_PRESENT_STUB` | Answers present requests without presenting (measurement). |
+| `PALMETTO_PRESENT_UNCAP` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_PRESENT_WIDTH` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_PRESENT_WINDOW` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_PROMPTS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_PROMPTS_SWITCH_MS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_QUEUE_PROXY_ISOLATE_ALL` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_QUEUE_PROXY_JOBS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_READBACK_AT_DRAW` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_READBACK_CENTRE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_READBACK_FULL` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_REPLAY_MISS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_RGB96_LARGE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_RIP_HIST` | Samples every thread's instruction pointer into a histogram in named windows. |
+| `PALMETTO_ROOT_DATA_TRACE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_RT136_A` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_RT136_B` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_RT136_C` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_RT_AS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_RT_ENV_INIT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_RUMBLE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_RUN_DLLMAIN` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_SAVE_DIR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_SCENE_AUDIO` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_SCENE_MODE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_SCRATCH_FUNCTIONS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_SCRATCH_LOAD` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_SCRATCH_MEMBER` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_SDR_EOTF` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_SHADER_DXBC` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_SIG_CLASS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_SKIP_CPU_CHECK` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_SLOT70_CBV` | Opt-in console slot-70 constant-buffer-view conversion (falsified). |
+| `PALMETTO_SLOT70_CENSUS` | Census of console slot-70 call shapes. |
+| `PALMETTO_SLOT70_IDENTITY_VA` | Resolves a console slot-70 destination address against the creation registry. |
+| `PALMETTO_SLOT70_PAIR` | Pairs console slot-70 texture publications with the resource created before them. |
+| `PALMETTO_SLOT70_PROBE` | Probes the console slot-70 call shape. |
+| `PALMETTO_SLOT70_PUBLISH` | Publishes the slot-70 record block as a matrix view. |
+| `PALMETTO_STANDIN_PIPELINES` | Builds stand-in graphics pipelines when a record cannot be converted. |
+| `PALMETTO_STREAM_CONSUMER` | Guards and labels the streamed-block consumer's first touches. |
+| `PALMETTO_SWAPCHAIN_MAINTENANCE1` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_SWEEP_PS_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_SWEEP_VS_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEB_CHECK` | Validates the thread environment block offsets before the loader runs. |
+| `PALMETTO_TEST_BUFFER_UAV_DIR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_CS_R9G9B9E5_UAV_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_CS_RAYQUERY_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_CS_SAMPLE_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_CS_SET0_SAMPLE_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_CS_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_DIR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_FS_SOLID_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_GATHER_ALPHA_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_GS_DEPTH_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_GS_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_INDIRECT_COUNT_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_M15_DIR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_M2F_DIR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_M2_DIR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_M3_DIR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_M4_DIR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_MSAA_FRAG_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_MSAA_VERT_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_MS_FLOAT_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_MS_SINT_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_MS_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_MS_UINT_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_PS_ATOMIC_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_PS_DEPTH_EMPTY_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_PS_DEPTH_WRITE_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_PS_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_PS_UINT_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_SUBGROUP_SHADERS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_VS_DEPTH_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_VS_FULLSCREEN_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_VS_INT_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_VS_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEST_VS_TRI_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEXTURE_BIND_FETCHED` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEXTURE_IMPORT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEXTURE_IMPORT_MAX` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TEXTURE_PAGE_WATCH` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_THREAD_STACKS` | Captures every thread's stack at named times. |
+| `PALMETTO_TITLE_PEEK` | Reads named words of the title process on a timer. |
+| `PALMETTO_TLS_GA_PATCH` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TYPELESS_PS_FLOAT_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TYPELESS_PS_UINT_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_TYPELESS_VS_SPV` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_UNIMPLEMENTED` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_UPLOAD_SYSMEM` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_USER_DATA_SHIFT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_USER_TRACE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_VERTEX_MATRIX_DESCRIPTOR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_VERTEX_PATH` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_VERTEX_STREAM_DESCRIPTOR` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_VK_DEVICE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_VK_DEVICE_FUNCTIONS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_VK_GRAPHICS_FAMILY_ONLY` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_VK_LOAD` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_VK_MAX_QUEUES_PER_FAMILY` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_VK_MEMBER` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_VK_VALIDATION` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_VULKAN_DEVICE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_VULKAN_LOADER` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_WAIT_SAMPLE` | Samples the title's wait states on a timer. |
+| `PALMETTO_WATCH_GLOBAL` | Watches a title global and reports writes. |
+| `PALMETTO_WATCH_RVA_WRITE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XBOX_PRESENT_HOOK_ONLY` | Keeps the PresentX hook without presenting. |
+| `PALMETTO_XBOX_VIEW_SHAPE` | Probes the console view-creation call shapes. |
+| `PALMETTO_XDXR_FUNCTIONS` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XDXR_LOAD` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XDXR_MEMBER` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XG_DUMP` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XG_LAYOUT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XG_TRACE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XMA2_BAD_PACKET_SIZE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XMA2_DECODER_FAILURE` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XMA2_DECODER_H` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XMA2_INVALID_ARGUMENT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XMA2_INVALID_FORMAT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XMA2_OK` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XMA2_OUT_OF_MEMORY` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XMA2_PACKET_BYTES` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XMA2_PANIC` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XS_CALLERS` | Logs the caller and argument shape of every console call (first call per site). |
+| `PALMETTO_XS_CALLERS_PROFILE` | Adds per-site call counts to the console caller probe. |
+| `PALMETTO_XS_CLEAR_BARRIER_PROBE` | Probes the console clear and barrier recording calls. |
+| `PALMETTO_XS_FRAME_INTERVAL_SLOT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XS_LIST_DUMP` | Dumps the arguments of named console list slots. |
+| `PALMETTO_XS_LIST_ID` | Logs which console list proxy a recording call lands on. |
+| `PALMETTO_XS_LIST_MUTE` | Suppresses named console list recording calls (measurement). |
+| `PALMETTO_XS_LIST_X_SLOT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XS_QUEUE_X_SLOT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XS_SCHEDULE_EVENT_SLOT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_XS_SLOT57_LAYOUT_DUMP` | Dumps the slot-57 input layout of the first records. |
+| `PALMETTO_XS_WAIT_EVENT_SLOT` | Runtime diagnostic switch; opt-in and off by default. |
 
 ## Console vtable slot maps
 

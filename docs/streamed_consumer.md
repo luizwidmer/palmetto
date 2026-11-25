@@ -50,6 +50,9 @@ boolean and no guard, handler or range is created):
 * `PALMETTO_DS_ARRAYS=1` (section 6d): prints every live status array's state, the loader object's `[obj+0x30]` owner, the
   owner's vtable and the function at vtable+0x18, and the threads polling each array. Off by default; bounded to 1,600
   lines; no runtime change.
+* `PALMETTO_PIPELINE_TIMELINE=<seconds>` (section 6e): one line every N seconds with the pipeline-conversion counters
+  (slot-57 calls/converted/refused, slot-55 calls, graphics and compute pipelines created), submissions, presents, the
+  console-ABI call total, the thread count and the last slot-57 caller. Off by default; bounded to 240 lines.
 * the queue and fence proxies get the same window trace from the device side (`PALMETTO_LOAD_TRACE=<from_s>,<to_s>`,
   see below), so a poll that never satisfies, a second batch and a GPU wait are all visible in one boot.
 
@@ -395,6 +398,39 @@ the loader object, its `[obj+0x30]` owner, the owner's vtable and the exact func
 complete and the wrapper's call target, object and index are exactly the ones measured. The stalled wait is the title's
 own armed-flag lifecycle across the threads that share the loader object (the array state cannot produce it, and no
 pending entry exists to fix). No shim change is warranted; `PALMETTO_DS_ARRAYS` stays off by default.
+## 6e. Pipeline-conversion traffic as a time series: it runs from ~5 s to ~25 s, then everything is quiet
+
+`PALMETTO_PIPELINE_TIMELINE=<seconds>` (off by default) prints one line every N seconds with wall time and cumulative
+counters: slot-57 record calls / converted / refused, slot-55 derived calls, graphics pipelines created, compute calls /
+created, submissions (queue slot 35), presents (queue slot 32), console-ABI proxy call total, process thread count and
+the last slot-57 caller. Counters only; no game data. One 130 s boot (`boot-timeline1`, ALIVE 130.2 s, 0 exceptions,
+`PALMETTO_PIPELINE_TIMELINE=5`):
+
+| time | slot57 calls (converted/refused) | slot55 calls | graphics created | compute created | submits | presents | threads |
+|---|---|---|---|---|---|---|---|
+| +5 s | 0 | 0 | 0 | 53 | 0 | 0 | 69 |
+| +10 s | 3,340 (3,340/0) | 0 | 3,340 | 95 | 0 | 0 | 69 |
+| +15 s | 7,227 (7,227/0) | 0 | 7,227 | 95 | 0 | 0 | 69 |
+| +20 s | 10,241 (10,241/0) | 17,555 | 27,791 | 95 | 2 | 1 | 72 |
+| +25 s | 10,241 (10,241/0) | 41,545 | 51,786 | 95 | 736 | 367 | 88 |
+| +30 s | 10,241 | 41,545 | 51,786 | 95 | 1,955 | 977 | 87 |
+| +60 s | 10,241 | 41,545 | 51,786 | 95 | 9,294 | 4,646 | 83 |
+| +125 s | 10,241 | 41,545 | 51,786 | 95 | 25,093 | 12,546 | 83 |
+
+* **Slot-57 record conversion runs from before +10 s to between +15 s and +20 s**, and is complete at 10,241 records -
+  the whole record set, all converted, **0 refused**. The 41,545 slot-55 derivations run from between +15 s and +20 s to
+  between +20 s and +25 s, and every one creates a PC graphics pipeline (51,786 created = 10,241 + 41,545 exactly, so
+  there is no refusal in either path). The last slot-57 caller is `game+0x247757E` (the pipeline-creation worker seen in
+  the earlier profiles).
+* **The conversion traffic stops by +25 s, several seconds after the loader goes dormant** (~13.5 s last enqueue,
+  ~20 s last status). So the cdb observation of a process busy in slot 57 at 10 s is real but bounded: the conversion is
+  not an unending cost, and it ends before the first quarter of the boot. Nothing at all happens between that end and the
+  frame loop: from +30 s to +125 s the only movement is the frame loop's own submissions and presents (~240 submits and
+  ~120 presents per 5 s), with the console-call total rising in step; the pipeline counters are bit-identical at every
+  sample, and the thread count settles at 83 (from 88 at +25 s, i.e. the burst's temporary threads exit).
+* **Reading for the gate:** the title is genuinely idle-waiting after the pipeline precompile - the renderer's two-pass
+  loop is the only live traffic, and our conversion path is not the busy part after ~25 s (it is not even active). The
+  conversion cost itself is bounded and measured: 51,786 PC pipeline creations in ~15 s, no refusals.
 ## 7. The answer: where the GPU-side step is missing
 
 * **Do the streamed bytes reach a texture?** No. They reach a title CPU deserializer and, in the whole 130 s window, no
@@ -456,20 +492,28 @@ pending entry exists to fix). No shim change is warranted; `PALMETTO_DS_ARRAYS` 
     between two samples appears in the counts but not its intermediate pending state. The four polling thread ids are the
     threads that ever polled the array over the whole boot, not simultaneous pollers; the concurrency claim rests on the
     armed=0 samples (250 ms apart) combined with those four threads.
+13. `PALMETTO_PIPELINE_TIMELINE`'s "console calls" is the console-ABI proxy call total (device and child proxies), not the
+    D3D12 trace's PC-call count (535,283 in the same boot); "graphics created" counts successful slot-57 creations and
+    successful slot-55 derivations together (51,786 = 10,241 + 41,545); compute created counts slots 62 and 67. The 5 s
+    period brackets the end of the conversion traffic between +20 s and +25 s rather than pinning the second.
 
 ## 9. Gates, files and the next falsifier
 
 Gates: `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT` (both on the binary the
-stack-walk boots ran). All switches are off by default and alter no answer. Files touched: `port/shims/dstorage.cpp`,
+timeline boot ran). All switches are off by default and alter no answer. Files touched: `port/shims/dstorage.cpp`,
 `port/shims/d3d12_xs_device.cpp`, this page. Evidence boots on disk (outside the repository): `boot-shape1`,
 `boot-shape2`, `boot-shape3` (the call-shape increment), `boot-load1` (the load-stall increment), `boot-gate1` (the
-gate-naming boot) and `boot-poll1`, `boot-peek1`, `boot-peek3`, `boot-peek4` (the stack-walk increment), each with
-`stderr.log` and `summary.txt`.
+gate-naming boot), `boot-poll1`, `boot-peek1`, `boot-peek3`, `boot-peek4` (the stack-walk increment), `boot-arr1`,
+`boot-arr2` (the status-array increment) and `boot-timeline1` (the pipeline timeline), each with `stderr.log` and
+`summary.txt`.
 
 Next, smallest honest first - the stream itself and DirectStorage emulation are closed, and the state machine's own
 poll loop is now measured; the dispatcher above it is the target:
 
-1. **Name the loader object's armed-flag lifecycle (the one remaining contradiction).** Section 6d shows the array is
+1. **Name the loader object's armed-flag lifecycle (the one remaining contradiction).** Sections 6d and 6e bound the
+   remaining work: the status array is complete and the completion call is correct, and the pipeline-conversion traffic
+   ends by +25 s, after which the only live traffic is the frame loop (the title is genuinely idle-waiting, so the gate is
+   a missing event/asset or the loader's armed-flag lifecycle below, not our conversion cost).
    complete and the completion call is correct, so the stall is the title's own `[obj+0x78]` lifecycle across the four
    threads that poll the same loader object. The direct instrument is the existing `PALMETTO_LOADER_WATCH` hardware watch,
    re-armed from the first device call instead of at ~3 s, so it captures the initial arm and every later clear, with the
