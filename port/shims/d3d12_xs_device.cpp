@@ -3126,7 +3126,8 @@ bool slot70_enabled(const char* name) {
 bool slot70_measurement_enabled() {
     static const bool on = [] {
         return slot70_enabled("PALMETTO_SLOT70_PROBE") || slot70_enabled("PALMETTO_SLOT70_CBV") ||
-               slot70_enabled("PALMETTO_SLOT70_PUBLISH") || slot70_enabled("PALMETTO_SLOT70_CENSUS");
+               slot70_enabled("PALMETTO_SLOT70_PUBLISH") || slot70_enabled("PALMETTO_SLOT70_CENSUS") ||
+               slot70_enabled("PALMETTO_SLOT70_PAIR");
     }();
     return on;
 }
@@ -3152,6 +3153,11 @@ bool slot70_census_enabled() {
     static const bool on = slot70_enabled("PALMETTO_SLOT70_CENSUS");
     return on;
 }
+// Pairing the texture publications with the console resource creations (docs/device_slot70.md section 8).
+bool slot70_pair_enabled() {
+    static const bool on = slot70_enabled("PALMETTO_SLOT70_PAIR");
+    return on;
+}
 
 constexpr unsigned kSlot70Sites = 4;
 constexpr unsigned kSlot70DestPages = 8;
@@ -3175,6 +3181,12 @@ std::atomic<bool> g_slot70_matrix_logged{false};
 // are not pinned to a console T# encoding, so the publication refuses them by name instead of writing a guess.
 std::atomic<std::uint64_t> g_slot70_texture_refused{0};
 std::atomic<bool> g_slot70_texture_logged{false};
+// The pairing (PALMETTO_SLOT70_PAIR=1): texture publications that found a matching creation, those that did not, and the
+// layer T#s written.
+std::atomic<std::uint64_t> g_slot70_pairs_found{0};
+std::atomic<std::uint64_t> g_slot70_pairs_published{0};
+std::atomic<std::uint64_t> g_slot70_pairs_none{0};
+std::atomic<bool> g_slot70_pair_logged{false};
 
 // The census' distinct shapes. A shape is what the publication decision reads plus the resource description and the kind
 // of the record's first word, so two boots' logs can be compared as counts. The mutex is only taken on the census path
@@ -3330,6 +3342,12 @@ void slot70_summary(std::uint64_t calls) {
                  static_cast<unsigned long long>(g_slot70_matrix_unplaced.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(g_slot70_matrix_unreadable.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(g_slot70_texture_refused.load(std::memory_order_relaxed)));
+    std::fprintf(stderr,
+                 "[rt] d3d12_xs: slot 70 pair: %llu texture publication(s) paired, %llu with no creation in the window, "
+                 "%llu layer T# published\n",
+                 static_cast<unsigned long long>(g_slot70_pairs_found.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(g_slot70_pairs_none.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(g_slot70_pairs_published.load(std::memory_order_relaxed)));
 }
 
 void slot70_census_note(const D3D12_RESOURCE_DESC* desc, bool desc_readable, const std::uint8_t* record,
@@ -3428,6 +3446,150 @@ void slot70_census_summary(std::uint64_t calls) {
                             histogram[h].word, static_cast<unsigned long long>(histogram[h].calls),
                             histogram[h].shapes);
     std::fprintf(stderr, "%s\n", line);
+}
+
+// ---- Pairing the texture publications with the resources the title creates -----------------------------------------
+//
+// The 60 texture-shaped publications carry a resource description but no resource handle: the console device is expected
+// to resolve the resource from the creations around the call. This ring records the last creations that can supply a
+// sampled image - console slot 127 (create committed with a layout) and slot 133 (placed resources) - with their Xbox
+// description, the real resource the layer made and (for 133) the title VA. On a texture publication the ring is
+// searched for creations *before* it within a small window of slot-70 calls whose description matches on
+// dimension/width/height/format/mips/array. A proven pair publishes the layer's own T# for that resource at the
+// publication's destination through the real device's CreateShaderResourceView - no console encoding is guessed.
+constexpr unsigned kSlot70CreationRing = 16;
+constexpr std::uint64_t kSlot70PairWindow = 24;  // slot-70 calls
+struct Slot70CreationRecord {
+    std::uint64_t call_number = 0;  // the slot-70 call count when the creation was seen
+    std::uint64_t va = 0;
+    std::uint64_t resource = 0;
+    bool ref_taken = false;
+    unsigned source = 0;  // 127 or 133
+    D3D12_RESOURCE_DESC desc{};
+};
+Slot70CreationRecord g_slot70_creations[kSlot70CreationRing];
+std::uint64_t g_slot70_creation_total = 0;
+std::mutex g_slot70_creation_mutex;
+
+// Adds a reference only when the pointer really is a COM object this process can read (a test's synthetic pointer is
+// not, and must not be AddRef'd); the reference is released when the ring slot is reused.
+bool slot70_maybe_add_ref(std::uint64_t resource) {
+    if (!resource) return false;
+    if (!readable_range(reinterpret_cast<const void*>(resource), sizeof(void*))) return false;
+    const auto* vtable_pointer = *reinterpret_cast<void* const*>(reinterpret_cast<const void*>(resource));
+    if (!readable_range(vtable_pointer, sizeof(void*))) return false;
+    reinterpret_cast<IUnknown*>(resource)->AddRef();
+    return true;
+}
+
+void note_console_resource_creation(unsigned slot, const D3D12_RESOURCE_DESC& desc, void* resource,
+                                    std::uint64_t va) {
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE1D && desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+        desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE3D)
+        return;
+    const std::lock_guard lock(g_slot70_creation_mutex);
+    Slot70CreationRecord& entry = g_slot70_creations[g_slot70_creation_total % kSlot70CreationRing];
+    if (entry.ref_taken && entry.resource) reinterpret_cast<IUnknown*>(entry.resource)->Release();
+    entry.call_number = g_slot70_calls.load(std::memory_order_relaxed);
+    entry.va = va;
+    entry.resource = reinterpret_cast<std::uint64_t>(resource);
+    entry.ref_taken = slot70_maybe_add_ref(entry.resource);
+    entry.source = slot;
+    entry.desc = desc;
+    ++g_slot70_creation_total;
+}
+
+bool slot70_descriptions_match(const D3D12_RESOURCE_DESC& a, const D3D12_RESOURCE_DESC& b) {
+    return a.Dimension == b.Dimension && a.Width == b.Width && a.Height == b.Height && a.Format == b.Format &&
+           a.MipLevels == b.MipLevels && a.DepthOrArraySize == b.DepthOrArraySize;
+}
+
+// The pure part of the pairing rule: the newest creation before `call` within `window`, when its description matches.
+// Returned separately so the GPU-free test can exercise it through the proxy's behaviour (a proven pair calls the real
+// CreateShaderResourceView; an unproven one keeps the measured refusal).
+bool slot70_find_pairing(const D3D12_RESOURCE_DESC& publication, std::uint64_t call, std::uint64_t window,
+                         std::uint64_t& resource, std::uint64_t& va, unsigned& source, std::uint64_t& distance,
+                         unsigned& candidates, unsigned& matched) {
+    const std::lock_guard lock(g_slot70_creation_mutex);
+    bool found = false;
+    std::uint64_t best = 0;
+    const std::uint64_t total = g_slot70_creation_total;
+    for (std::uint64_t i = 0; i < total && i < kSlot70CreationRing; ++i) {
+        const Slot70CreationRecord& entry = g_slot70_creations[i];
+        if (!entry.call_number && i + 1 > total) continue;  // never filled
+        if (entry.call_number > call) continue;
+        const std::uint64_t d = call - entry.call_number;
+        if (d > window) continue;
+        ++candidates;
+        if (!slot70_descriptions_match(publication, entry.desc)) continue;
+        ++matched;
+        if (!found || d <= best) {
+            found = true;
+            best = d;
+            resource = entry.resource;
+            va = entry.va;
+            source = entry.source;
+            distance = d;
+        }
+    }
+    return found && resource != 0;
+}
+
+void slot70_publish_texture_view(DeviceProxy* self, const D3D12_RESOURCE_DESC& publication, std::uint64_t resource,
+                                 std::uint64_t destination, std::uint64_t call, unsigned source, std::uint64_t distance,
+                                 unsigned candidates, unsigned matched) {
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = publication.Format;
+    bool supported = true;
+    switch (publication.Dimension) {
+        case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+            if (publication.DepthOrArraySize > 1) {
+                srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY;
+                srv.Texture1DArray = {0, publication.MipLevels, 0, publication.DepthOrArraySize, 0.0f};
+            } else {
+                srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D;
+                srv.Texture1D = {0, publication.MipLevels, 0.0f};
+            }
+            break;
+        case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+            if (publication.DepthOrArraySize > 1) {
+                srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+                srv.Texture2DArray = {0, publication.MipLevels, 0, publication.DepthOrArraySize, 0, 0.0f};
+            } else {
+                srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                srv.Texture2D = {0, publication.MipLevels, 0, 0.0f};
+            }
+            break;
+        case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
+            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+            srv.Texture3D = {0, publication.MipLevels, 0.0f};
+            break;
+        default:
+            supported = false;
+            break;
+    }
+    if (!supported || !destination || (destination & 15) ||
+        !readable_range(reinterpret_cast<const void*>(destination), 32))
+        return;
+    // Through the real device: the layer encodes its own T# at the title's destination slot (a console-addressed heap's
+    // CPU handle is the title's own address), and the heap mirror copies it to the GPU-visible stand-in. The PC method
+    // returns void, as CreateConstantBufferView does; the layer logs a view it cannot make.
+    self->real->CreateShaderResourceView(reinterpret_cast<ID3D12Resource*>(resource), &srv,
+                                         D3D12_CPU_DESCRIPTOR_HANDLE{static_cast<SIZE_T>(destination)});
+    const std::uint64_t published = g_slot70_pairs_published.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (published <= 8 || call % 4096 == 0)
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: slot 70 pair: publication dim=%u 0x%llx x 0x%x format=0x%x mips=0x%x array=0x%x -> "
+                     "slot %u resource 0x%llx at distance %llu of %u candidate(s), %u full match(es); the layer SRV "
+                     "wrote its T# at dest page=0x%llx off=0x%llx, call=%llu, published #%llu\n",
+                     static_cast<unsigned>(publication.Dimension),
+                     static_cast<unsigned long long>(publication.Width), static_cast<unsigned>(publication.Height),
+                     static_cast<unsigned>(publication.Format), static_cast<unsigned>(publication.MipLevels),
+                     static_cast<unsigned>(publication.DepthOrArraySize), source,
+                     static_cast<unsigned long long>(resource), static_cast<unsigned long long>(distance), candidates,
+                     matched, static_cast<unsigned long long>(destination & ~std::uint64_t(0xFFFF)),
+                     static_cast<unsigned long long>(destination & 0xFFFF), static_cast<unsigned long long>(call),
+                     static_cast<unsigned long long>(published));
 }
 
 void slot70_texture_probe(const D3D12_RESOURCE_DESC* desc, const std::uint8_t* record, bool record_readable,
@@ -3654,6 +3816,47 @@ std::uint64_t proxy_console_slot70(DeviceProxy* self, std::uint64_t caller, std:
             }
             return hr_to_u64(S_OK);
         }
+    }
+
+    // ---- Pairing a texture-shaped publication with the resource the title just created (PALMETTO_SLOT70_PAIR=1) ----
+    // docs/device_slot70.md section 8: the publication carries only a resource description, so the resource is looked for
+    // among the console slot-127/133 creations within a small window of slot-70 calls; a proven pair publishes the
+    // layer's own T# at the title's destination slot, and no pair keeps the measured refusal below.
+    if (slot70_pair_enabled() && desc_readable && resource->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER &&
+        readable_range(reinterpret_cast<const void*>(a2), 0x40)) {
+        std::uint64_t resource_id = 0, pairing_va = 0, distance = 0;
+        unsigned source = 0, candidates = 0, matched = 0;
+        if (slot70_find_pairing(*resource, call, kSlot70PairWindow, resource_id, pairing_va, source, distance, candidates,
+                                matched)) {
+            g_slot70_pairs_found.fetch_add(1, std::memory_order_relaxed);
+            static std::atomic<unsigned> decision_lines{0};
+            if (decision_lines.fetch_add(1, std::memory_order_relaxed) < 12)
+                std::fprintf(stderr,
+                             "[rt] d3d12_xs: slot 70 pair: publication dim=%u 0x%llx x 0x%x format=0x%x mips=0x%x "
+                             "array=0x%x call=%llu: %u creation(s) in the window, %u full match(es), chosen slot %u "
+                             "distance %llu resource 0x%llx\n",
+                             static_cast<unsigned>(resource->Dimension),
+                             static_cast<unsigned long long>(resource->Width),
+                             static_cast<unsigned>(resource->Height), static_cast<unsigned>(resource->Format),
+                             static_cast<unsigned>(resource->MipLevels),
+                             static_cast<unsigned>(resource->DepthOrArraySize),
+                             static_cast<unsigned long long>(call), candidates, matched, source,
+                             static_cast<unsigned long long>(distance), static_cast<unsigned long long>(resource_id));
+            slot70_publish_texture_view(self, *resource, resource_id, a3, call, source, distance, candidates, matched);
+            return hr_to_u64(S_OK);
+        }
+        g_slot70_pairs_none.fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<unsigned> none_lines{0};
+        if (none_lines.fetch_add(1, std::memory_order_relaxed) < 8)
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: slot 70 pair: publication dim=%u 0x%llx x 0x%x format=0x%x mips=0x%x array=0x%x "
+                         "call=%llu: no creation within %llu slot-70 call(s) matches (%u candidate(s), %u full match(es)); "
+                         "keeping the measured refusal\n",
+                         static_cast<unsigned>(resource->Dimension),
+                         static_cast<unsigned long long>(resource->Width), static_cast<unsigned>(resource->Height),
+                         static_cast<unsigned>(resource->Format), static_cast<unsigned>(resource->MipLevels),
+                         static_cast<unsigned>(resource->DepthOrArraySize), static_cast<unsigned long long>(call),
+                         static_cast<unsigned long long>(kSlot70PairWindow), candidates, matched);
     }
 
     // A texture-shaped description is where the sampled-T# question lives (docs/device_slot70.md section 6). The census
@@ -5125,6 +5328,8 @@ HRESULT proxy_create_committed_resource_layout(DeviceProxy* self, const D3D12_HE
                      static_cast<unsigned long>(retry));
         hr = retry;
     }
+    if (SUCCEEDED(hr) && out && *out)
+        note_console_resource_creation(127, *xbox_desc, *out, 0);
     return hr;
 }
 
@@ -5179,8 +5384,11 @@ HRESULT proxy_create_placed_resource_x(DeviceProxy* self, void* va, const D3D12_
     const HRESULT hr = handler(self->real, va, pc_desc, state, *riid, out);
     // The title range this buffer stands for, kept for console slot 70's matrix publication: a V# base only names a
     // range the layer registered (and therefore rebases and pulls) when the buffer was made through this slot.
-    if (SUCCEEDED(hr) && pc_desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && pc_desc.Width)
-        note_placed_buffer_range(reinterpret_cast<std::uint64_t>(va), pc_desc.Width);
+    if (SUCCEEDED(hr) && out && *out) {
+        if (pc_desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && pc_desc.Width)
+            note_placed_buffer_range(reinterpret_cast<std::uint64_t>(va), pc_desc.Width);
+        note_console_resource_creation(133, *xbox_desc, *out, reinterpret_cast<std::uint64_t>(va));
+    }
     return hr;
 }
 

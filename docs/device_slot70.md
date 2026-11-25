@@ -315,13 +315,51 @@ on that resource with the layer's own T# encoder at the same destination - the d
 have to be guessed. If no publication can be paired, the sampled T#s come from the title's own T# writes elsewhere and the
 frontier is again the page producer of the placed 4K texture.
 
-## 8. What is modelled now, and what is not
+## 8. Pairing the texture publications with the resources the title creates
+
+The texture publication carries a resource description but no resource handle, so the device behind the call can only
+resolve the resource from the creations around it. `PALMETTO_SLOT70_PAIR=1` keeps a bounded ring (16) of console resource
+creations - console slot 127 (create committed with a layout) and slot 133 (placed resources) - with each creation's Xbox
+description, the real resource the layer made, the title VA (133) and the slot-70 call count at which it was seen. On a
+texture-shaped publication the ring is searched for creations **before** the call within `kSlot70PairWindow = 24` slot-70
+calls whose description matches on dimension/width/height/format/mips/array; the newest match wins. A proven pair calls
+the **real device's `CreateShaderResourceView`** with a view description built from the publication (view dimension from
+the desc, format, mip and array counts) and the title's destination slot as the CPU handle - so the layer writes its own
+T#, no console encoding is guessed. No pair keeps the measured refusal.
+
+Measured in `boot-slot70-pair` (150 s, ALIVE, 654,034 D3D12 calls; env: console feed + vertex-stream descriptor + matrix
+publication + pairing + census + sample dump, readback armed at the compose draw 28000, matrix-experiment switch off):
+
+| measured | value |
+|---|---|
+| texture-shaped publications | 60 (the measured census) |
+| **paired** | **6** - all of one shape (`dim3 0x80 x 0x48 fmt 0x29 mips 0x7 array 0x1`), each at calls 71-76 with a slot-133 creation at **distance 1** (the immediately preceding creation, 1..6 candidates in the window, all full matches) |
+| paired destinations | console heap page + offsets `0x1120`, `0x1140`, `0x1160`, `0x1180`, `0x11a0`, `0x11c0`; the layer's T# written there (`6 layer T# published`) |
+| **not paired** | **54** - no creation within 24 slot-70 calls matched (e.g. calls 4-12: 2 candidates, 0 full matches; the rest: no candidate at all) - the measured refusal kept |
+| compose draw 28000 | `ps present, 6 image sample(s)`; **render-target readback mean 0 0 0, non-black 0/16384, peak 0**; write control 51 102 204 (16,384/16,384) |
+
+**Result: the pairing exists but is not the compose pass' input.** Six publications prove the rule end to end (the
+layer's own T# at the title's destination), but their shape (`128x72`, format 0x29, 7 mips) and their destination slots
+(heap offsets 0x1120..0x11c0) are not the compose pass' sampled table slots, and the compose draw's display readback is
+unchanged at 0/16384 while its colour path still reports 6 image samples. The other 54 publications - including the
+`0x100x0x80`, `1x1` and `0x500x0x2d0` shapes at the start of the boot - have no matching creation within the window, so
+they cannot be paired by this rule.
+
+**What this pins and what it leaves.** Pinned: a texture publication *can* be turned into the layer's T# when the
+resource it views is one the title created in the same call neighbourhood, and the rule's pure part (description match +
+window) is exercised by the GPU-free test. Left: 54 publications need their resource identified some other way (the
+create call may be further away, or the publication may not be a view of a slot-127/133 resource at all), and the compose
+pass' missing sampled inputs are not among the six paired slots - framecap's trace names compose table key 1 as the
+sibling 4K image (resolved) and its other slots as float data or unresolved, so the next step is framecap's complete
+T#-slot list for draws 28000/28001 compared against these destinations and against the creations the ring recorded.
+
+## 9. What is modelled now, and what is not
 
 **Modelled:** the call's shape, arity and ABI (three words; third published with `clwb`); both call sites; the argument
 records and destination kinds measured; the measured refusal as the default; an opt-in probe that dumps the arguments,
 records, destination bytes and per-heap destination statistics; the falsified CBV conversion behind its own switch; the
 matrix publication over the record's block behind `PALMETTO_SLOT70_PUBLISH=1`, with the placement/readability/emptiness
-refusals; a bounded shape census (`PALMETTO_SLOT70_CENSUS=1`) that measured the 34-35 shapes above; the named refusal of texture-shaped records (no pinned T# encoding); the texture-destination probe that measured the title's non-write and the later re-dumps; and a shape test that refuses anything that is not the measured call instead of guessing.
+refusals; a bounded shape census (`PALMETTO_SLOT70_CENSUS=1`) that measured the 34-35 shapes above; the named refusal of texture-shaped records (no pinned T# encoding); the texture-destination probe that measured the title's non-write and the later re-dumps; the pairing rule (`PALMETTO_SLOT70_PAIR=1`) that turns a texture publication whose resource was created in the same window into the layer's own T# at the destination; non-write and the later re-dumps; and a shape test that refuses anything that is not the measured call instead of guessing.
 
 **Not modelled / still open:** the record's other fields are measured but not interpreted (the first word differs between
 the two sites - `0x100000027` at the wrapper site, the destination address at the dominant site - and its writer is not
@@ -329,7 +367,7 @@ explained; the resource description in `arg1` is not used by the publication, an
 publication writes the matrix view; whether the title then copies that descriptor into the table slot its draw names is
 what the measured boot below decides.
 
-## 9. Gates, files and the next falsifier
+## 10. Gates, files and the next falsifier
 
 Gates on the final tree: `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT`;
 `xs_proxy_mock_test` -> `PASS`, whose `check_slot70_console_view` covers the falsified conversion's hand-off, the matrix
@@ -344,7 +382,7 @@ record and `check_slot70_console_view`), this page. Evidence boots under `D:\leo
 140 s, ALIVE), `boot-slot70-cbv` (conversion, stopped at 29.5 s), `boot-slot70-final` (default path, 100 s, ALIVE), and
 `boot-slot70-publish3` (publication + acceptance, 150 s, ALIVE), `boot-slot70-publish2` (publication with the vertex-stream switch off, 150 s, ALIVE) and `boot-slot70-publish` (first publication boot, 150 s, ALIVE). The shape census and colour-path measurements are `boot-slot70-census` (PS control, 150 s, ALIVE) and
 `boot-slot70-census2` (plain + sampled readback, 150 s, ALIVE). The texture-destination probe is `boot-slot70-texprobe` (150 s, ALIVE): 60 texture-shaped publications,
-their destinations' before/after bytes and the re-dumps.
+their destinations' before/after bytes and the re-dumps. The pairing boot is `boot-slot70-pair` (150 s, ALIVE): 6 of 60 texture publications paired and published, 54 unpaired; compose draw 28000 readback unchanged at 0/16384.
 
 **Next falsifier.** The publication's acceptance is the PS-control readback changing from black: with the matrix A view
 published, the armed draw's `s8+0` fetch slot must decode as a matrix V# and the solid-pixel control must produce colour.

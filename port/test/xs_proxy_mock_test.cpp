@@ -178,6 +178,13 @@ struct Mock {
     D3D12_CONSTANT_BUFFER_VIEW_DESC cbv_desc;
     std::uint64_t cbv_dest;
     unsigned cbv_calls;
+    // Device slot 18 (PC CreateShaderResourceView): the layer's own T# path. The pairing publication
+    // (PALMETTO_SLOT70_PAIR) hands the paired resource and a view description built from the publication's resource
+    // description to the real device; the mock records both and writes a marker at the destination.
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc;
+    std::uint64_t srv_dest;
+    std::uint64_t srv_resource;
+    unsigned srv_calls;
 };
 
 Mock g_pool[256];
@@ -484,6 +491,34 @@ void WINAPI mock_queue_get_desc(void* hidden, void* object) {
     std::memcpy(hidden, &kMockQueueDesc, sizeof(kMockQueueDesc));
 }
 
+// PC ID3D12Device::CreateShaderResourceView (slot 18), the layer's T# encoder: the console slot-70 pairing publication
+// hands it the paired resource and the view description it built, and the mock writes a marker at the destination.
+void WINAPI mock_create_srv(Mock* self, ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC* desc,
+                            D3D12_CPU_DESCRIPTOR_HANDLE destination) {
+    ++self->srv_calls;
+    self->srv_resource = reinterpret_cast<std::uint64_t>(resource);
+    self->srv_dest = destination.ptr;
+    if (desc) self->srv_desc = *desc;
+    if (destination.ptr) {
+        const std::uint32_t mark[8] = {0x18u, static_cast<std::uint32_t>(self->srv_desc.ViewDimension),
+                                       self->srv_desc.Format, 0x18181818u,
+                                       0x18181818u, 0x18181818u, 0x18181818u, 0x18181818u};
+        std::memcpy(reinterpret_cast<void*>(destination.ptr), mark, sizeof(mark));
+    }
+}
+
+// The mock vtable is shared by every mock kind, and slot 18 is both the device's CreateShaderResourceView and the queue's
+// struct-returning GetDesc. Which one it is depends on the object the call arrives on.
+void WINAPI mock_slot18(void* object, void* a, void* b, void* c) {
+    if (reinterpret_cast<Mock*>(object)->kind == Kind::device) {
+        mock_create_srv(reinterpret_cast<Mock*>(object), reinterpret_cast<ID3D12Resource*>(a),
+                        reinterpret_cast<const D3D12_SHADER_RESOURCE_VIEW_DESC*>(b),
+                        D3D12_CPU_DESCRIPTOR_HANDLE{reinterpret_cast<SIZE_T>(c)});
+        return;
+    }
+    mock_queue_get_desc(object, a);  // (hidden return buffer, queue object)
+}
+
 template <std::size_t... I>
 void fill_mock_vtable(void** vtable, std::index_sequence<I...>) {
     ((vtable[I] = reinterpret_cast<void*>(&mock_slot<static_cast<unsigned>(I)>)), ...);
@@ -497,7 +532,7 @@ void** mock_vtable() {
         table[12] = reinterpret_cast<void*>(&mock_create_command_list);
         table[16] = reinterpret_cast<void*>(&mock_create_root_signature);  // PC CreateRootSignature
         table[27] = reinterpret_cast<void*>(&mock_create_committed_resource);  // PC CreateCommittedResource
-        table[18] = reinterpret_cast<void*>(&mock_queue_get_desc);  // the struct-returning GetDesc, not the generic thunk
+        table[18] = reinterpret_cast<void*>(&mock_slot18);  // GetDesc for a queue, CreateShaderResourceView for a device
         return true;
     }();
     (void)filled;
@@ -2289,6 +2324,51 @@ int check_slot70_console_view() {
         std::memcpy(matrix_record + 0x28, &block, sizeof(block));
         EXPECT(hr_of(raw(device, 70, word(&resource), word(matrix_record), word(published_dest))) == E_NOTIMPL);
 
+        // A texture-shaped publication pairs with the console resource the title created just before it: the
+        // publication's resource description matches the slot-127 creation on dimension/width/height/format/mips/array,
+        // and the pairing then hands that resource to the real CreateShaderResourceView with a view description built
+        // from the publication - the layer's own T#, not a guessed console encoding. A publication whose description does
+        // not match any creation keeps the measured refusal.
+        {
+            const GUID resource_iid = __uuidof(ID3D12Resource);
+            D3D12_HEAP_PROPERTIES heap_props{};
+            heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC created_desc{};
+            created_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            created_desc.Width = 0x100;
+            created_desc.Height = 0x80;
+            created_desc.DepthOrArraySize = 1;
+            created_desc.MipLevels = 1;
+            created_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            created_desc.SampleDesc.Count = 1;
+            void* created = nullptr;
+            EXPECT(hr_of(raw(device, 127, word(&heap_props), 0, word(&created_desc), 0, 0, 0, 0, 0, word(&resource_iid),
+                             word(&created))) == S_OK);
+
+            // The publication carries the same resource description and a record at the measured field offsets.
+            std::uint8_t texture_record[0x40] = {};
+            const std::uint32_t declared = 0x1688;
+            std::memcpy(texture_record + 0x08, &declared, sizeof(declared));
+            alignas(32) std::uint32_t srv_dest[8] = {};
+            const unsigned srv_before = mock->srv_calls;
+            EXPECT(hr_of(raw(device, 70, word(&created_desc), word(texture_record), word(srv_dest))) == S_OK);
+            EXPECT(mock->srv_calls == srv_before + 1);
+            EXPECT(mock->srv_resource == reinterpret_cast<std::uint64_t>(created));
+            EXPECT(mock->srv_dest == word(srv_dest));
+            EXPECT(mock->srv_desc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2D);
+            EXPECT(mock->srv_desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM);
+            EXPECT(mock->srv_desc.Texture2D.MipLevels == 1);
+            EXPECT(srv_dest[0] == 0x18u && srv_dest[1] == static_cast<std::uint32_t>(D3D12_SRV_DIMENSION_TEXTURE2D));
+
+            // A description that matches no creation is not published: dimension/format differ from the creation above.
+            D3D12_RESOURCE_DESC unmatched_desc = created_desc;
+            unmatched_desc.Width = 0x200;
+            alignas(32) std::uint32_t unmatched_dest[8] = {};
+            EXPECT(hr_of(raw(device, 70, word(&unmatched_desc), word(texture_record), word(unmatched_dest))) == E_NOTIMPL);
+            EXPECT(mock->srv_calls == srv_before + 1);
+            EXPECT(unmatched_dest[0] == 0 && unmatched_dest[1] == 0);
+        }
+
         // A non-buffer resource description is not the measured buffer publication either: the census measured only
         // BUFFER descriptions at this slot, so a texture-shaped record is refused rather than guessed into a V#/T#.
         {
@@ -2337,6 +2417,7 @@ int main(int argc, char** argv) {
     EXPECT(::SetEnvironmentVariableA("PALMETTO_SLOT70_CBV", "1") != FALSE);
     EXPECT(::SetEnvironmentVariableA("PALMETTO_SLOT70_PUBLISH", "1") != FALSE);
     EXPECT(::SetEnvironmentVariableA("PALMETTO_SLOT70_CENSUS", "1") != FALSE);
+    EXPECT(::SetEnvironmentVariableA("PALMETTO_SLOT70_PAIR", "1") != FALSE);
     if (check_tail(true) || check_queue_console_slots() || check_levels() || check_fence1() ||
         check_create_failures() || check_open_shared() || check_alloc_failures() || check_allocators() ||
         check_xbox_slots() || check_console_command_list() || check_slot57_graphics_record() ||
