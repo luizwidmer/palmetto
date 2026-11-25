@@ -134,6 +134,40 @@ constexpr DWORD kDbgPrintWide = 0x4001000A;  // DBG_PRINTEXCEPTION_WIDE_C
 constexpr DWORD kCppException = 0xE06D7363;  // MSVC throw: logged with its address, never its payload
 constexpr int kMaxFrames = 16;
 
+// Whether an exception code deserves a stack report. This handler is first-chance, so the filter is the only thing that
+// separates "the process is dying" from "the program threw, handled it, and carried on". A report costs one walk of the
+// faulting thread; the every-thread pass costs a suspend/context/write per thread - 45-62 ms on a 60-82 thread process,
+// measured - and it is paid on the thread that threw. Without this gate three handled C++ throws produced three passes,
+// each overwriting the last, so the directory described the last throw rather than the fault.
+// Excluded by name: the two DBG_PRINT codes, a breakpoint, a single step, the SetThreadName convention, and a C++
+// throw - 0xE06D7363 carries the SEVERE bit like a real fault, so it has to be named explicitly rather than filtered.
+inline bool worth_crash_report(DWORD code) noexcept {
+    switch (code) {
+        case kCppException:
+        case kDbgPrint:
+        case kDbgPrintWide:
+        case EXCEPTION_BREAKPOINT:
+        case EXCEPTION_SINGLE_STEP:
+        case 0x406D1388:  // SetThreadName: RaiseException(0x406D1388, ...) from a debug helper
+            return false;
+        default:
+            break;
+    }
+    return (code & 0xC0000000ul) == 0xC0000000ul;
+}
+
+// One every-thread pass per process. The first fatal code wins; later ones are still traced (as
+// crash_report_all_suppressed) but do not overwrite the reports of the pass that caught the process breaking, which is
+// the only pass whose file set is self-consistent.
+inline std::atomic<bool>& all_threads_taken() noexcept {
+    static std::atomic<bool> taken{false};
+    return taken;
+}
+inline std::atomic<unsigned long>& all_threads_code() noexcept {
+    static std::atomic<unsigned long> code{0};
+    return code;
+}
+
 inline std::string stack_from(const CONTEXT& start_context) {
     CONTEXT c = start_context;
     std::string out = "[";
@@ -310,16 +344,52 @@ inline void log_exception(const EXCEPTION_POINTERS& info) {
                 }
             }
             event("exception", f);
-    // PALMETTO_CRASH_REPORT=<path>: write a .pdata-walked report of the faulting thread. Kept behind a switch
-    // because it touches the filesystem on the fault path; the walk itself never allocates.
-    if (detail::crash_image_base()) {
+    // PALMETTO_CRASH_REPORT=<file>: a .pdata-walked report of the faulting thread.
+    // PALMETTO_CRASH_REPORT_ALL=<directory>: the same walk for every other thread of the process, one file each, plus
+    // that directory's crash_report.threads.txt index. Both stay behind switches because they touch the filesystem on
+    // the fault path; the walks themselves never allocate. Both are also gated on the exception code
+    // (worth_crash_report): a first-chance handler that reports every throw describes the last throw, not the fault.
+    if (detail::crash_image_base() && detail::worth_crash_report(r.ExceptionCode)) {
         wchar_t path[512] = {};
-        const DWORD n = GetEnvironmentVariableW(L"PALMETTO_CRASH_REPORT", path, 512);
-        if (n > 0 && n < 512) {
+        wchar_t directory[512] = {};
+        const DWORD own = GetEnvironmentVariableW(L"PALMETTO_CRASH_REPORT", path, 512);
+        const DWORD all = GetEnvironmentVariableW(L"PALMETTO_CRASH_REPORT_ALL", directory, 512);
+        const bool wants_own = own > 0 && own < 512;
+        const bool wants_all = all > 0 && all < 512;
+        if (wants_own || wants_all) {
             rt::crash_report::set_image(detail::crash_image_base(), detail::crash_image_size(),
-                                       static_cast<const IMAGE_RUNTIME_FUNCTION_ENTRY*>(detail::crash_image_functions()),
-                                       detail::crash_image_function_count());
-            if (info.ContextRecord) rt::crash_report::dump(info.ContextRecord, path);
+                                        static_cast<const IMAGE_RUNTIME_FUNCTION_ENTRY*>(
+                                            detail::crash_image_functions()),
+                                        detail::crash_image_function_count());
+        }
+        // Which fault produced a file, written into every report and into the index: without it a directory of reports
+        // is a set of files that cannot be attributed to a pass.
+        char pass[64] = {};
+        std::snprintf(pass, sizeof pass, "exception 0x%08lx", static_cast<unsigned long>(r.ExceptionCode));
+        // The faulting thread first: it is the one the caller asked about, and the all-threads pass below suspends and
+        // resumes the others one at a time.
+        if (wants_own && info.ContextRecord) rt::crash_report::dump(info.ContextRecord, path, pass);
+        if (wants_all) {
+            // The latch: the first fatal code takes the pass. Later ones are traced, not dumped, so they cannot
+            // overwrite the reports of the pass that caught the process breaking.
+            bool expected = false;
+            if (detail::all_threads_taken().compare_exchange_strong(expected, true)) {
+                detail::all_threads_code().store(static_cast<unsigned long>(r.ExceptionCode),
+                                                 std::memory_order_relaxed);
+                const rt::crash_report::AllThreadsResult result =
+                    rt::crash_report::dump_all(directory, nullptr, pass);
+                // The four counts are the only evidence the pass ran at all: when the directory cannot be written they
+                // are all zero, and dropping them (as this call used to) leaves the whole pass silent.
+                event("crash_report_all", "\"code\":" + quote(hex(r.ExceptionCode)) + ",\"pass\":1" +
+                                              ",\"considered\":" + std::to_string(result.considered) +
+                                              ",\"written\":" + std::to_string(result.written) +
+                                              ",\"skipped\":" + std::to_string(result.skipped) +
+                                              ",\"truncated\":" + std::to_string(result.truncated));
+            } else {
+                event("crash_report_all_suppressed", "\"code\":" + quote(hex(r.ExceptionCode)) + ",\"already\":" +
+                                                         quote(hex(detail::all_threads_code().load(
+                                                             std::memory_order_relaxed))));
+            }
         }
     }
         }
@@ -874,6 +944,14 @@ inline bool open(const wchar_t* path, int* error = nullptr) {
         (void)atexit_registered;
     }
     detail::veh = AddVectoredExceptionHandler(1, &detail::handler);
+    // The report walk and the every-thread pass both run inside this handler, on the stack of the thread that faulted -
+    // and a stack-overflow fault leaves next to none of it. The guarantee is per thread, so it has to be asked for
+    // before the fault: doing it here covers the thread that installs the trace, and dump_all() asks again for the
+    // thread that actually raises a report. It is a guarantee and not a reserve (see kStackGuaranteeBytes): no stack
+    // grows, it only fixes how much stays usable to the handler after an overflow. The result is ignored on purpose -
+    // a thread with a small reserve accepts what it can and keeps running.
+    ULONG guaranteed = rt::crash_report::kStackGuaranteeBytes;
+    (void)SetThreadStackGuarantee(&guaranteed);
     detail::on.store(true, std::memory_order_release);
     event("trace_open", "\"pid\":" + std::to_string(GetCurrentProcessId()));
     return true;

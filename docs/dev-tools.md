@@ -156,7 +156,8 @@ These switches are opt-in and off by default unless stated; `PALMETTO_SHADERS`, 
 | `PALMETTO_CONSERVATIVE_TIER3_PS` | Runtime diagnostic switch; opt-in and off by default. |
 | `PALMETTO_CONSERVATIVE_VS` | Runtime diagnostic switch; opt-in and off by default. |
 | `PALMETTO_CONTENT_PACKAGES` | Runtime diagnostic switch; opt-in and off by default. |
-| `PALMETTO_CRASH_REPORT` | Runtime diagnostic switch; opt-in and off by default. |
+| `PALMETTO_CRASH_REPORT` | Writes a `.pdata`-walked stack report of the faulting thread; only for fault codes, not for handled C++ throws. |
+| `PALMETTO_CRASH_REPORT_ALL` | The same walk for every other thread, once per process; only for fault codes. |
 | `PALMETTO_D3D49_DUMP` | Runtime diagnostic switch; opt-in and off by default. |
 | `PALMETTO_D3D49_VERBOSE` | Runtime diagnostic switch; opt-in and off by default. |
 | `PALMETTO_DEPTH24_FUNCTIONS` | Runtime diagnostic switch; opt-in and off by default. |
