@@ -3187,6 +3187,26 @@ std::atomic<std::uint64_t> g_slot70_pairs_found{0};
 std::atomic<std::uint64_t> g_slot70_pairs_published{0};
 std::atomic<std::uint64_t> g_slot70_pairs_none{0};
 std::atomic<bool> g_slot70_pair_logged{false};
+// The creation lifetime registry (section 9): every console resource creation the proxy handles, bounded by count, with
+// the description, the made resource, its GPU VA (a buffer VA or an image key) and the title VA. Declared here so the
+// slot-70 summary can report it.
+constexpr unsigned kSlot70Creations = 1024;
+struct Slot70CreationRecord {
+    std::uint64_t call_index = 0;  // device-call sequence when the creation was seen
+    std::uint64_t title_va = 0;
+    std::uint64_t gpu_va = 0;  // GetGPUVirtualAddress: a buffer VA or an image key for a texture
+    std::uint64_t resource = 0;
+    unsigned source = 0;  // 76, 127 or 133
+    D3D12_RESOURCE_DESC desc{};
+};
+Slot70CreationRecord g_slot70_creations[kSlot70Creations];
+std::uint64_t g_slot70_creation_total = 0;
+std::uint64_t g_slot70_creation_dropped = 0;
+std::mutex g_slot70_creation_mutex;
+std::atomic<std::uint64_t> g_device_call_index{0};
+std::atomic<std::uint64_t> g_slot70_identity_va{0};
+std::atomic<bool> g_slot70_identity_done{false};
+
 
 // The census' distinct shapes. A shape is what the publication decision reads plus the resource description and the kind
 // of the record's first word, so two boots' logs can be compared as counts. The mutex is only taken on the census path
@@ -3348,6 +3368,23 @@ void slot70_summary(std::uint64_t calls) {
                  static_cast<unsigned long long>(g_slot70_pairs_found.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(g_slot70_pairs_none.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(g_slot70_pairs_published.load(std::memory_order_relaxed)));
+    {
+        const std::lock_guard lock(g_slot70_creation_mutex);
+        const std::uint64_t total =
+            g_slot70_creation_total < kSlot70Creations ? g_slot70_creation_total : kSlot70Creations;
+        unsigned by_source[134] = {};
+        unsigned with_gpu_va = 0;
+        for (std::uint64_t i = 0; i < total; ++i) {
+            if (g_slot70_creations[i].source < 134) ++by_source[g_slot70_creations[i].source];
+            if (g_slot70_creations[i].gpu_va) ++with_gpu_va;
+        }
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: creation registry: %llu creation(s) recorded (%llu dropped), %u with a GPU VA; "
+                     "slot 76/127/133 = %u/%u/%u\n",
+                     static_cast<unsigned long long>(total),
+                     static_cast<unsigned long long>(g_slot70_creation_dropped), with_gpu_va, by_source[76],
+                     by_source[127], by_source[133]);
+    }
 }
 
 void slot70_census_note(const D3D12_RESOURCE_DESC* desc, bool desc_readable, const std::uint8_t* record,
@@ -3448,86 +3485,156 @@ void slot70_census_summary(std::uint64_t calls) {
     std::fprintf(stderr, "%s\n", line);
 }
 
-// ---- Pairing the texture publications with the resources the title creates -----------------------------------------
+// ---- Pairing the texture publications with the resources the title creates, and the creation lifetime registry ------
 //
-// The 60 texture-shaped publications carry a resource description but no resource handle: the console device is expected
-// to resolve the resource from the creations around the call. This ring records the last creations that can supply a
-// sampled image - console slot 127 (create committed with a layout) and slot 133 (placed resources) - with their Xbox
-// description, the real resource the layer made and (for 133) the title VA. On a texture publication the ring is
-// searched for creations *before* it within a small window of slot-70 calls whose description matches on
-// dimension/width/height/format/mips/array. A proven pair publishes the layer's own T# for that resource at the
-// publication's destination through the real device's CreateShaderResourceView - no console encoding is guessed.
-constexpr unsigned kSlot70CreationRing = 16;
-constexpr std::uint64_t kSlot70PairWindow = 24;  // slot-70 calls
-struct Slot70CreationRecord {
-    std::uint64_t call_number = 0;  // the slot-70 call count when the creation was seen
-    std::uint64_t va = 0;
-    std::uint64_t resource = 0;
-    bool ref_taken = false;
-    unsigned source = 0;  // 127 or 133
-    D3D12_RESOURCE_DESC desc{};
-};
-Slot70CreationRecord g_slot70_creations[kSlot70CreationRing];
-std::uint64_t g_slot70_creation_total = 0;
-std::mutex g_slot70_creation_mutex;
+// The texture publications carry a resource description but no resource handle, so the device behind the call can only
+// resolve the resource from the creations around it. This is a bounded-by-count lifetime record (1024) of every console
+// resource creation the proxy handles - device slot 76 (the console's committed-resource creation), slot 127
+// (create-with-layout) and slot 133 (placed resources) - with the Xbox description, the real resource the layer made, its
+// GPU VA (GetGPUVirtualAddress: a buffer VA or, for a texture, the layer's image key), the title VA (133) and the device
+// call index. It answers two questions: which creation a texture publication views (pairing) and whether a given address
+// was ever created (identity lookup, PALMETTO_SLOT70_IDENTITY_VA).
 
-// Adds a reference only when the pointer really is a COM object this process can read (a test's synthetic pointer is
-// not, and must not be AddRef'd); the reference is released when the ring slot is reused.
-bool slot70_maybe_add_ref(std::uint64_t resource) {
-    if (!resource) return false;
-    if (!readable_range(reinterpret_cast<const void*>(resource), sizeof(void*))) return false;
+
+// The identity lookup's target (PALMETTO_SLOT70_IDENTITY_VA, hex). Read once; 0 means no lookup.
+std::uint64_t slot70_identity_target() {
+    static const std::uint64_t value = [] {
+        char text[32] = {};
+        if (GetEnvironmentVariableA("PALMETTO_SLOT70_IDENTITY_VA", text, sizeof(text)) == 0) return std::uint64_t(0);
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(text, &end, 16);
+        return static_cast<std::uint64_t>(parsed);
+    }();
+    return value;
+}
+
+// A created resource's GPU VA: for a texture that is the layer's image key (GetGPUVirtualAddress), the same value a
+// title uses to build a T#. Only safe on a real COM object (a test's synthetic pointer is not, and is skipped).
+std::uint64_t slot70_resource_gpu_va(std::uint64_t resource) {
+    if (!resource) return 0;
+    if (!readable_range(reinterpret_cast<const void*>(resource), sizeof(void*))) return 0;
     const auto* vtable_pointer = *reinterpret_cast<void* const*>(reinterpret_cast<const void*>(resource));
-    if (!readable_range(vtable_pointer, sizeof(void*))) return false;
-    reinterpret_cast<IUnknown*>(resource)->AddRef();
-    return true;
+    if (!readable_range(vtable_pointer, sizeof(void*))) return 0;
+    return reinterpret_cast<ID3D12Resource*>(resource)->GetGPUVirtualAddress();
 }
 
 void note_console_resource_creation(unsigned slot, const D3D12_RESOURCE_DESC& desc, void* resource,
                                     std::uint64_t va) {
-    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE1D && desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
-        desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE3D)
-        return;
     const std::lock_guard lock(g_slot70_creation_mutex);
-    Slot70CreationRecord& entry = g_slot70_creations[g_slot70_creation_total % kSlot70CreationRing];
-    if (entry.ref_taken && entry.resource) reinterpret_cast<IUnknown*>(entry.resource)->Release();
-    entry.call_number = g_slot70_calls.load(std::memory_order_relaxed);
-    entry.va = va;
+    if (g_slot70_creation_total >= kSlot70Creations) {
+        ++g_slot70_creation_dropped;
+        return;
+    }
+    Slot70CreationRecord& entry = g_slot70_creations[g_slot70_creation_total];
+    entry.call_index = g_device_call_index.load(std::memory_order_relaxed);
+    entry.title_va = va;
     entry.resource = reinterpret_cast<std::uint64_t>(resource);
-    entry.ref_taken = slot70_maybe_add_ref(entry.resource);
+    entry.gpu_va = slot70_resource_gpu_va(entry.resource);
     entry.source = slot;
     entry.desc = desc;
     ++g_slot70_creation_total;
+    // A creation's GPU VA is the image key a title builds a T# from: report it for the first few, and answer the identity
+    // lookup as soon as a creation matches the configured address.
+    static std::atomic<unsigned> logged{0};
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 24)
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: creation registry: #%llu slot %u dim=%u 0x%llx x 0x%x format=0x%x mips=0x%x "
+                     "array=0x%x title VA=0x%llx gpu VA=0x%llx resource 0x%llx\n",
+                     static_cast<unsigned long long>(g_slot70_creation_total), slot,
+                     static_cast<unsigned>(desc.Dimension), static_cast<unsigned long long>(desc.Width),
+                     static_cast<unsigned>(desc.Height), static_cast<unsigned>(desc.Format),
+                     static_cast<unsigned>(desc.MipLevels), static_cast<unsigned>(desc.DepthOrArraySize),
+                     static_cast<unsigned long long>(va), static_cast<unsigned long long>(entry.gpu_va),
+                     static_cast<unsigned long long>(entry.resource));
 }
 
-bool slot70_descriptions_match(const D3D12_RESOURCE_DESC& a, const D3D12_RESOURCE_DESC& b) {
-    return a.Dimension == b.Dimension && a.Width == b.Width && a.Height == b.Height && a.Format == b.Format &&
-           a.MipLevels == b.MipLevels && a.DepthOrArraySize == b.DepthOrArraySize;
+void slot70_report_identity() {
+    const std::uint64_t target = slot70_identity_target();
+    if (!target || g_slot70_identity_done.exchange(true, std::memory_order_relaxed)) return;
+    const std::lock_guard lock(g_slot70_creation_mutex);
+    const std::uint64_t total = g_slot70_creation_total < kSlot70Creations ? g_slot70_creation_total : kSlot70Creations;
+    const Slot70CreationRecord* by_title = nullptr;
+    const Slot70CreationRecord* by_gpu = nullptr;
+    const Slot70CreationRecord* contains = nullptr;
+    unsigned matching_shape = 0;
+    for (std::uint64_t i = 0; i < total; ++i) {
+        const Slot70CreationRecord& entry = g_slot70_creations[i];
+        if (entry.title_va == target) by_title = &entry;
+        if (entry.gpu_va == target) by_gpu = &entry;
+        const std::uint64_t extent = entry.desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ? entry.desc.Width : 0;
+        if (entry.title_va && target >= entry.title_va && target - entry.title_va < extent) contains = &entry;
+        if (entry.desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && entry.desc.Width == 3840 &&
+            entry.desc.Height == 2160)
+            ++matching_shape;
+    }
+    if (by_title)
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: identity 0x%llx: found as a creation's TITLE VA: slot %u dim=%u 0x%llx x 0x%x "
+                     "format=0x%x mips=0x%x array=0x%x gpu VA=0x%llx resource 0x%llx (call %llu)\n",
+                     static_cast<unsigned long long>(target), by_title->source,
+                     static_cast<unsigned>(by_title->desc.Dimension),
+                     static_cast<unsigned long long>(by_title->desc.Width), static_cast<unsigned>(by_title->desc.Height),
+                     static_cast<unsigned>(by_title->desc.Format), static_cast<unsigned>(by_title->desc.MipLevels),
+                     static_cast<unsigned>(by_title->desc.DepthOrArraySize),
+                     static_cast<unsigned long long>(by_title->gpu_va),
+                     static_cast<unsigned long long>(by_title->resource),
+                     static_cast<unsigned long long>(by_title->call_index));
+    else if (by_gpu)
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: identity 0x%llx: found as a creation's GPU VA (a buffer VA or an IMAGE KEY): slot %u "
+                     "dim=%u 0x%llx x 0x%x format=0x%x mips=0x%x array=0x%x title VA=0x%llx resource 0x%llx (call %llu); "
+                     "%u creation(s) are 3840x2160 2D textures\n",
+                     static_cast<unsigned long long>(target), by_gpu->source,
+                     static_cast<unsigned>(by_gpu->desc.Dimension),
+                     static_cast<unsigned long long>(by_gpu->desc.Width), static_cast<unsigned>(by_gpu->desc.Height),
+                     static_cast<unsigned>(by_gpu->desc.Format), static_cast<unsigned>(by_gpu->desc.MipLevels),
+                     static_cast<unsigned>(by_gpu->desc.DepthOrArraySize),
+                     static_cast<unsigned long long>(by_gpu->title_va),
+                     static_cast<unsigned long long>(by_gpu->resource),
+                     static_cast<unsigned long long>(by_gpu->call_index), matching_shape);
+    else if (contains)
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: identity 0x%llx: not a creation VA or GPU VA, but INSIDE creation #%llu's title range "
+                     "(title VA 0x%llx width 0x%llx, offset 0x%llx, dim=%u format=0x%x)\n",
+                     static_cast<unsigned long long>(target),
+                     static_cast<unsigned long long>(contains - g_slot70_creations),
+                     static_cast<unsigned long long>(contains->title_va),
+                     static_cast<unsigned long long>(contains->desc.Width),
+                     static_cast<unsigned long long>(target - contains->title_va),
+                     static_cast<unsigned>(contains->desc.Dimension), static_cast<unsigned>(contains->desc.Format));
+    else
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: identity 0x%llx: NOT the title VA, GPU VA (image key) or range of any of the %llu "
+                     "creation(s) recorded%s; %u of them are 3840x2160 2D textures\n",
+                     static_cast<unsigned long long>(target), static_cast<unsigned long long>(total),
+                     g_slot70_creation_dropped ? " (registry full; dropped creations)" : "", matching_shape);
 }
 
-// The pure part of the pairing rule: the newest creation before `call` within `window`, when its description matches.
-// Returned separately so the GPU-free test can exercise it through the proxy's behaviour (a proven pair calls the real
-// CreateShaderResourceView; an unproven one keeps the measured refusal).
-bool slot70_find_pairing(const D3D12_RESOURCE_DESC& publication, std::uint64_t call, std::uint64_t window,
-                         std::uint64_t& resource, std::uint64_t& va, unsigned& source, std::uint64_t& distance,
+// The newest creation before `call` whose description matches the publication on dimension/width/height/format/mips/array.
+bool slot70_find_pairing(const D3D12_RESOURCE_DESC& publication, std::uint64_t call, std::uint64_t& resource,
+                         std::uint64_t& title_va, std::uint64_t& gpu_va, unsigned& source, std::uint64_t& distance,
                          unsigned& candidates, unsigned& matched) {
     const std::lock_guard lock(g_slot70_creation_mutex);
+    const std::uint64_t total = g_slot70_creation_total < kSlot70Creations ? g_slot70_creation_total : kSlot70Creations;
     bool found = false;
     std::uint64_t best = 0;
-    const std::uint64_t total = g_slot70_creation_total;
-    for (std::uint64_t i = 0; i < total && i < kSlot70CreationRing; ++i) {
+    for (std::uint64_t i = 0; i < total; ++i) {
         const Slot70CreationRecord& entry = g_slot70_creations[i];
-        if (!entry.call_number && i + 1 > total) continue;  // never filled
-        if (entry.call_number > call) continue;
-        const std::uint64_t d = call - entry.call_number;
-        if (d > window) continue;
+        if (entry.call_index > call) continue;
+        const std::uint64_t d = call - entry.call_index;
         ++candidates;
-        if (!slot70_descriptions_match(publication, entry.desc)) continue;
+        const D3D12_RESOURCE_DESC& c = entry.desc;
+        if (c.Dimension != publication.Dimension || c.Width != publication.Width || c.Height != publication.Height ||
+            c.Format != publication.Format || c.MipLevels != publication.MipLevels ||
+            c.DepthOrArraySize != publication.DepthOrArraySize)
+            continue;
         ++matched;
         if (!found || d <= best) {
             found = true;
             best = d;
             resource = entry.resource;
-            va = entry.va;
+            title_va = entry.title_va;
+            gpu_va = entry.gpu_va;
             source = entry.source;
             distance = d;
         }
@@ -3733,6 +3840,7 @@ std::uint64_t proxy_console_slot70(DeviceProxy* self, std::uint64_t caller, std:
     else if (slot70_census_enabled())
         slot70_census_note(resource, desc_readable, nullptr, false, a3, call);
     if (call % 4096 == 0) {
+        slot70_report_identity();
         slot70_summary(call);
         if (slot70_census_enabled()) slot70_census_summary(call);
     }
@@ -3818,30 +3926,34 @@ std::uint64_t proxy_console_slot70(DeviceProxy* self, std::uint64_t caller, std:
         }
     }
 
-    // ---- Pairing a texture-shaped publication with the resource the title just created (PALMETTO_SLOT70_PAIR=1) ----
-    // docs/device_slot70.md section 8: the publication carries only a resource description, so the resource is looked for
-    // among the console slot-127/133 creations within a small window of slot-70 calls; a proven pair publishes the
-    // layer's own T# at the title's destination slot, and no pair keeps the measured refusal below.
+    // ---- Pairing a texture-shaped publication with a recorded creation (PALMETTO_SLOT70_PAIR=1) ------------------
+    // docs/device_slot70.md section 9: the publication carries only a resource description, so the resource is looked for
+    // among every console creation recorded before the call; a proven pair publishes the layer's own T# at the title's
+    // destination slot, and no pair keeps the measured refusal below.
+    if (desc_readable && resource->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) slot70_report_identity();
     if (slot70_pair_enabled() && desc_readable && resource->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER &&
         readable_range(reinterpret_cast<const void*>(a2), 0x40)) {
-        std::uint64_t resource_id = 0, pairing_va = 0, distance = 0;
+        std::uint64_t resource_id = 0, pairing_title_va = 0, pairing_gpu_va = 0, distance = 0;
         unsigned source = 0, candidates = 0, matched = 0;
-        if (slot70_find_pairing(*resource, call, kSlot70PairWindow, resource_id, pairing_va, source, distance, candidates,
-                                matched)) {
+        if (slot70_find_pairing(*resource, g_device_call_index.load(std::memory_order_relaxed), resource_id, pairing_title_va, pairing_gpu_va, source, distance,
+                                candidates, matched)) {
             g_slot70_pairs_found.fetch_add(1, std::memory_order_relaxed);
             static std::atomic<unsigned> decision_lines{0};
             if (decision_lines.fetch_add(1, std::memory_order_relaxed) < 12)
                 std::fprintf(stderr,
                              "[rt] d3d12_xs: slot 70 pair: publication dim=%u 0x%llx x 0x%x format=0x%x mips=0x%x "
-                             "array=0x%x call=%llu: %u creation(s) in the window, %u full match(es), chosen slot %u "
-                             "distance %llu resource 0x%llx\n",
+                             "array=0x%x call=%llu: %u creation(s) recorded before it, %u full match(es), chosen slot %u "
+                             "distance %llu device call(s); resource 0x%llx gpu VA=0x%llx title VA=0x%llx\n",
                              static_cast<unsigned>(resource->Dimension),
                              static_cast<unsigned long long>(resource->Width),
                              static_cast<unsigned>(resource->Height), static_cast<unsigned>(resource->Format),
                              static_cast<unsigned>(resource->MipLevels),
                              static_cast<unsigned>(resource->DepthOrArraySize),
                              static_cast<unsigned long long>(call), candidates, matched, source,
-                             static_cast<unsigned long long>(distance), static_cast<unsigned long long>(resource_id));
+                             static_cast<unsigned long long>(distance),
+                             static_cast<unsigned long long>(resource_id),
+                             static_cast<unsigned long long>(pairing_gpu_va),
+                             static_cast<unsigned long long>(pairing_title_va));
             slot70_publish_texture_view(self, *resource, resource_id, a3, call, source, distance, candidates, matched);
             return hr_to_u64(S_OK);
         }
@@ -3850,13 +3962,13 @@ std::uint64_t proxy_console_slot70(DeviceProxy* self, std::uint64_t caller, std:
         if (none_lines.fetch_add(1, std::memory_order_relaxed) < 8)
             std::fprintf(stderr,
                          "[rt] d3d12_xs: slot 70 pair: publication dim=%u 0x%llx x 0x%x format=0x%x mips=0x%x array=0x%x "
-                         "call=%llu: no creation within %llu slot-70 call(s) matches (%u candidate(s), %u full match(es)); "
-                         "keeping the measured refusal\n",
+                         "call=%llu: no recorded creation matches the publication (%u creation(s) recorded before it, "
+                         "%u full match(es)); keeping the measured refusal\n",
                          static_cast<unsigned>(resource->Dimension),
                          static_cast<unsigned long long>(resource->Width), static_cast<unsigned>(resource->Height),
                          static_cast<unsigned>(resource->Format), static_cast<unsigned>(resource->MipLevels),
                          static_cast<unsigned>(resource->DepthOrArraySize), static_cast<unsigned long long>(call),
-                         static_cast<unsigned long long>(kSlot70PairWindow), candidates, matched);
+                         candidates, matched);
     }
 
     // A texture-shaped description is where the sampled-T# question lives (docs/device_slot70.md section 6). The census
@@ -5330,6 +5442,8 @@ HRESULT proxy_create_committed_resource_layout(DeviceProxy* self, const D3D12_HE
     }
     if (SUCCEEDED(hr) && out && *out)
         note_console_resource_creation(127, *xbox_desc, *out, 0);
+    if (SUCCEEDED(hr) && out && *out)
+        note_console_resource_creation(76, *xbox_desc, *out, 0);
     return hr;
 }
 
@@ -5397,6 +5511,7 @@ std::uint64_t WINAPI proxy_slot(DeviceProxy* self, std::uint64_t a1, std::uint64
                                 std::uint64_t a4, std::uint64_t a5, std::uint64_t a6, std::uint64_t a7,
                                 std::uint64_t a8, std::uint64_t a9, std::uint64_t a10, std::uint64_t a11,
                                 std::uint64_t a12, std::uint64_t a13, std::uint64_t a14) {
+    g_device_call_index.fetch_add(1, std::memory_order_relaxed);
     if (callers_enabled()) note_caller(CallerKind::device, Slot, _ReturnAddress(), a1, a2, a3, a4);
     if (streamed_blocks::active()) stream_note_device_call(Slot, _ReturnAddress(), a1, a2, a3, a4, a5, a6);
     if (view_shape_enabled()) {

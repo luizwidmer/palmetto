@@ -2369,6 +2369,42 @@ int check_slot70_console_view() {
             EXPECT(unmatched_dest[0] == 0 && unmatched_dest[1] == 0);
         }
 
+        // The registry is a lifetime record, not a small window: a creation recorded long before the publication still
+        // pairs. One texture is created, many slot-70 calls happen, and only then is its publication made - under a
+        // 24-call window this would not pair, with the lifetime registry it does.
+        {
+            const GUID resource_iid = __uuidof(ID3D12Resource);
+            D3D12_HEAP_PROPERTIES heap_props{};
+            heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC created_desc{};
+            created_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            created_desc.Width = 0x40;
+            created_desc.Height = 0x40;
+            created_desc.DepthOrArraySize = 1;
+            created_desc.MipLevels = 1;
+            created_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            created_desc.SampleDesc.Count = 1;
+            void* created = nullptr;
+            EXPECT(hr_of(raw(device, 127, word(&heap_props), 0, word(&created_desc), 0, 0, 0, 0, 0, word(&resource_iid),
+                             word(&created))) == S_OK);
+            // A publication that matches no creation: 40 of these run before the real publication (each keeps the
+            // measured refusal, and each is a device call between the creation and the pairing).
+            D3D12_RESOURCE_DESC other_desc = created_desc;
+            other_desc.Width = 0x80;
+            alignas(32) std::uint32_t lifetime_dest[8] = {};
+            std::uint8_t other_record[0x40] = {};
+            for (unsigned i = 0; i < 40; ++i)
+                EXPECT(hr_of(raw(device, 70, word(&other_desc), word(other_record), word(lifetime_dest))) == E_NOTIMPL);
+            std::uint8_t texture_record[0x40] = {};
+            const std::uint32_t declared = 0x1688;
+            std::memcpy(texture_record + 0x08, &declared, sizeof(declared));
+            const unsigned srv_before = mock->srv_calls;
+            EXPECT(hr_of(raw(device, 70, word(&created_desc), word(texture_record), word(lifetime_dest))) == S_OK);
+            EXPECT(mock->srv_calls == srv_before + 1);
+            EXPECT(mock->srv_resource == reinterpret_cast<std::uint64_t>(created));
+            EXPECT(lifetime_dest[0] == 0x18u);
+        }
+
         // A non-buffer resource description is not the measured buffer publication either: the census measured only
         // BUFFER descriptions at this slot, so a texture-shaped record is refused rather than guessed into a V#/T#.
         {

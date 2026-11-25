@@ -353,7 +353,44 @@ pass' missing sampled inputs are not among the six paired slots - framecap's tra
 sibling 4K image (resolved) and its other slots as float data or unresolved, so the next step is framecap's complete
 T#-slot list for draws 28000/28001 compared against these destinations and against the creations the ring recorded.
 
-## 9. What is modelled now, and what is not
+## 9. The creation lifetime registry, and the identity of the compose pass' T# address
+
+The bounded 16-entry pairing ring is now a **lifetime record** of every console resource creation the proxy handles:
+slot 76 (the console's committed-resource creation), slot 127 (create-with-layout) and slot 133 (placed resources), up to
+1024 entries (dropped creations are counted), each with the Xbox description, the real resource, its **GPU VA**
+(`GetGPUVirtualAddress`: a buffer VA or, for a texture, the layer's image key), the title VA (133) and the **device-call
+index**. Pairing searches every recorded creation before the publication (not a fixed window) and takes the newest
+description match. `PALMETTO_SLOT70_IDENTITY_VA=<hex>` answers the identity question for one address: it is looked up as
+a creation's title VA, as a creation's GPU VA (image key), and as an offset inside a created range, and reported with the
+creation's description, resource and call index.
+
+Measured in `boot-slot70-identity` (150 s, ALIVE 150.2 s, 653,204 D3D12 calls; env: console feed + vertex-stream
+descriptor + matrix publication + pairing + identity 0x100001600 + sample dump, readback armed at 20001):
+
+| measured | value |
+|---|---|
+| creation registry | **37 creation(s)** recorded, 0 dropped: slot 76/127/133 = **2/2/33**; only **3 report a GPU VA** (the buffers, arena VAs) - **every texture creation reports GPU VA 0** |
+| 3840x2160 2D creations | 4 in the early set: slot 127/76 twice at format **0x1c**, slot 133 at format **0x41** |
+| **identity 0x100001600** | **"NOT the title VA, GPU VA (image key) or range of any of the 5 creation(s) recorded (at that moment); 4 of them are 3840x2160 2D textures"** - and the full lifetime run (37 creations) reaches the same negative |
+| pairing | **10 of 60** texture publications paired (up from 6 with the 24-call window), 10 layer T#s published; 50 unpaired |
+| compose/armed draw | `ps present, 6 image sample(s)`; render-target readback **mean 0 0 0, non-black 0/16384** (the 4K sibling image, which is this boot's draw-20001 target); write control 16,384/16,384 |
+
+**The negative, precisely.** No console creation - slot 76, 127 or 133 - was ever made at title VA `0x100001600`, with
+that GPU VA, or with a range containing it. Two things make the answer sharper:
+* the value is in the layer's documented **image-key range** (`0x100000000` + 256-byte steps; `0x100001600` is key 22)
+  and it is **identical in five boots** while `heap_base` moves - so it is deterministic, not a title heap VA;
+* this tree's `GetGPUVirtualAddress` returns **0 for every texture creation**, so the creation registry cannot resolve an
+  image key at all: the layer assigns image keys but does not expose them here. The T# carries a gfx10 image format (56)
+  that does not equal any creation's DXGI format field (0x1c/0x41), so no description match exists either.
+
+So the compose pass' T# address is **not the title VA of any console creation**: either it is an image key the layer
+stopped exposing through `GetGPUVirtualAddress` (a layer gap to fix before any bind-by-address can work), or it is the
+title's own fixed GPU VA in the same 4 GiB space. In both cases the route to content is the one framecap proposed: build
+a layer image from the placed 4K texture's title pages (the sibling target) and bind that image for the compose pass,
+rather than matching a console creation by address. The paired publications (10) are still not the compose pass' inputs;
+the compose readback is unchanged at 0/16384.
+
+## 10. What is modelled now, and what is not
 
 **Modelled:** the call's shape, arity and ABI (three words; third published with `clwb`); both call sites; the argument
 records and destination kinds measured; the measured refusal as the default; an opt-in probe that dumps the arguments,
@@ -367,7 +404,7 @@ explained; the resource description in `arg1` is not used by the publication, an
 publication writes the matrix view; whether the title then copies that descriptor into the table slot its draw names is
 what the measured boot below decides.
 
-## 10. Gates, files and the next falsifier
+## 11. Gates, files and the next falsifier
 
 Gates on the final tree: `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT`;
 `xs_proxy_mock_test` -> `PASS`, whose `check_slot70_console_view` covers the falsified conversion's hand-off, the matrix
@@ -382,7 +419,9 @@ record and `check_slot70_console_view`), this page. Evidence boots under `D:\leo
 140 s, ALIVE), `boot-slot70-cbv` (conversion, stopped at 29.5 s), `boot-slot70-final` (default path, 100 s, ALIVE), and
 `boot-slot70-publish3` (publication + acceptance, 150 s, ALIVE), `boot-slot70-publish2` (publication with the vertex-stream switch off, 150 s, ALIVE) and `boot-slot70-publish` (first publication boot, 150 s, ALIVE). The shape census and colour-path measurements are `boot-slot70-census` (PS control, 150 s, ALIVE) and
 `boot-slot70-census2` (plain + sampled readback, 150 s, ALIVE). The texture-destination probe is `boot-slot70-texprobe` (150 s, ALIVE): 60 texture-shaped publications,
-their destinations' before/after bytes and the re-dumps. The pairing boot is `boot-slot70-pair` (150 s, ALIVE): 6 of 60 texture publications paired and published, 54 unpaired; compose draw 28000 readback unchanged at 0/16384.
+their destinations' before/after bytes and the re-dumps. The pairing boot is `boot-slot70-pair` (150 s, ALIVE): 6 of 60 texture publications paired and published, 54 unpaired; compose draw 28000 readback unchanged at 0/16384. The lifetime-registry and identity boot is `boot-slot70-identity` (150 s, ALIVE): 37 creations
+recorded, identity 0x100001600 not a creation, 10 of 60 publications paired, compose readback still
+0/16384.
 
 **Next falsifier.** The publication's acceptance is the PS-control readback changing from black: with the matrix A view
 published, the armed draw's `s8+0` fetch slot must decode as a matrix V# and the solid-pixel control must produce colour.
