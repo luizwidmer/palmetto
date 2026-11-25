@@ -25,6 +25,7 @@
 #include "queue_families.h"
 #include "resource_tiling.h"
 #include "xdxr_build.h"
+#include "../shims/xmem.h"  // docs/card_copies.md: the guard-page write tracker the mirror gate polls
 
 #include <algorithm>
 #include <atomic>
@@ -968,6 +969,24 @@ public:
     VulkanContext(PFN_vkGetDeviceProcAddr get, VkDevice device, bool separate_depth_stencil_layouts,
                   bool conditional_rendering = false, bool ray_tracing = false, bool xdxr = false)
         : device_(device), tracker_(separate_depth_stencil_layouts), ray_tracing_(ray_tracing) {
+        // docs/card_copies.md: the per-submission title-memory mirror's switches, read once per process. With every one
+        // unset the context behaves exactly as before this slice (no clock read, no tracker call, no skip).
+        const auto switch_on = [](const char* name) {
+            const char* value = std::getenv(name);
+            return value && *value && *value != '0';
+        };
+        card_copy_trace_ = switch_on("PALMETTO_CARD_COPY_TRACE");
+        card_copy_skip_no_shader_ = switch_on("PALMETTO_CARD_COPY_SKIP_NO_SHADER");
+        card_copy_watch_ = switch_on("PALMETTO_CARD_COPY_WATCH");
+        card_copy_gate_ = card_copy_watch_ && switch_on("PALMETTO_CARD_COPY_GATE");
+        if (const char* refresh = std::getenv("PALMETTO_CARD_COPY_GATE_REFRESH"))
+            card_copy_gate_refresh_ = static_cast<unsigned>(std::strtoul(refresh, nullptr, 10));
+        if (card_copy_trace_ || card_copy_watch_)
+            std::fprintf(stderr,
+                         "[rt] replay: card copies: trace %d, skip no-shader submission %d, write tracker %d, gate %d "
+                         "(refresh every %u), tracker hooks %s\n",
+                         int(card_copy_trace_), int(card_copy_skip_no_shader_), int(card_copy_watch_),
+                         int(card_copy_gate_), card_copy_gate_refresh_, console_watch_available() ? "present" : "null");
         loaded_ = vk.load(get, device);
         replay_.pipeline_barrier = vk.vkCmdPipelineBarrier;
         replay_.clear_color_image = vk.vkCmdClearColorImage;
@@ -1414,6 +1433,7 @@ public:
     // buffer_at; every shader-visible copy of it is rebased (replay_.rebase_console_va) before a shader sees it.
     void add_console_va_range(std::uint64_t title, std::uint64_t size, std::uint64_t arena, ConsoleVaKind kind) {
         if (console_vas_.add(title, size, arena, kind)) {
+            if (kind == ConsoleVaKind::descriptors) note_console_mirror_added(title, size);
             static std::atomic<unsigned> logged{0};
             if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
                 std::fprintf(stderr,
@@ -1430,7 +1450,10 @@ public:
                      static_cast<unsigned long long>(title), static_cast<unsigned long long>(size),
                      console_va_kind_name(kind));
     }
-    void remove_console_va_range(std::uint64_t title) { console_vas_.remove(title); }
+    void remove_console_va_range(std::uint64_t title) {
+        note_console_mirror_removed(title);
+        console_vas_.remove(title);
+    }
     bool console_va_ready() const { return !console_vas_.incomplete(); }
     // The boot's one-line report of the title-VA work: ranges aliased, shader-visible VAs rebased, V# bases patched.
     std::size_t console_va_ranges() const { return console_vas_.size(); }
@@ -1445,6 +1468,154 @@ public:
         if (patched) console_vas_.count_fields(patched);
         return patched;
     }
+    // ---- docs/card_copies.md: the per-submission title-memory mirror -------------------------------------------------
+    // The measured copy path (docs/page_address_space.md section 4): before every submission, sync_console_heaps()
+    // copies the title's CPU descriptor-heap bytes into their GPU-visible arena mirrors, a full compare pass over the
+    // measured 38-40 MB heap that costs 3.4-4.4 ms - most of the ~3.8 ms between submissions. This slice quantifies
+    // that path and readies the two ways of avoiding it; every switch is off by default, so the default path is
+    // exactly the tree before the slice.
+    //
+    //   PALMETTO_CARD_COPY_TRACE=1            count the refresh per submission (calls, skipped, microseconds, max, the
+    //                                         bytes it covers) and print the totals at the submission milestones.
+    //                                         Behaviour unchanged: the measurement arm.
+    //   PALMETTO_CARD_COPY_SKIP_NO_SHADER=1   skip the refresh for a submission that records no command a shader can
+    //                                         read the mirror from (barriers, clears, copies, queries only). The
+    //                                         mirror can only be read by a shader, so no submission that records none
+    //                                         needs it; a later draw submission refreshes before it is recorded.
+    //   PALMETTO_CARD_COPY_WATCH=1            arm the guard-page write tracker (xmem.h, docs/card_copies.md) on the
+    //                                         mirrored title ranges and poll it every submission, counts only.
+    //   PALMETTO_CARD_COPY_GATE=1             with WATCH, skip the refresh when no watched page was written since the
+    //                                         last one. READIED, NOT ENABLED: the safety condition needs the device's
+    //                                         console-heap census (in-arena heaps are not mirrored and their
+    //                                         title-written V# bases are patched by the same refresh, so an
+    //                                         unmirrored heap must force the full refresh) - see the page's
+    //                                         "what remains" section for the exact pending hook.
+    //   PALMETTO_CARD_COPY_GATE_REFRESH=<n>   with GATE, force one refresh every n submissions: the bound on how long
+    //                                         a write that landed while the guards were suspended can stay
+    //                                         unmirrored. 0 (default) means only a changed page refreshes.
+    bool card_copy_trace() const { return card_copy_trace_; }
+    bool card_copy_watch() const { return card_copy_watch_; }
+    bool card_copy_gate() const { return card_copy_gate_; }
+    // The measured mirror: how many ranges the layer mirrors and their bytes, and how many the write tracker guards.
+    std::size_t console_mirror_ranges() const {
+        std::lock_guard lock(console_mirrors_mutex_);
+        return console_mirrors_.size();
+    }
+    std::uint64_t console_mirror_bytes() const { return console_mirror_bytes_.load(std::memory_order_relaxed); }
+    std::uint32_t console_watch_ranges() const { return console_watch_ranges_.load(std::memory_order_relaxed); }
+    bool console_watch_available() const { return rt::xmem::page_watch_arm && rt::xmem::page_watch_forget && rt::xmem::page_watch_poll; }
+    std::uint64_t console_watch_pages() const { return rt::xmem::page_watch_pages ? rt::xmem::page_watch_pages() : 0; }
+    std::uint64_t page_write_hits() const { return rt::xmem::page_watch_write_trips ? rt::xmem::page_watch_write_trips() : 0; }
+    std::uint64_t page_read_hits() const { return rt::xmem::page_watch_read_trips ? rt::xmem::page_watch_read_trips() : 0; }
+
+    // A console descriptor heap's title range is now mirrored (add_console_va_range): record its size and, with the
+    // write tracker on, arm its pages. A range the tracker cannot guard stays `armed = false`, which keeps the gate's
+    // coverage condition false and so keeps the full refresh running.
+    void note_console_mirror_added(std::uint64_t title, std::uint64_t size) {
+        // Only PALMETTO_CARD_COPY_WATCH arms a range: the trace arm must not change the refresh path's cost.
+        const bool arm = card_copy_watch_ && rt::xmem::page_watch_arm &&
+                         rt::xmem::page_watch_arm(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(title)), size);
+        std::lock_guard lock(console_mirrors_mutex_);
+        console_mirrors_.push_back({title, size, arm});
+        console_mirror_bytes_.fetch_add(size, std::memory_order_relaxed);
+        if (arm) console_watch_ranges_.fetch_add(1, std::memory_order_relaxed);
+    }
+    void note_console_mirror_removed(std::uint64_t title) {
+        std::lock_guard lock(console_mirrors_mutex_);
+        for (auto it = console_mirrors_.begin(); it != console_mirrors_.end(); ++it) {
+            if (it->title != title) continue;
+            if (it->armed && rt::xmem::page_watch_forget)
+                rt::xmem::page_watch_forget(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(it->title)));
+            if (it->armed) console_watch_ranges_.fetch_sub(1, std::memory_order_relaxed);
+            console_mirror_bytes_.fetch_sub(it->size, std::memory_order_relaxed);
+            console_mirrors_.erase(it);
+            return;
+        }
+    }
+    // The gate's cover condition: every mirrored range is guarded (no unmirrored console heap is visible here - the
+    // device census hook named in docs/card_copies.md is what proves that, which is why GATE is readied, not enabled).
+    bool watch_covers_mirrors() const {
+        std::lock_guard lock(console_mirrors_mutex_);
+        if (console_mirrors_.empty()) return false;
+        for (const auto& mirror : console_mirrors_)
+            if (!mirror.armed) return false;
+        return console_watch_ranges() == console_mirrors_.size();
+    }
+    // The gate's staleness bound (PALMETTO_CARD_COPY_GATE_REFRESH): the n-th submission since the last refresh always
+    // refreshes, so a write that landed while the guards were suspended cannot stay unmirrored longer than n
+    // submissions.
+    bool gate_allows_refresh_skip() {
+        const std::uint64_t since =
+            gate_submissions_since_refresh_.fetch_add(1, std::memory_order_relaxed) + 1;
+        return card_copy_gate_refresh_ == 0 || since < card_copy_gate_refresh_;
+    }
+
+    // The queue's per-submission mirror step (docs/card_copies.md). `shader_submission` says whether any list of the
+    // submission records a command that launches a shader - the only commands that can read the mirror. With every
+    // switch off this is exactly sync_console_heaps(), with no clock read and no tracker call. Returns the measured
+    // microseconds the refresh took, 0 when it was skipped.
+    std::uint64_t sync_console_heaps_measured(bool shader_submission) {
+        const bool watch = card_copy_watch_ && console_watch_available() && console_watch_ranges() > 0;
+        bool refresh = true;
+        bool unchanged = false;
+        if (watch) {
+            const auto verdict = rt::xmem::page_watch_poll();
+            unchanged = verdict == rt::xmem::WriteWatchPoll::unchanged;
+            if (card_copy_gate_ && unchanged && watch_covers_mirrors() && gate_allows_refresh_skip()) refresh = false;
+        } else if (card_copy_trace_ && console_watch_available() && console_watch_ranges() > 0) {
+            // The measurement arm also keeps the tracker's guard state coherent if a caller armed it without WATCH.
+            (void)rt::xmem::page_watch_poll();
+        }
+        const bool no_shader_skip = refresh && shader_submission == false && card_copy_skip_no_shader_;
+        if (no_shader_skip) refresh = false;
+        if (!refresh) {
+            heap_refresh_skipped_.fetch_add(1, std::memory_order_relaxed);
+            if (unchanged) heap_refresh_skipped_unchanged_.fetch_add(1, std::memory_order_relaxed);
+            else heap_refresh_skipped_no_shader_.fetch_add(1, std::memory_order_relaxed);
+            return 0;
+        }
+        // A full refresh reads every mirrored page, and every guarded page would trip: take the guards off around it.
+        if (watch && rt::xmem::page_watch_suspend) rt::xmem::page_watch_suspend();
+        std::uint64_t microseconds = 0;
+        if (card_copy_trace_) {
+            const auto started = std::chrono::steady_clock::now();
+            sync_console_heaps();
+            microseconds = static_cast<std::uint64_t>(
+                std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started).count());
+        } else {
+            sync_console_heaps();
+        }
+        if (watch && rt::xmem::page_watch_resume) rt::xmem::page_watch_resume();
+        heap_refresh_calls_.fetch_add(1, std::memory_order_relaxed);
+        heap_refresh_us_.fetch_add(microseconds, std::memory_order_relaxed);
+        std::uint64_t max = heap_refresh_max_us_.load(std::memory_order_relaxed);
+        while (microseconds > max && !heap_refresh_max_us_.compare_exchange_weak(max, microseconds)) {
+        }
+        gate_submissions_since_refresh_.store(0, std::memory_order_relaxed);
+        return microseconds;
+    }
+    // The boot's milestone report of the mirror path (docs/card_copies.md section 4), empty when no switch is on.
+    std::string card_copy_report() const {
+        if (!card_copy_trace_ && !card_copy_watch_) return {};
+        const std::uint64_t calls = heap_refresh_calls_.load(std::memory_order_relaxed);
+        const std::uint64_t us = heap_refresh_us_.load(std::memory_order_relaxed);
+        const std::uint64_t skipped = heap_refresh_skipped_.load(std::memory_order_relaxed);
+        char text[512];
+        std::snprintf(text, sizeof text,
+                      "mirror %zu range(s) %.1f MB, tracker %u range(s)/%.1f MB | refreshed %llu, skipped %llu "
+                      "(unchanged %llu, no-shader %llu) | %.0f us/refresh, %.1f ms total, max %.0f us | page watch "
+                      "changed %llu, read-trip %llu",
+                      console_mirror_ranges(), double(console_mirror_bytes()) / (1 << 20),
+                      console_watch_ranges(), double(console_watch_pages()) * 4096.0 / (1 << 20),
+                      static_cast<unsigned long long>(calls), static_cast<unsigned long long>(skipped),
+                      static_cast<unsigned long long>(heap_refresh_skipped_unchanged_.load(std::memory_order_relaxed)),
+                      static_cast<unsigned long long>(heap_refresh_skipped_no_shader_.load(std::memory_order_relaxed)),
+                      calls ? double(us) / double(calls) : 0.0, double(us) / 1000.0,
+                      double(heap_refresh_max_us_.load(std::memory_order_relaxed)),
+                      static_cast<unsigned long long>(page_write_hits()), static_cast<unsigned long long>(page_read_hits()));
+        return text;
+    }
+
     // Copies the title's shader-visible console descriptor heaps into their arena mirrors and rebases the V# bases the
     // title wrote there. Set by the device; called before a queue records a submission's lists.
     void set_console_heap_sync(std::function<void()> sync) {
@@ -1948,6 +2119,17 @@ public:
     void tick_page_watch() {
         if (page_watch_tick_) page_watch_tick_();
     }
+    // Deferred pipeline compilation (docs/deferred_compile.md): the device registers this; each queue calls it from
+    // execute_now before the lists are prepared/recorded, so a pipeline a submission's dispatch names is ready before
+    // the replay resolves its id. Called without resource_mutex_ held (the hook is where a waiting submission may
+    // block, never the recording thread); a no-op when empty.
+    void set_prepare_pipelines(std::function<void(std::span<const CommandList* const>)> prepare) {
+        std::unique_lock lock(resource_mutex_);
+        prepare_pipelines_ = std::move(prepare);
+    }
+    void prepare_pipelines(std::span<const CommandList* const> lists) {
+        if (prepare_pipelines_) prepare_pipelines_(lists);
+    }
     // The arena span that stands in for a title span, and the reverse (arena span -> title span); used by the device's
     // page pull to find source and destination.
     bool console_va_span(std::uint64_t title, ConsoleVaKind kind, std::uint64_t& arena,
@@ -2417,11 +2599,31 @@ private:
     // A resource or heap adds its range when it is created and removes it when it is destroyed.
     ConsoleVaMap console_vas_;
     std::function<void()> console_heap_sync_;  // the device's copy of its console heaps' bytes into their mirrors
+    // docs/card_copies.md: the mirrored console descriptor-heap title ranges (registered with add_console_va_range),
+    // how many the write tracker guards, and the refresh counters the milestone report prints.
+    struct ConsoleMirror {
+        std::uint64_t title = 0;
+        std::uint64_t size = 0;
+        bool armed = false;
+    };
+    mutable std::mutex console_mirrors_mutex_;
+    std::vector<ConsoleMirror> console_mirrors_;
+    std::atomic<std::uint64_t> console_mirror_bytes_{0};
+    std::atomic<std::uint32_t> console_watch_ranges_{0};
+    bool card_copy_trace_ = false;          // PALMETTO_CARD_COPY_TRACE: measure the refresh (behaviour unchanged)
+    bool card_copy_skip_no_shader_ = false; // PALMETTO_CARD_COPY_SKIP_NO_SHADER: no refresh for a shader-free submission
+    bool card_copy_watch_ = false;          // PALMETTO_CARD_COPY_WATCH: arm and poll the guard-page write tracker
+    bool card_copy_gate_ = false;           // PALMETTO_CARD_COPY_GATE: skip when the tracker says unchanged
+    unsigned card_copy_gate_refresh_ = 0;   // PALMETTO_CARD_COPY_GATE_REFRESH: force a refresh every n submissions
+    std::atomic<std::uint64_t> gate_submissions_since_refresh_{0};
+    std::atomic<std::uint64_t> heap_refresh_calls_{0}, heap_refresh_skipped_{0}, heap_refresh_skipped_unchanged_{0},
+        heap_refresh_skipped_no_shader_{0}, heap_refresh_us_{0}, heap_refresh_max_us_{0};
     std::function<void(std::uint64_t, std::uint64_t)> console_page_pull_;   // title pages -> arena stand-in
     std::function<void(std::uint64_t, std::uint32_t)> console_table_pull_;  // a table's V# data -> arena stand-in
     std::function<void()> placed_texture_import_;                           // title-placed texture pages -> image
     std::function<bool()> deferred_image_binder_;  // deferred image backing, before a submission records
     std::function<void()> page_watch_tick_;  // docs/texture_source.md: the page-writer watch, once per submission
+    std::function<void(std::span<const CommandList* const>)> prepare_pipelines_;  // docs/deferred_compile.md
     std::function<std::string()> pipeline_census_;  // docs/memory_growth.md: the live-pipeline budget's counters
     std::function<void(std::uint64_t, std::uint64_t)> console_arena_pull_;  // a copy's source range -> arena stand-in
     // The one-shot colour-target readbacks of docs/page_content.md (up to four per submission, docs/frame_capture.md):
@@ -2577,6 +2779,23 @@ private:
     VulkanContext& context_;
     VkSemaphore semaphore_ = VK_NULL_HANDLE;
 };
+
+// docs/card_copies.md: whether any list of a submission records a command that can launch a shader. Only a shader can
+// read a console descriptor heap through its arena mirror, so a submission of barriers, clears, copies, queries and
+// markers only cannot read it and does not need the per-submission title-memory refresh. Draw, Dispatch and
+// ExecuteIndirect cover every draw/dispatch path (indirect ones launch their shaders from the argument buffer), and a
+// raytracing build reads descriptors it was handed, so it counts too.
+inline bool submission_launches_a_shader(std::span<const CommandList* const> lists) {
+    for (const CommandList* list : lists) {
+        if (!list) continue;
+        for (const Command& command : list->commands())
+            if (std::holds_alternative<Draw>(command) || std::holds_alternative<Dispatch>(command) ||
+                std::holds_alternative<ExecuteIndirect>(command) ||
+                std::holds_alternative<BuildAccelerationStructure>(command))
+                return true;
+    }
+    return false;
+}
 
 // One D3D12 command queue on one VkQueue. D3D12 lets one thread use a queue at a time per call and the COM wrapper
 // serialises its calls; state_mutex_ additionally serialises them against the thread that releases a held batch
@@ -3042,8 +3261,9 @@ private:
         // The title's shader-visible console descriptor heaps are CPU memory; their GPU-visible mirrors are refreshed
         // here, before anything that reads them is recorded (console_va_map.h, docs/page_address_space.md). Copying
         // the title's own bytes is what a console GPU would read, so a title that rewrites descriptors still in flight
-        // keeps the same race it would have on the console.
-        context_.sync_console_heaps();
+        // keeps the same race it would have on the console. docs/card_copies.md measures this step and the switches
+        // that avoid it; with every switch unset the call below is the bare refresh, as before the slice.
+        context_.sync_console_heaps_measured(submission_launches_a_shader(lists));
         // Deferred image backing (docs/streamed_image_backing.md): a placed/streamed image whose memory was not
         // allocated at creation gets it here, before the lists below are prepared or recorded, so the first command
         // that could name it finds a bound image. A no-op unless the device registered the hook; an allocation that
@@ -3055,6 +3275,9 @@ private:
         // Diagnostic (docs/texture_source.md): the page-writer watch for sampled placed textures, ticked once per
         // submission; it scans every 64th. A no-op unless the device registered it and the switch is on.
         context_.tick_page_watch();
+        // Deferred pipeline compilation (docs/deferred_compile.md): make every pipeline this submission names ready
+        // before the lists below are prepared and recorded.
+        context_.prepare_pipelines(lists);
         // Bounded progress diagnostic (counts only): how fast submissions come, so a clean boot's draw count can be
         // told apart from a stalled or slowed title.
         {
@@ -3070,6 +3293,9 @@ private:
                 // docs/memory_growth.md: the live-pipeline budget's counters ride the same bounded milestone.
                 const std::string census = context_.pipeline_census();
                 if (!census.empty()) std::fprintf(stderr, "[rt] replay: pipeline budget: %s\n", census.c_str());
+                // docs/card_copies.md: the title-memory mirror's counters ride the same milestone.
+                const std::string mirror = context_.card_copy_report();
+                if (!mirror.empty()) std::fprintf(stderr, "[rt] replay: card copies: %s\n", mirror.c_str());
             }
         }
         if (kind_ != QueueKind::direct)

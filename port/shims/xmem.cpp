@@ -986,6 +986,255 @@ bool copy_page_mappings(void* destination, const void* source, std::uint64_t pag
 [[maybe_unused]] const bool g_copy_page_mappings_installed =
     (rt::xmem::copy_page_mappings_fn = &copy_page_mappings, true);
 
+// ---- The guard-page write tracker (docs/card_copies.md) ----------------------------------------------------------
+//
+// The layer mirrors the title's CPU descriptor-heap bytes into GPU-visible arena ranges and can only tell whether a
+// mirror still matches them by comparing all of them: a measured 3.4-4.4 ms pass over 38-40 MB per submission
+// (docs/page_address_space.md section 4, reproduced at 3.5 ms on this machine). The title's heap is pagefile-section
+// views, and GetWriteWatch answers ERROR_INVALID_PARAMETER for that memory (measured, docs/card_copies.md), so the OS
+// write watch cannot answer. This tracker uses the mechanism the peer project documents instead - a PAGE_GUARD on
+// every page of a watched range: the first access to a guarded 4 KiB page raises EXCEPTION_GUARD_PAGE and the system
+// clears that page's guard, so a guard exception is a "this page was accessed" signal that costs a handler call, not a
+// scan. A write is recorded as a change (the mirror is stale); a read is recorded only as "guard this page again", so
+// the layer's own reads of the title bytes never fake a change.
+//
+// Measured limits (docs/card_copies.md section 2): arming a 39.8 MB heap costs 0.6 ms (one VirtualProtect per 64 KiB
+// view - one call over the whole multi-view range fails), a guarded write ~10 us, and a full scan of an armed heap
+// ~35 ms because every 4 KiB page of it trips once. That last figure is why the change signal alone is not a fix: the
+// full refresh scan must be narrowed to the changed pages (device-side, docs/card_copies.md "what remains") before a
+// gate on this tracker can pay, and why the tracker is landed behind switches and off by default.
+namespace {
+
+constexpr std::uintptr_t kWatchPage = 0x1000;     // the guard granularity: one PTE
+constexpr std::uintptr_t kWatchBlock = 0x10000;   // the measured console heap page: what one arm call covers
+constexpr unsigned kWatchRanges = 8;              // watched ranges (the title's shader-visible heaps)
+constexpr unsigned kWatchTrips = 16384;           // recorded pages between polls; past it the poll answers "unavailable"
+
+// Published for the exception handler, which must not take a lock (a fault can arrive on any thread, including one
+// that holds the tracker's mutex inside an arm/forget loop). Written under the mutex, read lock-free.
+std::atomic<std::uintptr_t> g_watch_begin[kWatchRanges];
+std::atomic<std::uintptr_t> g_watch_end[kWatchRanges];
+std::atomic<unsigned> g_watch_published{0};
+
+// The trip record. The handler appends the 4 KiB page a guard exception named; a poll drains it and guards each page
+// again. An overflow is not a lost write silently ignored: it makes the poll answer "unavailable", so the caller falls
+// back to the full work.
+std::atomic<std::uintptr_t> g_watch_trips[kWatchTrips];
+std::atomic<unsigned> g_watch_trip_count{0};
+std::atomic<bool> g_watch_overflow{false};
+std::atomic<bool> g_watch_changed{false};
+std::atomic<std::uint64_t> g_watch_write_trips{0}, g_watch_read_trips{0};
+std::atomic<std::uint64_t> g_watch_pages_guarded{0};
+
+std::mutex g_watch_mutex;
+struct WatchRange {
+    std::uintptr_t start;
+    std::uintptr_t end;
+};
+std::vector<WatchRange> g_watch_ranges;
+
+// Whether [address, address + kWatchBlock) can hold a guard: every host page committed and writable, and no guard
+// already set (a title may guard its own memory; the tracker must not adopt or clear it).
+bool watchable_block(std::uintptr_t address) {
+    MEMORY_BASIC_INFORMATION info{};
+    if (!VirtualQuery(reinterpret_cast<void*>(address), &info, sizeof(info)) || info.State != MEM_COMMIT) return false;
+    const DWORD writable = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    const DWORD protect = info.Protect & 0xff;
+    return !(info.Protect & (PAGE_GUARD | PAGE_NOACCESS | PAGE_WRITECOMBINE | PAGE_NOCACHE)) &&
+           (writable & protect) != 0;
+}
+
+// Guards [address, address + bytes): one VirtualProtect per 64 KiB block where the range allows it (the console heap
+// is whole 64 KiB views, so this is one call per view and sets the guard bit on all sixteen of its 4 KiB pages -
+// measured: a later scan of the armed heap trips once per 4 KiB page), one per 4 KiB page elsewhere. A block that
+// cannot be guarded fails the whole arm (the caller has nothing safe to poll), so the caller restores what this armed.
+std::size_t arm_range(std::uintptr_t start, std::uintptr_t end) {
+    std::size_t guarded = 0;
+    for (std::uintptr_t at = start; at < end;) {
+        const bool block = (at & (kWatchBlock - 1)) == 0 && end - at >= kWatchBlock;
+        const std::size_t size = block ? kWatchBlock : kWatchPage;
+        DWORD old = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(at), size, PAGE_READWRITE | PAGE_GUARD, &old)) break;
+        guarded += block ? kWatchBlock / kWatchPage : 1;
+        at += size;
+    }
+    return guarded;
+}
+
+// Restores ordinary writable protection on [address, address + bytes); used to undo an arm and by forget/suspend.
+void disarm_range(std::uintptr_t start, std::uintptr_t end) {
+    for (std::uintptr_t at = start; at < end;) {
+        const bool block = (at & (kWatchBlock - 1)) == 0 && end - at >= kWatchBlock;
+        const std::size_t size = block ? kWatchBlock : kWatchPage;
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<void*>(at), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) {
+            at += size;
+            continue;
+        }
+        if (info.Protect & PAGE_GUARD) {
+            DWORD old = 0;
+            VirtualProtect(reinterpret_cast<void*>(at), size, info.Protect & ~DWORD(PAGE_GUARD), &old);
+        }
+        at += size;
+    }
+}
+
+bool range_is_watched(std::uintptr_t start) {
+    for (const auto& range : g_watch_ranges)
+        if (range.start == start) return true;
+    return false;
+}
+
+// Re-guards the pages the handler recorded and clears the record. With `read_verdict`, the change flag is taken too.
+rt::xmem::WriteWatchPoll drain_trips(bool read_verdict) {
+    if (g_watch_overflow.exchange(false)) return rt::xmem::WriteWatchPoll::unavailable;
+    const bool changed = read_verdict ? g_watch_changed.exchange(false) : g_watch_changed.load();
+    for (unsigned i = 0, count = g_watch_trip_count.exchange(0); i < count; ++i) {
+        const auto page = g_watch_trips[i].load(std::memory_order_relaxed);
+        DWORD old = 0;
+        VirtualProtect(reinterpret_cast<void*>(page), kWatchPage, PAGE_READWRITE | PAGE_GUARD, &old);
+    }
+    return changed ? rt::xmem::WriteWatchPoll::changed : rt::xmem::WriteWatchPoll::unchanged;
+}
+
+LONG CALLBACK watch_handler(EXCEPTION_POINTERS* info) {
+    thread_local bool busy = false;
+    const EXCEPTION_RECORD* record = info ? info->ExceptionRecord : nullptr;
+    if (busy || !record || record->ExceptionCode != EXCEPTION_GUARD_PAGE || record->NumberParameters < 2)
+        return EXCEPTION_CONTINUE_SEARCH;
+    const auto page = static_cast<std::uintptr_t>(record->ExceptionInformation[1]) & ~(kWatchPage - 1);
+    const unsigned published = g_watch_published.load(std::memory_order_acquire);
+    bool ours = false;
+    for (unsigned i = 0; i < published && i < kWatchRanges; ++i) {
+        if (page >= g_watch_begin[i].load(std::memory_order_relaxed) &&
+            page < g_watch_end[i].load(std::memory_order_relaxed)) {
+            ours = true;
+            break;
+        }
+    }
+    // Not a page this tracker guards: the title's own guard pages must keep their own exception handling.
+    if (!ours) return EXCEPTION_CONTINUE_SEARCH;
+    busy = true;
+    const unsigned slot = g_watch_trip_count.fetch_add(1, std::memory_order_relaxed);
+    if (slot < kWatchTrips) {
+        g_watch_trips[slot].store(page, std::memory_order_relaxed);
+        // 0 = read, 1 = write, 8 = execute (EXCEPTION_INFORMATION for an access violation; the guard page uses the
+        // same layout). A read or an execute is not a change: only a store makes the mirror stale.
+        if (record->ExceptionInformation[0] == 0 || record->ExceptionInformation[0] == 8) {
+            g_watch_read_trips.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            g_watch_write_trips.fetch_add(1, std::memory_order_relaxed);
+            g_watch_changed.store(true, std::memory_order_relaxed);
+        }
+    } else {
+        g_watch_overflow.store(true, std::memory_order_relaxed);
+    }
+    busy = false;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+void install_watch_handler() {
+    static const bool installed = AddVectoredExceptionHandler(1, &watch_handler) != nullptr;
+    (void)installed;
+}
+
+bool watch_arm(const void* address, std::size_t bytes) {
+    if (!address || !bytes) return false;
+    install_watch_handler();
+    const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(address) & ~(kWatchPage - 1);
+    const std::uintptr_t end =
+        (reinterpret_cast<std::uintptr_t>(address) + bytes + kWatchPage - 1) & ~(kWatchPage - 1);
+    std::lock_guard lock(g_watch_mutex);
+    if (range_is_watched(start)) return true;  // already watched; arming twice would leak the original protection
+    for (std::uintptr_t at = start; at < end; at += kWatchBlock)
+        if (!watchable_block(at)) return false;
+    if (g_watch_ranges.size() >= kWatchRanges) return false;
+    // Publish the range before arming it: a fault that arrives between the two is then recognised as ours (a page
+    // that is not guarded yet cannot fault, and one that is guarded by a previous range must not be orphaned).
+    const unsigned slot = g_watch_published.load(std::memory_order_relaxed);
+    g_watch_begin[slot].store(start, std::memory_order_relaxed);
+    g_watch_end[slot].store(end, std::memory_order_relaxed);
+    g_watch_published.store(slot + 1, std::memory_order_release);
+    const std::size_t guarded = arm_range(start, end);
+    if (guarded != (end - start) / kWatchPage) {
+        disarm_range(start, end);
+        g_watch_published.store(slot, std::memory_order_release);
+        return false;
+    }
+    g_watch_ranges.push_back({start, end});
+    g_watch_pages_guarded.fetch_add(guarded, std::memory_order_relaxed);
+    return true;
+}
+
+void watch_forget(const void* address) {
+    if (!address) return;
+    const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(address) & ~(kWatchPage - 1);
+    std::lock_guard lock(g_watch_mutex);
+    for (std::size_t i = 0; i < g_watch_ranges.size(); ++i) {
+        if (g_watch_ranges[i].start != start) continue;
+        const std::uint64_t pages = (g_watch_ranges[i].end - g_watch_ranges[i].start) / kWatchPage;
+        disarm_range(g_watch_ranges[i].start, g_watch_ranges[i].end);
+        // Close the publication hole: move the last published range into this slot.
+        const unsigned last = g_watch_published.load(std::memory_order_relaxed) - 1;
+        if (last != i) {
+            g_watch_begin[i] = g_watch_begin[last].load(std::memory_order_relaxed);
+            g_watch_end[i] = g_watch_end[last].load(std::memory_order_relaxed);
+        }
+        g_watch_published.store(last, std::memory_order_release);
+        g_watch_ranges.erase(g_watch_ranges.begin() + std::ptrdiff_t(i));
+        g_watch_pages_guarded.fetch_sub(pages, std::memory_order_relaxed);
+        return;
+    }
+}
+
+rt::xmem::WriteWatchPoll watch_poll() {
+    std::lock_guard lock(g_watch_mutex);
+    if (g_watch_ranges.empty()) return rt::xmem::WriteWatchPoll::unavailable;
+    return drain_trips(true);
+}
+
+void watch_rearm() {
+    std::lock_guard lock(g_watch_mutex);
+    if (g_watch_ranges.empty()) return;
+    (void)drain_trips(false);
+}
+
+// Suspends the guard state so a full refresh scan does not pay one exception per 4 KiB page (measured ~35 ms for the
+// 39.8 MB heap), and resumes it afterwards. Used only when the caller runs the full work a poll could not skip.
+void watch_suspend() {
+    std::lock_guard lock(g_watch_mutex);
+    for (const auto& range : g_watch_ranges) disarm_range(range.start, range.end);
+    // Trips recorded before the suspension are drained here: the full work that follows reads every page anyway.
+    g_watch_trip_count.store(0, std::memory_order_relaxed);
+}
+
+void watch_resume() {
+    std::lock_guard lock(g_watch_mutex);
+    g_watch_changed.store(false, std::memory_order_relaxed);
+    for (const auto& range : g_watch_ranges) {
+        if (arm_range(range.start, range.end) != (range.end - range.start) / kWatchPage) {
+            // A page that cannot be guarded again: the caller's poll will answer "unavailable" (range dropped).
+            g_watch_overflow.store(true, std::memory_order_relaxed);
+        }
+    }
+}
+
+std::uint64_t watch_write_trips() { return g_watch_write_trips.load(std::memory_order_relaxed); }
+std::uint64_t watch_read_trips() { return g_watch_read_trips.load(std::memory_order_relaxed); }
+std::uint64_t watch_pages() { return g_watch_pages_guarded.load(std::memory_order_relaxed); }
+
+}  // namespace
+
+[[maybe_unused]] const bool g_page_watch_installed = (rt::xmem::page_watch_arm = &watch_arm,
+                                                      rt::xmem::page_watch_forget = &watch_forget,
+                                                      rt::xmem::page_watch_poll = &watch_poll,
+                                                      rt::xmem::page_watch_rearm = &watch_rearm,
+                                                      rt::xmem::page_watch_suspend = &watch_suspend,
+                                                      rt::xmem::page_watch_resume = &watch_resume,
+                                                      rt::xmem::page_watch_write_trips = &watch_write_trips,
+                                                      rt::xmem::page_watch_read_trips = &watch_read_trips,
+                                                      rt::xmem::page_watch_pages = &watch_pages, true);
+
 UINT WINAPI XMemGetWriteWatch(DWORD flags, void* base_address, SIZE_T region_size, void** addresses, ULONG_PTR* count,
                               ULONG* granularity) {
     return GetWriteWatch(flags, base_address, region_size, addresses, count, granularity);

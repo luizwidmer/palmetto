@@ -1102,6 +1102,103 @@ void print_result() {
     }
 }
 
+// docs/card_copies.md: the guard-page write tracker. The tracker is filled in by xmem.cpp (the same hook shape as the
+// page-mapping hooks) and answers "was any watched page written since the last poll" without a scan. The checks are the
+// coherence cases the mirror gate needs: an unchanged interval, a write reported once and only once, a read not
+// reported as a change, detection surviving a read trip, the suspended window not reporting (and resuming), a range
+// that cannot be guarded refused, and forget restoring ordinary protection.
+void test_page_write_watch() {
+    check(rt::xmem::page_watch_arm && rt::xmem::page_watch_forget && rt::xmem::page_watch_poll &&
+              rt::xmem::page_watch_rearm && rt::xmem::page_watch_suspend && rt::xmem::page_watch_resume,
+          "xmem.cpp installs the guard-page write tracker hooks");
+    if (!rt::xmem::page_watch_arm || !rt::xmem::page_watch_forget || !rt::xmem::page_watch_poll ||
+        !rt::xmem::page_watch_rearm || !rt::xmem::page_watch_suspend || !rt::xmem::page_watch_resume)
+        return;
+    constexpr SIZE_T kFourPages = 4 * 4096;
+    auto* const region = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, kFourPages, MEM_RESERVE | MEM_COMMIT,
+                                                                 PAGE_READWRITE));
+    auto* const other = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT,
+                                                                PAGE_READWRITE));
+    check(region != nullptr && other != nullptr, "two scratch regions for the write tracker");
+    if (!region || !other) return;
+
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unavailable,
+          "the tracker answers unavailable before any range is watched");
+    check(rt::xmem::page_watch_arm(region, kFourPages), "a committed writable range arms");
+    check(rt::xmem::page_watch_arm(other, 4096), "a second range arms");
+    check(rt::xmem::page_watch_pages() == 5, "the tracker reports the five guarded pages");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unchanged,
+          "a freshly armed range has no write to report");
+
+    // A write trips the guard, the handler lets it continue, and the next poll reports it exactly once.
+    region[4096 + 0x30] = 0x5a;
+    check(region[4096 + 0x30] == 0x5a, "a write through a guarded page lands unchanged (coherence)");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::changed, "a guarded write is reported as changed");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unchanged,
+          "the change is reported once: the next poll is unchanged again");
+
+    // A read is an access, not a change: it trips the guard, is re-armed, and is never reported as a change.
+    volatile std::uint8_t read = region[2 * 4096 + 0x10];
+    (void)read;
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unchanged,
+          "a guarded read is not reported as a change");
+
+    // Detection survives that read trip: the other pages were never unguarded.
+    region[3 * 4096] = 0x11;
+    check(region[3 * 4096] == 0x11, "a second page's write lands");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::changed,
+          "a write after a read-trip page is still reported");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unchanged, "and is reported once");
+
+    // The gate's dirty-range shape: two ranges, a write in one, the other reported unchanged until it is written.
+    other[0] = 0x22;
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::changed, "a write in the second range is reported");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unchanged, "the verdict clears");
+    region[0] = 0x33;
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::changed, "a write in the first range is reported");
+
+    // Suspended window (the full refresh scan): a write is not recorded, and resuming restores detection.
+    rt::xmem::page_watch_suspend();
+    region[4096 * 2] = 0x44;
+    check(region[4096 * 2] == 0x44, "a write in the suspended window lands");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unchanged,
+          "a suspended write is not reported (the measured, documented window)");
+    rt::xmem::page_watch_resume();
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unchanged, "resume keeps the verdict quiet");
+    region[4096 * 2 + 1] = 0x55;
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::changed, "resume restores write detection");
+
+    // A range that is reserved but never committed cannot hold a guard: the arm is refused, nothing stays armed.
+    auto* const reserved = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE, PAGE_NOACCESS));
+    if (reserved) {
+        check(!rt::xmem::page_watch_arm(reserved, 4096), "a reserved (uncommitted) range is refused");
+        check(rt::xmem::page_watch_pages() == 5, "a refused arm leaves the guarded page count unchanged");
+        VirtualFree(reserved, 0, MEM_RELEASE);
+    }
+    // A range already guarded by the title is not adopted.
+    auto* const own_guard = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT,
+                                                                    PAGE_READWRITE | PAGE_GUARD));
+    if (own_guard) {
+        check(!rt::xmem::page_watch_arm(own_guard, 4096), "a page another owner already guards is not adopted");
+        VirtualFree(own_guard, 0, MEM_RELEASE);
+    }
+
+    // Forget restores ordinary protection and closes the range; the tracker goes unavailable with nothing left.
+    rt::xmem::page_watch_forget(other);
+    rt::xmem::page_watch_forget(region);
+    check(rt::xmem::page_watch_pages() == 0, "forget releases every guarded page");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unavailable,
+          "the tracker is unavailable again with no range watched");
+    // Coherence of the release: writing and reading the released memory must not trip a guard.
+    region[4096] = 0x66;
+    check(region[4096] == 0x66, "a forgotten range is ordinary writable memory again");
+    // The tracker can be re-armed on the same address after a forget (the range registry is not a leak).
+    check(rt::xmem::page_watch_arm(region, 4096), "a forgotten range can be armed again");
+    rt::xmem::page_watch_forget(region);
+    VirtualFree(other, 0, MEM_RELEASE);
+    VirtualFree(region, 0, MEM_RELEASE);
+}
+
 }  // namespace
 
 int main() {
@@ -1168,6 +1265,7 @@ int main() {
     }
 
     test_title_virtual_alloc();
+    test_page_write_watch();
 
     if (alloc_default && free_default) test_default_alloc(alloc, free_mem, alloc_default, free_default);
     if (tools_mem) check(tools_mem() == FALSE, "XMemIsToolsMemAvailable returns FALSE (no devkit tools memory)");
