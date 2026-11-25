@@ -12,10 +12,10 @@
 //   - A request's zlib stage (the reference's ZlibDecompress, RFC 1950) runs here: its compressed source is inflated
 //     with the runtime's own inflate (src/shader_library.h) into the destination the request names. The advanced
 //     stages have an opt-in slice behind PALMETTO_DS_* switches (docs/directstorage_advanced.md): a bounded staging
-//     area, pinning of write-watched destinations, the physical page-list plan, the swizzle/macro-unshuffle stage,
-//     the runtime BCPack block decoder and the local BCPack predictor file it reads. Off by default, so a boot without
-//     the switches behaves exactly as before; a live page-list resolve is still refused by a named limitation (it
-//     the xmem page table respectively).
+//     area, pinning of write-watched destinations, the physical page-list plan and its live transfer through xmem's
+//     page resolver (docs/page_resolver.md), the swizzle/macro-unshuffle stage, the runtime BCPack block decoder and
+//     the local BCPack predictor file it reads. Off by default, so a boot without the switches behaves exactly as
+//     before.
 // Nothing here goes online or touches the GPU.
 #include <windows.h>
 #include <intrin.h>
@@ -44,6 +44,7 @@
 #include "first_touch.h"           // the shared first-touch page commit used by the file-range read repair
 #include "shims.h"
 #include "startup_trace.h"         // the named, bounded "dstorage_read_noaccess" measurement on the repair path
+#include "xmem.h"                  // resolve_physical_page_fn: the page-number -> CPU view seam of a page-list request
 
 using namespace dsx;
 
@@ -165,7 +166,7 @@ struct AdvancedConfig {
     std::size_t staging_cap = 0;      // PALMETTO_DS_STAGING: bytes; 0 = off
     bool pin = false;                 // PALMETTO_DS_PIN: hand a write-watched destination back to the consumer
     bool pin_resident = false;        // PALMETTO_DS_PIN_RESIDENT: VirtualLock the destination for the write
-    bool pages = false;               // PALMETTO_DS_PAGES: answer a page-list request through the plan (refused: no resolver)
+    bool pages = false;               // PALMETTO_DS_PAGES: transfer a page-list request live through the xmem resolver
     bool unshuffle = false;           // PALMETTO_DS_UNSHUFFLE: run a swizzle request's macro-unshuffle stage
     bool bcpack = false;              // PALMETTO_DS_BCPACK: load the predictor file and refuse by named limitation
     std::wstring predictor;           // PALMETTO_DS_BCPACK_PREDICTOR: the local predictor path (outside the repository)
@@ -198,7 +199,7 @@ struct AdvancedCounters {
     std::atomic<std::uint64_t> pins{0}, pinned_pages{0}, write_watched{0}, pin_refusals{0}, pin_lock_failures{0};
     std::atomic<std::uint64_t> unshuffle_ok{0}, unshuffle_refused{0};
     std::atomic<std::uint64_t> bcpack_refused{0}, bcpack_decoded{0}, bcpack_blocks{0}, bcpack_bytes{0},
-        bcpack_history_reads{0}, pages_planned{0}, pages_refused{0};
+        bcpack_history_reads{0}, pages_planned{0}, pages_refused{0}, pages_transferred{0}, pages_bytes{0};
 };
 AdvancedCounters g_advanced;
 
@@ -2009,7 +2010,7 @@ private:
                       "source-pages=%llu | staging hits=%llu fallbacks=%llu bytes=%llu | pins=%llu pages=%llu "
                       "write-watched=%llu lock-failures=%llu refusals=%llu | unshuffle ok=%llu refused=%llu | "
                       "bcpack refused=%llu decoded=%llu blocks=%llu bytes=%llu history=%llu | pages planned=%llu "
-                      "refused=%llu | predictor=%s",
+                      "transferred=%llu bytes=%llu refused=%llu | predictor=%s",
                       static_cast<unsigned long long>(g_advanced.file_source.load()),
                       static_cast<unsigned long long>(g_advanced.memory_source.load()),
                       static_cast<unsigned long long>(g_advanced.zlib.load()),
@@ -2033,6 +2034,8 @@ private:
                       static_cast<unsigned long long>(g_advanced.bcpack_bytes.load()),
                       static_cast<unsigned long long>(g_advanced.bcpack_history_reads.load()),
                       static_cast<unsigned long long>(g_advanced.pages_planned.load()),
+                      static_cast<unsigned long long>(g_advanced.pages_transferred.load()),
+                      static_cast<unsigned long long>(g_advanced.pages_bytes.load()),
                       static_cast<unsigned long long>(g_advanced.pages_refused.load()), predictor_state_name());
         storage_trace(advanced);
     }
@@ -2052,8 +2055,11 @@ private:
                     hr = execute_request(e);
                     set_pending(-1);
                     // PALMETTO_STREAM_CONSUMER: report the completed destination range to the device proxy and arm the
-                    // first-touch guard (docs/streamed_consumer.md). One cached boolean when the switch is off.
-                    if (SUCCEEDED(hr) && e.request.Destination && e.request.DestinationSize)
+                    // first-touch guard (docs/streamed_consumer.md). One cached boolean when the switch is off. A
+                    // page-list request's Destination field is its page array, not a data range, so it is not a
+                    // streamed block and stays out of the registry.
+                    const bool page_list_destination = (e.request.Options.AsUINT64 & options::kDestinationPages) != 0;
+                    if (SUCCEEDED(hr) && !page_list_destination && e.request.Destination && e.request.DestinationSize)
                         stream_note_completed(e.request.Destination, e.request.DestinationSize, e.caller);
                 }
                 if (e.file && e.file_counted) e.file->finish_pending();
@@ -2157,7 +2163,7 @@ private:
         if (options::swizzle(o) > DSTORAGE_SWIZZLE_MODE_4K_12K_4K_12K) return E_DSTORAGE_INVALID_SWIZZLE_MODE;
         if (o & (options::kDestinationPages | options::kSourcePages)) {
             if (advanced_config().pages) return page_list_request(e);
-            log_once("pages", "physical-page requests are not implemented yet (E_NOTIMPL)");
+            log_once("pages", "physical-page requests need PALMETTO_DS_PAGES=1 (E_NOTIMPL)");
             return E_NOTIMPL;
         }
         // The advanced stages. With their switches unset the branches below refuse exactly as before (same line, same
@@ -2183,8 +2189,9 @@ private:
         const bool memory = desc_.SourceType == DSTORAGE_REQUEST_SOURCE_MEMORY;
         const uint64_t total = static_cast<uint64_t>(r.DestinationSize) + (memory ? r.SourceSize : 0u);
         if (total > kMaxRequestBytes) return E_DSTORAGE_REQUEST_TOO_LARGE;
-        // DSTORAGE_REQUEST: a destination over 32 MiB is allowed only with 64 KiB or 2 MiB pages, which are not
-        // implemented yet (refused above). The source equals the destination here, so this covers both buffers.
+        // DSTORAGE_REQUEST: a destination over 32 MiB needs a 64 KiB or 2 MiB physical page list, which a request
+        // names with the page flags (the branch above takes those before this one). The source equals the
+        // destination here, so this covers both linear buffers.
         if (r.DestinationSize > kMax4kPageDestinationSize) return E_DSTORAGE_REQUEST_TOO_LARGE;
         if (!r.Destination) return E_INVALIDARG;
         if (memory) {
@@ -2223,8 +2230,8 @@ private:
             return fail(E_DSTORAGE_INVALID_DESTINATION_SIZE, "a destination no larger than the compressed source");
         const uint64_t total = static_cast<uint64_t>(r.DestinationSize) + (memory ? r.SourceSize : 0u);
         if (total > kMaxRequestBytes) return fail(E_DSTORAGE_REQUEST_TOO_LARGE, "source and destination over 1 GiB");
-        // The same 32 MiB rule as for an uncompressed destination: a larger linear buffer would need 64 KiB or 2 MiB
-        // pages, which are not implemented yet.
+        // The same 32 MiB rule as for an uncompressed linear destination: a larger linear buffer needs a 64 KiB or
+        // 2 MiB physical page list, and a request that names one takes the page-list branch above instead.
         if (r.DestinationSize > kMax4kPageDestinationSize)
             return fail(E_DSTORAGE_REQUEST_TOO_LARGE, "a linear destination over 32 MiB");
         if (!r.Destination) return fail(E_INVALIDARG, "a null destination");
@@ -2568,46 +2575,132 @@ private:
         return S_OK;
     }
 
-    // PALMETTO_DS_PAGES: a physical-page request's plan. The plan and copy math are implemented and tested, but the
-    // runtime has no page resolver (xmem keeps its page table private), so a live page-list request is refused by name
-    // after the page numbers have been read and the plan counted - never half-filled into title memory.
+    // PALMETTO_DS_PAGES: a physical-page request's live transfer (docs/page_resolver.md). The page numbers are read
+    // once, bounded by the plan's fixed span table; the plan is the tested arithmetic in dstorage_advanced.h; every
+    // page the plan needs is resolved through xmem's page table before the first byte moves, so a number with no live
+    // backing refuses the whole request and no partial destination is ever visible to the title. The bytes are
+    // materialised in the queue worker's own vector (a file read or memory copy, then the zlib stage, or a gather from
+    // a source page list) and only then scattered into the destination page list - or copied into a linear destination
+    // for a source page list. BCPack and swizzle over a page list stay a named refusal: those decode stages write a
+    // linear destination, and composing them with the scatter belongs to the BCPack runtime slice's seam.
     HRESULT page_list_request(const Entry& e) {
         const DSTORAGE_REQUEST& r = e.request;
         const uint64_t o = r.Options.AsUINT64;
-        const bool destination = (o & options::kDestinationPages) != 0;
-        const ULONG_PTR* const pages = destination ? r.DestinationPageArray : r.SourcePageArray;
-        const uint16_t page_offset = destination ? r.DestinationPageOffset : r.SourcePageOffset;
-        const std::size_t bytes = destination ? r.DestinationSize : r.SourceSize;
-        const auto refuse = [destination, page_offset, &r](HRESULT hr, const std::string& why) {
+        const bool destination_pages = (o & options::kDestinationPages) != 0;
+        const bool source_pages = (o & options::kSourcePages) != 0;
+        const bool memory = desc_.SourceType == DSTORAGE_REQUEST_SOURCE_MEMORY;
+        const ULONG_PTR* const pages = source_pages ? r.SourcePageArray : r.DestinationPageArray;
+        const uint16_t page_offset = source_pages ? r.SourcePageOffset : r.DestinationPageOffset;
+        const std::size_t page_bytes = source_pages ? r.SourceSize : r.DestinationSize;
+        const auto refuse = [destination_pages, page_offset, &r](HRESULT hr, const std::string& why) {
             g_advanced.pages_refused.fetch_add(1, std::memory_order_relaxed);
             log_once("pages" + hr_text(hr) + why.substr(0, 12),
                      "a physical-page request is refused: " + why + " (" + hr_text(hr) + "; " +
-                         (destination ? "destination" : "source") + " page list, page offset " +
-                         std::to_string(page_offset) + ", " + (destination ? "destination " : "source ") +
-                         size_band(destination ? r.DestinationSize : r.SourceSize) + ")");
+                         (destination_pages ? "destination" : "source") + " page list, page offset " +
+                         std::to_string(page_offset) + ", " + (destination_pages ? "destination " : "source ") +
+                         size_band(destination_pages ? r.DestinationSize : r.SourceSize) + ")");
             return hr;
         };
+        const rt::xmem::ResolvePhysicalPageFn resolver_hook = rt::xmem::resolve_physical_page_fn;
+        if (resolver_hook == nullptr)
+            return refuse(E_NOTIMPL, "this build has no xmem page resolver, so a page list cannot be transferred");
+        if (destination_pages && source_pages)
+            return refuse(E_INVALIDARG, "a request that names a source and a destination page list");
+        if (source_pages && !memory)
+            return refuse(E_DSTORAGE_INVALID_SOURCE_TYPE, "a page-list source on a file queue (a page list is memory)");
         if (pages == nullptr) return refuse(E_INVALIDARG, "a null page array");
-        if (bytes == 0) return refuse(E_DSTORAGE_INVALID_DESTINATION_SIZE, "a page-list buffer of 0 bytes");
+        if (options::bcpack(o) != 0 || options::swizzle(o) != 0)
+            return refuse(E_NOTIMPL,
+                          "BCPack or swizzle over a physical page list (the decode stages write a linear destination)");
+        if (r.IntermediateSize != 0)
+            return refuse(E_DSTORAGE_INVALID_INTERMEDIATE_SIZE, "an intermediate size without BCPack");
+        const bool zlib = options::zlib(o) != 0;
+        const uint64_t total = static_cast<uint64_t>(r.DestinationSize) +
+                               (memory ? static_cast<uint64_t>(r.SourceSize) : 0u);
+        if (total > kMaxRequestBytes) return refuse(E_DSTORAGE_REQUEST_TOO_LARGE, "source and destination over 1 GiB");
+        if (zlib && r.DestinationSize <= r.SourceSize)
+            return refuse(E_DSTORAGE_INVALID_DESTINATION_SIZE, "a destination no larger than the compressed source");
+        if (!zlib && r.DestinationSize != r.SourceSize)
+            return refuse(E_DSTORAGE_INVALID_DESTINATION_SIZE, "a destination size that does not match the source");
+        // A linear buffer keeps the PC 32 MiB rule; the page-list side is bounded by the plan's span table instead.
+        if (!destination_pages && r.DestinationSize > kMax4kPageDestinationSize)
+            return refuse(E_DSTORAGE_REQUEST_TOO_LARGE, "a linear destination over 32 MiB");
+        if (r.SourceSize == 0) return S_OK;  // nothing to move; mirrors the uncompressed and zlib paths
         // Read only the page numbers the transfer needs, bounded by the plan's fixed span table (+1 so an over-long
         // transfer is refused as too many pages rather than attributed to a short list).
         const std::size_t needed =
-            1 + (static_cast<std::size_t>(page_offset) + bytes - 1) / palmetto::dstorage::kPageListPageBytes;
-        const std::size_t count = (std::min)(needed, static_cast<std::size_t>(palmetto::dstorage::PagePlan::kMaxSpans) + 1);
+            1 + (static_cast<std::size_t>(page_offset) + page_bytes - 1) / palmetto::dstorage::kPageListPageBytes;
+        const std::size_t count =
+            (std::min)(needed, static_cast<std::size_t>(palmetto::dstorage::PagePlan::kMaxSpans) + 1);
         std::uint64_t numbers[palmetto::dstorage::PagePlan::kMaxSpans + 1] = {};
         if (!guarded_move(numbers, pages, count * sizeof(std::uint64_t)))
             return refuse(E_DSTORAGE_ACCESS_VIOLATION, "an inaccessible page array");
         palmetto::dstorage::PagePlan plan;
-        const palmetto::dstorage::PagePlanError error =
-            palmetto::dstorage::plan_page_transfer(numbers, count, page_offset, bytes, plan);
-        if (error != palmetto::dstorage::PagePlanError::ok)
+        const palmetto::dstorage::PagePlanError planned =
+            palmetto::dstorage::plan_page_transfer(numbers, count, page_offset, page_bytes, plan);
+        if (planned != palmetto::dstorage::PagePlanError::ok)
             return refuse(E_DSTORAGE_INVALID_DESTINATION_SIZE,
-                          std::string("the page plan failed: ") + palmetto::dstorage::page_plan_error_name(error));
+                          std::string("the page plan failed: ") + palmetto::dstorage::page_plan_error_name(planned));
         g_advanced.pages_planned.fetch_add(1, std::memory_order_relaxed);
-        return refuse(E_NOTIMPL,
-                      "the page plan is implemented (planned " + std::to_string(plan.count) + " span(s) over " +
-                          std::to_string(plan.bytes) + " bytes) but the xmem page table is not exposed, so there is "
-                          "no page resolver for a live request");
+        // The adapter from xmem's hook (a page number -> a CPU view) to the copy path's context-free resolver shape.
+        const palmetto::dstorage::PageResolver resolve = [](void*, std::uint64_t page_number) -> const std::uint8_t* {
+            const rt::xmem::ResolvePhysicalPageFn hook = rt::xmem::resolve_physical_page_fn;
+            return hook ? hook(page_number) : nullptr;
+        };
+        const auto refused_transfer = [&refuse](const palmetto::dstorage::PageTransferResult& transfer) {
+            return refuse(E_INVALIDARG, "page " + std::to_string(transfer.page) + " has no live physical page (" +
+                                            palmetto::dstorage::page_transfer_error_name(transfer.error) + " at " +
+                                            std::to_string(transfer.spans) + " span(s))");
+        };
+        // 1. The source bytes: a file read, a memory copy, or a gather out of a source page list.
+        std::vector<std::uint8_t> data(r.SourceSize);
+        if (source_pages) {
+            const auto gathered = palmetto::dstorage::transfer_page_list(numbers, count, page_offset, r.SourceSize,
+                                                                        resolve, nullptr, data.data(), false);
+            if (gathered.error != palmetto::dstorage::PageTransferError::ok) return refused_transfer(gathered);
+        } else if (memory) {
+            if (!guarded_move(data.data(), r.Source, data.size()))
+                return refuse(E_DSTORAGE_ACCESS_VIOLATION, "an inaccessible source");
+        } else {
+            if (!r.File) return refuse(E_INVALIDARG, "a null file");
+            if (!e.file_counted) return refuse(E_DSTORAGE_FILE_NOT_OPEN, "a file that is not open");
+            if (zlib && r.FileOffset % 16)
+                return refuse(E_DSTORAGE_INVALID_FILE_OFFSET, "a file offset not 16-byte aligned");
+            if (const HRESULT hr = read_file_range(e.file->handle(), r.FileOffset, data.data(), r.SourceSize); FAILED(hr))
+                return refuse(hr, "the source file read failed");
+        }
+        // 2. The zlib stage: exactly DestinationSize bytes, or the request fails before touching a page.
+        if (zlib) {
+            std::vector<std::uint8_t> inflated;
+            if (!palmetto::zlib_inflate(std::span<const std::uint8_t>(data.data(), data.size()), inflated,
+                                        r.DestinationSize) ||
+                inflated.size() != static_cast<std::size_t>(r.DestinationSize))
+                return refuse(kDecompressionError, "a malformed stream or a decompressed size that does not match");
+            data = std::move(inflated);
+        }
+        // 3. Publish: scatter into the destination page list, or copy into the linear destination.
+        if (destination_pages) {
+            const auto scattered = palmetto::dstorage::transfer_page_list(numbers, count, page_offset, data.size(),
+                                                                         resolve, nullptr, data.data(), true);
+            if (scattered.error != palmetto::dstorage::PageTransferError::ok) return refused_transfer(scattered);
+            g_advanced.pages_transferred.fetch_add(1, std::memory_order_relaxed);
+            g_advanced.pages_bytes.fetch_add(scattered.bytes, std::memory_order_relaxed);
+            log_once("pages-ok", "a physical-page request transferred (destination page list, " +
+                                     std::to_string(scattered.spans) + " span(s) over " +
+                                     std::to_string(scattered.bytes) + " byte(s), zlib " + (zlib ? "on" : "off") +
+                                     "; source " + size_band(r.SourceSize) + ")");
+        } else {
+            if (!r.Destination) return refuse(E_INVALIDARG, "a null destination");
+            if (!guarded_move(r.Destination, data.data(), data.size()))
+                return refuse(E_DSTORAGE_ACCESS_VIOLATION, "an inaccessible destination");
+            g_advanced.pages_transferred.fetch_add(1, std::memory_order_relaxed);
+            g_advanced.pages_bytes.fetch_add(data.size(), std::memory_order_relaxed);
+            log_once("pages-ok", "a physical-page request transferred (source page list, " +
+                                     std::to_string(plan.count) + " span(s) over " + std::to_string(r.SourceSize) +
+                                     " byte(s), zlib " + (zlib ? "on" : "off") + "; destination " +
+                                     size_band(r.DestinationSize) + ")");
+        }
+        return S_OK;
     }
 
     void set_pending(int delta) {

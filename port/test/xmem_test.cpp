@@ -7,7 +7,9 @@
 // XMemTransferMemory follows the call shape in Microsoft's public samples: TRUE for any direction and size, with
 // nothing committed, and one trace event per distinct (type, size). XMemVirtualAlloc accepts attribute words and console
 // graphics protection bits and commits 2 MiB guest pages; the placeholder flags pass through; physical pages keep their
-// contents across unmap and remap, alias when mapped twice, and scatter-map per address.
+// contents across unmap and remap, alias when mapped twice, and scatter-map per address. The DirectStorage page-list
+// resolver turns a page number into the CPU view of its backing and is driven through the page-plan transfer seam
+// (dstorage_advanced.h) against real pages and a real title window (docs/page_resolver.md).
 #include <windows.h>
 #include <psapi.h>
 
@@ -26,6 +28,7 @@
 #include "shims.h"
 #include "startup_trace.h"
 #include "xmem.h"
+#include "dstorage_advanced.h"  // the page-list transfer seam the dstorage request path runs (docs/page_resolver.md)
 
 namespace {
 
@@ -676,6 +679,92 @@ void test_copy_page_mappings(const PhysicalApi& api) {
     check(api.free_pages(kPages, pages) == TRUE, "XMemFreePhysicalPages frees the slot-31 pages");
 }
 
+// The DirectStorage page-list resolver (port/shims/xmem.h, docs/page_resolver.md): a page number resolves to the CPU
+// view of the physical page's backing, which is one memory with every mapping of that page. The dstorage page-list path
+// drives the resolver through dstorage_advanced.h's transfer_page_list, so this test runs that same seam against real
+// pages and a real title window: the bytes must be readable at the mapping the title reads.
+void test_resolve_physical_page(const PhysicalApi& api) {
+    check(rt::xmem::resolve_physical_page_fn != nullptr, "xmem installs the DirectStorage page-list resolver hook");
+    if (!rt::xmem::resolve_physical_page_fn) return;
+    constexpr uint64_t kPages = 3;
+    auto* const window = static_cast<uint8_t*>(
+        api.virtual_alloc(nullptr, kPages * kPage64k, MEM_RESERVE | kXmem64kPages, 0x21, PAGE_READWRITE));
+    check(window != nullptr, "XMemVirtualAlloc reserves a window for the resolver");
+    if (!window) return;
+    uint64_t pages[kPages] = {};
+    uint64_t count = kPages;
+    check(api.allocate(0x280, &count, pages) == TRUE && count == kPages, "physical pages for the resolver");
+    if (count != kPages) return;
+
+    // A mapped page: the title's view and the resolver's view are one memory in both directions.
+    check(api.map(window, 1, pages) == window, "the first resolver page maps into the window");
+    fill_page(window, 0x51510000u);
+    uint8_t* const view = rt::xmem::resolve_physical_page_fn(pages[0]);
+    check(view != nullptr, "a live physical page number resolves to a CPU view");
+    bool same = view != nullptr;
+    if (view) {
+        for (std::size_t i = 0; i < kPage64k / sizeof(uint32_t); i += 1024)
+            same &= *reinterpret_cast<const uint32_t*>(view + i * sizeof(uint32_t)) ==
+                    0x51510000u + static_cast<uint32_t>(i);
+        check(same, "the resolved view holds what the title's mapping holds (one memory)");
+        *reinterpret_cast<uint32_t*>(view + 0x2000) = 0xfeedc0deu;
+        check(read_u32(window, 0x2000) == 0xfeedc0deu, "a write through the resolved view is visible at the mapped view");
+    }
+
+    // A page that was allocated but never touched resolves and is committed on the way out (a store into it must not
+    // fault); mapping it afterwards shows the bytes the resolver wrote.
+    uint8_t* const fresh = rt::xmem::resolve_physical_page_fn(pages[1]);
+    check(fresh != nullptr, "an untouched physical page resolves (and is committed)");
+    if (fresh) {
+        std::memset(fresh, 0x5a, kPage64k);
+        check(api.map(window + kPage64k, 1, pages + 1) == window + kPage64k,
+              "the untouched page maps after the resolve");
+        check(read_u32(window + kPage64k, 0) == 0x5a5a5a5au, "the title's mapping sees the resolver's write");
+    }
+
+    // The same seam the request path uses: a plan over two mapped pages, the transfer, and the bytes read back.
+    using palmetto::dstorage::PageTransferError;
+    using palmetto::dstorage::transfer_page_list;
+    const palmetto::dstorage::PageResolver resolve = [](void*, std::uint64_t page_number) -> const std::uint8_t* {
+        return rt::xmem::resolve_physical_page_fn ? rt::xmem::resolve_physical_page_fn(page_number) : nullptr;
+    };
+    constexpr std::size_t kBytes = 100000;
+    std::vector<uint8_t> payload(kBytes);
+    for (std::size_t at = 0; at < kBytes; ++at) payload[at] = static_cast<uint8_t>((at * 29 + 7) & 0xff);
+    const auto scattered = transfer_page_list(pages, 2, 4321, kBytes, resolve, nullptr, payload.data(), true);
+    bool scattered_ok = scattered.error == PageTransferError::ok && scattered.spans == 2;
+    if (scattered_ok) {
+        for (std::size_t at = 0; at < kBytes; ++at) {
+            const std::size_t page = (4321 + at) / kPage64k;
+            const std::size_t offset = (4321 + at) % kPage64k;
+            if (window[page * kPage64k + offset] != payload[at]) scattered_ok = false;
+        }
+    }
+    check(scattered_ok, "a live page-list transfer's bytes are visible through the title's mappings");
+    std::vector<uint8_t> gathered(kBytes);
+    const auto read_back = transfer_page_list(pages, 2, 4321, kBytes, resolve, nullptr, gathered.data(), false);
+    check(read_back.error == PageTransferError::ok && gathered == payload,
+          "the same page list gathers the transferred bytes back");
+
+    // An unallocated page number refuses the whole transfer before the first byte: the mapped pages keep their bytes.
+    uint64_t absent[2] = {pages[0], 0x1fffff0};  // a multiple of 16 below the slot limit that was never allocated
+    const std::vector<uint8_t> before(window, window + 2 * kPage64k);
+    const auto refused = transfer_page_list(absent, 2, 0, static_cast<std::size_t>(kPage64k) + 32, resolve, nullptr,
+                                            payload.data(), true);
+    check(refused.error == PageTransferError::unresolved_page && refused.page == absent[1],
+          "an unallocated page number is an unresolved_page refusal");
+    check(std::vector<uint8_t>(window, window + 2 * kPage64k) == before,
+          "the refused transfer wrote nothing into the mapped pages");
+
+    // The resolver's own refusals: page 0, a never-allocated number, and a number after its pages are freed.
+    check(rt::xmem::resolve_physical_page_fn(0) == nullptr, "page number 0 does not resolve");
+    check(rt::xmem::resolve_physical_page_fn(absent[1]) == nullptr, "a never-allocated page number does not resolve");
+    check(api.map(window, 1, nullptr) == window, "unmap the first resolver page");
+    check(api.map(window + kPage64k, 1, nullptr) == window + kPage64k, "unmap the second resolver page");
+    check(api.free_pages(kPages, pages) == TRUE, "free the resolver's pages");
+    check(rt::xmem::resolve_physical_page_fn(pages[2]) == nullptr, "a freed page number no longer resolves");
+}
+
 void test_first_touch_during_remap(const PhysicalApi& api) {
     constexpr uint64_t kSlice = 16;
     constexpr uint64_t kSlices = 256;
@@ -1087,6 +1176,7 @@ int main() {
         test_physical_pages_commit_on_touch(physical);
         test_commit_physical_pages(physical);
         test_copy_page_mappings(physical);
+        test_resolve_physical_page(physical);
         test_first_touch_during_remap(physical);
         test_placeholders(physical);
     }

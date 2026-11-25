@@ -14,11 +14,14 @@
 // locally at a title's call sites (each function says which). The page functions are built on the Windows placeholder
 // APIs (VirtualAlloc2, MapViewOfFile3), whose flags the title's own XMemVirtualAlloc calls already use.
 #include <windows.h>
+#include <heapapi.h>
 #include <intrin.h>
 #include <malloc.h>
 #include <psapi.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -30,10 +33,12 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "../src/alloc_trace.h"
 #include "shims.h"
 #include "startup_trace.h"
 #include "xmem.h"
@@ -89,18 +94,173 @@ void note_caller(const char* api, const void* caller) {
                                                   rt::startup_trace::quote(where));
 }
 
-void* allocate_block(size_t size) { return _aligned_malloc(size ? size : 1, kAlign); }
+// ---- PALMETTO_MEM_TRACE=<seconds>: the owner counters a long boot needs ------------------------------------------
+//
+// The 300 s boot's process private bytes grow from 16.7 GB to 83.6 GB while nothing is read, no DirectStorage request
+// is made and no platform call starts after 115 s (docs/story_load_probe.md), so the growth is a retention in host
+// memory, not content arriving. These counters split that growth by the allocator entry point the title called and by
+// the title caller (module+RVA): the XMemAlloc/XMemAllocDefault heap (live bytes), XMemVirtualAlloc's requested bytes
+// and its commit requests, kernel32!VirtualAlloc as the title calls it, and the physical-page tables (live pages,
+// mapped pages, sections and the pages the first-touch handler committed). A caller table of 48 entries keeps live and
+// total bytes per (kind, caller); when it is full the rest is counted only in the totals.
+//
+// Off by default: one cached environment parse, then one relaxed load per call. On, one stderr line per <seconds>,
+// bounded to 240 lines, and the heap path keeps a 64-byte header per block so XMemFree - which receives no size - can
+// attribute the free. Counters only: no allocation is served differently and nothing is read from the title.
+std::atomic<std::uint64_t> g_mem_period_ms{0};  // 0: off
+
+struct MemTrace {
+    std::atomic<std::uint64_t> heap_live{0}, heap_peak{0}, heap_blocks{0};
+    std::atomic<std::uint64_t> xva_calls{0}, xva_bytes{0}, xva_commit_calls{0}, xva_commit_bytes{0};
+    std::atomic<std::uint64_t> tva_calls{0}, tva_bytes{0}, tva_commit_bytes{0};
+    std::atomic<std::uint64_t> phys_calls{0}, phys_pages{0};
+    std::atomic<std::uint64_t> map_calls{0}, map_pages{0};
+    std::atomic<std::uint64_t> committed_pages{0};  // pages the first-touch handler / placed-at-VA hook committed
+};
+MemTrace g_mem_trace;
+
+bool mem_trace_enabled() { return g_mem_period_ms.load(std::memory_order_relaxed) != 0; }
+
+enum MemCallerKind : std::uint8_t { mem_heap = 0, mem_xmem_va = 1, mem_title_va = 2, mem_phys = 3 };
+
+constexpr unsigned kMemCallerSlots = 48;
+struct MemCaller {
+    std::uint64_t caller = 0;
+    std::uint8_t kind = 0;
+    std::uint64_t live = 0;   // heap only
+    std::uint64_t total = 0;  // bytes requested through this entry point
+    std::uint64_t count = 0;
+};
+MemCaller g_mem_callers[kMemCallerSlots];
+unsigned g_mem_caller_count = 0;
+std::mutex g_mem_caller_mutex;
+
+// A caller's entry (adding one when the table has room), under g_mem_caller_mutex. A contended lock skips only the
+// per-caller split, never a total.
+MemCaller* mem_caller_slot(std::uint8_t kind, std::uint64_t caller) {
+    for (unsigned i = 0; i < g_mem_caller_count; ++i)
+        if (g_mem_callers[i].caller == caller && g_mem_callers[i].kind == kind) return &g_mem_callers[i];
+    if (g_mem_caller_count >= kMemCallerSlots) return nullptr;
+    MemCaller& slot = g_mem_callers[g_mem_caller_count++];
+    slot.caller = caller;
+    slot.kind = kind;
+    return &slot;
+}
+
+void mem_note_bytes(std::uint8_t kind, std::uint64_t caller, std::uint64_t bytes) {
+    if (!mem_trace_enabled() || !caller) return;
+    std::unique_lock lock(g_mem_caller_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return;
+    if (MemCaller* slot = mem_caller_slot(kind, caller)) {
+        slot->total += bytes;
+        ++slot->count;
+    }
+}
+
+void mem_note_heap(std::uint64_t caller, std::uint64_t bytes, bool alloc) {
+    if (!mem_trace_enabled()) return;
+    if (alloc) {
+        const std::uint64_t live = g_mem_trace.heap_live.fetch_add(bytes) + bytes;
+        std::uint64_t peak = g_mem_trace.heap_peak.load();
+        while (live > peak && !g_mem_trace.heap_peak.compare_exchange_weak(peak, live)) {
+        }
+        g_mem_trace.heap_blocks.fetch_add(1);
+        mem_note_bytes(mem_heap, caller, bytes);
+        return;
+    }
+    std::uint64_t live = g_mem_trace.heap_live.load();
+    while (true) {
+        const std::uint64_t freed = bytes < live ? bytes : live;
+        if (g_mem_trace.heap_live.compare_exchange_weak(live, live - freed)) break;
+    }
+    if (!caller) return;
+    std::unique_lock lock(g_mem_caller_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return;
+    if (MemCaller* slot = mem_caller_slot(mem_heap, caller))
+        slot->live = slot->live > bytes ? slot->live - bytes : 0;
+}
+
+// The 64-byte header a traced heap block keeps in front of its payload: XMemFree gets no size, so the header is where
+// the size and the allocating caller are. It exists only when the switch is on, so the default path is unchanged.
+constexpr std::size_t kMemHeapHeader = 64;
+constexpr std::uint64_t kMemHeapMagic = 0x45434152544D454Dull;  // "MEMTRACE" in little-endian order
+struct MemHeapHeader {
+    std::uint64_t size;
+    std::uint64_t caller;
+    std::uint64_t magic;
+};
+
+// The print thread (defined after the physical-page tables it reads).
+void start_mem_trace();
+
+// PALMETTO_MEM_TRACE's value as a period in milliseconds (0: off). Called from the entry points, cached: the switch's
+// text cannot change while the process runs.
+void note_mem_trace_switch() {
+    static const bool parsed = [] {
+        char value[32] = {};
+        if (GetEnvironmentVariableA("PALMETTO_MEM_TRACE", value, sizeof value) != 0 && value[0] != '\0') {
+            char* end = nullptr;
+            const double seconds = std::strtod(value, &end);
+            if (end != value && seconds > 0.0)
+                g_mem_period_ms.store(std::uint64_t(seconds * 1000.0) ? std::uint64_t(seconds * 1000.0) : 1);
+        }
+        // The allocation attribution shares this thread: PALMETTO_ALLOC_TRACE=1 rewrites the loaded modules' allocation
+        // imports and the print below reports the largest stacks.
+        char alloc[8] = {};
+        const DWORD alloc_length = GetEnvironmentVariableA("PALMETTO_ALLOC_TRACE", alloc, sizeof alloc);
+        palmetto::alloc_trace::start(alloc_length ? alloc : "");
+        return true;
+    }();
+    (void)parsed;
+    start_mem_trace();
+}
+
+void* allocate_block(size_t size, const void* caller) {
+    note_mem_trace_switch();
+    if (!mem_trace_enabled()) return _aligned_malloc(size ? size : 1, kAlign);
+    const std::size_t payload = size ? size : 1;
+    auto* base = static_cast<std::uint8_t*>(_aligned_malloc(payload + kMemHeapHeader, kAlign));
+    if (!base) return nullptr;
+    auto* header = reinterpret_cast<MemHeapHeader*>(base);
+    header->size = payload;
+    header->caller = reinterpret_cast<std::uint64_t>(caller);
+    header->magic = kMemHeapMagic;
+    mem_note_heap(header->caller, header->size, true);
+    return base + kMemHeapHeader;
+}
+
+void free_block(void* p) {
+    if (!p) return;
+    if (!mem_trace_enabled()) {
+        _aligned_free(p);
+        return;
+    }
+    auto* base = static_cast<std::uint8_t*>(p) - kMemHeapHeader;
+    auto* header = reinterpret_cast<MemHeapHeader*>(base);
+    if (header->magic == kMemHeapMagic) {
+        mem_note_heap(header->caller, header->size, false);
+        header->magic = 0;
+        _aligned_free(base);
+        return;
+    }
+    // A block without the header: this shim did not allocate it through the traced path. Free it at its own address
+    // (the allocator never returns a pointer into the middle of a block) and say so once.
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true, std::memory_order_relaxed))
+        std::fprintf(stderr, "[rt] xmem: XMemFree of a block without the PALMETTO_MEM_TRACE header\n");
+    _aligned_free(p);
+}
 
 void* __stdcall XMemAlloc(size_t size, uint64_t attributes) {
     note_attributes("XMemAlloc", attributes, size, _ReturnAddress());
     note_caller("XMemAlloc", _ReturnAddress());
-    return allocate_block(size);
+    return allocate_block(size, _ReturnAddress());
 }
 
 void __stdcall XMemFree(void* p, uint64_t attributes) {
     note_attributes("XMemFree", attributes, kNoSize, _ReturnAddress());
     note_caller("XMemFree", _ReturnAddress());
-    _aligned_free(p);
+    free_block(p);
 }
 
 // XMemAllocDefault / XMemFreeDefault: the GDK's own allocator behind XMemAlloc and XMemFree, which a title that hooks
@@ -110,13 +270,13 @@ void __stdcall XMemFree(void* p, uint64_t attributes) {
 void* __stdcall XMemAllocDefault(size_t size, uint64_t attributes) {
     note_attributes("XMemAllocDefault", attributes, size, _ReturnAddress());
     note_caller("XMemAllocDefault", _ReturnAddress());
-    return allocate_block(size);
+    return allocate_block(size, _ReturnAddress());
 }
 
 void __stdcall XMemFreeDefault(void* p, uint64_t attributes) {
     note_attributes("XMemFreeDefault", attributes, kNoSize, _ReturnAddress());
     note_caller("XMemFreeDefault", _ReturnAddress());
-    _aligned_free(p);
+    free_block(p);
 }
 
 // BOOL XMemIsToolsMemAvailable(void). The measured title calls it from one helper, which six out-of-memory paths reach
@@ -401,6 +561,18 @@ void* WINAPI XMemVirtualAlloc(void* address, SIZE_T size, DWORD allocation_type,
     const bool new_placeholder = (host_type & MEM_RESERVE_PLACEHOLDER) != 0;
     const bool replace = (host_type & MEM_REPLACE_PLACEHOLDER) != 0;
     const bool window = page_mode != 0 && !commit && !new_placeholder;
+    note_mem_trace_switch();
+    if (mem_trace_enabled()) {
+        const auto caller = reinterpret_cast<std::uint64_t>(_ReturnAddress());
+        const auto bytes = static_cast<std::uint64_t>(size);
+        g_mem_trace.xva_calls.fetch_add(1, std::memory_order_relaxed);
+        g_mem_trace.xva_bytes.fetch_add(bytes, std::memory_order_relaxed);
+        if (commit) {
+            g_mem_trace.xva_commit_calls.fetch_add(1, std::memory_order_relaxed);
+            g_mem_trace.xva_commit_bytes.fetch_add(bytes, std::memory_order_relaxed);
+            mem_note_bytes(mem_xmem_va, caller, bytes);
+        }
+    }
     if ((new_placeholder || replace || window || page_mode == kXmemLargePages) && !placeholder_api().available()) {
         SetLastError(ERROR_NOT_SUPPORTED);
         return nullptr;
@@ -527,8 +699,9 @@ PageCommit commit_mapped_page(uintptr_t address, uintptr_t accessed, DWORD& prot
         return PageCommit::committed_before;
     }
     void* const backing = static_cast<uint8_t*>(it->second.section->scratch) + it->second.offset;
-    return VirtualAlloc(backing, kPhysicalPageSize, MEM_COMMIT, PAGE_READWRITE) ? PageCommit::committed_now
-                                                                                 : PageCommit::failed;
+    if (!VirtualAlloc(backing, kPhysicalPageSize, MEM_COMMIT, PAGE_READWRITE)) return PageCommit::failed;
+    if (mem_trace_enabled()) g_mem_trace.committed_pages.fetch_add(1, std::memory_order_relaxed);
+    return PageCommit::committed_now;
 }
 
 bool access_allowed(DWORD protect, ULONG_PTR access) {
@@ -622,6 +795,13 @@ BOOL WINAPI XMemAllocatePhysicalPages(uint64_t attributes, uint64_t* page_count,
     const uint64_t count = *page_count;
     if (count == 0) return TRUE;
 
+    note_mem_trace_switch();
+    if (mem_trace_enabled()) {
+        g_mem_trace.phys_calls.fetch_add(1, std::memory_order_relaxed);
+        g_mem_trace.phys_pages.fetch_add(count, std::memory_order_relaxed);
+        mem_note_bytes(mem_phys, reinterpret_cast<std::uint64_t>(_ReturnAddress()), count * kPhysicalPageSize);
+    }
+
     const std::lock_guard lock(g_phys_mutex);
     if (count > g_free_slots.size() + (kPageSlotLimit - g_next_slot)) {
         *page_count = 0;
@@ -690,6 +870,7 @@ BOOL WINAPI XMemFreePhysicalPages(uint64_t page_count, const uint64_t* page_arra
 // Each page is its own view (MapViewOfFile3 into a 64 KiB placeholder), so any page can be remapped or unmapped later
 // without touching its neighbours. A failure part-way leaves the pages before it mapped.
 void* WINAPI XMemMapPhysicalPages(void* address, uint64_t page_count, const uint64_t* page_array) {
+    note_mem_trace_switch();
     const uintptr_t start = reinterpret_cast<uintptr_t>(address);
     if (!aligned_page_address(start) || page_count > (std::numeric_limits<uintptr_t>::max)() / kPhysicalPageSize ||
         start > (std::numeric_limits<uintptr_t>::max)() - page_count * kPhysicalPageSize) {
@@ -713,6 +894,10 @@ void* WINAPI XMemMapPhysicalPages(void* address, uint64_t page_count, const uint
         return nullptr;
     }
     const DWORD protect = view_protect(*window);
+    if (mem_trace_enabled()) {
+        g_mem_trace.map_calls.fetch_add(1, std::memory_order_relaxed);
+        g_mem_trace.map_pages.fetch_add(page_count, std::memory_order_relaxed);
+    }
     for (uint64_t i = 0; i < page_count; ++i) {
         if (!map_page(start + i * kPhysicalPageSize, page_array[i], protect)) return nullptr;
     }
@@ -724,6 +909,7 @@ void* WINAPI XMemMapPhysicalPages(void* address, uint64_t page_count, const uint
 // unmaps). The result is tested as a 32-bit BOOL. Like MapUserPhysicalPagesScatter: entry i maps pageArray[i] at
 // addresses[i].
 BOOL WINAPI XMemMapPhysicalPagesScatter(void* const* addresses, uint32_t page_count, const uint64_t* page_array) {
+    note_mem_trace_switch();
     if (page_count && !addresses) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
@@ -866,7 +1052,124 @@ constexpr DWORD kMemGraphics = 0x10000000;
 constexpr DWORD kMemTitle = 0x40000000;
 
 LPVOID WINAPI TitleVirtualAlloc(LPVOID address, SIZE_T size, DWORD allocation_type, DWORD protect) {
+    note_mem_trace_switch();
+    if (mem_trace_enabled()) {
+        const DWORD type = allocation_type & ~(kMemGraphics | kMemTitle);
+        const auto caller = reinterpret_cast<std::uint64_t>(_ReturnAddress());
+        const auto bytes = static_cast<std::uint64_t>(size);
+        g_mem_trace.tva_calls.fetch_add(1, std::memory_order_relaxed);
+        g_mem_trace.tva_bytes.fetch_add(bytes, std::memory_order_relaxed);
+        if (type & MEM_COMMIT) {
+            g_mem_trace.tva_commit_bytes.fetch_add(bytes, std::memory_order_relaxed);
+            mem_note_bytes(mem_title_va, caller, bytes);
+        }
+    }
     return VirtualAlloc(address, size, allocation_type & ~(kMemGraphics | kMemTitle), host_protect(protect));
+}
+
+// The print thread. Every line is counts and RVAs only: no game data, no path, no title bytes.
+void start_mem_trace() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        const std::uint64_t period = g_mem_period_ms.load(std::memory_order_relaxed);
+        if (!period) return;
+        std::thread([period] {
+            const double every = double(period) / 1000.0;
+            const auto origin = std::chrono::steady_clock::now();
+            for (unsigned line = 1; line <= 240; ++line) {
+                std::this_thread::sleep_until(origin + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                                           std::chrono::duration<double>(every * line)));
+                PROCESS_MEMORY_COUNTERS_EX pmc{};
+                pmc.cb = sizeof pmc;
+                const bool have_process =
+                    GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc),
+                                         sizeof pmc) != FALSE;
+                // The process heaps' committed bytes: the title's XMemAlloc heap and the layer's own C++ heap are both
+                // here, so a growth the allocator counters below do not explain is the layer's own host memory.
+                std::uint64_t heap_committed = 0;
+                unsigned heaps = 0;
+                {
+                    HANDLE handles[64];
+                    const DWORD found = GetProcessHeaps(64, handles);
+                    for (DWORD i = 0; i < found; ++i) {
+                        HEAP_SUMMARY summary{};
+                        summary.cb = sizeof summary;
+                        if (HeapSummary(handles[i], 0, &summary)) {
+                            heap_committed += summary.cbCommitted;
+                            ++heaps;
+                        }
+                    }
+                }
+                // The two physical-page tables, under their lock (a short scan: the entries are per 64 KiB page).
+                std::size_t live_pages = 0, mapped_pages = 0, sections = 0;
+                {
+                    std::lock_guard lock(g_phys_mutex);
+                    live_pages = g_pages.size();
+                    mapped_pages = g_mapped.size();
+                    std::set<const Section*> seen;
+                    for (const auto& [page, backing] : g_pages) seen.insert(backing.section.get());
+                    sections = seen.size();
+                }
+                // The caller table, copied under its lock and sorted by live+total bytes.
+                MemCaller top[kMemCallerSlots];
+                unsigned count = 0;
+                {
+                    std::lock_guard lock(g_mem_caller_mutex);
+                    count = g_mem_caller_count;
+                    for (unsigned i = 0; i < count; ++i) top[i] = g_mem_callers[i];
+                }
+                std::sort(top, top + count, [](const MemCaller& a, const MemCaller& b) {
+                    return a.live + a.total > b.live + b.total;
+                });
+                std::string callers;
+                char text[160];
+                const unsigned shown = count < 10 ? count : 10;
+                static const char* const kinds[] = {"heap", "xmemva", "titleva", "phys"};
+                for (unsigned i = 0; i < shown; ++i) {
+                    if (i) callers += "; ";
+                    callers += kinds[top[i].kind & 3];
+                    callers += " " + rt::startup_trace::where(top[i].caller);
+                    std::snprintf(text, sizeof text, " live %.1f MB total %.1f MB %llu call(s)",
+                                  double(top[i].live) / (1 << 20), double(top[i].total) / (1 << 20),
+                                  static_cast<unsigned long long>(top[i].count));
+                    callers += text;
+                }
+                const double mib = 1.0 / (1 << 20);
+                std::fprintf(stderr,
+                             "[rt] mem: +%.1fs private %.1f MB ws %.1f MB%s | process heaps %.1f MB in %u heap(s) | "
+                             "xmem heap live %.1f MB peak %.1f MB "
+                             "blocks %llu | XMemVirtualAlloc %llu call(s) %.1f MB, %llu commit(s) %.1f MB | "
+                             "VirtualAlloc %llu call(s) %.1f MB, commit %.1f MB | physical pages %llu call(s) %llu "
+                             "page(s) %.1f MB, mapped %llu call(s) %llu page(s), %zu section(s) live, %llu page(s) "
+                             "committed by the fault handler %.1f MB\n",
+                             every * line, have_process ? double(pmc.PrivateUsage) * mib : 0.0,
+                             have_process ? double(pmc.WorkingSetSize) * mib : 0.0,
+                             have_process ? "" : " (no process counters)", double(heap_committed) * mib, heaps,
+                             double(g_mem_trace.heap_live.load()) * mib, double(g_mem_trace.heap_peak.load()) * mib,
+                             static_cast<unsigned long long>(g_mem_trace.heap_blocks.load()),
+                             static_cast<unsigned long long>(g_mem_trace.xva_calls.load()),
+                             double(g_mem_trace.xva_bytes.load()) * mib,
+                             static_cast<unsigned long long>(g_mem_trace.xva_commit_calls.load()),
+                             double(g_mem_trace.xva_commit_bytes.load()) * mib,
+                             static_cast<unsigned long long>(g_mem_trace.tva_calls.load()),
+                             double(g_mem_trace.tva_bytes.load()) * mib,
+                             double(g_mem_trace.tva_commit_bytes.load()) * mib,
+                             static_cast<unsigned long long>(g_mem_trace.phys_calls.load()),
+                             static_cast<unsigned long long>(g_mem_trace.phys_pages.load()),
+                             double(g_mem_trace.phys_pages.load() * kPhysicalPageSize) * mib,
+                             static_cast<unsigned long long>(g_mem_trace.map_calls.load()),
+                             static_cast<unsigned long long>(g_mem_trace.map_pages.load()), sections,
+                             static_cast<unsigned long long>(g_mem_trace.committed_pages.load()),
+                             double(g_mem_trace.committed_pages.load() * kPhysicalPageSize) * mib);
+                if (!callers.empty())
+                    std::fprintf(stderr, "[rt] mem:       top callers: %s\n", callers.c_str());
+                // The allocation attribution: patch the modules loaded since the last interval, then print the largest
+                // allocation stacks seen so far (PALMETTO_ALLOC_TRACE=1; a no-op otherwise).
+                palmetto::alloc_trace::tick();
+                palmetto::alloc_trace::print();
+            }
+        }).detach();
+    });
 }
 
 }  // namespace
@@ -917,10 +1220,37 @@ bool commit_physical_pages(const uint64_t* page_array, size_t count) {
         }
         void* const backing = static_cast<uint8_t*>(it->second.section->scratch) + it->second.offset;
         if (!VirtualAlloc(backing, (last - first) * kPhysicalPageSize, MEM_COMMIT, PAGE_READWRITE)) return false;
+        if (mem_trace_enabled()) g_mem_trace.committed_pages.fetch_add(last - first, std::memory_order_relaxed);
         first = last;
     }
     return true;
 }
+
+// The DirectStorage page-list resolver (xmem.h, docs/page_resolver.md). A page-list request names physical pages, not
+// addresses, and the console DMA writes the page's memory; here the page's memory is the section view this file keeps
+// as its backing, so that view is the write target and every mapping of the page is the same memory. The page is
+// committed on the way out: a page allocated but never touched is still SEC_RESERVE and a store into its backing would
+// fault, and the fault handler only knows mapped views (commit_mapped_page), not the backing. PAGE_READWRITE is what
+// commit_physical_pages uses for the same reason. Locking: the copy runs after this returns, so the address is only as
+// stable as the console contract makes it - a request's page list stays live until its status completes, and a title
+// that frees a page in the middle of its own transfer is out of contract (docs/page_resolver.md section 6).
+std::uint8_t* resolve_physical_page(std::uint64_t page_number) {
+    if (page_number == 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return nullptr;
+    }
+    const std::lock_guard lock(g_phys_mutex);
+    const auto it = g_pages.find(page_number);
+    if (it == g_pages.end() || !it->second.section->scratch) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return nullptr;
+    }
+    auto* const backing = static_cast<std::uint8_t*>(it->second.section->scratch) + it->second.offset;
+    if (!VirtualAlloc(backing, kPhysicalPageSize, MEM_COMMIT, PAGE_READWRITE)) return nullptr;
+    return backing;
+}
+[[maybe_unused]] const bool g_resolve_physical_page_installed =
+    (rt::xmem::resolve_physical_page_fn = &resolve_physical_page, true);
 
 }
 

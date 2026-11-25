@@ -119,6 +119,8 @@ These switches are opt-in and off by default unless stated; `PALMETTO_SHADERS`, 
 | `PALMETTO_TITLE_VA` | `0` disables rebasing the title's shader-visible VAs into the arena. |
 | `PALMETTO_TITLE_WATCH` | Hex RVAs of title memory to watch during a run (measurement only). |
 | `PALMETTO_TRACE_TLS` | Traces the loader's TLS redirect resolution. |
+| `PALMETTO_ALLOC_TRACE=1` | Rewrites every loaded module's allocator imports and records a 32-frame stack for each allocation of 1 MiB or more, with live bytes per stack; attribution only - it perturbs the driver's shader compiler enough to stall a boot, so do not use it for timing. Off by default. |
+| `PALMETTO_MEM_TRACE=<seconds>` | Prints one bounded owner-counter line per interval: process private/working set, process heaps, the title XMem heap live/peak per caller, XMemVirtualAlloc and title VirtualAlloc counts, and physical-page live/mapped/committed. Off by default. |
 | `PALMETTO_AGGREGATE_DEVICE_ID` | Runtime diagnostic switch; opt-in and off by default. |
 | `PALMETTO_ANALYTICS_FORM` | Runtime diagnostic switch; opt-in and off by default. |
 | `PALMETTO_ARENA_LOG` | Runtime diagnostic switch; opt-in and off by default. |

@@ -1,12 +1,13 @@
 // Tests for the advanced DirectStorage mechanisms in port/shims/dstorage_advanced.h: the bounded staging area, the
-// destination pinner (write-watch handoff and residency), the 64 KiB page-list plan and copy math, the macro
-// unshuffle, and the local BCPack predictor loader. Everything is synthetic and host-only: byte patterns generated in
-// the test, predictor JSON written to the temp directory, and the page list resolved through a test callback. No game
-// data, no package path, no GPU and no boot (docs/directstorage_advanced.md).
+// destination pinner (write-watch handoff and residency), the 64 KiB page-list plan, copy math and live transfer seam,
+// the macro unshuffle, and the local BCPack predictor loader. Everything is synthetic and host-only: byte patterns
+// generated in the test, predictor JSON written to the temp directory, and the page list resolved through a test
+// callback. No game data, no package path, no GPU and no boot (docs/directstorage_advanced.md, docs/page_resolver.md).
 //
 //   staging       reuse across borrows, the cap and its counted fallback, the peak
 //   pinning       PAGE_GUARD released for the write and re-armed after it, reserved memory refused, residency accounted
-//   page lists    plan shapes (offset, boundary, errors) and the copy math both ways through a resolver
+//   page lists    plan shapes (offset, boundary, errors), the copy math and the live transfer both ways through a
+//                 resolver, an unresolved page refused with nothing written, and the no-resolver/named refusals
 //   unshuffle     modes 1-4 are permutations with the table's stripe positions, and the refusals
 //   predictor     missing/unreadable/malformed/no-section/out-of-range/bad-length, a valid directory and a combined file
 //   bcpack        the test rANS encoder reproduces the reference chunks and every codec decodes, the documented BC7
@@ -365,6 +366,55 @@ void test_page_lists() {
     check(!copy_from_pages(one, &PageTable::resolve, &missing, gathered.data()),
           "pages: an unresolved page number refuses the copy");
     check(!copy_from_pages(plan, nullptr, &table, gathered.data()), "pages: a null resolver refuses the copy");
+
+    // The live transfer seam (transfer_page_list): the request path resolves the whole plan before one byte moves, so a
+    // page number with no live backing refuses the transfer with every page unchanged.
+    std::vector<unsigned char> scratch(bytes);
+    for (std::size_t at = 0; at < bytes; ++at) scratch[at] = static_cast<unsigned char>((at * 13 + 5) & 0xff);
+    const auto written = transfer_page_list(table.numbers.data(), table.numbers.size(), 1234, bytes,
+                                            &PageTable::resolve, &table, scratch.data(), true);
+    check(written.error == PageTransferError::ok && written.spans == 2u && written.bytes == bytes,
+          "pages: a live write transfer resolves every span and reports the plan");
+    bool live_ok = true;
+    for (std::size_t at = 0; at < bytes; ++at) {
+        const std::size_t page = (1234 + at) / kPageListPageBytes;
+        const std::size_t offset = (1234 + at) % kPageListPageBytes;
+        if (table.bytes[page][offset] != scratch[at]) live_ok = false;
+    }
+    check(live_ok, "pages: the live transfer's bytes are visible in the pages");
+    std::vector<unsigned char> rebuilt(bytes);
+    const auto read_back = transfer_page_list(table.numbers.data(), table.numbers.size(), 1234, bytes,
+                                              &PageTable::resolve, &table, rebuilt.data(), false);
+    check(read_back.error == PageTransferError::ok && rebuilt == scratch,
+          "pages: a live read transfer gathers the same bytes back");
+
+    const std::vector<std::vector<unsigned char>> before = table.bytes;
+    const std::uint64_t absent = 4096;
+    const std::uint64_t unresolved_numbers[2] = {table.numbers[0], absent};
+    const auto unresolved = transfer_page_list(unresolved_numbers, 2, 0,
+                                               static_cast<std::size_t>(kPageListPageBytes) + 16,
+                                               &PageTable::resolve, &table, scratch.data(), true);
+    check(unresolved.error == PageTransferError::unresolved_page && unresolved.page == absent,
+          "pages: a page number with no live backing is an unresolved_page refusal");
+    check(table.bytes == before, "pages: an unresolved page number leaves every page untouched");
+
+    const auto no_resolver =
+        transfer_page_list(table.numbers.data(), table.numbers.size(), 1234, bytes, nullptr, &table, scratch.data(), true);
+    check(no_resolver.error == PageTransferError::no_resolver, "pages: a null resolver is a no_resolver refusal");
+    check(table.bytes == before, "pages: a null resolver leaves every page untouched");
+
+    const auto zero_page =
+        transfer_page_list(with_zero, 2, 0, kPageListPageBytes + 16, &PageTable::resolve, &table, scratch.data(), true);
+    check(zero_page.error == PageTransferError::zero_page, "pages: the live transfer reports a 0 page as zero_page");
+    const auto too_many = transfer_page_list(many.data(), many.size(), 0, kPageListPageBytes * many.size(),
+                                             &PageTable::resolve, &table, scratch.data(), true);
+    check(too_many.error == PageTransferError::too_many_pages, "pages: the live transfer reports too_many_pages");
+    const auto nothing = transfer_page_list(table.numbers.data(), table.numbers.size(), 0, 0, &PageTable::resolve,
+                                            &table, scratch.data(), true);
+    check(nothing.error == PageTransferError::empty, "pages: an empty transfer is empty");
+    const auto no_buffer =
+        transfer_page_list(table.numbers.data(), 1, 0, 16, &PageTable::resolve, &table, nullptr, true);
+    check(no_buffer.error == PageTransferError::null_buffer, "pages: a null scratch buffer is a null_buffer refusal");
 }
 
 // ---- unshuffle -----------------------------------------------------------------------------------------------------

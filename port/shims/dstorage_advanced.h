@@ -369,6 +369,109 @@ inline bool copy_to_pages(const PagePlan& plan, PageResolver resolve, void* cont
     return at == plan.bytes;
 }
 
+// ---- A live page-list transfer through a resolver ---------------------------------------------------------------
+//
+// The request path resolves the whole plan before it moves a byte: every page number is looked up first, so a number
+// with no live backing refuses the transfer with nothing written into title memory. A page-list destination is real
+// title memory (unlike the caller's scratch buffer), so a half-applied scatter would be visible to the title; the
+// ordering rule is what makes a failed request leave the pages as they were. `buffer` is the caller's scratch: the
+// request path materialises the source/decoded bytes there (or gathers a source page list into it), so this step is
+// only the scatter/gather. `write` says which way the bytes go.
+enum class PageTransferError {
+    ok,
+    no_resolver,     // no page resolver installed (a build without xmem)
+    null_buffer,     // no scratch buffer to move through
+    unresolved_page, // a page number the plan needs has no live physical page
+    empty,           // nothing to move
+    zero_page,       // the plan's own refusals, same names as PagePlanError
+    too_many_pages,
+    too_short,
+    offset_out_of_range,
+};
+
+inline const char* page_transfer_error_name(PageTransferError error) {
+    switch (error) {
+        case PageTransferError::ok: return "ok";
+        case PageTransferError::no_resolver: return "no_resolver";
+        case PageTransferError::null_buffer: return "null_buffer";
+        case PageTransferError::unresolved_page: return "unresolved_page";
+        case PageTransferError::empty: return "empty";
+        case PageTransferError::zero_page: return "zero_page";
+        case PageTransferError::too_many_pages: return "too_many_pages";
+        case PageTransferError::too_short: return "too_short";
+        case PageTransferError::offset_out_of_range: return "offset_out_of_range";
+    }
+    return "?";
+}
+
+// What one transfer did, and which page number stopped it (the refusal is by name and by number, never by bytes).
+struct PageTransferResult {
+    PageTransferError error = PageTransferError::ok;
+    std::uint64_t page = 0;  // the unresolved page number, when error == unresolved_page
+    unsigned spans = 0;      // the plan's span count
+    std::size_t bytes = 0;   // the bytes the plan moves
+};
+
+inline PageTransferError plan_transfer_error(PagePlanError error) {
+    switch (error) {
+        case PagePlanError::ok: return PageTransferError::ok;
+        case PagePlanError::empty: return PageTransferError::empty;
+        case PagePlanError::zero_page: return PageTransferError::zero_page;
+        case PagePlanError::too_many_pages: return PageTransferError::too_many_pages;
+        case PagePlanError::too_short: return PageTransferError::too_short;
+        case PagePlanError::offset_out_of_range: return PageTransferError::offset_out_of_range;
+    }
+    return PageTransferError::too_short;
+}
+
+// Moves `bytes` between the caller's `buffer` and the page list: the request's page-array snapshot (`pages`,
+// `page_count` entries) and the byte offset into its first page. Read direction fills `buffer`, write direction
+// scatters it. Every page the plan names is resolved before the first copy, so a resolver miss returns
+// `unresolved_page` with the page number and leaves the pages and the buffer untouched.
+inline PageTransferResult transfer_page_list(const std::uint64_t* pages, std::size_t page_count,
+                                             std::uint16_t page_offset, std::size_t bytes, PageResolver resolve,
+                                             void* context, std::uint8_t* buffer, bool write) {
+    PageTransferResult result;
+    if (bytes == 0) {
+        result.error = PageTransferError::empty;
+        return result;
+    }
+    if (resolve == nullptr) {
+        result.error = PageTransferError::no_resolver;
+        return result;
+    }
+    if (buffer == nullptr) {
+        result.error = PageTransferError::null_buffer;
+        return result;
+    }
+    PagePlan plan;
+    result.error = plan_transfer_error(plan_page_transfer(pages, page_count, page_offset, bytes, plan));
+    result.spans = plan.count;
+    result.bytes = plan.bytes;
+    if (result.error != PageTransferError::ok) return result;
+    const std::uint8_t* views[PagePlan::kMaxSpans] = {};
+    for (unsigned i = 0; i < plan.count; ++i) {
+        views[i] = resolve(context, plan.spans[i].page);
+        if (views[i] == nullptr) {
+            result.error = PageTransferError::unresolved_page;
+            result.page = plan.spans[i].page;
+            return result;
+        }
+    }
+    std::size_t at = 0;
+    for (unsigned i = 0; i < plan.count; ++i) {
+        // The resolver hands back the page's backing, which the write direction writes; the const in the shared
+        // resolver type is what copy_from_pages needs for its read path.
+        if (write) {
+            std::memcpy(const_cast<std::uint8_t*>(views[i]) + plan.spans[i].offset, buffer + at, plan.spans[i].bytes);
+        } else {
+            std::memcpy(buffer + at, views[i] + plan.spans[i].offset, plan.spans[i].bytes);
+        }
+        at += plan.spans[i].bytes;
+    }
+    return result;
+}
+
 // ---- Macro unshuffle (DirectStorage swizzle modes 1-4) ------------------------------------------------------------
 //
 // A swizzle request writes BCn data that the console stored in a page-striped layout; the runtime has to put each
