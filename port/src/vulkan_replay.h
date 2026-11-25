@@ -1752,6 +1752,9 @@ struct PreparedDraw {
     // Diagnostic (docs/vertex_path.md): the arena-relative address of the driver-block V# the geometry fix filled for
     // this draw's vertex stream; 0 when the fix is off. Emit puts it in the s0/s1 user-data pair.
     std::uint64_t driver_block = 0;
+    // Diagnostic (docs/frame_capture.md): this draw is one of the readback-armed draws, so the queue copies its sampled
+    // textures mid-submission (right after this draw list) as well as post-submission.
+    bool armed_readback = false;
 
     // Back to a new draw's state, keeping the vectors' storage.
     void reset() {
@@ -1769,6 +1772,7 @@ struct PreparedDraw {
         area = {};
         layers = 1;
         driver_block = 0;
+        armed_readback = false;
     }
 };
 
@@ -2920,6 +2924,7 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                                           ? pipeline->color_formats[0]
                                           : p.colors[0].binding.format;
             vk.capture_attachment(p.colors[0].binding.image, captured, p.area, p.colors[0].id, seen);
+            p.armed_readback = true;
             std::fprintf(stderr,
                          "[rt] replay: readback armed at draw %llu: pipeline 0x%llx target resource 0x%llx image 0x%llx "
                          "format %d area %ux%u viewport %.1fx%.1f at %.1f,%.1f\n",

@@ -284,6 +284,49 @@ description (no pinned T# encoding)" - the likely source of the remaining sample
 
 Widening the sample probe to every descriptor slot (and classifying slots that decode as neither T# nor V#/S# as data) shows the compose pass table (draw 20001 at frame 20000/20001) holds **exactly one T#: slot 1 = table + 0x20**, resolving to the sibling pass 4K target. The table slots at +0x40/+0x60 that earlier read as unresolved T# were float data (bf800000 3f800000 ...), not descriptors. The other sampled images are therefore not table slots: the compose pixel shader fetches T# descriptors itself out of the **published matrix block** - the s8 table slot 0 is a V# over a 5768-byte block (address 0x86de20 in that boot), and scanning that block (32-byte T# windows, 8-byte stride) finds its T#s, e.g. at +0xa0: image title VA 0x100001600, format 56, 3840x2160.
 
+### Pre-draw capture and pass order: the passes share one list, sibling first, compose second
+
+The readback-armed submission now prints its list/draw order and copies the compose pass's sampled texture at the list
+it belongs to (`pre-draw sample readback`, next to the post-submission `frame dump sample readback`). Measured
+(`boot-predraw1`, all switches, armed at draws 28000/28001):
+
+```
+readback armed at draw 28000: pipeline 0x2af9ef39480 target resource 0x2af9c4db820 ...
+readback armed at draw 28001: pipeline 0x2afb03dfa10 target resource 0x2a1c6cd95f0 ...
+order: submission 28005 list 0 of 2: 8 command(s), 2 draw(s), the readback-armed draw is here
+order:   draw 0: pipeline 0x2afa74c9e58 target resource 0x2af9c4db820
+order:   draw 1: pipeline 0x2afa445fa48 target resource 0x2a1c6cd95f0 (armed)
+render-target readback [draw 28000 target resource 0x2af9c4db820]: mean 0 0 0, 0/16384, alpha 0/16384
+render-target readback [draw 28001 target resource 0x2a1c6cd95f0]: mean 0 0 0, 0/16384, alpha 0/16384
+colour path id match: sampled image 0x2b2d6365ad0 (resource 0x2af9c4db820) is draw 28000's target
+pre-draw sample readback [1/1] image 0x2b2d6365ad0 (resource 0x2af9c4db820): mean 0 0 0, 0/16384, alpha 0
+frame dump sample readback [1/1] image 0x2b2d6365ad0: mean 0 0 0, 0/16384, alpha 0
+```
+
+Read as a structural statement:
+
+* both passes of the frame are **draw 0 and draw 1 of the same command list in the same submission** (list 0 of 2; list 1
+  carries one command and no draw), and draw 0 executes before draw 1 - so the sibling pass runs first and the compose
+  pass second, in the recorded/executed order our replay emits;
+* the compose pass's sampled T# resolves to **draw 0's target** (same layer image, same resource `0x2af9c4db820`), i.e. it
+  samples the sibling pass's output of the same frame and same list, not the other ping-pong buffer and not the previous
+  frame; no render-target clear was counted in this submission's lists at this frame;
+* the pre-draw copy and the post-submission copy are identical here because both are recorded after list 0, and list 0
+  contains both draws: splitting the list emission at the armed draw is what a true pre-compose copy needs, and it is the
+  one instrument change this measurement could not make without restructuring `emit` per draw. Because draw 0 precedes
+  draw 1 in the same list, the content after the list IS the content the compose draw sampled, so the comparison still
+  answers the question.
+* at this frame the sibling target window was **black at both moments** (`0/16384`, alpha `0`): the blue element is
+  transient frame to frame (the same window at the same draw indices read `mean 14 28 57, 4,608/16,384` in `boot-twopass4`),
+  so the compose pass does sample black content on this frame. In frames where the window is blue, the sampled content is
+  blue (the id match and the sample readback say so) and the compose target still reads black, so the remaining gap is
+  the composition arithmetic/state, not the pass order, the buffer identity or the clear placement.
+
+Next falsifier, smallest: (a) a true pre-compose copy by emitting the list up to the armed draw and copying there (one
+`emit` split), and (b) the sample-coordinate trace - the pixel shader's sample coordinate (`%534`, built from the input
+varyings) against the window that carries the blue element, which says whether the composition reads the region we
+measure or a different one (mip/UV) and would close the arithmetic question without changing state blindly.
+
 ### Fourth channel and the compose pipeline's own coverage control (measured)
 
 Readback lines now report channel 3 alongside 0..2 (mean/non-black/peak), and one boot (`boot-alpha1`, all switches plus

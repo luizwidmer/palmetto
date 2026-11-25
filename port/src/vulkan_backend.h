@@ -3147,6 +3147,19 @@ private:
             auto pieces = detail::current(&next_tracker, id, range, VK_IMAGE_LAYOUT_UNDEFINED);
             detail::initialize(replay, command_buffer, *image, id, pieces, VK_IMAGE_LAYOUT_GENERAL, &next_tracker);
         }
+        // Diagnostic (docs/frame_capture.md): the mid-submission pre-draw copy. The sampled textures of a readback-armed
+        // draw are copied right after that draw's list, before any later list of the same submission can paint them, so
+        // the pre-draw window can be compared with the post-submission readback.
+        VkBuffer pre_buffer = VK_NULL_HANDLE;
+        VkDeviceMemory pre_memory = VK_NULL_HANDLE;
+        VkImage pre_images[2] = {};
+        VkExtent2D pre_regions[2] = {};
+        unsigned pre_texels[2] = {};
+        ResourceId pre_resources[2] = {};
+        unsigned pre_count = 0;
+        bool pre_recorded = false;
+        static std::atomic<std::uint64_t> submission_sequence{0};
+        const std::uint64_t submission_index = submission_sequence.fetch_add(1, std::memory_order_relaxed);
         bool wrote_readback = false;
         VkPipelineStageFlags2 readback_stages = 0;
         std::uint32_t open_labels = 0;  // events may span the lists of one ExecuteCommandLists
@@ -3155,6 +3168,120 @@ private:
             emit(list, command_buffer, replay, &next_tracker, &open_labels);
             wrote_readback |= list.wrote_readback;
             readback_stages |= list.readback_src_stages;
+            // The readback-armed draw's list: copy its sampled textures here, before any later list of this submission can
+            // paint them (docs/frame_capture.md, the pre-draw capture).
+            bool armed_list = false;
+            std::uint32_t armed_draw = 0;
+            for (std::size_t d = 0; d < list.draw_count && d < list.draws.size(); ++d) {
+                if (!list.draws[d].armed_readback) continue;
+                armed_list = true;
+                armed_draw = static_cast<std::uint32_t>(d);
+            }
+            if (armed_list)
+                std::fprintf(stderr,
+                             "[rt] replay: order: submission %llu list %zu of %zu: %zu command(s), %zu draw(s)%s\n",
+                             static_cast<unsigned long long>(submission_index), i, lists.size(),
+                             lists[i]->commands().size(), list.draw_count,
+                             armed_list ? ", the readback-armed draw is here" : "");
+            if (armed_list) {
+                for (std::size_t d = 0; d < list.draw_count && d < list.draws.size(); ++d) {
+                    const detail::PreparedDraw& draw = list.draws[d];
+                    const ResourceId target = draw.colors.empty() ? 0 : draw.colors[0].id;
+                    std::fprintf(stderr,
+                                 "[rt] replay: order:   draw %zu: pipeline 0x%llx target resource 0x%llx%s\n", d,
+                                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(draw.graphics)),
+                                 static_cast<unsigned long long>(target), d == armed_draw ? " (armed)" : "");
+                }
+                for (std::size_t l = 0; l < lists.size(); ++l) {
+                    std::size_t clears = 0;
+                    for (const Command& command : lists[l]->commands())
+                        if (std::holds_alternative<ClearRenderTarget>(command)) ++clears;
+                    if (clears)
+                        std::fprintf(stderr,
+                                     "[rt] replay: order:   list %zu has %zu render-target clear(s)\n", l, clears);
+                }
+                if (!pre_recorded && context_.vk.vkCmdCopyImageToBuffer) {
+                    pre_recorded = true;
+                    const unsigned armed = std::min<unsigned>(context_.sample_capture_count_, 2);
+                    VkDeviceSize total = 0;
+                    for (unsigned k = 0; k < armed; ++k) {
+                        const SampleCapture& capture = context_.sample_captures_[k];
+                        if (capture.image == VK_NULL_HANDLE) continue;
+                        unsigned texel = 4;
+                        switch (capture.format) {
+                        case VK_FORMAT_R16G16B16A16_UNORM:
+                        case VK_FORMAT_R16G16B16A16_SFLOAT: texel = 8; break;
+                        case VK_FORMAT_R32G32B32A32_SFLOAT: texel = 16; break;
+                        case VK_FORMAT_R32G32_UINT:
+                        case VK_FORMAT_R32G32_SINT:
+                        case VK_FORMAT_R32G32_SFLOAT: texel = 8; break;
+                        default: texel = 4; break;
+                        }
+                        pre_images[k] = capture.image;
+                        pre_texels[k] = texel;
+                        pre_regions[k].width = std::min(128u, capture.extent.width);
+                        pre_regions[k].height = std::min(128u, capture.extent.height);
+                        pre_resources[k] = capture.resource;
+                        pre_count = k + 1;
+                        total += VkDeviceSize(pre_regions[k].width) * pre_regions[k].height * texel;
+                    }
+                    VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+                    buffer_info.size = total;
+                    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                    if (context_.vk.vkCreateBuffer(context_.device(), &buffer_info, nullptr, &pre_buffer) == VK_SUCCESS) {
+                        VkMemoryRequirements requirements{};
+                        context_.vk.vkGetBufferMemoryRequirements(context_.device(), pre_buffer, &requirements);
+                        const auto& memory = context_.occlusion_resolve_memory_;
+                        std::uint32_t type = memory.memoryTypeCount;
+                        for (std::uint32_t t = 0; t < memory.memoryTypeCount; ++t) {
+                            if (!(requirements.memoryTypeBits & (1u << t))) continue;
+                            const VkMemoryPropertyFlags flags = memory.memoryTypes[t].propertyFlags;
+                            if (type == memory.memoryTypeCount) type = t;
+                            if ((flags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+                                type = t;
+                                break;
+                            }
+                        }
+                        VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+                        allocation.allocationSize = requirements.size;
+                        allocation.memoryTypeIndex = type;
+                        if (type < memory.memoryTypeCount &&
+                            context_.vk.vkAllocateMemory(context_.device(), &allocation, nullptr, &pre_memory) ==
+                                VK_SUCCESS &&
+                            context_.vk.vkBindBufferMemory(context_.device(), pre_buffer, pre_memory, 0) == VK_SUCCESS) {
+                            VkDeviceSize base = 0;
+                            for (unsigned k = 0; k < pre_count; ++k) {
+                                VkImageMemoryBarrier to{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                                to.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+                                to.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                                to.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                                to.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                                to.image = pre_images[k];
+                                to.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                                to.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                                to.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                                context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                                                                 nullptr, 1, &to);
+                                VkBufferImageCopy region{};
+                                region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                                region.imageExtent = {pre_regions[k].width, pre_regions[k].height, 1};
+                                region.bufferOffset = base;
+                                context_.vk.vkCmdCopyImageToBuffer(command_buffer, pre_images[k],
+                                                                   VK_IMAGE_LAYOUT_GENERAL, pre_buffer, 1, &region);
+                                base += VkDeviceSize(pre_regions[k].width) * pre_regions[k].height * pre_texels[k];
+                            }
+                        } else {
+                            context_.vk.vkDestroyBuffer(context_.device(), pre_buffer, nullptr);
+                            pre_buffer = VK_NULL_HANDLE;
+                            if (pre_memory) context_.vk.vkFreeMemory(context_.device(), pre_memory, nullptr);
+                            pre_memory = VK_NULL_HANDLE;
+                        }
+                    }
+                }
+            }
+
         }
         // Diagnostic (docs/frame_capture.md): the PS-only control. Draw the armed draw's OWN recorded command (same
         // render target, vertex/index buffers, counts, viewport, scissor and root arguments) through the title's
@@ -3733,6 +3860,61 @@ private:
             if (sample_buffers[k]) context_.vk.vkDestroyBuffer(context_.device(), sample_buffers[k], nullptr);
             if (sample_memories[k]) context_.vk.vkFreeMemory(context_.device(), sample_memories[k], nullptr);
         }
+        // Diagnostic (docs/frame_capture.md): the pre-draw window, copied mid-submission, printed next to the
+        // post-submission sample readback so the two can be compared directly.
+        if (submitted && pre_memory && pre_count) {
+            if (context_.vk.vkQueueWaitIdle(queue_) == VK_SUCCESS) {
+                void* mapped = nullptr;
+                if (context_.vk.vkMapMemory(context_.device(), pre_memory, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS) {
+                    const auto* bytes = static_cast<const std::uint8_t*>(mapped);
+                    VkDeviceSize base = 0;
+                    for (unsigned k = 0; k < pre_count; ++k) {
+                        const unsigned texel_bytes = pre_texels[k];
+                        const std::uint64_t pixels =
+                            std::uint64_t(pre_regions[k].width) * pre_regions[k].height;
+                        std::uint64_t sums[4] = {0, 0, 0, 0}, non_black = 0, peak = 0, alpha_non_black = 0,
+                                     alpha_peak = 0;
+                        for (std::uint64_t i = 0; i < pixels; ++i) {
+                            const std::uint8_t* texel = bytes + base + i * std::size_t(texel_bytes);
+                            const unsigned r = texel[0];
+                            const unsigned g = texel_bytes > 1 ? texel[1] : 0;
+                            const unsigned b = texel_bytes > 2 ? texel[2] : 0;
+                            const unsigned a = texel_bytes > 3 ? texel[3] : 0;
+                            sums[0] += r;
+                            sums[1] += g;
+                            sums[2] += b;
+                            sums[3] += a;
+                            if (r || g || b) ++non_black;
+                            if (a) ++alpha_non_black;
+                            peak = std::max<std::uint64_t>(peak, std::max(r, std::max(g, b)));
+                            alpha_peak = std::max<std::uint64_t>(alpha_peak, a);
+                        }
+                        std::fprintf(stderr,
+                                     "[rt] replay: pre-draw sample readback [%u/%u] image 0x%llx (resource 0x%llx): "
+                                     "%ux%u window, %u-byte texel: mean %llu %llu %llu, non-black %llu/%llu, peak "
+                                     "%llu, alpha mean %llu, alpha non-black %llu/%llu, alpha peak %llu\n",
+                                     k + 1, pre_count,
+                                     static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(pre_images[k])),
+                                     static_cast<unsigned long long>(pre_resources[k]), pre_regions[k].width,
+                                     pre_regions[k].height, texel_bytes,
+                                     static_cast<unsigned long long>(sums[0] / (pixels ? pixels : 1)),
+                                     static_cast<unsigned long long>(sums[1] / (pixels ? pixels : 1)),
+                                     static_cast<unsigned long long>(sums[2] / (pixels ? pixels : 1)),
+                                     static_cast<unsigned long long>(non_black),
+                                     static_cast<unsigned long long>(pixels),
+                                     static_cast<unsigned long long>(peak),
+                                     static_cast<unsigned long long>(sums[3] / (pixels ? pixels : 1)),
+                                     static_cast<unsigned long long>(alpha_non_black),
+                                     static_cast<unsigned long long>(pixels),
+                                     static_cast<unsigned long long>(alpha_peak));
+                        base += VkDeviceSize(pre_regions[k].width) * pre_regions[k].height * texel_bytes;
+                    }
+                    context_.vk.vkUnmapMemory(context_.device(), pre_memory);
+                }
+            }
+        }
+        if (pre_buffer) context_.vk.vkDestroyBuffer(context_.device(), pre_buffer, nullptr);
+        if (pre_memory) context_.vk.vkFreeMemory(context_.device(), pre_memory, nullptr);
         if (capture_buffer) context_.vk.vkDestroyBuffer(context_.device(), capture_buffer, nullptr);
         if (capture_memory) context_.vk.vkFreeMemory(context_.device(), capture_memory, nullptr);
         tracker_lock.unlock();
