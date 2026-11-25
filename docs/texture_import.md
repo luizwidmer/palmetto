@@ -1,12 +1,15 @@
 # Title-placed texture page import, and naming the consumer of the streamed blocks
 
-**Status: measured increment, negative on content but with the next address named.** The surface is now
+**Status: measured increment, negative on content; a later measurement names the streamed consumer and corrects this
+page's next step (sections 4-5).** The surface is now
 `port/shims/d3d12_vulkan_device.cpp` (the placed-texture stand-in) and the device entry points a consumer of the
 title's memory would use. Two pieces were built and measured: a bounded page import for title-placed textures
 (`PALMETTO_TEXTURE_IMPORT=1`, off by default), and off-by-default caller-RVA logging on the device creation/view/Map
 paths (`PALMETTO_DEVICE_TRACE=1`). The A/B is still black, and the measurement says why: **the bytes the title's
 texture-computer fill writes do not land in any title-placed resource's pages in the observed window**, so there is
-nothing for the import to read where the sampled images live.
+nothing for the import to read where the sampled images live. The streamed-block consumer this page tried to name was
+named later: a title CPU deserializer reads the blocks and never names them to the device, and the sampled 4K placed
+texture's pages are never written (`docs/streamed_consumer.md`, `docs/texture_source.md`).
 
 Counts, RVAs, formats and addresses only; no package bytes, paths or extracted tables.
 
@@ -93,27 +96,36 @@ instrumented entry point are title RVAs:
 Nothing here maps or views the DirectStorage destination ranges: the queue's streamed blocks are ordinary process-heap
 pointers (measured after `game+0x28C9A0E` enqueues them, `docs/wait_state.md` section 3), and the only large DEFAULT
 allocation (`game+0x1E86853`, 174 MiB) is created once at load. So in 120-150 s the streamed data is never handed to
-the GPU through any device entry point we instrumented; the consumer is either a title function that has not run yet or
-one that copies memory without a D3D12 call.
+the GPU through any device entry point we instrumented.
+
+**Correction, measured later - the consumer is named.** The inference that followed from this table ("either a title
+function that has not run yet or one that copies memory without a D3D12 call") is resolved: the consumer *is* a title
+function, and it never hands the blocks to the device. A `PAGE_GUARD` first-touch diagnostic named the reader at
+`game+0x248F680`, reached as `[obj+0x18]` through the job wrapper `game+0x4F65820`: it reads the first batch's blocks
+at ~2.3 s, and blocks sampled from later batches stay untouched. Over 13,629 device calls (13,568 of them console slot
+70) no call names any of the 4,096 destination ranges - 0 hits in the 14 argument words and 0 inside every
+argument-pointed structure; the only block pointers near these calls are in the caller's own frame structures. The
+linear-layout A/B's apparent "block address handed to a console view call" is withdrawn: those words are saved-register
+and caller-stack carry-over, not arguments. The streamed bytes die in CPU deserialization:
+[streamed_consumer.md](streamed_consumer.md) sections 3-6.
 
 ## 5. What still refuses, and the next increment
 
-Still refused / unmodelled: XG slots 2 (`GetResourceLayout`, 0x6C8-byte record) and 10 (tile list); placed resources in
-existing heaps (`OpenExistingHeapFromAddress` -> `E_NOTIMPL`, the same shape a fill-destination range would need); page
-import for more than one subresource; and any import whose pages were never filled by the texture computer.
+**Still refused / unmodelled:** XG slot 10 (`GetResourceTiling`); slot 2 (`GetResourceLayout`) is decoded and the linear
+layout is the default now - a 0x1B40-byte record, not the 0x6C8 this page assumed ([texture_layout.md](texture_layout.md)).
+Placed resources in existing heaps are answered `E_NOTIMPL` at the documented branch (and the imported heap now
+registers, so `CreatePlacedResource` on it reaches the address branch); page import for more than one subresource; and
+any import whose pages were never filled.
 
-Next increment, now that the address mismatch is measured: **find where the title's CPU-built texture memory is named by
-a resource**. The fill destinations (`0x1E34C40...`, `0x1E35A9C...` area) and the streamed 64 KiB blocks are the two
-address families to place:
-
-1. log every `CreateHeap`/`OpenExistingHeapFromAddress` and `CreatePlacedResource*` call with its caller RVA and heap
-   base (placements were 0 in this window through those paths, so a longer boot or a different phase is where the
-   missing call lives);
-2. correlate the title allocation that owns the fill range (`XMemAllocatePhysicalPages` caller `game+0x1E6C232` and the
-   174 MiB commit caller `game+0x1E86853`) with the fill destination pages, and see which resource description the
-   title places over them;
-3. then the existing import scheme applies unchanged: same `PALMETTO_TEXTURE_IMPORT` path, with the placement address
-   the new path records.
+**Correction, measured later - this page's next increment is superseded in both of its address families.** The streamed
+64 KiB blocks are measured never to be named to the device (section 4), so there is no block address to place. The
+CPU-built fill destinations are measured as a **different population** from the sampled texture: the XG
+texture-computer fill writes only a 32 KB atlas and 1x1 defaults, while the sampled 4K placed texture has committed,
+readable pages that are **never written** over 150 s (0 of 129,792 scanned bytes), and the import with its cap lifted to
+64 MiB had nothing to copy. So the import scheme still has no correctly-addressed source, and the next named place is
+the title-side producer that should write the sampled 4K texture's pages, not the import path:
+[texture_source.md](texture_source.md) sections 3-4 and 6. The smaller open items from this page stand:
+multi-subresource import and placed resources in existing heaps.
 
 Baseline defended on every bounded boot: ALIVE to timeout, 0 exceptions, 0 device-lost, 0 refused submits, 0 failed
 `Close`. Gates: `the local build script` -> `PALMETTO_OK`; `the local test build script` -> `TESTS_BUILT`; existing tests pass.

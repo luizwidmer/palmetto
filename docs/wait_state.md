@@ -91,10 +91,14 @@ reaches a GPU texture and the frame stays black.
 There is no wait to fix in the shims: no signal is missing and no object is stuck. The next smallest measurements, in
 order:
 
-1. **Name what consumes the streamed memory.** The anchors are the title RVAs `game+0x28C9A0E` (request enqueue) and
-   `game+0xE8943`/`0xE8950` (status+submit) and the destination heap range. A protected-destination or write-watch
-   sample (or a caller-RVA log on the D3D12 copy/view calls, in the device shim's owner's scope) says which title
-   function reads those 64 KiB blocks and what it does next - that is the function whose GPU-side step never happens.
+1. **Name what consumes the streamed memory - done.** The measured answer: a title CPU deserializer (`game+0x248F680`,
+   reached as `[obj+0x18]` through the job wrapper `game+0x4F65820`) reads the first batch's blocks at ~2.3 s, and over
+   13,629 device calls (13,568 of them console slot 70) no call names any of the 4,096 destination ranges - 0 hits in
+   the argument words and in argument-pointed structures, with the apparent A/B block addresses measured as
+   saved-register/caller-stack carry-over, not arguments. The streamed bytes never reach a GPU resource, so the
+   "function whose GPU-side step never happens" this item looked for is named and its step is measured absent in the
+   window ([streamed_consumer.md](streamed_consumer.md) sections 3-6). The last open number there is where between
+   requests 16 and 256 the consumer stops.
 2. **Instrument the status polling.** Log `IDStorageStatusArrayX::GetHResult`/`IsComplete` caller RVAs and values, to
    confirm the loader sees its batch complete (it does today) and what it calls next in the same turn.
 3. **Re-check the black is not the title's intended loading state.** The sampled waits are consistent with a normal
