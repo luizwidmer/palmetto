@@ -2831,6 +2831,21 @@ if(TARGET Vulkan::Headers)
       add_test(NAME d3d12_pso_validation COMMAND d3d12_pso_validation_test)
       set_tests_properties(d3d12_pso_validation PROPERTIES SKIP_RETURN_CODE 77
                            FAIL_REGULAR_EXPRESSION "Validation Error;VUID-")
+      # The per-process pipeline recipe cache (PALMETTO_PIPELINE_RECIPE_CACHE, docs/pipeline_cache.md): identical and
+      # differing descriptions created and released in several orders, to exercise the shared entry's reference count
+      # from both the adopt and the release side. The test turns the switch on itself.
+      add_executable(pipeline_recipe_cache_test test/pipeline_recipe_cache_test.cpp ${PALMETTO_TEST_VS}
+                     ${PALMETTO_TEST_VS_FULLSCREEN} ${PALMETTO_TEST_PS} ${PALMETTO_TEST_CS})
+      target_link_libraries(pipeline_recipe_cache_test PRIVATE palmetto_d3d12_com)
+      target_compile_definitions(pipeline_recipe_cache_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+                                 PALMETTO_TEST_VS_SPV="${PALMETTO_TEST_VS}"
+                                 PALMETTO_TEST_VS_FULLSCREEN_SPV="${PALMETTO_TEST_VS_FULLSCREEN}"
+                                 PALMETTO_TEST_PS_SPV="${PALMETTO_TEST_PS}"
+                                 PALMETTO_TEST_CS_SPV="${PALMETTO_TEST_CS}")
+      target_compile_options(pipeline_recipe_cache_test PRIVATE /W4 /permissive- /utf-8)
+      add_test(NAME pipeline_recipe_cache COMMAND pipeline_recipe_cache_test)
+      set_tests_properties(pipeline_recipe_cache PROPERTIES SKIP_RETURN_CODE 77
+                           FAIL_REGULAR_EXPRESSION "Validation Error;VUID-")
       # Conservative raster Tier 1, with geometric coverage bounds and host D3D12 references.
       set(PALMETTO_CONSERVATIVE_VS ${CMAKE_CURRENT_BINARY_DIR}/generated/vs_conservative.spv)
       set(PALMETTO_CONSERVATIVE_PS ${CMAKE_CURRENT_BINARY_DIR}/generated/ps_conservative.spv)

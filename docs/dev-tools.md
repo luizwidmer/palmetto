@@ -111,6 +111,7 @@ These switches are opt-in and off by default unless stated; `PALMETTO_SHADERS`, 
 | `PALMETTO_PIPELINE_CACHE` | Opt-in persistent `VkPipelineCache` file: loaded at the first pipeline creation and written back while the boot compiles; unset keeps today's empty/build-seeded cache (docs/pipeline_cache.md). |
 | `PALMETTO_PIPELINE_CACHE_MAX_MB` | Size bound of `PALMETTO_PIPELINE_CACHE`, 1 to 16384 MiB, default 512; a blob over it is neither read nor written. |
 | `PALMETTO_PIPELINE_PROFILE` | Pipeline creation profile: per-kind calls, driver compile vs shader-module/layout time, wall-clock windows, cache feedback and the slowest recipes (docs/pipeline_cache.md). |
+| `PALMETTO_PIPELINE_RECIPE_CACHE` | Opt-in per-process pipeline recipe cache: identical descriptions share one `VkPipeline`, `VkPipelineLayout` and shader modules, reference-counted until the last PSO using them is released (docs/pipeline_cache.md). |
 | `PALMETTO_POKE_LEA` | One shaped instruction to poke, for diagnosting a specific loader path. |
 | `PALMETTO_RESOLVE` | Hex address to describe (what lives there) for a call or store target outside the image. |
 | `PALMETTO_RNG_SEED` | Deterministic RNG seed (decimal or 0x hex) for reproducible runs. |

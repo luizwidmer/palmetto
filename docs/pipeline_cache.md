@@ -1,13 +1,14 @@
 # Pipeline compilation: where a boot's pipeline time goes, and a persistent pipeline cache
 
 **Status: measured, opt-in and off by default.** This page records where the Vulkan layer's pipeline creation time
-goes in one boot, and a persistent `VkPipelineCache` that a warm boot starts from (`PALMETTO_PIPELINE_CACHE`). The
-cache removes **81.2%** of the driver's compile time and **all 4,571** driver cache misses on a second warm boot, at
-unchanged pipeline counts, 0 pipeline refusals and the same presented frames. It is off unless the switch names a
-file, so the default path is the one the layer had before. The remaining per-call work — the layer builds a fresh
-`VkPipeline`, two shader modules and a pipeline layout for every derived state the title asks for — is **45%** of a
-cold boot's pipeline time and is not something a `VkPipelineCache` can remove; the next increment for that is at the
-end of this page.
+goes in one boot, a persistent `VkPipelineCache` that a warm boot starts from (`PALMETTO_PIPELINE_CACHE`), and a
+per-process recipe cache that shares one created pipeline, layout and shader modules between identical descriptions
+(`PALMETTO_PIPELINE_RECIPE_CACHE`). Together they cut a boot's graphics pipeline-creation time from **20.5 s to
+3.9 s (-80.9%)**, with unchanged pipeline counts, 0 pipeline refusals and the same presented frames; the persistent
+cache alone removes 81.2% of the driver's compile time (all 4,571 driver cache misses), and the recipe cache adopts
+79.4% of the 51,786 creation calls. Both switches are off by default, so the default path is the one the layer had
+before. The remaining cost is the 10,651 genuinely distinct pipelines the title asks for and the layer's per-call work
+for them; the limits section names what is left.
 
 All numbers are from the same machine (an NVIDIA RTX 4090 on a Vulkan 1.3 driver, one boot at a time, harness
 `tooling/boot_report.py`, 130 s, the standard boot environment of the other runtime pages, profile and capture switches
@@ -80,14 +81,16 @@ pipeline is untouched.
 | `PALMETTO_PIPELINE_CACHE=<file>` | opt-in. The device's `VkPipelineCache` is created with this file's blob as initial data, and the current blob is written back to it. Unset: today's behaviour exactly (an empty cache, or the build stage's `pipeline_cache.bin` seed beside the executable when one exists). |
 | `PALMETTO_PIPELINE_CACHE_MAX_MB=<1..16384>` | the file's bound, default 512 MiB. A blob over the bound is never read or written; the file is left as it was. |
 | `PALMETTO_PIPELINE_PROFILE=1` | the measurement switch of section 2; also chains the driver's creation feedback, which is what says whether a creation was a cache hit. |
+| `PALMETTO_PIPELINE_RECIPE_CACHE=1` | opt-in per-process recipe cache (section 5): one `VkPipeline` + `VkPipelineLayout` + shader modules shared, reference-counted, between identical pipeline descriptions within one process. Unset: every PSO builds and owns its own objects, exactly as before. |
 
 **Recommended for repeated boots:** set `PALMETTO_PIPELINE_CACHE` to a file in a local work folder (a machine-local
-path, never inside the repository) and keep it between boots. That is the configuration the warm-boot numbers of
-section 4 are for. The default (switch unset) is **byte-identical to the previous tree**: no file is opened, no
-background tick starts, no clock is read, and the device creates its cache exactly as before (an empty cache, or the
-build stage's `pipeline_cache.bin` seed beside the executable when one is compatible). The switch is opt-in because the
-first run pays the extra save writes and because a cache file is a machine-local artefact, not something a checkout or
-a report should carry.
+path, never inside the repository) and `PALMETTO_PIPELINE_RECIPE_CACHE=1`, and keep the file between boots. That is the
+configuration the warm-boot numbers of sections 4 and 5 are for. The default (both switches unset) is **byte-identical
+to the previous tree**: no file is opened, no background tick starts, no lookup or clock is read, and the device
+creates its cache exactly as before (an empty cache, or the build stage's `pipeline_cache.bin` seed beside the
+executable when one is compatible). Both switches are opt-in because the first run pays extra save writes, a cache file
+is a machine-local artefact, and the recipe cache changes what the title gets back (shared Vulkan objects), so it is
+measured behind the switch first.
 
 ### Load, validate, fall back
 
@@ -212,34 +215,116 @@ writes, is 1.4 s later). The pipeline burst overlaps other loading work, so it i
 That is the loading-gate question, a separate workstream; the pipeline side's remaining cost is the per-call layer work
 below.
 
-## 5. Limits and the next increment
+## 5. The per-process recipe cache
 
-- **The layer still creates a pipeline per derived state.** 51,786 `create_graphics` calls reach only 4,571 driver
-  compiles on a cold run; the layer builds a fresh `VkPipeline`, two shader modules and a layout for each of them. The
-  persistent cache removes the compile part on warm boots; a **per-process recipe cache** (share one `VkPipeline` +
-  modules + layout per identical create-info, reference-counted until the last `PipelineState` that uses it is
-  released) is the next increment and is measured to be worth the remaining ~12.8 s of warm-boot creation time
-  (8.8 s of layer work + 1.7 s of modules + 2.3 s of layouts). It changes what the title gets back (a shared pipeline
-  object), so it needs its own pass over PSO lifetime, `SetPipelineState`, frame capture and the pipeline-library
-  paths before it can be turned on.
-- **The burst is not the boot's critical path.** Even with most compiles removed the first present moves ~2 s and the
-  loading loop's last submission ~0.2 s; the loading gate needs the parallel workstream.
+The persistent cache removes the driver's compile, but the layer still built a fresh `VkPipeline`, a
+`VkPipelineLayout` and two `VkShaderModule`s for every one of the 51,786 calls, and resolved and patched the shaders
+again. The recipe cache keeps the first result of a description and lets an identical later description adopt it:
+**one pipeline, one layout and the shader modules shared between `PipelineState` objects, reference-counted**.
+
+`PALMETTO_PIPELINE_RECIPE_CACHE=1` turns it on; off is the previous path exactly.
+
+- **Key.** `PipelineState::cache_key_`, the SHA-256 the layer already builds for `GetCachedBlob`/`CachedPSO`: state
+  (blend, depth/stencil, rasterizer, input layout, formats, sample state, topology), the shader bytecode contents (a
+  DXBC container's checksum or a hash of the bytes), and the root signature's content. It is content-based; the one
+  pointer-based case, a foreign root signature hashed by address, is detected and that PSO is never cached. Two
+  descriptions with the same key therefore build the same `VkPipeline` on this device.
+- **Entry.** `SharedGraphicsPipeline` owns the `VkPipeline`, `VkPipelineLayout`, the shader modules, a copy of the
+  recipe (the lazy unbound-attachment/PS-control variants are built from it at draw time), and the replay-visible
+  fields (`color_formats`, depth format/aspects, `push_stages`, `table_windows`, vertex slots, strip cut, samples,
+  bindless set, the vertex-path diagnostic). The compute version owns the pipeline, layout, module and the program
+  bytes the per-PSO code base copies.
+- **Lifetime.** A `PipelineState` that created the entry or adopted it holds a `std::shared_ptr` to it; the device's
+  map holds only a `weak_ptr`, so the entry dies with its last user and never later than the device. The last release
+  destroys the Vulkan objects exactly once, in the order pipeline, then modules, then layout; per-PSO variant
+  pipelines and the code-base arena range are released first. Expired map entries are swept as new ones are inserted,
+  so a test that creates and destroys many states does not grow the map.
+- **Adopt path.** An adopted PSO gets the shared handles, a per-PSO copy of the recipe (with its stage `pNext` chains
+  repointed at the copy), its own arena range for the code base, the diagnostic lambda reading the shared vertex path,
+  and the same lazy variant lambdas as a created PSO. Everything a draw reads from the PSO is unchanged; only the
+  Vulkan object identities are shared.
+
+Measurement, 130 s boots, one at a time, profile and presenter capture on in all. The recipe-cache sequence is cold
+(persistent cache unset), warm 1 (empty file: compiles and saves) and warm 2 (loads that file); the "warm, no recipe"
+column is the same warm configuration with the recipe switch unset, for comparison.
+
+| measurement | cold + recipe | warm 1 + recipe (creates + saves) | warm 2 + recipe (loads) | reference: warm, no recipe |
+|---|---:|---:|---:|---:|
+| verdict / exceptions | ALIVE 130.2 s, 0 | ALIVE 130.2 s, 0 | ALIVE 130.2 s, 0 | ALIVE 130.3 s, 0 |
+| graphics pipelines created | 51,786 | 51,786 | 51,786 | 51,786 |
+| graphics creation time | 10,908.6 ms | 10,981.8 ms | **3,924.1 ms** | 14,692.9 ms |
+| driver `vkCreateGraphicsPipelines` calls / time | 10,656 / 7,338.5 ms | 10,661 / 7,342.1 ms | 10,646 / **866.3 ms** | 51,786 / 1,659.0 ms |
+| driver cache feedback hits / misses | 6,173 / 4,577 | 6,187 / 4,568 | 10,740 / **0** | 51,686 / 195 |
+| `vkCreateShaderModule` calls / time | 21,308 / 359.5 ms | 21,318 / 367.3 ms | 21,288 / 359.5 ms | 103,568 / 1,695.1 ms |
+| `vkCreatePipelineLayout` calls / time | 10,656 / 663.2 ms | 10,661 / 675.1 ms | 10,646 / 552.0 ms | 51,786 / 2,380.9 ms |
+| recipe-cache hits (graphics, compute) | 41,130, 1 | 41,125, 1 | 41,140, 1 | 0, 0 |
+| persistent cache file | — | 68.7 MiB saved (2 writes) | 68.7 MiB in, 68.7 MiB out | 66.4 in, 68.7 out |
+| first presented frame at | 24.04 s | 24.06 s | **19.2 s** | 21.15 s |
+| submission 8,192 / 16,384 at | 35.8 / 68.7 s | 36.4 / 70.1 s | 35.5 / 69.5 s | 36.6 / 69.7 s |
+| loading loop (last submission 24,576) | 101.1 s | 104.8 s | 103.7 s | 103.7 s |
+| presents / captured frames | 13,307 / frame_00001..12001 | 12,777 / same | 13,405 / same | 13,348 / same |
+| captured frame mean rgb | 0.00 0.00 0.00 | same | same | same |
+| slot 55 / slot 57 refusals | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+
+- **Warm 2 against the cold boot: graphics creation 10,908.6 → 3,924.1 ms (-64.0%)**; against the committed
+  no-recipe cold boot (20,545.9 ms, same default path) it is **-80.9%**. The recipe cache alone (cold + recipe) is
+  already -46.9% against that cold reference; the two caches together remove 16.6 s of a 20.5 s pipeline burst.
+- The driver-creation calls fall by 79.4% in every recipe-on run, modules and layouts by ~80%, while every run creates
+  the identical 51,786 pipelines, refuses nothing, and presents the identical captured frames. Warm 2's driver
+  creation feedback is **10,740 hits, 0 misses** against the loaded file.
+- **41,140 of 51,786 calls (79.4%) are adopted.** The remaining **10,646 are genuinely different `VkPipeline`s**
+  (derived states that differ in state the driver keys on, not just in shader). The driver's own no-recipe "4,571
+  misses" are a different number: they count shader-ISA compiles, and its `APPLICATION_PIPELINE_CACHE_HIT` bit can be
+  set for a pipeline whose state differs but whose shaders it already compiled. So 79.4% is the fraction of creation
+  calls that are exact repeats on this layer, and the recipe cache cannot do better without changing what the title
+  asks for (the slot-55 derived-state model), not with a different key. A refined key that left out the fields the
+  layer turns into draw-time state or ignores was measured too (10,648 distinct instead of 10,651) and reverted: the
+  established `cache_key_` already separates only genuine differences.
+- **Boot progress:** against the same warm boot without the recipe cache, the first presented frame moves 1.95 s
+  earlier (19.2 s against 21.15 s) and the 8,192-submission mark 1.1 s earlier; the loading loop's last submission is
+  unchanged (103.7 s) because the late loading work is not pipeline creation. The pipeline burst overlaps other
+  loading work, so 10.8 s of removed creation time is ~2 s of wall clock at first present.
+- **Compute:** 95 pipelines, 94 distinct recipes (one adopted); its creation time stays ~1.8-2.0 s because of the
+  one-time shader-library load below, not because of per-recipe work.
+
+**The 1.7 s first-pipeline cost is one-time per boot, not per recipe.** The single slowest creation in every cold
+profile (1.70-2.02 s, its `vkCreatePipelines` only 1.1-236 ms) is the first call into `ShaderLibrary::load()`: the
+library is loaded on first use, reading `index.json` plus the `fspx/` and `bvh/` sub-indexes. Every later pipeline,
+of any stage, pays nothing for it; the recipe cache does not remove it (it is not a pipeline or a compile), and a
+later increment could move it off the first-pipeline path (device creation or a background load).
+
+## 6. Limits and the next increment
+
+- **79.4% of creation calls are exact repeats; the other 10,651 are genuinely distinct pipelines** and still take the
+  full path each warm boot. A warm-2 recipe boot's 3,924.1 ms is 866.3 ms of driver calls, 911.5 ms of modules and
+  layouts and ~2.15 s of per-call layer work for the distinct states and the adopt path. Reducing that further means
+  fewer distinct states (the slot-55 derived-state model) or a cheaper per-call path, not another cache: the recipe
+  cache already shares everything an exact repeat can share.
+- **The one-time shader-library load is on the first-pipeline path.** `ShaderLibrary::load()` (index.json + the
+  `fspx/`/`bvh/` sub-indexes) costs 1.7-2.0 s in the first `create_*` call of every boot. Moving it to device
+  creation or a background load would take it off the pipeline path; it is not a compile and not cacheable as one.
+- **The burst is not the boot's only critical path.** Against the warm boot without the recipe cache, the first
+  present moves 1.95 s earlier and the 8,192-submission mark 1.1 s, while the loading loop's last submission is
+  unchanged; the loading gate needs the parallel workstream.
 - **A killed boot keeps its last save.** Saves happen while pipelines are created and for a short while after, but a
   run killed between two saves loses the last seconds of recipes; the next warm run saves again, so a cache converges
   over runs. On the final tree one create+saves run wrote 57.1 MiB mid-burst and 68.7 MiB after the burst, and the
   next run loaded those 68.7 MiB with 0 misses; on an earlier build three consecutive runs grew the file
   48.5 → 64.8 → 66.4 MiB before it was complete.
 - **A pre-1.3 device has no creation feedback.** `PALMETTO_PIPELINE_PROFILE` then reports `without feedback` for the
-  hit/miss line; the cache itself works the same.
+  hit/miss line; the caches themselves work the same.
 - **The bound is a hard refusal, not a truncation.** A driver blob over `PALMETTO_PIPELINE_CACHE_MAX_MB` is not
   written (and one over the bound on load is not read). The measured file is 68.7 MiB, comfortably inside the 512 MiB
   default; a driver that caches more per pipeline may need the switch raised, and the file is then bounded by the
   switch.
+- **The recipe cache shares only within one process/device** (its key has no device identity and the entries hold that
+  device's Vulkan objects). Across boots the persistent cache does the sharing; within a boot the recipe cache does.
+  Both are off by default.
 - **One boot at a time.** The cache file is per machine/GPU; two boots writing one file at once would race the rename
   (each write is atomic, so a reader only ever sees a complete file). The local harness serialises boots with the boot
   lock.
 
-## 6. Tests
+## 7. Tests
 
 - `port/test/pipeline_cache_test.cpp` (CMake target `pipeline_cache_test`, run by `ctest -R pipeline_cache`): the pure
   header/bound helpers — a synthetic 32-byte header is parsed and matched against a device identity, a wrong header
@@ -247,5 +332,12 @@ below.
   each give their status; the atomic replace creates a missing parent directory, round-trips, replaces a longer file
   with a shorter one, refuses a blob over the bound or without a version-one header without touching the destination,
   and fails on a directory destination with no temp file left behind.
-- The runtime path itself is measured by the three boots above (cold, create+saves, load: 0 misses) and by the corrupt
-  file boot of section 3.
+- The recipe cache's device test (CMake target `pipeline_recipe_cache_test`, skipped on a machine with no Vulkan 1.3
+  device): builds the Vulkan-backed device with synthetic GLSL modules and creates/releases identical and
+  differing graphics and compute descriptions in several orders — all alive, release every fourth, release in reverse,
+  release across descriptions, and after every PSO is gone ask again so the entry is created anew. It sets the switch
+  itself, and with `PALMETTO_VK_VALIDATION=1` the validation layer reports 0 errors (no premature free, no use of a
+  released pipeline, module or layout). The suite's other device tests (`d3d12_pso_validation_test`,
+  `d3d12_state_sweep_test`, `d3d12_pipeline_library_test`, `d3d12_shader_cache_test`) pass with the switch on too.
+- The runtime path is measured by the boots of sections 4 and 5 (cold, create+saves, load, recipe on/off: identical
+  counts, 0 refusals, identical captured frames) and by the corrupt-file boot of section 3.

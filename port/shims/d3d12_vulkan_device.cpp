@@ -268,6 +268,10 @@ struct PipelineProfile {
     std::atomic<std::uint64_t> cache_hits{0};
     std::atomic<std::uint64_t> cache_misses{0};
     std::atomic<std::uint64_t> cache_unknown{0};
+    // Calls answered by the per-process recipe cache (PALMETTO_PIPELINE_RECIPE_CACHE), i.e. calls that never reached
+    // the driver: the number that switch is there to move.
+    std::atomic<std::uint64_t> graphics_recipe_hits{0};
+    std::atomic<std::uint64_t> compute_recipe_hits{0};
     std::array<SlowEntry, 5> slowest{};
     std::atomic<std::uint64_t> slow_floor_us{0};  // the smallest kept time once the list is full, else 0
     std::atomic<std::int64_t> started_us{0};      // the first creation's start; the windows are relative to it
@@ -335,6 +339,12 @@ void pipeline_profile_layout(bool graphics, std::uint64_t us) {
     auto& counters = graphics ? pipeline_profile().graphics : pipeline_profile().compute;
     counters.layout_calls.fetch_add(1, std::memory_order_relaxed);
     counters.layout_us.fetch_add(us, std::memory_order_relaxed);
+}
+
+void pipeline_profile_recipe_hit(bool graphics) {
+    auto& profile = pipeline_profile();
+    (graphics ? profile.graphics_recipe_hits : profile.compute_recipe_hits)
+        .fetch_add(1, std::memory_order_relaxed);
 }
 
 void pipeline_profile_created(bool graphics, PipelineClock::time_point started, const std::string& label) {
@@ -431,6 +441,9 @@ void pipeline_profile_report() {
                  static_cast<unsigned long long>(profile.cache_hits.load()),
                  static_cast<unsigned long long>(profile.cache_misses.load()),
                  static_cast<unsigned long long>(profile.cache_unknown.load()));
+    std::fprintf(stderr, "[rt] pipeline: profile recipe-cache hits: graphics %llu, compute %llu\n",
+                 static_cast<unsigned long long>(profile.graphics_recipe_hits.load()),
+                 static_cast<unsigned long long>(profile.compute_recipe_hits.load()));
     for (std::size_t i = 0; i < profile.slowest.size(); ++i) {
         const auto& entry = profile.slowest[i];
         if (entry.us == 0) continue;
@@ -1088,6 +1101,114 @@ std::filesystem::path shader_directory_from_file(const std::filesystem::path& co
     return std::filesystem::path(std::u8string(text.begin(), text.end()));
 }
 
+// ---- per-process pipeline recipe cache (PALMETTO_PIPELINE_RECIPE_CACHE=1) --------------------------------
+//
+// A boot creates 51,786 graphics pipeline states and the driver says only 4,571 of those recipes are distinct (the
+// console's derived-state path re-asks for the same description thousands of times, docs/pipeline_cache.md). The
+// device's VkPipelineCache makes the repeat compiles cheap, but the layer still resolves the shaders, patches their
+// SPIR-V, creates two VkShaderModules and a VkPipelineLayout and builds the VkPipeline for every one of the calls.
+// This cache keeps the first result of a description and lets an identical description adopt it: the same
+// VkPipeline, VkPipelineLayout and shader modules, reference-counted by the PipelineState objects that use them, with
+// the replay-visible fields (formats, push-constant stages, code base copy, diagnostics) copied from the shared entry.
+//
+// The key is the device's content key for the description, `PipelineState::cache_key_` built by pipeline_key(): a
+// SHA-256 over the description's state (blend/depth/raster/input layout/formats/sample state), the shader bytecode
+// contents (the DXBC container checksum, or a hash of the bytes) and the root signature's content - no pointer or
+// address is part of it, except that a *foreign* root signature (not one this layer created) is hashed by address, so
+// such a PSO is never cached (PipelineState::cache_key_deterministic_).
+//
+// Off by default: with the switch unset no lookup happens and every PSO owns its Vulkan objects as before.
+bool pipeline_recipe_cache_enabled() {
+    static const bool enabled = [] {
+        char text[4] = {};
+        size_t length = 0;
+        return getenv_s(&length, text, "PALMETTO_PIPELINE_RECIPE_CACHE") == 0 && length > 1 && text[0] != '0';
+    }();
+    return enabled;
+}
+
+// What a graphics pipeline is made from, so variants can be built at draw time. Namespace-scope (it was
+// PipelineState::Recipe) so a shared entry can hold a copy of it.
+struct GraphicsRecipe {
+    bool mesh = false;  // no vertex input or input assembly state, and no dynamic topology or strides
+    std::vector<VkPipelineShaderStageCreateInfo> stages;
+    // One per entry of create_graphics's stage table (VS, GS, PS), static_assert there; what `stages` chain.
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo required_sizes[3]{};
+    std::vector<VkVertexInputAttributeDescription> attributes;
+    std::vector<VkVertexInputBindingDescription> bindings;
+    std::vector<VkVertexInputBindingDivisorDescriptionEXT> divisors;
+    VkPipelineInputAssemblyStateCreateInfo assembly{};
+    VkPipelineRasterizationStateCreateInfo raster{};
+    bool conservative = false;
+    VkPipelineMultisampleStateCreateInfo multisample{};
+    VkSampleMask sample_mask = ~0u;
+    VkPipelineDepthStencilStateCreateInfo depth{};
+    std::vector<VkPipelineColorBlendAttachmentState> blends;
+    VkPipelineColorBlendStateCreateInfo blend{};
+};
+
+// One created graphics pipeline and everything an identical description reuses: the pipeline, its layout, the shader
+// modules (a lazy unbound-attachment/PS-control variant built at draw time needs them), the recipe for those variants,
+// and the fields create_graphics computes while resolving the shaders. Reference-counted by the PipelineState objects
+// that adopt it; the last release destroys the Vulkan objects exactly once: pipeline first, then modules, layout last.
+struct SharedGraphicsPipeline {
+    const palmetto::VulkanDeviceFunctions* vk = nullptr;
+    VkDevice device = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    std::vector<VkShaderModule> modules;
+    GraphicsRecipe recipe;
+    std::vector<palmetto::SubgroupRequest> subgroup_requests;
+    VkShaderStageFlags push_stages = 0;
+    VkDescriptorSet bindless_set = VK_NULL_HANDLE;
+    std::vector<VkFormat> color_formats;
+    VkFormat depth_format = VK_FORMAT_UNDEFINED;
+    VkImageAspectFlags depth_aspects = 0;
+    std::uint32_t vertex_slots = 0;
+    std::uint32_t zero_step_slots = 0;
+    std::uint32_t strip_cut = 0;
+    std::uint32_t table_windows = 0;
+    std::uint32_t samples = 1;
+    bool mesh = false;
+    bool has_pixel_stage = false;
+    std::uint32_t ps_images = 0;
+    std::uint32_t vs_loads = 0;
+    palmetto::VertexPathInfo vertex_path;  // docs/vertex_path.md, the diagnostic the PSO reports without re-resolving
+    std::vector<std::uint8_t> code_bytes;   // the program bytes the per-PSO code-base arena copy needs (empty: none)
+
+    SharedGraphicsPipeline() = default;
+    SharedGraphicsPipeline(const SharedGraphicsPipeline&) = delete;
+    SharedGraphicsPipeline& operator=(const SharedGraphicsPipeline&) = delete;
+    ~SharedGraphicsPipeline() {
+        if (!vk || !device) return;
+        if (pipeline) vk->vkDestroyPipeline(device, pipeline, nullptr);
+        for (VkShaderModule module : modules) vk->vkDestroyShaderModule(device, module, nullptr);
+        if (layout) vk->vkDestroyPipelineLayout(device, layout, nullptr);
+    }
+};
+
+// The compute version: the pipeline, its layout and its module, plus the program bytes the per-PSO code-base copy
+// needs.
+struct SharedComputePipeline {
+    const palmetto::VulkanDeviceFunctions* vk = nullptr;
+    VkDevice device = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkShaderModule module = VK_NULL_HANDLE;
+    VkDescriptorSet bindless_set = VK_NULL_HANDLE;
+    std::vector<std::uint8_t> program_bytes;
+
+    SharedComputePipeline() = default;
+    SharedComputePipeline(const SharedComputePipeline&) = delete;
+    SharedComputePipeline& operator=(const SharedComputePipeline&) = delete;
+    ~SharedComputePipeline() {
+        if (!vk || !device) return;
+        if (pipeline) vk->vkDestroyPipeline(device, pipeline, nullptr);
+        if (module) vk->vkDestroyShaderModule(device, module, nullptr);
+        if (layout) vk->vkDestroyPipelineLayout(device, layout, nullptr);
+    }
+};
+
 // What a device's children need from it, kept apart from the COM class so children can hold a plain pointer.
 class DescriptorHeap;  // defined below; DeviceState keeps the console-addressed shader-visible ones to refresh
 class Resource;        // defined below; DeviceState keeps the title-placed textures to import (docs/texture_import.md)
@@ -1219,6 +1340,57 @@ struct DeviceState {
         if (!pipeline_cache_owner) return;
         unregister_pipeline_cache(pipeline_cache_owner);
         pipeline_cache_owner.reset();
+    }
+
+    // ---- per-process recipe cache (PALMETTO_PIPELINE_RECIPE_CACHE=1) -----------------------------------------
+    // Keyed by PipelineState::cache_key_, the content key of the description (pipeline_key). The maps hold weak
+    // references: the PipelineState objects own the entries through their shared_ptr, so the last PSO to release a
+    // recipe destroys its Vulkan objects, and a cache entry never outlives its users. Lookups are by value; the entry
+    // is immutable once inserted, so adopting one from another thread is safe (the map itself has its own mutex).
+    std::mutex recipe_cache_mutex;
+    std::unordered_map<std::string, std::weak_ptr<SharedGraphicsPipeline>> graphics_recipes;
+    std::unordered_map<std::string, std::weak_ptr<SharedComputePipeline>> compute_recipes;
+    std::size_t recipe_inserts = 0;
+
+    std::shared_ptr<SharedGraphicsPipeline> find_graphics_recipe(const std::string& key) {
+        std::lock_guard lock(recipe_cache_mutex);
+        const auto it = graphics_recipes.find(key);
+        if (it == graphics_recipes.end()) return {};
+        std::shared_ptr<SharedGraphicsPipeline> entry = it->second.lock();
+        if (!entry) graphics_recipes.erase(it);
+        return entry;
+    }
+
+    std::shared_ptr<SharedComputePipeline> find_compute_recipe(const std::string& key) {
+        std::lock_guard lock(recipe_cache_mutex);
+        const auto it = compute_recipes.find(key);
+        if (it == compute_recipes.end()) return {};
+        std::shared_ptr<SharedComputePipeline> entry = it->second.lock();
+        if (!entry) compute_recipes.erase(it);
+        return entry;
+    }
+
+    // Inserts or replaces the entry for `key` and returns the stored pointer. A thread that lost a race keeps its own
+    // entry (both stay correct; the map points at the latest one). Dead entries are swept periodically so a test that
+    // creates and destroys many states does not grow the map.
+    std::shared_ptr<SharedGraphicsPipeline> add_graphics_recipe(const std::string& key,
+                                                               std::shared_ptr<SharedGraphicsPipeline> entry) {
+        std::lock_guard lock(recipe_cache_mutex);
+        graphics_recipes[key] = entry;
+        if (++recipe_inserts % 256 == 0) {
+            for (auto it = graphics_recipes.begin(); it != graphics_recipes.end();)
+                it = it->second.expired() ? graphics_recipes.erase(it) : std::next(it);
+            for (auto it = compute_recipes.begin(); it != compute_recipes.end();)
+                it = it->second.expired() ? compute_recipes.erase(it) : std::next(it);
+        }
+        return entry;
+    }
+
+    std::shared_ptr<SharedComputePipeline> add_compute_recipe(const std::string& key,
+                                                             std::shared_ptr<SharedComputePipeline> entry) {
+        std::lock_guard lock(recipe_cache_mutex);
+        compute_recipes[key] = entry;
+        return entry;
     }
 
     QueueClock clock;  // what every queue's GetClockCalibration uses
@@ -4837,14 +5009,23 @@ public:
         auto& vk = device_.context->vk;
         const VkDevice dev = device_.info.device;
         if (registered_) device_.context->remove_pipeline(id());
-        if (pipeline_.pipeline) vk.vkDestroyPipeline(dev, pipeline_.pipeline, nullptr);
-        if (pipeline_.layout) vk.vkDestroyPipelineLayout(dev, pipeline_.layout, nullptr);
-        if (module_) vk.vkDestroyShaderModule(dev, module_, nullptr);
-        if (graphics_.pipeline) vk.vkDestroyPipeline(dev, graphics_.pipeline, nullptr);
+        // A shared entry owns its Vulkan objects; the PSO only releases its reference, and the entry's destructor
+        // destroys them when the last PSO using it is gone. Per-PSO variant pipelines go first: the shared layout must
+        // outlive every pipeline built from it.
+        if (!shared_compute_) {
+            if (pipeline_.pipeline) vk.vkDestroyPipeline(dev, pipeline_.pipeline, nullptr);
+            if (pipeline_.layout) vk.vkDestroyPipelineLayout(dev, pipeline_.layout, nullptr);
+            if (module_) vk.vkDestroyShaderModule(dev, module_, nullptr);
+        }
         for (const auto& [cull, built] : ps_variants_) vk.vkDestroyPipeline(dev, built, nullptr);  // PS-only control
         for (const auto& [unbound, built] : variants_) vk.vkDestroyPipeline(dev, built, nullptr);
-        if (graphics_.layout) vk.vkDestroyPipelineLayout(dev, graphics_.layout, nullptr);
-        for (VkShaderModule module : modules_) vk.vkDestroyShaderModule(dev, module, nullptr);
+        if (!shared_graphics_) {
+            if (graphics_.pipeline) vk.vkDestroyPipeline(dev, graphics_.pipeline, nullptr);
+            if (graphics_.layout) vk.vkDestroyPipelineLayout(dev, graphics_.layout, nullptr);
+            for (VkShaderModule module : modules_) vk.vkDestroyShaderModule(dev, module, nullptr);
+        }
+        shared_graphics_.reset();  // last reference: destroys pipeline, modules and layout exactly once
+        shared_compute_.reset();
         if (code_bytes_) device_.arena_release(code_base_, code_bytes_, DeviceState::arena_shader);
     }
 
@@ -4875,6 +5056,84 @@ public:
 
     std::uintptr_t id() const { return reinterpret_cast<std::uintptr_t>(static_cast<const ID3D12PipelineState*>(this)); }
     void set_cache_key(palmetto::cached_pso::Key key) { cache_key_ = std::move(key); }
+
+    // False only for a description whose key is not content-based (a foreign root signature is hashed by address):
+    // such a PSO is never shared through the recipe cache.
+    void set_cache_key_deterministic(bool deterministic) { cache_key_deterministic_ = deterministic; }
+    bool recipe_cache_ready() const { return !cache_key_.empty() && cache_key_deterministic_; }
+
+    // Adopt a recipe cache entry created by an earlier identical description: the PSO gets the entry's VkPipeline and
+    // VkPipelineLayout, a copy of its recipe (for the lazy variants), the replay-visible fields and its own copy of the
+    // program bytes the shader's code base reads. The entry stays alive through shared_graphics_ until this PSO is
+    // released; the last release destroys its Vulkan objects exactly once.
+    HRESULT adopt_graphics_recipe(const std::shared_ptr<SharedGraphicsPipeline>& shared) {
+        if (!shared) return E_FAIL;
+        // The per-PSO code-base copy comes first: it can fail, and nothing is adopted until it is in place.
+        VkDeviceSize code_base = 0, code_bytes = 0;
+        if (!shared->code_bytes.empty()) {
+            VkDeviceSize offset = 0;
+            if (!device_.arena_allocate(shared->code_bytes.size(), 256, offset, DeviceState::arena_shader))
+                return E_OUTOFMEMORY;
+            std::memcpy(device_.arena.mapped + offset, shared->code_bytes.data(), shared->code_bytes.size());
+            code_base = offset;
+            code_bytes = shared->code_bytes.size();
+        }
+        graphics_ = palmetto::GraphicsPipeline{};
+        graphics_.pipeline = shared->pipeline;
+        graphics_.layout = shared->layout;
+        graphics_.push_stages = shared->push_stages;
+        graphics_.code_base = code_base;
+        graphics_.bindless_set = shared->bindless_set;
+        graphics_.color_formats = shared->color_formats;
+        graphics_.depth_format = shared->depth_format;
+        graphics_.depth_aspects = shared->depth_aspects;
+        graphics_.vertex_slots = shared->vertex_slots;
+        graphics_.zero_step_slots = shared->zero_step_slots;
+        graphics_.strip_cut = shared->strip_cut;
+        graphics_.mesh = shared->mesh;
+        graphics_.table_windows = shared->table_windows;
+        graphics_.samples = shared->samples;
+        graphics_.has_pixel_stage = shared->has_pixel_stage;
+        graphics_.ps_images = shared->ps_images;
+        graphics_.vs_loads = shared->vs_loads;
+        graphics_.variant = [this](std::uint32_t unbound) { return variant(unbound); };
+        graphics_.with_ps = [this](VkShaderModule ps, bool cull_none) { return variant_with_ps(ps, cull_none); };
+        graphics_.describe_vertex_path = [shared](palmetto::VertexPathInfo& out) { out = shared->vertex_path; };
+        recipe_ = shared->recipe;
+        // The recipe's stage create infos chain their required-subgroup-size structs; point the copy at its own so a
+        // lazily built variant reads this PSO's recipe, not the entry's.
+        for (std::size_t i = 0; i < recipe_.stages.size() && i < std::size(recipe_.required_sizes); ++i)
+            if (recipe_.stages[i].pNext == &shared->recipe.required_sizes[i])
+                recipe_.stages[i].pNext = &recipe_.required_sizes[i];
+        subgroup_requests_ = shared->subgroup_requests;
+        code_base_ = code_base;
+        code_bytes_ = code_bytes;
+        shared_graphics_ = shared;
+        device_.context->add_graphics_pipeline(id(), graphics_);
+        registered_ = true;
+        is_graphics_ = true;
+        return S_OK;
+    }
+
+    HRESULT adopt_compute_recipe(const std::shared_ptr<SharedComputePipeline>& shared) {
+        if (!shared || shared->program_bytes.empty()) return E_FAIL;
+        VkDeviceSize offset = 0;
+        if (!device_.arena_allocate(shared->program_bytes.size(), 256, offset, DeviceState::arena_shader))
+            return E_OUTOFMEMORY;
+        std::memcpy(device_.arena.mapped + offset, shared->program_bytes.data(), shared->program_bytes.size());
+        pipeline_ = palmetto::ComputePipeline{};
+        pipeline_.pipeline = shared->pipeline;
+        pipeline_.layout = shared->layout;
+        pipeline_.code_base = offset;
+        pipeline_.bindless_set = shared->bindless_set;
+        code_base_ = offset;
+        code_bytes_ = shared->program_bytes.size();
+        module_ = VK_NULL_HANDLE;
+        shared_compute_ = shared;
+        device_.context->add_pipeline(id(), pipeline_);
+        registered_ = true;
+        return S_OK;
+    }
 
     // A null pointer is accepted with S_OK, as by the PC runtime (measured on an RTX 3060 and WARP).
     HRESULT STDMETHODCALLTYPE GetCachedBlob(ID3DBlob** blob) override {
@@ -4932,6 +5191,20 @@ public:
         if (profile) pipeline_profile_begin(true);
         const PipelineClock::time_point profile_started = profile ? PipelineClock::now() : PipelineClock::time_point{};
         const bool mesh = ms && ms->pShaderBytecode && ms->BytecodeLength;
+        // The per-process recipe cache (PALMETTO_PIPELINE_RECIPE_CACHE, off by default): an earlier identical description
+        // (same content key) already built the pipeline, layout and modules, so adopt them instead of resolving the
+        // shaders and building again. Only the plain-description path is keyed: the pipeline-state-stream path passes
+        // its mesh/amplification stages separately and has no key, and the stand-in diagnostic is never shared.
+        const bool recipe_cache =
+            pipeline_recipe_cache_enabled() && recipe_cache_ready() && !standin && !mesh && !(as && as->pShaderBytecode);
+        if (recipe_cache) {
+            if (const std::shared_ptr<SharedGraphicsPipeline> shared = device_.find_graphics_recipe(cache_key_)) {
+                if (profile) pipeline_profile_recipe_hit(true);
+                const HRESULT adopted = adopt_graphics_recipe(shared);
+                if (SUCCEEDED(adopted) && profile) pipeline_profile_created(true, profile_started, std::string());
+                return adopted;
+            }
+        }
         if (as && as->pShaderBytecode && as->BytecodeLength) {
             log_once("amplification shaders are not supported (the game has none); bytes", int(as->BytecodeLength));
             return E_NOTIMPL;
@@ -5041,7 +5314,7 @@ public:
                            {"ps", VK_SHADER_STAGE_FRAGMENT_BIT, desc.PS}};
         // stage_infos.size() indexes the recipe's per-stage required-size structs: one for every table entry.
         static_assert(std::size(stages) <= std::size(decltype(recipe_.required_sizes){}),
-                      "Recipe::required_sizes needs an entry per graphics stage");
+                      "GraphicsRecipe::required_sizes needs an entry per graphics stage");
         bool uses_bindless = false;  // a stage declares set-0 bindings: the layout holds the device's set 0
         std::vector<VkPipelineShaderStageCreateInfo> stage_infos;
         // Chained from stage_infos, which the recipe keeps for variants built at draw time: so they live in the recipe.
@@ -5751,6 +6024,35 @@ public:
                 graphics_.table_windows |= std::uint32_t(1) << (parameter.user_offset + 1);
             }
         }
+        // Everything that can fail is done. With the recipe cache on, the created objects move into a shared entry the
+        // next identical description adopts; this PSO keeps its own recipe, code-base range and diagnostics.
+        if (recipe_cache) {
+            auto entry = std::make_shared<SharedGraphicsPipeline>();
+            entry->vk = &device_.context->vk;
+            entry->device = device_.info.device;
+            entry->pipeline = graphics_.pipeline;
+            entry->layout = graphics_.layout;
+            entry->modules = std::move(modules_);
+            entry->recipe = recipe_;
+            entry->subgroup_requests = subgroup_requests_;
+            entry->push_stages = graphics_.push_stages;
+            entry->bindless_set = graphics_.bindless_set;
+            entry->color_formats = graphics_.color_formats;
+            entry->depth_format = graphics_.depth_format;
+            entry->depth_aspects = graphics_.depth_aspects;
+            entry->vertex_slots = graphics_.vertex_slots;
+            entry->zero_step_slots = graphics_.zero_step_slots;
+            entry->strip_cut = graphics_.strip_cut;
+            entry->table_windows = graphics_.table_windows;
+            entry->samples = graphics_.samples;
+            entry->mesh = graphics_.mesh;
+            entry->has_pixel_stage = graphics_.has_pixel_stage;
+            entry->ps_images = graphics_.ps_images;
+            entry->vs_loads = graphics_.vs_loads;
+            if (graphics_.describe_vertex_path) graphics_.describe_vertex_path(entry->vertex_path);
+            if (code_stage) entry->code_bytes = code_stage->fssm;
+            shared_graphics_ = device_.add_graphics_recipe(cache_key_, std::move(entry));
+        }
         device_.context->add_graphics_pipeline(id(), graphics_);
         registered_ = true;
         is_graphics_ = true;
@@ -5763,6 +6065,17 @@ public:
         const bool profile = pipeline_profile_enabled();
         if (profile) pipeline_profile_begin(false);
         const PipelineClock::time_point profile_started = profile ? PipelineClock::now() : PipelineClock::time_point{};
+        // The per-process recipe cache (PALMETTO_PIPELINE_RECIPE_CACHE): an earlier identical compute description (same
+        // content key) already built the pipeline, layout and module, so adopt them. Off by default.
+        const bool recipe_cache = pipeline_recipe_cache_enabled() && recipe_cache_ready();
+        if (recipe_cache) {
+            if (const std::shared_ptr<SharedComputePipeline> shared = device_.find_compute_recipe(cache_key_)) {
+                if (profile) pipeline_profile_recipe_hit(false);
+                const HRESULT adopted = adopt_compute_recipe(shared);
+                if (SUCCEEDED(adopted) && profile) pipeline_profile_created(false, profile_started, std::string());
+                return adopted;
+            }
+        }
         if (!desc.CS.pShaderBytecode || !desc.CS.BytecodeLength) return E_INVALIDARG;
         if (desc.NodeMask & ~1u) return E_INVALIDARG;
         if (static_cast<UINT>(desc.Flags) & ~kKnownPipelineStateFlags) return E_INVALIDARG;
@@ -5788,6 +6101,7 @@ public:
         bool ambiguous = false;
         const palmetto::ShaderEntry* entry = pick_entry(library->program_candidates("cs", program, &ambiguous),
                                                        [](const palmetto::ShaderEntry&) { return true; });
+        bool used_standin = false;  // the stand-in uses the last translated program, not this description: never shared
         if (!entry && last_compute_entry && standin_pipelines()) {
             // A stand-in, as #6915 uses for a placed buffer: the title gets a pipeline object it can hold, built from
             // the last compute program that did translate, so a missing translation stops the work rather than the
@@ -5799,6 +6113,7 @@ public:
                              "%s is used; its dispatch will not do that program's work\n",
                              last_compute_entry->name.c_str());
             entry = last_compute_entry;
+            used_standin = true;
         }
         if (!entry) {
             const bool fspx = program.kind == palmetto::ComputeProgram::Kind::fspx;
@@ -5928,31 +6243,26 @@ public:
         code_bytes_ = code.size();
         code_base_ = offset;
         pipeline_.code_base = offset;
+        // Everything that can fail is done. With the recipe cache on, the created objects move into a shared entry the
+        // next identical description adopts; this PSO keeps its own code-base range.
+        if (recipe_cache && !used_standin) {
+            auto entry = std::make_shared<SharedComputePipeline>();
+            entry->vk = &device_.context->vk;
+            entry->device = device_.info.device;
+            entry->pipeline = pipeline_.pipeline;
+            entry->layout = pipeline_.layout;
+            entry->module = module_;
+            entry->bindless_set = pipeline_.bindless_set;
+            entry->program_bytes = code;
+            module_ = VK_NULL_HANDLE;  // ownership moved into the entry
+            shared_compute_ = device_.add_compute_recipe(cache_key_, std::move(entry));
+        }
         device_.context->add_pipeline(id(), pipeline_);
         registered_ = true;
         return S_OK;
     }
 
 private:
-    // What a graphics pipeline is made from, so variants can be built at draw time.
-    struct Recipe {
-        bool mesh = false;  // no vertex input or input assembly state, and no dynamic topology or strides
-        std::vector<VkPipelineShaderStageCreateInfo> stages;
-        // One per entry of create_graphics's stage table (VS, GS, PS), static_assert there; what `stages` chain.
-        VkPipelineShaderStageRequiredSubgroupSizeCreateInfo required_sizes[3]{};
-        std::vector<VkVertexInputAttributeDescription> attributes;
-        std::vector<VkVertexInputBindingDescription> bindings;
-        std::vector<VkVertexInputBindingDivisorDescriptionEXT> divisors;
-        VkPipelineInputAssemblyStateCreateInfo assembly{};
-        VkPipelineRasterizationStateCreateInfo raster{};
-        bool conservative = false;
-        VkPipelineMultisampleStateCreateInfo multisample{};
-        VkSampleMask sample_mask = ~0u;
-        VkPipelineDepthStencilStateCreateInfo depth{};
-        std::vector<VkPipelineColorBlendAttachmentState> blends;
-        VkPipelineColorBlendStateCreateInfo blend{};
-    };
-
     // The graphics pipeline with the formats of the `unbound` slots (palmetto::GraphicsPipeline::variant) undefined.
     // `substitute_ps` (diagnostic, docs/frame_capture.md): the same pipeline with its fragment stage replaced by that
     // module, which is what the frame dump's PS-only control draws the title's own vertices through. Null keeps the
@@ -5969,7 +6279,7 @@ private:
             VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY, VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE,
             VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_BLEND_CONSTANTS,
             VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE};
-        const Recipe& r = recipe_;
+        const GraphicsRecipe& r = recipe_;
         // Diagnostic only: the recipe's stages with the fragment module swapped and its required-subgroup-size chain
         // dropped (the substituted shader declares none). Empty when the recipe has no fragment stage.
         std::vector<VkPipelineShaderStageCreateInfo> substituted_stages;
@@ -6119,7 +6429,7 @@ private:
     DeviceState& device_;
     palmetto::ComputePipeline pipeline_;
     palmetto::GraphicsPipeline graphics_;
-    Recipe recipe_;
+    GraphicsRecipe recipe_;
     std::mutex variants_mutex_;
     std::map<std::uint32_t, VkPipeline> variants_;
     std::map<std::uint32_t, VkPipeline> ps_variants_;  // docs/frame_capture.md, the PS-only control by cull mode
@@ -6131,7 +6441,13 @@ private:
     bool registered_ = false;
     bool is_graphics_ = false;
     std::vector<palmetto::SubgroupRequest> subgroup_requests_;  // one per stage, in creation order
-    palmetto::cached_pso::Key cache_key_;
+    palmetto::cached_pso::Key cache_key_;  // the CachedPSO identity (GetCachedBlob/check) and the recipe-cache key
+    // The per-process recipe cache (PALMETTO_PIPELINE_RECIPE_CACHE): when this PSO adopted an earlier identical
+    // description's shared entry, that entry owns the Vulkan objects and this pointer keeps it alive. Empty otherwise:
+    // the PSO owns and destroys its own objects as before.
+    std::shared_ptr<SharedGraphicsPipeline> shared_graphics_;
+    std::shared_ptr<SharedComputePipeline> shared_compute_;
+    bool cache_key_deterministic_ = false;  // false: a foreign root signature is hashed by address, so never share
 };
 
 void key_root_signature(palmetto::cached_pso::KeyBuilder& key, ID3D12RootSignature* signature) {
@@ -8180,11 +8496,15 @@ public:
         if (const HRESULT hr = check_cached_pso(state_.pso_identity, key, desc->CachedPSO); FAILED(hr)) return hr;
         auto* pipeline = new PipelineState(state_);
         pipeline->attach_device(identity());
+        // The recipe cache keys on this content key, so it has to be in place before create_compute asks for an entry.
+        pipeline->set_cache_key(std::move(key));
+        // A foreign root signature is hashed by address, not by content: never share such a PSO.
+        pipeline->set_cache_key_deterministic(desc->pRootSignature == nullptr ||
+                                              RootSignature::from<RootSignature>(desc->pRootSignature) != nullptr);
         if (const HRESULT hr = pipeline->create_compute(*desc); FAILED(hr)) {
             pipeline->Release();
             return hr;
         }
-        pipeline->set_cache_key(std::move(key));
         return hand_out(pipeline, riid, out);
     }
 
@@ -8197,11 +8517,15 @@ public:
         if (const HRESULT hr = check_cached_pso(state_.pso_identity, key, desc->CachedPSO); FAILED(hr)) return hr;
         auto* pipeline = new PipelineState(state_);
         pipeline->attach_device(identity());
+        // The recipe cache keys on this content key, so it has to be in place before create_graphics asks for an entry.
+        pipeline->set_cache_key(std::move(key));
+        // A foreign root signature is hashed by address, not by content: never share such a PSO.
+        pipeline->set_cache_key_deterministic(desc->pRootSignature == nullptr ||
+                                              RootSignature::from<RootSignature>(desc->pRootSignature) != nullptr);
         if (const HRESULT hr = pipeline->create_graphics(*desc); FAILED(hr)) {
             pipeline->Release();
             return hr;
         }
-        pipeline->set_cache_key(std::move(key));
         return hand_out(pipeline, riid, out);
     }
 

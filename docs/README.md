@@ -62,7 +62,7 @@ method, scope and caveats. No game data is included.
 | Document | Measured content |
 |---|---|
 | [d3d12_vulkan.md](d3d12_vulkan.md) | Xbox D3D12 to Vulkan plan and status; device proxy, queues, command lists, barriers, copies. |
-| [pipeline_cache.md](pipeline_cache.md) | Where a boot's pipeline time goes (measured profile: driver compile vs shader modules, layouts and per-call work), and the opt-in persistent `VkPipelineCache`: design, invalidation, cold/warm A/B and limits. |
+| [pipeline_cache.md](pipeline_cache.md) | Where a boot's pipeline time goes (measured profile: driver compile vs shader modules, layouts and per-call work), the opt-in persistent `VkPipelineCache` and a per-process recipe cache (shared pipeline/layout/modules between identical descriptions): design, invalidation, cold/warm A/B and limits. |
 | [mobile.md](mobile.md) | arm64/mobile path: the x86-64 → arm64 static-recompiler groundwork (`tooling/x64_recomp.py`), the `.pdata` coverage census (`tooling/recomp_census.py`), and what still blocks iOS. |
 | [boot.md](boot.md) | The first real boot: the `palmetto --trace`/`--trace-d3d12` runbook, the startup + D3D12 trace summary (`tooling/boot_trace.py`), the triage order and the Q1–Q22 checklist. |
 | [retail_boot_chain.md](retail_boot_chain.md) | How far `palmetto --run` gets with the retail executable: the stops in order and what clears each, the physical-page export shapes, and device slots 26, 48 and 73. |
