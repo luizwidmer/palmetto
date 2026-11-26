@@ -10,8 +10,12 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #define EXPECT(condition) do { \
@@ -386,6 +390,177 @@ int main() {
         EXPECT(injected_stalls.load() == kStalls);  // the queue did reach the cap and wait
         EXPECT(allocated_command_buffers <= VulkanQueue::kMaxQueuedCommandBuffers);
         EXPECT(static_cast<std::uint8_t*>(dst_map)[kBig - 1] == 0x5A);
+    }
+
+    // 6. The non-blocking pipeline hold (docs/peer_port_streaming.md). The deferred-compile hooks are synthetic: a
+    // batch is "held" when the test's map says one of its lists names a pipeline id the test has not marked finished.
+    // What is measured is the queue's own contract, on a real device: a submission that names an unfinished pipeline
+    // returns without a synchronous wait, held batches replay in submission order, the bound falls back to the old
+    // wait on the submitting thread, a hold past its budget is forced, and a queue destroyed with held work drops it
+    // and releases its token.
+    {
+        EXPECT(!context.pipeline_hold_enabled());  // switch off: every submission above ran the default path
+        std::unordered_set<std::uintptr_t> unfinished;
+        std::unordered_map<const CommandList*, std::vector<std::uintptr_t>> named;
+        std::uint32_t prepare_calls = 0, wake_calls = 0;
+        auto collect = [&](std::span<const CommandList* const> lists, std::vector<std::uintptr_t>& out) {
+            bool pending = false;
+            for (const CommandList* list : lists) {
+                const auto it = named.find(list);
+                if (it == named.end()) continue;
+                for (const std::uintptr_t id : it->second)
+                    if (unfinished.count(id)) {
+                        out.push_back(id);
+                        pending = true;
+                    }
+            }
+            return pending;
+        };
+        auto finished = [&](std::span<const std::uintptr_t> ids) {
+            for (const std::uintptr_t id : ids)
+                if (unfinished.count(id)) return false;
+            return true;
+        };
+        context.set_prepare_pipelines([&](std::span<const CommandList* const>) { ++prepare_calls; });
+        auto install = [&](std::size_t bound, std::uint64_t budget_us) {
+            PipelineHoldSettings settings;
+            settings.enabled = true;
+            settings.bound = bound;
+            settings.budget_us = budget_us;
+            context.set_pipeline_hold(collect, finished, [&] { ++wake_calls; }, settings);
+        };
+        install(8, 5'000'000);
+        EXPECT(context.pipeline_hold_enabled());
+
+        // Two different sources into the same destination range: the last release wins, so the destination says
+        // whether the batches ran in submission order.
+        void *src_a_map = nullptr, *src_b_map = nullptr;
+        const VkBuffer src_a = d.buffer(kSize, usage, &src_a_map);
+        const VkBuffer src_b = d.buffer(kSize, usage, &src_b_map);
+        EXPECT(src_a && src_b);
+        add_buffer(20, src_a, kSize);
+        add_buffer(21, src_b, kSize);
+        std::memset(src_a_map, 0x11, kSize);
+        std::memset(src_b_map, 0x22, kSize);
+        auto* hold_dst = static_cast<std::uint8_t*>(mid_map);
+        std::memset(hold_dst, 0, kSize);
+        CommandList held_a, held_b;
+        EXPECT(held_a.copy_buffer({mid_id, 0, 20, 0, kSize}));
+        EXPECT(held_a.close());
+        EXPECT(held_b.copy_buffer({mid_id, 0, 21, 0, kSize}));
+        EXPECT(held_b.close());
+        const CommandList* held_a_lists[] = {&held_a};
+        const CommandList* held_b_lists[] = {&held_b};
+        unfinished = {0x100, 0x101};
+        named[&held_a] = {0x100};
+        named[&held_b] = {0x101};
+        EXPECT(direct.execute(held_a_lists) == ReplayResult::success);
+        EXPECT(context.holds().any_held());  // held, not submitted
+        EXPECT(prepare_calls == 0);          // and this (the submitting) thread never entered the synchronous wait
+        EXPECT(direct.execute(held_b_lists) == ReplayResult::success);  // held behind a, in order
+        EXPECT(prepare_calls == 0);
+        EXPECT(wake_calls >= 2);  // each hold asked the layer's flusher to look
+        // b's pipeline finishes first: b is ready but must not overtake a. The test also has to tell the hold policy
+        // the id finished, which is what a compile worker's completion does in the real device.
+        unfinished.erase(0x101);
+        context.pipeline_hold().finished(0x101);
+        context.holds().pump_ready();
+        EXPECT(context.holds().any_held());
+        EXPECT(prepare_calls == 0);
+        bool ran_early = false;
+        for (std::uint32_t i = 0; i < kSize; ++i) ran_early |= hold_dst[i] != 0;
+        EXPECT(!ran_early);
+        // a finishes: both replay in order, and the last one (b) wins the destination.
+        unfinished.erase(0x100);
+        context.pipeline_hold().finished(0x100);
+        context.holds().pump_ready();
+        EXPECT(!context.holds().any_held());
+        EXPECT(prepare_calls >= 2);  // the hook runs when the batches replay, on the releasing thread
+        EXPECT(direct.idle());       // the replayed batches reach the GPU; the test reads their result
+        EXPECT(hold_dst[0] == 0x22 && hold_dst[kSize - 1] == 0x22);
+
+        // The bound: at one held submission, a second forces the oldest to complete by the old synchronous wait here
+        // (the fallback the slice keeps), then is held itself.
+        install(1, 5'000'000);
+        EXPECT(!context.holds().any_held());
+        unfinished = {0x200, 0x201};
+        CommandList bound_a, bound_b;
+        EXPECT(bound_a.copy_buffer({mid_id, 0, 20, 0, kSize}));
+        EXPECT(bound_a.close());
+        EXPECT(bound_b.copy_buffer({mid_id, 0, 21, 0, kSize}));
+        EXPECT(bound_b.close());
+        named[&bound_a] = {0x200};
+        named[&bound_b] = {0x201};
+        const CommandList* bound_a_lists[] = {&bound_a};
+        const CommandList* bound_b_lists[] = {&bound_b};
+        std::memset(hold_dst, 0, kSize);
+        EXPECT(direct.execute(bound_a_lists) == ReplayResult::success);
+        EXPECT(context.pipeline_hold().held() == 1);
+        prepare_calls = 0;
+        EXPECT(direct.execute(bound_b_lists) == ReplayResult::success);
+        EXPECT(prepare_calls >= 1);  // the bound forced the old wait
+        EXPECT(context.pipeline_hold().forced() == 1);
+        EXPECT(direct.idle());
+        EXPECT(hold_dst[0] == 0x11);  // a ran by the old path, in order, before b
+        EXPECT(context.pipeline_hold().held() == 1);  // b is still held
+        unfinished.erase(0x201);
+        context.pipeline_hold().finished(0x201);
+        context.holds().pump_ready();
+        EXPECT(!context.holds().any_held());
+        EXPECT(direct.idle());
+        EXPECT(hold_dst[0] == 0x22);
+
+        // The budget: a hold older than its budget is completed by the old wait on the releasing thread.
+        install(8, 1000);  // 1 ms
+        unfinished = {0x300};
+        CommandList late;
+        EXPECT(late.copy_buffer({mid_id, 0, 21, 0, kSize}));
+        EXPECT(late.close());
+        named[&late] = {0x300};
+        const CommandList* late_lists[] = {&late};
+        std::memset(hold_dst, 0, kSize);
+        EXPECT(direct.execute(late_lists) == ReplayResult::success);
+        EXPECT(context.holds().any_held());
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        prepare_calls = 0;
+        context.holds().pump_ready();
+        EXPECT(!context.holds().any_held());
+        EXPECT(prepare_calls >= 1);
+        EXPECT(context.pipeline_hold().timeouts() == 1);
+        EXPECT(context.pipeline_hold().forced() == 2);
+        EXPECT(direct.idle());
+        EXPECT(hold_dst[0] == 0x22);
+        unfinished.clear();
+
+        // A queue destroyed with held work drops it and releases its token (the existing held-work teardown).
+        install(8, 5'000'000);
+        unfinished = {0x400};
+        CommandList dropped;
+        EXPECT(dropped.copy_buffer({mid_id, 0, 20, 0, 4}));
+        EXPECT(dropped.close());
+        named[&dropped] = {0x400};
+        {
+            VulkanQueue short_lived(context, d.queue, d.family, Kind::direct);
+            EXPECT(short_lived.ok());
+            const CommandList* dropped_lists[] = {&dropped};
+            EXPECT(short_lived.execute(dropped_lists) == ReplayResult::success);
+            EXPECT(context.pipeline_hold().held() == 1);
+        }
+        EXPECT(context.pipeline_hold().held() == 0);
+        EXPECT(context.pipeline_hold().dropped() >= 1);
+        unfinished.clear();
+
+        // Switch off again: the hooks are gone and the same lists run the default path (no hold, no wait).
+        context.set_pipeline_hold(nullptr, nullptr, nullptr, PipelineHoldSettings{});
+        EXPECT(!context.pipeline_hold_enabled());
+        unfinished = {0x500};
+        named[&held_a] = {0x500};
+        prepare_calls = 0;
+        EXPECT(direct.execute(held_a_lists) == ReplayResult::success);
+        EXPECT(!context.holds().any_held());
+        EXPECT(direct.idle());
+        context.set_prepare_pipelines(nullptr);
+        std::printf("pipeline hold: ordering, bound fallback, budget force and queue-teardown drop ok\n");
     }
 
     EXPECT(direct.idle() && compute.idle() && copy.idle());

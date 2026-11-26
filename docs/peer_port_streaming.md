@@ -266,3 +266,237 @@ Reference material read for this audit, by snapshot (all licences as in section 
 
 The upstream projects remain the copyright of their contributors under the licences named in section 1; this repository
 grants no rights over their trees and claims none of their work as its own.
+
+## 10. Measured: implemented port 1 - the non-blocking pipeline hold, so no title thread waits for a pipeline build
+
+**Status: measured; opt-in and off by default.** This section implements rank 1 of the section 6 plan. The deferred compile
+([deferred_compile.md](deferred_compile.md)) already moves the driver build off the title's threads, but the submission
+that first names a still-unbuilt compute pipeline waits for that build on the thread that submits - a title thread - and
+the peer audit names exactly that pattern as the documented worker-stall cause (sections 3, 5.2 and 6). The port here is
+our own: a bounded, switchable **submission hold**. When the switch is on and a submitted list names a deferred compute
+pipeline the compile workers have not finished, the batch is held instead of waited for, in submission order, with its
+lists copied and their pipeline states pinned; it is replayed by the next submit/present on the submitting thread or by
+a layer-owned hold flusher as soon as every pipeline it names has finished. The switch is `PALMETTO_PIPELINE_HOLD`;
+unset is the previous path exactly. No peer code was copied (sections 1-9 are the audit this port was planned from;
+[upstream_port.md](upstream_port.md) is the policy; section 10.8 is the attribution).
+
+### 10.1 The measured wait this slice removes
+
+Two pre-change measurements were taken before any code of this section existed. The first is a 300 s light boot of the
+current committed behaviour with the class-0xa mitigation and the section-12 content environment from another in-flight
+slice's arm on this tree (`boot-stream3`, binary `208D7699...`, one boot under the boot lock, deferred compile on with
+bound 4,096 and 4 workers): it logged **9,993 submit-side pipeline waits, the longest 450.2 ms**, with the compile queue
+reporting 2,742 deferred pipelines, 356 built, **0 fallbacks** and a longest single worker build of **104.1 s**. The second
+is the same environment booted by this section before its code was written on the pre-change binary
+(`boot-nb-baseline`, `57EFCB2E...`, 56.7 s, 1 device loss, stopped on a title-side write
+`game+0x4d9f6c4` at `0x14cb183c0` before reaching stage 3 - the stage-3 race of
+[decomp_first_ui.md](decomp_first_ui.md) section 17, not this slice):
+
+| measurement | `boot-nb-baseline` (pre-change, 56.7 s) |
+|---|---|
+| submit-side pipeline waits | **17, total 511.1 ms, the longest 510.7 ms** |
+| of those, a driver build run on the waiting (title) thread | **1** - tid `0xd14c...` made 1 compute driver call of 510.7 ms and 0 creation calls, i.e. it claimed a queued compile task and ran the driver build itself |
+| graphics pipeline driver calls on title threads | **2 calls, 2.3 ms** (one thread, at first bind) |
+| compute driver calls | 325, all on the 4 `[compile worker]` threads; longest single 141.8 ms in this window |
+| caller threads / creation threads | 19 (14 title threads + 4 compile workers + 1 hold-free layer thread) / 14 |
+| session/stage state at the stop | init 2, loading 2, session 1, machine 2/2: stage 3 not reached |
+
+Both measurements say the same thing: **the wait family is the compute pipeline build, not graphics**, and when a
+submission waits out a build it is one driver call long (0.45-0.51 s in these windows, 0.5-63 s in the smaller boot set
+of [deferred_compile.md](deferred_compile.md) section 6). The wait is in `VulkanQueue::execute_now` ->
+`DeviceState::prepare_deferred_compute_pipelines`: the submitting thread first asks the compile queue to claim and build
+the task it needs (`CompileQueue::wait_or_build`), or waits for the worker that already owns it. The submitting thread is
+a title thread - it is the frame/present thread, the same pool the loading jobs run on - so a title thread is inside
+`nvgpucomp64` for up to a minute, which is the measured stall the peer audit ranks first. The five pool-2 events are
+unset in the same windows ([wait_forensics.md](wait_forensics.md) section 2: the `game+0x43C421E` wait site has 5 waits
+and 0 signals, the five per-thread events have no traced set), which is the title-side state that wait leaves behind.
+
+### 10.2 The design
+
+Our own mechanism, in our structure and naming, composed from the parts this tree already owns: the `CompileQueue` task
+map and the queue's CPU-side hold machinery (the `held_` deque of [queue_holds.h](../port/src/queue_holds.h), already
+used for Wait-before-Signal).
+
+| piece | what it does |
+|---|---|
+| `PALMETTO_PIPELINE_HOLD` | opt-in. On: a submission that names an unfinished deferred pipeline is held. Unset: the previous path exactly - no hold, no flusher thread, no extra work in `execute()` beyond one false branch. |
+| `PALMETTO_PIPELINE_HOLD_BOUND` | the most submissions held for pipelines at once, default **16**, clamped 1..1024. |
+| `PALMETTO_PIPELINE_HOLD_BUDGET_MS` | how long one held submission may wait for its pipelines before the old synchronous wait is forced, default **2000 ms**, clamped 1..600000. |
+
+- **The decision is in `VulkanQueue::execute` (port/src/vulkan_backend.h), before anything is recorded.** The context has
+  two device hooks and a wake hook, registered only when the switch is on: `collect` answers "does this batch name a
+  deferred pipeline the compile queue has not finished, and which ids" (read from the same task map the compile queue
+  already keeps), `finished` says whether a set of ids has finished, and `wake` starts the device's hold flusher. The
+  batch is held when `collect` finds at least one unbuilt id and the hold budget has room. Nothing is built or waited
+  for on the submitting thread on that path; the call returns as an ordinary held ExecuteCommandLists does.
+- **Order and lifetime come from the existing hold machinery.** The batch is copied into the queue's `held_` deque
+  (`CommandList` copies, as the Wait-before-Signal path already does), its pipeline states and root signatures are kept
+  alive by the existing `PinFn` pin, and every later submit, Signal, Wait, marker and Present is held behind it in the
+  same order. A held batch's new dependency is one field: the policy token of its pipeline ids. `ready()` is
+  "no pending Wait and no unfinished pipeline"; the release loop only releases the front, so a later ready batch cannot
+  overtake an unfinished earlier one.
+- **Release is off the title's threads.** The device starts one layer-owned **hold flusher** thread when the switch is on
+  (`[hold flusher]` in the pipeline-call report). A compile worker that finishes a build marks the pipeline id finished
+  in the hold policy and wakes the flusher; the flusher pumps the queues and the front batches replay on it, in order,
+  as ordinary submissions. The same pump also runs at the end of any title `execute`/`Signal`/Present, so a hold whose
+  pipelines are already built is completed by whichever thread gets there first - in the common case the next
+  submit/present on the submitting thread, with no wait to do.
+- **Two budgets, and the declared fallback.** At the bound, the oldest held batches that wait *only* for pipelines are
+  completed by the previous synchronous wait on the submitting thread, in order, until the budget has room; if the gate
+  still refuses the new submission, that submission takes the old synchronous wait itself and is then held for order
+  only - i.e. the previous behaviour, exactly, and only when the hold budget is exceeded. A hold past its budget (for
+  example one pipeline stuck in a 100 s driver compile) is completed the same way by the old wait, forced on the
+  releasing (layer) thread. A batch with a pending Wait can never be forced: that would reorder it past the work ahead
+  of it, so it keeps waiting for its fence as before.
+- **Torn down in order.** The flusher is joined in `~Device` before the compile workers and before the Vulkan context; a
+  queue destroyed with held work drops the batch, releases its token (counted as `dropped`) and reports it, the existing
+  held-work teardown. A device loss drops held batches the same way.
+- **What is deliberately not changed.** The graphics path is untouched: graphics pipelines are still built at their first
+  bind on the recording thread ([memory_growth.md](memory_growth.md)), measured at 2 calls / 2.3 ms in the pre-change
+  window, so they are not the family this slice removes. The compile queue, its worker count, its bound, the disk/recipe
+  caches and the named-refusal paths are unchanged. `port/src/vulkan_replay.h` is not modified. With the switch unset the
+  measured path is the one in section 10.1: the same tasks, the same submit-side wait, one extra false branch per
+  execute.
+- **Measurement, not behaviour.** The slice adds counters and two report lines, never shown with the switch unset except
+  one startup sentence that says the hold is off; the existing `compile wait submit` timeline line gains the waiting
+  thread's id so a boot can name the thread a wait happened on, and the compile report splits its submit waits into
+  "waited for a worker's build" and "built by the waiting thread" (the build-on-a-title-thread case).
+
+### 10.3 Tests
+
+`port/test/deferred_compile_test.cpp` (the GPU-free gate target) went from 18 to **50 checks**:
+
+| check group | what it proves |
+|---|---|
+| switch parsing | every off spelling (`unset`, empty, `0`, `off`, `OFF`, `false`, `no`, surrounding blanks) and every on spelling; the bound's default, floor and ceiling; the budget's default, floor and ceiling |
+| hold policy state machine | a token with two pipeline ids is ready only after both finish; a later token at the bound refuses a third (the fallback signal); the expiry boundary is exact (999 us not expired, 1000 us expired, unknown token never); release/drop bookkeeping, peak, and the report line |
+| shutdown | `clear()` drops the tokens still held and counts them |
+| disabled policy | the unset switch's policy is disabled and reports its defaults: what the queue never consults |
+| submit-wait split | a wait the waiting thread spent in a build it claimed itself is counted apart from a wait for a worker's build, and the per-thread report names each waiting thread |
+
+`port/test/vk_queue_test.cpp` (GPU-backed, run on this machine's RTX 4090 under the boot lock) has a new section with
+synthetic hold hooks: two batches copy different source patterns into the same destination range and the second source
+must win (submission order); the second batch's pipeline finishes first and nothing runs and nothing overtakes; `bound=1`
+forces the oldest batch through the old wait on the submitting thread (prepare hook count and `forced` counter) before
+the second is held; a 1 ms budget forces an expired hold (`timeouts` counter); a queue destroyed with held work drops it
+and leaves the policy empty (`dropped`); and after the hooks are removed the same lists run the default path (no hold).
+It prints `pipeline hold: ordering, bound fallback, budget force and queue-teardown drop ok` and `vk_queue_test: OK`.
+
+Gates on the changed tree: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`; `_setup\build_tests.cmd` prints `TESTS_BUILT`;
+the GPU-free gate subset (`deferred_compile` 50 checks, `frame_dump`, `unimplemented_policy` 98, `graphics_record` 180,
+`graphics_pso` 350, `buffer_va_index`, `dstorage` 234, `xapu_chad` 87, `arena_size`, `xbox_present`, `xs_proxy_mock`)
+exits 0; the docs checks pass with this section naming every switch above.
+
+### 10.4 A/B boots
+
+Two 300 s light boots, one binary, one at a time under `_setup/boot_lock.ps1`, the section-12 content environment from
+`D:\leonida-work\fsrstable\boot_arm.ps1` plus the class-0xa mitigation `PALMETTO_TITLE_CLASS0A_SIZE=1` and
+`PALMETTO_WAIT_TRACE=60,120,240`; arm A leaves `PALMETTO_PIPELINE_HOLD` unset, arm B sets it to `1` (bound 16, budget
+2000 ms). Binary SHA-256 `3ABBF220150DB0C1477FCF209412495E3443445100F3D3DF2E2C72DFD7227144` for both arms; the shared tree
+also carried another slice's in-flight `xbox_present`/`frame_pacer` files, unchanged between the two arms.
+
+The stage-3 race of [decomp_first_ui.md](decomp_first_ui.md) section 17 made the pair take retries: two hold-off boots
+(`boot-nb-holdoff`, `boot-nb-holdoff2`) stopped at 58.8 s on title-side `0xC0000005` reads (`game+0x43adfb0` read
+`0x82ea`, then `game+0x28cd3cc` read `0x574d20fc10`, both in the worker/wake family and with 0 device losses), and the
+third hold-off boot (`boot-nb-holdoff3`) plus the single hold-on boot (`boot-nb-holdon`) are the pair reported here.
+The pre-change baseline in section 10.1 (`boot-nb-baseline`) is a fifth boot of the same environment on the pre-change
+binary; it stopped at 56.7 s on the same race after one device loss.
+
+| measurement | A: hold off (previous path) | B: hold on |
+|---|---|---|
+| verdict / exceptions / device losses | ALIVE 300.2 s (harness timeout), 0, 0 | ALIVE 300.2 s (harness timeout), 0, 0 |
+| wall / D3D12 calls / PresentX calls | 300.2 s / 1,102,874 / 13,271 (44.2/s) | 300.2 s / 833,986 / 10,110 (33.7/s) |
+| submit-side pipeline waits (queue report) | **10,949 calls, total 696.6 ms, max single 524.1 ms**, all on one title thread (`tid 0xf8837ec980bc83b4`) | **1 call, 550.3 ms**, on the hold flusher: the budget-expired forced fallback. **0 on any title thread** |
+| of those, built by the waiting thread | **1, 524.1 ms** - a driver build run by the submitting title thread itself | 1, 550.3 ms, run by the `[hold flusher]` layer thread after the 2000 ms budget |
+| waits by thread (queue report lines) | one line, the title thread above; no other thread waited | none on a title thread; the flusher line is the forced wait above |
+| pipeline submit hold counters | switch off: no hold, no flusher (startup line says off) | bound 16, budget 2000 ms; **holds 2, releases 2, forced 1, timeouts 1**, bound refusals 0, fallback waits 0, dropped 0; peak 2, longest hold **2597.7 ms**; forced at t=29.45 s with n=2 lists |
+| compute driver calls / total / longest single | 360 / 484,986.2 ms / 106,368.4 ms (all on the 4 compile workers except the 1 title-thread build above) | 371 / 508,946.5 ms / 109,122.0 ms (all on the 4 compile workers except the 1 flusher build above) |
+| graphics driver calls / time / thread | 4 / 7.8 ms (max 2.2 ms) / one title thread at first bind | 4 / 7.6 ms (max 2.3 ms) / one title thread at first bind |
+| submissions / captures | 24,576 submissions at 259.5 s; 12 presenter captures (frames 1-2201) | 16,384 at 222.0 s; 12 presenter captures (frames 1-2201) |
+| captured pixels | 2564x1421, every capture mean rgb `0.00 0.00 0.00`; centre readbacks show the layer control colour `51 102 204` / `0 0 0`, no title pixel | same: every capture mean rgb `0.00 0.00 0.00`; centre readbacks the same layer colours |
+| state words: init/loading/session/machine at 298 s | 3 / 2 / 3 / current 3 next 3 (last changes 66 s, 62 s, 66 s) | 3 / 2 / 3 / current 3 next 3 (last changes 66 s, 62 s, 66 s) |
+| wait trace `game+0x43C421E` at 60/120/240 s; five pool events | 5 waits / 0 signalled in all three dumps; the five events (`0x1764`, `0x1770`, `0x1778`, `0x17c0`, ...) have **0 set calls**, `Event not-set` | same: 5 waits / 0 signalled in all three dumps; **0 set calls** on the five events |
+| class-0xa upload | `BLOCK ALLOC hit 1 size 0x1000 width 256 height 1`, job-block 0, overlap no; stride mitigation redirected at 3 call sites | same: `BLOCK ALLOC hit 1 size 0x1000 width 256 height 1`, job-block 0, overlap no; 3 call sites |
+| movie player at 298 s | state `0x9`, buffers 0, open 1, non-null handle (decode probe not enabled in this environment) | same: state `0x9`, buffers 0, open 1, non-null handle (decode probe not enabled) |
+| session-3 loading record completion | not probed in this pair (`PALMETTO_SLOT_WATCH` unset); the state words above are the measured stage evidence | not probed in this pair; same state words |
+
+**Verdict: the wait is removed from the title's threads and the worker-pool falsifier fires.** Arm A's title thread spent
+**696.6 ms inside the submit-side wait in 300 s**, one of those calls a 524.1 ms driver build it claimed and ran itself;
+the other 10,948 calls are the old path's per-named-pipeline bookkeeping (they find the task finished or finishing on a
+worker: 172.5 ms total, whose largest is under half a millisecond). Arm B spent **no time in that wait on any title
+thread**: the two submissions that named a pipeline still under construction were held (longest 2597.7 ms), replayed by
+the hold flusher once built, and the one that outlived its 2000 ms budget had the old wait forced on that layer thread,
+where the 550.3 ms build shows in the report as `[hold flusher]`. The restart of the earlier stall did not happen: no
+title thread built or waited for a pipeline in B. **But the five pool-2 events are still never set** in either arm (5
+waits, 0 signalled at every dump) and every state word is identical at 298 s, so the peer plan's falsifier fires:
+removing the compile wait from title threads does **not** wake the five-thread pool and does not complete the session-3
+loading record. The wait was one title-thread symptom, not the worker-stall cause this boot needs; the next plan step is
+the out-record state (sections 5.3 and 6's ranks 4-5), not more pipeline work. The presented frame stays black (all
+captures mean 0.00) and the movie player stays at state `0x9` with `buffers 0` in both arms; the class-0xa mitigation
+behaves identically in both, so the pair differs only in the pipeline hold.
+
+### 10.5 Limits and the next falsifier
+
+- **What the wait counter means.** `submit waits` in the queue report counts one call per named deferred pipeline the
+  old path looked up, even when the task is already finished; the honest axis is the blocked time and the per-thread
+  split the section adds, which is why arm A's 10,949 calls total 696.6 ms while exactly one of them (524.1 ms) is a
+  driver build on the waiting thread. Arm B's single reported wait is the budget-forced fallback, and its line says
+  `[hold flusher]`, not a title thread.
+- **A hold can be moved, not removed.** With the switch on, a submission whose pipeline is still being built returns
+  instead of waiting, but the work behind it - and every later submit, Signal and Present - is held until the pipeline is
+  built or the budget forces the old wait. The measured arm held 2 submissions (longest 2597.7 ms) and forced 1 after
+  the 2000 ms budget; a boot whose submission names a pipeline stuck in a 100 s driver build would be held for the
+  budget and then complete the old wait on the flusher, so the title's own fence or present wait can still be late by
+  one budget. The budget bounds that window; it does not make the compile faster.
+- **The compile queue's own bound is unchanged.** A creation past `PALMETTO_PIPELINE_COMPILE_BOUND` still falls back to a
+  synchronous driver build at creation, on the creating thread; that is not this slice's fallback and was 0 in both arms.
+- **The flusher is a layer thread, not a title one.** A forced or fallback wait can therefore still run in the layer -
+  on the submitting thread only when the hold budget is exceeded (the declared fallback), on the hold flusher when a hold
+  expires - and never on a title *worker* thread. The boot's `[hold flusher]` line in the pipeline-call report says where
+  a forced build ran.
+- **Graphics are untouched.** A graphics pipeline's first bind still builds on the recording thread (4 calls / 7.6-7.8 ms
+  in the pair); a workload with expensive graphics first-bind builds would still park a title thread, and is a separate
+  port.
+- **Held work at shutdown is dropped.** A queue destroyed while it holds a pipeline batch drops that batch (counted
+  `dropped`, reported on stderr), exactly as any other held work is dropped at queue teardown; no work is submitted for
+  it. A device loss drops it the same way.
+- **Present cadence is measured, not attributed.** Arm B recorded fewer `PresentX` calls and D3D12 calls than arm A over
+  the same wall time (10,110 against 13,271, and 833,986 against 1,102,874), while holding only 2 batches for at most
+  2.6 s; one pair on a shared host cannot say whether that is the deferred Present path, host load or the title's own
+  frame loop, and the slice does not claim it either way. A present-cadence A/B is the measurement that would settle it.
+- **The worker-pool falsifier fired.** The five pool-2 events were never set in either arm and the state words are
+  identical at 298 s (section 10.4): the peer plan's stated falsifier - "workers still parked and the dword still 0, so
+  the wait is not the wall" - is what this pair measures. The next step is the out-record state store (sections 5.3 and
+  6 ranks 4-5), and the session-3 loading-record probe (`PALMETTO_SLOT_WATCH`) is the diagnostic this pair did not carry.
+- **One machine, one driver, one arm per boot.** The pair is one RTX 4090 / Vulkan 1.3 boot each, the shared tree was
+  rebuilt by other slices before the pair, and two hold-off attempts stopped on the known stage-3 race before the
+  reported arm (section 10.4). Stage timings on this host are not stable
+  ([decomp_first_ui.md](decomp_first_ui.md) section 17), so a state that does not move in one pair is not a negative for
+  the title as a whole.
+
+### 10.6 Cross-check against the peers (reference only, no code copied)
+
+The mechanism is the one section 6 ranks first, and the peer files that pointed at it are: **Five Star Recomp**
+`45071d52` (`src/FiveStar.Loader/Shims/D3D12X/` pipeline creation, its `debugging.md` on the loading-screen frame, its
+wiki `Status.md`; the same title build as ours) and **XCL** `8b957be` (`crates/xcl/src/hle/d3d12x/pso_async.rs`: the
+stand-in returned at once, the real pipeline built on a worker, compute waited for only at its first bind) - both read in
+sections 1-9. What we took from them: the shape (never block the title's thread on the layer's compiler; a submission
+that needs a pipeline waits where the layer can afford it, or not at all). What is ours and differs: an in-process
+compile queue and worker pool (no stand-in pipeline object, no separate compile process), a **submission hold with two
+budgets and a forced fallback** on an existing held-batch machinery, the hold flusher as our own layer thread, unchanged
+graphics, and our `PALMETTO_*` switches, counters and tests. No peer code, comment, identifier or table was copied.
+
+### 10.7 Attribution and uncommitted files
+
+This section was implemented from this project's own measurements: the pre-change boots in section 10.1, the
+`CompileQueue`/`held_` primitives it composes, and the peer audit of sections 1-9 read as reference only under
+[upstream_port.md](upstream_port.md). The behaviour was cross-checked against the public GPL-3.0-or-later project
+Five Star Recomp (<https://github.com/ThatRecompDev/five-star-recomp>, commit `45071d52`) and the public GPL-2.0-only
+project XCL (<https://github.com/xcl-dev/xcl>, commit `8b957be`), files as cited in section 10.6 and section 9; no code
+from either was copied, and their trees remain the copyright of their contributors under their own licences. The
+`NOTICE.md` row for this slice is the lead's to add at commit time (the two projects, commits and licences above).
+Uncommitted files of this slice: `port/src/deferred_compile.h`, `port/src/vulkan_backend.h`,
+`port/shims/d3d12_vulkan_device.cpp`, `port/test/deferred_compile_test.cpp`, `port/test/vk_queue_test.cpp` and this
+section of `docs/peer_port_streaming.md`. No git write was made by this slice; boots and captures are under
+`D:\leonida-work\fsrstable\` outside the repository, and no game data is added: RVAs, thread-id hashes, counts, times,
+state words and image means only.

@@ -1537,6 +1537,46 @@ inline double pipeline_call_stats_interval_s() {
     return interval;
 }
 
+// ---- the non-blocking submission hold (docs/peer_port_streaming.md) -----------------------------------------
+//
+// PALMETTO_PIPELINE_HOLD=1: a submission that names a deferred compute pipeline the compile queue has not finished
+// is held instead of waited for (docs/deferred_compile.md's submit-side wait is the measured stall this removes from
+// the title's thread). The held batch is replayed in submission order, by the next submit/present on the submitting
+// thread or by this device's hold flusher, once every pipeline it names has been built. Two budgets bound it:
+// PALMETTO_PIPELINE_HOLD_BOUND submissions at once, and PALMETTO_PIPELINE_HOLD_BUDGET_MS held before the old
+// synchronous wait is forced. Off by default: unset is the current path exactly (no hold, no flusher thread).
+inline bool pipeline_hold_enabled() {
+    static const bool enabled = [] {
+        char value[16] = {};
+        size_t length = 0;
+        if (getenv_s(&length, value, "PALMETTO_PIPELINE_HOLD") != 0 || length <= 1) return false;
+        return palmetto::pipeline_hold_switch_enabled(value);
+    }();
+    return enabled;
+}
+
+inline std::size_t pipeline_hold_bound() {
+    static const std::size_t bound = [] {
+        char value[16] = {};
+        size_t length = 0;
+        if (getenv_s(&length, value, "PALMETTO_PIPELINE_HOLD_BOUND") != 0 || length <= 1)
+            return palmetto::PipelineHoldSettings{}.bound;
+        return palmetto::pipeline_hold_bound(value);
+    }();
+    return bound;
+}
+
+inline std::uint64_t pipeline_hold_budget_ms() {
+    static const std::uint64_t budget = [] {
+        char value[16] = {};
+        size_t length = 0;
+        if (getenv_s(&length, value, "PALMETTO_PIPELINE_HOLD_BUDGET_MS") != 0 || length <= 1)
+            return static_cast<std::uint64_t>(palmetto::PipelineHoldSettings{}.budget_us / 1000);
+        return palmetto::pipeline_hold_budget_ms(value);
+    }();
+    return budget;
+}
+
 // ---- pooled and deferred image memory (docs/streamed_image_backing.md) ------------------------------------
     //
     // PALMETTO_IMAGE_MEM_POOL=1: small textures that are neither attachments nor CPU-visible share 64 MiB blocks of
@@ -1589,6 +1629,21 @@ inline double pipeline_call_stats_interval_s() {
     void prepare_deferred_compute_pipelines(std::span<const palmetto::CommandList* const> lists);
     std::string deferred_compile_text();
     void stop_compile_workers();
+    // The non-blocking submission hold (docs/peer_port_streaming.md): the queue's hooks read the deferred task map, a
+    // finished build wakes the hold flusher, and the flusher releases the held submissions off the title's threads.
+    bool collect_pending_pipelines(std::span<const palmetto::CommandList* const> lists,
+                                   std::vector<std::uintptr_t>& out);
+    bool pipelines_finished(std::span<const std::uintptr_t> ids);
+    void pipeline_build_finished(std::uintptr_t id);
+    void notify_pipeline_hold();
+    void start_pipeline_hold_flusher();
+    void stop_pipeline_hold_flusher();
+    std::thread hold_flusher;
+    std::mutex hold_flusher_mutex;
+    std::condition_variable hold_flusher_cv;
+    bool hold_flusher_started = false;
+    bool hold_flusher_stop = false;
+    bool hold_flusher_pending = false;
     // The per-thread call report (PALMETTO_PIPELINE_CALL_STATS): created and printed on first use and owned by the
     // device, so its report can append the compile queue's counters; stopped in ~Device before the Vulkan device goes.
     std::mutex call_stats_mutex;
@@ -7516,8 +7571,13 @@ std::shared_ptr<palmetto::CompileQueue::Task> DeviceState::defer_compute_build(P
     if (!state || !build) return nullptr;
     start_compile_workers();
     state->AddRef();
-    auto task = compile_queue.submit([this, state, build = std::move(build)]() mutable {
+    const std::uintptr_t id = state->id();
+    auto task = compile_queue.submit([this, state, id, build = std::move(build)]() mutable {
         const bool ok = build();
+        // docs/peer_port_streaming.md: a held submission whose pipeline this was is woken here, on the compile worker
+        // that finished it, so the hold flusher can replay it without any title thread waiting for the build. No-op
+        // with the hold switch off; the state reference still makes `this` valid.
+        pipeline_build_finished(id);
         state->Release();
         return ok;
     });
@@ -7542,6 +7602,95 @@ void DeviceState::stop_compile_workers() {
     compile_queue.stop();
     std::lock_guard lock(deferred_compute_mutex);
     deferred_compute_tasks.clear();
+}
+
+// ---- the non-blocking submission hold (docs/peer_port_streaming.md) ----------------------------------------------
+//
+// The queue holds a submission that names an unfinished deferred pipeline (VulkanQueue::execute) and asks these two
+// hooks which pipeline ids the lists name that are still unbuilt and whether a set of ids has finished. The map under
+// deferred_compute_mutex is the same bookkeeping docs/deferred_compile.md already keeps for the submit-side wait, so
+// the two answers agree with it by construction.
+bool DeviceState::collect_pending_pipelines(std::span<const palmetto::CommandList* const> lists,
+                                            std::vector<std::uintptr_t>& out) {
+    if (!pipeline_defer_compile_enabled()) return false;
+    bool pending = false;
+    std::lock_guard lock(deferred_compute_mutex);
+    for (const palmetto::CommandList* list : lists) {
+        if (!list) continue;
+        for (const palmetto::Command& command : list->commands()) {
+            std::uintptr_t pipeline = 0;
+            if (const auto* dispatch = std::get_if<palmetto::Dispatch>(&command)) {
+                pipeline = dispatch->pipeline;
+            } else if (const auto* indirect = std::get_if<palmetto::ExecuteIndirect>(&command)) {
+                if (indirect->kind == palmetto::IndirectKind::dispatch) pipeline = indirect->pipeline;
+            }
+            if (!pipeline) continue;
+            const auto it = deferred_compute_tasks.find(pipeline);
+            if (it == deferred_compute_tasks.end() || it->second->finished()) continue;  // eager, or already built
+            out.push_back(pipeline);
+            pending = true;
+        }
+    }
+    return pending;
+}
+
+bool DeviceState::pipelines_finished(std::span<const std::uintptr_t> ids) {
+    std::lock_guard lock(deferred_compute_mutex);
+    for (const std::uintptr_t id : ids) {
+        const auto it = deferred_compute_tasks.find(id);
+        if (it != deferred_compute_tasks.end() && !it->second->finished()) return false;
+    }
+    return true;
+}
+
+// Called on the compile worker that finished a build (docs/peer_port_streaming.md): the hold policy loses that
+// pipeline as a dependency and the hold flusher is woken to replay whatever became ready. A no-op with the switch off.
+void DeviceState::pipeline_build_finished(std::uintptr_t id) {
+    if (!context || !context->pipeline_hold_enabled()) return;
+    context->pipeline_hold().finished(id);
+    notify_pipeline_hold();
+}
+
+void DeviceState::notify_pipeline_hold() {
+    if (!context || !context->pipeline_hold_enabled()) return;
+    {
+        std::lock_guard lock(hold_flusher_mutex);
+        hold_flusher_pending = true;
+    }
+    hold_flusher_cv.notify_one();
+}
+
+// The hold flusher: one layer thread that replays held submissions once their pipelines are built (and forces the old
+// wait when a hold expires past its budget). It is the "submit side" of the hold, so no title thread is ever inside a
+// compiler for it. The periodic wake notices a budget expiry and a device loss; the condition variable makes the
+// normal path prompt (one wake per finished build while something is held).
+void DeviceState::start_pipeline_hold_flusher() {
+    std::lock_guard lock(hold_flusher_mutex);
+    if (hold_flusher_started) return;
+    hold_flusher_started = true;
+    hold_flusher = std::thread([this] {
+        if (palmetto::PipelineCallStats* stats = pipeline_stats()) stats->note_hold_flusher();
+        std::unique_lock lock(hold_flusher_mutex);
+        for (;;) {
+            hold_flusher_cv.wait_for(lock, std::chrono::milliseconds(100),
+                                     [this] { return hold_flusher_stop || hold_flusher_pending; });
+            if (hold_flusher_stop) return;
+            hold_flusher_pending = false;
+            lock.unlock();
+            if (context) context->holds().pump_ready();
+            lock.lock();
+        }
+    });
+}
+
+void DeviceState::stop_pipeline_hold_flusher() {
+    {
+        std::lock_guard lock(hold_flusher_mutex);
+        if (!hold_flusher_started) return;
+        hold_flusher_stop = true;
+    }
+    hold_flusher_cv.notify_all();
+    if (hold_flusher.joinable()) hold_flusher.join();
 }
 
 // The queue hook (vulkan_backend.h prepare_pipelines, called from VulkanQueue::execute_now before the lists are
@@ -7577,9 +7726,17 @@ void DeviceState::prepare_deferred_compute_pipelines(std::span<const palmetto::C
                 deferred_built_count.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
+            // Non-blocking hold (docs/peer_port_streaming.md): a batch released from a hold names pipelines the hold
+            // was released on, so they are finished by then; counting each as a submit wait would put the flusher's
+            // replay into the title-thread wait counter. With the hold switch off this branch does nothing.
+            if (pipeline_hold_enabled() && task->finished()) {
+                deferred_built_count.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
             const double started = palmetto::timeline::seconds();
             const bool built = compile_queue.wait_or_build(task);
-            palmetto::timeline::line("compile wait submit built=%d us=%.0f", built ? 1 : 0,
+            palmetto::timeline::line("compile wait submit tid=0x%llx built=%d us=%.0f",
+                                     static_cast<unsigned long long>(palmetto::thread_hash()), built ? 1 : 0,
                                      (palmetto::timeline::seconds() - started) * 1e6);
             if (built) {
                 deferred_built_count.fetch_add(1, std::memory_order_relaxed);
@@ -7594,20 +7751,27 @@ void DeviceState::prepare_deferred_compute_pipelines(std::span<const palmetto::C
 
 std::string DeviceState::deferred_compile_text() {
     const auto& q = compile_queue;
-    char text[448] = {};
+    char text[512] = {};
     std::snprintf(text, sizeof text,
                   "[rt] deferred compile: submitted %llu, built %llu, failed %llu, rejected(fallback) %llu, cancelled "
                   "%llu, pending %zu of %zu, peak outstanding %llu; build time %.1f ms (max single %.1f ms); submit "
-                  "waits %llu (max single %.1f ms); workers %u\n",
+                  "waits %llu (total %.1f ms, max single %.1f ms; built by the waiting thread %llu, %.1f ms, max "
+                  "single %.1f ms); workers %u\n",
                   static_cast<unsigned long long>(q.submitted()), static_cast<unsigned long long>(q.built()),
                   static_cast<unsigned long long>(q.failed()), static_cast<unsigned long long>(q.rejected()),
                   static_cast<unsigned long long>(q.cancelled()), q.pending(), q.bound(),
                   static_cast<unsigned long long>(q.peak_outstanding()),
                   static_cast<double>(q.builds_us()) / 1000.0,
                   static_cast<double>(q.longest_build_us()) / 1000.0,
-                  static_cast<unsigned long long>(q.waits()),
-                  static_cast<double>(q.longest_wait_us()) / 1000.0, q.workers());
-    return text;
+                  static_cast<unsigned long long>(q.waits()), static_cast<double>(q.wait_us()) / 1000.0,
+                  static_cast<double>(q.longest_wait_us()) / 1000.0,
+                  static_cast<unsigned long long>(q.wait_builds()),
+                  static_cast<double>(q.wait_build_us()) / 1000.0,
+                  static_cast<double>(q.longest_wait_build_us()) / 1000.0, q.workers());
+    std::string out = text;
+    out += q.wait_threads_text();
+    if (context && context->pipeline_hold_enabled()) out += context->pipeline_hold_report();
+    return out;
 }
 
 // ---- the per-thread pipeline-call report (PALMETTO_PIPELINE_CALL_STATS, docs/deferred_compile.md) ------------
@@ -8658,6 +8822,30 @@ public:
             [this](std::span<const palmetto::CommandList* const> lists) {
                 state_.prepare_deferred_compute_pipelines(lists);
             });
+        // Non-blocking submission hold (docs/peer_port_streaming.md): a submission that names an unbuilt deferred
+        // pipeline is held by the queue and replayed by the hold flusher, never waited for on the title's thread.
+        // Registered only when PALMETTO_PIPELINE_HOLD is set; unset leaves the queue's pipeline paths exactly as above.
+        if (state_.pipeline_hold_enabled()) {
+            palmetto::PipelineHoldSettings settings;
+            settings.enabled = true;
+            settings.bound = state_.pipeline_hold_bound();
+            settings.budget_us = state_.pipeline_hold_budget_ms() * 1000;
+            state_.context->set_pipeline_hold(
+                [this](std::span<const palmetto::CommandList* const> lists, std::vector<std::uintptr_t>& out) {
+                    return state_.collect_pending_pipelines(lists, out);
+                },
+                [this](std::span<const std::uintptr_t> ids) { return state_.pipelines_finished(ids); },
+                [this] { state_.notify_pipeline_hold(); }, settings);
+            state_.start_pipeline_hold_flusher();
+            std::fprintf(stderr,
+                         "[rt] d3d12: pipeline submit hold: on (bound %zu, budget %llu ms); a submission that names an "
+                         "unbuilt deferred pipeline is held and replayed by the hold flusher, not waited for\n",
+                         settings.bound, static_cast<unsigned long long>(settings.budget_us / 1000));
+        } else if (state_.pipeline_defer_compile_enabled()) {
+            std::fprintf(stderr,
+                         "[rt] d3d12: pipeline submit hold: off; the submission that names an unbuilt deferred pipeline "
+                         "waits for it on the submitting thread\n");
+        }
         if (info.conditional_rendering) {
             const auto properties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
                 info.get_instance_proc(info.instance, "vkGetPhysicalDeviceProperties"));
@@ -8997,6 +9185,9 @@ public:
         // docs/deferred_compile.md: stop the call-report thread and the compile workers before the Vulkan device goes.
         // A queued task holds a reference to its pipeline state (and through it to this device), so the queue is empty
         // by the time the device can be destroyed.
+        // docs/peer_port_streaming.md: the hold flusher is joined first - it releases held submissions, which must not
+        // happen while the compile workers are being stopped; then the report thread and the compile workers.
+        state_.stop_pipeline_hold_flusher();
         state_.stop_pipeline_call_stats();
         state_.stop_compile_workers();
         if (state_.context) {

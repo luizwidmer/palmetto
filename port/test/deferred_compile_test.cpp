@@ -353,6 +353,126 @@ static int test_newest_first() {
     return 0;
 }
 
+// docs/peer_port_streaming.md: the switch spellings and the two budgets. The parsers are pure, so every spelling is
+// covered without an environment. An unset/off value is the current path exactly (no hold); the bounds clamp so a
+// typo cannot make the hold unbounded or disable the fallback.
+static int test_pipeline_hold_switch() {
+    const char* const off_values[] = {nullptr, "", "0", "off", "OFF", "false", "no", " No ", " 0 "};
+    for (const char* off : off_values) CHECK(!dc::pipeline_hold_switch_enabled(off));
+    const char* const on_values[] = {"1", "on", "true", "yes", "2", " 1 "};
+    for (const char* on : on_values) CHECK(dc::pipeline_hold_switch_enabled(on));
+    CHECK(dc::pipeline_hold_bound(nullptr) == 16);
+    CHECK(dc::pipeline_hold_bound("") == 16);
+    CHECK(dc::pipeline_hold_bound("0") == 1);
+    CHECK(dc::pipeline_hold_bound("7") == 7);
+    CHECK(dc::pipeline_hold_bound("abc") == 16);
+    CHECK(dc::pipeline_hold_bound("5000") == 1024);
+    CHECK(dc::pipeline_hold_budget_ms(nullptr) == 2000);
+    CHECK(dc::pipeline_hold_budget_ms("") == 2000);
+    CHECK(dc::pipeline_hold_budget_ms("0") == 1);
+    CHECK(dc::pipeline_hold_budget_ms("250") == 250);
+    CHECK(dc::pipeline_hold_budget_ms("zzz") == 2000);
+    CHECK(dc::pipeline_hold_budget_ms("999999") == 600000);
+    return 0;
+}
+
+// docs/peer_port_streaming.md: the hold policy's own state machine - which submission waits for which pipeline ids,
+// when it is ready, the bound that falls back to the old wait, the budget that expires a hold, and the release/drop
+// bookkeeping. The queue owns the held batches and their order; this class is the part of that decision that needs no
+// Vulkan, so it is tested here directly.
+static int test_pipeline_hold_policy() {
+    using Clock = dc::PipelineHoldPolicy::Clock;
+    dc::PipelineHoldSettings settings;
+    CHECK_COUNT(!settings.enabled);   // unset: the switch-off path, where the queue never consult the policy
+    CHECK_COUNT(settings.bound == 16);
+    CHECK_COUNT(settings.budget_us == 2'000'000);
+    settings.enabled = true;
+    settings.bound = 2;
+    settings.budget_us = 1000;
+    dc::PipelineHoldPolicy policy(settings);
+    CHECK_COUNT(policy.enabled());
+    CHECK_COUNT(policy.held() == 0);
+    CHECK_COUNT(!policy.at_bound());
+    CHECK_COUNT(policy.ready(99));  // a token it never saw is not held: no dependency
+    const auto start = Clock::now();
+    CHECK_COUNT(policy.hold(1, {7, 8}, start));
+    CHECK_COUNT(policy.held() == 1);
+    CHECK_COUNT(!policy.ready(1));
+    policy.finished(7);  // one dependency of two: still not ready
+    CHECK_COUNT(!policy.ready(1));
+    policy.finished(8);
+    CHECK_COUNT(policy.ready(1));
+    // A second token, at the bound: a third is refused, which is the queue's signal to take the old synchronous wait.
+    CHECK_COUNT(policy.hold(2, {9}, start));
+    CHECK_COUNT(policy.at_bound());
+    CHECK_COUNT(!policy.hold(3, {10}, start));
+    CHECK_COUNT(policy.bound_refusals() == 1);
+    CHECK_COUNT(policy.peak_held() == 2);
+    // The budget: at 1000 us the hold is expired, one microsecond earlier it is not, and an unknown token never is.
+    CHECK_COUNT(!policy.expired(1, start + std::chrono::microseconds(999)));
+    CHECK_COUNT(policy.expired(1, start + std::chrono::microseconds(1000)));
+    CHECK_COUNT(!policy.expired(99, start + std::chrono::microseconds(10'000)));
+    policy.release(1);
+    CHECK_COUNT(policy.held() == 1);
+    CHECK_COUNT(policy.released() == 1);
+    CHECK_COUNT(policy.ready(1));  // released: no dependency any more
+    policy.note_fallback();
+    policy.note_forced();
+    policy.note_timeout();
+    const std::string report = policy.report();
+    CHECK_COUNT(report.find("[rt] pipeline submit hold: bound 2, budget 1 ms") != std::string::npos);
+    CHECK_COUNT(report.find("fallback waits 1") != std::string::npos);
+    CHECK_COUNT(report.find("forced 1") != std::string::npos);
+    CHECK_COUNT(report.find("timeouts 1") != std::string::npos);
+    // Shutdown/teardown drops the tokens that were still held (the queue's held batches are dropped with the queue).
+    policy.clear();
+    CHECK_COUNT(policy.held() == 0);
+    CHECK_COUNT(policy.dropped() == 1);
+    CHECK_COUNT(policy.ready(2));
+    // A disabled policy is what the unset switch leaves in the context.
+    dc::PipelineHoldPolicy off;
+    CHECK_COUNT(!off.enabled());
+    CHECK_COUNT(off.report().find("pipeline submit hold: bound 16") != std::string::npos);
+    return 0;
+}
+
+// docs/peer_port_streaming.md: the submit wait split. A wait the submitting thread spent in a driver build it claimed
+// itself (`wait_or_build` on a still-queued task) is the measured build-on-the-title-thread case the non-blocking hold
+// removes; a wait for a worker's in-flight build is not that. The report names each waiting thread.
+static int test_wait_attribution() {
+    dc::CompileQueue queue(8);
+    CHECK(queue.start(1));
+    Gate gate;
+    const auto first = queue.submit([&] {
+        gate.wait();
+        return true;
+    });
+    CHECK(first != nullptr);
+    for (int i = 0; i < 2000 && first->state() == dc::CompileQueue::Task::State::queued; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(first->state() == dc::CompileQueue::Task::State::building);
+    const auto second = queue.submit([] { return true; });
+    CHECK(second != nullptr);
+    CHECK(queue.wait_or_build(second));  // this thread builds it: one wait, one build on the waiting thread
+    CHECK(queue.waits() == 1);
+    CHECK(queue.wait_builds() == 1);
+    CHECK(queue.wait_build_us() <= queue.wait_us());
+    CHECK(queue.wait_threads_text().find("built-on-submit 1") != std::string::npos);
+    // The worker's build is a plain wait: it is not the waiting thread's build.
+    gate.open_now();
+    CHECK(queue.wait(first));
+    CHECK(queue.waits() == 2);
+    CHECK(queue.wait_builds() == 1);
+    // A second thread's waits get their own line in the report.
+    const auto third = queue.submit([] { return true; });
+    CHECK(third != nullptr);
+    std::thread waiter([&] { queue.wait(third); });
+    waiter.join();
+    CHECK(queue.wait_threads_text().find("submit waits on tid") != std::string::npos);
+    queue.stop();
+    return 0;
+}
+
 int main() {
     int result = test_unstarted();
     if (!result) result = test_state_machine();
@@ -363,6 +483,9 @@ int main() {
     if (!result) result = test_newest_first();
     if (!result) result = test_stats();
     if (!result) result = test_queue_report_extra();
+    if (!result) result = test_pipeline_hold_switch();
+    if (!result) result = test_pipeline_hold_policy();
+    if (!result) result = test_wait_attribution();
     if (result) return result;
     std::printf("deferred compile: ok (%d check(s))\n", checks);
     return 0;

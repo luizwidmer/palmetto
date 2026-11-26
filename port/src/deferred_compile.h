@@ -25,15 +25,25 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace palmetto {
+
+// A stable 64-bit id for the calling thread (std::thread::id's hash), for the per-thread counters and the boot logs.
+inline std::uint64_t thread_hash() {
+    static thread_local const std::uint64_t id =
+        static_cast<std::uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    return id;
+}
 
 // A bounded pool of compile workers. One entry point for both the deferred path and its fallback: `submit` returns
 // nullptr when the switch is off, the pool was never started, or the queue is at its bound; the caller then takes the
@@ -132,7 +142,7 @@ public:
         if (!task) return false;
         const auto started = Clock::now();
         const bool ok = wait_finished(task);
-        record_wait(started);
+        record_wait(started, false);
         return ok;
     }
 
@@ -158,7 +168,7 @@ public:
             }
         }
         const bool ok = claimed ? build_task(task) : wait_finished(task);
-        record_wait(started);
+        record_wait(started, claimed);
         return ok;
     }
 
@@ -212,6 +222,32 @@ public:
     std::uint64_t waits() const { return waits_.load(std::memory_order_relaxed); }
     std::uint64_t wait_us() const { return wait_us_.load(std::memory_order_relaxed); }
     std::uint64_t longest_wait_us() const { return wait_us_max_.load(std::memory_order_relaxed); }
+    // The submit waits split by who did the work (docs/peer_port_streaming.md): a wait the submitting thread spent in a
+    // driver build it claimed itself (`wait_or_build` on a still-queued task) is the build-on-the-title-thread case the
+    // non-blocking hold removes; the rest are waits for a worker's build already in flight.
+    std::uint64_t wait_builds() const { return wait_builds_.load(std::memory_order_relaxed); }
+    std::uint64_t wait_build_us() const { return wait_build_us_.load(std::memory_order_relaxed); }
+    std::uint64_t longest_wait_build_us() const { return wait_build_us_max_.load(std::memory_order_relaxed); }
+
+    // One line per thread that made a submit wait: which thread, how many, how long, and how many of them it built
+    // itself. The device appends these to its report so a boot names the thread the expectation is about.
+    std::string wait_threads_text() const {
+        std::lock_guard lock(mutex_);
+        std::string out;
+        for (std::size_t i = 0; i < wait_thread_count_; ++i) {
+            const WaitThread& thread = wait_threads_[i];
+            char line[256] = {};
+            std::snprintf(line, sizeof line,
+                          "[rt] deferred compile: submit waits on tid 0x%llx: %llu, total %.1f ms, max %.1f ms; "
+                          "built-on-submit %llu, %.1f ms, max single %.1f ms\n",
+                          ull(thread.thread), ull(thread.waits), static_cast<double>(thread.us) / 1000.0,
+                          static_cast<double>(thread.us_max) / 1000.0, ull(thread.builds),
+                          static_cast<double>(thread.build_us) / 1000.0,
+                          static_cast<double>(thread.build_us_max) / 1000.0);
+            out += line;
+        }
+        return out;
+    }
 
 private:
     // Blocks until the task has finished, whichever thread built it.
@@ -222,16 +258,49 @@ private:
     }
 
     // Books one submit-path wait (both waits above call it, so the report's "submit waits" is the submission's own
-    // stall whether it was a queue wait or a build on the submitting thread).
-    void record_wait(Clock::time_point started) {
+    // stall whether it was a queue wait or a build on the submitting thread). `built_here` splits out the waits the
+    // submitting thread spent inside its own driver build.
+    void record_wait(Clock::time_point started, bool built_here) {
         const std::uint64_t us = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - started).count());
         ++waits_;
         wait_us_.fetch_add(us, std::memory_order_relaxed);
-        std::uint64_t longest = wait_us_max_.load(std::memory_order_relaxed);
-        while (us > longest && !wait_us_max_.compare_exchange_weak(longest, us, std::memory_order_relaxed)) {
+        bump_max(wait_us_max_, us);
+        if (built_here) {
+            ++wait_builds_;
+            wait_build_us_.fetch_add(us, std::memory_order_relaxed);
+            bump_max(wait_build_us_max_, us);
+        }
+        const std::uint64_t thread = thread_id();
+        std::lock_guard lock(mutex_);
+        std::size_t slot = 0;
+        while (slot < wait_thread_count_ && wait_threads_[slot].thread != thread) ++slot;
+        if (slot == wait_thread_count_) {
+            if (slot >= kMaxWaitThreads) return;  // counted in the totals, not followed per thread
+            wait_threads_[slot].thread = thread;
+            ++wait_thread_count_;
+        }
+        WaitThread& record = wait_threads_[slot];
+        ++record.waits;
+        record.us += us;
+        if (us > record.us_max) record.us_max = us;
+        if (built_here) {
+            ++record.builds;
+            record.build_us += us;
+            if (us > record.build_us_max) record.build_us_max = us;
         }
     }
+
+    static void bump_max(std::atomic<std::uint64_t>& counter, std::uint64_t value) {
+        std::uint64_t longest = counter.load(std::memory_order_relaxed);
+        while (value > longest && !counter.compare_exchange_weak(longest, value, std::memory_order_relaxed)) {
+        }
+    }
+
+    static unsigned long long ull(std::uint64_t value) { return static_cast<unsigned long long>(value); }
+
+    // A stable 64-bit id for the calling thread: std::thread::id's hash, which the same thread returns every call.
+    static std::uint64_t thread_id() { return thread_hash(); }
 
     // One build, whichever thread runs it (a compile worker, or the submitting thread from wait_or_build). The caller
     // has taken the task out of the queue; this marks it building, runs the closure, books the counters and wakes the
@@ -310,6 +379,17 @@ private:
 
     const std::size_t bound_;
     const bool newest_first_;
+    // The per-thread submit-wait records (bounded; a thread past the bound still moves the totals above).
+    static constexpr std::size_t kMaxWaitThreads = 32;
+    struct WaitThread {
+        std::uint64_t thread = 0;
+        std::uint64_t waits = 0;
+        std::uint64_t us = 0;
+        std::uint64_t us_max = 0;
+        std::uint64_t builds = 0;
+        std::uint64_t build_us = 0;
+        std::uint64_t build_us_max = 0;
+    };
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<std::shared_ptr<Task>> queue_;
@@ -330,6 +410,11 @@ private:
     std::atomic<std::uint64_t> waits_{0};
     std::atomic<std::uint64_t> wait_us_{0};
     std::atomic<std::uint64_t> wait_us_max_{0};
+    std::atomic<std::uint64_t> wait_builds_{0};
+    std::atomic<std::uint64_t> wait_build_us_{0};
+    std::atomic<std::uint64_t> wait_build_us_max_{0};
+    WaitThread wait_threads_[kMaxWaitThreads] = {};
+    std::size_t wait_thread_count_ = 0;
 };
 
 // Who enters pipeline creation and how long they spend in the driver. The switch constructs one instance
@@ -370,6 +455,13 @@ public:
     void note_compile_worker() {
         std::lock_guard lock(mutex_);
         thread_record(thread_id()).compile_worker = true;
+    }
+
+    // Called by the layer's pipeline-hold flusher thread on entry (docs/peer_port_streaming.md): a boot's report then
+    // says where a budget-forced build ran, so it cannot be read as a title thread compiling.
+    void note_hold_flusher() {
+        std::lock_guard lock(mutex_);
+        thread_record(thread_id()).hold_flusher = true;
     }
 
     std::uint64_t creation_calls(bool graphics) const { return creation_calls_[graphics ? 0 : 1].load(); }
@@ -437,7 +529,7 @@ public:
             std::snprintf(one, sizeof one,
                           "[rt] pipeline caller tid 0x%llx%s: create graphics %llu compute %llu; driver graphics %llu "
                           "compute %llu, %.1f ms, max single %.1f ms; longest create %.1f ms\n",
-                          ull(thread.thread), thread.compile_worker ? " [compile worker]" : "",
+                          ull(thread.thread), role_text(thread),
                           ull(thread.creation_calls[0]), ull(thread.creation_calls[1]), ull(thread.driver_calls[0]),
                           ull(thread.driver_calls[1]),
                           static_cast<double>(thread.driver_us[0] + thread.driver_us[1]) / 1000.0,
@@ -458,7 +550,14 @@ private:
         std::uint64_t driver_us_max = 0;
         std::uint64_t creation_us_max = 0;
         bool compile_worker = false;
+        bool hold_flusher = false;
     };
+
+    static const char* role_text(const ThreadRecord& thread) {
+        if (thread.compile_worker) return " [compile worker]";
+        if (thread.hold_flusher) return " [hold flusher]";
+        return "";
+    }
 
     static std::uint64_t now_us() {
         return static_cast<std::uint64_t>(
@@ -573,6 +672,225 @@ private:
     std::atomic<std::uint64_t> concurrent_driver_{0};
     std::atomic<std::uint64_t> concurrent_driver_max_{0};
     ThreadRecord overflow_{};
+};
+
+// ---- the non-blocking submission hold (docs/peer_port_streaming.md) -----------------------------------------------
+//
+// The deferred compile above moves the driver build off the title's threads, but the submission that first names a
+// pipeline still waits for it on the thread that submits (VulkanQueue::execute_now -> prepare_pipelines). That thread
+// is a title thread, and the peer audit (docs/peer_port_streaming.md sections 5-6) ranks "no title thread waits for a
+// pipeline build" as the first port: the peers build on their own workers and never park the submitting thread. This
+// section is the GPU-free half of our own version of that port: the switch parsing, and the book that tracks which
+// held submission waits for which deferred pipeline ids and enforces two budgets.
+//
+// The queue owns the batch itself (its existing held_ deque: a copy of the lists, the pins that keep the pipeline
+// states alive, and the Wait fences), so ordering and lifetime come from the machinery docs/queue_holds.md already
+// covers. What is here is only the decision: may this submission be held (bound), is the submission whose token is X
+// ready (all its pipeline ids finished), has it been held past its budget (force the old wait), and the counters that
+// the boot report prints.
+//
+// The switch is PALMETTO_PIPELINE_HOLD. Unset is the current path exactly: no submission is held for a pipeline and
+// every wait stays where it is. The parsers are pure so the unit test covers every spelling without an environment.
+
+struct PipelineHoldSettings {
+    bool enabled = false;               // PALMETTO_PIPELINE_HOLD
+    std::size_t bound = 16;             // PALMETTO_PIPELINE_HOLD_BOUND: the most submissions held for pipelines at once
+    std::uint64_t budget_us = 2'000'000;  // PALMETTO_PIPELINE_HOLD_BUDGET_MS: how long one may stay held (ms, x1000)
+};
+
+// True when the value is a switch-on spelling: set, not empty, and not 0/off/false/no (case-insensitive, blanks
+// trimmed). Every other value turns the switch on, as the repository's other switches do.
+inline bool pipeline_hold_switch_enabled(const char* value) {
+    if (!value) return false;
+    while (*value == ' ' || *value == '\t') ++value;
+    if (!*value) return false;
+    auto lower = [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; };
+    char text[8] = {};
+    std::size_t length = 0;
+    for (const char* c = value; *c && length + 1 < sizeof text; ++c) text[length++] = lower(*c);
+    while (length && (text[length - 1] == ' ' || text[length - 1] == '\t')) text[--length] = '\0';
+    return !(std::strcmp(text, "0") == 0 || std::strcmp(text, "off") == 0 || std::strcmp(text, "false") == 0 ||
+             std::strcmp(text, "no") == 0);
+}
+
+// The bound: unset or unusable reads the default 16; a parsed value is clamped to 1..1024 so a typo cannot turn the
+// hold into an unbounded queue and a 0 cannot disable the fallback by accident.
+inline std::size_t pipeline_hold_bound(const char* value) {
+    if (!value || !*value) return PipelineHoldSettings{}.bound;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (end == value) return PipelineHoldSettings{}.bound;
+    const unsigned long long clamped = parsed < 1 ? 1 : (parsed > 1024 ? 1024 : parsed);
+    return static_cast<std::size_t>(clamped);
+}
+
+// The budget in milliseconds (the report prints the value it read): unset reads 2000 ms, a parsed value is clamped to
+// 1..600000 ms. The budget is the age past which a submission held only for pipelines gets the old synchronous wait,
+// forced on the releasing thread, instead of staying held.
+inline std::uint64_t pipeline_hold_budget_ms(const char* value) {
+    constexpr std::uint64_t kDefaultMs = 2000;
+    if (!value || !*value) return kDefaultMs;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (end == value) return kDefaultMs;
+    return parsed < 1 ? 1 : (parsed > 600'000 ? 600'000 : parsed);
+}
+
+// The book of submissions held for pipelines. Thread-safe: a queue's submit thread adds and drops tokens, compile
+// workers mark ids finished, and the hold flusher asks what is ready or expired.
+class PipelineHoldPolicy {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    PipelineHoldPolicy() = default;
+    explicit PipelineHoldPolicy(PipelineHoldSettings settings) : settings_(settings) {}
+
+    const PipelineHoldSettings& settings() const { return settings_; }
+    bool enabled() const { return settings_.enabled; }
+
+    // Fills in the settings of a policy the device constructs disabled (the policy owns a mutex, so it is neither
+    // copyable nor movable; the switch is registered before any queue exists).
+    void configure(const PipelineHoldSettings& settings) {
+        std::lock_guard lock(mutex_);
+        settings_ = settings;
+    }
+
+    // The most submissions the budget allows held at once; past it the queue falls back to the old wait.
+    bool at_bound() const {
+        std::lock_guard lock(mutex_);
+        return settings_.bound && entries_.size() >= settings_.bound;
+    }
+    std::size_t held() const {
+        std::lock_guard lock(mutex_);
+        return entries_.size();
+    }
+
+    // Records submission `token` as held for `pipelines`. False when the budget is already used up (the caller then
+    // falls back to the old synchronous path); the caller must not keep the token in that case.
+    bool hold(std::uint64_t token, std::vector<std::uintptr_t> pipelines, Clock::time_point now) {
+        std::lock_guard lock(mutex_);
+        if (settings_.bound && entries_.size() >= settings_.bound) {
+            ++bound_refusals_;
+            return false;
+        }
+        Entry entry;
+        entry.pipelines = std::move(pipelines);
+        entry.done.assign(entry.pipelines.size(), false);
+        entry.held_at = now;
+        entries_[token] = std::move(entry);
+        ++held_total_;
+        if (entries_.size() > peak_held_) peak_held_ = entries_.size();
+        return true;
+    }
+
+    // A compile worker finished this pipeline id: every held submission naming it loses that dependency.
+    void finished(std::uintptr_t id) {
+        std::lock_guard lock(mutex_);
+        for (auto& [token, entry] : entries_) {
+            for (std::size_t i = 0; i < entry.pipelines.size(); ++i)
+                if (entry.pipelines[i] == id) entry.done[i] = true;
+        }
+    }
+
+    // Every pipeline this token names has been built (a failed build counts as finished: the held batch is released
+    // and the replay refuses it, the same honest answer the eager path gives for an unresolved pipeline).
+    bool ready(std::uint64_t token) const {
+        std::lock_guard lock(mutex_);
+        const auto it = entries_.find(token);
+        if (it == entries_.end()) return true;
+        for (const bool done : it->second.done)
+            if (!done) return false;
+        return true;
+    }
+
+    // The token has been held longer than its budget.
+    bool expired(std::uint64_t token, Clock::time_point now) const {
+        std::lock_guard lock(mutex_);
+        const auto it = entries_.find(token);
+        if (it == entries_.end()) return false;
+        const auto age = std::chrono::duration_cast<std::chrono::microseconds>(now - it->second.held_at).count();
+        return age >= static_cast<long long>(settings_.budget_us);
+    }
+
+    // The token's submission has run or been dropped. Books how long it was held.
+    void release(std::uint64_t token) {
+        std::lock_guard lock(mutex_);
+        const auto it = entries_.find(token);
+        if (it == entries_.end()) return;
+        const auto age = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - it->second.held_at).count();
+        const std::uint64_t age_us = age < 0 ? 0 : static_cast<std::uint64_t>(age);
+        if (age_us > longest_hold_us_) longest_hold_us_ = age_us;
+        entries_.erase(it);
+        ++released_;
+    }
+
+    // The token's held batch was dropped without running (queue teardown, a fence released under it, device loss):
+    // the same bookkeeping as release, counted apart so a boot can say how much held work never ran.
+    void drop(std::uint64_t token) {
+        release(token);
+        ++dropped_;
+    }
+
+    // Queue shutdown/teardown: the tokens are gone with the held batches.
+    void clear() {
+        std::lock_guard lock(mutex_);
+        dropped_ += entries_.size();
+        entries_.clear();
+    }
+
+    // Counters the boot report prints. `fallback` is one submission whose own submit thread took the old synchronous
+    // wait because the hold budget could not take it; `forced` is a held submission completed by that wait when its
+    // budget expired; `timeout` counts the expiry decision itself (one per forced release).
+    void note_fallback() { ++fallbacks_; }
+    void note_forced() { ++forced_; }
+    void note_timeout() { ++timeouts_; }
+
+    std::uint64_t held_total() const { return held_total_.load(std::memory_order_relaxed); }
+    std::uint64_t released() const { return released_.load(std::memory_order_relaxed); }
+    std::uint64_t fallbacks() const { return fallbacks_.load(std::memory_order_relaxed); }
+    std::uint64_t forced() const { return forced_.load(std::memory_order_relaxed); }
+    std::uint64_t timeouts() const { return timeouts_.load(std::memory_order_relaxed); }
+    std::uint64_t bound_refusals() const { return bound_refusals_.load(std::memory_order_relaxed); }
+    std::uint64_t dropped() const { return dropped_.load(std::memory_order_relaxed); }
+    std::uint64_t peak_held() const { return peak_held_.load(std::memory_order_relaxed); }
+    std::uint64_t longest_hold_us() const { return longest_hold_us_.load(std::memory_order_relaxed); }
+
+    // One report line (the device appends it to the deferred-compile line only when the switch is on).
+    std::string report() const {
+        char line[384] = {};
+        std::snprintf(line, sizeof line,
+                      "[rt] pipeline submit hold: bound %zu, budget %llu ms; held now %zu, peak %llu; holds %llu, "
+                      "releases %llu, forced %llu, timeouts %llu, bound refusals %llu, fallback waits %llu, dropped "
+                      "%llu; longest hold %.1f ms\n",
+                      settings_.bound, static_cast<unsigned long long>(settings_.budget_us / 1000), held(),
+                      static_cast<unsigned long long>(peak_held()), static_cast<unsigned long long>(held_total()),
+                      static_cast<unsigned long long>(released()), static_cast<unsigned long long>(forced()),
+                      static_cast<unsigned long long>(timeouts()),
+                      static_cast<unsigned long long>(bound_refusals()),
+                      static_cast<unsigned long long>(fallbacks()), static_cast<unsigned long long>(dropped()),
+                      static_cast<double>(longest_hold_us()) / 1000.0);
+        return line;
+    }
+
+private:
+    struct Entry {
+        std::vector<std::uintptr_t> pipelines;
+        std::vector<bool> done;
+        Clock::time_point held_at;
+    };
+
+    mutable std::mutex mutex_;
+    PipelineHoldSettings settings_;
+    std::unordered_map<std::uint64_t, Entry> entries_;
+    std::atomic<std::uint64_t> held_total_{0};
+    std::atomic<std::uint64_t> released_{0};
+    std::atomic<std::uint64_t> fallbacks_{0};
+    std::atomic<std::uint64_t> forced_{0};
+    std::atomic<std::uint64_t> timeouts_{0};
+    std::atomic<std::uint64_t> bound_refusals_{0};
+    std::atomic<std::uint64_t> dropped_{0};
+    std::atomic<std::uint64_t> peak_held_{0};
+    std::atomic<std::uint64_t> longest_hold_us_{0};
 };
 
 }  // namespace palmetto

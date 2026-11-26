@@ -12,6 +12,7 @@
 #include "binary_occlusion_spirv.h"
 #include "buffer_va_index.h"
 #include "console_va_map.h"
+#include "deferred_compile.h"
 #include "occlusion_sum_spirv.h"
 #include "queue_holds.h"
 #include "retire_tickets.h"
@@ -2546,6 +2547,47 @@ public:
     void prepare_pipelines(std::span<const CommandList* const> lists) {
         if (prepare_pipelines_) prepare_pipelines_(lists);
     }
+    // ---- non-blocking submission hold (docs/peer_port_streaming.md) ----------------------------------------------
+    //
+    // The measured problem: the deferred compile moves the driver build off the title's threads, but the submission
+    // that first names a still-unbuilt pipeline waits for it inside prepare_pipelines above - on the thread that
+    // submits, a title thread. The peer audit ranks "never wait for a pipeline build on a title thread" first. The
+    // queue's own fix is here: when the switch is on and a listed dispatch names a pipeline the compile queue has not
+    // finished, the submission is held (the queue's held_ deque, with the lists copied and their pipeline states
+    // pinned) instead of executed; it is replayed by the next submit/present on the submitting thread or by the
+    // device's hold flusher as soon as every pipeline it names has finished, in submission order. `collect` answers
+    // "does this batch name an unfinished deferred pipeline, and which ids"; `finished` answers "have all these ids
+    // finished"; `wake` wakes the device's flusher. With the switch off nothing is registered and every call below is
+    // one false branch: the default path is unchanged.
+    using PipelineHoldCollectFn =
+        std::function<bool(std::span<const CommandList* const>, std::vector<std::uintptr_t>&)>;
+    using PipelineHoldFinishedFn = std::function<bool(std::span<const std::uintptr_t>)>;
+    void set_pipeline_hold(PipelineHoldCollectFn collect, PipelineHoldFinishedFn finished, std::function<void()> wake,
+                           const PipelineHoldSettings& settings) {
+        std::unique_lock lock(resource_mutex_);
+        pipeline_hold_collect_ = std::move(collect);
+        pipeline_hold_finished_ = std::move(finished);
+        pipeline_hold_wake_ = std::move(wake);
+        pipeline_hold_.configure(settings);
+        pipeline_hold_enabled_ = pipeline_hold_.enabled() && pipeline_hold_collect_ && pipeline_hold_finished_;
+    }
+    bool pipeline_hold_enabled() const { return pipeline_hold_enabled_; }
+    // True when `lists` name at least one deferred pipeline the compile workers have not finished; `out` gets those ids.
+    bool collect_pending_pipelines(std::span<const CommandList* const> lists, std::vector<std::uintptr_t>& out) const {
+        if (!pipeline_hold_enabled_) return false;
+        return pipeline_hold_collect_(lists, out);
+    }
+    // True when every one of `ids` has finished (built, failed or cancelled); an id the device does not know finished.
+    bool pipelines_finished(std::span<const std::uintptr_t> ids) const {
+        return !pipeline_hold_enabled_ || !pipeline_hold_finished_ || pipeline_hold_finished_(ids);
+    }
+    PipelineHoldPolicy& pipeline_hold() { return pipeline_hold_; }
+    const PipelineHoldPolicy& pipeline_hold() const { return pipeline_hold_; }
+    void wake_pipeline_hold() {
+        if (pipeline_hold_enabled_ && pipeline_hold_wake_) pipeline_hold_wake_();
+    }
+    // The boot report's hold line; empty unless the switch is on.
+    std::string pipeline_hold_report() const { return pipeline_hold_enabled_ ? pipeline_hold_.report() : std::string(); }
     // The arena span that stands in for a title span, and the reverse (arena span -> title span); used by the device's
     // page pull to find source and destination.
     bool console_va_span(std::uint64_t title, ConsoleVaKind kind, std::uint64_t& arena,
@@ -3051,6 +3093,14 @@ private:
     std::function<bool()> deferred_image_binder_;  // deferred image backing, before a submission records
     std::function<void()> page_watch_tick_;  // docs/texture_source.md: the page-writer watch, once per submission
     std::function<void(std::span<const CommandList* const>)> prepare_pipelines_;  // docs/deferred_compile.md
+    // Non-blocking submission hold (docs/peer_port_streaming.md): registered only when PALMETTO_PIPELINE_HOLD is set.
+    // The collect/finished hooks read the device's deferred-compile task map; the wake hook starts the device's hold
+    // flusher so a held submission is completed off the title's thread as soon as its pipelines are built.
+    PipelineHoldCollectFn pipeline_hold_collect_;
+    PipelineHoldFinishedFn pipeline_hold_finished_;
+    std::function<void()> pipeline_hold_wake_;
+    mutable PipelineHoldPolicy pipeline_hold_;
+    bool pipeline_hold_enabled_ = false;
     std::function<std::string()> pipeline_census_;  // docs/memory_growth.md: the live-pipeline budget's counters
     std::function<void(std::uint64_t, std::uint64_t)> console_arena_pull_;  // a copy's source range -> arena stand-in
     // Title pages a command names directly (docs/vertex_buffer_va.md): the device imports the title's own pages as a
@@ -3461,23 +3511,72 @@ public:
     ReplayResult execute(std::span<const CommandList* const> lists, const PinFn& pin = {}) {
         ReplayResult result = ReplayResult::success;
         bool held = false;
+        bool pipeline_held = false;
         std::vector<std::shared_ptr<void>> retired;  // destroyed after state_mutex_ is released
         timeline::line("exec entry n=%u", static_cast<unsigned>(lists.size()));
         const double started = timeline::seconds();
         {
             std::lock_guard state(state_mutex_);
-            if (!must_hold()) {
-                result = execute_now(lists);
-            } else if (context_.is_device_lost()) {
-                result = ReplayResult::unsupported;
-            } else {
-                Deferred op;
-                op.kind = Deferred::Kind::batch;
-                op.lists.reserve(lists.size());
-                for (const CommandList* list : lists) op.lists.push_back(*list);
-                if (pin) op.pins.push_back(pin());
-                hold(std::move(op));
-                held = true;
+            // Non-blocking pipeline hold (docs/peer_port_streaming.md): when the switch is on and a listed dispatch
+            // names a deferred pipeline the compile queue has not finished, hold the submission instead of waiting for
+            // the build on this (a title) thread. It is replayed in order, by the next submit/present or by the
+            // device's hold flusher, once every pipeline it names has finished. The budget bounds the hold: at the
+            // bound the oldest pipeline holds are completed by the old synchronous wait here, and if the gate still
+            // refuses this submission it takes the old wait itself - the declared fallback - and is held for order
+            // only, as a batch behind held work already is.
+            std::vector<std::uintptr_t> pending;
+            const bool wants_pipeline_hold =
+                context_.pipeline_hold_enabled() && !context_.is_device_lost() &&
+                context_.collect_pending_pipelines(lists, pending);
+            if (wants_pipeline_hold) {
+                if (context_.pipeline_hold().at_bound()) force_oldest_pipeline_holds_locked();
+                const std::uint64_t token = context_.holds().next_seq();
+                if (context_.pipeline_hold().hold(token, pending, std::chrono::steady_clock::now())) {
+                    Deferred op;
+                    op.kind = Deferred::Kind::batch;
+                    op.hold_token = token;
+                    op.lists.reserve(lists.size());
+                    for (const CommandList* list : lists) op.lists.push_back(*list);
+                    if (pin) op.pins.push_back(pin());
+                    hold(std::move(op));
+                    held = true;
+                    pipeline_held = true;
+                    // A build may have finished between the collect above and this hold: the completion notification
+                    // that would have marked it is already past, so mark it now (the check reads the device's live
+                    // task state) and wake the flusher, which releases the batch if nothing is pending any more.
+                    for (const std::uintptr_t id : pending)
+                        if (context_.pipelines_finished(std::span<const std::uintptr_t>(&id, 1)))
+                            context_.pipeline_hold().finished(id);
+                    context_.wake_pipeline_hold();
+                } else {
+                    context_.pipeline_hold().note_fallback();
+                    context_.prepare_pipelines(lists);  // the previous behaviour, on this thread
+                }
+            }
+            if (!pipeline_held) {
+                if (!must_hold()) {
+                    result = execute_now(lists);
+                } else if (context_.is_device_lost()) {
+                    result = ReplayResult::unsupported;
+                } else {
+                    Deferred op;
+                    op.kind = Deferred::Kind::batch;
+                    op.lists.reserve(lists.size());
+                    for (const CommandList* list : lists) op.lists.push_back(*list);
+                    if (pin) op.pins.push_back(pin());
+                    // Held behind earlier work, but it may name unfinished pipelines too: gate its replay on them, so
+                    // the thread that releases it never has to wait for a build either.
+                    if (context_.pipeline_hold_enabled()) {
+                        std::vector<std::uintptr_t> also;
+                        if (context_.collect_pending_pipelines(lists, also)) {
+                            const std::uint64_t token = context_.holds().next_seq();
+                            context_.pipeline_hold().hold(token, std::move(also), std::chrono::steady_clock::now());
+                            op.hold_token = token;
+                        }
+                    }
+                    hold(std::move(op));
+                    held = true;
+                }
             }
             drain_pins(retired);
         }
@@ -3498,7 +3597,10 @@ public:
                 if (idle == VK_ERROR_DEVICE_LOST) context_.mark_device_lost();
             }
         }
-        if (held) context_.holds().pump_ready();  // a Signal may have been submitted since the check
+        if (held) {
+            context_.holds().pump_ready();  // a Signal may have been submitted since the check
+            if (pipeline_held) context_.wake_pipeline_hold();
+        }
         return result;
     }
 
@@ -5245,6 +5347,9 @@ private:
         enum class Kind : std::uint8_t { batch, signal, marker };
         Kind kind = Kind::batch;
         std::uint64_t seq = 0;  // QueueHolds::next_seq(): the order operations were held in, across queues
+        // Nonzero: this batch is also held for the deferred pipelines the hold policy's entry for this token names
+        // (docs/peer_port_streaming.md). 0: held only for order and/or a pending Wait.
+        std::uint64_t hold_token = 0;
         std::vector<VkSemaphore> waits;
         std::vector<std::uint64_t> wait_values;
         std::vector<CommandList> lists;  // batch: copies, so the application may Reset its lists after the call
@@ -5353,7 +5458,46 @@ private:
         for (auto& pin : later_pins) wait_pins_.push_back(std::move(pin));
     }
 
-    bool ready(const Deferred& op) const { return !waits_pending(op.waits, op.wait_values); }
+    // A held batch may run when every Wait it carries has a submitted Signal and every deferred pipeline it names
+    // has finished (docs/peer_port_streaming.md). The pipeline half is absent for an ordinary held batch (token 0).
+    bool ready(const Deferred& op) const {
+        if (waits_pending(op.waits, op.wait_values)) return false;
+        return !op.hold_token || context_.pipeline_hold().ready(op.hold_token);
+    }
+
+    // The previous behaviour for one held submission, forced by the hold budget: wait for (or build) every pipeline
+    // it names on this thread, then run it. Only called with state_mutex_ held and only when the budget is exceeded or
+    // expired, so the fallback the slice keeps is exactly the old synchronous wait - moved off the submission's own
+    // call to the thread that finds the hold at its bound (the submitting thread at the bound, the releasing thread at
+    // expiry), never to a worker of the title.
+    void force_pipeline_wait_locked(std::uint64_t token, Deferred& op) {
+        std::vector<const CommandList*> lists;
+        lists.reserve(op.lists.size());
+        for (CommandList& list : op.lists) lists.push_back(&list);
+        context_.pipeline_hold().release(token);
+        timeline::line("pipeline hold forced n=%u", static_cast<unsigned>(lists.size()));
+        if (!lists.empty()) context_.prepare_pipelines(lists);
+        run(op);
+    }
+
+    // At the hold bound: complete the oldest held submissions that wait only for pipelines by the old synchronous
+    // wait, in order, until the budget has room. A batch with fence waits cannot be forced (that would reorder it past
+    // the work ahead of it), and neither can a batch behind a held Signal/marker: the queue keeps its order.
+    void force_oldest_pipeline_holds_locked() {
+        std::vector<std::shared_ptr<void>> retired;
+        while (!held_.empty() && context_.pipeline_hold().at_bound()) {
+            Deferred& front = held_.front();
+            if (!front.hold_token || !front.waits.empty()) break;
+            const std::uint64_t token = front.hold_token;
+            if (context_.pipeline_hold().ready(token)) break;  // the next pump releases it
+            Deferred op = std::move(front);
+            held_.pop_front();
+            context_.holds().held_changed(-1);
+            context_.pipeline_hold().note_forced();
+            force_pipeline_wait_locked(token, op);
+        }
+        drain_pins(retired);
+    }
 
     // Holder: called by the thread whose Signal made a held operation ready (never with a queue lock held).
     bool release_ready() override {
@@ -5361,11 +5505,35 @@ private:
         bool released = false;
         {
             std::lock_guard state(state_mutex_);
-            while (!held_.empty() && (context_.is_device_lost() || ready(held_.front()))) {
+            const auto now = std::chrono::steady_clock::now();
+            while (!held_.empty()) {
+                Deferred& front = held_.front();
+                const bool lost = context_.is_device_lost();
+                if (!lost && !ready(front)) {
+                    // The budget: a submission held only for pipelines longer than it may be gets the old synchronous
+                    // wait here (docs/peer_port_streaming.md). A batch with fence waits keeps waiting for its fence.
+                    if (front.hold_token && front.waits.empty() &&
+                        context_.pipeline_hold().expired(front.hold_token, now)) {
+                        const std::uint64_t token = front.hold_token;
+                        Deferred op = std::move(front);
+                        held_.pop_front();
+                        context_.holds().held_changed(-1);
+                        context_.pipeline_hold().note_timeout();
+                        context_.pipeline_hold().note_forced();
+                        force_pipeline_wait_locked(token, op);
+                        released = true;
+                        continue;
+                    }
+                    break;
+                }
                 Deferred op = std::move(held_.front());
                 held_.pop_front();
                 context_.holds().held_changed(-1);
-                if (!context_.is_device_lost()) run(op);
+                if (op.hold_token) {
+                    if (lost) context_.pipeline_hold().drop(op.hold_token);
+                    else context_.pipeline_hold().release(op.hold_token);
+                }
+                if (!lost) run(op);
                 released = true;
             }
             drain_pins(retired);
@@ -5390,6 +5558,8 @@ private:
                 it = held_.erase(it);
                 context_.holds().held_changed(-1);
             }
+            for (const Deferred& op : dropped)
+                if (op.hold_token) context_.pipeline_hold().drop(op.hold_token);
         }
     }
 
@@ -5420,6 +5590,8 @@ private:
                          signals ? "; CPU waits on the fences of its held Signals are completed" : "");
             for (const Deferred& op : held_)
                 if (op.kind == Deferred::Kind::signal) context_.cancel_fence_waits(op.fence);
+            for (const Deferred& op : held_)
+                if (op.hold_token) context_.pipeline_hold().drop(op.hold_token);
             context_.holds().held_changed(-static_cast<std::int64_t>(held_.size()));
             dropped.swap(held_);
         }
