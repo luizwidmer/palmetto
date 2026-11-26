@@ -56,6 +56,25 @@ sole gate, XGameUi/XLauncher dialogs, XAppCapture, xg slot 10 tiling, DirectStor
 containers, `XMemIsToolsMemAvailable`, and the renderer/memory hypotheses already measured negative in the earlier
 pages.
 
+## Measured follow-ups
+
+The roadmap rows were taken up immediately after the campaign; this table records what the measurements retired and what
+they renamed, so the page cannot be read as a list of open hypotheses that are already settled.
+
+| roadmap row | measured outcome | evidence |
+|---|---|---|
+| 1. Session-3 loading/streaming record | **Negative for the storage path, writer named.** The storage shims delivered everything (both loader bursts done, status arrays complete, zero refusals, nothing in flight), and a per-thread write watch found the only writer of the completion dword is the loading record's own reset, storing zero. The completing producer had not been dispatched before the title's own stop. | decomp_stage.md sections 10-11 |
+| 2. Boot-media AC chain | **Retired: the producer is dead code in this image.** The present body is ticked but exits on its two keys; the media module is armed; the only producer of the type-0x24 set event has no call, jump or data pointer anywhere in the image. A clean 300 s boot confirms the keys stay zero and every capture is black. | decomp_first_ui.md section 11 |
+| 3. Per-record rasterizer decode | **Still open.** The content window's compose draw rasterises under a control when culling is off, and the source image is zero; the per-record state decode is still the next measured step for real content pixels. | vertex_buffer_va.md section 20 |
+| 4. Speech, offline user/save and input defaults | **Landed and measured: consumed, not sufficient.** The accessibility screen owner executes with the new defaults, but no present follows and the machine stays at stage 2 in a clean 300 s boot. | decomp_first_ui.md section 12 |
+| 5. Movie trigger and frame-buffer mapping | **Still open.** The movie module is bound and armed, its API is never entered in the measured window; the trigger path is the next measurement. | decomp_first_ui.md sections 3-4 |
+| 6. Deferred LUT/console-type probes | **Partially retired/renamed.** The type-5 LUT family's missing stride case is title-side; the remaining answer-shaped question is whether the console-type branch (kind 7 FSR) would skip the LUT command, which needs a registry-level console-type answer rather than a new renderer probe. | decomp_renderer.md sections 5-6, decomp_campaign.md roadmap |
+
+The dominant remaining wall for the picture is unchanged: stage 3 dies a few seconds after entry on the title-side
+class-0xa zero-byte overrun, so the first-run producers that follow stage 3 do not run. The campaign's own evidence says
+there is no runtime answer in that overrun; the console-type branch is the only measured lever that might avoid the
+command entirely, which is why it is the next experiment rather than another decode.
+
 ## Limits
 
 - Phase attribution in the import map is inferred for part of the surface (console DLLs 85/97 sites, GDK 200/358);
