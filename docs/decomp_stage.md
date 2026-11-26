@@ -655,3 +655,167 @@ sampler's lines. The static check reused the read-only Ghidra project copy secti
 (`D:\leonida-work\decomp-stage\ghidra-proj`), with decompiled C under `D:\leonida-work\slotwatch\decomp-writer`; no
 peer code was used and no game data is added: RVAs, field offsets, instruction bytes, values, counts and outcomes only.
 
+## 12. Measured: the record-completion writer is live in the boot for two other loading records, and the session-3 record's two dispatchers never run
+
+**Status: measured, diagnostic only, negative for the session-3 record; the producer is named and section 17's
+semaphore reading is corrected.** Section 11 named the completion dword's only writer as the reset and left two
+falsifiers: an execution probe on the streaming subscriber start `0x2355DD0` and the reset `0x22310D0`, and a
+wait-object trace of the loading task's semaphore (section 11.6). This section runs both in two clean 300 s light arms
+and adds the producer's static attribution: the dword is written by the record-completion function `0x5862370` when a
+caller passes the record's own poll index. In the second arm that function's **execution probe fired twice for two
+other loading records but never for `0x78AC9C8` slot 4**, and the two call sites that pass this record - the streaming
+subscriber's completion/stop virtual method `0x2355D40` and the task callback `0x27ED3A0` - never ran. The dword
+therefore stayed zero for the whole window (the reset's zero store is its only write), the session word stayed 3, the
+frame thread stayed in the 33 ms session-3 poll, the movie player held state `0x9` with `buffers 0`, the per-frame
+decode `0x2EF0E0` was never entered, and every capture and full-target readback is black. The wait trace refutes
+section 17's reading of the loading task: its semaphore is the task system's **worker idle wait**, released 11,791
+times in the same boot by title code at `0x6380`, not a wait that stops the loader. No runtime answer of ours is
+measured on the path, so no shim is changed and the default path is unchanged.
+
+### 12.1 The arms and the environment
+
+Two boots, one at a time under `_setup/boot_lock.ps1` (`-Who s3record`), `-Light`, through `tooling/boot_report.py`,
+300 s timeout. One binary: SHA-256 `2120E306743D2DBD...`, the section-16/17 gate build (unmodified tree). The
+environment is section 17.1's content environment - the template's deferred-compile/state-trace/stage-3-pump/alloc
+watch lines, `PALMETTO_CONTENT_PROBE=1`, `PALMETTO_GRAPHICS_CONSOLE_ROOT=1`, `PALMETTO_SLOT70_PUBLISH=1`,
+`PALMETTO_READBACK_FULL=1`, captures every 100 frames to 30, `PALMETTO_USER_TRACE=1`, `PALMETTO_INPUT_TRACE=1` - plus
+the mitigation `PALMETTO_TITLE_CLASS0A_SIZE=1` in every arm and these diagnostics:
+
+| switch | arm 1 `record1` | arm 2 `record2` |
+|---|---|---|
+| completion-dword watch | `PALMETTO_SLOT_WATCH=1` | `PALMETTO_SLOT_WATCH=1` |
+| execution probes | `PALMETTO_POKE_LOG=2355DD0,22310D0` | `PALMETTO_POKE_LOG=5862370,58623E0,2355D40,2EF0E0` |
+| record sampler | `PALMETTO_DS_RECORD=500,300` | `PALMETTO_DS_RECORD=500,300` |
+| stage-3 pump | `PALMETTO_STAGE3_PUMP=5,20,60,120,180,240` | same |
+| wait-object trace | `PALMETTO_WAIT_TRACE=70,100,130,170,220,280` | `PALMETTO_WAIT_TRACE=130,170,220,280` |
+
+| arm | wall | stage 3 (state clock) | session word | stop | device loss | captures / readbacks |
+|---|---|---|---|---|---|---|
+| `record1` | 300.2 s (timeout) | 96.0 s | 3 from 96.0 s to 298.0 s | ALIVE, 0 exceptions | 0 | 30, all mean rgb `0.00 0.00 0.00`; 4, all mean 0 max 0 |
+| `record2` | 300.2 s (timeout) | 76.0 s | 3 from 76.0 s to 296.0 s | ALIVE, 0 exceptions | 0 | 30, all mean rgb `0.00 0.00 0.00`; 4, all mean 0 max 0 |
+
+This is the first pair in the stage-3 programme with two clean long arms in a row: the stage-3 window is 202 s
+(`record1`) and 220 s (`record2`), and both boots kept submitting after the entry (13,741 and 17,691
+`ExecuteCommandLists` in the timeline; 9,135 and 13,885 of them after the stage-3 entry; the last at relative 299.2 s
+and 299.1 s). Both arms report the mitigation line "image+0x1555c10 redirected at 3 direct call site(s)".
+
+### 12.2 The completion producer, statically
+
+Section 10.6 left the dword's writer unnamed because the store goes through a register. It is now decompiled: the
+function `0x5862370` reads the title tick `0x4E4BA80`, and when its second argument (the record pointer's poll index)
+equals the record's own index (`**(int**)(record+0x190)`) it stores the tick at `record+0x18+index*0x50`, then walks
+the record's callback list at `+0x1A8` and notifies each callback with event code 6 [M, decompiled C]. Its entry gate
+`0x58623E0` takes `*(record+0x1A0)`: a null pointer allows the write, otherwise a flag word at `+0x198` and the
+record poll `0x41E8C0` decide [M]. The function has ten direct call sites; the two that pass the session-3 record
+`0x78AC9C8` with index `&0x1478ACBA0` (value 4) are the ones that matter here:
+
+| call site | caller | what the caller does | record it passes | measured in `record2` |
+|---|---|---|---|---|
+| `0x2355D6D` | `0x2355D40`, the streaming subscriber's virtual method at vtable `+0x60` | calls the job stop helper, then the writer, then posts event type `0xe` and calls the media state object's `+0x70` | `0x78AC9C8` / index 4 | **0 execution-probe hits** |
+| `0x27ED3BB` | `0x27ED3A0`, a task callback with no direct caller (function-pointer dispatch) | calls the writer, then the streaming update, then posts event type 9 | `0x78AC9C8` / index 4 | **0 hits, proved by the writer probe** |
+| `0x58622B4` | `0x58621D0` | pairs with the media event check | `0x147BB4CA0` / index 4 | not probed |
+| `0x1CFC349` | `0x1CFC320` (through `0x5A68B20`) | load-completion callbacks of another channel | `0x1474511B8` / index 0 | **1 writer hit at relative 26.6 s** |
+| `0x2207863` | `0x2207680` | state-checked completion of another channel | `0x147BD2320` / index 2 | **1 writer hit at relative 71.9 s** |
+| `0x21B741E` | `0x21B7310`, session handler 11 | media command check; the tail jump's record operand was not recovered | not recovered | not reached (session stays 3) |
+| `0x21B751D` | `0x21B7430`, session handler 12 | media command check | `0x147BD2140` / index 0 | not reached (session stays 3) |
+| `0xDCBC08`, `0x289E5B2`, `0x29DF27F` | `0xDCBAC0`, `0x289E470`, `0x29DF250` | other loading families | `0x147BB4978`, `0x1478B2A58`, `0x147BC4A00` | not probed |
+
+The start side is unchanged from section 11.4: the subscriber start `0x2355DD0` (vtable `+0x68`) calls the reset
+`0x22310D0` with the record literal and the poll index, executes the event's command block through `0x5BB4DE0`, and
+posts event type `0xe` into the loading event queue `0x147F00518`. So the only two dispatches that can store the
+session-3 record's completion are the subscriber's completion method and the task callback, and the second one's call
+is excluded by the writer probe itself (a call would have shown in it).
+
+### 12.3 What the two boots measured
+
+The completion watch and the execution probes, per arm. `record1` probes the start/reset pair named in section 11.6;
+`record2` probes the writer, its gate, the subscriber completion method and the movie per-frame decode. Every line is
+from the same boot as its controls.
+
+| measurement | `record1` | `record2` |
+|---|---|---|
+| completion-dword watch (DR0 on `image+0x78ACB20`) | 1 hit, value `0x0`, writer `game+0x2231126` (the reset), state `init 3, machine 3/3, loading 2, session 3`, poll index 4, loader armed 0/in-flight 0, all five slots `0/0/0`, at state clock 97.6 s | 1 hit, value `0x0`, writer `game+0x2231126` (the reset), at state clock 77.8 s |
+| same-boot live control (DR1, slot 0 tick) | 8,804 hits by 290 s | 13,404 hits by 290 s |
+| same-boot poll control (DR2, slot 4 tick) | 5,765 hits by 290 s | 6,325 hits by 290 s |
+| method control (DR3) | 5,681 hits; 110 threads armed | 5,624 hits; 110 threads armed |
+| subscriber start `0x2355DD0` | 1 hit at relative 97.5 s: `rcx` = subscriber object (vtable `game+0x61B2790`), `rdx` = event payload, payload qwords `0,0,0,0x100000000`, the dword it reads at `+0x18` is 0; return address `game+0x22FE404` | not probed |
+| reset `0x22310D0` | 1 hit: `rcx` = record `0x1478AC9C8`, `rdx` = 4, return address `game+0x2355DF2` | not probed |
+| writer `0x5862370` | not probed | **2 hits**: record `0x1474511B8` / index 0 at relative 26.6 s (caller `game+0x1CFC349`), record `0x147BD2320` / index 2 at relative 71.9 s (caller `game+0x22076863`); **no hit for `0x78AC9C8`** |
+| writer gate `0x58623E0` | not probed | 2 hits, `rcx` (the `record+0x1A0` object) `0x0`, `rdx` 0 and 2 - both calls allowed |
+| subscriber completion `0x2355D40` | not probed | **0 hits** |
+| movie per-frame decode `0x2EF0E0` | not probed | **0 hits** |
+| DirectStorage record sampler | 480 samples to +241.7 s: five completion dwords all 0, max `0x0`, slot 0 and slot 4 ticks advancing; header lists `+0x1A8`/`+0x1C0` 0 | 480 samples to +241.8 s: same, max `0x0` |
+
+The writer probe is the decisive control: in `record2` the completion writer was entered for two other loading records
+50 s and 5 s apart (the second one at relative 71.9 s, i.e. 4 s before this arm's stage-3 read at 76.0 s), and its gate
+returned "allowed" at both calls, so the debug-register-observed dword's silence is not a method failure and the store
+path is title-side and live. Those two calls passed other entries of the same eight-record loading table registered by
+`0x22D3B0`; the session-3 record `0x78AC9C8` shares poll index 4 with one other record, `0x147BB4CA0`, whose
+completion helper `0x58621D0` passes that record and not this one.
+
+The wait trace answers section 11.6's second falsifier and corrects section 17.2. The loading worker thread (tid 59404
+in `record1`, 38316 in `record2`) does wait on a semaphore with an infinite timeout, at `game+0x56A0D`, and the wait
+object table shows that semaphore released by title code `ReleaseSemaphore` at `game+0x6380`: handle `0x94c` had
+12,004 waits / 11,634 sets, handle `0x958` had 11,841 waits / 11,791 sets at the 130 s dump in the two arms. Seven
+other worker semaphores (`0x948`, `0x950`, `0x95c`, `0x1b78`, `0x1c28`, `0x1c40`, `0x1c8c`, `0x1c90`) sit at the same
+site with the same release site, and in `record2` the worker was running inside `loading-update` at the 60/120/180 s
+stage-3 pump samples. So the semaphore is the task executor's per-worker idle wait - the loader is not parked on a
+missing signal, and the loading tick keeps advancing in both arms (1,000 counts/s from the 96 s to the 296 s sample).
+The thread that really is parked is the frame thread: `Sleep(33)` at `game+0x21B70A5` (the session-3 poll) at every
+stage-3 pump sample of both arms, and no thread's blocked wait at any dump is an object our shims answer.
+
+| state/pixel witness | `record1` | `record2` |
+|---|---|---|
+| state changes after stage 3 | none: init 3 / loading 2 / session 3 from 96.0 s to 298.0 s | none: init 3 / loading 2 / session 3 from 76.0 s to 296.0 s |
+| movie player state `entity+0x1c4` | `0x3` at 92.0 s, `0x9` from 98.0 s to 298.0 s, handle non-null, `buffers 0` | `0x9` from 78.0 s to 296.0 s, handle non-null, `buffers 0` |
+| movie decode / frame-buffer registration | not probed (section 17 measured 0 hits) | per-frame decode `0x2EF0E0` 0 hits |
+| presenter captures | 30, 2564x1421, every mean rgb `0.00 0.00 0.00` | 30, same |
+| full-target readbacks | 4, draws 4636-4639, 3840x2160, mean 0, max 0 | 4, draws 3860-3863, mean 0, max 0 |
+| renderer submission | 13,741 command lists, 9,135 after the entry, last relative 299.2 s | 17,691 command lists, 13,885 after the entry, last relative 299.1 s |
+
+### 12.4 Verdict, limits and the next falsifier
+
+The verdict on the producer is a negative with both dispatches named and excluded in the same boot: the completion
+dword's producer is `0x5862370`, the session-3 record's two callers into it are the subscriber completion method
+`0x2355D40` (probe: 0 hits) and the task callback `0x27ED3A0` (excluded by the writer probe's silence on this record
+while the probe fired for two other records), and neither ran in the measured window. This is consistent with section
+10.5's producer-side measurement (storage delivered everything, nothing outstanding): no shim producer is in the
+path, so no shim behaviour changes and the default path stays byte-identical.
+
+- **A correction to section 17.2.** The loading task's semaphore wait is the task executor's idle wait (released by
+  title code `game+0x6380`, shared by eight workers), not a wait that stops the loader: the loading update keeps
+  running and its tick keeps advancing. The only parked thread on the path is the frame thread in the session-3 poll,
+  which is the consumer of the record this section leaves incomplete.
+- **The completion store path itself is proven live.** The writer/gate probes fired for other loading records in the
+  same boot; the negative is about which dispatcher runs for `0x78AC9C8`, not about the store code or our probe.
+- **Limits.** Two boots, one stage-3 window each; the writer probe covers the writer entry but not the gate's input for
+  this record (the record's `+0x1A0`/`+0x198` were not sampled when the store was absent); `0x27ED3A0` is excluded by
+  the writer probe rather than by a probe of its own entry; the completion method's name ("stop/finish") is inferred
+  from its body; and the vtable `+0x60` dispatch that should call `0x2355D40` has no named caller yet.
+- **Next falsifier.** Name the dispatch that should call the subscriber completion `0x2355D40` (or the task callback
+  `0x27ED3A0`): an execution probe on the `+0x60` call itself, on the loading event queue `0x147F00518` consumer that
+  receives the start's event type `0xe`, and on the job object the start built (`0x5BB4DE0`'s block) would separate
+  "the job finished and nobody called the completion" from "the job never finished". A boot in which a caller of the
+  completion runs should store a non-zero slot-4 dword and move session 3 -> 4 in one 33 ms pass.
+
+### 12.5 Tests and gates
+
+- No test target is added and no code file is edited: this slice uses the existing opt-in probes only
+  (`PALMETTO_SLOT_WATCH`, `PALMETTO_POKE_LOG`, `PALMETTO_DS_RECORD`, `PALMETTO_WAIT_TRACE`,
+  `PALMETTO_STAGE3_PUMP`), and every one of them is off in a default run.
+- Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, the GPU-free
+  gate targets exit 0, and every `tests/test_docs_*.py` check passes.
+- Evidence outside the repository: `D:\leonida-work\fsrstable\boot-record1`, `boot-record2` (stderr/stdout/summary/
+  meta), `capture-record1`, `capture-record2`, `readback-record1`, `readback-record2`, and the analysis scripts under
+  `D:\leonida-work\s3record` (`run_arm.ps1`, `analyze_record.py`, `find_calls_to.py`, `pe_rva.py`). No game data:
+  RVAs, offsets, register/pointer values, counts, times and image means only.
+
+### 12.6 Attribution
+
+This section was implemented from this project's own measurement: the two long arms, the completion watch and its
+controls, the execution probes, the wait-object dumps, the record sampler, the state-word timeline, the captures and
+readbacks, and the disassembled/decompiled start, reset, writer, gate and subscriber functions. The static check
+reused the read-only Ghidra project copy section 1 describes (`D:\leonida-work\decomp-stage\ghidra-proj`), with
+decompiled C under `D:\leonida-work\s3record\decomp-b6` through `decomp-b10`; no peer code was used and no game data
+is added: RVAs, field offsets, instruction bytes, values, counts and outcomes only.
+
