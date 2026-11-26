@@ -1776,3 +1776,427 @@ the structural reading of the pixel shaders is the earlier pages' and is cited, 
 and the fixed-function stand-in are the earlier slices' measurements ([state_blob.md](state_blob.md),
 [frame_capture.md](frame_capture.md)). No peer code was used and no game data is added: RVAs, VAs, resource ids,
 counts, formats, viewport/scissor values and outcomes only.
+
+## 18. The content draws' vertex stage fetched the descriptor table as its console driver block: the graphics user-data block is the PC packing, and the console layout makes the content geometry cover pixels
+
+**Status: measured, and the first content geometry to cover pixels.** Section 17 left the stage-3 content draws covering
+none of their 4K target under a constant-output pixel shader. This section tabulates the vertex feed of all three content
+draws, names the exact conversion gap, implements the console graphics root-argument feed and the console driver-block
+V# with a heap-relative base, and measures one A/B: on the default path a content draw's control writes
+`0/8,294,400` pixels; with `PALMETTO_GRAPHICS_CONSOLE_ROOT=1` the constant pass's control writes
+**4,147,200/8,294,400 pixels** (mean `16 80 120`, peak 240 - exactly the substituted `32 160 240` over the half-screen
+triangle the draw's vertices form), in two boots, and the content pass is fed too (its bounded arena staging copy
+succeeds). The presented target still reads black: the compose pass's matrix A is the empty table slot 0 and the slot-70
+publication arm (`PALMETTO_SLOT70_PUBLISH=1`) did not fill it. The stop is the pre-existing title allocator/writer
+family, the device is not lost and the default path is unchanged: the conversion is behind its switch and runs only
+inside the stage-3 content window.
+
+### 18.1 What this slice changes
+
+| file | change |
+|---|---|
+| `port/src/vulkan_replay.h` | `GraphicsPipeline::ConsoleParameter`/`console_ok`: the pipeline's root parameters at their console user-SGPR slots, filled by the shim from the root signature. `ReplayFunctions::buffer_arena_address` (is a resolved buffer the GPU address arena, and at what offset) and `stage_title_span` (a cached arena copy of a span of the title's own memory). The pure helpers `console_parameter_dwords`, `graphics_console_block` (place each parameter at its console slot, refuse overlap/spill/unrepresentable counts), `driver_block_range` (one 64-byte arena block per pipeline, shared by the two feeds) and `vertex_stream_arena_address` (the heap-relative address a driver-block V# may name). `PreparedDraw::console_user_data`: the converted block emit pushes instead of the recorded one. `prepare_draw`: the console conversion, the driver-block feed with the resolved base, and the vertex-path dump now prints the emitted console block and the reachable arena address |
+| `port/shims/d3d12_vulkan_device.cpp` | `GraphicsPipeline::console_ok`/`console_parameter` filled in `create_graphics` from `RootArgumentLayout` (both the created PSO and the shared recipe entry, so an adopted PSO carries it); `buffer_arena_address` (the arena buffer only) and `stage_title_span` (bounded eight ranges, 4 MiB each, re-copied per use, named refusal) with their registration |
+| `port/src/vulkan_backend.h` | the two setters for those callbacks |
+| `port/test/frame_dump_test.cpp` | 15 checks: the console dword width per parameter type, the measured table-only placement (the PC pair at s0/s1 becomes the one console dword at s8, s0/s1 zero), a table plus two constants (s8, s9/s10), and the four refusals |
+| `docs/vertex_buffer_va.md` | this section |
+
+All switches are off by default. With `PALMETTO_GRAPHICS_CONSOLE_ROOT` unset the recorded block is emitted exactly as
+before, the driver-block feed does not run and the vertex-path dump's new lines report the unchanged path; the loading
+frames and the constant-pass path are byte-identical because the conversion is gated to the content window as well.
+
+### 18.2 The vertex feed of the three content draws, measured
+
+The three draws of one content submission (boot `d2`, section 17.2's `boot-d2`; the same environment and binary as
+section 17) and what each translated vertex stage reads:
+
+| draw | title pipeline | shaders | published VS user-SGPR reads | console root layout | recorded block |
+|---|---|---|---|---|---|
+| A constant pass | `0x1874ebe0770` | `fspx/lib_vs_00821` + `fspx/lib_ps_00820` | `s0 ptr64_lo`, `s1 const32`, `s2 const32` | one descriptor table: console `s8`, 1 dword | `s0/s1` = table title-VA pair (arena `0xc2ae200`), `s2..s31` = 0 |
+| B content pass | `0x187538c1920` | `fspx/lib_vs_00107` + `fspx/lib_ps_00106` | `s0/s1/s2` as A, plus `s8 ptr32_lo` (the matrix table) | table at console `s8` (1 dword), then its 2 constants at `s9`/`s10` | `s0/s1` = table pair (arena `0xc2ce1a0`), `s2/s3` = the two constants (0), rest 0 |
+| C compose pass | `0x187535e42c0` | `fspx/lib_vs_00823` + `fspx/lib_ps_00822` | `s0/s1/s2` as A, plus `s8 ptr32_lo` (matrix A at `s8+0`, matrix B at `s8+0x40`) | table at console `s8`, 1 dword | `s0/s1` = table pair (arena `0xc2cd140`), rest 0 |
+
+The module reads the two dwords at `s0`/`s1` as the **console driver block's heap-relative address**
+(`heap_base + ((s1 & 0xFF) << 32 | (s0 & ~3))`, then a 4-dword V# there; docs/root_arguments.md section 3), and it reads
+its root arguments at the **console slots** - base `s8`, a descriptor table as ONE dword. What the driver-block fetch
+actually landed on is the measured conversion gap:
+
+| draw | fetch at the emitted `s0`/`s1` pair | what that V# says | the V# the console ABI needs |
+|---|---|---|---|
+| A | table slot 0: `009af210 00000000 00000060 30014fac` | V# address `0x9af210`, **stride 0**, 96 records, format 20 (the constant pass's 96-byte colour-source block, section 17.2) | the bound stream: arena `0x9ae220`, stride 24, **170 records**, format 22 |
+| B | table slot 0: `009ce1c0 00000000 00000040 30014fac` | V# address `0x9ce1c0`, stride 0, 64 records | the bound stream: view 1,179,648 B, stride 16, 73,728 records (title-pages import, 0x120000 B) |
+| C | table slot 0: `00000000 00000000 00000000 00000000` | **empty** - all four dwords zero | the bound stream: arena `0x9cd1b0`, stride 24, 170 records |
+
+A stride-0 V# makes every vertex fetch read the same element, so the triangle collapses to one point; and `s8`/`s9` are
+zero on the default path, so the two modules that fetch matrices at `s8` (B and C) read `heap_base + 0` - the arena's
+never-handed-out first 64 KiB, all zeros. That is the whole measured reason a constant-output pixel shader drawn with
+these draws' vertices, pipeline, raster state and target writes 0 of 8,294,400 pixels.
+
+### 18.3 The conversion gap, in three measured parts
+
+1. **The PC packing puts the descriptor table where the console driver block belongs.** The graphics bind point writes
+   `rt::rootsig::pack()`'s dwords from `s0` (two per descriptor table), while the translated stage reads `s0`/`s1` as the
+   driver block and its table at `s8`. The table VA that was put at `s0`/`s1` is exactly what the two stages read as a
+   V# address, which is why the fetch decodes to the table's slot 0 above.
+2. **The console graphics slots are not forwarded by default.** The dual feed that fills `s8+` (`PALMETTO_GRAPHICS_CONSOLE_ROOT`,
+   docs/root_arguments.md section 5b) is a diagnostic and is off; on these draws `s8..s31` are zero. The table's own
+   slots hold real producer data (B's `s8+0` block reads 32 non-zero bytes of a matrix, its `s8+0x40` slot is the
+   480-byte constants V#; C's `s8+0x40` is the constants V#), so forwarding the table is what gives a matrix-fetching
+   stage its data.
+3. **The driver-block V# base must be heap-relative.** The existing diagnostic feed
+   (`PALMETTO_VERTEX_STREAM_DESCRIPTOR`) emitted the resolved buffer's **offset** as the V# base. For a view that
+   resolves inside the GPU address arena that offset is the heap-relative address and the feed's internal acceptance
+   passed (docs/vertex_path.md section 8); for a view the layer imported over the title's own pages at first use - the
+   content pass's vertex stream - it is the offset inside the imported buffer (`0x800`/`0x900`), which the shader adds
+   to `heap_base` and reads as arena zeros. The content pass is therefore the measured case the old composition cannot
+   express.
+
+### 18.4 What we implemented
+
+* **The console block is built at emit time from the recorded PC block.** For a graphics pipeline whose signature has a
+  console placement, `graphics_console_block` places each parameter's resolved console dwords at its console slot and
+  zeroes every other dword: a descriptor table becomes ONE dword (the 32-bit arena-relative VA of its first descriptor,
+  resolved through the device's title-VA map at prepare time), a root descriptor keeps its two dwords, constants keep
+  their values. A placement that would overlap another parameter, spill past s31 or name more dwords than a parameter
+  has is refused by name and the draw keeps the recorded block. Because the block's dwords are already arena-relative,
+  the title-VA rebase scan is not run on it (the one 64-bit window the PC packing filled is gone).
+* **The console driver block is fed at `s0`/`s1`.** `vertex_stream_arena_address` resolves the draw's slot-0 vertex view
+  and returns the heap-relative address the V# must name: the arena offset when the view resolves inside the GPU address
+  arena, otherwise an arena staging copy of the title's pages (`stage_title_span`, bounded to eight 4 MiB ranges,
+  re-copied on each use because the title may rewrite its vertices). The copy is cut to the span the draw can reach - the
+  index values for an indexed draw, the first-vertex/count pair otherwise - because the content pass's whole 1.1 MiB
+  vertex stream did not fit the arena's free list in the measured boot (`title span staging: refused no arena room`).
+  The second console boot measured that refusal; the bounded span is this section's answer. The V# is the same measured
+  form (`vertex_stream_descriptor`: base, stride, records, format 22, identity swizzle, bounds structured-with-offset)
+  and it is written into one 64-byte driver block per pipeline (`driver_block_range`), shared with the existing
+  diagnostic feed. A view whose bytes are in neither place keeps the recorded pair and is named once.
+* **The conversion is gated to the content window.** It runs only while `title_import_capture()` is armed - the
+  submissions whose lists named title memory at first use, i.e. the stage-3 content draws this page measures - so the
+  loading frames, the constant-pass path and every other draw keep the exact recorded PC block.
+* **The vertex-path dump now prints what is emitted**: the converted console block, the `s0`/`s1`/`s8`/`s9` fetch bases,
+  the fetch slots decoded from the emitted bytes, and the reachable arena address of each bound view. This is the
+  position/coverage arm's measurement: the driver-block slot must decode to the bound view's V# (stride, record count).
+
+### 18.5 The A/B
+
+One boot per attempt, under the boot lock, the section-12 content environment (stage-3 pump, deferred compile, presenter
+captures, centre-window and full-target readbacks), 300 s timeout, the PS-only control
+(`PALMETTO_FRAME_DUMP_CONTROL_PS` = the project's `fs_solid`), the content probe and the vertex-path dump. The A/B pair
+(`bf2` control and `be1` console feed) is one binary, SHA-256 `E32BAF2EB8C9A5AE...`; `bc1` ran the same code path one
+build earlier (`184ADB2C96020441...`, before the bounded-staging cut) and is quoted for the first acceptance:
+
+| arm | switches added | boots | wall | stage 3 | stop | content control readbacks, submission 1 |
+|---|---|---|---|---|---|---|
+| A (control) | none | `bf1` (no stage 3, stopped 55.7 s at `game+0x86F981`), `bf2` | 127.0 s | yes | `game+0x13360A3` read -1 | intermediate `0/8,294,400` (draws 5187 and 5188), control `0/8,294,400`, display `0/8,294,400` |
+| B (console feed only) | `PALMETTO_GRAPHICS_CONSOLE_ROOT=1` | `bc1` (one build earlier, `184ADB2C...`) | 118.2 s | 66 s | `game+0x55AA4E6` write `0x3F8000003F98` | **intermediate 4,147,200/8,294,400, mean 16 80 120, peak 240**; display `0/8,294,400` |
+| C (console feed + slot 70; A/B pair with `bf2`, same binary) | + `PALMETTO_SLOT70_PUBLISH=1` | `be1` (`bd1` one build earlier: the full-span staging refused, draw B unfed) | 107.1 s (144.0 s) | 86 s (134 s) | `game+0x515ACF5` read `0x18` (`game+0x13360A3` read -1) | **intermediate 4,147,200/8,294,400**, draw B's driver block fed in `be1`; display `0/8,294,400` |
+
+* **The content geometry covers pixels in arm B.** The first submission's control readback over the intermediate target
+  reads `mean 16 80 120, non-black 4,147,200/8,294,400, peak 240`: the covered half is the constant pass's
+  lower-left half-screen triangle and its colour is exactly the substituted `32 160 240` (each channel halved by the
+  uncovered half). The readback PPM shows the triangle: the left edge at the top widens to the whole bottom row. In
+  arm A the same readback is `0/8,294,400` in both submissions and on every target.
+* **The measured vertex-feed acceptance.** Arm B's vertex-path dump for draw A reads
+  `fetch slot driver(s0/s1)+0x00: ... 003ae220 00180000 000000aa 00016fac -> V# buffer address 0x3ae220 stride 24
+  records 170 format 22` and `fetch slot table(s8)+0x00` decodes the table's slot 0 - the recorded block's own place
+  before the fix. Draw C is fed the same way (`V# address 0x3ad1b0 stride 24 records 170`) and its `s8` table decodes
+  to slot 1's T# (the intermediate image) and slot 2's constants V#. Both emit their converted block
+  (`emitted user data (the console graphics layout, 0 title VA(s) rebased)`) with `s8` = the table's arena VA.
+* **Draw B's vertex stream staging was measured and bounded.** In `bd1` the staging refused the whole 1.1 MiB span
+  (`title span staging: refused no arena room at VA 0x1842C400900 + 0x120000`), so draw B kept the recorded pair. The
+  copy is now cut to the span the draw can reach (the index values for an indexed draw, first-vertex/count otherwise);
+  in `be1` draw B's console line reads `console block placed (2 parameter(s), 0 refused), s8=..., driver block 0x1309e600
+  at s0/s1`, i.e. its V# is fed. The dump's own later request for the full span is refused because the bounded range is
+  already cached (`a shorter range is already cached for this VA`), which is why the dump line still prints
+  `unreachable`; it is a diagnostic artefact, the feed's own line is the acceptance.
+* **The presented target stays black, and the slot-70 arm did not fill matrix A.** Draw C's control readback is
+  `0/8,294,400` in every arm: the compose pass fetches matrix A from its table's slot 0, which is **empty**
+  (`00000000 00000000 00000000 00000000`), so its clip position is zero. Adding `PALMETTO_SLOT70_PUBLISH=1` (the
+  measured producer of the 128-byte transform block, [root_arguments.md](root_arguments.md) section 7,
+  [device_slot70.md](device_slot70.md) section 5) did not change that readback in `bd1`/`be1`, so the publication's
+  destination is not this compose table - the next falsifier (18.6).
+* **The second content submission's readbacks read 0 in both arms.** Its frame draws' targets are black in arm A too, so
+  the frame content explanation is unchanged, but the control readbacks appended in submission 2 read 0 in the console
+  arm as well (the first submission's read the coverage). Whether the second submission's target is copied before or
+  after its appended control is not measured here; the acceptance is submission 1's, in two boots. Named in 18.7.
+* **Nothing else moved.** Stage/loading/session words are section 17's shape (init 2 at 22-24 s, loading 1, loading 2
+  and session 1 around 62 s, stage 3/session 3 at 66 s `bc1`, 86 s `be1`, 134 s `bd1`); 143,329-158,298 D3D12 calls; no
+  `Vulkan device was lost` line; the stops are the title's own families sections 12-17 record (`0xC0000005` reads of
+  `-1`/`0x18` or the write into the `0x3F800000...` constant block), not a layer frame. Every presenter capture reads
+  `mean rgb 0.00` (the presented target is still the title's black compose output).
+
+### 18.6 The remaining gaps and the next falsifier
+
+1. **Matrix A of the compose pass is still not produced.** Draw C's `s8+0` is empty and `PALMETTO_SLOT70_PUBLISH=1` did
+   not fill it in the measured arm. The next measurement is where the slot-70 publication actually writes: record its
+   destination heap page/offset against the compose table's own title VA in the same boot (`PALMETTO_SLOT70_PROBE`,
+   [device_slot70.md](device_slot70.md)), and compare with the table slot the module fetches (`s8+0`). If the destination
+   is a different table, the compose's matrix is a title-side layout the layer has not named; if it is the same table and
+   the publication did not happen, the publication's placement/readability refusals are the next line.
+2. **The second content submission's zero readbacks.** The same-submission control readback order (appended control
+   before or after the target copy) is the first thing to check; the acceptance does not depend on it, but a 300 s arm
+   whose every content submission covers is the honest stronger result.
+3. **The default path.** The conversion stays behind `PALMETTO_GRAPHICS_CONSOLE_ROOT` because its acceptance (covered
+   pixels) arrives with the stop and the presented target still black; what would make it default is a 300 s boot whose
+   content and display targets are both non-black with the submission counters still growing.
+
+### 18.7 Limits
+
+- **One to two boots per arm, and the stage-3 reach is the environmental race.** Arm A needed two attempts (`bf1`
+  stopped before stage 3 at 55.7 s in a pre-existing family, `bf2` measured); arm B one (`bc1`); arm B+slot 70 two
+  (`bd1`, `be1`); one further console-feed attempt (`bb1`) was still in loading 2 at 114 s when it was stopped with the
+  state words intact. The control numbers quoted are this slice's own arm-A boot, not section 17's.
+- **The covered half is the constant pass's geometry through the control pixel shader.** The accepted 4,147,200 pixels
+  are draw A's half-screen triangle; draw B's own geometry is fed but its own pixel stage is the content pass's
+  (unmeasured colour here), draw C's compose is still degenerate. No title pixel is claimed.
+- **The staging copy is a layer-side stand-in.** It copies the title's own committed host pages into the arena, cut to the
+  draw's reachable span; it is not written back to the title's memory and disappears with the arena.
+- **The vertex-path dump's `driver-block-shaped V#` line does not stage.** A read-only dump reports an imported view as
+  `unreachable`; the V# the feed emitted is printed by the feed's own line and decoded in the fetch-slot lines.
+- **The pixel content is not claimed.** Even with coverage, draw A's own pixel shader writes its measured zero colour
+  block, so the intermediate's real frame is black; the accepted pixels are the control's.
+- **The presented captures are black.** 11 presenter captures (every 200 presented frames) read mean rgb 0.00, and the
+  display target's whole-target readback is 0 of 8,294,400.
+
+### 18.8 Tests and gates
+
+- `port/test/frame_dump_test.cpp` gains 15 checks for the console block: the per-type console dword width, the measured
+  table-only placement (PC pair at `s0/s1` -> one console dword at `s8`, `s0`/`s1` zero), a table plus two constants at
+  `s9`/`s10`, and the refusals (no parameter, two parameters on one dword, a placement past s31, an unrepresentable
+  dword count). The target exits 0.
+- Gate subset on the changed tree, all exit 0: `frame_dump_test`, `graphics_pso_test`, `graphics_record_test`,
+  `unimplemented_policy_test`, `buffer_va_index_test`. Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`,
+  `_setup\build_tests.cmd` prints `TESTS_BUILT`; `d3d12_fence_timing_test` remains the documented pre-existing crash.
+- The documentation checks: every `tests/test_docs_*.py` check passes, and the reused switches
+  `PALMETTO_GRAPHICS_CONSOLE_ROOT`, `PALMETTO_FRAME_DUMP_PS_CONTROL`, `PALMETTO_FRAME_DUMP_CONTROL_PS`,
+  `PALMETTO_READBACK_FULL`, `PALMETTO_CONTENT_PROBE` and `PALMETTO_VERTEX_PATH` are named in pages.
+
+### 18.9 Attribution
+
+This section was implemented from this project's own measurements: the per-draw command and vertex-path dumps of the
+content window (`boot-d2`, section 17), the console-feed arms (`bc1`, `bd1`, `be1`) and the control arm (`bf1`, `bf2`),
+and the published shader metadata's `user_sgpr_reads` field, disassembled with `spirv-dis` from the project's translated
+corpus (module names, SGPR numbers, offsets and structure only). The console user-SGPR layout, the driver-block V#
+encoding and the matrix roles are [root_arguments.md](root_arguments.md)'s,
+[vertex_constant_feed.md](vertex_constant_feed.md)'s and [vertex_path.md](vertex_path.md)'s; this section applies them to
+the content window and corrects the V# base's composition. No peer code was used and no game data is added: pipeline
+ids, VAs, strides, record counts, formats, user-data dwords and readback statistics only.
+
+## 19. The class-0xa overrun is not moved by the arena's base, alignment or front space: the title heap is anchored to the pointer we return and every placement arm stops in the same family within 0.9-4.1 s
+
+**Status: measured, and negative for a placement lever. The title's heap arena is one `XMemVirtualAlloc` request
+(`0x25400000` bytes, large-pages type, title caller `game+0x1e1d28d`). The three arms this slice adds place that answer
+further into a larger reservation (`prefix`), at a required 16 MiB alignment (`align`) or behind a 2 MiB guard
+allocation (`guard`); each changed the pointer we returned, measured in the same boot's shim log. Across the three arms
+the title's allocator object stayed at the same `0x3473020` offset from the returned pointer, the command object stayed
+in the same `0x4137xxx`-`0x433xxxx` band, and every stage-3 arm stopped 0.9-4.1 s after stage 3 in the title's own
+allocator/executor family: one constant-table upload pass, black content readbacks, 9-12 black presenter captures, no
+device lost. The overrun's victim (the free-class tree above a bump block versus the live command object under a
+reused block) is a loading-history lottery that the measured default-path boots show with every switch off; no arm
+survives the pass and none reaches a second content submission. The default path is unchanged: both switches are off
+unless set.**
+
+### 19.1 What this slice changes
+
+| file | change |
+|---|---|
+| `port/shims/xmem.cpp`, `port/shims/xmem.h` | `PALMETTO_XMEM_LAYOUT=<mode>[:<bytes>]` (`log`, `prefix:<hex>`, `align:<hex>`, `guard:<hex>`) and `PALMETTO_XMEM_LAYOUT_CALLER=<hex rva>`: a parsed plan (pure, refused to the default path on any unplaceable form), a bounded stderr record of every answer of at least 1 MiB (`log`), and the three placement arms, which only ever change the one measured title caller's answer. Off by default: one cached switch read, no allocation and no answer changed unless a switch is set |
+| `port/test/xmem_test.cpp` | 19 checks for the plan: unset/empty/zero leave the default path, the four modes and their arguments, the exact-caller match, and every refusal (no bytes, no caller, a malformed caller, a page-unaligned prefix, a non-power-of-two alignment, a zero guard, an over-limit argument, an unknown mode). The target exits 0 with 305 checks (286 before) |
+| `docs/vertex_buffer_va.md` | this section |
+
+The record line is one bounded stderr line per recorded answer (`[rt] xmem layout`): stage, caller module+RVA, request
+address/size/type/attributes/protect, answer, served size and the `VirtualQuery` of the answer. The arms are the same
+`XMemVirtualAlloc` path with one placement changed: `prefix` reserves `answer_size + prefix` and returns base + prefix,
+`align` asks the host for the requested alignment (or a larger power of two), and `guard` allocates the guard bytes just
+before serving the answer. None of them reads or writes title memory.
+
+### 19.2 The arena the shim serves
+
+One boot (`s19-log1`, `PALMETTO_XMEM_LAYOUT=log`) records every `XMemVirtualAlloc` answer of at least 1 MiB, 17 in the
+boot. The addresses and sizes are that boot's; the title caller RVAs are the executable's. The row the title heap lives
+in is marked.
+
+| # | stage | title caller | request | type / attributes | protect | answer | served | `VirtualQuery` at the answer |
+|---:|---|---|---:|---|---:|---|---:|---|
+| 1 | placeholder | `game+0x1e1d00f` | `0x600000000` | `0x20402000` / `0x21` | `0x4` | `0x187fff20000` | `0x600000000` | `0x600000000` reserved |
+| 2 | placeholder | `game+0x1e1d03e` | `0x600000000` | `0x20402000` / `0x3` | `0x801` | `0x18dfff20000` | `0x600000000` | `0x600000000` reserved |
+| 3 | large-pages | `game+0x1e1d186` | `0x49400000` | `0x20003000` / `0x183` | `0x22004` | `0x18781e00000` | `0x49400000` | committed, private |
+| 4 | large-pages | `game+0x1e1d4db` | `0x89700000` | `0x20003000` / `0x283` | `0x2404` | `0x19400000000` | `0x89800000` | committed, private |
+| 5 | large-pages | `game+0x1e1d36e` | `0x23300000` | `0x20003000` / `0x183` | `0x22004` | `0x187cb200000` | `0x23400000` | committed, private |
+| 6 | **large-pages** | **`game+0x1e1d28d`** | **`0x25400000`** | **`0x20003000` / `0x183`** | **`0x22004`** | **`0x19489800000`** | **`0x25400000`** | **committed, private - the heap arena** |
+| 7 | virtual-alloc | `game+0x5ba6c35` | `0x1400000` | `0x20403000` / `0x181` | `0x4` | `0x187ee600000` | `0x1400000` | committed, private |
+| 8 | placeholder | `game+0x1e8649f` | `0xb900000` | `0x42000` / `0x7` | `0x1` | `0x1959d200000` | `0xb900000` | `0xb900000` reserved |
+| 9 | window | `game+0x1e865a3` | `0xa00000` | `0x20406000` / `0x27` | `0x1004` | `0x1959d200000` | `0xa00000` | reserved carve |
+| 10 | window | `game+0x1e865d5` | `0x100000` | `0x20406000` / `0x27` | `0x1404` | `0x1959dc00000` | `0x100000` | reserved carve |
+| 11 | window | `game+0x1e86605` | `0x1b00000` | `0x20406000` / `0x27` | `0x8404` | `0x1959dd00000` | `0x1b00000` | reserved carve |
+| 12 | window | `game+0x1e86635` | `0x2f00000` | `0x20406000` / `0x27` | `0x2404` | `0x1959f800000` | `0x2f00000` | reserved carve |
+| 13 | window | `game+0x1e86671` | `0x6400000` | `0x20406000` / `0x27` | `0x2004` | `0x195a2700000` | `0x6400000` | reserved carve |
+| 14 | placeholder | `game+0x1e6c278` | `0x185c00000` | `0x20402000` / `0x23` | `0x2004` | `0x1976aba0000` | `0x185c00000` | reserved |
+| 15 | large-pages | `game+0x193e225` | `0x1e00000` | `0x20003000` / `0x283` | `0x2004` | `0x1993b400000` | `0x1e00000` | committed, private |
+| 16 | virtual-alloc | `game+0x1d6e654` | `0xd00000` | `0x20403000` / `0x181` | `0x4` | `0x19945c50000` | `0xd00000` | committed, private |
+| 17 | large-pages | `game+0x193e225` | `0x2000000` | `0x20003000` / `0x283` | `0x2004` | `0x19b87800000` | `0x2000000` | committed, private |
+
+The arena request is a **large-pages commit** (`0x20003000` = `MEM_COMMIT | MEM_RESERVE` plus the 2 MiB page mode),
+attributes `0x183`, protect `0x22004` (`PAGE_READWRITE` plus `PAGE_GRAPHICS_COHERENT`, the measured console graphics
+bits), served through `VirtualAlloc2` at a 2 MiB-aligned address. The same request size `0x25400000` was answered in
+every later arm boot on the final binary, so the title's request is a constant of the title, not of the boot.
+
+The request is not the region the title reports at the crash. All three arm boots (and the control) show one
+`VirtualQuery` at the command object whose **allocation base is the answer** and whose **committed size is smaller than
+the served size**: `0x212c8000`-`0x212c9000` bytes of a `0x25400000` answer (`s19-p21` reports `0x212c2000` at the
+block and `0x212c3000` at the job). The subrange is the title's own commit bookkeeping inside the range we served: the
+heap manager decides what inside the answer stays committed, so an arm that moves the answer moves this whole picture
+uniformly. That is the mechanism the rest of the section tests.
+
+### 19.3 The title heap layout, per stage-3 arm
+
+Four boots read machine stage 3 with the alloc-watch probe (`PALMETTO_ALLOC_WATCH=1`) so the command object (job), the
+zero-byte block and the allocator object are printed at the allocation, before the copy. "Pointer" is the address the
+shim returned for the arena request (from the arm's own log line; the control boot has no layout switch, so its pointer
+is the `VirtualQuery` allocation base - the large-pages branch returns its reservation base unchanged). Offsets are
+from that pointer.
+
+| boot (arm) | pointer returned | pointer mod 16 MiB | served | committed region at the block | allocator − pointer | job − pointer | block − job | stop | stage 3 → stop |
+|---|---|---:|---:|---|---:|---:|---:|---|---|
+| `s19-base1` (control) | `0x17459000000` | `0x0` | not logged | `0x212c8000` | `0x3473020` | `0x41384f0` | `+0xa0` | `game+0x538d0e6` read `0x18` | 4.1 s (94.0 → 98.14 s) |
+| `s19-a21` (align 16 MiB) | `0x23d46000000` | `0x0` | `0x25400000` | `0x212c9000` | `0x3473020` | `0x41374c0` | `+0xa0` | `game+0x1335dcb` read `0xffffffffffffffff` | 0.94 s (62.0 → 62.94 s) |
+| `s19-p21` (prefix 2 MiB) | `0x1cb53800000` | `0x800000` | `0x25400000` | `0x212c2000` | `0x3473020` | `0x433e440` | `-0xef0` | `game+0x13360a3` read `0xffffffffffffffff` | 2.0 s (50.0 → 52.00 s) |
+| `s19-g22` (guard 2 MiB) | `0x2b40a000000` | `0x0` | `0x25400000` | `0x212c9000` | `0x3473020` | `0x4137520` | `+0x110` | `game+0x515acf5` read `0x18` | 2.3 s (56.0 → 58.33 s) |
+
+Three facts hold across the table. First, the title's allocator object is at the **same** offset `0x3473020` from the
+pointer in all four boots, including the `prefix` boot whose underlying host reservation begins 2 MiB before the pointer
+we returned: the title's heap bookkeeping is anchored to the pointer it was handed, so a prefix moves the heap with it
+instead of putting a new gap between the arena and the heap. Second, the command object stays in the same band
+(`0x41374c0`-`0x433e440`, 65.2-67.3 MiB into the pointer) and its page pattern is unchanged; the `prefix` boot's
+0x2 MiB-shifted job offset is the same magnitude as the shift we introduced, which is the price of an interior pointer
+and is named in 19.5. Third, the copy's victim is the boot's own allocation history, not the arm: the block is above the
+job (`+0xa0`, `+0x110`) in the control, align and guard boots and the 0x1000 bytes run over the allocator's free
+structures (stops `0x538d0e6`, `0x515acf5`, `0x1335dcb`); in the prefix boot the zero-size class returned a reused block
+0xef0 below the job, the probe prints `overlap YES`, and the copy covers the live command object (stop `0x13360a3`, the
+same family section 15 caught twice with no arm at all).
+
+The arms did what they said: `s19-a21`'s answer is 16 MiB-aligned (forced by
+`MEM_ADDRESS_REQUIREMENTS.Alignment`), `s19-p21`'s answer is `0x200000` above its underlying reservation
+(`0x1cb53600000`), and `s19-g22`'s guard ended exactly at the answer (`0x2b409e00000` + `0x200000`). A 25 s smoke boot
+showed the `align` line at 0.9 s in the boot, before the loading window, with no exception: the arm changes one answer
+and nothing else.
+
+### 19.4 The boots
+
+One binary for every boot on the final tree: `palmetto_layout.exe`, SHA-256
+`ECA761B0A1B9E9DFA9ADE8DB9973D73DF3C35467D24CF86A114175C6E67B3A8C` (the `palmetto` target built from the tree with the
+`replay.h` of the adjacent slice at the time). Boots take the shared lock and run under `tooling/boot_report.py` in the
+section-12 content environment; 180 s per attempt (300 s for the measurement boot), retried until stage 3 read. "Block
+allocations" is the alloc-watch `BLOCK ALLOC` count; captures and readbacks are the PPM files under the arm's
+directories.
+
+| boot | switches | timeout | wall | stage 3 | first exception (t, site, access/address) | block allocations | device lost | capture PPMs | readback PPMs |
+|---|---|---:|---:|---|---|---:|---|---:|---:|
+| `s19-log1` | `log` + watch | 300 s | 65.6 s | no (init 2 at 62.2 s) | 51.04 s, `0x3db414`, read `0xffffffffffffffff` | 0 | no | 8 | 0 |
+| `s19-base1` | watch | 180 s | 110.0 s | 94.0 s | 98.14 s, `0x538d0e6`, read `0x18` | 1 | no | 12 | 4 |
+| `s19-b21` | watch | 180 s | 67.2 s | no | 59.05 s, `0x86f97e`, read `0x2e200000000` | 0 | yes | 12 | 0 |
+| `s19-b22` | watch | 180 s | 55.6 s | no | 47.39 s, `0x86f981`, read `0x6f85` | 0 | yes | 8 | 0 |
+| `s19-align16m1` | none (env malformed) | 180 s | 93.2 s | ~80.0 s | 82.99 s, `0x13360a3`, read `0xffffffffffffffff` | 0 | no | 12 | 0 |
+| `s19-align16m2` | none (env malformed) | 180 s | 123.9 s | no | 111.94 s, `0x4d9f636`, read `0x29a000007d0` | 0 | yes | 12 | 0 |
+| `s19-align16m3` | none (env malformed) | 180 s | 75.2 s | ~66.0 s | 65.88 s, `0x502b2f1`, read `0x1000397ab` | 0 | yes | 11 | 0 |
+| `s19-a21` | `align:0x1000000` + watch | 180 s | 71.5 s | 62.0 s | 62.94 s, `0x1335dcb`, read `0xffffffffffffffff` | 1 | no | 12 | 4 |
+| `s19-p21` | `prefix:0x200000` + watch | 180 s | 59.4 s | 50.0 s | 52.00 s, `0x13360a3`, read `0xffffffffffffffff` | 1 | no | 9 | 4 |
+| `s19-g21` | `guard:0x200000` + watch | 180 s | 66.3 s | no | 58.39 s, `0x4064926`, read `0x1c` | 0 | yes | 12 | 0 |
+| `s19-g22` | `guard:0x200000` + watch | 180 s | 66.5 s | 56.0 s | 58.33 s, `0x515acf5`, read `0x18` | 1 | no | 12 | 4 |
+| `s19-smoke-align` | `align:0x1000000` + watch | 25 s | 25.3 s (killed) | no | none | 0 | no | 1 | 0 |
+
+The three `s19-align16m*` rows are default-path boots, not arm boots: the first attempt's `-ExtraEnv` was passed as one
+comma-joined string, so no switch reached the process (no alloc-watch header and no layout line in the log). They are
+kept as the measured default path of the same binary and environment, and one of them reached machine stage 3 and
+stopped at `0x13360a3` - the live-command-object family - with every switch off. The stage-3 reach is the
+environmental race sections 10-17 record: of the eight arm/probe attempts, four read stage 3, and of the three
+default-path attempts two read machine 3; the per-arm attempts are reported above rather than assumed.
+
+### 19.5 The picture and the content window
+
+Every stage-3 arm shows one constant-table upload pass (`BLOCK ALLOC` hit 1) and stops inside it, so no arm reaches a
+second content submission, let alone a fourth. The four readback PPMs each arm wrote are the section-15 pattern: two
+content windows read `mean 0 0 0, non-black 0/16,384` and two write-control windows on the same targets read
+`mean 51 102 204, non-black 16,384/16,384, peak 204`. The presenter captures are black in every arm (9, 12, 12 and 12
+files, all `mean rgb 0.00 0.00 0.00`), and no stage-3 arm logs `the Vulkan device was lost`. So the furthest the arms
+get is exactly where the default path gets: the title's own allocator and renderer code, one upload pass after stage 3,
+with no title pixel and no survived pass.
+
+### 19.6 Verdict and the next falsifier
+
+- **A placement lever is measured negative.** Moving the arena answer by 2 MiB (prefix and guard) or forcing a 16 MiB
+  alignment moves the pointer and the whole title heap with it (allocator offset constant), but does not change the
+  relative layout of the job and the zero-byte block enough to move the overrun off a fatal target: every arm stops
+  0.9-4.1 s after stage 3 in the title's allocator/executor family. There is no arm to promote to a default.
+- **The victim is elected by the loading history, not by the arena.** The block is a freed class-0 node 0xef0 below
+  the command object in the prefix boot and a bump block 0xa0 above it in the control, align and guard boots; the same
+  two shapes were caught in section 15 with no arm, and the default-path attempt `s19-align16m1` stops at
+  `0x13360a3` (the live-object family) with every switch off. The class-0 free tree of the title's allocator is filled
+  by the loading path before stage 3, which is a race our runtime affects only through the loading decisions sections
+  10-17 record, not through where the arena sits.
+- **The next falsifier is a count, not a placement.** The title allocator's own counters are named by section 15's
+  decompilation of `game+0x538D220`: `allocator+0x250` is the small-class allocation count and `allocator+0x238` the
+  small-class bytes, incremented on exactly the path that answers both the 0xa0 job and the 0-byte block. The existing
+  `PALMETTO_ALLOC_WATCH` block payload already resolves the allocator object
+  (`image+0xabcc310` -> the heap object) at the allocation, so one bounded read of those two fields there would turn
+  "a freed node happened to exist" into a number per boot (allocations before the block, and how many of them were
+  class-0). That is a `port/src/main.cpp` probe change, so it is left to the lead's coordination; it is the smallest
+  measurement that would make the layout lottery predictable rather than observed.
+- **A size lever was not tested.** The arms changed placement only. A later arm could serve a different committed
+  size for the same request (a smaller committed answer, or a reservation whose committed part starts elsewhere); the
+  measured data says the title's committed subrange inside our answer is title-side, so this would change what its
+  grow function sees rather than where our answer is, and it is only worth a boot once the counter above says the
+  free-tree state actually depends on the size.
+- **The producer-level fix is unchanged.** Sections 15 and 16 measured the zero-byte class and the 0x1000 copy as
+  title code and title data (the format table's class 0xa row and the row-stride switch's missing case). Nothing in
+  this slice's measurements changes that; a layer placement choice cannot size the block the copy writes.
+
+### 19.7 Limits
+
+- **One to three attempts per arm.** The stage-3 reach is the environmental race sections 10-17 record: the control
+  read stage 3 on its first attempt after two earlier control attempts stopped before it, the guard arm needed a second
+  attempt, and the align and prefix arms each read it on their first. The arm measurements are taken at the answer
+  (before the loading window) and at the block allocation (before the copy), so the stop site does not decide them.
+- **The prefix boot's job offset is 2 MiB-shifted.** The title heap is anchored to the returned pointer in all four
+  boots (allocator offset constant), but the prefix boot's job/block band is `0x433e440`, about `0x2 MiB` above the
+  other three. The cause is not separated here: it is the one boot where an interior pointer was handed over and the
+  title's `XMemVirtualQuery` of that pointer reports the host reservation base and the larger reservation size, so its
+  own pool bookkeeping could have consumed the difference. The arm's verdict does not depend on that separation - it
+  did not survive - but the exact heap base under a prefix is not claimed.
+- **The committed subrange's start is not printed.** The probe payload prints `VirtualQuery`'s allocation base and
+  region size, not the region's base address, so the exact pool start inside our answer is not claimed; what is
+  measured is the allocator object, the command object, the block and their offsets from the pointer we returned.
+- **The layout answer table is one boot of a pre-final binary.** `s19-log1` ran the same shim change on the copy built
+  before the adjacent slice's replay change (SHA-256 `C5A58B4F...`); the arena row itself (site `0x1e1d28d`,
+  `0x25400000`, large-pages) repeats in every final-binary arm boot, and the arm boots are all the final binary. The
+  other 16 answers are that one boot's; they are the context of the arena row, not independent arm evidence.
+- **The overrun's exact victim object is not named.** The stops say which instruction read the corrupted state
+  (`0x538d0e6` and `0x515acf5` are allocator tree/free-path reads, `0x13360a3`/`0x1335dcb` are the executor's reads
+  after the command object's vtable/fields were covered), not which freed node the copy overwrote byte for byte; the
+  `block-before`/`block` memory lines at the allocation are the evidence that the block sat in allocator-managed bytes.
+- **No size or free-timing arm.** The slice tests the three placement shapes the task named; the class-0 free-tree
+  history itself is left to the counter falsifier above.
+
+### 19.8 Tests and gates
+
+- `port/test/xmem_test.cpp` gains 19 checks for the layout plan (modes, arguments, exact caller, and the eight refusal
+  forms); the target exits 0 with 305 checks (286 before). The parse is pure, so the GPU-free test covers both the
+  default path (the test process sets neither switch, and `layout_plan()` reports disabled) and every arm's decision.
+- Gate subset on the changed tree, all exit 0: `frame_dump_test`, `unimplemented_policy_test`,
+  `graphics_record_test`, `graphics_pso_test`, `buffer_va_index_test`, `dstorage_test`, `xapu_chad_test`,
+  `deferred_compile_test`, `arena_size_test`, `xbox_present_test`, `xs_proxy_mock_test`; `d3d12_fence_timing_test`
+  remains the documented pre-existing crash.
+- Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, and every
+  `tests/test_docs_*.py` check passes. The two new switches, `PALMETTO_XMEM_LAYOUT` and
+  `PALMETTO_XMEM_LAYOUT_CALLER`, are named in this section; the reused `PALMETTO_ALLOC_WATCH` is named in section 15.
+
+### 19.9 Attribution
+
+This section was implemented from this project's own measurements: the shim's own answer log, the `PALMETTO_ALLOC_WATCH`
+block/executor payloads of four stage-3 boots, the default-path attempts of the same binary, the arm boots, the
+`VirtualQuery` regions and the readback/capture files. The allocator identity and its decompiled allocation/free paths,
+the class-0xa producer and the copy are sections 15-16's measurements (`game+0x538D220`, `game+0x538D040`,
+`game+0x515ABB0`, `game+0x45594F0`, `game+0x550E2D0`); this section applies them to the arena placement question. The
+title functions were decompiled earlier with this project's Ghidra tooling from the user's own image. No peer code was
+used and no game data is added: RVAs, VAs, sizes, alignments, offsets, counts, formats and readback statistics only.
+

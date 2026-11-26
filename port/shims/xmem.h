@@ -14,6 +14,48 @@ bool commit_physical_pages(const std::uint64_t* page_array, std::size_t count);
 // append-only and bounded, so a range freed later still answers yes: the probe asks where the bytes came from.
 bool served_range(const void* address, std::uint64_t* caller, std::uint8_t* kind);
 
+// ---- The opt-in arena-layout probe and arms (docs/vertex_buffer_va.md section 19) --------------------------------
+//
+// The title's classed heap lives in memory this shim's XMemVirtualAlloc answered. The measured boot put the title's own
+// allocator object, the stage-3 command object (the job) and the constant table's zero-byte block in one MEM_PRIVATE
+// committed region at a host-chosen base, 0x81174e0 bytes into it (region 0x212c9000 bytes; section 19.3). The console's
+// allocator layout is not observable, so where that region sits - its base, its alignment and the address space in
+// front of it - is a choice this runtime makes. The arms below make one such choice explicit and record what the
+// title's own allocator then does with it. Off by default: with neither switch set the default path is unchanged.
+//
+// PALMETTO_XMEM_LAYOUT=<mode>[:<bytes>]:
+//   log           record every XMemVirtualAlloc answer of at least 1 MiB (request, answer, caller, VirtualQuery)
+//   prefix:<hex>  serve the target call `bytes` further into a larger reservation (the prefix stays reserved)
+//   align:<hex>   require the target answer to be aligned to `bytes` (a power of two, at least 4 KiB)
+//   guard:<hex>   allocate `bytes` before serving the target answer (an address-space guard)
+// PALMETTO_XMEM_LAYOUT_CALLER=<hex rva> is the measured title caller of the answer a prefix, align or guard arm targets;
+// a targeted mode without a usable caller records nothing, and `log` needs no caller.
+enum class XmemLayoutMode : std::uint8_t {
+    none = 0,
+    log = 1,
+    prefix = 2,
+    align = 3,
+    guard = 4,
+};
+
+struct XmemLayoutPlan {
+    XmemLayoutMode mode = XmemLayoutMode::none;
+    std::uint64_t argument = 0;    // bytes: the prefix/guard length, or the required alignment
+    std::uint64_t caller_rva = 0;  // the title module RVA the arm targets; 0 when unset
+    bool enabled() const { return mode != XmemLayoutMode::none; }
+    bool targeted() const {
+        return mode == XmemLayoutMode::prefix || mode == XmemLayoutMode::align || mode == XmemLayoutMode::guard;
+    }
+    bool targets(std::uint64_t rva) const { return targeted() && caller_rva != 0 && rva == caller_rva; }
+};
+
+// Parse the two switch values (either may be null). Anything unrecognised is XmemLayoutMode::none, which is the
+// default path; a targeted mode without a usable caller is also none. Pure, so the GPU-free xmem test checks it.
+XmemLayoutPlan layout_plan_from(const char* layout, const char* caller);
+
+// The process's plan, parsed once. One relaxed load per XMemVirtualAlloc call when no switch is set.
+const XmemLayoutPlan& layout_plan();
+
 // Console queue slot 31 (CopyPageMappingsBatchX, port/shims/d3d12_xs_device.cpp): the command-object proxy is also
 // compiled into GPU-free test binaries that link no xmem, so the mapping primitive is a hook this file's
 // implementation fills in and a test can replace. Each call gives `pages` 64 KiB destination pages a second view of

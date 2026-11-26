@@ -254,6 +254,69 @@ int main() {
     expect(std::strlen(frame_dump::driver_block_decision(false, 1u, true, 24, 4080, true).why) == 0,
            "a taken feed has no reason text");
 
+    // The console graphics user-data layout (docs/vertex_buffer_va.md section 18): a descriptor table is ONE console
+    // dword (its 32-bit heap-relative VA, not the PC packing's 64-bit title-VA pair), a root descriptor two, a constant
+    // parameter its value count. The block puts each parameter at its console slot and zeroes every other dword, so the
+    // PC-packed dwords are discarded and s0/s1 are free for the console driver block.
+    expect(frame_dump::console_parameter_dwords(2, 0) == 1, "a descriptor table takes one console dword");
+    expect(frame_dump::console_parameter_dwords(1, 0) == 2, "a root descriptor takes two console dwords");
+    expect(frame_dump::console_parameter_dwords(0, 4) == 4, "a constant parameter takes its value count");
+    expect(frame_dump::console_parameter_dwords(7, 0) == 0, "an unknown parameter type takes none");
+    {
+        // The measured content draws' table-only signature: the PC pair at s0/s1 becomes the console table dword at s8.
+        frame_dump::ConsoleBlockParameter parameter{};
+        parameter.console_offset = 8;
+        parameter.dwords = 1;
+        parameter.value[0] = 0x0C16EF00u;
+        std::array<std::uint32_t, 32> block{};
+        expect(frame_dump::graphics_console_block(&parameter, 1, block) == frame_dump::ConsoleBlockResult::ok,
+               "a table-only signature places its console block");
+        expect(block[8] == 0x0C16EF00u, "the table's arena-relative VA is the console table dword at s8");
+        expect(block[0] == 0 && block[1] == 0, "s0/s1 are zero: the console driver block owns them");
+        expect(block[9] == 0 && block[31] == 0, "the dwords the placement does not name stay zero");
+    }
+    {
+        // The measured content pass's signature: a descriptor table at s8, then two 32-bit constants at s9/s10.
+        frame_dump::ConsoleBlockParameter parameters[2]{};
+        parameters[0].console_offset = 8;
+        parameters[0].dwords = 1;
+        parameters[0].value[0] = 0x0C2CE1A0u;
+        parameters[1].console_offset = 9;
+        parameters[1].dwords = 2;
+        parameters[1].value[0] = 0x11111111u;
+        parameters[1].value[1] = 0x22222222u;
+        std::array<std::uint32_t, 32> block{};
+        expect(frame_dump::graphics_console_block(parameters, 2, block) == frame_dump::ConsoleBlockResult::ok,
+               "a table plus two constants places");
+        expect(block[8] == 0x0C2CE1A0u && block[9] == 0x11111111u && block[10] == 0x22222222u,
+               "the constants follow the table at their console slots");
+    }
+    {
+        // Refusals: no parameter, two parameters on one dword, a placement past s31, an unrepresentable count.
+        std::array<std::uint32_t, 32> block{};
+        expect(frame_dump::graphics_console_block(nullptr, 0, block) == frame_dump::ConsoleBlockResult::no_parameters,
+               "an empty console placement feeds nothing");
+        frame_dump::ConsoleBlockParameter overlap[2]{};
+        overlap[0].console_offset = 8;
+        overlap[0].dwords = 2;
+        overlap[1].console_offset = 9;
+        overlap[1].dwords = 1;
+        expect(frame_dump::graphics_console_block(overlap, 2, block) == frame_dump::ConsoleBlockResult::overlap,
+               "two parameters on one console dword are refused, not guessed");
+        frame_dump::ConsoleBlockParameter spill{};
+        spill.console_offset = 31;
+        spill.dwords = 2;
+        expect(frame_dump::graphics_console_block(&spill, 1, block) == frame_dump::ConsoleBlockResult::spill,
+               "a placement past s31 is refused");
+        frame_dump::ConsoleBlockParameter wide{};
+        wide.console_offset = 8;
+        wide.dwords = 5;
+        expect(frame_dump::graphics_console_block(&wide, 1, block) == frame_dump::ConsoleBlockResult::out_of_range,
+               "a dword count past a parameter's value array is refused");
+        expect(std::strlen(frame_dump::console_block_result_name(frame_dump::ConsoleBlockResult::overlap)) != 0,
+               "a refused console placement has a name");
+    }
+
     // The colour path (docs/colour_path.md): the constant pass's colour source. The measured table's slot 0 V# names a
     // 96-byte raw block (stride 0, records 96, format 20); a V#'s declared size is the record count when the stride is 0
     // and stride x records otherwise; the table's data slots at +0x40/+0x60 are float data, not descriptors, so neither

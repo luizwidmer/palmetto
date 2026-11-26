@@ -2226,6 +2226,17 @@ public:
     void set_driver_block_allocator(std::function<bool(std::uint32_t, std::uint64_t&)> allocator) {
         replay_.allocate_driver_block = std::move(allocator);
     }
+    // The heap-relative address of a buffer resolved by buffer_at (docs/vertex_buffer_va.md section 18.3): the arena
+    // offset for the GPU address arena itself, false for any other buffer (a title-pages import at a device address the
+    // shader's heap_base + value model cannot name).
+    void set_buffer_arena_address(std::function<bool(VkBuffer, VkDeviceSize, std::uint64_t&)> address) {
+        replay_.buffer_arena_address = std::move(address);
+    }
+    // A cached arena staging copy of a span of the title's own host memory, so a translated shader can fetch a vertex
+    // stream the layer imported over the title's pages at first use (docs/vertex_buffer_va.md section 18.3).
+    void set_title_span_stager(std::function<bool(std::uint64_t, std::uint64_t, std::uint64_t&)> stager) {
+        replay_.stage_title_span = std::move(stager);
+    }
     // Diagnostic (docs/frame_capture.md, the colour path): binds layer images for the T#s a shader fetches itself out of
     // its published matrix block. Opt-in (PALMETTO_TEXTURE_BIND_FETCHED).
     void set_fetched_texture_binder(std::function<void(std::uint64_t)> binder) {

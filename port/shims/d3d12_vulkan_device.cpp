@@ -1185,6 +1185,11 @@ struct SharedGraphicsPipeline {
     bool has_pixel_stage = false;
     std::uint32_t ps_images = 0;
     std::uint32_t vs_loads = 0;
+    // The root signature's console user-SGPR placement (docs/vertex_buffer_va.md section 18): the same parameters at
+    // their console slots, which the replay converts a graphics draw's recorded block into.
+    bool console_ok = false;
+    std::uint32_t console_parameter_count = 0;
+    palmetto::GraphicsPipeline::ConsoleParameter console_parameter[16];
     palmetto::VertexPathInfo vertex_path;  // docs/vertex_path.md, the diagnostic the PSO reports without re-resolving
     std::vector<std::uint8_t> code_bytes;   // the program bytes the per-PSO code-base arena copy needs (empty: none)
 
@@ -1807,6 +1812,15 @@ inline double pipeline_call_stats_interval_s() {
         VkDeviceSize use_in_use[4] = {}, use_peak[4] = {};
         std::uint64_t allocations = 0, failures = 0;
     } arena;
+
+    // The arena staging copies of title spans a translated shader must fetch by a heap-relative address
+    // (docs/vertex_buffer_va.md section 18.3): one range per title VA, re-copied on each use. Bounded to eight ranges.
+    struct StagedSpan {
+        std::uint64_t bytes = 0;
+        std::uint64_t offset = 0;
+    };
+    std::mutex staged_mutex_;
+    std::unordered_map<std::uint64_t, StagedSpan> staged_spans_;
 
     std::uint32_t sparse_buffer_memory_types = 0;
     bool sparse_image_tiles = false;
@@ -2868,6 +2882,63 @@ inline double pipeline_call_stats_interval_s() {
         VkDeviceSize offset = 0;
         if (!arena_allocate(bytes, 256, offset, arena_buffer)) return false;
         address = offset;
+        return true;
+    }
+
+    // The heap-relative address a buffer_at result starts at, for the console driver-block V# (docs/vertex_buffer_va.md
+    // section 18.3): only the GPU address arena itself is reachable through the shader's heap_base + value model. False
+    // for any other buffer, including a title-pages import whose device address heap_base cannot name; those go through
+    // stage_title_span.
+    bool buffer_arena_address(VkBuffer buffer, VkDeviceSize offset, std::uint64_t& address) {
+        address = 0;
+        if (!buffer || buffer != arena.buffer || offset >= arena.size) return false;
+        address = offset;
+        return true;
+    }
+
+    // A cached arena staging copy of a span of the title's own memory (docs/vertex_buffer_va.md section 18.3): a vertex
+    // stream the layer imported over the title's pages at first use has a device address the shader cannot form from
+    // heap_base, so the bytes are copied into an arena range and the driver-block V# names that range. One range per
+    // title VA (bounded to eight, 4 MiB each) and re-copied on every use, because the title may rewrite its vertices
+    // between draws. The pages are the title's committed host memory (that is why they were importable), so a memcpy
+    // from the title VA reads them.
+    bool stage_title_span(std::uint64_t va, std::uint64_t bytes, std::uint64_t& address) {
+        address = 0;
+        const auto refuse = [](const char* why, std::uint64_t a, std::uint64_t b) {
+            static std::atomic<unsigned> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 4)
+                std::fprintf(stderr,
+                             "[rt] d3d12: title span staging: refused %s at VA 0x%llx + 0x%llx (the draws whose vertex "
+                             "stream it holds keep their recorded s0/s1 pair)\n",
+                             why, static_cast<unsigned long long>(a), static_cast<unsigned long long>(b));
+            return false;
+        };
+        if (!va || !bytes) return false;
+        if (!context || !arena.mapped) return refuse("no GPU address arena", va, bytes);
+        constexpr std::uint64_t kMaxStageBytes = 4ull << 20;
+        if (bytes > kMaxStageBytes) return refuse("the span is larger than the 4 MiB staging bound", va, bytes);
+        std::lock_guard lock(staged_mutex_);
+        auto found = staged_spans_.find(va);
+        if (found == staged_spans_.end()) {
+            if (staged_spans_.size() >= 8) return refuse("the staging cache holds its eight ranges", va, bytes);
+            VkDeviceSize offset = 0;
+            if (!arena_allocate(bytes, 256, offset, arena_buffer)) return refuse("no arena room", va, bytes);
+            found = staged_spans_.emplace(va, StagedSpan{bytes, offset}).first;
+        }
+        if (found->second.bytes < bytes) return refuse("a shorter range is already cached for this VA", va, bytes);
+        const auto base = static_cast<const std::uint8_t*>(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(va)));
+        MEMORY_BASIC_INFORMATION info{};
+        if (::VirtualQuery(base, &info, sizeof(info)) != sizeof(info))
+            return refuse("VirtualQuery cannot describe the pages", va, bytes);
+        if (info.State != MEM_COMMIT) return refuse("the pages are not committed", va, bytes);
+        if (info.Protect & (PAGE_NOACCESS | PAGE_GUARD | PAGE_WRITECOMBINE | PAGE_NOCACHE)) {
+            char why[64] = {};
+            std::snprintf(why, sizeof(why), "the pages' protection 0x%lx is not readable host memory",
+                          static_cast<unsigned long>(info.Protect));
+            return refuse(why, va, bytes);
+        }
+        std::memcpy(arena.mapped + found->second.offset, base, std::size_t(bytes));
+        address = found->second.offset;
         return true;
     }
 
@@ -5800,6 +5871,10 @@ public:
         graphics_.has_pixel_stage = shared->has_pixel_stage;
         graphics_.ps_images = shared->ps_images;
         graphics_.vs_loads = shared->vs_loads;
+        graphics_.console_ok = shared->console_ok;
+        graphics_.console_parameter_count = shared->console_parameter_count;
+        std::copy(std::begin(shared->console_parameter), std::end(shared->console_parameter),
+                  std::begin(graphics_.console_parameter));
         graphics_.variant = [this](std::uint32_t unbound) { return variant(unbound); };
         graphics_.with_ps = [this](VkShaderModule ps, bool cull_none) { return variant_with_ps(ps, cull_none); };
         graphics_.describe_vertex_path = [shared](palmetto::VertexPathInfo& out) { out = shared->vertex_path; };
@@ -6738,6 +6813,19 @@ public:
                 graphics_.table_windows |= std::uint32_t(1) << parameter.user_offset;
                 graphics_.table_windows |= std::uint32_t(1) << (parameter.user_offset + 1);
             }
+            // The same parameters at their console slots (docs/root_arguments.md sections 4-5, docs/vertex_buffer_va.md
+            // section 18): the replay converts a draw's recorded block into this layout when
+            // PALMETTO_GRAPHICS_CONSOLE_ROOT is set, so a translated stage finds its table at s8 (one dword) and its
+            // constants after it instead of only the PC table pair at s0/s1.
+            graphics_.console_ok = root->console_ok;
+            for (const auto& parameter : root->parameters) {
+                if (graphics_.console_parameter_count >= std::size(graphics_.console_parameter)) break;
+                auto& entry = graphics_.console_parameter[graphics_.console_parameter_count++];
+                entry.type = std::uint32_t(parameter.type);
+                entry.pc_offset = parameter.user_offset;
+                entry.console_offset = parameter.console_offset;
+                entry.constant_count = parameter.constant_count;
+            }
         }
         // Everything that can fail is done. With the recipe cache on, the created objects move into a shared entry the
         // next identical description adopts; this PSO keeps its own recipe, code-base range and diagnostics.
@@ -6764,6 +6852,10 @@ public:
             entry->has_pixel_stage = graphics_.has_pixel_stage;
             entry->ps_images = graphics_.ps_images;
             entry->vs_loads = graphics_.vs_loads;
+            entry->console_ok = graphics_.console_ok;
+            entry->console_parameter_count = graphics_.console_parameter_count;
+            std::copy(std::begin(graphics_.console_parameter), std::end(graphics_.console_parameter),
+                      std::begin(entry->console_parameter));
             if (graphics_.describe_vertex_path) graphics_.describe_vertex_path(entry->vertex_path);
             if (code_stage) entry->code_bytes = code_stage->fssm;
             shared_graphics_ = device_.add_graphics_recipe(cache_key_, std::move(entry));
@@ -8447,6 +8539,17 @@ public:
         state_.context->set_driver_block_allocator(
             [this](std::uint32_t bytes, std::uint64_t& address) {
                 return state_.allocate_driver_block(bytes, address);
+            });
+        // The console driver-block V#'s base is heap-relative (docs/vertex_buffer_va.md section 18.3). A view that
+        // resolves inside the GPU address arena names its arena offset; one the layer imported over the title's own pages
+        // at first use is staged into an arena range, because its device address cannot be formed from heap_base.
+        state_.context->set_buffer_arena_address(
+            [this](VkBuffer buffer, VkDeviceSize offset, std::uint64_t& address) {
+                return state_.buffer_arena_address(buffer, offset, address);
+            });
+        state_.context->set_title_span_stager(
+            [this](std::uint64_t va, std::uint64_t bytes, std::uint64_t& address) {
+                return state_.stage_title_span(va, bytes, address);
             });
         // Diagnostic (docs/frame_capture.md, the colour path): bind layer images for the T#s the compose pass fetches
         // itself out of its published matrix block. Opt-in only.

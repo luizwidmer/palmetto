@@ -1199,6 +1199,58 @@ void test_page_write_watch() {
     VirtualFree(region, 0, MEM_RELEASE);
 }
 
+// The arena-layout plan (docs/vertex_buffer_va.md section 19). The switch text is parsed as data, so an arm is a pure
+// decision over one measured title caller: a typo, a missing caller or an unplaceable argument falls back to the
+// default path instead of guessing at the title's allocator. This test process sets neither switch, so it also checks
+// that the runtime's own plan stays off by default.
+void test_layout_plan() {
+    using rt::xmem::XmemLayoutMode;
+    const auto none = rt::xmem::layout_plan_from(nullptr, nullptr);
+    check(none.mode == XmemLayoutMode::none && !none.enabled() && !none.targeted(),
+          "layout plan: unset switches leave the default path");
+    check(rt::xmem::layout_plan_from("", "1e1d28d").mode == XmemLayoutMode::none,
+          "layout plan: an empty switch leaves the default path");
+    check(rt::xmem::layout_plan_from("0", "1e1d28d").mode == XmemLayoutMode::none,
+          "layout plan: a zero switch leaves the default path");
+    check(!rt::xmem::layout_plan().enabled(), "layout plan: the runtime's plan is off with no switch set");
+
+    const auto log = rt::xmem::layout_plan_from("log", nullptr);
+    check(log.mode == XmemLayoutMode::log && log.enabled() && !log.targeted(),
+          "layout plan: log records answers and needs no caller");
+    check(rt::xmem::layout_plan_from("log:0x10000", nullptr).mode == XmemLayoutMode::log,
+          "layout plan: log ignores a trailing argument");
+
+    const auto prefix = rt::xmem::layout_plan_from("prefix:0x10000", "1e1d28d");
+    check(prefix.mode == XmemLayoutMode::prefix && prefix.argument == 0x10000 && prefix.caller_rva == 0x1e1d28d,
+          "layout plan: prefix takes its bytes and the measured caller");
+    check(prefix.targeted() && prefix.targets(0x1e1d28d) && !prefix.targets(0x1e1d28e),
+          "layout plan: a targeted plan matches exactly its caller");
+    const auto align = rt::xmem::layout_plan_from("align:0x200000", "1e1d28d");
+    check(align.mode == XmemLayoutMode::align && align.argument == 0x200000, "layout plan: align takes its alignment");
+    const auto guard = rt::xmem::layout_plan_from("guard:0x10000", "1e1d28d");
+    check(guard.mode == XmemLayoutMode::guard && guard.argument == 0x10000, "layout plan: guard takes its bytes");
+
+    // Every malformed or unplaceable form falls back to the default path rather than guessing.
+    check(rt::xmem::layout_plan_from("prefix", "1e1d28d").mode == XmemLayoutMode::none,
+          "layout plan: prefix without bytes is the default path");
+    check(rt::xmem::layout_plan_from("prefix:0x10000", nullptr).mode == XmemLayoutMode::none,
+          "layout plan: a placement arm without a caller is the default path");
+    check(rt::xmem::layout_plan_from("prefix:0x10000", "zzz").mode == XmemLayoutMode::none,
+          "layout plan: a malformed caller is the default path");
+    check(rt::xmem::layout_plan_from("prefix:0x810", "1e1d28d").mode == XmemLayoutMode::none,
+          "layout plan: a prefix not on a page boundary is the default path");
+    check(rt::xmem::layout_plan_from("align:0x1234", "1e1d28d").mode == XmemLayoutMode::none,
+          "layout plan: an alignment that is not a power of two is the default path");
+    check(rt::xmem::layout_plan_from("guard:0", "1e1d28d").mode == XmemLayoutMode::none,
+          "layout plan: a zero-length guard is the default path");
+    check(rt::xmem::layout_plan_from("prefix:0x80000000", "1e1d28d").mode == XmemLayoutMode::none,
+          "layout plan: an over-limit argument is the default path");
+    check(rt::xmem::layout_plan_from("bogus:0x10000", "1e1d28d").mode == XmemLayoutMode::none,
+          "layout plan: an unknown mode is the default path");
+    check(rt::xmem::layout_plan_from("prefix:0x1000", "1e1d28d").mode == XmemLayoutMode::prefix,
+          "layout plan: one page is a usable prefix");
+}
+
 }  // namespace
 
 int main() {
@@ -1266,6 +1318,7 @@ int main() {
 
     test_title_virtual_alloc();
     test_page_write_watch();
+    test_layout_plan();
 
     if (alloc_default && free_default) test_default_alloc(alloc, free_mem, alloc_default, free_default);
     if (tools_mem) check(tools_mem() == FALSE, "XMemIsToolsMemAvailable returns FALSE (no devkit tools memory)");

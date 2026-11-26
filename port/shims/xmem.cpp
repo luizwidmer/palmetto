@@ -318,6 +318,81 @@ void* served_virtual(void* address, size_t bytes, const void* caller) {
     return address;
 }
 
+// ---- The arena-layout probe and arms (docs/vertex_buffer_va.md section 19) ----------------------------------------
+//
+// The title's classed heap lives in memory an XMemVirtualAlloc answer of ours created: one measured boot put the
+// title's allocator object, the stage-3 command object and the constant table's zero-byte block inside a MEM_PRIVATE
+// region at a host-chosen base. The console's allocator layout is not observable, so the base, the alignment and the
+// address space in front of that region are a choice this runtime makes; these arms record that choice and what the
+// title's own allocator does with it. All off by default (one cached switch read, nothing allocated or changed unless a
+// switch is set, and the arms only ever answer one measured title caller).
+constexpr std::uint64_t kLayoutLogMinimumBytes = 0x100000;  // the smallest answer that could hold the measured arena
+constexpr unsigned kLayoutLogLines = 128;                  // bounded: the whole measured boot makes ~20 such answers
+constexpr std::uint64_t kLayoutArgumentLimit = 0x40000000;  // 1 GiB, far below the measured arena, so an arm stays bounded
+
+// "module+0xRVA" for the title caller, then the RVA.
+std::uint64_t layout_caller_rva(const void* caller) {
+    const std::string where = rt::startup_trace::where(reinterpret_cast<std::uint64_t>(caller));
+    const auto plus = where.rfind('+');
+    if (plus == std::string::npos) return 0;
+    return std::strtoull(where.c_str() + plus + 1, nullptr, 0);
+}
+
+// The title image runs under this project's own PE loader, not under LoadLibrary, so it is absent from the host's
+// module list: a caller the kernel cannot name is title code, and one it can name is a host module the arm must not
+// touch (the shim's own tests call XMemVirtualAlloc from the host image too).
+bool layout_caller_is_host(const void* caller) {
+    HMODULE module = nullptr;
+    return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              reinterpret_cast<LPCWSTR>(caller), &module) != FALSE;
+}
+
+std::uint64_t layout_round_up(std::uint64_t value, std::uint64_t alignment) {
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
+// True when this call is the one the arm targets: the measured title caller, in title code.
+bool layout_is_target(const void* caller) {
+    const rt::xmem::XmemLayoutPlan& plan = rt::xmem::layout_plan();
+    return plan.targeted() && !layout_caller_is_host(caller) && plan.targets(layout_caller_rva(caller));
+}
+
+// One bounded stderr line per recorded answer or arm action. `targeted` is the caller match the caller already made.
+void layout_note(const char* what, const void* caller, bool targeted, std::uint64_t requested_address,
+                 std::uint64_t requested_size, DWORD allocation_type, ULONGLONG attributes, DWORD protect,
+                 const void* answer, std::size_t served_size) {
+    const rt::xmem::XmemLayoutPlan& plan = rt::xmem::layout_plan();
+    if (!plan.enabled()) return;
+    // The log arm records every answer that could hold the arena; a placement arm records only the call it changes.
+    if (plan.mode == rt::xmem::XmemLayoutMode::log) {
+        if (served_size < kLayoutLogMinimumBytes) return;
+    } else if (!targeted) {
+        return;
+    }
+    static std::atomic<unsigned> lines{0};
+    if (lines.fetch_add(1, std::memory_order_relaxed) >= kLayoutLogLines) return;
+    MEMORY_BASIC_INFORMATION info{};
+    const SIZE_T queried = answer ? VirtualQuery(answer, &info, sizeof info) : 0;
+    const auto region_base =
+        queried == sizeof info ? reinterpret_cast<std::uintptr_t>(info.AllocationBase) : static_cast<std::uintptr_t>(0);
+    std::fprintf(stderr,
+                 "[rt] xmem layout t=%llu %s caller %s rva 0x%llx addr 0x%llx size 0x%llx type 0x%lx attrs 0x%llx "
+                 "protect 0x%lx -> 0x%llx served 0x%llx | region 0x%llx+0x%llx state 0x%lx type 0x%lx protect 0x%lx\n",
+                 static_cast<unsigned long long>(GetTickCount64()), what,
+                 rt::startup_trace::where(reinterpret_cast<std::uint64_t>(caller)).c_str(),
+                 static_cast<unsigned long long>(layout_caller_rva(caller)),
+                 static_cast<unsigned long long>(requested_address),
+                 static_cast<unsigned long long>(requested_size), static_cast<unsigned long>(allocation_type),
+                 static_cast<unsigned long long>(attributes), static_cast<unsigned long>(protect),
+                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(answer)),
+                 static_cast<unsigned long long>(served_size), static_cast<unsigned long long>(region_base),
+                 static_cast<unsigned long long>(queried == sizeof info ? info.RegionSize : 0),
+                 static_cast<unsigned long>(queried == sizeof info ? info.State : 0),
+                 static_cast<unsigned long>(queried == sizeof info ? info.Type : 0),
+                 static_cast<unsigned long>(queried == sizeof info ? info.Protect : 0));
+    std::fflush(stderr);
+}
+
 void __stdcall XMemFree(void* p, uint64_t attributes) {
     note_attributes("XMemFree", attributes, kNoSize, _ReturnAddress());
     note_caller("XMemFree", _ReturnAddress());
@@ -597,6 +672,8 @@ PVOID reserve_placeholder(void* address, SIZE_T size, SIZE_T alignment) {
 // VirtualAlloc2.
 void* WINAPI XMemVirtualAlloc(void* address, SIZE_T size, DWORD allocation_type, ULONGLONG attributes, DWORD protect) {
     const void* const caller = _ReturnAddress();
+    const auto layout_requested_address = reinterpret_cast<std::uint64_t>(address);
+    const auto layout_requested_size = static_cast<std::uint64_t>(size);
     note_attributes("XMemVirtualAlloc", attributes, size, caller);
     if (size == 0) {
         SetLastError(ERROR_INVALID_PARAMETER);
@@ -682,37 +759,114 @@ void* WINAPI XMemVirtualAlloc(void* address, SIZE_T size, DWORD allocation_type,
         return nullptr;
     }
 
+    // The arena-layout arms (docs/vertex_buffer_va.md section 19). `layout_target` is true only when the switch names a
+    // placement arm and this call's caller is the measured title site; with no switch set every branch below is the
+    // default path, unchanged.
+    const bool layout_target = layout_is_target(caller);
+    if (layout_target && rt::xmem::layout_plan().mode == rt::xmem::XmemLayoutMode::guard) {
+        const auto guard_bytes = static_cast<SIZE_T>(rt::xmem::layout_plan().argument);
+        void* const guard = VirtualAlloc(nullptr, guard_bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        layout_note("guard", caller, layout_target, 0, rt::xmem::layout_plan().argument, allocation_type, attributes,
+                    protect, guard, static_cast<std::size_t>(rt::xmem::layout_plan().argument));
+    }
+
+    // The front bytes and the alignment one placement path should use for this arm. Both are rounded to that path's
+    // granularity, so the answer stays an allocation-granularity base the title can name as its own.
+    const auto layout_placement = [&](SIZE_T granularity) {
+        std::uint64_t front = 0;
+        SIZE_T alignment = granularity;
+        if (layout_target) {
+            const rt::xmem::XmemLayoutPlan& plan = rt::xmem::layout_plan();
+            if (plan.mode == rt::xmem::XmemLayoutMode::prefix) {
+                front = layout_round_up(plan.argument, granularity);
+            } else if (plan.mode == rt::xmem::XmemLayoutMode::align && plan.argument > alignment) {
+                alignment = static_cast<SIZE_T>(plan.argument);
+            }
+        }
+        return std::pair<std::uint64_t, SIZE_T>{front, alignment};
+    };
+    const auto layout_log_placement = [&](const char* what, std::uint64_t front, SIZE_T alignment, SIZE_T granularity,
+                                          void* answer) {
+        if (front) layout_note("prefix", caller, layout_target, layout_requested_address, layout_requested_size,
+                               allocation_type, attributes, protect, answer, size);
+        if (alignment != granularity)
+            layout_note("align", caller, layout_target, layout_requested_address, layout_requested_size,
+                        allocation_type, attributes, protect, answer, size);
+        layout_note(what, caller, layout_target, layout_requested_address, layout_requested_size, allocation_type,
+                    attributes, protect, answer, size);
+    };
+
     if (replace) {
         const std::lock_guard lock(g_phys_mutex);
         if (!isolate_placeholder(address, size)) return nullptr;
         if (window) {
             // A reserve-only replacement stays a placeholder: the physical pages are mapped into it.
             record_window(address, size, host_prot);
+            layout_log_placement("window", 0, base_granularity, base_granularity, address);
             return served_virtual(address, size, caller);
         }
-        return served_virtual(placeholder_api().virtual_alloc2(GetCurrentProcess(), address, size,
-                                                               host_type | MEM_RESERVE, host_prot, nullptr, 0),
-                              size, caller);
+        void* const answer = placeholder_api().virtual_alloc2(GetCurrentProcess(), address, size, host_type | MEM_RESERVE,
+                                                              host_prot, nullptr, 0);
+        layout_log_placement("replace", 0, base_granularity, base_granularity, answer);
+        return served_virtual(answer, size, caller);
     }
     if (new_placeholder || window) {
-        void* const result = reserve_placeholder(address, size, base_granularity);
-        if (result && window) {
+        auto [front, alignment] = layout_placement(base_granularity);
+        if (front > (std::numeric_limits<SIZE_T>::max)() - size) front = 0;
+        const SIZE_T reserve_size = size + static_cast<SIZE_T>(front);
+        void* const result = reserve_placeholder(address, reserve_size, alignment);
+        void* const answer = result ? static_cast<std::uint8_t*>(result) + front : nullptr;
+        if (answer && window) {
             const std::lock_guard lock(g_phys_mutex);
-            record_window(result, size, host_prot);
+            record_window(answer, size, host_prot);
         }
-        return served_virtual(result, size, caller);
+        layout_log_placement("placeholder", front, alignment, base_granularity, answer);
+        return served_virtual(answer, size, caller);
     }
     if (page_mode == kXmemLargePages && address == nullptr) {
+        auto [front, alignment] = layout_placement(kXmemPageSize2m);
+        if (front > (std::numeric_limits<SIZE_T>::max)() - size) front = 0;
         MEM_ADDRESS_REQUIREMENTS requirements{};
-        requirements.Alignment = kXmemPageSize2m;
+        requirements.Alignment = alignment;
         MEM_EXTENDED_PARAMETER parameter{};
         parameter.Type = MemExtendedParameterAddressRequirements;
         parameter.Pointer = &requirements;
-        return served_virtual(placeholder_api().virtual_alloc2(GetCurrentProcess(), nullptr, size,
-                                                               host_type | MEM_RESERVE, host_prot, &parameter, 1),
-                              size, caller);
+        void* const result = placeholder_api().virtual_alloc2(GetCurrentProcess(), nullptr,
+                                                              size + static_cast<SIZE_T>(front),
+                                                              host_type | MEM_RESERVE, host_prot, &parameter, 1);
+        void* const answer = result ? static_cast<std::uint8_t*>(result) + front : nullptr;
+        layout_log_placement("large-pages", front, alignment, kXmemPageSize2m, answer);
+        return served_virtual(answer, size, caller);
     }
-    return served_virtual(VirtualAlloc(address, size, host_type, host_prot), size, caller);
+    {
+        // A plain host allocation: the only path where a prefix is safe (the answer is a base of its own, and its
+        // reservation is the whole range, so the title can free what it was handed).
+        const SIZE_T placement_granularity = (host_type & MEM_RESERVE) ? base_granularity : page_granularity;
+        auto [front, alignment] = layout_placement(placement_granularity);
+        if (layout_target && address == nullptr && (front || alignment > page_granularity)) {
+            if (front > (std::numeric_limits<SIZE_T>::max)() - size) front = 0;
+            void* answer = nullptr;
+            if (front) {
+                answer = VirtualAlloc(nullptr, size + static_cast<SIZE_T>(front), host_type, host_prot);
+                if (answer) answer = static_cast<std::uint8_t*>(answer) + front;
+            } else if (placeholder_api().available()) {
+                MEM_ADDRESS_REQUIREMENTS requirements{};
+                requirements.Alignment = alignment;
+                MEM_EXTENDED_PARAMETER parameter{};
+                parameter.Type = MemExtendedParameterAddressRequirements;
+                parameter.Pointer = &requirements;
+                answer = placeholder_api().virtual_alloc2(GetCurrentProcess(), nullptr, size, host_type, host_prot,
+                                                          &parameter, 1);
+            }
+            if (answer) {
+                layout_log_placement("virtual-alloc", front, alignment, placement_granularity, answer);
+                return served_virtual(answer, size, caller);
+            }
+        }
+        void* const answer = VirtualAlloc(address, size, host_type, host_prot);
+        layout_log_placement("virtual-alloc", 0, placement_granularity, placement_granularity, answer);
+        return served_virtual(answer, size, caller);
+    }
 }
 
 // With g_phys_mutex held. Unmaps the page at `address` if one is mapped there; the address becomes a placeholder again.
@@ -1488,6 +1642,63 @@ void start_mem_trace() {
 }  // namespace
 
 namespace rt::xmem {
+
+// The switch values parsed once (docs/vertex_buffer_va.md section 19). The plan is pure data: the arms apply it from
+// XMemVirtualAlloc, and nothing here touches the title.
+XmemLayoutPlan layout_plan_from(const char* layout, const char* caller) {
+    XmemLayoutPlan plan;
+    if (!layout || !*layout || (layout[0] == '0' && layout[1] == '\0')) return plan;
+    std::string spec(layout);
+    std::string mode = spec;
+    std::string argument;
+    const auto colon = spec.find(':');
+    if (colon != std::string::npos) {
+        mode = spec.substr(0, colon);
+        argument = spec.substr(colon + 1);
+    }
+    XmemLayoutMode parsed = XmemLayoutMode::none;
+    if (mode == "log") {
+        parsed = XmemLayoutMode::log;
+    } else if (mode == "prefix") {
+        parsed = XmemLayoutMode::prefix;
+    } else if (mode == "align") {
+        parsed = XmemLayoutMode::align;
+    } else if (mode == "guard") {
+        parsed = XmemLayoutMode::guard;
+    }
+    if (parsed == XmemLayoutMode::none) return plan;
+    if (parsed != XmemLayoutMode::log) {
+        // A placement arm needs one measured title caller: which answer it perturbs is part of the measurement, not a
+        // guess over every allocation the title makes.
+        if (argument.empty() || !caller || !*caller) return plan;
+        char* end = nullptr;
+        const auto value = std::strtoull(argument.c_str(), &end, 0);
+        if (end == argument.c_str() || *end || value == 0 || value > kLayoutArgumentLimit) return plan;
+        if (parsed == XmemLayoutMode::align) {
+            if ((value & (value - 1)) != 0 || value < 0x1000) return plan;
+        } else if (value % 0x1000 != 0) {
+            return plan;
+        }
+        char* caller_end = nullptr;
+        const auto rva = std::strtoull(caller, &caller_end, 16);
+        if (caller_end == caller || *caller_end || rva == 0) return plan;
+        plan.argument = value;
+        plan.caller_rva = rva;
+    }
+    plan.mode = parsed;
+    return plan;
+}
+
+const XmemLayoutPlan& layout_plan() {
+    static const XmemLayoutPlan plan = [] {
+        char layout[64] = {};
+        char caller[32] = {};
+        const DWORD layout_length = GetEnvironmentVariableA("PALMETTO_XMEM_LAYOUT", layout, sizeof layout);
+        const DWORD caller_length = GetEnvironmentVariableA("PALMETTO_XMEM_LAYOUT_CALLER", caller, sizeof caller);
+        return layout_plan_from(layout_length ? layout : nullptr, caller_length ? caller : nullptr);
+    }();
+    return plan;
+}
 
 // Which XMem entry point served `address`, and from which title caller (raw address; the caller resolves it to a
 // module+RVA). False when no recorded XMemVirtualAlloc answer contains it, or when the registry switch is off.

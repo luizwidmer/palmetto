@@ -838,6 +838,22 @@ struct GraphicsPipeline {
     bool has_pixel_stage = false;
     std::uint32_t ps_images = 0;  // image sample/gather/read instructions in the pixel shader
     std::uint32_t vs_loads = 0;   // OpLoad instructions in the vertex shader
+    // The root signature's parameters in the CONSOLE user-SGPR layout (docs/root_arguments.md section 4): base s8 for a
+    // vertex/pixel/geometry pipeline, one dword per descriptor table, two per root descriptor and one per constant.
+    // docs/vertex_buffer_va.md section 18 measured that the content draws' recorded block carries the PC packing (the
+    // table's 64-bit title VA pair at s0/s1) while the translated vertex and pixel stages read the console slots - the
+    // table at s8, nothing at s0/s1 - so those draws' geometry fetched the descriptor table as if it were the console
+    // driver block (table slot 0 decoded as a stride-0 V#, every vertex the same, no fragment). The replay converts the
+    // recorded block to this layout when PALMETTO_GRAPHICS_CONSOLE_ROOT is set.
+    struct ConsoleParameter {
+        std::uint32_t type = 0;            // rt::rootsig::ParamType as an integer (0 constants, 1 root descriptor, 2 table)
+        std::uint32_t pc_offset = 0;       // first PC-packed user-data dword (UINT32_MAX: not PC-packed)
+        std::uint32_t console_offset = 0;  // first console user-SGPR dword
+        std::uint32_t constant_count = 0;  // a Constants parameter's value count (0 for the others)
+    };
+    bool console_ok = false;  // every graphics parameter has a console placement
+    std::uint32_t console_parameter_count = 0;
+    ConsoleParameter console_parameter[16];
 };
 
 // The 144-byte push-constant block every translated shader declares: s0..s31, heap base, code base.
@@ -1186,6 +1202,15 @@ struct ReplayFunctions {
     // translated shader a distinct driver-block address (the s0/s1 pair) instead of the descriptor table's own. Set by
     // the shim; opt-in only.
     std::function<bool(std::uint32_t bytes, std::uint64_t& arena_address)> allocate_driver_block;
+    // The heap-relative address a resolved buffer starts at: `offset` inside the GPU address arena itself. False for any
+    // other buffer (a title-pages import lives at a device address the shader's heap_base + value model cannot name).
+    // docs/vertex_buffer_va.md section 18: the driver-block V#'s base is heap-relative, so an imported vertex stream
+    // must be staged into the arena first (stage_title_span).
+    std::function<bool(VkBuffer buffer, VkDeviceSize offset, std::uint64_t& arena_address)> buffer_arena_address;
+    // A cached arena staging copy of up to 4 MiB of the title's own memory at `va`, re-copied on each call (the title may
+    // rewrite its vertices between draws), starting at the returned heap-relative address. False when the span is not
+    // readable host memory, is too large, or the cache is full.
+    std::function<bool(std::uint64_t va, std::uint64_t bytes, std::uint64_t& arena_address)> stage_title_span;
     // Diagnostic (docs/frame_capture.md, the colour path): bind layer images for the T#s a shader fetches itself out of its
     // published matrix block (PALMETTO_TEXTURE_BIND_FETCHED). Set by the shim; opt-in only.
     std::function<void(std::uint64_t table_va)> bind_fetched_textures;
@@ -1670,6 +1695,114 @@ inline gfx10::BufferWords vertex_stream_descriptor(std::uint64_t arena_address, 
     return gfx10::encode(buffer);
 }
 
+// The graphics console root-argument switch (docs/root_arguments.md section 5, docs/vertex_buffer_va.md section 18):
+// `PALMETTO_GRAPHICS_CONSOLE_ROOT=1` makes the replay emit a graphics draw's user-data block in the console user-SGPR
+// layout - the root parameters at their console slots and the console driver-block V# address at s0/s1 - instead of the
+// PC packing whose descriptor-table pair sits at s0/s1. Off by default: the A/B is what decides (docs/vertex_buffer_va.md
+// section 18.5).
+inline bool graphics_console_root_enabled() {
+    static const bool on = [] {
+        const char* value = std::getenv("PALMETTO_GRAPHICS_CONSOLE_ROOT");
+        return value && *value && value[0] != '0' && value[0] != 'n';
+    }();
+    return on;
+}
+
+// The console user-SGPR dwords one root parameter takes (docs/root_arguments.md section 4): a descriptor table is ONE
+// dword (the 32-bit heap-relative VA of its first descriptor), a root descriptor two, a 32-bit-constant parameter its
+// value count. Pure; frame_dump_test pins it.
+inline std::uint32_t console_parameter_dwords(std::uint32_t type, std::uint32_t constant_count) {
+    switch (type) {
+    case 0: return constant_count;  // rt::rootsig::ParamType::Constants
+    case 1: return 2;               // a root descriptor's 64-bit VA
+    case 2: return 1;               // a descriptor table's one-dword heap-relative VA
+    default: return 0;
+    }
+}
+
+// The console-layout user-data block from a pipeline's console root-parameter table (docs/vertex_buffer_va.md section
+// 18.2): every parameter's already-resolved console dwords at its console slot, every other dword zero. The PC packing's
+// dwords are discarded: the console layout is the ABI a translated stage reads, and s0/s1 are then free for the console
+// driver block. A placement that overlaps another parameter is refused (the console ABI would have two parameters share
+// a dword), and so is one past s31. Pure; frame_dump_test pins the truth table.
+enum class ConsoleBlockResult : std::uint8_t { ok, no_parameters, overlap, spill, out_of_range };
+inline const char* console_block_result_name(ConsoleBlockResult result) {
+    switch (result) {
+    case ConsoleBlockResult::ok: return "ok";
+    case ConsoleBlockResult::no_parameters: return "no console-placed parameter";
+    case ConsoleBlockResult::overlap: return "two parameters share a console dword";
+    case ConsoleBlockResult::spill: return "a parameter runs past s31";
+    case ConsoleBlockResult::out_of_range: return "a parameter's dword count is not representable";
+    }
+    return "unknown";
+}
+struct ConsoleBlockParameter {
+    std::uint32_t console_offset = 0;  // first console user-SGPR dword
+    std::uint32_t dwords = 0;          // console dwords the parameter takes (console_parameter_dwords)
+    std::uint32_t value[4] = {};       // those dwords' values
+};
+inline ConsoleBlockResult graphics_console_block(const ConsoleBlockParameter* parameters, std::uint32_t count,
+                                                 std::array<std::uint32_t, 32>& out) {
+    out.fill(0);
+    if (!parameters || !count) return ConsoleBlockResult::no_parameters;
+    if (count > 16) return ConsoleBlockResult::out_of_range;
+    std::uint32_t occupied = 0;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const ConsoleBlockParameter& parameter = parameters[i];
+        if (!parameter.dwords || parameter.dwords > std::size(parameter.value))
+            return ConsoleBlockResult::out_of_range;
+        if (parameter.console_offset >= 32 || parameter.dwords > 32 - parameter.console_offset)
+            return ConsoleBlockResult::spill;
+        for (std::uint32_t d = 0; d < parameter.dwords; ++d) {
+            const std::uint32_t bit = 1u << (parameter.console_offset + d);
+            if (occupied & bit) return ConsoleBlockResult::overlap;
+            occupied |= bit;
+        }
+    }
+    for (std::uint32_t i = 0; i < count; ++i)
+        for (std::uint32_t d = 0; d < parameters[i].dwords; ++d)
+            out[parameters[i].console_offset + d] = parameters[i].value[d];
+    return ConsoleBlockResult::ok;
+}
+
+// One 64-byte driver-block range per pipeline in the GPU address arena (docs/vertex_path.md): the block whose
+// heap-relative address is emitted in s0/s1 and whose first 16 bytes are the vertex-stream V#. Shared by the two feeds
+// (PALMETTO_VERTEX_STREAM_DESCRIPTOR and the console-layout feed) so a pipeline gets one block. False when the shim
+// offered no allocator or the arena is full.
+inline bool driver_block_range(const ReplayFunctions& vk, std::uintptr_t pipeline, std::uint64_t& block) {
+    static std::mutex mutex;
+    static std::unordered_map<std::uintptr_t, std::uint64_t> blocks;
+    std::lock_guard lock(mutex);
+    if (const auto found = blocks.find(pipeline); found != blocks.end()) {
+        block = found->second;
+        return block != 0;
+    }
+    std::uint64_t fresh = 0;
+    if (!vk.allocate_driver_block || !vk.allocate_driver_block(64, fresh) || !fresh) {
+        block = 0;
+        return false;
+    }
+    blocks.emplace(pipeline, fresh);
+    block = fresh;
+    return true;
+}
+
+// The heap-relative address a translated vertex shader's V# must name for a bound view (docs/vertex_buffer_va.md section
+// 18.3): the arena offset when the view resolves inside the GPU address arena, or the arena staging copy when the layer
+// imported the title's own pages at first use (that device address cannot be expressed as heap_base + value, which is
+// the shader's only address model). `size` is cut to the resolved buffer's end by buffer_at. False when neither exists.
+inline bool vertex_stream_arena_address(const ReplayFunctions& vk, std::uint64_t va, std::uint64_t& size,
+                                        std::uint64_t& address) {
+    address = 0;
+    if (!va || !vk.buffer_at) return false;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceSize offset = 0;
+    if (!vk.buffer_at(va, size, buffer, offset)) return false;
+    if (vk.buffer_arena_address && vk.buffer_arena_address(buffer, offset, address) && address) return true;
+    address = 0;
+    return vk.stage_title_span && vk.stage_title_span(va, size, address) && address;
+}
+
 // The MATRIX V# form the module reads from the s8 table's slot 0 (docs/root_arguments.md section 7): a raw buffer over a
 // 4x4 matrix (stride 0, the byte count in w2, w3 = 0x30000FAC: bounds raw, format 0, identity select). Used only by the
 // coverage experiment; pure.
@@ -2127,6 +2260,11 @@ struct PreparedDraw {
     // Diagnostic (docs/vertex_path.md): the arena-relative address of the driver-block V# the geometry fix filled for
     // this draw's vertex stream; 0 when the fix is off. Emit puts it in the s0/s1 user-data pair.
     std::uint64_t driver_block = 0;
+    // The console-layout user-data block the replay converted the recorded PC packing into (docs/vertex_buffer_va.md
+    // section 18): the root parameters at their console slots. When set, emit pushes this block instead of the recorded
+    // one, and the driver block above fills s0/s1. `console_user_data_ok` is false on the default path.
+    std::array<std::uint32_t, 32> console_user_data{};
+    bool console_user_data_ok = false;
     // Diagnostic (docs/frame_capture.md): this draw is one of the readback-armed draws, so the queue copies its sampled
     // textures mid-submission (right after this draw list) as well as post-submission.
     bool armed_readback = false;
@@ -2147,6 +2285,8 @@ struct PreparedDraw {
         area = {};
         layers = 1;
         driver_block = 0;
+        console_user_data.fill(0);
+        console_user_data_ok = false;
         armed_readback = false;
     }
 };
@@ -3479,15 +3619,81 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
             }
             std::fprintf(stderr, "%s (%u of 32)\n", nonzero_constants > 8 ? " ..." : "", nonzero_constants);
         }
-        // The measured vertex/transform feed (docs/vertex_path.md, docs/vertex_constant_feed.md): a translated vertex
-        // stage reads the vertex-stream V# from the console driver block whose heap-relative address sits in its s0/s1
-        // user-data pair, but the port's PC packing puts the descriptor table's pair there, so the fetch lands on the
-        // table instead of the vertex stream (docs/frame_first_light.md section 6). Synthesise the driver block from the
-        // draw's bound vertex view - one scratch range per pipeline - and emit its address in s0/s1. The s8 descriptor
-        // table and the title's own descriptors are not touched. A draw the feed does not apply to keeps the recorded
-        // user data; the reason is logged once by name. Off by default (PALMETTO_VERTEX_STREAM_DESCRIPTOR=1 enables it);
-        // it writes no memory unless the switch is set.
-        if (frame_dump::vertex_stream_descriptor_enabled() && vk.write_device_memory && vk.allocate_driver_block) {
+        // The measured vertex/transform feed (docs/vertex_path.md, docs/vertex_constant_feed.md,
+        // docs/vertex_buffer_va.md section 18): a translated vertex stage reads the vertex-stream V# from the console
+        // driver block whose heap-relative address sits in its s0/s1 user-data pair, but the port's PC packing puts the
+        // descriptor table's pair there, so the fetch lands on the table instead of the vertex stream. Synthesise the
+        // driver block from the draw's bound vertex view - one scratch range per pipeline - and emit its address in
+        // s0/s1. The V#'s base must be heap-relative (the shader forms heap_base + it): the arena offset of an
+        // arena-resident view, or the arena staging copy of a title-pages import the layer made at first use. A draw the
+        // feed does not apply to keeps its recorded user data; the reason is logged once by name. Off by default
+        // (PALMETTO_VERTEX_STREAM_DESCRIPTOR=1 enables it).
+        const auto feed_driver_block = [&](const VertexBufferView& view, std::uint64_t& block) -> bool {
+            block = 0;
+            if (!vk.write_device_memory) return false;
+            const std::uint32_t stride = view.stride;
+            if (!stride || view.size < stride) return false;
+            // Address only the span this draw can reach: an indexed draw's index values bound its vertex addresses, a
+            // non-indexed draw's first-vertex/count pair does. That keeps the arena staging copy of a title-pages import
+            // small (the whole content stream is over 1 MiB, which the arena could not fit in the measured boot).
+            std::uint64_t records_needed = std::uint64_t(view.size / stride);
+            if (draw.indexed && draw.index.va && vk.read_title_memory && draw.count) {
+                const bool wide = draw.index.format != 57;
+                const std::uint32_t index_bytes = wide ? 4u : 2u;
+                const std::uint32_t read_count = std::min<std::uint32_t>(draw.count, 4096u);
+                std::uint8_t indices[4096 * 4] = {};
+                std::uint32_t got = 0;
+                if (vk.read_title_memory(draw.index.va + std::uint64_t(draw.first) * index_bytes, read_count * index_bytes,
+                                         indices, got) &&
+                    got) {
+                    std::uint32_t max_index = 0;
+                    const std::uint32_t count = got / index_bytes;
+                    for (std::uint32_t i = 0; i < count; ++i) {
+                        std::uint32_t value = 0;
+                        if (wide) {
+                            std::memcpy(&value, indices + i * 4, sizeof(value));
+                        } else {
+                            std::uint16_t half_word = 0;
+                            std::memcpy(&half_word, indices + i * 2, sizeof(half_word));
+                            value = half_word;
+                        }
+                        max_index = std::max(max_index, value);
+                    }
+                    records_needed = std::min<std::uint64_t>(records_needed, std::uint64_t(max_index) + 1);
+                }
+            } else {
+                records_needed =
+                    std::min<std::uint64_t>(records_needed, std::uint64_t(draw.first) + std::uint64_t(draw.count));
+            }
+            std::uint64_t size = std::min<std::uint64_t>(view.size, records_needed * stride);
+            if (!size) size = view.size;
+            std::uint64_t arena_address = 0;
+            if (!frame_dump::vertex_stream_arena_address(vk, view.va, size, arena_address)) {
+                static std::atomic<bool> unreachable{false};
+                if (!unreachable.exchange(true))
+                    std::fprintf(stderr,
+                                 "[rt] replay: vertex stream descriptor: a bound vertex view's bytes are not "
+                                 "reachable through the GPU address arena, so its draws keep the recorded s0/s1 pair\n");
+                return false;
+            }
+            if (!frame_dump::driver_block_range(vk, draw.pipeline, block)) return false;
+            const std::uint32_t records = static_cast<std::uint32_t>(std::min<std::uint64_t>(size / stride, UINT32_MAX));
+            const gfx10::BufferWords words = frame_dump::vertex_stream_descriptor(arena_address, stride, records);
+            if (!vk.write_device_memory(vk.heap_base + block, sizeof(words),
+                                        reinterpret_cast<const std::uint8_t*>(words.data())))
+                return false;
+            static std::atomic<unsigned> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
+                std::fprintf(stderr,
+                             "[rt] replay: vertex stream descriptor: pipeline 0x%llx driver block 0x%llx (emitted at "
+                             "s0/s1): wrote V# address 0x%llx stride %u records %u format 22 (dwords %08x %08x %08x "
+                             "%08x)\n",
+                             static_cast<unsigned long long>(draw.pipeline), static_cast<unsigned long long>(block),
+                             static_cast<unsigned long long>(arena_address), stride, records, words[0], words[1],
+                             words[2], words[3]);
+            return true;
+        };
+        if (frame_dump::vertex_stream_descriptor_enabled()) {
             const bool has_view = draw.views && !draw.views->vertex_buffers.empty() &&
                                   draw.views->vertex_buffers[0].va;
             const frame_dump::DriverBlockDecision decision = frame_dump::driver_block_decision(
@@ -3505,101 +3711,143 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                                      "%s\n",
                                      decision.why);
                 }
-            } else {
-                const VertexBufferView& view = draw.views->vertex_buffers[0];
-                const std::uint32_t stride = view.stride;
-                if (stride && view.size >= stride) {
-                    std::uint64_t arena_address = 0;
-                    {
-                        VkBuffer resolved = VK_NULL_HANDLE;
-                        VkDeviceSize offset = 0;
-                        std::uint64_t size = view.size;
-                        if (vk.buffer_at && vk.buffer_at(view.va, size, resolved, offset)) arena_address = offset;
-                    }
-                    static std::mutex blocks_mutex;
-                    static std::unordered_map<std::uintptr_t, std::uint64_t> blocks;
-                    std::uint64_t block = 0;
-                    {
-                        std::lock_guard lock(blocks_mutex);
-                        const auto found = blocks.find(draw.pipeline);
-                        if (found != blocks.end()) block = found->second;
-                    }
-                    if (!block && arena_address) {
-                        std::uint64_t fresh = 0;
-                        if (vk.allocate_driver_block(64, fresh) && fresh) {
-                            std::lock_guard lock(blocks_mutex);
-                            blocks.emplace(draw.pipeline, fresh);
-                            block = fresh;
+            } else if (feed_driver_block(draw.views->vertex_buffers[0], p.driver_block)) {
+                // The table's s8+0 and s8+0x40 slots are MATRIX-A and MATRIX-B buffers, not vertex streams
+                // (docs/root_arguments.md section 7): the vertex V# deliberately does not go there. The optional
+                // coverage experiment writes a matrix V# over the title's 480-byte constants buffer at s8+0.
+                std::uint64_t matrix_address = 0, matrix_bytes = 0;
+                if (frame_dump::matrix_descriptor_enabled() && vk.sampled_table) {
+                    // The descriptor-table probe reads the console heap mirror by the table's TITLE VA; the emitted s8
+                    // carries the arena-relative form the shader adds heap_base to, so probe with the raw s0/s1 pair
+                    // (both name the same table) and write at the arena-relative one.
+                    const std::uint64_t table_title =
+                        std::uint64_t(draw.user_data[0]) | (std::uint64_t(draw.user_data[1]) << 32);
+                    const std::uint64_t table_arena = std::uint64_t(draw.user_data[8]) & ~std::uint64_t(3);
+                    SampledTable table_probe;
+                    if (table_title && table_arena && vk.sampled_table(table_title, 64, table_probe)) {
+                        for (std::uint32_t k = 0; k < table_probe.keys; ++k) {
+                            if (table_probe.key[k].image) continue;
+                            gfx10::Buffer buffer{};
+                            const gfx10::BufferWords probe_words{
+                                table_probe.key[k].words[0], table_probe.key[k].words[1],
+                                table_probe.key[k].words[2], table_probe.key[k].words[3]};
+                            if (!gfx10::decode(probe_words, buffer) || !buffer.address) continue;
+                            matrix_address = buffer.address;
+                            matrix_bytes = buffer.stride ? std::uint64_t(buffer.stride) * buffer.num_records
+                                                         : std::uint64_t(buffer.num_records);
+                            break;
                         }
                     }
-                    if (block && arena_address) {
-                        const std::uint32_t records = static_cast<std::uint32_t>(view.size / stride);
-                        const gfx10::BufferWords words =
-                            frame_dump::vertex_stream_descriptor(arena_address, stride, records);
-                        if (vk.write_device_memory(vk.heap_base + block, sizeof(words),
-                                                   reinterpret_cast<const std::uint8_t*>(words.data()))) {
-                            p.driver_block = block;
-                            // The table's s8+0 and s8+0x40 slots are MATRIX-A and MATRIX-B buffers, not vertex streams
-                            // (docs/root_arguments.md section 7): the vertex V# deliberately does not go there. The
-                            // optional coverage experiment writes a matrix V# over the title's 480-byte constants
-                            // buffer at s8+0.
-                            std::uint64_t matrix_address = 0, matrix_bytes = 0;
-                            if (frame_dump::matrix_descriptor_enabled() && vk.sampled_table) {
-                                // The descriptor-table probe reads the console heap mirror by the table's TITLE VA; the
-                                // emitted s8 carries the arena-relative form the shader adds heap_base to, so probe
-                                // with the raw s0/s1 pair (both name the same table) and write at the arena-relative
-                                // one.
-                                const std::uint64_t table_title =
-                                    std::uint64_t(draw.user_data[0]) | (std::uint64_t(draw.user_data[1]) << 32);
-                                const std::uint64_t table_arena = std::uint64_t(draw.user_data[8]) & ~std::uint64_t(3);
-                                SampledTable table_probe;
-                                if (table_title && table_arena && vk.sampled_table(table_title, 64, table_probe)) {
-                                    for (std::uint32_t k = 0; k < table_probe.keys; ++k) {
-                                        if (table_probe.key[k].image) continue;
-                                        gfx10::Buffer buffer{};
-                                        const gfx10::BufferWords probe_words{
-                                            table_probe.key[k].words[0], table_probe.key[k].words[1],
-                                            table_probe.key[k].words[2], table_probe.key[k].words[3]};
-                                        if (!gfx10::decode(probe_words, buffer) || !buffer.address) continue;
-                                        matrix_address = buffer.address;
-                                        matrix_bytes = buffer.stride ? std::uint64_t(buffer.stride) * buffer.num_records
-                                                                     : std::uint64_t(buffer.num_records);
-                                        break;
-                                    }
-                                }
-                                if (matrix_address && matrix_bytes >= 64 &&
-                                    vk.write_device_memory(
-                                        vk.heap_base + table_arena, sizeof(gfx10::BufferWords),
-                                        reinterpret_cast<const std::uint8_t*>(
-                                            frame_dump::matrix_descriptor(matrix_address, static_cast<std::uint32_t>(
-                                                                                             std::min<std::uint64_t>(
-                                                                                                 matrix_bytes, UINT32_MAX)))
-                                                .data()))) {
-                                    static std::atomic<unsigned> matrix_logged{0};
-                                    if (matrix_logged.fetch_add(1, std::memory_order_relaxed) < 8)
-                                        std::fprintf(stderr,
-                                                     "[rt] replay: vertex matrix descriptor: pipeline 0x%llx table "
-                                                     "s8=0x%llx slot 0: wrote matrix V# over the constants buffer "
-                                                     "address 0x%llx + %llu B (stride 0)\n",
-                                                     static_cast<unsigned long long>(draw.pipeline),
-                                                     static_cast<unsigned long long>(table_arena),
-                                                     static_cast<unsigned long long>(matrix_address),
-                                                     static_cast<unsigned long long>(matrix_bytes));
-                                }
-                            }
-                            static std::atomic<unsigned> logged{0};
-                            if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
-                                std::fprintf(stderr,
-                                             "[rt] replay: vertex stream descriptor: pipeline 0x%llx driver block 0x%llx "
-                                             "(emitted at s0/s1): wrote V# address 0x%llx stride %u records %u format 22 "
-                                             "(dwords %08x %08x %08x %08x)\n",
-                                             static_cast<unsigned long long>(draw.pipeline),
-                                             static_cast<unsigned long long>(block),
-                                             static_cast<unsigned long long>(arena_address), stride, records, words[0],
-                                             words[1], words[2], words[3]);
-                        }
+                    if (matrix_address && matrix_bytes >= 64 &&
+                        vk.write_device_memory(
+                            vk.heap_base + table_arena, sizeof(gfx10::BufferWords),
+                            reinterpret_cast<const std::uint8_t*>(
+                                frame_dump::matrix_descriptor(matrix_address, static_cast<std::uint32_t>(
+                                                                                 std::min<std::uint64_t>(
+                                                                                     matrix_bytes, UINT32_MAX)))
+                                    .data()))) {
+                        static std::atomic<unsigned> matrix_logged{0};
+                        if (matrix_logged.fetch_add(1, std::memory_order_relaxed) < 8)
+                            std::fprintf(stderr,
+                                         "[rt] replay: vertex matrix descriptor: pipeline 0x%llx table s8=0x%llx slot "
+                                         "0: wrote matrix V# over the constants buffer address 0x%llx + %llu B "
+                                         "(stride 0)\n",
+                                         static_cast<unsigned long long>(draw.pipeline),
+                                         static_cast<unsigned long long>(table_arena),
+                                         static_cast<unsigned long long>(matrix_address),
+                                         static_cast<unsigned long long>(matrix_bytes));
                     }
                 }
+            }
+        }
+        // The console graphics root-argument layout (docs/root_arguments.md sections 3-5, docs/vertex_buffer_va.md section
+        // 18): the translated vertex and pixel stages read every root parameter at its CONSOLE user-SGPR slot - base s8,
+        // a descriptor table as ONE dword holding its heap-relative VA, constants after it, a root descriptor's pair -
+        // while the PC packing writes the table as a 64-bit title-VA pair at s0/s1 and nothing at s8. Convert this
+        // draw's recorded block to the console layout when the pipeline's signature has one, then feed the console
+        // driver block for the bound vertex stream (s0/s1 is driver-managed space in that layout). Applied to the
+        // stage-3 content submissions only - the window whose lists named title memory at first use - so every other
+        // draw (the loading frames and the constant-pass path the earlier slices measured) keeps the exact recorded PC
+        // block. Opt-in (PALMETTO_GRAPHICS_CONSOLE_ROOT=1); a draw that does not qualify keeps its recorded block, named
+        // once.
+        const bool console_window = vk.title_import_capture && vk.title_import_capture();
+        if (frame_dump::graphics_console_root_enabled() && console_window && !pipeline->mesh && pipeline->console_ok &&
+            pipeline->console_parameter_count && vk.rebase_console_va) {
+            std::array<frame_dump::ConsoleBlockParameter, 16> parameters{};
+            std::uint32_t parameter_count = 0;
+            unsigned refused = 0;
+            const char* refused_why = "";
+            for (std::uint32_t i = 0; i < pipeline->console_parameter_count && i < std::size(pipeline->console_parameter);
+                 ++i) {
+                const GraphicsPipeline::ConsoleParameter& source = pipeline->console_parameter[i];
+                frame_dump::ConsoleBlockParameter parameter;
+                parameter.console_offset = source.console_offset;
+                parameter.dwords = frame_dump::console_parameter_dwords(source.type, source.constant_count);
+                if (!parameter.dwords) continue;
+                if (source.type == 0) {  // a 32-bit-constant parameter: the recorded values, no rebase
+                    if (source.pc_offset == UINT32_MAX || source.constant_count > std::size(parameter.value) ||
+                        source.pc_offset + source.constant_count > 32) {
+                        ++refused;
+                        refused_why = "a constant parameter has no PC-packed dword";
+                        continue;
+                    }
+                    for (std::uint32_t d = 0; d < parameter.dwords; ++d)
+                        parameter.value[d] = draw.user_data[source.pc_offset + d];
+                    if (parameter_count < std::size(parameters)) parameters[parameter_count++] = parameter;
+                    continue;
+                }
+                const bool table = source.type == 2;
+                const std::uint64_t va = (source.pc_offset != UINT32_MAX && source.pc_offset + 1 < 32)
+                                             ? (std::uint64_t(draw.user_data[source.pc_offset]) |
+                                                (std::uint64_t(draw.user_data[source.pc_offset + 1]) << 32))
+                                             : 0;
+                std::uint64_t arena = 0;
+                if (!va || !vk.rebase_console_va(va, arena, table)) {
+                    ++refused;
+                    refused_why = "a parameter's 64-bit VA is not a resolvable title VA";
+                    continue;
+                }
+                if (table) {
+                    if (arena >> 32) {
+                        ++refused;
+                        refused_why = "a descriptor table's arena VA does not fit the console layout's one dword";
+                        continue;
+                    }
+                    parameter.value[0] = std::uint32_t(arena);
+                } else {
+                    parameter.value[0] = std::uint32_t(arena);
+                    parameter.value[1] = std::uint32_t(arena >> 32);
+                }
+                if (parameter_count < std::size(parameters)) parameters[parameter_count++] = parameter;
+            }
+            std::array<std::uint32_t, 32> block{};
+            const frame_dump::ConsoleBlockResult placed =
+                frame_dump::graphics_console_block(parameters.data(), parameter_count, block);
+            if (placed == frame_dump::ConsoleBlockResult::ok) {
+                p.console_user_data = block;
+                p.console_user_data_ok = true;
+                if (!p.driver_block && draw.views && !draw.views->vertex_buffers.empty())
+                    if (draw.views->vertex_buffers[0].va)
+                        feed_driver_block(draw.views->vertex_buffers[0], p.driver_block);
+                static std::atomic<unsigned> logged{0};
+                if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
+                    std::fprintf(stderr,
+                                 "[rt] replay: graphics console root: pipeline 0x%llx console block placed (%u "
+                                 "parameter(s), %u refused%s%s), s8=0x%08x; driver block %s0x%llx at s0/s1\n",
+                                 static_cast<unsigned long long>(draw.pipeline), parameter_count, refused,
+                                 refused ? ": " : "", refused ? refused_why : "", block[8],
+                                 p.driver_block ? "" : "none, recorded pair stays; ",
+                                 static_cast<unsigned long long>(p.driver_block));
+            } else {
+                static std::mutex reasons_mutex;
+                static std::set<int> printed;
+                const std::lock_guard lock(reasons_mutex);
+                if (printed.size() < 8 && printed.insert(static_cast<int>(placed)).second)
+                    std::fprintf(stderr,
+                                 "[rt] replay: graphics console root: this draw keeps its recorded block: %s (pipeline "
+                                 "0x%llx)\n",
+                                 frame_dump::console_block_result_name(placed),
+                                 static_cast<unsigned long long>(draw.pipeline));
             }
         }
         // Diagnostic (docs/frame_capture.md, the colour path): the compose pass pixel shader fetches T# descriptors
@@ -3829,15 +4077,24 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
             if (vk.read_device_memory) {
                 const std::uint64_t heap = vk.heap_base;
                 ShaderUserData emitted{};
-                std::copy(draw.user_data.begin(), draw.user_data.end(), emitted.s);
+                unsigned rebased = 0;
+                if (p.console_user_data_ok) {
+                    // The console graphics layout the replay emits for this draw (docs/vertex_buffer_va.md section 18);
+                    // no title-VA rebase: every dword is already arena-relative.
+                    std::copy(p.console_user_data.begin(), p.console_user_data.end(), emitted.s);
+                } else {
+                    std::copy(draw.user_data.begin(), draw.user_data.end(), emitted.s);
+                    rebased = rebase_user_data(vk, emitted, pipeline->table_windows);
+                }
                 emitted.heap_base = vk.heap_base;
                 emitted.code_base = pipeline->code_base;
-                const unsigned rebased = rebase_user_data(vk, emitted, pipeline->table_windows);
-                if (p.driver_block) {  // the geometry fix's driver block is emitted in s0/s1 (see emit)
+                if (p.driver_block) {  // the driver block is emitted in s0/s1 (see emit)
                     emitted.s[0] = std::uint32_t(p.driver_block);
                     emitted.s[1] = std::uint32_t(p.driver_block >> 32);
                 }
-                std::fprintf(stderr, "[rt] replay: vertex path: emitted user data (%u title VA(s) rebased)", rebased);
+                std::fprintf(stderr, "[rt] replay: vertex path: emitted user data (%s, %u title VA(s) rebased)",
+                             p.console_user_data_ok ? "the console graphics layout" : "the recorded PC packing",
+                             rebased);
                 for (unsigned w = 0; w < 32; ++w)
                     std::fprintf(stderr, "%s%08x", (w % 8) == 0 ? "\n  " : " ", emitted.s[w]);
                 std::fprintf(stderr, "\n");
@@ -3871,10 +4128,20 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
                         VkDeviceSize offset = 0;
                         std::uint64_t size = view.size;
                         if (!vk.buffer_at(view.va, size, buffer, offset)) continue;
+                        // The heap-relative address the driver-block V# must name (docs/vertex_buffer_va.md section
+                        // 18.3) when the view is arena-resident; a title-pages import has none unless the feed stages a
+                        // bounded copy (the feed's own line prints that V#), and a read-only dump must not allocate.
+                        std::uint64_t arena_address = 0;
+                        const bool reachable =
+                            vk.buffer_arena_address && vk.buffer_arena_address(buffer, offset, arena_address) &&
+                            arena_address;
                         std::fprintf(stderr,
-                                     "[rt] replay: vertex path: driver-block-shaped V# for vb%u: arena-relative "
-                                     "address 0x%llx stride %u records %u (view %u B, %u record(s) at that stride)\n",
-                                     slot, static_cast<unsigned long long>(offset), view.stride,
+                                     "[rt] replay: vertex path: driver-block-shaped V# for vb%u: buffer offset 0x%llx, "
+                                     "arena-relative address %s0x%llx stride %u records %u (view %u B, %u record(s) at "
+                                     "that stride)\n",
+                                     slot, static_cast<unsigned long long>(offset),
+                                     reachable ? "" : "unreachable ", static_cast<unsigned long long>(arena_address),
+                                     view.stride,
                                      view.stride ? static_cast<std::uint32_t>(view.size / view.stride) : 0u, view.size,
                                      view.stride ? static_cast<std::uint32_t>(view.size / view.stride) : 0u);
                     }
@@ -6739,12 +7006,18 @@ inline void emit(const PreparedList& prepared, VkCommandBuffer command_buffer, c
             vk.begin_rendering(command_buffer, &rendering);
 
             ShaderUserData data{};
-            std::copy(draw->user_data.begin(), draw->user_data.end(), data.s);
+            if (d.console_user_data_ok) {
+                // The console graphics layout the replay converted the recorded PC packing into
+                // (docs/vertex_buffer_va.md section 18): already arena-relative values, so no title-VA rebase runs.
+                std::copy(d.console_user_data.begin(), d.console_user_data.end(), data.s);
+            } else {
+                std::copy(draw->user_data.begin(), draw->user_data.end(), data.s);
+                rebase_user_data(vk, data, graphics.table_windows);
+            }
             data.heap_base = vk.heap_base;
             data.code_base = graphics.code_base;
-            const unsigned rebased = rebase_user_data(vk, data, graphics.table_windows);
-            // Diagnostic (docs/vertex_path.md): the geometry fix's driver block goes in the s0/s1 pair, the two dwords
-            // the translated vertex shader reads as the driver block's heap-relative address (docs/root_arguments.md).
+            // The console driver block's heap-relative address in the s0/s1 pair (the console layout's driver-managed
+            // dwords; the same two dwords the PC packing used for the table pair).
             if (d.driver_block) {
                 data.s[0] = std::uint32_t(d.driver_block);
                 data.s[1] = std::uint32_t(d.driver_block >> 32);
@@ -6753,9 +7026,10 @@ inline void emit(const PreparedList& prepared, VkCommandBuffer command_buffer, c
                 static std::atomic<unsigned> emitted{0};
                 if (emitted.fetch_add(1, std::memory_order_relaxed) < 8)
                     std::fprintf(stderr,
-                                 "[rt] replay: emitting a draw: %u count(s), %u instance(s), %u title VA(s) rebased in "
-                                 "its user data\n",
-                                 draw->count, draw->instances, rebased);
+                                 "[rt] replay: emitting a draw: %u count(s), %u instance(s), %s user data\n",
+                                 draw->count, draw->instances,
+                                 d.console_user_data_ok ? "the console graphics layout (one line per boot)"
+                                                        : "the recorded PC packing");
             }
             vk.bind_pipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipeline);
             if (graphics.bindless_set) {
