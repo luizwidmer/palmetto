@@ -1,13 +1,14 @@
 # Stage and state machine from stage 3 on: writers, transitions, the boot-media gate, the job graph and the runtime answers it reads
 
-**Status: static decompilation only (no boot, no runtime change, no other page touched).** This page maps what
-the title does after its game/stage word reaches 3: the exact phase dispatch of the stage machine object, every
+**Status: sections 1-9 are static decompilation only; section 10 is measured.** The static part of this page maps
+what the title does after its game/stage word reaches 3: the exact phase dispatch of the stage machine object, every
 writer of the three state words with its store site, the boot-media gate bytes `0x71B90AC`/`0x71B90AD` and the
 title path they select, the stage-3 search handlers, the 16-slot job graph the stage-3 update dispatches to, the
 session state machine that runs in the same call tree (`0` -> `1` -> `3` -> `4` -> ...), and the runtime answers
 (IAT imports and console-object vtable calls) read on those paths with the RVA of each read. It closes with a
 ranked list of runtime-answer hypotheses that could keep stage 3 alive or make the first visible content
-reachable, each with the shim where we answer it.
+reachable, each with the shim where we answer it. Section 10 reports the boot that measured ranked hypothesis 1 and
+the diagnostic switch it added.
 
 Marking: **[M]** measured statically in this slice (decompiled C or instruction bytes); **[I]** inferred from the
 call graph, a measured page elsewhere, or a structure's use. Where this page corrects an earlier one it says so.
@@ -22,7 +23,7 @@ data.
 | Decompiler | Ghidra 12.1.4 PUBLIC headless, `D:\leonida-work\rea-tooling\ghidra_scripts\DecompileRanges.java` over exact `.pdata` ranges; 69 range decompiles in 4 batches (13 + 28 + 16 + 12), split into per-function files |
 | Static scans | validated RIP-relative reference scan over `.text` (instruction-boundary validated, `[M]`), direct `E8`/`E9` call/jmp scan, qword pointer scan for VA and RVA forms, raw disassembly of thunks outside `.pdata` |
 | Call-graph walk | bounded depth-2 direct-call walk from three root sets, reporting every IAT read reached: 197 functions from the stage-3 path, 247 from the session handlers, 243 from the media/boot-media/job modules |
-| Boots | none. The runtime values quoted below are the other pages' measurements, marked as such |
+| Boots | none for sections 1-9; section 10 is a measured runtime slice on the same page |
 | Work notes | `D:\leonida-work\decomp\stage-machine.md` (outside the repository, raw tables) |
 
 ## 2. The machine object and its four phases
@@ -329,5 +330,161 @@ shim that owns the runtime value; none of these is a code change made by this sl
 - **Evidence.** Decompiled C per function and the four headless logs are in `D:\leonida-work\decomp-stage\decomp-b1`,
   `-b2`, `-b4`, `-b5` (outside the repository); scan tools `pe_scan.py`, `scan_branch.py`, `runtime_answers.py`
   in `D:\leonida-work\decomp-stage\tools`; raw tables in `D:\leonida-work\decomp\stage-machine.md`.
-- **Files this slice touched:** this page only. No other page, no port source, no test, no build file and no git
-  write. The repository also carries other slices' uncommitted files; none of them was touched here.
+- **Files the static slice touched:** this page only, in sections 1-9. No other page, no port source, no test, no
+  build file and no git write. The repository also carries other slices' uncommitted files; none of them was touched
+  there. Section 10 came later and touched `port/shims/dstorage.cpp`, `port/shims/dstorage_advanced.h`,
+  `port/test/dstorage_test.cpp` and this page (10.7).
+
+## 10. Measured: the loading record in a boot, and the completion the session-3 poll waits for
+
+**Status: measured, diagnostic only, negative.** Sections 1-9 are static decompilation. This section adds one opt-in
+probe to the DirectStorage shim and reports six boots. The record at `image+0x78AC9C8` was sampled once per interval:
+its own-slot pointer came back as `image+0x78ACBA0` (the poll slot, value 4), the five 0x50-byte slots' completion
+dwords stayed zero in every sampled window, and the one arm that reached session 3 sat in the 33 ms poll from
+`0x21B7070` until the title's own crash 9.9 s later, so the predicate `0x41E8C0` never returned true. On the producer
+side the storage path answered every request it was given: the loader's first burst of 4,199 requests completed by
++3 s, no request was refused and every first-touch repair succeeded. So no producer fix in
+`port/shims/dstorage.cpp` or `port/shims/file_system.cpp` is implied by this measurement. The next falsifier is named
+in section 10.6.
+
+### 10.1 The record, as the probe reads it
+
+The probe is `PALMETTO_DS_RECORD` in `port/shims/dstorage.cpp`. It starts on the first queue call, resolves the title
+image base from that call's return address (no base, no thread) and prints one line per sample: the poll slot, each
+slot's tick/completion/state dwords, the record's list-head and tick fields, and the three state words with the stage
+machine's current/requested pair. It is off by default (one cached boolean, no thread, no allocation without the
+switch), bounded (480 lines, at most 600 s), and its grammar is pure and tested (`parse_record_trace_spec` in
+`port/shims/dstorage_advanced.h`). The measured shape:
+
+| field | address | value in the six boots | what it is |
+|---|---|---|---|
+| poll slot | `record+0x1D8` (`image+0x78ACBA0`) | 4, constant | the `param_2` the session-3 poll passes to `0x41E8C0` |
+| own-slot pointer | `record+0x190` | `image+0x78ACBA0` | dereferenced by `0x41E8C0`; `own` equals the poll slot |
+| slots 0-4 | `record+slot*0x50` | tick `+0x0`, completion `+0x18`, state `+0x20` | the five job slots the reset `0x22310D0` zeroes at load start |
+| list heads | `record+0x188`, `+0x1A8`, `+0x1C0` | 0 in every sample | the reset's outstanding-job list; empty here |
+| header ticks | `record+0x1CC`, `+0x1D0`, `+0x1D4` | a title tick, `0x22F01073`, `0x22F01073` | written by the record's own init |
+
+So in this build the dword the session-3 predicate tests is `image+0x78ACB20` (slot 4, `+0x18`), and the five slots'
+tick dwords are `image+0x78AC9C8`, `+0x78ACA18`, `+0x78ACA68`, `+0x78ACAB8`, `+0x78ACB08`.
+
+### 10.2 The arms
+
+Six boots, one at a time under `_setup/boot_lock.ps1`, harness `tooling/boot_report.py`, 300 s timeout, logs under
+`D:\leonida-work\sessionload` (outside the repository). Every arm is the standard deferred-compile environment of
+[3d_textures.md](3d_textures.md) section 11.1 plus `PALMETTO_STATE_TRACE=2,300`, `PALMETTO_STAGE3_PUMP`, the record
+switch and `PALMETTO_WAIT_TRACE`; Record 1 also ran `PALMETTO_DSTORAGE_TRACE`, `PALMETTO_DS_LOAD_TRACE` and
+`PALMETTO_DS_ARRAYS`; Record 5 added `PALMETTO_FILE_TRACE=1`, and Record 6 armed the presenter captures and the
+full-frame readback (`PALMETTO_CAPTURE`, `PALMETTO_READBACK_PPM`).
+
+| arm | binary SHA-256 (first 8) | record window | stage 3 | verdict |
+|:--|:--|:--|:--|:--|
+| record1 | `F22439B6` | 500 ms, 80 s | 107.8 s | STOP `game+0x13360A3` read `0xFFFFFFFFFFFFFFFF`, t 117.7 s, wall 124.0 s |
+| record2 | `1B67BBEF` | 250 ms, 300 s | not reached | STOP `game+0x43ADFEA` read `0x26500000006`, t 90.0 s, wall 105.0 s |
+| record3 | `1B67BBEF` | 100 ms, 300 s | not reached | STOP host `VCRUNTIME140+0x1CCA7` read `0x21100000100`, t 70.0 s, wall 88.8 s |
+| record4 | `1B67BBEF` | 100 ms, 300 s | not reached | STOP `game+0x43ADFEA` read `0x21600000000`, t 63.2 s, wall 66.1 s |
+| record5 | `E900132B` | 500 ms, 300 s | not reached | STOP `0x0` execute, t 75.8 s, wall 142.0 s |
+| record6 | `E900132B` | 500 ms, 300 s, captures on | not reached | STOP `game+0x43AE026` read `0x18`, t 78.0 s, wall 90.0 s |
+
+Stage-3 arming has the same spread the earlier pages record: it ranged 52-110 s, and five of these six arms stopped
+in the pre-stage crash family the content slice already named ([vertex_buffer_va.md](vertex_buffer_va.md) section
+10.5), so one arm carries a session-3 window.
+
+### 10.3 What the record showed
+
+- **All five completion dwords stayed zero in every sample of every arm.** No store into `slot+0x18` was observed:
+  slots 1-4 are zero in tick, completion and state in every sample, and slot 0 carries a tick only. No sample shows
+  the value that would make `0x41E8C0` return true.
+- **Slot 0's tick dword is the only slot field that moves.** It is zero through the boot's first phase, then starts
+  carrying a title tick when the loading pass begins (record4's first non-zero value at +45.77 s of its clock, record5's
+  at +46.11 s, record3's at +50.73 s, record6's at +56.24 s), and it advances while the loading worker runs. That is a
+  title-side progress write, not a completion.
+- **The poll slot (4) never carries a tick in any sampled window.** The session-3 poll would write it; the one arm
+  with a session-3 window (record1) had already ended its 80 s record window when session 3 began, so the witness for
+  that arm is the state word, not a record sample (10.4).
+- **The header lists are empty** (`+0x188`, `+0x1A8`, `+0x1C0` all zero), so the reset/owner list walk had no
+  outstanding job either.
+- **The samplers stop reporting at the loading-pass phase in four arms.** In record3, record4, record5 and record6 the
+  record sampler's last line is at +55.62 s, +50.67 s, +51.69 s and +68.21 s of its clock while the boot ran on to its
+  crash, and the page's own `PALMETTO_STATE_TRACE` sampler stopped within a few seconds of it (60.0 s, 63.2 s, 58.0 s,
+  74.0 s). Both are poll-based detached-thread samplers that read title memory; this is a tooling limit of the
+  measurement, not a property of the record. Record1 ran both samplers through stage 3 (state lines to 120.7 s), so the
+  sampler cannot explain the session word staying 3 there.
+
+### 10.4 The arm that reached session 3
+
+`record1` reached stage 3 at 107.8 s (machine current 3, requested 3), the loading word moved 1 -> 2 at 106.0 s, the
+session word 0 -> 1 -> 3 and read 3 from 108.0 s. The stage-3 pump probe's samples at +1, +2, +4, +6 and +8 s after
+entry name the frame thread inside the session-3 poll: `game+0x21B70A5` is the `Sleep(33)` of `0x21B7070`, reached
+through `0x1D83996` <- `0x81AFB9` <- `0x53EC079` <- `0x53EBF66` <- `0x661F0` <- `0x1D109C9` <- `0x5A91C0D` <-
+`0x56A1E5A`, and the heartbeat advanced 0 times after stage 3 entry in the first sample. The loading task thread
+(`0x4FD1AD0`'s worker) was alive in `loading-update`/`loading-task` and the loading word's tick kept advancing
+(`27423423` at 110.0 s, `27423968` at 112.0 s), so the loader was still being driven while the frame thread polled.
+
+The state trace read session 3 with "last change 108.0 s" at 108.0, 110.0, 112.0, 114.0, 116.0, 118.0 and 120.7 s,
+and the machine word current/requested 3/3 at each of those samples. A true predicate is consumed in one 33 ms pass
+and stores 4 at `0x21B7182`; that store never happened before the title stopped at `game+0x13360A3` (read of `-1`)
+9.9 s after stage 3 entry. The session word is the witness that the record's completion dword was still zero.
+
+### 10.5 The producer path, measured on the storage side
+
+Record1's `PALMETTO_DSTORAGE_TRACE` and `PALMETTO_DS_LOAD_TRACE` lines answer what the storage path did:
+
+| measure | value |
+|---|---|
+| first load burst | 4,199 `EnqueueRequest` calls, all 4,199 done by +3 s of the trace's clock |
+| status arrays | all complete, pending 0 in the 38.7 s dump; last poll value `0x0`; no `EnqueueSignal`/`EnqueueSetEvent` |
+| second burst (pipeline precompile) | requests up to 8,297 by +20 s, done 8,297 |
+| DirectStorage repair events | 10 `dstorage_read_noaccess` enqueues in the load window, every one repaired |
+| `ReadFile` repair events | 2 in the load window (271 MiB at t 35.4 s, 84.8 MiB at t 106.5 s), both repaired |
+| storage refusals / errors | 0 request refusals, 0 `unknown resource`, no device-lost line |
+
+Every read the title's loader asked the storage shims for was delivered, or was a first-touch repair that then
+succeeded. A read left in flight, a completion event never signalled or a queued request never drained is not what
+this measurement shows. The record is reset and walked by title code (`0x22310D0` and the record's callback list), and
+no shim on the storage path holds its completion: the completion the poll waits for is produced by a title subsystem,
+which this slice did not name.
+
+Record6 is the capture-armed arm, and its content numbers are the same negative the content slice reports: one
+presenter capture (2564x1421, mean rgb 0.00 0.00 0.00, i.e. black), no full-frame readback because no content draw was
+reached, one device-lost line, and four `ExecuteCommandLists` refusals after it. At 74.0 s its state words read
+garbage (init `260240686`, loading `260561804`, boot-media gate `0x62`), five exceptions followed, and the first was
+`game+0x43AE026` reading `0x18`. So this arm stopped in the pre-stage family and adds no content evidence either way.
+
+### 10.6 Verdict, limits and the next falsifier
+
+The verdict is a negative. In the measured boots the loading/streaming record's completion dword never became
+non-zero, the one session-3 window shows the poll spinning until the title's own crash, and the storage path answered
+everything it was asked. The two shims named by the roadmap row are not the producer of that value, so this slice
+changes no shim behaviour beyond the diagnostic switch.
+
+- **Sampling, not watching.** The probe polls once per 500 ms (250/100 ms in the earlier builds); it can miss a store
+  and a later clear between two samples. The state word closes that gap for session 3: a true predicate is consumed
+  in one 33 ms pass and stores 4, and the word never moved, so the title never observed a completion.
+- **The poll-based samplers stop at the loading phase in some boots.** 10.3 names the three arms where they did and
+  the one arm where they ran through stage 3; the stall is in the measurement threads, after their last reported
+  sample, and does not change any state word.
+- **One boot per arm, and the pre-stage crash family.** Stage 3 was reached in one of six arms; the other five
+  stopped before it at `game+0x43ADFEA` (twice), in host `VCRUNTIME140`, at `0x0` (execute) and at `game+0x43AE026`.
+  That family is the content slice's stop, not this probe's: the same environment without the probe stops there too.
+- **The record's writer is not named.** `0x22310D0` resets the slots and `0x41E8C0` is the reader; the store that
+  would write slot 4's `+0x18` has no static call site in this slice's search because the record is passed as a
+  pointer and the store is through a register.
+- **Next falsifier.** A hardware write watchpoint on `image+0x78ACB20` (slot 4, `+0x18`), armed from the load start,
+  would name the storing title function and the subsystem that owns it. If it fires around the boot-media/AC
+  handshake, the media slice owns the fix; if it never fires before the crash, the title stops short of dispatching
+  the job at all. That names the producer instead of guessing it, in one boot.
+
+### 10.7 Tests and gates
+
+- `port/test/dstorage_test.cpp` gains `test_record_trace_spec`: a null/empty/`0`/unparsable spec is off, `1` is the
+  documented 500 ms / 300 s default, an interval and an interval+duration are read, the interval and duration are
+  clamped, and a zero duration keeps the default (10 new `check` lines; the target prints 234 checks, 0 failed).
+- Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, the
+  `dstorage_test` target exits 0, and every `tests/test_docs_*.py` check passes.
+
+### 10.8 Attribution
+
+This section was implemented from this project's own measurement: the record trace, the five arms, the state-word
+timeline and the storage counters. No peer code was used and no game data is added: RVAs, field offsets, values,
+counts and outcomes only.
+

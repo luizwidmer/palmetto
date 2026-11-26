@@ -218,6 +218,35 @@ void test_staging() {
     check(env_size("PALMETTO_DS_STAGING") == 0, "staging: an unset size is 0");
 }
 
+// ---- loading-record trace spec --------------------------------------------------------------------------------------
+//
+// The session-3 loading/streaming record trace in shims/dstorage.cpp is a diagnostic and its grammar is pure
+// (parse_record_trace_spec): off unless the switch names a spec, "1" is the documented default, and the interval and
+// duration are clamped so a typo cannot spin a sampler. docs/decomp_stage.md section 10 names the switch.
+
+void test_record_trace_spec() {
+    using palmetto::dstorage::parse_record_trace_spec;
+    check(!parse_record_trace_spec(nullptr).on, "record trace: a null spec is off");
+    check(!parse_record_trace_spec("").on, "record trace: an empty spec is off");
+    check(!parse_record_trace_spec("0").on, "record trace: 0 is off");
+    check(!parse_record_trace_spec("off").on, "record trace: an unparsable spec is off");
+    const auto documented = parse_record_trace_spec("1");
+    check(documented.on && documented.interval_ms == 500 && documented.seconds == 300.0,
+          "record trace: 1 is the documented 500 ms / 300 s default");
+    const auto interval = parse_record_trace_spec("250");
+    check(interval.on && interval.interval_ms == 250 && interval.seconds == 300.0,
+          "record trace: a bare interval keeps the default duration");
+    const auto both = parse_record_trace_spec("100,120");
+    check(both.on && both.interval_ms == 100 && both.seconds == 120.0, "record trace: interval,duration is read");
+    const auto clamped = parse_record_trace_spec("10,900");
+    check(clamped.on && clamped.interval_ms == 50 && clamped.seconds == 600.0,
+          "record trace: the interval and the duration are clamped");
+    const auto slow = parse_record_trace_spec("20000");
+    check(slow.on && slow.interval_ms == 10000, "record trace: a slow interval is clamped to 10 s");
+    const auto zero_duration = parse_record_trace_spec("250,0");
+    check(zero_duration.on && zero_duration.seconds == 300.0, "record trace: a zero duration keeps the default");
+}
+
 // ---- pinning -------------------------------------------------------------------------------------------------------
 
 bool page_guarded(const void* address) {
@@ -1140,6 +1169,7 @@ void test_bcpack_history(const testfiles::ScratchDir& scratch) {
 int main() {
     testfiles::ScratchDir scratch("palmetto_dstorage_test");
     test_staging();
+    test_record_trace_spec();
     test_pinning();
     test_page_lists();
     test_unshuffle();

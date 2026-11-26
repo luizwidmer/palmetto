@@ -68,6 +68,37 @@ inline std::size_t env_size(const char* name) {
     return static_cast<std::size_t>(bytes);
 }
 
+// ---- Loading-record trace spec (measurement only; docs/decomp_stage.md) -------------------------------------------
+//
+// The session-3 loading/streaming record trace in dstorage.cpp samples the title's record at image+0x78AC9C8 and the
+// three state words. Its switch is PALMETTO_DS_RECORD: unset, empty, "0" or unparsable is off; "1" is the documented
+// default (500 ms samples for 300 s); otherwise the text is <interval_ms>[,<seconds>], the interval clamped to 50..10000
+// ms and the duration to at most 600 s. Pure, so the test checks the grammar without a boot.
+struct RecordTraceSpec {
+    bool on = false;
+    unsigned interval_ms = 500;
+    double seconds = 300.0;
+};
+
+inline RecordTraceSpec parse_record_trace_spec(const char* text) {
+    RecordTraceSpec spec;
+    if (!text || *text == '\0' || std::strcmp(text, "0") == 0) return spec;
+    if (std::strcmp(text, "1") == 0) {
+        spec.on = true;
+        return spec;
+    }
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(text, &end, 0);
+    if (end == text) return spec;
+    spec.interval_ms = parsed >= 50 ? static_cast<unsigned>(std::min<unsigned long>(parsed, 10000ul)) : 50u;
+    if (*end == ',') {
+        const double seconds = std::strtod(end + 1, nullptr);
+        if (seconds > 0.0) spec.seconds = std::min(seconds, 600.0);
+    }
+    spec.on = true;
+    return spec;
+}
+
 // ---- Bounded staging ----------------------------------------------------------------------------------------------
 //
 // One reusable buffer per transform stage, with a hard cap: a request above the cap falls back to an owned allocation

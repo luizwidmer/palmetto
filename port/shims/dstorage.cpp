@@ -26,6 +26,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -587,6 +588,134 @@ void ds_load_heartbeat_start() {
     }).detach();
 }
 
+// ---- Loading-record trace (measurement only; PALMETTO_DS_RECORD=1) -------------------------------------------------
+//
+// docs/decomp_stage.md section 5.2 and its ranked hypothesis 1: the session-3 poll FUN_1421b7070 (RVA 0x21B7070) loops
+// every 33 ms on FUN_14041e8c0(image+0x78AC9C8, [image+0x78ACBA0]) and requests session 4 only when that predicate
+// returns true. The predicate stores its poll tick into entry [0x78ACBA0]*0x50 and returns entry [own]*0x50 + 0x18 != 0,
+// where `own` is the int at the pointer stored at record+0x190. The record is the title's loading/streaming completion
+// table, filled by the title's streaming systems; the shim question is whether the read/completion path we answer leaves
+// that slot empty. This trace starts on the first queue call (the loader drains DirectStorage from the boot's first
+// seconds), then samples the record once per interval and prints one compact line per sample: the poll index, the five
+// 0x50-byte slots' poll tick / completion / state dwords, the record header fields the reset and list code use (+0x1A8,
+// +0x1C0, +0x1C8, +0x1D0, +0x1D4), and the three state words with the stage machine's current/next, so the record's
+// timeline reads against PALMETTO_STATE_TRACE. A separate line marks the first time a slot's completion dword becomes
+// non-zero. Off by default (one cached boolean, no thread), bounded (480 lines, at most 600 s), reads only committed
+// pages through palmetto_mem_read, values and offsets only.
+//
+// PALMETTO_DS_RECORD=1 uses 500 ms samples for 300 s; <ms> overrides the interval; <ms>,<seconds> both; 0/unset is off.
+// The grammar and its clamp live in dstorage_advanced.h (parse_record_trace_spec), where the test checks them.
+
+const palmetto::dstorage::RecordTraceSpec& ds_record_trace_spec() {
+    static const palmetto::dstorage::RecordTraceSpec spec = [] {
+        char value[64] = {};
+        size_t length = 0;
+        if (getenv_s(&length, value, "PALMETTO_DS_RECORD") != 0 || length <= 1)
+            return palmetto::dstorage::RecordTraceSpec{};
+        return palmetto::dstorage::parse_record_trace_spec(value);
+    }();
+    return spec;
+}
+
+// One guarded read of title memory; false when the range is not committed/readable. palmetto_mem_read is the runtime's
+// own guarded read (d3d12_xs_device.cpp), safe from this detached thread.
+bool ds_record_read(std::uint64_t address, void* out, unsigned size) {
+    return palmetto_mem_read(address, out, size) == size;
+}
+
+// Starts the trace on the first queue call. The title image base comes from that call's return address (the queue API's
+// caller is title code); no base, no thread. Off and unstarted without the switch.
+void ds_record_trace_start(void* caller) {
+    const palmetto::dstorage::RecordTraceSpec& spec = ds_record_trace_spec();
+    if (!spec.on) return;
+    static std::atomic<bool> started{false};
+    if (started.load(std::memory_order_relaxed)) return;
+    if (g_title_image_base.load(std::memory_order_relaxed) == 0 && !ensure_title_base(caller)) return;
+    if (started.exchange(true, std::memory_order_relaxed)) return;
+    const std::uint64_t base = g_title_image_base.load(std::memory_order_relaxed);
+    std::thread([base, spec] {
+        constexpr std::uint32_t kRecordRva = 0x78AC9C8;       // the loading/streaming completion table
+        constexpr std::uint32_t kPollIndexRva = 0x78ACBA0;    // the slot 0x21B7070 passes to the predicate
+        constexpr std::uint32_t kInitStateRva = 0x7446510;    // the stage word
+        constexpr std::uint32_t kLoadingStateRva = 0x7453ED0; // the loading word
+        constexpr std::uint32_t kSessionStateRva = 0x98F828C; // the session word
+        constexpr std::uint32_t kMachineRva = 0x71273C8;      // [machine] -> current u16 +0x10, requested u16 +0x12
+        const std::uint64_t record = base + kRecordRva;
+        const unsigned deadline_ms = static_cast<unsigned>(spec.seconds * 1000.0);
+        unsigned lines = 0;
+        std::uint32_t previous_completion[5] = {};
+        bool have_completion[5] = {};
+        for (unsigned waited = 0; waited <= deadline_ms && lines < 480; waited += spec.interval_ms) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(spec.interval_ms));
+            std::uint32_t poll_index = 0;
+            const bool ok_index = ds_record_read(base + kPollIndexRva, &poll_index, 4);
+            std::uint64_t owner = 0;
+            const bool ok_owner = ds_record_read(record + 0x190, &owner, 8) && owner != 0;
+            std::uint32_t own = 0;
+            if (ok_owner) ds_record_read(owner, &own, 4);
+            std::uint32_t slot_tick[5] = {}, slot_completion[5] = {}, slot_state[5] = {};
+            bool slots_ok = true;
+            for (unsigned slot = 0; slot < 5; ++slot) {
+                const std::uint64_t slot_base = record + slot * 0x50ull;
+                slots_ok = ds_record_read(slot_base, &slot_tick[slot], 4) &&
+                           ds_record_read(slot_base + 0x18, &slot_completion[slot], 4) &&
+                           ds_record_read(slot_base + 0x20, &slot_state[slot], 4) && slots_ok;
+            }
+            std::uint64_t header_a8 = 0, header_c0 = 0, header_c8 = 0, header_d0 = 0;
+            std::uint32_t header_d4 = 0;
+            ds_record_read(record + 0x1a8, &header_a8, 8);
+            ds_record_read(record + 0x1c0, &header_c0, 8);
+            ds_record_read(record + 0x1c8, &header_c8, 8);
+            ds_record_read(record + 0x1d0, &header_d0, 8);
+            ds_record_read(record + 0x1d4, &header_d4, 4);
+            std::uint32_t init_state = 0, loading = 0, session = 0;
+            ds_record_read(base + kInitStateRva, &init_state, 4);
+            ds_record_read(base + kLoadingStateRva, &loading, 4);
+            ds_record_read(base + kSessionStateRva, &session, 4);
+            std::uint64_t machine = 0;
+            ds_record_read(base + kMachineRva, &machine, 8);
+            std::uint16_t current = 0, next = 0;
+            if (machine && (machine & 7) == 0) {
+                ds_record_read(machine + 0x10, &current, 2);
+                ds_record_read(machine + 0x12, &next, 2);
+            }
+            // A slot completion becoming non-zero is the event this trace exists for: the session-3 predicate
+            // FUN_14041e8c0 reads entry [own]+0x18 != 0, so a non-zero dword here is the exact value that would move the
+            // session word off 3. The transition is also marked on its own line.
+            for (unsigned slot = 0; slot < 5; ++slot) {
+                if ((!have_completion[slot] || previous_completion[slot] == 0) && slot_completion[slot] != 0) {
+                    std::lock_guard lock(log_mutex());
+                    std::fprintf(stderr,
+                                 "[rt] ds record +%.2fs: SLOT %u COMPLETION dword 0x%x (own %s%u) - the session-3 "
+                                 "predicate 0x41E8C0 now reads true for this slot\n",
+                                 ds_load_seconds(), slot, slot_completion[slot], ok_owner ? "" : "?", own);
+                    ++lines;
+                }
+                have_completion[slot] = true;
+                previous_completion[slot] = slot_completion[slot];
+            }
+            char index_text[16], own_text[16];
+            if (ok_index) std::snprintf(index_text, sizeof index_text, "%u", poll_index);
+            else std::snprintf(index_text, sizeof index_text, "?");
+            if (ok_owner) std::snprintf(own_text, sizeof own_text, "%u", own);
+            else std::snprintf(own_text, sizeof own_text, "?");
+            std::lock_guard lock(log_mutex());
+            std::fprintf(stderr,
+                         "[rt] ds record +%.2fs: index %s own %s%s; slots 0..4 tick/comp/state: 0:%u/%u/%u "
+                         "1:%u/%u/%u 2:%u/%u/%u 3:%u/%u/%u 4:%u/%u/%u; hdr 1a8=0x%llx 1c0=0x%llx 1c8=0x%llx "
+                         "1d0=0x%llx 1d4=0x%x; init %u loading %u session %u machine %u/%u\n",
+                         ds_load_seconds(), index_text, own_text, slots_ok ? "" : "?", slot_tick[0],
+                         slot_completion[0], slot_state[0], slot_tick[1], slot_completion[1], slot_state[1],
+                         slot_tick[2], slot_completion[2], slot_state[2], slot_tick[3], slot_completion[3],
+                         slot_state[3], slot_tick[4], slot_completion[4], slot_state[4],
+                         static_cast<unsigned long long>(header_a8), static_cast<unsigned long long>(header_c0),
+                         static_cast<unsigned long long>(header_c8), static_cast<unsigned long long>(header_d0),
+                         header_d4, init_state, loading, session, static_cast<unsigned>(current),
+                         static_cast<unsigned>(next));
+            ++lines;
+        }
+    }).detach();
+}
 
 // ---- Streamed-block consumer diagnostics (measurement only; PALMETTO_STREAM_CONSUMER=1) ---------------------------
 //
@@ -1661,6 +1790,7 @@ public:
     }
 
     void STDMETHODCALLTYPE EnqueueRequest(const DSTORAGE_REQUEST* request) override {
+        ds_record_trace_start(_ReturnAddress());  // PALMETTO_DS_RECORD: no thread without the switch
         ds_stack_scan("enqueue", _ReturnAddress(), _AddressOfReturnAddress(), 0, S_OK, false);
         Entry e;
         e.type = Entry::Type::Request;
@@ -1712,6 +1842,7 @@ public:
     }
 
     void STDMETHODCALLTYPE EnqueueStatus(IDStorageStatusArrayX* status_array, UINT32 index) override {
+        ds_record_trace_start(_ReturnAddress());  // PALMETTO_DS_RECORD: a queue whose first call is a status entry
         Entry e;
         e.type = Entry::Type::Status;
         e.status_as_given = status_array;
