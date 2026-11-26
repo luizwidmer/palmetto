@@ -79,3 +79,13 @@ The root-signature packing slice ([docs/root_packing.md](docs/root_packing.md)) 
 spill mechanisms against the public reference fork (GPL-3.0): files in its root-signature, D3D12 COM and root-signature
 serializer sources, at the commits the page cites. No code is copied; the planner, the measured shapes and the tests are
 our own work.
+
+### Peer-port campaign evidence (reference only)
+
+The peer-port audit pages ([peer_port_streaming.md](docs/peer_port_streaming.md),
+[peer_port_movie.md](docs/peer_port_movie.md), [peer_port_first_ui.md](docs/peer_port_first_ui.md)) read five public
+ports as evidence for mechanisms this repository does not yet implement: five-star-recomp (GPL-3.0-or-later, commit
+`45071d52`), PercyScarlett (GPL-2.0-only, `e44c465`), VIctory (GPL-3.0-or-later, `63bcca4`), victory-fork
+(GPL-3.0-or-later, `52ac4ec`) and XCL (GPL-2.0-only, `8b957be`). Their code and documentation are read to understand
+behaviour; no source, comment, identifier or data table is copied into this repository, and the mechanisms described
+are reimplemented here in our own structure with attribution when a port lands.
