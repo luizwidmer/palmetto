@@ -8286,6 +8286,173 @@ void start_stream_open_probe(std::uintptr_t image_base, std::size_t image_size, 
     }).detach();
 }
 
+// ---- Bink library diagnostic (PALMETTO_BINK_PROBE) ------------------------------------------------------------
+// docs/decomp_first_ui.md section 18: the movie/Bink path enters the package's decoder (Bink2Scarlett.dll), and one
+// measured arm stopped inside it at decoder+0x5de9 reading 0x1660000005c, i.e. the async service thread loaded the
+// qword at HBINK+0x1b8 and used it as the track-array base. This probe measures where that field comes from: the
+// decoder's own open builds a 0x6e8-byte context on the stack and copies it into a block it allocates, so the field's
+// value is the block allocator's answer for the track-array slot. Three points are logged:
+//   image+0x6c33  the first open path, right after the context block is allocated (rax = block, rbx = context);
+//   image+0x6f11  the second open path, right after its context block is allocated (rax = block) and after the slot
+//                 table has written the track-array pointer into the stack template at [rbp+0x178];
+//   image+0x6f88  the second open path, right after the template copy into the context (rdi = context) - the field
+//                 HBINK+0x1b8 is final here;
+//   image+0x5de2  the async service thread's load of HBINK+0x1b8 (rbx = the list node, the HBINK) - the measured
+//                 crash site's preceding instruction.
+// The library is a package module the loader maps by name; the export table gives its base, so every printed address
+// is an RVA into that library. Opt-in; default path unchanged. No game data: RVAs, field values and counts only.
+constexpr std::uint32_t kBinkOpenWithOptionsExportRva = 0x4710;  // measured export RVA (local decompilation)
+constexpr unsigned kBinkProbeSites = 4;
+constexpr std::uint32_t kBinkProbeSiteRvas[kBinkProbeSites] = {0x6C33, 0x6F11, 0x6F88, 0x5DE2};
+constexpr const char* kBinkProbeSiteNames[kBinkProbeSites] = {"open1-context", "open2-block", "open2-context",
+                                                              "worker-node"};
+constexpr unsigned kBinkProbeLines = 24;
+
+struct BinkProbe {
+    std::atomic<bool> ready{false};
+    std::atomic<std::uintptr_t> address[kBinkProbeSites] = {};
+    unsigned char original[kBinkProbeSites] = {};
+    std::atomic<unsigned> hits[kBinkProbeSites] = {};
+    std::atomic<unsigned> logged{0};
+    std::uintptr_t base = 0;
+};
+
+BinkProbe& bink_probe() {
+    static BinkProbe probe;
+    return probe;
+}
+
+thread_local unsigned bink_probe_repoke_slot = 0;
+
+void bink_probe_write_byte(unsigned slot, unsigned char value) {
+    BinkProbe& probe = bink_probe();
+    const auto address = probe.address[slot].load(std::memory_order_relaxed);
+    if (!address) return;
+    DWORD old_protect = 0;
+    if (VirtualProtect(reinterpret_cast<void*>(address), 1, PAGE_EXECUTE_READWRITE, &old_protect)) {
+        *reinterpret_cast<unsigned char*>(address) = value;
+        VirtualProtect(reinterpret_cast<void*>(address), 1, old_protect, &old_protect);
+    }
+}
+
+void bink_probe_log_hit(unsigned slot, CONTEXT& context) {
+    BinkProbe& probe = bink_probe();
+    const std::uintptr_t base = probe.base;
+    const auto at = static_cast<std::uintptr_t>(context.Rip);
+    char head[224];
+    std::snprintf(head, sizeof head,
+                  "[rt] bink probe t=%.3f site %s hit %u tid %lu at bink+0x%llx rax 0x%llx rbx 0x%llx rcx 0x%llx "
+                  "rdx 0x%llx rdi 0x%llx rbp 0x%llx rsi 0x%llx",
+                  executor_watch_seconds(), kBinkProbeSiteNames[slot],
+                  probe.hits[slot].load(std::memory_order_relaxed), static_cast<unsigned long>(GetCurrentThreadId()),
+                  static_cast<unsigned long long>(at - base), static_cast<unsigned long long>(context.Rax),
+                  static_cast<unsigned long long>(context.Rbx), static_cast<unsigned long long>(context.Rcx),
+                  static_cast<unsigned long long>(context.Rdx), static_cast<unsigned long long>(context.Rdi),
+                  static_cast<unsigned long long>(context.Rbp), static_cast<unsigned long long>(context.Rsi));
+    std::string text = head;
+    const std::uintptr_t caller = executor_watch_read_u64(static_cast<std::uintptr_t>(context.Rsp));
+    text += " caller " + rt::shims::module_offset(caller);
+    const std::uintptr_t block = static_cast<std::uintptr_t>(context.Rax);
+    const std::uintptr_t candidate = slot == 0   ? static_cast<std::uintptr_t>(context.Rbx)
+                                     : slot == 1 ? block
+                                     : slot == 2 ? static_cast<std::uintptr_t>(context.Rdi)
+                                                 : static_cast<std::uintptr_t>(context.Rbx);
+    if (slot == 1) {
+        // The allocator has just filled the stack template's track-array slot, and the same instruction's rbp is that
+        // template's frame: [rbp+0x178] is the pointer the copy will put at HBINK+0x1b8.
+        const std::uint64_t slot_value = executor_watch_read_u64(static_cast<std::uintptr_t>(context.Rbp) + 0x178);
+        text += " block " + executor_watch_hex(block) + " templ+0x1b8 " + executor_watch_hex(slot_value);
+    } else if (candidate) {
+        text += " candidate " + rt::shims::module_offset(candidate);
+        text += " +0x0 " + executor_watch_hex(executor_watch_read_u64(candidate));
+        text += " +0x4c " + std::to_string(executor_watch_read_u32(candidate + 0x4c));
+        text += " +0x12c " + std::to_string(executor_watch_read_u32(candidate + 0x12c));
+        const std::uint64_t array = executor_watch_read_u64(candidate + 0x1b8);
+        text += " +0x1b8 " + executor_watch_hex(array);
+        if (array >= 0x10000) {
+            const std::uint32_t status = executor_watch_read_u32(static_cast<std::uintptr_t>(array) + 0x5c);
+            text += " array+0x5c " + std::to_string(status);
+        }
+        if (slot == 3) text += " next " + executor_watch_hex(executor_watch_read_u64(candidate + 0xb8));
+    }
+    text += "\n";
+    std::fwrite(text.data(), 1, text.size(), stderr);
+    std::fflush(stderr);
+}
+
+LONG CALLBACK bink_probe_exception(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT& context = *info->ContextRecord;
+    BinkProbe& probe = bink_probe();
+    if (!probe.ready.load(std::memory_order_relaxed)) return EXCEPTION_CONTINUE_SEARCH;
+    if (info->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT) {
+        const auto at = reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress);
+        unsigned slot = kBinkProbeSites;
+        for (unsigned i = 0; i < kBinkProbeSites; ++i)
+            if (probe.address[i].load(std::memory_order_relaxed) == at) {
+                slot = i;
+                break;
+            }
+        if (slot == kBinkProbeSites) return EXCEPTION_CONTINUE_SEARCH;
+        probe.hits[slot].fetch_add(1, std::memory_order_relaxed);
+        if (probe.logged.fetch_add(1, std::memory_order_relaxed) < kBinkProbeLines) bink_probe_log_hit(slot, context);
+        // The service thread is a loop: after a generous number of hits the site is disarmed permanently so the probe
+        // cannot become the measurement. The open sites are cold and keep their int3 for a retry.
+        if (slot == 3 && probe.hits[slot].load(std::memory_order_relaxed) > 64) {
+            bink_probe_write_byte(slot, probe.original[slot]);
+            probe.address[slot].store(0, std::memory_order_relaxed);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        bink_probe_write_byte(slot, probe.original[slot]);
+        bink_probe_repoke_slot = slot + 1;
+        context.EFlags |= 0x100;  // trap after the original instruction, then put the int3 back
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (info->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP) {
+        if (!bink_probe_repoke_slot) return EXCEPTION_CONTINUE_SEARCH;
+        const unsigned slot = bink_probe_repoke_slot - 1;
+        bink_probe_repoke_slot = 0;
+        bink_probe_write_byte(slot, 0xCC);
+        context.EFlags &= ~static_cast<DWORD>(0x100);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// Arms the probe. The library is looked up by the name the loader mapped, and its export table supplies the base; a
+// module that is not mapped yet (the boot maps it at ~0.9 s) simply leaves the probe unarmed.
+void start_bink_probe() {
+    BinkProbe& probe = bink_probe();
+    void* const module = rt::shims::find_loaded_bundled_module("bink2scarlett.dll");
+    bool owns = false;
+    void* const open = module ? rt::shims::get_bundled_proc_address(module, "BinkOpenWithOptions", owns) : nullptr;
+    if (!open) {
+        std::fprintf(stderr,
+                     "[rt] bink probe: Bink2Scarlett.dll is not mapped through the bundled loader (module %p); not "
+                     "armed\n",
+                     module);
+        std::fflush(stderr);
+        return;
+    }
+    probe.base = reinterpret_cast<std::uintptr_t>(open) - kBinkOpenWithOptionsExportRva;
+    void* const handler = AddVectoredExceptionHandler(1, bink_probe_exception);
+    unsigned installed = 0;
+    for (unsigned i = 0; i < kBinkProbeSites; ++i) {
+        auto* const at = reinterpret_cast<unsigned char*>(probe.base + kBinkProbeSiteRvas[i]);
+        DWORD old = 0;
+        if (!VirtualProtect(at, 1, PAGE_EXECUTE_READWRITE, &old)) continue;
+        probe.original[i] = *at;
+        *at = 0xCC;
+        VirtualProtect(at, 1, old, &old);
+        probe.address[i].store(reinterpret_cast<std::uintptr_t>(at), std::memory_order_relaxed);
+        ++installed;
+    }
+    probe.ready.store(installed != 0, std::memory_order_relaxed);
+    std::fprintf(stderr, "[rt] bink probe: base bink+0x0 = 0x%llx, %u of %u int3 site(s) installed (handler %p)\n",
+                 static_cast<unsigned long long>(probe.base), installed, kBinkProbeSites, handler);
+    std::fflush(stderr);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -8864,6 +9031,11 @@ int wmain(int argc, wchar_t** argv) {
         // trace above). Off by default; PALMETTO_ALLOC_WATCH_FREE=1 adds the allocator's free entry.
         if (const char* watch = std::getenv("PALMETTO_ALLOC_WATCH"); watch && *watch && *watch != '0')
             start_alloc_watch(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size);
+        // PALMETTO_BINK_PROBE=1: int3 points on the package Bink decoder's open (its block allocation and the context's
+        // HBINK+0x1b8 write) and on the async service thread's HBINK+0x1b8 load, so a boot measures where the track-array
+        // pointer comes from; the library base is read from its export table (diagnostic; see the probe above). Off by
+        // default.
+        if (const char* bink = std::getenv("PALMETTO_BINK_PROBE"); bink && *bink && *bink != '0') start_bink_probe();
         const int code = rt::process::run_entry(main_module.base + main_module.entry_rva);
         std::fflush(stdout);
         std::printf("game exited with code %d\n", code);

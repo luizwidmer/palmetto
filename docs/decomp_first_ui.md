@@ -1379,3 +1379,168 @@ the state words, screen-owner hits, movie player state and presenter captures co
   captures are this project's own measurements on the user's own image and the chain of
   [decomp_stage.md](decomp_stage.md) sections 10-11 and [vertex_buffer_va.md](vertex_buffer_va.md) sections 14-16. No
   peer code was used and no game data is added.
+
+## 18. Measured: the decoder's async-service field HBINK+0x1b8 is its open block allocator's answer; the device-loss arm's console-range pointer is not a shim answer and does not reproduce on a clean arm
+
+**Status: measured, negative for a runtime-answer fix, with the fault site attributed statically and its field origin
+measured on a clean arm.** Section 17 left the movie player at state `0x9` with `buffers 0`, the per-frame decode wrapper
+`0x2EF0E0` and frame-buffer registration `0x442F760` at **0 hits**, and the decode not issued. The open task was the one
+movie arm that did enter the decoder and fault: `boot-open3` stopped inside `Bink2Scarlett.dll+0x5de9` reading
+`0x1660000005c` after a Vulkan device loss ([decomp_stage.md](decomp_stage.md) section 15.5). This section attributes the
+read statically (the decoder's async-service worker walking its open-context list), measures where the field comes from
+with a new opt-in probe in a clean 300.4 s arm, and reports the negative: on the clean arm the field is a valid pointer
+into the block the decoder's own open allocated through the title's memory callbacks, the service thread pumps it without
+a fault, no shim answer produces the console-range value, and no shim is changed. Decode and registration still have
+**0 hits**, `buffers` stays 0 and the presented captures stay black, so no movie pixel is claimed.
+
+### 18.1 The fault site, statically
+
+`Bink2Scarlett.dll` is the package's own Bink 2 decoder (`SizeOfImage` `0x44000`), mapped by the loader at
+`0x15a76800000` in `boot-open3`. The exception the boot reported has four frames only, the decoder's own service thread:
+`+0x5de9` <- `+0x23ece` <- `host:KERNEL32.DLL+0x2dda7` (BaseThreadInitThunk) <- `host:ntdll.dll+0xc9c5c`
+(RtlUserThreadStart), i.e. a thread the decoder created itself, not a title frame and not a shim call.
+
+| item | measured |
+|---|---|
+| containing function | RVA `0x5d30..0x5eed` (exception-directory range), the decoder's async-service worker: it takes its global lock at `0x237a0`, walks the decoder's open-context list (global list head RVA `0x3e8c8`, next node at context `+0xb8`) and, for a node with `+0x4c == 0` and `+0x12c != 0`, reads the node status dword and runs the pump `0x8570` |
+| faulting instruction | `0x5de9` = `mov ecx,[rax+0x5c]`, preceded by `0x5de2` = `mov rax,[rbx+0x1b8]`; `rbx` is the list node (the decoder's `HBINK` context), so the reported read address `0x1660000005c` means `[HBINK+0x1b8]` = `0x16600000000` |
+| the field | `HBINK+0x1b8` is the base of a `0x1c0`-byte-stride array whose count is `HBINK+0x12c`; entries carry status words at `+0x4c`/`+0x5c` and callbacks at `+0x170`/`+0x178`/`+0x180` (decompiled teardown `0x2418`, pump `0x8570`/`0x85f6`/`0x873a`). So the fault is on the decoder's per-track structure array, not on compressed video and not on a frame buffer; `+0x5c` is a track status dword |
+| worker caller | thread trampoline RVA `0x23ec8` (`mov rcx,[rdi+8]` / `call [rdi]`), which is the `+0x23ece` return address in the exception stack |
+
+### 18.2 Where HBINK+0x1b8 comes from (static)
+
+`BinkOpenWithOptions` is export RVA `0x4710` and tail-jumps to the open `0x67c0..0x8357`. The open memsets a `0x66c`-byte
+stack template (`0x6868`), registers the track-array slot `lea rdx,[rbp+0x178]` (template `+0x1b8`) with size
+`max(count,1) * 0x1c0` through the block builder `0x25b20` (`0x6e31`), allocates the whole context block at `0x6f0c` with
+`0x25a40`, fills the template slot from that allocation, and copies the template over the context at `0x6f83`
+(context = `(block+0x100) & ~0xff` at `0x6f6e`). The value is therefore **the open block allocator's answer for the
+track-array slot**: `block + slot offset`.
+
+Two measurements make that attribution complete:
+
+- **No decoder instruction writes `[reg+0x1b8]`.** An exhaustive capstone scan of every `.pdata` function plus a raw
+  scan for the disp32 bytes `b8 01 00 00` found only loads and `add` uses of the field (the one dword store, RVA
+  `0x18767`, is a stack local in another function; the two `lea rbp+0x1b8`, RVAs `0x19ffd`/`0x20d8e`, are other frames).
+  The only writer is the block builder's slot table, writing through the registered stack-slot address during `0x25a40`.
+- **The allocation is title memory, not a shim answer.** The title installs the decoder's callbacks at its movie module
+  init RVA `0x577f500`: `BinkSetOSFileCallbacks` with `0x1946220`/`0x92ebc0`/`0x442e890`/`0x1a400f0`, and
+  `BinkSetMemory(&UNK_143a1a170,&UNK_14169c4d0)`. The malloc wrapper RVA `0x3a1a170` is `mov edx,0x20; jmp 0x4f9e90`,
+  and `0x4f9e90` allocates through the title's own allocator (small path) or its async/virtual path (>= `0x20000`). The
+  decoder's XMem/File imports are not called in any measured boot (`PALMETTO_XMEM_CALLERS`/`FILE_TRACE` negative,
+  section 15.5), and no shim sits between the allocation and this field.
+
+### 18.3 The diagnostic this slice adds
+
+`PALMETTO_BINK_PROBE=1` (opt-in, off by default; the default path is unchanged) puts four `int3` points in the mapped
+decoder after the loader maps it and uses the same restore / single-step / re-poke discipline as the movie probes. The
+base is read from the decoder's own export table (`BinkOpenWithOptions`, export RVA `0x4710`) through the loader's
+bundled-module lookup, so every printed address is `bink+<RVA>`. A handler prints the registers, the containing site,
+the caller and the decoded fields; the worker site is disarmed after 64 hits and the log is capped at 24 lines.
+
+| site RVA | where it fires | what it prints |
+|---|---|---|
+| `0x6c33` | first open path, right after its context block is allocated | `rax` block, `rbx` context |
+| `0x6f11` | second open path, right after its context block is allocated | `rax` block; the template's track slot at `[rbp+0x178]` (the value the copy will put at `HBINK+0x1b8`) |
+| `0x6f88` | second open path, right after the template copy | `rdi` context and its `+0x0/+0x4c/+0x12c/+0x1b8`, plus `[+0x1b8]+0x5c` when readable |
+| `0x5de2` | the service worker's load of `HBINK+0x1b8` | `rbx` node and its `+0x0/+0x4c/+0x12c/+0x1b8/+0xb8`, plus `[+0x1b8]+0x5c` |
+
+### 18.4 The clean arm
+
+One arm, `binkprobe1`, one boot under `_setup/boot_lock.ps1`, the section-12 content environment from the template,
+`-Light`, 300 s, plus `PALMETTO_TITLE_CLASS0A_SIZE=1`, `PALMETTO_MOVIE_PROBE=player` and `PALMETTO_BINK_PROBE=1`.
+Binary sha256 first 16 `57EFCB2E729B6622` (this slice's probe build). Logs and captures outside the repository.
+
+| measure | value |
+|---|---|
+| wall / verdict | 300.4 s, **ALIVE** (harness timeout), 0 exceptions, **0 device losses** |
+| stage 3 | init 3 / session 3 last change 98.0 s, loading 2 |
+| movie player | 0x3 at 96.0/98.0 s (probe 1, open 1, handle 0), 0x6 at 100.0 s, **0x9 from 102.0 s to 298.0 s**, handle `0x1805acdb600`, `buffers 0`, probe 0, open 1, error 0 |
+| play-step probes | metadata/probe open `0x442EA70` **3**, playback open `0x199EF20` **1**, per-frame decode `0x2EF0E0` **0**, frame-buffer registration `0x442F760` **0** |
+| presenter captures | 12 (frames 1..2201), every one 2564x1421 mean rgb `0.00 0.00 0.00` (black) |
+
+The new probe measured the field's origin and the service thread's use of it:
+
+| site | measurement |
+|---|---|
+| `0x6f11` / `0x6f88` | 4 hits each: the metadata/probe open (`block 0x1806fa4dee0`, template slot `0x1806fa502c0`) and the playback open (`block 0x1805acdb560`, context `0x1805acdb600`, template slot and `context+0x1b8` = `0x1805acdd940`); the slot is **block + 0x23e0** in both opens; `+0x12c` reads 0 at the copy point (the count is stored later by `0x791c`) |
+| `0x5de2` | 16 logged hits starting 0.1 s after the playback open: the node **is the playing handle** `0x1805acdb600`, `+0x12c` = **1**, `+0x1b8` = `0x1805acdd940` (readable), `[+0x1b8]+0x5c` = **0**, next node 0; the worker pumps the track and loops, no fault |
+
+So on the clean arm `HBINK+0x1b8` is a valid pointer into the very block the decoder's open allocated through the title's
+memory callbacks, at a constant `+0x23e0` slot offset for this open's layout, with one track and status 0. The service
+thread runs, and the whole boot holds the playing state for 196 s with no decoder exception.
+
+### 18.5 The device-loss arms and the pointer's shape
+
+- **`boot-open3`** (section 15.5's arm; pre-slice binary `2A553C49...`): 97.8 s, one device loss, movie player state `0x9`
+  next `0x3` handle `0x16681428100` at the 90.0/92.0/94.0 s samples. `stderr` carries `[rt] replay: the Vulkan device was
+  lost` after the 94.0 s sample (the sampler's own fine line reads 92.7 s) and the exception is trace t 96.25 s, so the
+  fault is inside the device-loss window. The crashed thread is the decoder's own service thread (stack above), and the
+  movie player was still holding a live handle at state `0x9`.
+- **`boot-binkprobe2`** (this slice's probe build; the section-17 content environment plus the stream-open probe and the
+  Bink probe, 182.5 s, one device loss): the decoder open ran and the probe measured the field valid there too
+  (`block 0x2efb306d3a0`, template slot `0x2efb306f780` = block + `0x23e0`, context `0x2efb306d400`, count 0 at the copy
+  point). The movie player sat at state `0x3` next `0x3` handle 0 with probe 1/open 1, so the service worker never
+  reached a nonzero-count node, and the boot died in the host compute driver, `host:nvgpucomp64.dll+0x3eac474` reading
+  `0x48`, after the device loss. That arm did not reach the Bink fault.
+- **The crash value's shape.** In `boot-open3` every title-side address reads `0x166...` (slot0 entity `0x1667e4ef350`,
+  stream `0x1667e248520`, handle `0x16681428100`), and `0x16600000000` is exactly that range with the low 32 bits zero. In
+  the clean arm the same class of value would be `0x18000000000` (the title's ranges read `0x1805...`/`0x1806...`). The
+  crash value is therefore the high half of that boot's title VirtualAlloc range, **not** a value any measured allocator
+  answer produces: the XMem layout arm (`boot-xmemlayout1`) shows the shim's answers are ordinary host VirtualAlloc bases
+  (`0x1da37ce0000`, `0x1e037ce0000`, `0x1e6...`, `0x1e8...` - none 4 GiB-aligned), and the decoder's allocations never
+  enter the shims at all (title callbacks, 18.2).
+
+**Negative: the writer of the crash-time value is not measured.** The clean arm reads the field valid at the open and at
+the worker; no decoder instruction stores it; the open's allocator answer is `block+0x23e0`; and the crash happened only
+in a device-loss window on a boot whose player still held state `0x9` and a live handle. The two mechanisms left are
+(a) a torn-down/reused context: after the device loss the title's teardown or another allocation rewrites the context
+memory while the decoder's service list still holds the node (a reused `+0x12c` would make the worker take the branch),
+or (b) a second decoder context from a different allocation pool whose field already holds that shape. Neither is
+measured, so no shim is changed.
+
+### 18.6 Verdict, limits and the next falsifier
+
+- **Verdict: the fault site is attributed and the field's origin is measured on a clean arm; the crash value is not a
+  runtime answer of this tree and does not reproduce without a device loss.** No shim, resource, view, presenter or file
+  answer is on the decoder's allocation path (the title supplies the allocator itself), so there is nothing for this
+  slice to fix; the default path is byte-identical and the only source change is the opt-in probe.
+- **Limits.** One clean arm. The one crash boot (`open3`) predates the probe, so it carries no in-decoder evidence; the
+  second probe arm (`binkprobe2`) carried the probe but did not reach the same site. The value's shape is an
+  observation (that boot's title-range high half), not a named writer. No decoder close/teardown probe and no service-list
+  membership read ran; the worker-node site logs 16 lines before it is disarmed.
+- **Next falsifier, in the order it would decide the reading.** (a) A boot with `PALMETTO_BINK_PROBE=1` that reproduces
+  `Bink2Scarlett.dll+0x5de9` in a device-loss window: its `0x5de2` line names the node and shows `+0x12c`/`+0x1b8` at the
+  fault, which separates "the playing handle's own context" from "a stale/reused node". (b) A hardware write watch on
+  `HBINK+0x1b8` (and `+0x12c`) armed at `0x6f88` and left through the device-loss window, with the clean arm's 0x5de2
+  hits as the live control: a named store is the producer, no store at all says the node is stale. (c) A decoder
+  close-path probe (the title's teardown calling `BinkClose`, export RVA `0x2400`) reading the service-list membership
+  word `+0x1d4` before the free. A clean arm that ever shows this fault would falsify the device-loss reading.
+- **The picture is unchanged.** The playing state, `buffers 0` and the 0 hits on `0x2EF0E0`/`0x442F760` are the same
+  result section 17 measured in a longer window; the decode wrapper is what would call `BinkRegisterFrameBuffers`, and it
+  is never issued while the movie draw path is parked. Every capture is black, so the first visible frame is not reached.
+
+### 18.7 Tests and gates
+
+- **No test target changed.** The slice adds one opt-in diagnostic probe in `port/src/main.cpp` (no shim, no pure helper,
+  no build target); the default path and every switch's default are unchanged.
+- Gates on the changed tree: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`; `_setup\build_tests.cmd` prints
+  `TESTS_BUILT`; the GPU-free gate subset exits 0, 13 of 13 (`code_hooks`, `frame_dump`, `unimplemented_policy`,
+  `graphics_record`, `graphics_pso`, `buffer_va_index`, `dstorage`, `xapu_chad`, `deferred_compile`, `arena_size`,
+  `xbox_present`, `xs_proxy_mock`, `xmem`); the docs checks (`tests/test_docs_*.py`, run with the session's broken
+  `GIT_CONFIG_*` variables cleared) pass, and this section names `PALMETTO_BINK_PROBE` for the environment-variable check.
+
+### 18.8 Evidence, uncommitted files, attribution
+
+- **Evidence (outside the repository)**: `D:\leonida-work\fsrstable\boot-binkprobe1` and `boot-binkprobe2` with
+  `stderr.log`/`stdout.log`/`summary.txt`/`meta.txt`/`boot.jsonl`; `capture-binkprobe1` (12 presenter PPMs +
+  `index.txt`); `boot-xmemlayout1` (the XMem served-range layout arm); `boot-open3` (the crash arm, pre-slice binary).
+  The static work is under `D:\leonida-work\binkdecode`: the local PE parse and export/function map of the decoder, the
+  capstone scans of the `0x1b8` field and the open's slot registrations, the Ghidra decompiles of the decoder's worker,
+  open, block builder and close/pump family, and of the title's Bink memory/file callbacks (`0x577f500`, `0x3a1a170`,
+  `0x4f9e90`, `0x169c4d0`). No game data: RVAs, field offsets, register/pointer values, counts and image means only.
+- **Uncommitted files**: `port/src/main.cpp` (the `PALMETTO_BINK_PROBE` diagnostic) and this section of
+  `docs/decomp_first_ui.md`. `docs/README.md` needs one index row for the page's new section; that file is outside this
+  slice's write scope, so the lead adds it. No git write.
+- **Attribution.** The arms, the probe, the field measurements, the allocations and the captures are this project's own
+  measurements; the title functions and the package decoder were decompiled locally from the user's own image with the
+  project's Ghidra tooling. No peer code was used and no game data is added.
