@@ -191,6 +191,22 @@ method, scope and caveats. No game data is included.
 | [fspx_pipeline_map.md](fspx_pipeline_map.md) | The 29 FidelityFX programs against what the boot asks for: per-program wave32, thread counts, translation and request counts, and which few untranslated programs the runtime actually requested. |
 | [pipeline_program_source.md](pipeline_program_source.md) | Where the eight "untranslated" pipeline programs came from: zeroed reads of the library's own compute records 31-41 caused by the refused zlib stage, not a second container or a load-time patch. |
 
+## Static decompilation campaign
+
+The campaign pages are static evidence from the retail image: RVAs, structures, call graphs and counts, with no boots
+and no game data. [decomp_campaign.md](decomp_campaign.md) is the overview, the per-slice findings and the consolidated
+roadmap; each row below is one slice.
+
+| page | subject |
+|---|---|
+| [decomp_campaign.md](decomp_campaign.md) | Campaign overview: the six slices, what they changed, the consolidated frontier-first roadmap and the do-not-repeat list. |
+| [decomp_stage.md](decomp_stage.md) | Stage and session state machine: writers, transition conditions, phase protocol, stage-3 job graph and the runtime answers those paths read. |
+| [decomp_first_ui.md](decomp_first_ui.md) | The first-run/UI/movie producer: boot-media gate, screen-owner paths, Bink entries, UI classes and the runtime services each screen asks for. |
+| [decomp_renderer.md](decomp_renderer.md) | Renderer command graph: decoder forms, the shared node, the type-5 LUT family and its three producers, the upscaler kind branch, compose and present. |
+| [decomp_jobs.md](decomp_jobs.md) | Job/threading contract: creator/executor/flush/submit-wait, pools, frame tick, heartbeat and watchdog, and the ordering the title assumes. |
+| [decomp_memory.md](decomp_memory.md) | Title heap and XMem arena contract: inner allocator, zero-size degeneration, graphics VA/page model and where our answers are consumed. |
+| [decomp_imports.md](decomp_imports.md) | Complete import map: 587 imports by subsystem and phase, our shim status, the stage-3/first-run gate list and a ranked implementation list. |
+
 ## Testing, tooling and records
 
 | Document | Measured content |
