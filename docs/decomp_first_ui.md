@@ -576,3 +576,156 @@ stage/present producer of section 11.4, not another first-run service answer.
 - **Uncommitted**: the three shim files and three test files above, plus this page. `port/src/main.cpp` is the parallel
   slice's uncommitted change, not this one's.
 
+## 13. Measured: the movie/Bink trigger, decoded statically and probed in one bounded boot (negative)
+
+**Status: measured; static decode plus one bounded probe arm, negative.** This section answers the picture roadmap's
+row 5 ([decomp_campaign.md](decomp_campaign.md)): **what would have to happen for the movie/Bink path to run**, and
+whether the measured boot reaches it. The static decode below names the module init, the per-frame component update,
+the two slot gates and every play step behind them, and the game-side request that would set those gates. The probe
+arm shows the module is armed and the component update is enabled, but no request ever binds a player slot: the four
+play-step probes read 0 hits and the slot-0 words that a request would set read 0 in every sample. The Bink decoder is
+mapped, bound and never executed. The arm was cut at 131.4 s by the host GPU losing the device (the lead terminated the
+post-loss spin; not a harness timeout), but every movie-chain word had been stable since 30 s, so the negative is the
+measured state of the full boot window rather than of its first half.
+
+### 13.1 The trigger decode (static)
+
+The path is a chain of four layers: the middleware module's init, the engine frame's component update, a per-player
+slot gate, and the play steps behind that gate. The names below are the title's own RVAs (image base `0x140000000`).
+
+| step | RVA | measured shape |
+|---|---|---|
+| module init dispatcher | `0x577F500` | param 2 = process init: sets the player-slot count `0x9187418 = 0x3a` (**58**) at `0x577F630`, runs the slot constructor `0x347140` for all 58 (`0x149165B98 + i*0x940`), registers the two async workers `0x3A1A180`/`0x3A1A500`, and sets the module-ready byte `0x91874B2 = 1` at `0x577F9A7`; param 8 = the `BinkGetPlatformInfo`/thread teardown branch |
+| boot call into the init | `0x21B8960` | the stage-2 boot sequence calls `0x21B8B20` at `0x21B8A64` (immediately after its boot-media wait loop breaks at `0x21B8A58`); `0x21B8B20` calls `0x577F500(2)` at `0x21B8BA4`. The second caller is the middleware module dispatcher `0x57780E0` at `0x5778504` |
+| per-frame component update | `0x11F740` -> `0x2257700` -> `0x3A1AEB0` | the engine frame `0x2257700` calls the movie component update at `0x22577C9` only while the movie-active guard byte `0x91AC9FA` reads 0 (`0x22571E0` clears it at `0x225723A`; `0x1E77BA2` and `0x3A19AF8` set it 1 as a re-entry guard) |
+| the ready gate | `0x3A1AEB0` | `if (0x91874B2 != 1) return;`; then calls `0x3A1AC50`, then rebuilds an 8-entry active-handle list from the slot array's `+0x4c8`/`+0x4f0` words |
+| the per-frame slot loop | `0x3A1AC50` | calls `0x3A13C80`, then `0x3A18620(slot)` for each of the 58 slots (`0x149165B98`, stride `0x940`); afterwards, for eight per-slot handle pairs starting at `0x14916592C`, looks the entity up (`0x51B60`) and, when `entity+0x1c4 == 9` and `entity+0x1c7 == 1` and the frame is inside a per-slot window, calls `0x140C06970` - the frame-ready/present scheduling already modelled in section 2 |
+| the two slot gates | `0x3A18620` | returns at `+0` if `slot+8` (the entity) is null, and at `+0x10` if `slot[0x694] == 0`; otherwise the armed flag `slot[0x5f2]` is refreshed each frame as `(slot[0x898] != 0) | slot[0x8ad]` |
+| the request that sets them | `0x3A16260` -> `0x3A167E0` | allocates a free slot (`0x3A16770`: first slot whose `+8` is null; creates the entity with `0x1416136B0` and binds it at `+8`), copies the play descriptor into `+0x4c8`/`+0x4cc`/`+0x4d0`/`+0x50c`/`+0x50d`/`+0x50e`/`+0x510`/`+0x520`/`+0x574`, then `0x3A167E0` copies the `0x2a8`-byte Bink options block to `+0x698` and sets `slot[0x694] = 1` |
+| the descriptor helper that calls the request | `0x18501E0` | if the descriptor's first dword equals `0xB7003DFF` it starts no player; otherwise calls `0x3A16260` (its only caller, at `0x185020A`) and attaches the entity via `0x3A16650` |
+| the stop path | `0x3358080` -> `0x3A1A860` | code 1 or 8: releases the bound entities, posts worker command 5 (`0x442FD10`, close) and clears the ready byte `0x91874B2 = 0` at `0x3A1AAA5` |
+
+The play steps inside `0x3A18620`, each with the decompiled condition that decides it (all are below the two slot
+gates; `armed` is `slot[0x5f2]`, `entity` is `slot+8`):
+
+| play step | entry RVA | posted/called from | condition that enters it |
+|---|---|---|---|
+| probe/metadata open (worker command 4) | `0x442EA70` | `0x442EE50` at `0x3A18BD0`; worker `0x442FA80` dispatches command 4 at `0x442FC31` | `armed && entity+0x1c4 == 3`, or `!armed && entity+0x1c4 == 1` |
+| player prepare (worker command 0) | `0x199EF10` | `0x442F260` at `0x3A19243`; the packet-0 body `0x199EF10` at `0x3A19222`, and worker command 0 dispatches `0x199EF10` at `0x442FC01` | `entity+0x1c4 != 0xb`, `slot[0x5f0] == 0`, `!armed`, and `entity+0x1c4 == 6` or `slot+0x598` non-empty; `slot[0x5c0]` selects `0x442FE20` instead |
+| playback open (worker command 2) | `0x199EF20` -> `0x442EFE0` (`BinkOpenWithOptions` at `0x442F056`) | `0x442EDC0` at `0x3A191F8`; player wrapper `0x18AA500` at `0x3A19382` -> `0x199EF20` at `0x18AA50C` | `entity+0x1c4 != 0xb`, `slot[0x5f0] == 0`, the slot's `+0x598` buffer record ready or `entity+0x1c4 == 6`, armed and `slot[0x5f1] == 0` (runs once: `[0x5f1] = 1`); the `entity+0x1c4 == 6` branch also enters `0x199EF10` when `slot[0x8ae] == 0` |
+| frame-buffer configure/registration | `0x442F0B0` -> `0x442F760` (`BinkRegisterFrameBuffers` at `0x442F9B8`) | `0x442F0B0` at `0x3A19285`/`0x3A192E6`/`0x3A19392`; `0x442F760` from the decode wrapper `0x2EF0E0` at `0x2EF130`/`0x2EF3AD` | `entity+0x1c4 == 7` (line `0x3A1924F`), or `slot[0x5fb] == 1` once the buffer record is ready, or after `0x18AA500` succeeds |
+| player open gate | `0x199EF20` | `0x18AA500` at `0x3A19382` | armed, `slot[0x515] == 1`, and `entity+0x1c5 == 3` |
+| per-frame decode | `0x2EF0E0` | called by the draw `0x2349D80` at `0x234A117` and the second advance `0x51B45B0` at `0x51B464A`; calls `0x442F760` and the `BinkDoFrameAsync*`/`BinkNextFrame` set | only once a playback handle exists (`player+0x50`) and `player+0x1c4 == 9` |
+
+**Who would issue the request.** `0x18501E0` is the common helper, and its callers are the game/UI owners of video
+playback: the UI video-widget constructor `0x184F100` (from its update `0x184EEC0` at `0x184EED8`) and `0x184FC00`
+(from `0x184F100` at `0x184F1D1` and `0x4C6D420` at `0x4C6D6F2`); the front-end widget helpers `0x3A15F00`/`0x3A16090`
+(from `0x3A15DB0` and `0x3C284A0`); the game video manager `0x335AB60` at `0x335B02C` (keyed by a hash; its sibling
+`0x3358080` is the stop path); `0x3A1B4F0` (from `0x3A26B30`); `0x2261790`; `0x1B39130`; and `0x5BAC680`. The UI widget's
+per-frame present/notification path is separate: `0x57CB570` -> `0x1850B00` -> `0x442F170` (worker command 3), reached
+from `0x184F100` at `0x184F335`/`0x184F3D7`/`0x184F63A`. So the request is an event the front-end/page layer issues
+when it owns a video widget; it is not part of the boot-media frame loop decoded in sections 2-3.
+
+### 13.2 Shims on the path
+
+No shim answer gates the entry, and none was asked. `Bink2Scarlett.dll` maps at +0.92 s and its `DllMain` returns 1
+(section 2.2 of [movie_path.md](movie_path.md) records the same binding); its allocator/file imports remain
+`port/shims/xmem.cpp` and `port/shims/file_system.cpp`, and the boot's reach signals show the module making none of
+those calls. The play steps are title-side worker state posted by the component, so the missing piece is a game-side
+request, not a runtime refusal; this slice changes no shim.
+
+### 13.3 The probe and the boot
+
+`port/src/main.cpp` gains two opt-in diagnostics, both off unless their switch is set:
+
+- `PALMETTO_MOVIE_PROBE=player` installs four int3 entry probes through the existing poke-log machinery on the four
+  play steps above: `0x2EF0E0` (per-frame decode), `0x442EA70` (probe open), `0x199EF20` (playback open) and
+  `0x442F760` (frame-buffer registration). `PALMETTO_MOVIE_PROBE=trigger` is the game-side set for a later arm:
+  `0x577F500` (module init), `0x3A16260` (play request), `0x18501E0` (descriptor helper) and `0x3A1A860` (stop).
+- The existing `PALMETTO_STATE_TRACE` sampler gains a movie-chain line: the ready byte `0x91874B2`, the update guard
+  `0x91AC9FA`, the slot count `0x9187418`, and the slot-0 word pair/triple a request would set (`+8` entity `0x9165BA0`,
+  `+0x694` active `0x916622C`, `+0x5f2` armed `0x916618A`, `+0x4c8` media id `0x9166060`).
+
+One arm ran under `_setup/boot_lock.ps1` with `tooling/boot_report.py`, the standard Vulkan environment
+(`PALMETTO_D3D12=vulkan`, `PALMETTO_SHADERS`, `PALMETTO_SKIP_INT3=1`) plus `PALMETTO_MOVIE_PROBE=player`,
+`PALMETTO_STATE_TRACE=10`, the Bink reach switches `PALMETTO_XMEM_CALLERS=1` and `PALMETTO_FILE_TRACE=1`, and presenter
+captures every 600 frames (at most 16). Logs, trace and captures are outside the repository under
+`D:\leonida-work\boot-movie-probe` and `capture-movie-probe`. The four probes installed (each byte `0x41` -> `0xCC`).
+
+| probe site | role (13.1) | hits |
+|---|---|---|
+| `0x2EF0E0` | per-frame decode wrapper | **0** |
+| `0x442EA70` | probe/metadata open | **0** |
+| `0x199EF20` | playback open | **0** |
+| `0x442F760` | frame-buffer registration | **0** |
+
+| measure | value |
+|---|---|
+| verdict | terminated at 131.4 s by the host GPU losing the device (lead terminated the post-loss spin; not a harness timeout), 0 exceptions in the 19,768-event trace |
+| D3D12 calls / trace events | 236,913 / 19,768 |
+| presenter captures | 9 (frames 1, 601, 1201, ..., 4801), each 2564x1421, **mean rgb 0.00 0.00 0.00** |
+| stage words | init 0 -> 1 at 20 s, 1 -> 2 at 30 s; loading 1 at 30 s; session 0; machine current 2, next 2 |
+| boot-media gate / platform gate / semaphores | `0x71B9048` = 2; `0xA210D81` = 0x101; `0x71B9078`/`0x71B9088` = 0x714/0x71c |
+| Bink module | mapped at +0.92 s, `DllMain` = 1; **no** `xmem_caller` and **no** `file_open` event names the module (3 xmem callers and 121 opens in the whole boot, all title or host) |
+
+The movie-chain line over the arm (samples every 10 s):
+
+| time | ready `0x91874B2` | update guard `0x91AC9FA` | slot count | slot0 entity | slot0 active `+0x694` | slot0 armed `+0x5f2` | slot0 media id |
+|---|---|---|---|---|---|---|---|
+| 0 s, 20 s | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| 30 s .. 120 s (every sample) | **1** | **0** | **58** | **0** | **0** | **0** | **0** |
+
+Reading: the module init ran between the 20 s and 30 s samples (ready byte 0 -> 1 and slot count 0 -> 58 are written
+only by `0x577F500(2)`), and the engine frame's update guard reads 0 from the start, so the component update
+`0x3A1AEB0` is called on the per-frame path from then on. The two slot gates are never passed: no entity is bound and
+no slot is active in any sample, which is exactly the state the request path (13.1) leaves until `0x3A16260` runs.
+
+### 13.4 Verdict, limits and the next falsifier
+
+**Verdict: negative, and not a shim gap.** The movie middleware is armed in the measured boot - its init ran, the slot
+array exists (58 slots), the ready byte is 1 and the component update is enabled - but nothing ever binds a playback
+request to a slot: the slot-0 entity/active/armed words are 0 in every sample, the four play-step probes have 0 hits,
+and the Bink decoder, though mapped and bound at +0.92 s, never executes (no allocator or file call names it). So the
+launch-movie producer is above this module: a game/front-end request through `0x18501E0 -> 0x3A16260`, not a runtime
+answer this tree can serve differently.
+
+- **Next falsifier.** One boot in which `0x18501E0` or `0x3A16260` executes (`PALMETTO_MOVIE_PROBE=trigger`), or the
+  slot-0 entity/active words read non-zero, or any of the four `player` probes fires. Any of them means the request is
+  reachable and the chain trace restarts one level down; then the existing `PALMETTO_XMEM_CALLERS`/`PALMETTO_FILE_TRACE`
+  switches on the same boot say whether the decoder follows.
+- **The named event.** The request is issued by a front-end/page owner of video playback (13.1): the UI video widget
+  `0x184F100`/`0x184EEC0`/`0x184FC00`, the front-end helpers `0x3A15F00`/`0x3A16090`, the game video manager
+  `0x335AB60`, or `0x3A1B4F0`. The measured boot never runs one of those owners - the stage words are frozen at
+  init 2 / loading 1 / session 0 - so the next slice's question is which front-end page or story-load step creates the
+  first video widget, not another shim answer.
+- **Arm limit.** The arm was cut at 131.4 s by the host device loss, so a request that would have arrived after 131 s
+  is not ruled out by this run alone; the chain words are stable from 30 s to 120 s and the earlier 300 s clean boot of
+  section 12.3 (same tree family) and the 600 s boot of [long_boot.md](long_boot.md) show no later stage change, which
+  is the argument this negative does not rely on a truncated window.
+- **Probe limit.** Entry only, and four sites; an interior branch or the request path itself is not separated. The
+  probes are exactly the four play steps the section asks about; `PALMETTO_MOVIE_PROBE=trigger` covers the request side
+  in a later arm.
+- **Data limit.** The play descriptor is game data (a front-end/RBF0 page resource); this page reads none of it and
+  names only RVAs, counts and outcomes. The requester list is static address-taken/call-site evidence, not a measured
+  call order.
+
+### 13.5 Files, tests, evidence and gates
+
+- **Source change**: `port/src/main.cpp` only - the `PALMETTO_MOVIE_PROBE` switch (two four-site groups through the
+  existing poke-log machinery) and four movie-chain fields added to the existing `PALMETTO_STATE_TRACE` line. Both
+  opt-in; the default path, every shim and every build target are unchanged.
+- **This page**: the section above. `docs/README.md` needs one index row; that file is outside this slice's write
+  scope, so the lead adds it.
+- **Tests and gates**: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`; `_setup\build_tests.cmd` prints `TESTS_BUILT`;
+  the GPU-free gate targets pass (the listed checks: `unimplemented_policy_test` 98, `graphics_record_test` 180,
+  `graphics_pso_test` 350, `xbox_present_test` all cases, `dstorage_test` 234, `xapu_chad_test` 87, `deferred_compile_test`
+  18, plus `frame_dump_test`, `xs_proxy_mock_test` and `buffer_va_index_test`); the pre-existing quarantined
+  `d3d12_fence_timing_test` crash is unchanged ([testing.md](testing.md) line 95 - not a gate check); and the docs checks
+  (`tests/test_docs_*.py`) pass (43 passed, 218 subtests). No shim, test source or build target changed in this slice.
+- **Evidence (outside the repository)**: `D:\leonida-work\boot-movie-probe` (stderr, stdout, `summary.txt`,
+  `boot.jsonl`) and `D:\leonida-work\capture-movie-probe` (9 captures + `index.txt`); driver
+  `D:\leonida-work\boot_movie_probe.ps1`; the static work notes and decompiles under `D:\leonida-work\decomp\out-movietrigger*`
+  and `.md` notes. No game data: API names, RVAs, counts, times, HRESULTs and image means only.
+- **No git write**: the lead commits the two uncommitted files of this slice (`port/src/main.cpp`,
+  `docs/decomp_first_ui.md`). The tree also carries other slices' uncommitted files, which are not this slice's.
+

@@ -3927,6 +3927,20 @@ constexpr std::uint32_t kTitleBootMediaSemaphoreBRva = 0x71B9088;
 constexpr std::uint32_t kTitleStateMachineRva = 0x71273C8;     // state machine object pointer (set at stage-2 entry)
 constexpr std::uint32_t kTitlePlatformGateRva = 0xA210D81;     // byte; 1 makes FUN_1421B8960 take its 4 gated waits
 constexpr std::uint32_t kTitleLoadingActiveRva = 0x7453EE0;    // byte set by the loading subsystem init
+// The movie/Bink chain (docs/decomp_first_ui.md section 13). The middleware module init FUN_14577F500(2) runs from the
+// stage-2 boot sequence (call site 0x21B8A64; it sets the ready byte 0x91874B2 = 1 and the player-slot count
+// 0x9187418 = 58). The engine frame FUN_142257700 calls the component update FUN_143A1AEB0 while the movie-active guard
+// byte 0x91AC9FA reads 0 (it is cleared by the frame init FUN_1422571E0). That update loops the 58 player slots and
+// FUN_143A18620 returns from each slot at its first two compares: slot+8 (the entity) must be non-null and slot+0x694
+// must be 1, which only the game-side play request FUN_143A16260 -> FUN_143A167E0 binds. Sampling these words says
+// whether the module is armed and whether any playback request was ever bound, without an int3 on the per-frame path.
+constexpr std::uint32_t kTitleMovieReadyRva = 0x91874B2;        // byte: 1 after the module init, 0 after the stop
+constexpr std::uint32_t kTitleMovieUpdateGuardRva = 0x91AC9FA;  // byte: 0 = the frame calls the component update
+constexpr std::uint32_t kTitleMoviePlayerCountRva = 0x9187418;  // dword: 58 after the module init
+constexpr std::uint32_t kTitleMovieSlot0EntityRva = 0x9165BA0;  // qword: player slot 0 + 8, the request's entity
+constexpr std::uint32_t kTitleMovieSlot0ActiveRva = 0x916622C;  // byte: player slot 0 + 0x694, set by the request
+constexpr std::uint32_t kTitleMovieSlot0ArmedRva = 0x916618A;   // byte: player slot 0 + 0x5f2, per-frame armed flag
+constexpr std::uint32_t kTitleMovieSlot0MediaIdRva = 0x9166060; // dword: player slot 0 + 0x4c8, the request's media id
 
 // RVAs of the state machine's own entry points: a thread whose RIP or stack names one of these is holding the machine.
 constexpr std::uint32_t kTitleStateOwners[] = {
@@ -5436,6 +5450,18 @@ void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_siz
             const std::uint32_t platform_gate = title_read_u32(image_base, kTitlePlatformGateRva, ok_platform);
             const std::uint32_t loading_active = title_read_u32(image_base, kTitleLoadingActiveRva, ok_active);
             const std::uint32_t session_companion = title_read_u32(image_base, kTitleSessionCompanionRva, ok_companion);
+            bool ok_movie_ready = false, ok_movie_guard = false, ok_movie_players = false, ok_movie_entity = false,
+                 ok_movie_slot_active = false, ok_movie_slot_armed = false, ok_movie_media_id = false;
+            const std::uint32_t movie_ready = title_read_u32(image_base, kTitleMovieReadyRva, ok_movie_ready);
+            const std::uint32_t movie_guard = title_read_u32(image_base, kTitleMovieUpdateGuardRva, ok_movie_guard);
+            const std::uint32_t movie_players = title_read_u32(image_base, kTitleMoviePlayerCountRva, ok_movie_players);
+            const std::uint64_t movie_entity = title_read_u64(image_base, kTitleMovieSlot0EntityRva, ok_movie_entity);
+            const std::uint32_t movie_slot_active =
+                title_read_u32(image_base, kTitleMovieSlot0ActiveRva, ok_movie_slot_active);
+            const std::uint32_t movie_slot_armed =
+                title_read_u32(image_base, kTitleMovieSlot0ArmedRva, ok_movie_slot_armed);
+            const std::uint32_t movie_media_id =
+                title_read_u32(image_base, kTitleMovieSlot0MediaIdRva, ok_movie_media_id);
             const std::uint64_t state_machine = title_read_u64(image_base, kTitleStateMachineRva, ok_machine);
             std::uint16_t machine_current = 0, machine_next = 0;
             if (ok_machine && state_machine && (state_machine & 7) == 0) {
@@ -5493,6 +5519,17 @@ void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_siz
                          ok_next ? "" : "?", machine_next, ok_sem_a ? "" : "?",
                          static_cast<unsigned long long>(boot_media_sem_a), ok_sem_b ? "" : "?",
                          static_cast<unsigned long long>(boot_media_sem_b));
+            // The movie/Bink chain (docs/decomp_first_ui.md section 13): ready byte and slot count prove the middleware
+            // module init ran; the update guard proves the engine frame still calls the component update; the slot-0
+            // entity/active/armed words prove whether a game-side play request ever bound playback to a slot.
+            std::fprintf(stderr,
+                         "[rt] state trace at %.1f s: movie ready %s0x%x, update guard %s0x%x, players %s%u,"
+                         " slot0 entity %s0x%llx active %s0x%x armed %s0x%x media-id %s0x%x\n",
+                         at, ok_movie_ready ? "" : "?", movie_ready & 0xFF, ok_movie_guard ? "" : "?", movie_guard & 0xFF,
+                         ok_movie_players ? "" : "?", movie_players, ok_movie_entity ? "" : "?",
+                         static_cast<unsigned long long>(movie_entity), ok_movie_slot_active ? "" : "?",
+                         movie_slot_active & 0xFF, ok_movie_slot_armed ? "" : "?", movie_slot_armed & 0xFF,
+                         ok_movie_media_id ? "" : "?", movie_media_id);
             ++sample;
             const bool census_now = censuses < 12 || (sample % 10 == 0 && censuses < 24);
             if (census_now) {
@@ -6228,37 +6265,65 @@ int wmain(int argc, wchar_t** argv) {
                 std::printf("[rt] poked an int3 over the lea at image+0x%llx\n", static_cast<unsigned long long>(rva));
             }
         }
+        // PALMETTO_MOVIE_PROBE=<group>: bounded opt-in int3 entry probes on the movie/Bink path
+        // (docs/decomp_first_ui.md section 13). "player" is the four middleware play steps the component's per-player
+        // update drives: per-frame decode 0x2EF0E0, probe/metadata open 0x442EA70, playback open 0x199EF20 and
+        // frame-buffer registration 0x442F760. "trigger" is the game-side request chain: module init 0x577F500, play
+        // request 0x3A16260, descriptor helper 0x18501E0 and stop 0x3A1A860. Same one-shot machinery and logging as
+        // PALMETTO_POKE_LOG; a hit means the measured boot reached a path that the static negative says it does not,
+        // so the probe set is a reach signal, not a hot-path trace. Off when unset.
+        constexpr std::uint32_t kMoviePlayerProbeSites[] = {0x2EF0E0, 0x442EA70, 0x199EF20, 0x442F760};
+        constexpr std::uint32_t kMovieTriggerProbeSites[] = {0x577F500, 0x3A16260, 0x18501E0, 0x3A1A860};
+        auto poke_log_sites = [&main_module](const std::uint32_t* rvas, unsigned count) {
+            std::uintptr_t addresses[4] = {};
+            unsigned char originals[4] = {};
+            unsigned installed = 0;
+            for (; installed < count && installed < 4; ++installed) {
+                auto* const at = main_module.base + rvas[installed];
+                DWORD old = 0;
+                if (!VirtualProtect(at, 1, PAGE_EXECUTE_READWRITE, &old)) break;
+                originals[installed] = *at;
+                *at = 0xCC;
+                VirtualProtect(at, 1, old, &old);
+                addresses[installed] = reinterpret_cast<std::uintptr_t>(at);
+                std::printf("[rt] poked a register log at image+0x%llx (byte now %02x, was %02x)\n",
+                            static_cast<unsigned long long>(rvas[installed]), *at, originals[installed]);
+            }
+            rt::startup_trace::set_poke_log(addresses, originals, installed);
+            std::fflush(stdout);
+            return installed;
+        };
         if (const DWORD size = GetEnvironmentVariableW(L"PALMETTO_POKE_LOG", nullptr, 0); size > 1) {
             std::wstring value(size, L'\0');
             const DWORD n = GetEnvironmentVariableW(L"PALMETTO_POKE_LOG", value.data(), size);
             if (n > 0 && n < size) value.resize(n);
-            std::uintptr_t addresses[4] = {};
-            unsigned char originals[4] = {};
+            std::uint32_t rvas[4] = {};
             unsigned count = 0;
             size_t start = 0;
             while (start <= value.size() && count < 4) {
                 const size_t comma = value.find(L',', start);
                 const std::wstring piece =
                     value.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start);
-                if (!piece.empty()) {
-                    const auto rva = std::wcstoull(piece.c_str(), nullptr, 16);
-                    auto* const at = main_module.base + rva;
-                    DWORD old = 0;
-                    if (VirtualProtect(at, 1, PAGE_EXECUTE_READWRITE, &old)) {
-                        originals[count] = *at;
-                        *at = 0xCC;
-                        VirtualProtect(at, 1, old, &old);
-                        addresses[count] = reinterpret_cast<std::uintptr_t>(at);
-                        ++count;
-                        std::printf("[rt] poked a register log at image+0x%llx (byte now %02x, was %02x)\n",
-                                    static_cast<unsigned long long>(rva), *at, originals[count ? count - 1 : 0]);
-                    }
-                }
+                if (!piece.empty()) rvas[count++] = static_cast<std::uint32_t>(
+                    std::wcstoull(piece.c_str(), nullptr, 16));
                 if (comma == std::wstring::npos) break;
                 start = comma + 1;
             }
-            rt::startup_trace::set_poke_log(addresses, originals, count);
-            std::fflush(stdout);
+            poke_log_sites(rvas, count);
+        }
+        if (const DWORD size = GetEnvironmentVariableW(L"PALMETTO_MOVIE_PROBE", nullptr, 0); size > 1) {
+            std::wstring value(size, L'\0');
+            const DWORD n = GetEnvironmentVariableW(L"PALMETTO_MOVIE_PROBE", value.data(), size);
+            if (n > 0 && n < size) value.resize(n);
+            if (value == L"player") {
+                std::printf("[rt] PALMETTO_MOVIE_PROBE=player: %u movie play-step probe(s)\n",
+                            poke_log_sites(kMoviePlayerProbeSites, 4));
+            } else if (value == L"trigger") {
+                std::printf("[rt] PALMETTO_MOVIE_PROBE=trigger: %u movie request-chain probe(s)\n",
+                            poke_log_sites(kMovieTriggerProbeSites, 4));
+            } else {
+                std::printf("[rt] PALMETTO_MOVIE_PROBE: unknown group (use player or trigger); no probe installed\n");
+            }
         }
         // PALMETTO_BACK_IMAGES=1 commits zeroed memory over the console image-address range, which starts at 4 GiB. Our
         // descriptor code hands that range out as a texture's address on the strength of "nothing dereferences it" - but
