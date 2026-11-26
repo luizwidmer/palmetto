@@ -18,12 +18,12 @@
 //   XUserDeviceImpl     every device belongs to the offline user; associations and audio endpoints never change, so
 //                       their change registrations are kept until unregistered and never called back; the user has
 //                       no audio endpoint of its own; finding a controller shows no UI (as on desktop).
-//   XAccessibilityImpl  high contrast is Off, closed captions can't be configured. The default answer has no voice
-//                       installed (enumerating calls back zero times), XSpeechSynthesizerCreate fails (E_FAIL) with a
-//                       null handle, the other speech calls refuse the handle they were never given (E_INVALIDARG).
-//                       PALMETTO_SILENT_SPEECH=1 answers the speech surface with one silent voice instead: a
-//                       synthesizer handle, a valid empty WAVE stream and the calls that drive them (see the section
-//                       below and docs/first_run_path.md). Speech-to-text display calls fail (E_FAIL).
+//   XAccessibilityImpl  high contrast is Off, closed captions can't be configured. The speech surface is a console
+//                       answer by default: one silent voice installed, XSpeechSynthesizerCreate hands out a
+//                       synthesizer handle, and text/SSML streams are a valid empty WAVE container (see the section
+//                       below and docs/first_run_path.md). PALMETTO_SILENT_SPEECH=0 refuses the create with E_FAIL
+//                       and a null handle, the answer this tree measured before the default change (the opt-out kept
+//                       for the fallback and the tests). Speech-to-text display calls fail (E_FAIL).
 //   XLauncherImpl       XLaunchUri and the display timeout deferral calls fail (E_FAIL); nothing is launched.
 //
 // Slots whose signature the public pages don't give answer with a value that is safe whichever way the caller reads
@@ -628,20 +628,23 @@ HRESULT STDMETHODCALLTYPE accessibility_captions_set_enabled(void*, bool) { retu
 //                                       size_t* bufferUsed)
 //   21  XSpeechSynthesizerCreateStreamFromSsml(XSpeechSynthesizerHandle, const char* ssml, stream*)
 // The boot calls one of them: slot 9, once, at +23.74 s and +25.35 s in the two 130 s boots measured for
-// docs/first_run_path.md. The default answer refuses it with E_FAIL and a null handle (docs/runtime_imports.md,
-// "Accessibility and speech").
+// docs/first_run_path.md, and the slot-8 enumerate follows it when the create succeeds.
 //
-// PALMETTO_SILENT_SPEECH=1 (docs/first_run_path.md): Microsoft's pages list Windows as a supported platform, so a host
-// answers these calls, but this runtime has no voice to synthesize with. The opt-in answer is one silent voice and a
-// stream that is a valid WAVE container with no sample data, so a title that narrates plays silence and goes on. Off by
-// default: unset, the lines, answers and handles are the ones measured before this slice.
+// The default is the console answer: Microsoft's pages list Windows as a supported platform, so a host answers these
+// calls, and this runtime has no voice to synthesize with. It therefore installs one silent voice and a stream that is
+// a valid WAVE container with no sample data, so a title that narrates plays silence and goes on. The measured A/B that
+// justified making it the default is docs/decomp_first_ui.md section 12 (the switch-on arm added the enumerate and
+// nothing else; the create is refused no more, which is the console's answer to a create).
+//
+// PALMETTO_SILENT_SPEECH=0|off is the fallback: the pre-default answer of this tree (create E_FAIL with a null handle,
+// no voice enumerated), kept because a caller that wants the exact old behaviour must be able to ask for it.
 
 // PALMETTO_SILENT_SPEECH, read per call: the speech surface is not polled (the boot calls one slot once), and a test
-// flips the variable between calls. "0" and "off" keep the default; any other non-empty value turns the silent voice on.
+// flips the variable between calls. Unset means the surface exists; "0" and "off" restore the pre-default refusal.
 bool silent_speech_enabled() {
     char value[8] = {};
     const DWORD n = GetEnvironmentVariableA("PALMETTO_SILENT_SPEECH", value, sizeof value);
-    return n > 0 && n < sizeof value && std::strcmp(value, "0") != 0 && _stricmp(value, "off") != 0;
+    return !(n > 0 && n < sizeof value && (std::strcmp(value, "0") == 0 || _stricmp(value, "off") == 0));
 }
 
 // A caller-supplied output pointer is only written after this proves the range committed and writable, the same rule
@@ -740,8 +743,9 @@ void trace_speech(const char* what, HRESULT hr, void* caller) {
     rt::shims::platform_trace(what, caller, static_cast<std::uint64_t>(hr));
 }
 
-// 8: HRESULT XSpeechSynthesizerEnumerateInstalledVoices(void* context, callback). The default has no voice installed,
-// so the callback runs zero times; with the silent voice it runs once and its bool return stops the enumeration.
+// 8: HRESULT XSpeechSynthesizerEnumerateInstalledVoices(void* context, callback). The console surface has a voice
+// installed, so the default enumerates the one silent voice; the PALMETTO_SILENT_SPEECH=0 fallback has none and calls
+// back zero times.
 HRESULT STDMETHODCALLTYPE speech_enumerate_voices(void*, void* context, InstalledVoicesCallback callback) {
     if (!callable_pointer(reinterpret_cast<const void*>(callback))) {
         trace_speech("XSpeechSynthesizerEnumerateInstalledVoices", E_INVALIDARG, _ReturnAddress());
@@ -752,8 +756,8 @@ HRESULT STDMETHODCALLTYPE speech_enumerate_voices(void*, void* context, Installe
     return S_OK;
 }
 
-// 9: HRESULT XSpeechSynthesizerCreate(XSpeechSynthesizerHandle* synthesizer). The default refuses with E_FAIL; the
-// silent answer hands out the synthesizer handle.
+// 9: HRESULT XSpeechSynthesizerCreate(XSpeechSynthesizerHandle* synthesizer). The console answer creates the
+// synthesizer; the PALMETTO_SILENT_SPEECH=0 fallback refuses it with E_FAIL and a null handle.
 HRESULT STDMETHODCALLTYPE speech_create(void* self, void** synthesizer) {
     const bool writable = synthesizer && writable_range(synthesizer, sizeof *synthesizer);
     if (!silent_speech_enabled()) {
@@ -774,7 +778,7 @@ HRESULT STDMETHODCALLTYPE speech_create(void* self, void** synthesizer) {
     static std::atomic<bool> s_logged{false};
     if (!s_logged.exchange(true))
         std::fprintf(stderr, "[rt] xgameruntime: speech synthesis is silent offline: one silent voice, empty WAVE "
-                             "streams (PALMETTO_SILENT_SPEECH=1)\n");
+                             "streams (PALMETTO_SILENT_SPEECH=0 restores the refusal)\n");
     trace_speech("XSpeechSynthesizerCreate", S_OK, _ReturnAddress());
     return S_OK;
 }

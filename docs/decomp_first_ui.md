@@ -426,3 +426,153 @@ build; the stage-2 -> 3 gate (roadmap row 1) and the first-run/UI and movie prod
   static scan helpers under `D:\leonida-work\mediaac`.
 - **No game data**: RVAs, counts, handles and outcomes only; no string, asset, package path or hash is quoted here.
 - **No git write**: the lead commits the two uncommitted files (`port/src/main.cpp`, `docs/decomp_first_ui.md`).
+
+## 12. Measured: the first-run service answers, their defaults, and the first save-provider start
+
+**Status: measured; two boots plus the existing A/B pages.** Sections 1-10 are the static slice and section 11 is the
+boot-media negative. This section answers the picture roadmap's row 4 ([decomp_campaign.md](decomp_campaign.md)): it
+measures the first-run services the boot consumes, makes the measured console answers the defaults, and reports whether
+a screen owner executes or the presented frame changes. Three defaults change (the speech surface, the user change event
+and the input device); the offline sign-in and the save/settings reads do not, because the tree already serves the
+measured console answer for them (a signed-in user and the file-backed offline store).
+
+### 12.1 Measuring the answers and what follows them (200 s boot, pre-change binary)
+
+One 200 s boot of the pre-change binary (SHA-256 `7D2DFEB28E346EE45E4CAFBFF4F7D00B60528F3EB91492CECA423ADB29E23F3B`,
+built 09:50) with the tree's existing opt-in answers on at once: `PALMETTO_SILENT_SPEECH=1`,
+`PALMETTO_USER_CHANGE_EVENT=1`, `PALMETTO_FAKE_INPUT=3`, `PALMETTO_KEYBOARD_PAD=always`, plus the standard environment
+(`PALMETTO_SHADERS`, `PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL=75DF268:D8`) and the
+measurement layer `PALMETTO_USER_TRACE`, `PALMETTO_INPUT_TRACE`, `PALMETTO_STATE_TRACE=10` and presenter captures.
+The arm measures the answers and everything the title does after them; it cannot separate which answer causes which
+follow-up, which is why 12.3 repeats it with the defaults alone.
+
+| measure | value |
+|---|---|
+| verdict | ALIVE 200.4 s, killed by the harness timeout; 0 exceptions, no stop |
+| D3D12 calls / startup-trace events | 326,245 / 33,770 |
+| presenter captures | 3 (frames 1, 3,001, 6,001), every one mean rgb 0.00 0.00 0.00 |
+| stage words | init 2, loading 1 (both last changed 20.0 s), session 0; machine current 2 next 2 |
+| boot-media gate / semaphores | `0x71B9048` 0 -> 2 by 20 s; `0x71B9078`/`0x71B9088` = 0x714/0x71c |
+| last platform call | +104.33 s (`XNetworkingGetConnectivityHint`, bounded trace #10000) |
+
+The sequence the answered services release (times are the runtime's process clock; the caller is the title's thunk or
+its own call site):
+
+| when (s) | call | answer | what the title does next |
+|---|---|---|---|
+| +1.82 | `XUserRegisterForChangeEvent` (queue, context, callback `game+0x2211C80`) | `S_OK` | one `SignedInAgain` (0) delivered; `XUserFindUserByLocalId`, `XUserGetId`, `XUserGetLocalId`, `XUserDuplicateHandle`, `XUserCloseHandle` once each |
+| +1.84 | `XPersistentLocalStorageGetPath` | `S_OK` | the overlay path; the persistent profile record is created here |
+| +2.x | `GameInputCreate` (`game+0x59258C8`) and `RegisterDeviceCallback` (`game+0x592586E`) | `S_OK` | the callback enumerates the two paired devices (keyboard slot 4, scripted slot 5) and calls `GetDeviceInfo` |
+| +20.27 | `XSpeechSynthesizerCreate` (`game+0x55DCED0`) | `S_OK`, handle handed out | `XSpeechSynthesizerEnumerateInstalledVoices` `S_OK` with one silent voice; no stream request (slots 13 and 21 are not called) |
+| +20.55 | `IGameInput::GetCurrentReading(Gamepad)` (`game+0x2211BA3`) and `GetGamepadState` (`game+0x6AEDAA`) | `S_OK` / `true` | the first-run/UI read that no-device boots never make |
+| +20.55 | `XGameSaveImpl` class request x2, then `XGameSaveInitializeProvider` | `S_OK` | the offline file store opens as the save provider: its first measured slot call |
+| +20.55 | user-ready refresh: 9x `XUserGetId`/`GetLocalId`/`DuplicateHandle`, 9x `XUserGetGamertag`, `XUserGetIsGuest`, `XUserGetAgeGroup`, 9x `XUserCheckPrivilege` | all `S_OK` | the title's own user refresh, the same shape the delivered event measured in [user_event_probe.md](user_event_probe.md) |
+| +21.35 .. +104.33 | `XNetworkingGetConnectivityHint` (bounded trace) | `S_OK` | the connectivity poll; nothing after it |
+
+**What the arm does not show.** `XUserAddAsync`/`XUserAddResult` (the sign-in owner `0x5BB5390`) is not called in
+200 s; `XGameUiImpl`, `XLauncherImpl` and the movie API are not called; the narration stream slots are not called, so
+the speech surface this boot consumes is one create and one voice enumeration, not a narration. The accessibility owner
+`0x5A75F80` executes - section 4's static map makes it the only caller of that create, and here the create succeeds - and
+the save store starts, but no presented frame changes: the stage words stay at 2/2 and every capture is black.
+
+### 12.2 The defaults after the measurement
+
+| service | before this slice | after this slice | fallback | why the measured answer is the default |
+|---|---|---|---|---|
+| speech surface | create `E_FAIL` with a null handle, no voice enumerated | create `S_OK` with a synthesizer handle; one silent voice enumerated; text/SSML streams are a 44-byte WAVE container with no samples | `PALMETTO_SILENT_SPEECH=0` or `off` | a console has a synthesizer; the switch-on A/B in [first_run_path.md](first_run_path.md) section 5 advanced one call and did not regress anything, and the 12.1 arm's +20.27 s is that advance reaching the first-run phase |
+| user change event | registered, never delivered | one `SignedInAgain` per registration, on the title's own queue, once | `PALMETTO_USER_CHANGE_EVENT=0` or `off` | [user_events.md](user_events.md) and [user_event_probe.md](user_event_probe.md) measured the delivery consumed to the user-ready refresh and the first `XGameSave` class request, with the stage words unchanged |
+| input device | no device on a host with no pad; the title reads nothing | one paired neutral pad from the always-built backend, so the first-run read succeeds | `PALMETTO_PAD_PRESENT=0` or `off` | a console has a pad; [input_backend.md](input_backend.md) section 5 measured that presence causes the first-run read and absence never does, and the default boot's +24.75 s read has no presses |
+| offline sign-in | signed in; `XUserAddAsync`/`AddResult` answer `S_OK` with the offline user | unchanged | - | already the measured console answer; the sign-in owner is not reached in either boot |
+| save/settings reads | the offline file store is the default provider | unchanged | - | [persistent_store.md](persistent_store.md) and the gamesave store; this slice measures the first `XGameSaveInitializeProvider` |
+
+**What stays a stand-in, named.** The audio output itself: the WAVE container has a valid header and no samples, so a
+title that plays the stream hears silence. The press is still a stimulus and not a runtime answer: the default pad is
+present and neutral, and `PALMETTO_FAKE_INPUT` keeps the scripted press schedule opt-in. The change event is the
+registration's initial state, not a transition the offline user took: the user is signed in when the title registers.
+The input default changes the always-built no-SDL backend only; a build with SDL3 keeps its previous input defaults. On
+a host with a physical controller the presence pad is a second paired device (the measured host has no controller, so
+this boot's enumeration is the presence pad alone) - the switch is the fallback for a caller that wants device count to
+match the host exactly.
+
+### 12.3 The clean default 300 s boot
+
+One 300 s boot of the post-change binary (SHA-256
+`F0A45CD2C146BAE5061A3688563061A2F88E30C65378171090B5100BE1AFC048`, built 09:59:25) with no opt-in answer switches:
+the standard environment plus `PALMETTO_USER_TRACE`, `PALMETTO_INPUT_TRACE`, `PALMETTO_STATE_TRACE=10` and presenter
+captures every 3,000 frames up to 16.
+
+| measure | value |
+|---|---|
+| verdict | ALIVE 300.2 s, killed by the harness timeout; 0 exceptions, no stop, no device-lost line |
+| D3D12 calls / startup-trace events | 461,752 / 51,717 |
+| presenter captures | 4 (frames 1, 3,001, 6,001, 9,001), every one mean rgb 0.00 0.00 0.00 |
+| stage words | init 2 (last changed 30 s), loading 1 (last changed 30 s), session 0; machine current 2 next 2 |
+| boot-media gate / platform gate / loading-active | `0x71B9048` = 2; `0xA210D81` = 0x101; `0x7453EE0` = 1 |
+| media semaphores | `0x71B9078`/`0x71B9088` = 0x714/0x71c |
+| slot-67 refusals | 113 calls with `0x80070057` (the pre-existing stand-in answer, none fatal) |
+| last platform call | +108.68 s (`XNetworkingGetConnectivityHint`, bounded trace #10000) |
+
+The three changed defaults are consumed by the boot itself:
+
+| answer | clean default boot |
+|---|---|
+| speech surface | `XSpeechSynthesizerCreate` + `XSpeechSynthesizerEnumerateInstalledVoices` at +24.46 s, both `S_OK` |
+| user change event | `SignedInAgain` delivered at +1.90 s to `game+0x2211C80`; the five follow-up user calls at +1.90 s |
+| input device | one neutral pad enumerated by the title's device callback; `GetCurrentReading` + `GetGamepadState` at +24.75 s, `S_OK`/`true` (no scripted press is set) |
+| offline save provider | `XGameSaveInitializeProvider` at +24.75 s, `S_OK`, 0 bytes |
+| user-ready refresh | +24.75 s, the same call shape as 12.1 |
+| sign-in owner / UI dialogs / movie | not called in 300 s |
+
+**Reading.** The defaults reproduce the sequence of 12.1 within boot-speed variance (+20.3/+20.6 s there,
++24.5/+24.8 s here): the accessibility screen owner executes against a synthesizer that exists, the first-run gamepad
+read happens with only the neutral pad present, and the save provider starts. The presented frame still does not
+change: the four captures are black and the stage words are 2/2, as in the clean boot of section 11.3.
+
+The boot's binary is the one above. After the boot this slice edited two comment blocks in the shims and nothing else,
+so the gate build's SHA-256 differs (`2E992BB7D91502C974D4D0CAB896FE49D46273CBFC9D08FC37B188A509E283BC`, built
+10:09:41; the parallel task-149's `port/src/main.cpp` is also in that build) and the boot was not repeated - the same
+comment-only-difference convention [first_run_path.md](first_run_path.md) section 9 records.
+
+### 12.4 Verdict and the next wall
+
+The slice's first half is answered yes: the first screen owner the boot reaches now answers its runtime services. The
+accessibility create `0x5A75F80` succeeds by default, its narration enumeration runs, the first-run read succeeds against
+the default pad, the offline user event is consumed and the save store opens. This is the first measurement on this tree
+where the save store is initialized by the title at all, and it follows the answered services directly.
+
+The second half is answered no, honestly: no presented frame changes and no stage word moves. The four captures are
+black, `init` stays 2, `loading` stays 1 and `session` stays 0 for 300 s. The remaining wall is the title-side
+stage/present producer of section 11.4, not another first-run service answer.
+
+- **Next falsifier.** A boot in which a presenting screen owner executes - `XGameUiImpl` text entry or profile card, the
+  `XUserAddAsync` sign-in owner `0x5BB5390`, or the movie open `0x442EA70` - or in which any presenter capture is
+  non-black. Either would mean the first-run flow moved beyond the service answers and the remaining gate is named by
+  the new call.
+- **The cause split.** One boot per fallback (`PALMETTO_PAD_PRESENT=0`, `PALMETTO_USER_CHANGE_EVENT=0`,
+  `PALMETTO_SILENT_SPEECH=0`) attributes the +24.75 s read and the provider start at the same clock to presence, event
+  or speech. The three A/B pages already separate the answers pairwise on older tree states; this tree's split is not
+  measured.
+- **The boot is dormant after +108.68 s**: no platform call, no file open and no stage change follows in the 300 s
+  window, so a later window cannot be ruled out by this boot alone (the 600 s boot of [long_boot.md](long_boot.md) is
+  the argument against it).
+
+### 12.5 Files, tests and evidence
+
+- **Source changed**: `port/shims/xgameruntime_offline.cpp` (speech default), `port/shims/xgameruntime_user.cpp`
+  (change-event default), `port/shims/gameinput_nosdl.h` (default pad presence in the always-built backend). No build
+  file, no `port/shims/persistent_store.h`, no D3D12, DirectStorage or xmem change; `port/src/main.cpp` is not touched
+  by this slice (the parallel task-149 edits it).
+- **Tests**: `port/test/xgameruntime_offline_test.cpp` (79 checks, 0 failures; default surface, the 0/off fallback,
+  and the surface back after clearing), `port/test/xgameruntime_user_test.cpp` (96 checks, 0 failures; the default
+  delivery, the 0 fallback, the dropped delivery and the per-process cap), `port/test/gameinput_nosdl_test.cpp`
+  (9 of 9 cases; a new `default pad presence` case covers the neutral default, a refused press schedule and the
+  `PALMETTO_PAD_PRESENT=0` fallback). `xgameruntime_gamesave_test` is unchanged and still passes.
+- **Gates**: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, the three
+  targets above pass, and the docs checks pass.
+- **Evidence (outside the repository)**: `D:\leonida-work\firstrunowners\boot-measure1` and `boot-default300` (stderr,
+  summary, startup trace), `capture-measure1` and `capture-default300` (captures + `index.txt` with the frame means),
+  and the drivers `boot_arm.ps1`, `analyze_boot.py`, `build_tests_targets.cmd`. No game data: API names, slot numbers,
+  times, counts, HRESULTs, the title's own RVAs and image means only.
+- **Uncommitted**: the three shim files and three test files above, plus this page. `port/src/main.cpp` is the parallel
+  slice's uncommitted change, not this one's.
+

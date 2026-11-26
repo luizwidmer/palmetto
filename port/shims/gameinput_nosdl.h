@@ -15,8 +15,14 @@
 // second, and `PALMETTO_INPUT_TRACE=1` logs every call that matters. Whether the title reads any of it is measured by
 // the A/B boot, not assumed here.
 //
-// Switches (all read from the environment once, on the first GameInputCreate; names already documented in
-// docs/gameinput.md and docs/input_gate.md, so no new variable is introduced):
+// Switches (all read from the environment once, on the first GameInputCreate; the names before PALMETTO_PAD_PRESENT
+// are already documented in docs/gameinput.md and docs/input_gate.md, and PALMETTO_PAD_PRESENT is documented by the
+// first-run slice, docs/decomp_first_ui.md section 12):
+//   PALMETTO_PAD_PRESENT=0|off             removes the paired pad the always-built backend presents by default. A
+//                                         console boot always has a pad connected; an unattended host does not, and
+//                                         the measured A/B (docs/input_backend.md) shows the title only takes its
+//                                         first-run reading when a device is present. The default is one neutral pad
+//                                         (no presses); the switch is the fallback.
 //   PALMETTO_KEYBOARD_PAD=1|focus|always  the keyboard/mouse pad, off by default (same meaning as the SDL shim)
 //   PALMETTO_FAKE_INPUT=<seconds>         one scripted pad and a bounded press schedule: confirm then start, about
 //                                         once a second for 30 presses, each held 150 ms. The delay is the first press.
@@ -275,11 +281,13 @@ private:
     bool have_cursor_ = false;
 };
 
-// The scripted first-run press schedule: opt-in with PALMETTO_FAKE_INPUT=<seconds>, which the input-gate experiment
-// already documents as a synthetic accept press. Its generic sequence here is our own: confirm (A) at every even
-// press and start (Menu) at every odd one, about once a second, each held 150 ms, thirty presses (a bounded
-// schedule of about 29 s). The parse rules are the input-gate schedule's (src/fake_input.h): a plain non-negative
-// decimal number of seconds; anything else is refused so a typo never presses anything.
+// The scripted pad: one extra gamepad the always-built backend presents so a boot has a device to pair, as a console
+// always does. Without PALMETTO_FAKE_INPUT the pad is present and neutral (no presses) - the measured presence the
+// title's first-run read needs (docs/input_backend.md); PALMETTO_PAD_PRESENT=0|off removes it. With
+// PALMETTO_FAKE_INPUT=<seconds> the same pad runs the bounded first-run press schedule: confirm (A) at every even
+// press and start (Menu) at every odd one, about once a second, each held 150 ms, thirty presses (a bounded schedule
+// of about 29 s). The parse rules are the input-gate schedule's (src/fake_input.h): a plain non-negative decimal
+// number of seconds; anything else is refused so a typo never presses anything.
 class ScriptedPresses {
 public:
     static constexpr uint64_t kBurstUs = palmetto::FakeInputSchedule::kDefaultBurstUs;  // 150 ms
@@ -291,8 +299,10 @@ public:
         if (!delay) return std::nullopt;
         return ScriptedPresses(delay->press_at_us());
     }
-    explicit ScriptedPresses(uint64_t first_press_us = 0)
-        : schedule_(first_press_us, kBurstUs, kIntervalUs, kPresses) {}
+    // The default paired pad: a schedule with no presses, so the pad is connected and neutral for the whole boot.
+    static ScriptedPresses presence() { return ScriptedPresses(0, 0); }
+    explicit ScriptedPresses(uint64_t first_press_us = 0, unsigned presses = kPresses)
+        : schedule_(first_press_us, kBurstUs, kIntervalUs, presses) {}
 
     std::optional<unsigned> press_index_at(uint64_t process_us) const { return schedule_.press_at(process_us); }
     // The buttons a scripted press holds at `process_us`: confirm on the even presses, start on the odd ones.
@@ -804,12 +814,26 @@ inline void configure_from_env(Backend* b) {
         b->scripted = ScriptedPresses::parse(fake.c_str());
         if (!b->scripted)
             std::fprintf(stderr,
-                         "[rt] gameinput: PALMETTO_FAKE_INPUT=%s is not a number of seconds, ignored\n", fake.c_str());
+                         "[rt] gameinput: PALMETTO_FAKE_INPUT=%s is not a number of seconds, no presses\n", fake.c_str());
         else
             std::fprintf(stderr,
                          "[rt] gameinput: scripted first-run pad: %u presses, 1 s apart, 150 ms each, first at "
                          "%.3f s\n",
                          ScriptedPresses::kPresses, b->scripted->first_press_us() / 1e6);
+    }
+    // The always-built backend's default presence: one paired, neutral pad, the device a console boot has. The
+    // measured first-run read only happens when a pad exists (docs/input_backend.md section 5), so the default makes
+    // the console answer and PALMETTO_PAD_PRESENT=0|off restores an unattended host with no pad. The switch is also
+    // what the no-device test arming uses.
+    if (!b->scripted) {
+        const std::string present = detail::env("PALMETTO_PAD_PRESENT");
+        if (present != "0" && present != "off") {
+            b->scripted = ScriptedPresses::presence();
+            static std::atomic<bool> s_logged{false};
+            if (!s_logged.exchange(true))
+                std::fprintf(stderr, "[rt] gameinput: a pad is present and neutral by default "
+                                     "(PALMETTO_PAD_PRESENT=0 removes it)\n");
+        }
     }
     const std::string thread = detail::env("PALMETTO_GAMEINPUT_THREAD");
     b->thread_on = thread != "0";

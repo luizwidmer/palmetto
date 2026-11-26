@@ -186,6 +186,10 @@ int main(int argc, char** argv) {
     using Unregister = bool(STDMETHODCALLTYPE*)(void*, XTaskQueueRegistrationToken, bool);
     using Deferral = HRESULT(STDMETHODCALLTYPE*)(void*, void**);
     auto on_change = [](void*, XUserLocalId, uint32_t) {};
+    // The default delivers one event per registration, so this token/unregister check forces the fallback off first:
+    // otherwise its delivery can be running when the unregister asks, and "not pending" would legitimately be false.
+    check(rt::shims::xgameruntime_set_user_change_event(false),
+          "the change-event seam reports the default is on and forces the fallback off");
     XTaskQueueRegistrationToken reg{};
     check(at<Register>(user, 33)(user, nullptr, nullptr, on_change, &reg) == S_OK && reg.token != 0,
           "XUserRegisterForChangeEvent hands out a token");
@@ -197,24 +201,45 @@ int main(int argc, char** argv) {
     check(at<Deferral>(user, 35)(user, &deferral) == E_GAMEUSER_DEFERRAL_NOT_AVAILABLE && deferral == nullptr,
           "XUserGetSignOutDeferral: E_GAMEUSER_DEFERRAL_NOT_AVAILABLE (nothing signs out offline)");
 
-    // ---- the opt-in change-event probe (docs/user_events.md) ----
-    // Off, the registration above delivered nothing: the user never changes offline. The probe delivers one
-    // SignedInAgain event per registration on the queue the title registered with, with its context and the offline
-    // local id; the switch is the seam so both faces are checked in one process.
-    check(g_change_events.load() == 0, "the registration made with the probe off delivered no change event");
+    // ---- the delivered change event (default) and PALMETTO_USER_CHANGE_EVENT=0 (fallback) ----
+    // The default delivers one SignedInAgain event per registration, on the queue the registration names, with its
+    // own context and the offline local id (docs/user_event_probe.md: the title's callback runs its user-ready
+    // refresh, the stage words do not move). The seam forces the fallback so both faces are checked in one process;
+    // it is already forced off by the token check above.
+    check(g_change_events.load() == 0, "the no-op registration above was unregistered before any counted delivery");
+    XTaskQueueHandle fallback_queue = nullptr;
+    if (XTaskQueueCreate(XTaskQueueDispatchMode::Manual, XTaskQueueDispatchMode::Manual, &fallback_queue) == S_OK &&
+        fallback_queue) {
+        int context = 7;
+        XTaskQueueRegistrationToken quiet{};
+        check(at<Register>(user, 33)(user, fallback_queue, &context, count_change_event, &quiet) == S_OK &&
+                  quiet.token != 0,
+              "a registration with the fallback on hands out a token");
+        while (XTaskQueueDispatch(fallback_queue, XTaskQueuePort::Completion, 0)) {
+        }
+        check(g_change_events.load() == 0, "the fallback delivers no change event");
+        at<Unregister>(user, 34)(user, quiet, false);
+        XTaskQueueTerminate(fallback_queue, false, nullptr, nullptr);
+        while (XTaskQueueDispatch(fallback_queue, XTaskQueuePort::Work, 0)) {
+        }
+        XTaskQueueCloseHandle(fallback_queue);
+    } else {
+        check(false, "a manual task queue for the change-event fallback could not be created");
+    }
+    check(!rt::shims::xgameruntime_set_user_change_event(true), "the change-event seam reports the fallback is off");
     XTaskQueueHandle queue = nullptr;
     if (XTaskQueueCreate(XTaskQueueDispatchMode::ThreadPool, XTaskQueueDispatchMode::ThreadPool, &queue) == S_OK &&
         queue) {
         int context = 7;
-        check(!rt::shims::xgameruntime_set_user_change_event(true), "the change-event seam reports the switch was off");
         XTaskQueueRegistrationToken probed{};
         check(at<Register>(user, 33)(user, queue, &context, count_change_event, &probed) == S_OK && probed.token != 0,
-              "a registration with the probe on hands out a token");
+              "a registration with the default on hands out a token");
         for (int i = 0; i < 400 && g_change_events.load() == 0; ++i) Sleep(10);
         check(g_change_events.load() == 1 && g_change_local_id.load() == 1 && g_change_event_value.load() == 0 &&
                   g_change_context.load() == &context,
               "the registered callback ran once with its own context, the offline local id (1) and SignedInAgain (0)");
-        check(at<Unregister>(user, 34)(user, probed, false), "unregistering a delivered registration is not pending");
+        check(at<Unregister>(user, 34)(user, probed, true),
+              "unregistering a delivered registration (wait = true) is not pending once its callback returned");
 
         // A registration dropped before its queue delivers it must not reach the callback: a manual queue only
         // delivers when dispatched.

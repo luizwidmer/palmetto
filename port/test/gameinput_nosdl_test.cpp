@@ -59,6 +59,9 @@ void clear_sources() {
     g_focused = true;
     SetEnvironmentVariableA("PALMETTO_KEYBOARD_PAD", nullptr);
     SetEnvironmentVariableA("PALMETTO_FAKE_INPUT", nullptr);
+    // The backend presents one neutral pad by default (docs/decomp_first_ui.md 12); the ABI tests that count devices
+    // arm each source explicitly, so the shared reset removes the default pad first.
+    SetEnvironmentVariableA("PALMETTO_PAD_PRESENT", "0");
     SetEnvironmentVariableA("PALMETTO_GAMEINPUT_THREAD", "0");
     SetEnvironmentVariableA("PALMETTO_INPUT_TRACE", nullptr);
     set_xinput_source(&kFakeXInput);
@@ -511,6 +514,59 @@ int test_scripted_over_abi() {
     return 0;
 }
 
+// ---- 9. the default paired pad and its fallback (docs/decomp_first_ui.md 12) ---------------------------------------
+//
+// A console boot always has a pad; the always-built backend now presents one neutral pad by default, so a title's
+// first-run code that reads a device finds one. PALMETTO_PAD_PRESENT=0 is the fallback (no device, the pre-default
+// host state), and a refused PALMETTO_FAKE_INPUT value still leaves the pad present and neutral (it presses nothing).
+int test_default_pad_presence() {
+    clear_sources();
+    SetEnvironmentVariableA("PALMETTO_PAD_PRESENT", nullptr);
+    detail::reset_for_test();
+    detail::poll_at(1'000);
+
+    gi::IGameInput* input = nullptr;
+    CHECK(GameInputCreate(&input) == S_OK);
+    CallbackLog log;
+    gi::GameInputCallbackToken token = 0;
+    CHECK(input->RegisterDeviceCallback(nullptr, gi::GameInputKindGamepad, gi::GameInputDeviceAnyStatus,
+                                        gi::GameInputBlockingEnumeration, &log, &on_device, &token) == S_OK);
+    CHECK(log.devices.size() == 1);  // the default pad is the only device: no physical XInput pad in the fake source
+    CHECK(log.statuses.size() == 1 && (log.statuses[0] & gi::GameInputDeviceConnected) != 0);
+    gi::IGameInputReading* reading = nullptr;
+    CHECK(input->GetCurrentReading(gi::GameInputKindGamepad, log.devices[0], &reading) == S_OK);
+    gi::GameInputGamepadState state{};
+    CHECK(reading->GetGamepadState(&state));
+    CHECK(state.buttons == 0);  // present and neutral: presence is the runtime answer, presses are a stimulus
+    reading->Release();
+    CHECK(input->UnregisterCallback(token, 0));
+
+    // A refused press schedule still leaves the default pad present and neutral.
+    SetEnvironmentVariableA("PALMETTO_FAKE_INPUT", "not-a-number");
+    detail::reset_for_test();
+    detail::poll_at(2'000);
+    CallbackLog invalid_log;
+    CHECK(input->RegisterDeviceCallback(nullptr, gi::GameInputKindGamepad, gi::GameInputDeviceAnyStatus,
+                                        gi::GameInputBlockingEnumeration, &invalid_log, &on_device, &token) == S_OK);
+    CHECK(invalid_log.devices.size() == 1);
+    CHECK(input->GetCurrentReading(gi::GameInputKindGamepad, invalid_log.devices[0], &reading) == S_OK);
+    CHECK(reading->GetGamepadState(&state) && state.buttons == 0);
+    reading->Release();
+    CHECK(input->UnregisterCallback(token, 0));
+    SetEnvironmentVariableA("PALMETTO_FAKE_INPUT", nullptr);
+
+    // Fallback: PALMETTO_PAD_PRESENT=0 removes the pad, so the title finds no device and no reading.
+    SetEnvironmentVariableA("PALMETTO_PAD_PRESENT", "0");
+    detail::reset_for_test();
+    detail::poll_at(3'000);
+    gi::IGameInputReading* none = reinterpret_cast<gi::IGameInputReading*>(1);
+    CHECK(input->GetCurrentReading(gi::GameInputKindGamepad, nullptr, &none) == gi::GAMEINPUT_E_READING_NOT_FOUND);
+    CHECK(none == nullptr);
+    SetEnvironmentVariableA("PALMETTO_PAD_PRESENT", nullptr);
+    input->Release();
+    return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -527,6 +583,7 @@ int main() {
         {"active input record", test_active_input_feed},
         {"v0 ABI over a fake source", test_abi_over_fake_source},
         {"scripted pad over the ABI", test_scripted_over_abi},
+        {"default pad presence", test_default_pad_presence},
     };
     int failures = 0;
     for (const Case& c : cases) {

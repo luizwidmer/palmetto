@@ -10,10 +10,10 @@
 // Offline there is one local user, always signed in: the default user XUserAddAsync returns (with or without
 // AddDefaultUserSilently), with a fixed Xbox user id and local id, and a gamertag from PALMETTO_GAMERTAG (15 ASCII
 // characters at most, "Player" otherwise). Nothing goes online: token and gamer-picture requests fail as they would
-// without a network, and the user never changes, so registered change callbacks are never called by default. The opt-in
-// probe PALMETTO_USER_CHANGE_EVENT=1 delivers one SignedInAgain event per registration instead, for the measured
-// question this file's trace answers: does the title's registered callback at game+0x2211C80 change the boot when it
-// runs? (docs/user_events.md; the default path is unchanged.)
+// without a network. The user never signs out offline, but the registration is the documented way a title learns that
+// its user is ready, so the default now delivers one SignedInAgain event per registration (the measured answer of the
+// A/B in docs/user_event_probe.md: the title's own callback runs its user-ready refresh and the first XGameSave class
+// request). PALMETTO_USER_CHANGE_EVENT=0|off is the fallback: the pre-default behaviour, no delivery.
 //
 // The executable links thunks for IXUserImpl slots 3-5, 7-14, 19-25 and 33-34 and IXUserGamertagImpl slot 3
 // (tooling/gdk_runtime_calls.py, from the file alone; docs/runtime_imports.md). None of them is a private or PC-only
@@ -365,22 +365,23 @@ HRESULT STDMETHODCALLTYPE user_resolve_privilege_result(void*, XAsyncBlock* asyn
 //                                         XTaskQueueRegistrationToken* token)
 // 34: bool XUserUnregisterForChangeEvent(XTaskQueueRegistrationToken token, bool wait)
 //
-// The user never changes offline, so the registered callback is never invoked by default: the registration is kept
-// (with the callback and its context) and unregistering is never pending. PALMETTO_USER_CHANGE_EVENT=1 (OFF by
-// default) delivers one XUserChangeEvent::SignedInAgain to each registration, on the same task queue the title
-// registered with (the queue's completion port, as the networking registrations in xgameruntime.cpp deliver their
-// documented initial notification), and invokes the title's callback once. It is the falsifier of the "a frontend
-// waits for a user change event instead of polling" hypothesis, not a claim that the offline user changed: the
-// measured registration is the only user call in the boot and nothing re-reads user state (docs/user_events.md).
-// Delivering a transition that did not happen can change a title's state, so it is opt-in, one delivery per
-// registration, and capped per process. The switch's seam for tests is xgameruntime_set_user_change_event.
+// The offline user never signs out, but the title registers this callback as the documented way it learns that its
+// user is ready, so the default delivers one XUserChangeEvent::SignedInAgain to each registration, on the same task
+// queue the title registered with (the queue's completion port, as the networking registrations in xgameruntime.cpp
+// deliver their documented initial notification), and invokes the title's callback once. The measured A/B in
+// docs/user_event_probe.md separates the answers: the delivery makes the title run its own user-ready refresh
+// (gamertag, ids, guest/age, privilege checks, the first XGameSave class request) that the no-delivery control never
+// makes, and the stage words still do not move. The event is the registration's initial state, not a transition the
+// offline user took: the user is signed in when the title registers.
+// PALMETTO_USER_CHANGE_EVENT=0|off is the fallback (the pre-default answer, no delivery, measured in
+// docs/user_events.md); the switch's seam for tests is xgameruntime_set_user_change_event.
 std::atomic<int> g_change_event_override{-1};   // test seam: -1 follows the environment, 0/1 force OFF/ON
 bool change_event_enabled() {
     const int forced = g_change_event_override.load();
     if (forced >= 0) return forced != 0;
     char value[8] = {};
     const DWORD n = GetEnvironmentVariableA("PALMETTO_USER_CHANGE_EVENT", value, sizeof value);
-    return n > 0 && n < sizeof value && std::strcmp(value, "0") != 0 && _stricmp(value, "off") != 0;
+    return !(n > 0 && n < sizeof value && (std::strcmp(value, "0") == 0 || _stricmp(value, "off") == 0));
 }
 
 struct ChangeRegistration {
