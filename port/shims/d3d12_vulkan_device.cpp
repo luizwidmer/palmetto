@@ -7372,7 +7372,11 @@ void DeviceState::prepare_deferred_compute_pipelines(std::span<const palmetto::C
                 if (it != deferred_compute_tasks.end()) task = it->second;
             }
             if (!task) continue;  // not deferred: the replay map already holds its handle
-            if (compile_queue.wait_or_build(task)) {
+            const double started = palmetto::timeline::seconds();
+            const bool built = compile_queue.wait_or_build(task);
+            palmetto::timeline::line("compile wait submit built=%d us=%.0f", built ? 1 : 0,
+                                     (palmetto::timeline::seconds() - started) * 1e6);
+            if (built) {
                 deferred_built_count.fetch_add(1, std::memory_order_relaxed);
             } else if (deferred_failed_count.fetch_add(1, std::memory_order_relaxed) == 0) {
                 std::fprintf(stderr,

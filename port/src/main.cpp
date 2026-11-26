@@ -928,6 +928,940 @@ void start_loader_watch(std::uintptr_t image_base, std::size_t image_size, std::
     }).detach();
 }
 
+// ---- Renderer executor watch (PALMETTO_EXECUTOR_WATCH) ---------------------------------------------------------------
+// docs/vertex_buffer_va.md section 10 left the renderer stop attributed to a title object whose memory is reused while
+// the per-command executor (game+0x1335A20) still virtual-calls through its first qword; the writer was unnamed. This
+// probe is a measurement, off by default, that names it in-process without a debugger:
+//
+//  * a hardware execution breakpoint on the executor entry (DR0). The job is RCX and the object the executor calls
+//    through is *(*(job+0x28)+0x10); the probe reads both, remembers them, logs the first sight with the object's
+//    vtable (image+RVA) and a bounded memory dump, and notices a first qword that changed between two appearances;
+//  * a hardware execution breakpoint on the title's block free path (DR1, game+0x515ABB0; the block pointer is RDX).
+//    A free of a remembered job/graph/object names the caller that released it, with tick and title stack;
+//  * a write-only hardware data breakpoint on the tracked object's first qword (DR2), armed in every thread as soon as
+//    the executor first names the object. The store that replaces the vtable raises the breakpoint after it executes, so
+//    the log carries the writer's thread, instruction, registers and title stack - the writer itself;
+//  * a write-only data breakpoint on this probe's own control slot (DR3), written every 50 ms. If that one never fires,
+//    debug registers are not honoured here and a silent object watch is a method failure, not a measurement.
+//
+// Every line prints the steady_clock tick, the same value the runtime's PALMETTO_TIMELINE lines print, so a title-side
+// write orders against the layer's ExecuteCommandLists/fence/deferred-compile returns. RVAs, field offsets, counts and
+// register values only; no game data.
+//
+// PALMETTO_EXECUTOR_WATCH=1 uses the measured sites above; PALMETTO_EXECUTOR_WATCH=<exec_rva>[,<free_rva>] overrides
+// them (hex, image-relative; a single RVA disables the free breakpoint). Off when unset or "0".
+struct ExecutorLifetimeWatch {
+    std::atomic<std::uintptr_t> executor_entry{0};  // DR0: execution breakpoint, the per-command executor's entry
+    std::atomic<std::uintptr_t> free_base{0};       // DR1's site, once it is time to arm it (hot during loading)
+    std::atomic<std::uintptr_t> free_entry{0};      // DR1: execution breakpoint, the title's block free path
+    std::atomic<std::uintptr_t> object_qword{0};    // DR2: 8-byte write watch on the tracked object's first qword
+    std::atomic<std::uintptr_t> object_base{0};     // the tracked object itself (the qword watch is aligned down)
+    std::atomic<std::uint64_t> object_first{0};     // the tracked object's first qword as last seen at an entry
+    std::atomic<std::uintptr_t> control_slot{0};    // DR3: 8-byte write watch on this probe's own control slot
+    std::atomic<unsigned> target_version{0};        // bumped whenever the data watch target changes
+    std::atomic<unsigned> executor_hits{0};
+    std::atomic<unsigned> executor_logged{0};
+    std::atomic<unsigned> free_hits{0};
+    std::atomic<unsigned> free_logged{0};
+    std::atomic<unsigned> object_hits{0};
+    std::atomic<unsigned> control_hits{0};
+};
+
+ExecutorLifetimeWatch& executor_watch() {
+    static ExecutorLifetimeWatch watch;
+    return watch;
+}
+
+// The control slot the probe's own thread writes every 50 ms; nothing else writes it. Aligned and volatile only.
+alignas(8) volatile std::uint64_t executor_watch_control_slot = 0;
+std::uintptr_t executor_watch_image_base = 0, executor_watch_image_size = 0;
+double executor_watch_free_arm_at = 0.0;  // absolute steady_clock second the delayed free breakpoint arms at
+
+std::mutex& executor_watch_print_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+void executor_watch_print(const std::string& text) {
+    std::lock_guard lock(executor_watch_print_mutex());
+    std::fwrite(text.data(), 1, text.size(), stderr);
+    std::fflush(stderr);
+}
+
+std::string executor_watch_hex(std::uint64_t value) {
+    char buffer[24];
+    std::snprintf(buffer, sizeof buffer, "0x%llx", static_cast<unsigned long long>(value));
+    return buffer;
+}
+
+// A module-relative label for a value that points into the title image; the raw value otherwise.
+std::string executor_watch_label(std::uint64_t value, std::uintptr_t image_base, std::uintptr_t image_size) {
+    if (value >= image_base && value < image_base + image_size)
+        return rt::shims::module_offset(static_cast<std::uintptr_t>(value));
+    return executor_watch_hex(value);
+}
+
+double executor_watch_seconds() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+std::string executor_watch_prefix(const char* what) {
+    char buffer[96];
+    std::snprintf(buffer, sizeof buffer, "[rt] executor watch t=%.3f %s", executor_watch_seconds(), what);
+    return buffer;
+}
+
+bool executor_watch_readable(std::uintptr_t address, std::size_t bytes) {
+    if (address < 0x10000) return false;
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof info) != sizeof info) return false;
+    if (info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+    const auto end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+    return address + bytes <= end;
+}
+
+// A guarded read of title memory: no C++ object is alive in this frame, so the __try is legal and a page that turns
+// unreadable between the query and the copy costs a skipped read, not a second fault.
+bool executor_watch_read_block(std::uintptr_t address, void* out, std::size_t bytes) {
+    if (!executor_watch_readable(address, bytes)) return false;
+    __try {
+        std::memcpy(out, reinterpret_cast<const void*>(address), bytes);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+std::uint64_t executor_watch_read_u64(std::uintptr_t address) {
+    std::uint64_t value = 0;
+    return executor_watch_read_block(address, &value, sizeof value) ? value : 0;
+}
+
+std::uint32_t executor_watch_read_u32(std::uintptr_t address) {
+    std::uint32_t value = 0;
+    return executor_watch_read_block(address, &value, sizeof value) ? value : 0;
+}
+
+// The title stack, title-image frames only, from the faulting/writing thread's RSP. Same fault-tolerant page scan the
+// samplers use; module_offset() takes the shim registry lock after the walk.
+std::string executor_watch_title_stack(std::uintptr_t rsp) {
+    WaitSampleModules modules;
+    modules.image_base = executor_watch_image_base;
+    modules.image_end = executor_watch_image_base + executor_watch_image_size;
+    std::uint64_t frames[32] = {};
+    const unsigned found = scan_stack_words_deep(rsp, frames, 32, modules, 24);
+    std::string text;
+    unsigned shown = 0;
+    for (unsigned i = 0; i < found && shown < 12; ++i) {
+        if (frames[i] < modules.image_base || frames[i] >= modules.image_end) continue;
+        text += " " + rt::shims::module_offset(static_cast<std::uintptr_t>(frames[i]));
+        ++shown;
+    }
+    return text.empty() ? " (none)" : text;
+}
+
+std::string executor_watch_memory_dump(const char* name, std::uintptr_t address, unsigned bytes) {
+    std::string text = "\n  ";
+    text += name;
+    text += " ";
+    text += executor_watch_hex(address);
+    for (unsigned offset = 0; offset + 8 <= bytes; offset += 8) {
+        char word[24];
+        std::snprintf(word, sizeof word, " %016llx",
+                      static_cast<unsigned long long>(executor_watch_read_u64(address + offset)));
+        text += word;
+    }
+    return text;
+}
+
+// The job/graph/object chain one executor entry runs: job state at +0x40 (the dword the job executor compares with 3
+// and the submit/wait loop waits on), the graph struct the job names at +0x28, and the object it virtual-calls through.
+struct ExecutorGraphView {
+    std::uint64_t job = 0, graph = 0, object = 0, object_first = 0;
+    std::uint32_t state = 0;
+    bool object_readable = false;
+};
+
+ExecutorGraphView executor_watch_view(std::uintptr_t job) {
+    ExecutorGraphView view;
+    view.job = job;
+    if (!job) return view;
+    view.state = executor_watch_read_u32(job + 0x40);
+    view.graph = executor_watch_read_u64(job + 0x28);
+    if (!view.graph) return view;
+    view.object = executor_watch_read_u64(static_cast<std::uintptr_t>(view.graph) + 0x10);
+    if (!view.object) return view;
+    view.object_readable = executor_watch_read_block(static_cast<std::uintptr_t>(view.object), &view.object_first, 8);
+    return view;
+}
+
+std::string executor_watch_view_text(const ExecutorGraphView& view) {
+    std::string text = "job " + executor_watch_hex(view.job) + " state " + std::to_string(view.state) + " graph " +
+                       executor_watch_label(view.graph, executor_watch_image_base, executor_watch_image_size) +
+                       " object " +
+                       executor_watch_label(view.object, executor_watch_image_base, executor_watch_image_size) +
+                       " object[0] " + executor_watch_hex(view.object_first);
+    return text;
+}
+
+// Remember every pointer the probe learns, so the free breakpoint can name what it releases. Bounded; first name wins.
+std::mutex& executor_watch_names_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::map<std::uint64_t, std::string>& executor_watch_names() {
+    static std::map<std::uint64_t, std::string> names;
+    return names;
+}
+
+void executor_watch_remember(std::uint64_t address, const char* name) {
+    if (!address) return;
+    std::lock_guard lock(executor_watch_names_mutex());
+    auto& names = executor_watch_names();
+    if (names.size() >= 256) return;
+    if (names.find(address) == names.end()) names[address] = name;
+}
+
+std::string executor_watch_name_of(std::uint64_t address) {
+    std::lock_guard lock(executor_watch_names_mutex());
+    const auto it = executor_watch_names().find(address);
+    return it == executor_watch_names().end() ? std::string() : it->second;
+}
+
+// Per-object first-qword history, so a change between two executor entries is visible even if the data breakpoint is
+// armed after the first write (the free/reuse window a later boot can then watch from its first sight).
+std::mutex& executor_watch_objects_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::map<std::uint64_t, std::uint64_t>& executor_watch_objects() {
+    static std::map<std::uint64_t, std::uint64_t> objects;
+    return objects;
+}
+
+// Arms the object first-qword write watch on the first object the executor names whose first qword looks like a vtable
+// (a code or read-only-data pointer), and only once: a boot watches one object. Logs the arm with the tick. The
+// steady state is allocation-free: 60k executor entries per boot hit this path, and the common case (the same object,
+// the same first qword) is one atomic load and one memory read.
+void executor_watch_track(const ExecutorGraphView& view, const char* source) {
+    if (!view.object) return;
+    ExecutorLifetimeWatch& watch = executor_watch();
+    if (view.object == watch.object_base.load(std::memory_order_relaxed)) {
+        const std::uint64_t previous = watch.object_first.load(std::memory_order_relaxed);
+        if (view.object_first == previous) return;
+        watch.object_first.store(view.object_first, std::memory_order_relaxed);
+        executor_watch_print(executor_watch_prefix("object first qword changed between entries (") + source +
+                             "): object " + executor_watch_hex(view.object) + " was " +
+                             executor_watch_label(previous, executor_watch_image_base, executor_watch_image_size) +
+                             " now " +
+                             executor_watch_label(view.object_first, executor_watch_image_base, executor_watch_image_size) +
+                             executor_watch_memory_dump("object", static_cast<std::uintptr_t>(view.object), 0x60) + "\n");
+        return;
+    }
+    executor_watch_remember(view.job, "job");
+    executor_watch_remember(view.graph, "graph");
+    executor_watch_remember(view.object, "object");
+    bool first = false, changed = false;
+    std::uint64_t previous = 0;
+    {
+        std::lock_guard lock(executor_watch_objects_mutex());
+        auto& objects = executor_watch_objects();
+        const auto it = objects.find(view.object);
+        if (it == objects.end()) {
+            first = true;
+            if (objects.size() < 512) objects[view.object] = view.object_first;
+        } else if (it->second != view.object_first) {
+            changed = true;
+            previous = it->second;
+            it->second = view.object_first;
+        }
+    }
+    std::string text;
+    if (first) {
+        text = executor_watch_prefix("object first seen (") + source + "): " + executor_watch_view_text(view) +
+               executor_watch_memory_dump("object", static_cast<std::uintptr_t>(view.object), 0x60) +
+               executor_watch_memory_dump("graph", static_cast<std::uintptr_t>(view.graph), 0x40);
+        const bool pointer_like = view.object_first >= 0x10000 && view.object_first < 0x7FFFFFFFFFFFull;
+        if (watch.object_base.load() == 0 && pointer_like) {
+            const auto qword = static_cast<std::uintptr_t>(view.object & ~static_cast<std::uint64_t>(7));
+            watch.object_first.store(view.object_first, std::memory_order_relaxed);
+            watch.object_base.store(static_cast<std::uintptr_t>(view.object));
+            watch.object_qword.store(qword);
+            watch.target_version.fetch_add(1);
+            text += "\n  " + executor_watch_prefix("armed the object first-qword write watch at ") +
+                    executor_watch_hex(qword) + " (object " + executor_watch_hex(view.object) + ", first qword " +
+                    executor_watch_label(view.object_first, executor_watch_image_base, executor_watch_image_size) +
+                    ")";
+        }
+    } else if (changed) {
+        text = executor_watch_prefix("object first qword changed between entries (") + source +
+               "): object " + executor_watch_hex(view.object) + " was " +
+               executor_watch_label(previous, executor_watch_image_base, executor_watch_image_size) + " now " +
+               executor_watch_label(view.object_first, executor_watch_image_base, executor_watch_image_size) +
+               executor_watch_memory_dump("object", static_cast<std::uintptr_t>(view.object), 0x60);
+    }
+    if (!text.empty()) executor_watch_print(text + "\n");
+}
+
+// Names the free of a tracked block: the pointer, the block's first qword at release, and the caller's title stack.
+void executor_watch_free(const CONTEXT& context) {
+    ExecutorLifetimeWatch& watch = executor_watch();
+    const unsigned hit = watch.free_hits.fetch_add(1, std::memory_order_relaxed) + 1;
+    const auto pointer = static_cast<std::uint64_t>(context.Rdx);
+    const std::string name = executor_watch_name_of(pointer);
+    const auto watched_object = static_cast<std::uint64_t>(watch.object_qword.load());
+    const bool tracked = !name.empty() || (watched_object && pointer == (watched_object & ~static_cast<std::uint64_t>(7)));
+    const bool log_line = tracked || (hit % 4096 == 0);
+    if (!log_line || watch.free_logged.fetch_add(1, std::memory_order_relaxed) >= (tracked ? 64u : 8u)) return;
+    std::string text = executor_watch_prefix("free path hit: ") + "pointer " + executor_watch_hex(pointer);
+    if (!name.empty()) text += " (" + name + ")";
+    const std::uint64_t first = executor_watch_read_u64(static_cast<std::uintptr_t>(pointer));
+    text += " first qword now " + executor_watch_label(first, executor_watch_image_base, executor_watch_image_size);
+    text += "\n  " + executor_watch_prefix("free stack") + executor_watch_title_stack(context.Rsp);
+    executor_watch_print(text + "\n");
+}
+
+// One executor entry: log the first few and periodic samples, remember the chain, and notice a first-qword change.
+void executor_watch_entry(const CONTEXT& context) {
+    ExecutorLifetimeWatch& watch = executor_watch();
+    const unsigned hit = watch.executor_hits.fetch_add(1, std::memory_order_relaxed) + 1;
+    const auto job = static_cast<std::uintptr_t>(context.Rcx);
+    const ExecutorGraphView view = executor_watch_view(job);
+    const std::uint64_t caller = executor_watch_read_u64(static_cast<std::uintptr_t>(context.Rsp));
+    const bool sample = hit <= 12 || hit % 2048 == 0;
+    if (sample && watch.executor_logged.fetch_add(1, std::memory_order_relaxed) < 128) {
+        std::string text = executor_watch_prefix("executor entry:") + " hit " + std::to_string(hit) + " tid " +
+                           std::to_string(GetCurrentThreadId()) + " caller " +
+                           executor_watch_label(caller, executor_watch_image_base, executor_watch_image_size) + "\n  " +
+                           executor_watch_view_text(view);
+        // The deep stack scan costs 24 pages; only the first few entries and the periodic samples need it.
+        if (hit <= 3 || hit % 2048 == 0)
+            text += "\n  " + executor_watch_prefix("entry stack") + executor_watch_title_stack(context.Rsp);
+        executor_watch_print(text + "\n");
+    }
+    executor_watch_track(view, "executor");
+}
+
+// A hardware data-breakpoint hit: DR2 is the tracked object's first qword (the writer the slice needs), DR3 the
+// probe's own control slot. Called with the thread's context after the storing instruction executed.
+void executor_watch_data(const CONTEXT& context) {
+    ExecutorLifetimeWatch& watch = executor_watch();
+    const DWORD dr6 = context.Dr6;
+    if ((dr6 & 0x8u) != 0) {  // DR3: the control slot - proves the debug registers are honoured on this machine
+        const unsigned hits = watch.control_hits.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (hits <= 3)
+            executor_watch_print(executor_watch_prefix("control watch fired: the debug registers and the write watch "
+                                                       "work") + " (" + std::to_string(hits) + ")\n");
+    }
+    if ((dr6 & 0x4u) == 0) return;  // DR2 is the object first qword; anything else is reported by its own path
+    const unsigned hits = watch.object_hits.fetch_add(1, std::memory_order_relaxed) + 1;
+    const auto qword = static_cast<std::uintptr_t>(watch.object_qword.load());
+    std::uint64_t now = 0;
+    executor_watch_read_block(qword, &now, 8);
+    std::string text = executor_watch_prefix("OBJECT FIRST-QWORD WRITER") + " hit " + std::to_string(hits) + " tid " +
+                       std::to_string(GetCurrentThreadId()) +
+                       " writer " + executor_watch_hex(context.Rip) + " (" +
+                       executor_watch_label(context.Rip, executor_watch_image_base, executor_watch_image_size) + ")" +
+                       " value now " + executor_watch_label(now, executor_watch_image_base, executor_watch_image_size);
+    // The bytes leading up to RIP name the store instruction without a disassembler (the breakpoint fires after it).
+    unsigned char bytes[16] = {};
+    if (context.Rip >= 16 && executor_watch_read_block(static_cast<std::uintptr_t>(context.Rip) - 16, bytes, 16)) {
+        text += "\n  bytes before writer rip:";
+        char byte[8];
+        for (unsigned i = 0; i < 16; ++i) {
+            std::snprintf(byte, sizeof byte, " %02x", bytes[i]);
+            text += byte;
+        }
+    }
+    char registers[320];
+    std::snprintf(registers, sizeof registers,
+                  "\n  rax %llx rbx %llx rcx %llx rdx %llx rsi %llx rdi %llx r8 %llx r9 %llx r14 %llx r15 %llx",
+                  static_cast<unsigned long long>(context.Rax), static_cast<unsigned long long>(context.Rbx),
+                  static_cast<unsigned long long>(context.Rcx), static_cast<unsigned long long>(context.Rdx),
+                  static_cast<unsigned long long>(context.Rsi), static_cast<unsigned long long>(context.Rdi),
+                  static_cast<unsigned long long>(context.R8), static_cast<unsigned long long>(context.R9),
+                  static_cast<unsigned long long>(context.R14), static_cast<unsigned long long>(context.R15));
+    text += registers;
+    text += "\n  " + executor_watch_prefix("writer stack") + executor_watch_title_stack(context.Rsp);
+    text += executor_watch_memory_dump("object",
+                                       static_cast<std::uintptr_t>(watch.object_base.load()), 0x80);
+    if (hits <= 4) executor_watch_print(text + "\n");
+}
+
+LONG CALLBACK executor_watch_exception(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT& context = *info->ContextRecord;
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
+    if ((context.EFlags & 0x100u) != 0) return EXCEPTION_CONTINUE_SEARCH;  // a trap the int3 probe machinery set
+    ExecutorLifetimeWatch& watch = executor_watch();
+    const auto at = static_cast<std::uintptr_t>(context.Rip);
+    const auto entry = static_cast<std::uintptr_t>(watch.executor_entry.load());
+    const auto free_entry = static_cast<std::uintptr_t>(watch.free_entry.load());
+    if (entry && at == entry) {
+        context.Dr6 = 0;
+        executor_watch_entry(context);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (free_entry && at == free_entry) {
+        context.Dr6 = 0;
+        executor_watch_free(context);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if ((context.Dr6 & 0xCu) != 0) {
+        executor_watch_data(context);
+        context.Dr6 = 0;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// Arms DR0/DR1 (execution) and DR2/DR3 (8-byte write) in one thread. Called with no lock the title could need: it
+// suspends the thread for the length of one Get/SetThreadContext.
+bool executor_watch_configure_thread(DWORD tid) {
+    ExecutorLifetimeWatch& watch = executor_watch();
+    const auto entry = static_cast<std::uintptr_t>(watch.executor_entry.load());
+    const auto free_entry = static_cast<std::uintptr_t>(watch.free_entry.load());
+    const auto object_qword = static_cast<std::uintptr_t>(watch.object_qword.load());
+    const auto control = static_cast<std::uintptr_t>(watch.control_slot.load());
+    DWORD dr7 = 0;
+    if (entry) dr7 |= 0x1u;                                    // L0, RW0=00 LEN0=00: execute at DR0
+    if (free_entry) dr7 |= 0x1u << 2;                          // L1: execute at DR1
+    if (object_qword && (object_qword & 7u) == 0) {            // L2, RW2=01 write, LEN2=11 8 bytes
+        dr7 |= 0x1u << 4;
+        dr7 |= 0x1u << 24;
+        dr7 |= 0x3u << 26;
+    }
+    if (control && (control & 7u) == 0) {                      // L3, RW3=01 write, LEN3=11 8 bytes
+        dr7 |= 0x1u << 6;
+        dr7 |= 0x1u << 28;
+        dr7 |= 0x3u << 30;
+    }
+    const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, tid);
+    if (!thread) return false;
+    bool configured = false;
+    if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
+        CONTEXT context{};
+        context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        if (GetThreadContext(thread, &context)) {
+            context.Dr0 = entry;
+            context.Dr1 = free_entry;
+            context.Dr2 = object_qword;
+            context.Dr3 = control;
+            context.Dr6 = 0;
+            context.Dr7 = dr7;
+            configured = SetThreadContext(thread, &context) != FALSE;
+        }
+        ResumeThread(thread);
+    }
+    CloseHandle(thread);
+    return configured;
+}
+
+void start_executor_watch_threads() {
+    // The control writer: proves the data-watch machinery works where the object watch stays silent.
+    std::thread([] {
+        for (;;) {
+            ++executor_watch_control_slot;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }).detach();
+    // The arming sweep: configures every thread once, reconfigures all of them when the object watch target appears,
+    // and picks up threads created later. Fixed arrays only: a thread suspended inside its own heap allocation holds
+    // the process heap lock, so the sweep must not allocate between SuspendThread and ResumeThread. A thread is only
+    // configured after it has been alive across two scans: a thread suspended in the window between its creation and
+    // its first instruction can end up with a suspend count its owner never balances, which stalls the loader.
+    std::thread([] {
+        static constexpr unsigned kMaxThreads = 4096, kPending = 512;
+        static DWORD configured[kMaxThreads];
+        static DWORD seen_tid[kMaxThreads];
+        static ULONGLONG seen_at[kMaxThreads];
+        unsigned configured_count = 0, seen_count = 0;
+        unsigned configured_version = ~0u;
+        unsigned long loops = 0;
+        const auto find = [](const DWORD* table, unsigned count, DWORD tid) -> int {
+            for (unsigned i = 0; i < count; ++i)
+                if (table[i] == tid) return static_cast<int>(i);
+            return -1;
+        };
+        for (;;) {
+            ExecutorLifetimeWatch& watch = executor_watch();
+            // Arm the hot free breakpoint only at its time: the allocator free path runs millions of times during
+            // loading, and one trap per call would swamp the boot this probe is measuring.
+            if (watch.free_entry.load(std::memory_order_relaxed) == 0 &&
+                watch.free_base.load(std::memory_order_relaxed) != 0 &&
+                executor_watch_seconds() >= executor_watch_free_arm_at) {
+                watch.free_entry.store(watch.free_base.load(std::memory_order_relaxed));
+                watch.target_version.fetch_add(1, std::memory_order_relaxed);
+                std::fprintf(stderr, "[rt] executor watch: free path armed at %s (t=%.3f)\n",
+                             executor_watch_hex(static_cast<std::uint64_t>(watch.free_entry.load())).c_str(),
+                             executor_watch_seconds());
+                std::fflush(stderr);
+            }
+            const unsigned version = watch.target_version.load(std::memory_order_relaxed);
+            const bool changed = version != configured_version;
+            if (changed) {
+                configured_count = 0;
+                configured_version = version;
+                std::fprintf(stderr,
+                             "[rt] executor watch: arming the debug registers (target version %u, object qword %p)\n",
+                             version, reinterpret_cast<void*>(static_cast<std::uintptr_t>(watch.object_qword.load())));
+                std::fflush(stderr);
+            }
+            const ULONGLONG now = GetTickCount64();
+            DWORD pending[kPending];
+            unsigned pending_count = 0, refused = 0;
+            const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if (snapshot != INVALID_HANDLE_VALUE) {
+                THREADENTRY32 entry{};
+                entry.dwSize = sizeof entry;
+                const DWORD pid = GetCurrentProcessId();
+                const DWORD self = GetCurrentThreadId();  // never suspend this sweep: a self-suspend never resumes
+                if (Thread32First(snapshot, &entry))
+                    do {
+                        if (entry.th32OwnerProcessID != pid || entry.th32ThreadID == self) continue;
+                        if (find(configured, configured_count, entry.th32ThreadID) >= 0) continue;
+                        const int seat = find(seen_tid, seen_count, entry.th32ThreadID);
+                        if (seat < 0) {
+                            if (seen_count < kMaxThreads) {
+                                seen_tid[seen_count] = entry.th32ThreadID;
+                                seen_at[seen_count] = now;
+                                ++seen_count;
+                            }
+                            continue;  // first sight: wait one scan before suspending it
+                        }
+                        if (now - seen_at[seat] < 1000) continue;
+                        if (pending_count < kPending) pending[pending_count++] = entry.th32ThreadID;
+                    } while (Thread32Next(snapshot, &entry));
+                CloseHandle(snapshot);
+            }
+            for (unsigned i = 0; i < pending_count; ++i) {
+                if (executor_watch_configure_thread(pending[i])) {
+                    if (configured_count < kMaxThreads) configured[configured_count++] = pending[i];
+                } else {
+                    ++refused;
+                }
+            }
+            // A full thread scan is only needed when the target just changed; afterwards it is enough to pick up
+            // threads created later, and a slower scan keeps the probe's own cost out of the boot's timing. The
+            // heartbeat proves the sweep is alive and shows how many threads carry the debug registers.
+            if (++loops % 20 == 0) {
+                std::fprintf(stderr,
+                             "[rt] executor watch sweep: %u thread(s) configured, %u refused this pass, target version "
+                             "%u\n",
+                             configured_count, refused, configured_version);
+                std::fflush(stderr);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(changed ? 25 : 250));
+        }
+    }).detach();
+    // A bounded reporter, so a watch that never fires still shows the counters in the boot log.
+    std::thread([] {
+        for (int sample = 1; sample <= 120; ++sample) {
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+            ExecutorLifetimeWatch& watch = executor_watch();
+            std::fprintf(stderr,
+                         "[rt] executor watch at %d s: executor entries %u (logged %u), free-path hits %u (logged %u), "
+                         "object writer hits %u, control watch fired %u, object qword %p\n",
+                         sample * 10, watch.executor_hits.load(std::memory_order_relaxed),
+                         watch.executor_logged.load(std::memory_order_relaxed),
+                         watch.free_hits.load(std::memory_order_relaxed),
+                         watch.free_logged.load(std::memory_order_relaxed),
+                         watch.object_hits.load(std::memory_order_relaxed),
+                         watch.control_hits.load(std::memory_order_relaxed),
+                         reinterpret_cast<void*>(static_cast<std::uintptr_t>(watch.object_qword.load())));
+            std::fflush(stderr);
+        }
+    }).detach();
+}
+
+// Starts the renderer executor watch. Measurement only: it changes no layer call and no title call (the breakpoints
+// trap and are continued); see the block comment above. The free path is optional and may carry an arm delay
+// (`<exec_rva>,<free_rva>@<seconds>`): it is very hot while the title loads, so a boot arms it only for the window
+// that matters.
+void start_executor_watch(std::uintptr_t image_base, std::size_t image_size) {
+    const char* spec = std::getenv("PALMETTO_EXECUTOR_WATCH");
+    if (!spec || !*spec || *spec == '0') return;
+    std::uint64_t exec_rva = 0x1335A20ull, free_rva = 0x515ABB0ull;
+    double free_delay = 0.0;
+    if (!(spec[0] == '1' && spec[1] == '\0')) {
+        char* end = nullptr;
+        const std::uint64_t first = std::strtoull(spec, &end, 16);
+        if (end == spec) {
+            std::fprintf(stderr, "[rt] executor watch: PALMETTO_EXECUTOR_WATCH=%s is not a hex RVA; not armed\n", spec);
+            return;
+        }
+        exec_rva = first;
+        free_rva = 0;
+        if (*end == ',') {
+            const char* second = end + 1;
+            char* second_end = nullptr;
+            const std::uint64_t value = std::strtoull(second, &second_end, 16);
+            if (second_end != second && value) {
+                free_rva = value;
+                if (*second_end == '@') free_delay = std::strtod(second_end + 1, nullptr);
+            }
+        }
+    }
+    executor_watch_image_base = image_base;
+    executor_watch_image_size = image_size;
+    ExecutorLifetimeWatch& watch = executor_watch();
+    watch.executor_entry.store(image_base + exec_rva);
+    if (free_rva && free_delay > 0.0) {
+        // Arm the hot free-path breakpoint only after the delay; the sweep sees the deadline cross.
+        watch.free_base.store(image_base + free_rva);
+        watch.free_entry.store(0);
+        executor_watch_free_arm_at = executor_watch_seconds() + free_delay;
+    } else {
+        watch.free_entry.store(image_base + free_rva);  // 0 disables the free breakpoint
+        executor_watch_free_arm_at = 0.0;
+    }
+    watch.control_slot.store(reinterpret_cast<std::uintptr_t>(const_cast<std::uint64_t*>(&executor_watch_control_slot)));
+    AddVectoredExceptionHandler(1, executor_watch_exception);
+    start_executor_watch_threads();
+    unsigned char bytes[8] = {};
+    executor_watch_read_block(image_base + exec_rva, bytes, sizeof bytes);
+    std::fprintf(stderr, "[rt] executor watch: executor entry image+0x%llx, free path image+0x%llx, control slot %p\n",
+                 static_cast<unsigned long long>(exec_rva), static_cast<unsigned long long>(free_rva),
+                 static_cast<void*>(const_cast<std::uint64_t*>(&executor_watch_control_slot)));
+    std::fprintf(stderr, "[rt] executor watch: bytes at the entry site: %02x %02x %02x %02x\n", bytes[0], bytes[1],
+                 bytes[2], bytes[3]);
+    std::fflush(stderr);
+}
+
+// ---- Title renderer-object write watch (PALMETTO_OBJECT_WRITE_WATCH) --------------------------------------
+// docs/vertex_buffer_va.md sections 10-11. The renderer stop is an object the per-command executor
+// (game+0x1335A20) virtual-calls through whose first qword reads two 1.0f floats: the block was freed and reused
+// while the executor still held the pointer. The hardware-breakpoint probe above names the object but needs a
+// suspended thread per configuration, and a boot with it did not get past loading (docs section 11 records that).
+//
+// This probe reaches the same measurement with no debug registers and no thread suspension:
+//  * an int3 over the executor entry's first byte (re-written after each pass, so every pass is seen). From RCX (the
+//    job) it derives the graph (job+0x28) and the object ([graph+0x10]), logs the first object of each class it meets
+//    with the tick and the object's vtable (image+RVA), and keeps a first-qword history per object;
+//  * on the first sight of an object whose first qword looks like a vtable, the 4 KiB page holding its first 0x100
+//    bytes is made PAGE_READONLY. EVERY thread's store into it faults, so the writer is named by its thread, its
+//    instruction and its title stack after the store executed, with no suspend/SetThreadContext in the path;
+//  * a page owned by this probe is protected the same way and written every 50 ms: if its fault never fires, the
+//    page-write method itself is unproven in this environment and a silent object watch is a method failure.
+//
+// Every line prints the steady_clock tick PALMETTO_TIMELINE lines print. PALMETTO_OBJECT_WRITE_WATCH=1 uses the
+// measured executor entry (game+0x1335A20); =<exec_rva> overrides it. Off when unset or "0".
+struct TitleWriteWatch {
+    std::atomic<std::uintptr_t> executor_entry{0};
+    std::atomic<unsigned char> original_byte{0};
+    std::atomic<std::uintptr_t> pages[8];    // protected pages (object pages and the control page)
+    std::atomic<std::uintptr_t> objects[8];  // object bases whose first 0x100 bytes are watched
+    std::atomic<unsigned> page_count{0}, object_count{0};
+    std::atomic<unsigned> executor_hits{0}, executor_logged{0};
+    std::atomic<unsigned> write_faults{0}, tracked_writes{0}, control_faults{0}, page_faults_other{0};
+    std::atomic<std::uintptr_t> control_page{0};
+    std::atomic<unsigned> armed_at_tick{0};
+};
+
+TitleWriteWatch& title_write_watch() {
+    static TitleWriteWatch watch;
+    return watch;
+}
+
+thread_local std::uintptr_t title_write_repoke_address = 0;
+thread_local std::uintptr_t title_write_pending_page = 0;
+thread_local std::uintptr_t title_write_pending_object = 0;
+thread_local std::uintptr_t title_write_pending_rip = 0;
+
+// The bytes a protected-page write fault's instruction will execute next, so the store can be named without a
+// disassembler: the fault is raised before the store, so RIP is the store instruction itself.
+std::string title_write_store_bytes(std::uintptr_t rip) {
+    unsigned char bytes[16] = {};
+    if (!executor_watch_read_block(rip, bytes, sizeof bytes)) return "";
+    std::string text;
+    char byte[8];
+    for (unsigned i = 0; i < 8; ++i) {
+        std::snprintf(byte, sizeof byte, " %02x", bytes[i]);
+        text += byte;
+    }
+    return text;
+}
+
+bool title_write_page_index(std::uintptr_t address, unsigned* index) {
+    TitleWriteWatch& watch = title_write_watch();
+    const unsigned count = watch.page_count.load(std::memory_order_relaxed);
+    for (unsigned i = 0; i < count; ++i) {
+        if (watch.pages[i].load(std::memory_order_relaxed) == address) {
+            if (index) *index = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool title_write_watched_object(std::uintptr_t address, std::uintptr_t* object) {
+    TitleWriteWatch& watch = title_write_watch();
+    const unsigned count = watch.object_count.load(std::memory_order_relaxed);
+    for (unsigned i = 0; i < count; ++i) {
+        const std::uintptr_t candidate = watch.objects[i].load(std::memory_order_relaxed);
+        if (address >= candidate && address < candidate + 0x100) {
+            if (object) *object = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Protects one 4 KiB page read-only and records it. Returns false when the page cannot be protected.
+bool title_write_protect_page(std::uintptr_t page) {
+    DWORD old = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(page), 0x1000, PAGE_READONLY, &old)) return false;
+    TitleWriteWatch& watch = title_write_watch();
+    const unsigned index = watch.page_count.fetch_add(1, std::memory_order_relaxed);
+    if (index < 8) watch.pages[index].store(page, std::memory_order_relaxed);
+    return index < 8;
+}
+
+std::uintptr_t title_write_control_page() {
+    TitleWriteWatch& watch = title_write_watch();
+    if (watch.control_page.load(std::memory_order_relaxed)) return watch.control_page.load(std::memory_order_relaxed);
+    void* const page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    watch.control_page.store(reinterpret_cast<std::uintptr_t>(page), std::memory_order_relaxed);
+    return reinterpret_cast<std::uintptr_t>(page);
+}
+
+// Names the writer of a store into a watched page: which object it hit, the storing instruction, the thread, the
+// value after the store and the title stack. `first` is the first store of this fault (before the single-step).
+void title_write_record(std::uintptr_t page, std::uintptr_t address, const CONTEXT& context, bool after) {
+    TitleWriteWatch& watch = title_write_watch();
+    std::uintptr_t object = 0;
+    const bool tracked = title_write_watched_object(address, &object);
+    const std::uintptr_t control_page = watch.control_page.load(std::memory_order_relaxed);
+    if (page == control_page) {
+        const unsigned hits = watch.control_faults.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (hits <= 3)
+            executor_watch_print(executor_watch_prefix("control page write watch fired: the page-write method and its "
+                                                       "single-step arm work") + " (" + std::to_string(hits) + ")\n");
+        return;
+    }
+    if (!after) {
+        watch.write_faults.fetch_add(1, std::memory_order_relaxed);
+        if (!tracked) {
+            const unsigned other = watch.page_faults_other.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (other <= 4)
+                executor_watch_print(executor_watch_prefix("write into a watched page outside the object window:") +
+                                     " address " + executor_watch_hex(address) + " writer " +
+                                     executor_watch_label(static_cast<std::uint64_t>(context.Rip), executor_watch_image_base,
+                                                          executor_watch_image_size) + "\n");
+        }
+        return;
+    }
+    if (!tracked) return;
+    const unsigned hits = watch.tracked_writes.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (hits > 6) return;
+    std::uint64_t value = 0;
+    executor_watch_read_block(address, &value, 8);
+    const std::uintptr_t store_rip = title_write_pending_rip ? title_write_pending_rip
+                                                             : static_cast<std::uintptr_t>(context.Rip);
+    std::string text = executor_watch_prefix("OBJECT WRITE WATCH") + " hit " + std::to_string(hits) + " object " +
+                       executor_watch_hex(object) + " offset " + executor_watch_hex(address - object) + " value " +
+                       executor_watch_label(value, executor_watch_image_base, executor_watch_image_size) +
+                       " writer " + executor_watch_label(static_cast<std::uint64_t>(store_rip), executor_watch_image_base,
+                                                         executor_watch_image_size) +
+                       " store bytes" + title_write_store_bytes(store_rip) +
+                       " tid " + std::to_string(GetCurrentThreadId());
+    text += "\n  " + executor_watch_prefix("writer stack") + executor_watch_title_stack(context.Rsp);
+    text += executor_watch_memory_dump("object", object, 0x80);
+    executor_watch_print(text + "\n");
+}
+
+void title_write_executor_entry(CONTEXT& context);
+
+LONG CALLBACK title_write_exception(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT& context = *info->ContextRecord;
+    const DWORD code = info->ExceptionRecord->ExceptionCode;
+    TitleWriteWatch& watch = title_write_watch();
+    if (code == EXCEPTION_ACCESS_VIOLATION && info->ExceptionRecord->NumberParameters >= 2 &&
+        info->ExceptionRecord->ExceptionInformation[0] == 1) {
+        const auto address = static_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionInformation[1]);
+        const auto page = address & ~static_cast<std::uintptr_t>(0xFFF);
+        if (!title_write_page_index(page, nullptr)) return EXCEPTION_CONTINUE_SEARCH;
+        title_write_record(page, address, context, false);
+        title_write_pending_page = page;
+        title_write_pending_object = address;
+        title_write_pending_rip = static_cast<std::uintptr_t>(context.Rip);
+        DWORD old = 0;
+        VirtualProtect(reinterpret_cast<void*>(page), 0x1000, PAGE_READWRITE, &old);
+        context.EFlags |= 0x100;  // trap after the store, so the page can be protected again
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (code == EXCEPTION_BREAKPOINT) {
+        const auto at = reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress);
+        if (at != static_cast<std::uintptr_t>(watch.executor_entry.load())) return EXCEPTION_CONTINUE_SEARCH;
+        title_write_executor_entry(context);
+        DWORD old = 0;
+        if (VirtualProtect(reinterpret_cast<void*>(at), 1, PAGE_EXECUTE_READWRITE, &old)) {
+            *reinterpret_cast<unsigned char*>(at) = watch.original_byte.load();
+            VirtualProtect(reinterpret_cast<void*>(at), 1, old, &old);
+        }
+        title_write_repoke_address = at;
+        context.EFlags |= 0x100;  // trap after the restored instruction, then put the int3 back
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (code == EXCEPTION_SINGLE_STEP) {
+        if (title_write_pending_page) {
+            const std::uintptr_t page = title_write_pending_page;
+            const std::uintptr_t address = title_write_pending_object;
+            title_write_pending_page = 0;
+            title_write_pending_object = 0;
+            context.EFlags &= ~static_cast<DWORD>(0x100);
+            DWORD old = 0;
+            VirtualProtect(reinterpret_cast<void*>(page), 0x1000, PAGE_READONLY, &old);
+            title_write_record(page, address, context, true);
+            title_write_pending_rip = 0;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if (title_write_repoke_address) {
+            const std::uintptr_t address = title_write_repoke_address;
+            title_write_repoke_address = 0;
+            context.EFlags &= ~static_cast<DWORD>(0x100);
+            DWORD old = 0;
+            if (VirtualProtect(reinterpret_cast<void*>(address), 1, PAGE_EXECUTE_READWRITE, &old)) {
+                *reinterpret_cast<unsigned char*>(address) = 0xCC;
+                VirtualProtect(reinterpret_cast<void*>(address), 1, old, &old);
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// The executor entry's int3: logs the job/graph/object chain (bounded) and arms the page watch on a new object class.
+void title_write_executor_entry(CONTEXT& context) {
+    TitleWriteWatch& watch = title_write_watch();
+    const unsigned hit = watch.executor_hits.fetch_add(1, std::memory_order_relaxed) + 1;
+    const auto job = static_cast<std::uintptr_t>(context.Rcx);
+    const ExecutorGraphView view = executor_watch_view(job);
+    if (hit <= 12 || hit % 4096 == 0) {
+        if (watch.executor_logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+            std::string text = executor_watch_prefix("executor entry:") + " hit " + std::to_string(hit) + " tid " +
+                               std::to_string(GetCurrentThreadId()) + "\n  " + executor_watch_view_text(view);
+            if (hit <= 3)
+                text += "\n  " + executor_watch_prefix("entry stack") + executor_watch_title_stack(context.Rsp);
+            executor_watch_print(text + "\n");
+        }
+    }
+    if (!view.object || !view.object_readable) return;
+    auto& objects_history = executor_watch_objects();
+    bool first = false;
+    std::uint64_t was = 0;
+    {
+        std::lock_guard lock(executor_watch_objects_mutex());
+        const auto it = executor_watch_objects().find(view.object);
+        if (it == executor_watch_objects().end()) {
+            first = true;
+            if (objects_history.size() < 512) objects_history[view.object] = view.object_first;
+        } else if (it->second != view.object_first) {
+            was = it->second;
+            it->second = view.object_first;
+        }
+    }
+    if (!first && !was) return;
+    if (was) {
+        executor_watch_print(executor_watch_prefix("object first qword changed between entries: object ") +
+                             executor_watch_hex(view.object) + " was " +
+                             executor_watch_label(was, executor_watch_image_base, executor_watch_image_size) + " now " +
+                             executor_watch_label(view.object_first, executor_watch_image_base, executor_watch_image_size) +
+                             executor_watch_memory_dump("object", static_cast<std::uintptr_t>(view.object), 0x80) + "\n");
+        return;
+    }
+    executor_watch_remember(view.job, "job");
+    executor_watch_remember(view.graph, "graph");
+    executor_watch_remember(view.object, "object");
+    std::string text = executor_watch_prefix("object first seen:") + " " + executor_watch_view_text(view) +
+                       "\n  vtable " + executor_watch_label(view.object_first, executor_watch_image_base,
+                                                             executor_watch_image_size) +
+                       executor_watch_memory_dump("object", static_cast<std::uintptr_t>(view.object), 0x80) +
+                       executor_watch_memory_dump("graph", static_cast<std::uintptr_t>(view.graph), 0x40);
+    const unsigned index = watch.object_count.fetch_add(1, std::memory_order_relaxed);
+    if (index < 8) {
+        watch.objects[index].store(static_cast<std::uintptr_t>(view.object), std::memory_order_relaxed);
+        const auto page = static_cast<std::uintptr_t>(view.object & ~static_cast<std::uint64_t>(0xFFF));
+        text += "\n  " + executor_watch_prefix("armed the object page write watch on page ") + executor_watch_hex(page) +
+                " (object " + executor_watch_hex(view.object) + ")";
+        title_write_protect_page(page);
+    }
+    executor_watch_print(text + "\n");
+}
+
+// Puts an int3 over the executor entry and starts the probe's control writer and reporter. The exception handler is
+// registered after the int3 is in place; every later pass is re-armed by the single-step handler.
+void start_title_write_watch(std::uintptr_t image_base, std::size_t image_size) {
+    const char* spec = std::getenv("PALMETTO_OBJECT_WRITE_WATCH");
+    if (!spec || !*spec || *spec == '0') return;
+    std::uint64_t exec_rva = 0x1335A20ull;
+    if (!(spec[0] == '1' && spec[1] == '\0')) {
+        char* end = nullptr;
+        const std::uint64_t value = std::strtoull(spec, &end, 16);
+        if (end == spec) {
+            std::fprintf(stderr, "[rt] object write watch: PALMETTO_OBJECT_WRITE_WATCH=%s is not a hex RVA; not armed\n",
+                         spec);
+            return;
+        }
+        exec_rva = value;
+    }
+    executor_watch_image_base = image_base;
+    executor_watch_image_size = image_size;
+    TitleWriteWatch& watch = title_write_watch();
+    const auto site = static_cast<std::uintptr_t>(image_base + exec_rva);
+    watch.executor_entry.store(site);
+    auto* const byte = reinterpret_cast<unsigned char*>(site);
+    watch.original_byte.store(*byte);
+    DWORD old = 0;
+    if (!VirtualProtect(byte, 1, PAGE_EXECUTE_READWRITE, &old)) {
+        std::fprintf(stderr, "[rt] object write watch: cannot make the executor entry writable; not armed\n");
+        return;
+    }
+    *byte = 0xCC;
+    VirtualProtect(byte, 1, old, &old);
+    AddVectoredExceptionHandler(1, title_write_exception);
+    // The control page: protect it, then write it every 50 ms; its first fault proves the page-write method works.
+    const std::uintptr_t control = title_write_control_page();
+    title_write_protect_page(control);
+    std::thread([control] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        for (;;) {
+            *reinterpret_cast<volatile std::uint64_t*>(control) += 1;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }).detach();
+    std::thread([] {
+        for (int sample = 1; sample <= 120; ++sample) {
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+            TitleWriteWatch& watch = title_write_watch();
+            std::fprintf(stderr,
+                         "[rt] object write watch at %d s: executor entries %u (logged %u), objects %u, page write "
+                         "faults %u (other %u), tracked object writes %u, control watch fired %u, site byte %02x\n",
+                         sample * 10, watch.executor_hits.load(std::memory_order_relaxed),
+                         watch.executor_logged.load(std::memory_order_relaxed),
+                         watch.object_count.load(std::memory_order_relaxed),
+                         watch.write_faults.load(std::memory_order_relaxed),
+                         watch.page_faults_other.load(std::memory_order_relaxed),
+                         watch.tracked_writes.load(std::memory_order_relaxed),
+                         watch.control_faults.load(std::memory_order_relaxed),
+                         *reinterpret_cast<const unsigned char*>(static_cast<std::uintptr_t>(watch.executor_entry.load())));
+            std::fflush(stderr);
+        }
+    }).detach();
+    unsigned char bytes[8] = {};
+    executor_watch_read_block(site + 1, bytes, 7);
+    std::fprintf(stderr,
+                 "[rt] object write watch: int3 over the executor entry image+0x%llx (original byte %02x, next bytes %02x "
+                 "%02x %02x), control page %p\n",
+                 static_cast<unsigned long long>(exec_rva), watch.original_byte.load(), bytes[0], bytes[1], bytes[2],
+                 reinterpret_cast<void*>(control));
+    std::fflush(stderr);
+}
+
 // ---- RIP histogram (PALMETTO_RIP_HIST) ---------------------------------------------------------------------------------
 // Diagnostic, off unless the variable names sample windows ("5,20" or "5,20;60,90": start,end seconds). In each window the
 // sampler enumerates every other thread every 3 ms, suspends it, reads the instruction pointer and keeps the ones inside
@@ -3521,6 +4455,15 @@ int wmain(int argc, wchar_t** argv) {
             *hook_switch != '0')
             start_loader_hooks(reinterpret_cast<std::uintptr_t>(main_module.base));
         std::printf("running %s\n", main_module.name.c_str());
+        // PALMETTO_TIMELINE's clock origin: the runtime's timeline lines (vulkan_replay.h) print steady_clock
+        // seconds; this line is printed at the run's start so a trace-relative second can be mapped onto them when
+        // the boot stops (docs/vertex_buffer_va.md section 11). One line, only when the switch is on.
+        if (const char* timeline = std::getenv("PALMETTO_TIMELINE"); timeline && *timeline && *timeline != '0') {
+            const double now =
+                std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            std::fprintf(stderr, "[rt] timeline origin t=%.3f (the run's start; trace time counts from trace open)\n", now);
+            std::fflush(stderr);
+        }
         std::fflush(stdout);
         // PALMETTO_WATCH_GLOBAL=<hex rva> logs every change of a mapped image's 8-byte global with the millisecond it
         // happened, so a value the title stores and later dereferences can be traced to the call that produced it
@@ -3551,6 +4494,16 @@ int wmain(int argc, wchar_t** argv) {
         // loader write watch above). Off by default.
         if (const char* watch = std::getenv("PALMETTO_LOADER_WATCH"); watch && *watch && *watch != '0')
             start_loader_watch(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, 0x79F6D70ull);
+        // PALMETTO_EXECUTOR_WATCH=1: the renderer executor's hardware breakpoint pair (executor entry and the title's
+        // block free) plus the tracked object's first-qword hardware write watch (diagnostic; see the renderer
+        // executor watch above). Off by default.
+        if (const char* watch = std::getenv("PALMETTO_EXECUTOR_WATCH"); watch && *watch && *watch != '0')
+            start_executor_watch(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size);
+        // PALMETTO_OBJECT_WRITE_WATCH=1: an int3 on the renderer executor's entry plus a page write watch on the
+        // object the executor virtual-calls through, so the store that replaces its vtable is named in-process
+        // without a debugger (diagnostic; see the title renderer-object write watch above). Off by default.
+        if (const char* watch = std::getenv("PALMETTO_OBJECT_WRITE_WATCH"); watch && *watch && *watch != '0')
+            start_title_write_watch(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size);
         const int code = rt::process::run_entry(main_module.base + main_module.entry_rva);
         std::fflush(stdout);
         std::printf("game exited with code %d\n", code);

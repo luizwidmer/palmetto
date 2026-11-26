@@ -425,3 +425,141 @@ This section was implemented from this project's own measurements: the capture t
 windows, the presenter plane ids, the in-process fault registers and memory, the 300 s arms and the arena A/B. The
 stop sites and the job/command chain were decompiled with the project's Ghidra tooling from the user's own image; no
 peer code was used and no game data is added. RVAs, VAs, field offsets, counts, shapes and outcomes only.
+
+## 11. The executor's object is a reused block; the two in-process watches this slice built did not name the writer
+
+**Status: measured negative, with two new in-process watch methods proven and one method failure named.** Section 10
+attributed the stop at `game+0x13360A3` to a title object whose memory is reused while the per-command executor still
+virtual-calls through it, and named one falsifier: a hardware write watchpoint on the object's first qword, armed from
+a `PALMETTO_POKE_LOG` line at the executor entry. This section builds that measurement (and a second, suspension-free
+one), runs it in the content arm of section 10, and reports what it measured: the control watches work, the executor
+chain is resolved, and the loading-phase object the probe tracks is **not** the block the stop calls through - so the
+writer is still unnamed. No layer call was changed: the boot's stop and the black content frame are unchanged.
+
+### 11.1 The two watches, and the layer timeline
+
+| file | change |
+|---|---|
+| `port/src/main.cpp` | `PALMETTO_EXECUTOR_WATCH`: hardware (DR0..DR3) probe. DR0 execution breakpoint on the executor entry `game+0x1335A20`, DR1 on the title's allocator helper `game+0x515ABB0` (optional, delayed by `@seconds`), DR2 a write-only 8-byte data watch on the tracked object's first qword, DR3 a write-only data watch on the probe's own control slot (written every 50 ms). A sweep thread arms the four registers in every thread. From the hit at the entry it reads job = RCX, graph = *(job+0x28), object = *(graph+0x10), job state = *(job+0x40), logs the title stack and the object/graph memory, and notices a first-qword change between two executor passes |
+| `port/src/main.cpp` | `PALMETTO_OBJECT_WRITE_WATCH`: suspension-free probe. A self-managed int3 over the executor entry (re-written on the single-step after each pass) reads the same chain, and on the first sight of a plausible object makes the 4 KiB page holding its first 0x100 bytes `PAGE_READONLY`; every thread's store into it traps, is logged with the writer's thread, instruction, title stack and the value after the store, and the page is re-protected. A probe-owned page is protected the same way and written every 50 ms as the control |
+| `port/src/vulkan_replay.h` | `palmetto::timeline` (`PALMETTO_TIMELINE`): one line at each ExecuteCommandLists entry/return, queue Signal, CPU fence signal, fence Wait and deferred-compile submit wait, with the steady_clock tick and microseconds. `main.cpp` prints the clock origin at the run's start |
+| `port/shims/d3d12_vulkan_device.cpp` | the deferred-compile submit wait (`prepare_deferred_compute_pipelines`) emits its timeline line with the wait's microseconds |
+
+All three switches are off by default. The probes read title memory and log RVAs, field offsets, counts and outcomes
+only: no game data.
+
+### 11.2 The hardware watch: the executor chain is resolved, and the control proves the method
+
+`boot-probe4`..`boot-probe8` used the hardware probe in the section-10 environment (deferred compile arm, first-use
+title-page import readback). The control data watch fired on every 50 ms write from the first second on (196 events in
+the first 10 s, 1,791 by 90 s), so the debug registers and the write watch are honoured on this machine; a silent
+object watch is therefore a measurement, not a method failure.
+
+The execution breakpoint on `game+0x1335A20` fired from about +18 s in every one of those boots and measured the
+chain section 10 decompiled, with stable relative layout in three different boots (ASLR moves the heap base only):
+
+| measurement | `probe4` | `probe5` | `probe8` |
+|---|---:|---:|---:|
+| executor entries by 90 s | 60,089 | 30,000+ (30 s sample: 8,713) | 51,097 |
+| caller of the entry (top of stack) | `game+0x186424` | `game+0x186424` | `game+0x186424` |
+| job - graph (heap offset) | `0x1FA10` | `0x1FA10` | `0x1FA10` |
+| object - graph (heap offset) | `0xEB0` | `0xEB0` | `0xEB0` |
+| object's first qword | `image+0x658DB60` | `image+0x658DB60` | `image+0x658DB60` |
+| job state `*(job+0x40)` at first sight | 0 | 0 | 0 |
+| different objects named by `*(graph+0x10)` in the whole boot | 1 | 1 | 1 |
+| object first-qword writer hits | **0** | **0** | **0** |
+
+So in the loading phase the executor runs on one job/graph/object triple, the object's first qword is a constant
+vtable `image+0x658DB60`, and **no thread ever writes it**: the tracked object is not the block that is corrupted in
+the section-10 stop. The watch was armed for 90 s over 51,097-60,089 executor entries and never saw a store; a
+`PALMETTO_OBJECT_WRITE_WATCH` boot that protected the object page saw no fault in that page either.
+
+The runner-up measurement is a correction to section 10.3: the function at `game+0x515ABB0` is **not** a per-block
+free entry. Armed from boot it took 46,329,648 traps in a 90 s boot (about half a million per second), and after the
+delayed arm (`@55`) 13,958,734 traps in 35 s, most of them the same pointer repeating with first qword `0x7`: it is a
+hot allocator helper (lock/owner lookup) that the allocator calls on ordinary traffic, so a stop inside it does not by
+itself name a release, and it must not be read as "the free of the faulting block".
+
+### 11.3 The suspension-free watch: the page method works, the int3 over the entry does not trap
+
+The hardware sweep suspends and re-configures every thread, and every boot in which it ran **did not get past
+loading**: the loading word stayed at 1 from 16-18 s and the boot then stopped on a title task thread
+(`game+0x2215C35` or `game+0x258B000`, a write of 0), four boots in a row (`probe4`, `probe5`, `probe6`, `probe8`). The
+same environment without the sweep reaches loading 2 and stage 3 (section 11.5). The probe is therefore not safe for
+this boot, and section 11.2's object measurement is a loading-phase measurement.
+
+`PALMETTO_OBJECT_WRITE_WATCH` was built to avoid the suspension. Its control page watch fired on every 50 ms write
+(3,379 faults by 90 s), so the access-violation -> single-step -> re-protect path is sound. The int3 on the executor
+entry, however, **never trapped** in five boots (`smoke5`, `smoke7`, `probe7`, `probe8`; 0 entries, the site byte still
+`0xcc` at every 10 s check). In the same `probe8` boot the hardware execution breakpoint at the identical address
+fired 51,097 times, so the title does execute that address and the int3 route failed for a reason this slice did not
+establish. A control int3 at `game+0x2215EA0` (the title thread wrapper) trapped normally in the same build (20
+entries in 10 s), so the handler, its re-arm and the vectored-handler order are sound; the failure is specific to that
+entry page. The int3 route is recorded as a failed method here, not as a measurement.
+
+### 11.4 The layer's completion order, measured
+
+`PALMETTO_TIMELINE=1` gives the layer's own returns the same tick as the watches. The last ordering arm
+(`boot-timeline2`, 130 s, same content environment) measured 4,412 `ExecuteCommandLists`, each with an entry and a
+return line (4,412 of each, **0 held**), each followed by a queue `Signal` entry and return, **0 fence waits** and 2
+deferred-compile submit waits, with the tick origin printed at the run's start. The return microseconds are
+submission-scale (examples: 2 us and 8,331 us on the last content submissions; 21.2 s for one submission in the
+readback arm `probe2`, where a 4K readback copy is done inside the call). So in these arms the layer returned from
+`ExecuteCommandLists` after `vkQueueSubmit` (no deferred replay), submitted each fence Signal immediately after the
+batch it follows, and never had a fence Wait or a held batch in flight; that ordering is what an early-completion bug
+would have to break, and it is not broken here.
+
+### 11.5 The 300 s default-path boot (A/B negative)
+
+One boot with the probes off, the section-10 content environment (`PALMETTO_READBACK_CENTRE=1`, presenter captures,
+stage-3 pump, deferred compile), 300 s timeout, under the boot lock. Build `17369510...E243CC`:
+
+| measurement | `boot-final300` |
+|---|---|
+| verdict | STOP `game+0x13360A3`, read `0xFFFFFFFFFFFFFFFF`, trace t 59.04 s, wall 80.7 s |
+| stage 3 / loading / session | 56.0 s (machine current 3 next 3) / loading 2 at 54.0 s / session 3 at 56.0 s |
+| `ExecuteCommandLists` ok / refused | 3,755 / **0** |
+| `PresentX` ok / captures | 1,877 / 10 (every capture mean rgb 0.00 0.00 0.00) |
+| content-frame readback | black: mean 0 0 0, non-black 0/16,384 at the centre window; write control 51 102 204, 16,384/16,384, peak 204 |
+| device-lost lines | **0** |
+| D3D12 calls | 144,073 |
+
+The stop is the section-10 site with the same registers: `RCX = RSI = 0x1e23df3f440` (the dump is
+`float4(1,1,1,0)` repeated), `RAX = 0x3F8000003F800000`, `RBX = graph+0x18` with `graph = 0x1e23d27f090`. The picture is
+the same black content frame. Nothing moved, which is the honest A/B for a slice that changes no layer call.
+
+### 11.6 Verdict, the corrected reading, and the next wall
+
+- **The writer is not named.** Both watch methods were proven on their controls, and both fail to observe the write
+  for two different measured reasons: the object the loading-phase executor calls through is never written, and the
+  suspension-free int3 route does not trap on the entry page. This is a negative, not a fix.
+- **Ours vs title-side is unchanged from section 10**: no runtime producer was measured. The layer's returns are
+  post-submit, its fence signals are submitted after their batch, and it had no wait or held batch in the measured
+  arms; the fault is inside the title's own job/command-graph object with no layer frame. What is new is the measured
+  asymmetry that blocks the watch: at the stop the object the executor calls through is `0x1e23df3f440`, about 13 MB
+  from its graph, while in every loading-phase pass `*(graph+0x10)` was `graph+0xEB0` - the field changed between the
+  loading-phase runs and the stage-3 stop, so an object watch armed from a loading-phase entry cannot see the
+  corrupted block.
+- **Correction to section 10.3:** `game+0x515ABB0` is a hot allocator helper, not a per-block free entry (see 11.2);
+  the 2047 arm's stop inside it does not name a release.
+- **Next falsifier** (one boot): a hook on the executor entry that does not suspend threads **and** does trap. The
+  int3 route must be made to trap at that page first - candidate: an int3 at a mid-function site (`game+0x1335B1F`,
+  where the executor reads `[graph+0x28]`) instead of the entry byte, or a page-guard/execute-only protection of the
+  entry page - and only then arm the object's page from the stage-3 entry and log the writer. If the mid-function int3
+  also fails to trap, the failure is a property of the page/alias and must be named before any watch can be trusted
+  there.
+
+### 11.7 Tests and gates
+
+- `port/src/main.cpp` probes are diagnostics behind their switches; the default path is unchanged (`git diff` of the
+  layer files is the timeline lines only, gated by `PALMETTO_TIMELINE`). No new pure helper was added, so no test
+  target changed; the test subset of section 10 stays green in the gate run below.
+- Gates on the changed tree: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`; `_setup\build_tests.cmd` prints
+  `TESTS_BUILT`; the section-10 test subset exits 0; every `tests/test_docs_*.py` check passes.
+
+### 11.8 Attribution
+
+This section was implemented from this project's own measurements: the two in-process watches, the layer timeline,
+the probe boots named above and the 300 s default-path boot. The stop sites and the executor/job chain were
+decompiled with the project's Ghidra tooling from the user's own image; no peer code was used and no game data is
+added. RVAs, VAs, field offsets, counts, shapes and outcomes only.

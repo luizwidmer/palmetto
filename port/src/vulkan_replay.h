@@ -49,6 +49,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <chrono>
+#include <cstdarg>
 #include <limits>
 #include <map>
 #include <memory>
@@ -61,6 +63,39 @@
 #include <vector>
 
 namespace palmetto {
+
+// ---- Process timeline (PALMETTO_TIMELINE, measurement only, off by default) -------------------------------
+// docs/vertex_buffer_va.md section 11: the renderer stop is a title object whose memory was reused while the
+// per-command executor still called through its vtable. Deciding whether the layer's completion/fence semantics
+// produced the reuse needs the layer's own returns timed against the title-side write, so this prints one line at
+// each ExecuteCommandLists, fence and deferred-compile return. The clock is steady_clock's raw epoch, which every
+// translation unit of this process shares, so main.cpp's executor watch lines order against these lines directly.
+// No extra lines when the variable is unset; the switch only observes.
+namespace timeline {
+
+inline bool enabled() {
+    static const bool on = [] {
+        const char* value = std::getenv("PALMETTO_TIMELINE");
+        return value && *value && *value != '0';
+    }();
+    return on;
+}
+
+inline double seconds() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+inline void line(const char* format, ...) {
+    if (!enabled()) return;
+    char text[320];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(text, sizeof text, format, args);
+    va_end(args);
+    std::fprintf(stderr, "[rt] timeline t=%.3f %s\n", seconds(), text);
+}
+
+}  // namespace timeline
 
 // What the resolver knows about a resource. image == VK_NULL_HANDLE means a buffer in the shared GPU address
 // space: its transitions become global memory barriers.

@@ -3162,6 +3162,7 @@ public:
         const VkResult result = context_.vk.vkSignalSemaphore(context_.device(), &info);
         if (result == VK_ERROR_DEVICE_LOST) context_.mark_device_lost();
         if (result != VK_SUCCESS) return false;
+        timeline::line("cpu fence signal v=%llu", static_cast<unsigned long long>(value));
         context_.holds().signaled(semaphore_, value);  // queues that held a batch for this value run it now
         context_.holds().pump_ready();
         return true;
@@ -3173,8 +3174,11 @@ public:
         info.semaphoreCount = 1;
         info.pSemaphores = &semaphore_;
         info.pValues = &value;
+        const double started = timeline::seconds();
         const VkResult result = context_.vk.vkWaitSemaphores(context_.device(), &info, timeout_ns);
         if (result == VK_ERROR_DEVICE_LOST) context_.mark_device_lost();
+        timeline::line("fence wait v=%llu ok=%d us=%.0f", static_cast<unsigned long long>(value),
+                       result == VK_SUCCESS ? 1 : 0, (timeline::seconds() - started) * 1e6);
         return result == VK_SUCCESS;
     }
 
@@ -3387,6 +3391,8 @@ public:
         ReplayResult result = ReplayResult::success;
         bool held = false;
         std::vector<std::shared_ptr<void>> retired;  // destroyed after state_mutex_ is released
+        timeline::line("exec entry n=%u", static_cast<unsigned>(lists.size()));
+        const double started = timeline::seconds();
         {
             std::lock_guard state(state_mutex_);
             if (!must_hold()) {
@@ -3405,6 +3411,8 @@ public:
             drain_pins(retired);
         }
         retired.clear();
+        timeline::line("exec return n=%u result=%d held=%d us=%.0f", static_cast<unsigned>(lists.size()),
+                       static_cast<int>(result), held ? 1 : 0, (timeline::seconds() - started) * 1e6);
         if (held) context_.holds().pump_ready();  // a Signal may have been submitted since the check
         return result;
     }
@@ -3415,6 +3423,7 @@ public:
     bool signal(VkSemaphore fence, std::uint64_t value, const PinFn& pin = {}) {
         bool ok = true;
         std::vector<std::shared_ptr<void>> retired;
+        timeline::line("queue signal entry v=%llu", static_cast<unsigned long long>(value));
         {
             std::lock_guard state(state_mutex_);
             if (must_hold()) {
@@ -3430,6 +3439,7 @@ public:
             drain_pins(retired);
         }
         retired.clear();
+        timeline::line("queue signal return v=%llu ok=%d", static_cast<unsigned long long>(value), ok ? 1 : 0);
         context_.holds().pump_ready();  // this Signal, or the hold above, may have made a held batch ready
         return ok;
     }
@@ -3439,6 +3449,7 @@ public:
     // `pin` returns what keeps the fence object alive until then (a D3D12 queue holds its fences).
     void wait(VkSemaphore fence, std::uint64_t value, const PinFn& pin = {}) {
         std::vector<std::shared_ptr<void>> retired;  // fences whose submission has completed: released unlocked
+        timeline::line("queue wait v=%llu", static_cast<unsigned long long>(value));
         {
             std::lock_guard state(state_mutex_);
             waits_.push_back(fence);
