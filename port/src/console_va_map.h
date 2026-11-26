@@ -128,6 +128,13 @@ public:
         return find(va, ConsoleVaKind::buffer) != nullptr;
     }
 
+    // A copy of the ranges, for a diagnostic that has to say which title range a command VA falls in or next to
+    // (docs/vertex_buffer_va.md, the miss dump). Ordered by title VA like the internal list.
+    std::vector<ConsoleVaRange> snapshot() const {
+        std::shared_lock lock(mutex_);
+        return ranges_;
+    }
+
     std::size_t size() const {
         std::shared_lock lock(mutex_);
         return ranges_.size();

@@ -1044,6 +1044,59 @@ inline ReplayResult unresolved_at(const char* site, std::uint64_t id = 0, std::u
     return ReplayResult::unresolved_resource;
 }
 
+// The command arguments a draw resolves through buffer_at, and the bounded first-use import rule for a title VA no
+// mapping covers (docs/vertex_buffer_va.md). The stage-3 renderer streams vertex and index data into its own committed
+// pages and binds the ranges by their title VA; no D3D12 resource exists for them, so no creation path registered
+// them. The span is imported over the title's pages at first use (the device's side does the Vulkan import), which
+// needs no arena room: the measured pages are MEM_COMMIT and readable, and the CPU's writes are then the GPU's reads.
+// Pure: only the collection and the bounded refusal rule live here, so a GPU-free test pins both.
+namespace title_buffers {
+
+inline constexpr std::uint64_t kMaxRangeBytes = 32ull << 20;  // one imported span
+inline constexpr std::uint64_t kMaxTotalBytes = 64ull << 20;  // every imported span of one boot
+inline constexpr std::size_t kMaxRanges = 32;
+// The arena's VAs are offsets below its 32-bit size (docs/arena_size.h), so a VA at or above 4 GiB cannot be one.
+inline constexpr std::uint64_t kArenaWindowEnd = std::uint64_t{1} << 32;
+
+// Appends the (title VA, bytes) spans a recorded list names through buffer_at: a draw's vertex views and index view,
+// and a WriteBufferImmediate address. Bounded: once `out` holds kMaxRanges spans nothing more is added.
+inline void collect_requests(const CommandList& list, std::vector<std::pair<std::uint64_t, std::uint64_t>>& out) {
+    const auto add = [&out](std::uint64_t va, std::uint64_t bytes) {
+        if (!va || !bytes || out.size() >= kMaxRanges) return;
+        out.emplace_back(va, bytes);
+    };
+    for (const Command& command : list.commands()) {
+        std::visit(
+            [&add](const auto& c) {
+                using T = std::decay_t<decltype(c)>;
+                if constexpr (std::is_same_v<T, Draw>) {
+                    if (c.views)
+                        for (std::uint32_t slot = 0; slot < 32; ++slot) {
+                            const VertexBufferView& view = c.views->vertex_buffers[slot];
+                            if (view.va) add(view.va, view.size);
+                        }
+                    if (c.indexed && c.index.va) add(c.index.va, c.index.size);
+                } else if constexpr (std::is_same_v<T, WriteImmediate>) {
+                    add(c.address, 4);
+                }
+            },
+            command);
+    }
+}
+
+// Why the span must stay refused, or null when it may be imported at first use. `ranges` and `bytes` are what the
+// boot has already imported.
+inline const char* refusal(std::uint64_t va, std::uint64_t size, std::size_t ranges, std::uint64_t bytes) {
+    if (!va || !size) return "empty span";
+    if (va < kArenaWindowEnd) return "inside the 32-bit arena window";
+    if (size > kMaxRangeBytes) return "the span is larger than the per-range import bound";
+    if (ranges >= kMaxRanges) return "the imported-range budget is spent";
+    if (size > kMaxTotalBytes || bytes > kMaxTotalBytes - size) return "the imported-byte budget is spent";
+    return nullptr;
+}
+
+}  // namespace title_buffers
+
 // Diagnostic (docs/frame_capture.md): one console descriptor table as the shim decoded it, for the frame dump's
 // sampled-texture readback. Bounded: at most max_sampled_keys slots are copied out.
 inline constexpr std::uint32_t max_sampled_keys = 16;
@@ -5424,6 +5477,92 @@ inline void submission(std::span<const PreparedList> lists) {
 }
 
 } // namespace frame_dump
+
+// Diagnostic (docs/vertex_buffer_va.md): the submission-time dump of a command list the replay refused, which is what
+// the vertex-buffer VA measurement has to read: every command of the refused list and every resource the draw names
+// (pipeline, render targets, depth, vertex and index views, user data). Raw recorded fields only - the list failed
+// before the failing command was prepared, so there is no prepared entry to read. Off unless PALMETTO_REPLAY_MISS=2
+// (the measurement arm of the switch docs/dev-tools.md already documents);
+// bounded to the first two refused lists and their first kMaxCommands commands.
+namespace miss_dump {
+
+inline bool enabled() {
+    // The measurement arm of the existing PALMETTO_REPLAY_MISS switch (docs/dev-tools.md): 2 (or "dump") also prints
+    // the whole refused list and probes each unresolved VA, where the default arm prints the first lines only.
+    static const bool on = [] {
+        const char* value = std::getenv("PALMETTO_REPLAY_MISS");
+        return value && (value[0] == '2' || std::strcmp(value, "dump") == 0);
+    }();
+    return on;
+}
+
+inline constexpr std::size_t kMaxCommands = 24;
+
+inline void command(const Command& c, std::size_t index) {
+    std::fprintf(stderr, "[rt] replay: miss dump:  #%zu %s", index, frame_dump::kind_name(c));
+    std::visit(
+        [](const auto& value) {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, Draw>) {
+                std::fprintf(stderr, " pipeline 0x%llx %s %u/%u first %u base %d instances %u",
+                             static_cast<unsigned long long>(value.pipeline), value.indexed ? "indexed" : "vertices",
+                             value.count, value.instances, value.first, value.base_vertex, value.first_instance);
+                if (value.indexed)
+                    std::fprintf(stderr, " index va 0x%llx size %u format %u",
+                                 static_cast<unsigned long long>(value.index.va), value.index.size,
+                                 value.index.format);
+                if (const auto* views = value.views.get()) {
+                    for (std::uint32_t slot = 0; slot < 32; ++slot) {
+                        const VertexBufferView& view = views->vertex_buffers[slot];
+                        if (!view.va) continue;
+                        std::fprintf(stderr, " vb%u va 0x%llx size %u stride %u", slot,
+                                     static_cast<unsigned long long>(view.va), view.size, view.stride);
+                    }
+                }
+                std::fprintf(stderr, "\n[rt] replay: miss dump: user data:");
+                for (unsigned k = 0; k < 32; ++k) std::fprintf(stderr, " %08x", value.user_data[k]);
+            } else if constexpr (std::is_same_v<T, WriteImmediate>) {
+                std::fprintf(stderr, " address 0x%llx value 0x%x mode %u",
+                             static_cast<unsigned long long>(value.address), value.value, value.mode);
+            } else if constexpr (std::is_same_v<T, CopyBuffer>) {
+                std::fprintf(stderr, " dst 0x%llx+0x%llx src 0x%llx+0x%llx size 0x%llx",
+                             static_cast<unsigned long long>(value.dst),
+                             static_cast<unsigned long long>(value.dst_offset),
+                             static_cast<unsigned long long>(value.src),
+                             static_cast<unsigned long long>(value.src_offset),
+                             static_cast<unsigned long long>(value.size));
+            } else if constexpr (std::is_same_v<T, CopyTexture>) {
+                std::fprintf(stderr, " dst 0x%llx+0x%llx src 0x%llx+0x%llx",
+                             static_cast<unsigned long long>(value.dst.resource),
+                             static_cast<unsigned long long>(value.dst.offset),
+                             static_cast<unsigned long long>(value.src.resource),
+                             static_cast<unsigned long long>(value.src.offset));
+            } else if constexpr (std::is_same_v<T, CopyResource>) {
+                std::fprintf(stderr, " dst 0x%llx src 0x%llx",
+                             static_cast<unsigned long long>(value.dst),
+                             static_cast<unsigned long long>(value.src));
+            } else if constexpr (std::is_same_v<T, Dispatch>) {
+                std::fprintf(stderr, " pipeline 0x%llx %ux%ux%u",
+                             static_cast<unsigned long long>(value.pipeline), value.x, value.y, value.z);
+            }
+        },
+        c);
+    std::fprintf(stderr, "\n");
+}
+
+// One refused list: its index among the submission's lists, the ReplayResult and the command count, then the commands.
+inline void refused_list(const CommandList& list, std::size_t index, std::size_t count, int result) {
+    static std::atomic<unsigned> dumped{0};
+    const unsigned shown = dumped.fetch_add(1, std::memory_order_relaxed);
+    if (shown >= 2) return;
+    const auto commands = list.commands();
+    std::fprintf(stderr,
+                 "[rt] replay: miss dump: list %zu of %zu refused (result %d), %zu command(s), dumping first %zu:\n",
+                 index, count, result, commands.size(), std::min(commands.size(), kMaxCommands));
+    for (std::size_t i = 0; i < commands.size() && i < kMaxCommands; ++i) command(commands[i], i);
+}
+
+}  // namespace miss_dump
 
 // A submission is planned against the currently published query state plus its own earlier lists.
 // Keep every physical pool referenced by the recorded batch alive until that batch completes.

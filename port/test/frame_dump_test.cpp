@@ -384,6 +384,60 @@ int main() {
                su::pipeline_id != palmetto::frame_dump::ps_control_pipeline_id,
            "the stand-in's pipeline id is its own (not one of the frame dump's controls)");
 
+    // ---- Title pages a command names directly (docs/vertex_buffer_va.md) --------------------------------------
+    // A draw's vertex views and index view and a WriteBufferImmediate address are the command arguments the replay
+    // resolves through buffer_at. The submission-time scan offers exactly those spans to the device's import, and the
+    // bounded rule refuses a span inside the 32-bit arena window, an oversized span and a spent budget while it accepts
+    // the measured stage-3 shape.
+    {
+        CommandList title_va_list;
+        Draw indexed_draw;
+        indexed_draw.pipeline = 0x2000;
+        indexed_draw.count = 30;
+        indexed_draw.instances = 1;
+        indexed_draw.indexed = true;
+        indexed_draw.index.va = 0x18d58d20380ull;
+        indexed_draw.index.size = 0x60000;
+        indexed_draw.index.format = 57;
+        auto views = std::make_shared<DrawViews>();
+        views->vertex_buffers[0].va = 0x18d58c00300ull;
+        views->vertex_buffers[0].size = 0x120000;
+        views->vertex_buffers[0].stride = 16;
+        views->vertex_buffers[3].va = 0x18d58c00380ull;
+        views->vertex_buffers[3].size = 0x11ff80;
+        views->vertex_buffers[3].stride = 16;
+        indexed_draw.views = views;
+        expect(title_va_list.draw(indexed_draw), "record the measured stage-3 indexed draw");
+        expect(title_va_list.write_immediate(WriteImmediate{0x18d58c00300ull, 0x5A5A5A5A, 0}), "record its write");
+        const std::vector<std::pair<std::uint64_t, std::uint64_t>> expected = {
+            {0x18d58c00300ull, 0x120000ull},
+            {0x18d58c00380ull, 0x11ff80ull},
+            {0x18d58d20380ull, 0x60000ull},
+            {0x18d58c00300ull, 4ull}};
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> requests;
+        title_buffers::collect_requests(title_va_list, requests);
+        expect(requests == expected, "the scan collects the vertex, index and write-immediate VAs in command order");
+        const CommandList empty_list;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> none;
+        title_buffers::collect_requests(empty_list, none);
+        expect(none.empty(), "a list that names no buffer VA asks for no import");
+        expect(title_buffers::refusal(0x18d58c00300ull, 0x120000ull, 0, 0) == nullptr,
+               "the measured stage-3 span may be imported at first use");
+        expect(title_buffers::refusal(0x10000ull, 0x1000ull, 0, 0) != nullptr,
+               "a VA inside the 32-bit arena window stays refused");
+        expect(title_buffers::refusal(0x18d58c00300ull, title_buffers::kMaxRangeBytes + 1, 0, 0) != nullptr,
+               "a span over the per-range bound stays refused");
+        expect(title_buffers::refusal(0x18d58c00300ull, 0x1000ull, title_buffers::kMaxRanges, 0) != nullptr,
+               "a spent range budget keeps the span refused");
+        expect(title_buffers::refusal(0x18d58c00300ull, 0x1000ull, 0, title_buffers::kMaxTotalBytes) != nullptr,
+               "a spent byte budget keeps the span refused");
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> bounded;
+        for (unsigned i = 0; i < 3 * title_buffers::kMaxRanges; ++i) bounded.emplace_back(0x18d00000000ull + i * 0x1000, 4);
+        for (const auto& [va, bytes] : bounded) title_buffers::collect_requests(title_va_list, bounded);
+        expect(bounded.size() == 3 * title_buffers::kMaxRanges,
+               "the scan appends nothing past its own collection (the budget is the caller's)");
+    }
+
     if (failures) return 1;
     std::printf("frame_dump_test: command kinds, ordered writers and table windows exact\n");
     return 0;

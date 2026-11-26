@@ -1599,6 +1599,10 @@ inline double pipeline_call_stats_interval_s() {
     void import_placed_textures();
     // Page content copied from the title's pages into the arena stand-ins (docs/page_content.md), for the report.
     std::atomic<std::uint64_t> pages_pulled{0}, pages_pulled_bytes{0};
+    // Title pages a command named directly (docs/vertex_buffer_va.md): the VkBuffers imported over the title's own
+    // pages at first use, as (buffer, memory) for this device's lifetime; the teardown destroys them with the arena.
+    std::mutex imported_title_mutex;
+    std::vector<std::pair<VkBuffer, VkDeviceMemory>> imported_title_buffers;
     // The copy-source pulls of docs/page_content.md, counted apart from the draw-read pulls: requests (every copy
     // source the replay asks about) and pulls (those whose arena VA a title range stands in for).
     std::atomic<std::uint64_t> copy_source_requests{0};
@@ -1882,6 +1886,14 @@ inline double pipeline_call_stats_interval_s() {
                          context->console_va_ranges(),
                          static_cast<unsigned long long>(context->console_va_rebased_values()),
                          static_cast<unsigned long long>(context->console_va_rebased_fields()));
+            // docs/vertex_buffer_va.md: the title pages a command named directly and the device imported at first use.
+            const std::size_t imported_ranges = context->imported_title_ranges();
+            if (imported_ranges)
+                std::fprintf(stderr,
+                             "[rt] d3d12: title pages imported at first use: %zu range(s), %.1f MiB, %llu command "
+                             "argument(s) resolved to them\n",
+                             imported_ranges, double(context->imported_title_bytes()) / (1024.0 * 1024.0),
+                             static_cast<unsigned long long>(context->imported_title_hits()));
         }
     }
 
@@ -8374,6 +8386,13 @@ public:
                 console_pull_table(table_va, max_descriptors);
             },
             [this](std::uint64_t arena_va, std::uint64_t bytes) { console_pull_arena(arena_va, bytes); });
+        // Title pages a command names directly (docs/vertex_buffer_va.md): a vertex/index view or WriteBufferImmediate
+        // address whose VA no mapping resolves is imported over the title's own committed pages at first use. The
+        // replay side decides which spans to offer and bounds the number and bytes; the device does the Vulkan import.
+        state_.context->set_title_page_importer(
+            [this](std::uint64_t va, std::uint64_t bytes, VkBuffer& buffer, VkDeviceSize& offset, const char*& why) {
+                return import_title_pages(va, bytes, buffer, offset, why);
+            });
         // Diagnostic (docs/frame_capture.md): the frame dump's sampled-texture readback reads a draw's descriptor table
         // from the console heap mirror and resolves its first T# to the layer image set 0 holds. Reads only.
         state_.context->set_sampled_table_probe(
@@ -8799,6 +8818,16 @@ public:
             vk.vkDestroyBuffer(state_.info.device, state_.arena.buffer, nullptr);
             if (state_.arena.memory) vk.vkFreeMemory(state_.info.device, state_.arena.memory, nullptr);
         }
+        // The VkBuffers imported over title pages at first use (docs/vertex_buffer_va.md): the pages stay the title's,
+        // so only the buffers and their imported memory go here, before the device that owns them.
+        if (state_.context) {
+            std::lock_guard lock(state_.imported_title_mutex);
+            for (const auto& [buffer, memory] : state_.imported_title_buffers) {
+                state_.context->vk.vkDestroyBuffer(state_.info.device, buffer, nullptr);
+                if (memory) state_.context->vk.vkFreeMemory(state_.info.device, memory, nullptr);
+            }
+            state_.imported_title_buffers.clear();
+        }
         // The persistent cache's final write (PALMETTO_PIPELINE_CACHE): before the handle goes, while its blob is
         // readable. The periodic save already covers a run that is killed at its timeout.
         state_.close_pipeline_cache();
@@ -8864,6 +8893,130 @@ public:
                          static_cast<unsigned long long>(title_va), static_cast<unsigned long long>(copied),
                          static_cast<unsigned long long>(arena_va), nonzero);
         }
+    }
+
+    // ---- Title pages a command names directly (docs/vertex_buffer_va.md) ---------------------------------------
+    // Xbox unified memory: the title can bind a vertex or index view to pages it wrote itself, with no D3D12 resource
+    // behind them, so no creation path registered the range. The measured range is MEM_COMMIT / PAGE_READWRITE and every
+    // page of it is readable, and by the time stage-3 content draws the GPU address arena is full (a 36 MiB slot-133
+    // stand-in is refused with E_OUTOFMEMORY in the same boot), so an arena stand-in cannot serve the span. The device
+    // imports the pages with VK_EXT_external_memory_host, exactly as the caller's own pages are already imported for
+    // device slot 133 and OpenExistingHeapFromAddress: the buffer is the title's memory, so the CPU's writes are the
+    // GPU's reads and no copy is needed. The caller bounds how many ranges are imported and their total bytes.
+    bool import_title_pages(std::uint64_t va, std::uint64_t bytes, VkBuffer& out_buffer, VkDeviceSize& out_offset,
+                            const char*& why) {
+        out_buffer = VK_NULL_HANDLE;
+        out_offset = 0;
+        why = "";
+        if (!state_.context || !state_.context->loaded()) {
+            why = "the Vulkan context is not loaded";
+            return false;
+        }
+        if (!state_.get_host_pointer_properties || !state_.info.host_pointer_alignment) {
+            why = "the device has no VK_EXT_external_memory_host import";
+            return false;
+        }
+        const VkDeviceSize alignment = state_.info.host_pointer_alignment;
+        if (!alignment || (alignment & (alignment - 1)) || !bytes || !va) {
+            why = "the host pointer alignment or the span is unusable";
+            return false;
+        }
+        const std::uintptr_t start = static_cast<std::uintptr_t>(va);
+        if (start > (std::numeric_limits<std::uintptr_t>::max)() - bytes) {
+            why = "the span wraps the address space";
+            return false;
+        }
+        const std::uintptr_t base = start & ~static_cast<std::uintptr_t>(alignment - 1);
+        const VkDeviceSize offset = start - base;
+        if (offset + bytes > UINT64_MAX - alignment) {
+            why = "the span wraps the address space";
+            return false;
+        }
+        const VkDeviceSize allocation = (offset + bytes + alignment - 1) & ~(alignment - 1);
+        // The whole imported range must be committed and not write-combined: the same rule the slot-133 import applies
+        // to the caller's pages. A page not committed yet cannot be imported, and the span stays refused by name.
+        for (VkDeviceSize at = 0; at < allocation;) {
+            MEMORY_BASIC_INFORMATION region{};
+            if (!VirtualQuery(reinterpret_cast<const void*>(base + at), &region, sizeof(region)) ||
+                region.State != MEM_COMMIT || (region.Protect & (PAGE_WRITECOMBINE | PAGE_NOCACHE))) {
+                why = "the pages are not committed host memory the GPU can import";
+                return false;
+            }
+            const auto region_end = reinterpret_cast<std::uintptr_t>(region.BaseAddress) + region.RegionSize;
+            if (region_end <= base + at) {
+                why = "the pages are not committed host memory the GPU can import";
+                return false;
+            }
+            const std::uint64_t chunk = std::min<std::uint64_t>(allocation - at, region_end - (base + at));
+            at += chunk ? chunk : alignment;
+        }
+        auto& vk = state_.context->vk;
+        VkExternalMemoryBufferCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+        external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+        VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, &external};
+        info.size = bytes;
+        info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                     VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+        const bool need_bda = state_.info.buffer_device_address;
+        if (need_bda) info.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        state_.share(info);
+        VkBuffer buffer = VK_NULL_HANDLE;
+        if (vk.vkCreateBuffer(state_.info.device, &info, nullptr, &buffer) != VK_SUCCESS) {
+            why = "the buffer over the title's pages could not be created";
+            return false;
+        }
+        const auto fail = [this, &buffer, &why](const char* reason) {
+            state_.context->vk.vkDestroyBuffer(state_.info.device, buffer, nullptr);
+            buffer = VK_NULL_HANDLE;
+            why = reason;
+            return false;
+        };
+        VkMemoryRequirements requirements{};
+        vk.vkGetBufferMemoryRequirements(state_.info.device, buffer, &requirements);
+        VkMemoryHostPointerPropertiesEXT host{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+        if (state_.get_host_pointer_properties(state_.info.device,
+                                               VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+                                               reinterpret_cast<const void*>(base), &host) != VK_SUCCESS)
+            return fail("the driver reported no importable memory type for the pages");
+        const std::uint32_t types = host.memoryTypeBits & requirements.memoryTypeBits;
+        if (!types || (offset % requirements.alignment) || allocation < offset + requirements.size)
+            return fail("the pages' alignment or room does not fit the buffer");
+        VkImportMemoryHostPointerInfoEXT import{VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
+        import.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+        import.pHostPointer = reinterpret_cast<void*>(base);
+        VkMemoryAllocateFlagsInfo flags{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+        flags.pNext = &import;
+        flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        for (const VkMemoryPropertyFlags want :
+             {VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+              VkMemoryPropertyFlags(0)}) {
+            for (std::uint32_t i = 0; i < state_.memory.memoryTypeCount && !memory; ++i) {
+                if (!(types & (1u << i)) || (state_.memory.memoryTypes[i].propertyFlags & want) != want) continue;
+                VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                              need_bda ? static_cast<const void*>(&flags)
+                                                       : static_cast<const void*>(&import)};
+                allocate.allocationSize = allocation;
+                allocate.memoryTypeIndex = i;
+                if (vk.vkAllocateMemory(state_.info.device, &allocate, nullptr, &memory) != VK_SUCCESS)
+                    memory = VK_NULL_HANDLE;
+            }
+            if (memory) break;
+        }
+        if (!memory) return fail("importing the title's pages failed (no memory type took the range)");
+        if (vk.vkBindBufferMemory(state_.info.device, buffer, memory, offset) != VK_SUCCESS) {
+            vk.vkFreeMemory(state_.info.device, memory, nullptr);
+            return fail("the buffer could not be bound to the title's pages");
+        }
+        {
+            std::lock_guard lock(state_.imported_title_mutex);
+            state_.imported_title_buffers.emplace_back(buffer, memory);
+        }
+        out_buffer = buffer;
+        out_offset = offset;
+        return true;
     }
 
     // A descriptor table's VA: read its slots from the console heap's mirror and pull the buffer data each V# names.

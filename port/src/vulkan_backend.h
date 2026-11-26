@@ -51,7 +51,105 @@
 #include <unordered_map>
 #include <vector>
 
+// The host-memory probe above reads the same VirtualQuery result create_host_buffer does (docs/vertex_buffer_va.md).
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace palmetto {
+
+// Diagnostic (docs/vertex_buffer_va.md): what a VA the replay could not resolve actually is, for the vertex-buffer
+// measurement. It answers the one question the refusal cannot: is the VA a page range the CPU can read (the title's own
+// memory, which a copy into an arena stand-in can serve) or nothing at all? Prints the containing host allocation and,
+// when the pages are committed and readable, how many bytes of the requested span are readable and how many non-zero
+// bytes the first 64 KiB hold. No bytes are printed; only shapes. Off unless PALMETTO_REPLAY_MISS=2 (the measurement
+// arm of the switch docs/dev-tools.md already documents).
+inline void probe_host_range(std::uint64_t va, std::uint64_t bytes) {
+    if (!va) return;
+#if defined(_WIN32)
+    constexpr std::uint64_t kScanCap = 4ull << 20;  // 4 MiB: enough to tell a vertex buffer from a stray pointer
+    const std::uint64_t span = std::min(bytes ? bytes : 1, kScanCap);
+    std::uint64_t readable = 0, committed = 0;
+    std::uint64_t first_unreadable = 0;
+    std::uint32_t page_size = 4096;
+    SYSTEM_INFO system_info{};
+    GetSystemInfo(&system_info);
+    if (system_info.dwPageSize) page_size = system_info.dwPageSize;
+    for (std::uint64_t at = 0; at < span; at += page_size) {
+        MEMORY_BASIC_INFORMATION page{};
+        if (!VirtualQuery(reinterpret_cast<const void*>(va + at), &page, sizeof(page)) ||
+            page.State != MEM_COMMIT) {
+            if (!first_unreadable) first_unreadable = at;
+            continue;
+        }
+        ++committed;
+        const DWORD readable_protect = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
+                                        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        if (page.Protect & (PAGE_NOACCESS | PAGE_GUARD) || !(page.Protect & readable_protect)) {
+            if (!first_unreadable) first_unreadable = at;
+            continue;
+        }
+        ++readable;
+    }
+    MEMORY_BASIC_INFORMATION info{};
+    const bool queried = VirtualQuery(reinterpret_cast<const void*>(va), &info, sizeof(info)) == sizeof(info);
+    const std::uint64_t base = queried ? reinterpret_cast<std::uint64_t>(info.AllocationBase) : 0;
+    const std::uint64_t alloc_offset = base ? va - base : 0;
+    const std::uint64_t nonzero = readable ? std::count_if(
+                                                  reinterpret_cast<const std::uint8_t*>(va),
+                                                  reinterpret_cast<const std::uint8_t*>(va) +
+                                                      std::min<std::uint64_t>(span, 0x10000),
+                                                  [](std::uint8_t b) { return b != 0; })
+                                          : 0;
+    std::fprintf(stderr,
+                 "[rt] replay: miss probe: VA 0x%llx size 0x%llx is host state %s protect 0x%x allocation base 0x%llx "
+                 "offset 0x%llx region 0x%llx; of the first 0x%llx bytes %llu page(s) committed/%llu readable, first "
+                 "unreadable at 0x%llx, %llu non-zero byte(s) in the first 64 KiB\n",
+                 static_cast<unsigned long long>(va), static_cast<unsigned long long>(bytes),
+                 queried ? (info.State == MEM_COMMIT ? "commit" : (info.State == MEM_RESERVE ? "reserve" : "free"))
+                         : "unqueried",
+                 queried ? static_cast<unsigned>(info.Protect) : 0u, static_cast<unsigned long long>(base),
+                 static_cast<unsigned long long>(alloc_offset),
+                 queried ? static_cast<unsigned long long>(info.RegionSize) : 0ull,
+                 static_cast<unsigned long long>(span), static_cast<unsigned long long>(committed),
+                 static_cast<unsigned long long>(readable), static_cast<unsigned long long>(first_unreadable),
+                 static_cast<unsigned long long>(nonzero));
+#else
+    (void)va;
+    (void)bytes;
+#endif
+}
+
+// Diagnostic: where the miss VA sits relative to the console-VA ranges the layer already aliased, so "no mapping" is
+// printed together with "nearest range below/above", which says whether the VA is a range the layer has not seen or a
+// small offset outside one.
+inline void probe_console_ranges(const std::vector<ConsoleVaRange>& ranges, std::uint64_t va) {
+    const ConsoleVaRange* below = nullptr;
+    const ConsoleVaRange* above = nullptr;
+    bool holds = false;
+    for (const auto& range : ranges) {
+        if (range.holds(va)) holds = true;
+        if (range.title <= va && (!below || range.title > below->title)) below = &range;
+        if (range.title > va && (!above || range.title < above->title)) above = &range;
+    }
+    std::fprintf(stderr, "[rt] replay: miss probe: %zu title range(s) aliased, none holds the VA: %d", ranges.size(),
+                 int(holds));
+    if (below)
+        std::fprintf(stderr, "; nearest below: 0x%llx + 0x%llx (offset 0x%llx, %s)",
+                     static_cast<unsigned long long>(below->title), static_cast<unsigned long long>(below->size),
+                     static_cast<unsigned long long>(va - below->title), console_va_kind_name(below->kind));
+    if (above)
+        std::fprintf(stderr, "; nearest above: 0x%llx + 0x%llx (%s)",
+                     static_cast<unsigned long long>(above->title), static_cast<unsigned long long>(above->size),
+                     console_va_kind_name(above->kind));
+    std::fprintf(stderr, "\n");
+}
 
 // A CPU-written Vulkan-address instance pointer array, kept until the submission that builds with it completes.
 // Completed stages are pooled per queue and reused, so a per-frame TLAS build does not allocate memory each frame.
@@ -1078,10 +1176,23 @@ public:
             if (console_vas_.rebase(va, rebased, palmetto::ConsoleVaKind::buffer)) va = rebased;
             BufferVaIndex<ResourceId>::Hit hit{};
             if (!buffer_vas_.find(va, hit, size)) {
+                // A title VA this layer imported over the title's own pages at first use (docs/vertex_buffer_va.md):
+                // the command argument names those pages by the VA the title placed them at.
+                if (imported_title_range(va, size, buffer, offset)) {
+                    imported_title_hits_.fetch_add(1, std::memory_order_relaxed);
+                    return true;
+                }
                 static std::atomic<unsigned> misses{0};
                 if (misses.fetch_add(1, std::memory_order_relaxed) < 6)
                     std::fprintf(stderr, "[rt] replay: buffer_at miss for VA 0x%llx size 0x%llx\n",
                                  static_cast<unsigned long long>(va), static_cast<unsigned long long>(size));
+                // Diagnostic (docs/vertex_buffer_va.md): the miss measurement: is the VA readable host memory (the
+                // title's pages), and where does it sit relative to the title ranges the layer already aliased? The
+                // first few misses only, so the probe cannot dominate a boot.
+                if (miss_dump::enabled() && misses.load(std::memory_order_relaxed) <= 6) {
+                    probe_host_range(va, size);
+                    probe_console_ranges(console_vas_.snapshot(), va);
+                }
                 return false;  // prefers an aliasing buffer that holds all of it
             }
             const ResourceBinding* b = resolve(hit.id);
@@ -1476,7 +1587,12 @@ public:
         note_console_mirror_removed(title);
         console_vas_.remove(title);
     }
-    bool console_va_ready() const { return !console_vas_.incomplete(); }
+    // Draws stay refused while a title range the title can name as a shader-visible VA has no stand-in, and while a
+    // title descriptor names a page range this layer imported at first use (the shader would add heap_base to the
+    // title VA). docs/vertex_buffer_va.md.
+    bool console_va_ready() const {
+        return !console_vas_.incomplete() && !import_conflict_.load(std::memory_order_relaxed);
+    }
     // The boot's one-line report of the title-VA work: ranges aliased, shader-visible VAs rebased, V# bases patched.
     std::size_t console_va_ranges() const { return console_vas_.size(); }
     std::uint64_t console_va_rebased_values() const { return console_vas_.rebased_values(); }
@@ -1488,6 +1604,7 @@ public:
     std::size_t patch_console_descriptor_bases(std::uint8_t* bytes, std::size_t size) {
         const std::size_t patched = console_vas_.patch_descriptor_bases(bytes, size);
         if (patched) console_vas_.count_fields(patched);
+        note_imported_title_descriptors(bytes, size);
         return patched;
     }
     // ---- docs/card_copies.md: the per-submission title-memory mirror -------------------------------------------------
@@ -1751,6 +1868,136 @@ public:
         console_table_pull_ = std::move(table);
         console_arena_pull_ = std::move(arena);
     }
+
+    // ---- Title pages a command names directly (docs/vertex_buffer_va.md) ---------------------------------------
+    // The stage-3 renderer streams vertex and index data into committed pages of its own and binds the ranges by the VA
+    // it placed them at. There is no D3D12 resource for those pages, so no creation path registered them and the
+    // arena's title-VA map does not know the range. Measured on the refused draw: the vertex view's VA is MEM_COMMIT,
+    // PAGE_READWRITE, all 288 pages of its 0x120000 bytes readable, inside a 0x44a00000 title allocation; by that point
+    // the GPU address arena is full (a 36 MiB slot-133 stand-in was refused with E_OUTOFMEMORY in the same boot), so an
+    // arena stand-in cannot serve the span. The measured answer is the import the slot-133 path already uses whenever
+    // its pages can be imported: a VkBuffer over the title's own pages at the title VA the command names, so the CPU's
+    // writes are the GPU's reads and no arena room is needed. Only the device can make that import (host-pointer
+    // alignment, Vulkan handles); this side decides which spans to ask for and resolves the command arguments to it.
+    struct ImportedTitleBuffer {
+        std::uint64_t va = 0;     // first title VA of the span
+        std::uint64_t size = 0;   // bytes
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceSize offset = 0;  // byte offset in `buffer` of the byte at `va`
+    };
+    using TitlePageImporter =
+        std::function<bool(std::uint64_t va, std::uint64_t bytes, VkBuffer& buffer, VkDeviceSize& offset,
+                           const char*& why)>;
+    void set_title_page_importer(TitlePageImporter importer) {
+        std::unique_lock lock(resource_mutex_);
+        title_page_importer_ = std::move(importer);
+    }
+    // Called by the submitting queue thread once per submission, before the lists are prepared (and before the shared
+    // resource lock is taken): every buffer VA the lists name that no mapping resolves is offered to the importer. A
+    // span that stays unresolved is left to the replay's named refusal, as before. Returns the number imported.
+    std::size_t register_title_command_buffers(std::span<const CommandList* const> lists) {
+        if (!title_page_importer_ || lists.empty()) return 0;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> requests;
+        requests.reserve(16);
+        for (const CommandList* list : lists) {
+            if (!list || requests.size() >= title_buffers::kMaxRanges) continue;
+            title_buffers::collect_requests(*list, requests);
+        }
+        if (requests.empty()) return 0;
+        std::unique_lock lock(resource_mutex_);
+        std::size_t imported = 0;
+        for (const auto& [va, bytes] : requests) {
+            {
+                // An earlier submission (or an earlier command in this one) already imported a range holding this VA:
+                // buffer_at resolves it from that range, so there is nothing to do.
+                std::uint64_t imported_size = bytes;
+                VkBuffer imported_buffer = VK_NULL_HANDLE;
+                VkDeviceSize imported_offset = 0;
+                if (imported_title_range(va, imported_size, imported_buffer, imported_offset)) continue;
+            }
+            std::uint64_t rebased = 0;
+            if (console_vas_.rebase(va, rebased, palmetto::ConsoleVaKind::buffer)) continue;  // a registered title range
+            BufferVaIndex<ResourceId>::Hit hit{};
+            if (buffer_vas_.find(va, hit)) continue;  // an ordinary or arena buffer, or an earlier import
+            if (const char* why = title_buffers::refusal(va, bytes, imported_title_ranges(),
+                                                          imported_title_bytes())) {
+                note_title_import_refusal(va, bytes, why);
+                continue;
+            }
+            VkBuffer buffer = VK_NULL_HANDLE;
+            VkDeviceSize offset = 0;
+            const char* why = nullptr;
+            if (!title_page_importer_(va, bytes, buffer, offset, why) || buffer == VK_NULL_HANDLE) {
+                note_title_import_refusal(va, bytes, why && *why ? why : "the host import refused the pages");
+                continue;
+            }
+            {
+                std::lock_guard lock(imported_title_mutex_);
+                imported_title_buffers_.push_back({va, bytes, buffer, offset});
+                imported_title_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+            }
+            ++imported;
+            static std::atomic<unsigned> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
+                std::fprintf(stderr,
+                             "[rt] replay: title pages imported at first use: VA 0x%llx + 0x%llx (a command names the "
+                             "title's own memory; the buffer is those pages, no arena stand-in)\n",
+                             static_cast<unsigned long long>(va), static_cast<unsigned long long>(bytes));
+        }
+        return imported;
+    }
+    // The byte range of an imported title buffer that holds `va`, cut to the range's end.
+    bool imported_title_range(std::uint64_t va, std::uint64_t& size, VkBuffer& buffer, VkDeviceSize& offset) const {
+        std::lock_guard lock(imported_title_mutex_);
+        for (const auto& range : imported_title_buffers_) {
+            if (va < range.va || va - range.va >= range.size) continue;
+            const std::uint64_t at = va - range.va;
+            buffer = range.buffer;
+            offset = range.offset + at;
+            size = std::min<std::uint64_t>(size, range.size - at);
+            return true;
+        }
+        return false;
+    }
+    void note_title_import_refusal(std::uint64_t va, std::uint64_t bytes, const char* why) {
+        if (title_import_refusals_.fetch_add(1, std::memory_order_relaxed) < 8)
+            std::fprintf(stderr,
+                         "[rt] replay: title pages a command names stay refused: VA 0x%llx + 0x%llx (%s)\n",
+                         static_cast<unsigned long long>(va), static_cast<unsigned long long>(bytes), why);
+    }
+    // Called with a console descriptor heap's mirror (a shader-visible V# the title wrote can name a title VA): a base
+    // inside an imported range would be added to heap_base by the shader and reach a wild device address, so the draws
+    // stay refused rather than fault. Only the ranges this slice imported are scanned; the console-VA map's own patch
+    // already ran.
+    void note_imported_title_descriptors(const std::uint8_t* bytes, std::size_t size) {
+        if (!bytes || size < console_va_descriptor_size) return;
+        std::lock_guard lock(imported_title_mutex_);
+        if (imported_title_buffers_.empty()) return;
+        for (std::size_t at = 0; at + console_va_descriptor_size <= size; at += console_va_descriptor_size) {
+            const auto* dwords = reinterpret_cast<const std::uint32_t*>(bytes + at);
+            const std::uint64_t base =
+                std::uint64_t(dwords[0]) | (std::uint64_t(dwords[1] & 0xffffu) << 32);
+            if (base < title_buffers::kArenaWindowEnd) continue;
+            for (const auto& range : imported_title_buffers_) {
+                if (base < range.va || base - range.va >= range.size) continue;
+                import_conflict_.store(true, std::memory_order_relaxed);
+                static std::atomic<unsigned> logged{0};
+                if (logged.fetch_add(1, std::memory_order_relaxed) < 3)
+                    std::fprintf(stderr,
+                                 "[rt] replay: a title descriptor names imported title pages (VA 0x%llx); draws stay "
+                                 "refused rather than add heap_base to a title VA\n",
+                                 static_cast<unsigned long long>(base));
+                return;
+            }
+        }
+    }
+    std::size_t imported_title_ranges() const {
+        std::lock_guard lock(imported_title_mutex_);
+        return imported_title_buffers_.size();
+    }
+    std::uint64_t imported_title_bytes() const { return imported_title_bytes_.load(std::memory_order_relaxed); }
+    std::uint64_t imported_title_hits() const { return imported_title_hits_.load(std::memory_order_relaxed); }
+
     // Diagnostic (docs/page_content.md): read the first draw's colour target back after its submission, so the frame's
     // own bytes can be compared with what the present blits. Armed once per boot; the image's layout is restored.
     // Diagnostic (docs/frame_capture.md): arm one colour-target readback. Up to four can be armed for one submission, so
@@ -2752,6 +2999,16 @@ private:
     std::function<void(std::span<const CommandList* const>)> prepare_pipelines_;  // docs/deferred_compile.md
     std::function<std::string()> pipeline_census_;  // docs/memory_growth.md: the live-pipeline budget's counters
     std::function<void(std::uint64_t, std::uint64_t)> console_arena_pull_;  // a copy's source range -> arena stand-in
+    // Title pages a command names directly (docs/vertex_buffer_va.md): the device imports the title's own pages as a
+    // VkBuffer at first use; these are those buffers and their byte counts. `imported_title_mutex_` is taken after
+    // resource_mutex_ (registration) and alone from the descriptor patch, so the lock order is consistent.
+    TitlePageImporter title_page_importer_;
+    mutable std::mutex imported_title_mutex_;
+    std::vector<ImportedTitleBuffer> imported_title_buffers_;
+    std::atomic<std::uint64_t> imported_title_bytes_{0};
+    std::atomic<std::uint64_t> imported_title_hits_{0};
+    std::atomic<unsigned> title_import_refusals_{0};
+    std::atomic<bool> import_conflict_{false};  // a title descriptor named an imported range: draws stay refused
     // The one-shot colour-target readbacks of docs/page_content.md (up to four per submission, docs/frame_capture.md):
     // armed by the draws PALMETTO_READBACK_AT_DRAW lists and taken after that submission completes.
     AttachmentCapture attachment_captures_[4];
@@ -3379,6 +3636,12 @@ private:
 
     ReplayResult execute_now(std::span<const CommandList* const> lists) {
         if (context_.is_device_lost() || !wait_for_room()) return ReplayResult::unsupported;
+        // Title pages a command names directly (docs/vertex_buffer_va.md): a vertex/index view or immediate-write VA
+        // that no mapping resolves is imported over the title's own pages at first use, before the lists below are
+        // prepared, so prepare_draw finds a VkBuffer for it. The measured stage-3 range is the title's committed memory
+        // and the arena is full, so the import is the one answer that needs no arena room; a span the device cannot
+        // import stays unresolved and keeps the replay's named refusal.
+        context_.register_title_command_buffers(lists);
         // Diagnostic (docs/frame_capture.md): which control drew after the frame's commands. The one-shot readback below
         // copies the target after them, so its line is labelled as the control's readback; that axis measures coverage
         // independently of the title pixel shader.
@@ -3597,6 +3860,8 @@ private:
                     std::fprintf(stderr,
                                  "[rt] replay: list %zu of %zu refused in prepare: result %d, %zu command(s)\n", i,
                                  lists.size(), int(result), lists[i]->commands().size());
+                // Diagnostic (docs/vertex_buffer_va.md): every bound resource of the refused list, as recorded.
+                if (miss_dump::enabled()) miss_dump::refused_list(*lists[i], i, lists.size(), int(result));
                 return result;
             }
             if (prepared[i].segment_count > UINT32_MAX - segments ||

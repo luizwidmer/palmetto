@@ -3385,6 +3385,66 @@ std::uint64_t WINAPI list_slot(ListProxy* self, std::uint64_t a1, std::uint64_t 
                 if (!heaps.fill(a2, a1)) return 0;
                 if (heaps.data()) a2 = heaps.data();
             }
+            // Measurement (docs/vertex_buffer_va.md): console slot 48 forwards to PC IASetVertexBuffers and console slot
+            // 47 to PC IASetIndexBuffer, so the views the title binds are in the title's own memory. The probe prints
+            // each view's VA, which is what the replay then has to resolve, and the title caller, so the source of a
+            // title VA is measured at the moment the title names it. It runs when the existing PALMETTO_XS_LIST_DUMP
+            // names slot 47 or 48 (docs/dev-tools.md); bounded, no call changes.
+            if constexpr (Slot == 48 || Slot == 47) {
+                static const bool vb_trace = [] {
+                    char value[64] = {};
+                    if (GetEnvironmentVariableA("PALMETTO_XS_LIST_DUMP", value, sizeof(value)) <= 0) return false;
+                    char* at = value;
+                    while (*at) {
+                        char* end = nullptr;
+                        const unsigned long dumped_slot = std::strtoul(at, &end, 0);
+                        if (end == at) break;
+                        if (dumped_slot == 47 || dumped_slot == 48) return true;
+                        at = *end == ',' ? end + 1 : end;
+                    }
+                    return false;
+                }();
+                if (vb_trace) {
+                    static std::atomic<unsigned> shown{0};
+                    const unsigned n = shown.fetch_add(1, std::memory_order_relaxed);
+                    if (n < 96) {
+                        char caller[64];
+                        streamed_blocks::caller_text(reinterpret_cast<std::uint64_t>(_ReturnAddress()), caller,
+                                                     sizeof(caller));
+                        if constexpr (Slot == 48) {
+                            std::fprintf(stderr,
+                                         "[rt] d3d12_xs: vb trace %u: start %llu count %llu views 0x%llx (caller %s)",
+                                         n, static_cast<unsigned long long>(a1),
+                                         static_cast<unsigned long long>(a2), static_cast<unsigned long long>(a3),
+                                         caller);
+                            const auto* views = reinterpret_cast<const D3D12_VERTEX_BUFFER_VIEW*>(a3);
+                            const unsigned count = static_cast<unsigned>(std::min<std::uint64_t>(a2, 8));
+                            if (a3 && count && readable_range(views, count * sizeof(*views))) {
+                                for (unsigned i = 0; i < count; ++i)
+                                    std::fprintf(stderr, " %u:va 0x%llx size %u stride %u", i,
+                                                 static_cast<unsigned long long>(views[i].BufferLocation),
+                                                 views[i].SizeInBytes, views[i].StrideInBytes);
+                            } else if (a3 && a2) {
+                                std::fprintf(stderr, " views at 0x%llx are not readable",
+                                             static_cast<unsigned long long>(a3));
+                            }
+                        } else {
+                            std::fprintf(stderr,
+                                         "[rt] d3d12_xs: ib trace %u: view 0x%llx (caller %s)",
+                                         n, static_cast<unsigned long long>(a1), caller);
+                            const auto* view = reinterpret_cast<const D3D12_INDEX_BUFFER_VIEW*>(a1);
+                            if (a1 && readable_range(view, sizeof(*view)))
+                                std::fprintf(stderr, " va 0x%llx size %u format %u",
+                                             static_cast<unsigned long long>(view->BufferLocation),
+                                             view->SizeInBytes, view->Format);
+                            else if (a1)
+                                std::fprintf(stderr, " view at 0x%llx is not readable",
+                                             static_cast<unsigned long long>(a1));
+                        }
+                        std::fprintf(stderr, "\n");
+                    }
+                }
+            }
             const std::uint64_t result = reinterpret_cast<ForwardFn>(real_vtable[pc])(
                 self->real, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
             if constexpr (Slot == 9) {  // Close: a S_OK leaves the real list closed
@@ -6748,6 +6808,30 @@ HRESULT proxy_create_placed_resource_x(DeviceProxy* self, void* va, const D3D12_
         }
     }
     const HRESULT hr = handler(self->real, va, pc_desc, state, *riid, out);
+    // Measurement (docs/vertex_buffer_va.md): every slot-133 buffer creation that FAILED, and every large one, with
+    // the VA the title placed it at and the handler's answer, so a VA a later command names can be matched to (or
+    // definitively not matched to) a placement, and an arena that ran out of room is visible by VA. Small successes are
+    // not printed (the boot makes thousands). It runs with the existing PALMETTO_ARENA_LOG (docs/dev-tools.md), because
+    // a refused placement is the arena's own answer; bounded, no call changes.
+    if (pc_desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+        static const bool placed_trace = [] {
+            char value[8] = {};
+            return GetEnvironmentVariableA("PALMETTO_ARENA_LOG", value, sizeof(value)) > 0 && value[0] != '\0' &&
+                   value[0] != '0';
+        }();
+        const bool important = FAILED(hr) || pc_desc.Width >= (4ull << 20);
+        if (placed_trace && important) {
+            static std::atomic<unsigned> shown{0};
+            const unsigned n = shown.fetch_add(1, std::memory_order_relaxed);
+            if (n < 160)
+                std::fprintf(stderr,
+                             "[rt] d3d12_xs: placed trace %u: va=0x%llx width=0x%llx hr=0x%08x%s%s\n", n,
+                             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(va)),
+                             static_cast<unsigned long long>(pc_desc.Width), static_cast<unsigned>(hr),
+                             SUCCEEDED(hr) ? "" : " (refused)",
+                             SUCCEEDED(hr) && out && *out ? "" : " (no object)");
+        }
+    }
     // The title range this buffer stands for, kept for console slot 70's matrix publication: a V# base only names a
     // range the layer registered (and therefore rebases and pulls) when the buffer was made through this slot.
     if (SUCCEEDED(hr) && out && *out) {
