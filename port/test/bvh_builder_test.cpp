@@ -41,6 +41,7 @@
 #include "../shims/d3d12_xs_device.h"
 #include "../shims/shims.h"
 #include "../src/pe_loader.h"
+#include "../src/xdxr_descs.h"
 #ifdef PALMETTO_VULKAN_DEVICE
 #include "../shims/d3d12_com.h"
 #endif
@@ -175,6 +176,18 @@ Call guarded_dtor(Dtor fn, void* self) {
     Call c;
     __try {
         fn(self);
+    } __except (filter(GetExceptionInformation(), &c)) {
+        c.faulted = true;
+    }
+    return Call(c);
+}
+
+// A guarded call with two object arguments (the builder, then the command list).
+template <class Fn>
+Call guarded2(Fn fn, void* self, void* object) {
+    Call c;
+    __try {
+        fn(self, object);
     } __except (filter(GetExceptionInformation(), &c)) {
         c.faulted = true;
     }
@@ -721,6 +734,13 @@ bool hook_slot62(void* proxy, unsigned slots) {
 
 constexpr const char* kCtor = "??0XboxBvhBuilder@@QEAA@PEAUID3D12Device11@@_N@Z";
 constexpr const char* kDtor = "??1XboxBvhBuilder@@QEAA@XZ";
+// The build-route exports the title's own dynamic-import table names (mangled C++ members, measured from the image).
+constexpr const char* kPrebuild =
+    "?GetRaytracingAccelerationStructurePrebuildInfo@XboxBvhBuilder@@QEAAXPEBUD3D12_BUILD_RAYTRACING_ACCELERATION_"
+    "STRUCTURE_INPUTS@@PEBUD3D12XBOX_XDXR_STREAM_DESC@@PEAUD3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO@@@Z";
+constexpr const char* kBatchedBuild =
+    "?BuildRaytracingAccelerationStructureBatched2X@XboxBvhBuilder@@QEAAXPEAUID3D12GraphicsCommandList6@@IPEBUD3D12XBOX_"
+    "BUILD_RAYTRACING_ACCELERATION_STRUCTURE_BATCHED_DESC2@@@Z";
 constexpr size_t kObjectBuffer = 1u << 20;
 constexpr uint8_t kSentinel = 0xCD;
 
@@ -730,6 +750,316 @@ template <class M>
 auto module_tls_index(const M& m, int) -> decltype(m.tls_index, uint32_t()) { return m.tls_index; }
 template <class M>
 auto module_tls_index(const M& m, long) -> decltype(m.tls_slot, uint32_t()) { return m.has_tls_slot ? m.tls_slot : ~0u; }
+
+// ---- The measured build route (PALMETTO_BVH_BUILD=1) ---------------------------------------------------------
+// The title's own dynamic-import table names the builder exports it resolves (docs/d3d12_command_objects.md 3.1):
+// the constructor, BuildRaytracingAccelerationStructureBatched2X, GetRaytracingAccelerationStructurePrebuildInfo,
+// CopyRaytracingAccelerationStructure, RehydrateRaytracingAccelerationStructureBatched2X and Set64BitMortonCodes.
+// This arm calls the run-time part of that sequence with synthetic geometry: prebuild, one batched build on a
+// console-layout command list (the proxy the title hands the builder), a submit and a report of what landed in the
+// destination the prebuild sized. Nothing of the package is read here; the geometry is generated below.
+using PrebuildFn = void (*)(void*, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS*,
+                            const palmetto::xdxr::StreamDesc*,
+                            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO*);
+using BatchedBuildFn = void (*)(void*, ID3D12GraphicsCommandList6*, UINT, const palmetto::xdxr::BatchedDesc2*);
+using MortonFn = void (*)(void*, bool);
+using CreateListXFn = HRESULT(WINAPI*)(void*, const void*, ID3D12CommandAllocator*, ID3D12PipelineState*,
+                                       const IID*, void**);
+
+Call guarded_prebuild(PrebuildFn fn, void* self, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS* inputs,
+                      const palmetto::xdxr::StreamDesc* stream,
+                      D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO* out) {
+    Call c;
+    __try {
+        fn(self, inputs, stream, out);
+    } __except (filter(GetExceptionInformation(), &c)) {
+        c.faulted = true;
+    }
+    return Call(c);
+}
+
+Call guarded_batched(BatchedBuildFn fn, void* self, ID3D12GraphicsCommandList6* list, UINT count,
+                     const palmetto::xdxr::BatchedDesc2* descs) {
+    Call c;
+    __try {
+        fn(self, list, count, descs);
+    } __except (filter(GetExceptionInformation(), &c)) {
+        c.faulted = true;
+    }
+    return Call(c);
+}
+
+struct GpuBuf {
+    ID3D12Resource* resource = nullptr;
+    D3D12_GPU_VIRTUAL_ADDRESS va = 0;
+    std::uint8_t* mapped = nullptr;
+    void release() {
+        if (resource) resource->Release();
+        resource = nullptr;
+        mapped = nullptr;
+        va = 0;
+    }
+};
+
+GpuBuf make_upload_buffer(ID3D12Device* device, std::uint64_t size) {    GpuBuf out;
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = size;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                               nullptr, IID_PPV_ARGS(&out.resource))))
+        return out;
+    out.va = out.resource->GetGPUVirtualAddress();
+    if (FAILED(out.resource->Map(0, nullptr, reinterpret_cast<void**>(&out.mapped)))) out.mapped = nullptr;
+    return out;
+}
+
+// One build through the game's own builder export. Every call into the DLL is guarded; the commands the builder
+// records go through the console-layout list proxy the title hands it, and the arm submits the real list behind it.
+std::string slot_hits_text(const void* proxy);
+
+// Every address the builder's programs read or write must be an arena console VA: the builder rejects a
+// destination at or above 2^40 (docs/d3d12_vulkan.md "the BVH builder only takes destination addresses below
+// 2^40"), and an upload buffer's console VA is its device address minus heap_base, which can be negative.
+GpuBuf make_default_buffer(ID3D12Device* device, std::uint64_t size) {
+    GpuBuf out;
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = size;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON,
+                                               nullptr, IID_PPV_ARGS(&out.resource))))
+        return out;
+    out.va = out.resource->GetGPUVirtualAddress();
+    return out;
+}
+
+// One submit of a real command list, waited on before the next step: geometry fill, then the builder's dispatches.
+bool submit_wait(ID3D12CommandQueue* queue, ID3D12Fence* fence, HANDLE event, ID3D12GraphicsCommandList* list,
+                 UINT64 value) {
+    if (!queue || !fence || !event || !list) return false;
+    list->Close();
+    ID3D12CommandList* lists[1] = {list};
+    queue->ExecuteCommandLists(1, lists);
+    queue->Signal(fence, value);
+    return fence->SetEventOnCompletion(value, event) == S_OK && WaitForSingleObject(event, 60000) == WAIT_OBJECT_0;
+}
+
+// One build through the game's own builder export. Every call into the DLL is guarded; the commands the builder
+// records go through the console-layout list proxy the title hands it, and the arm submits the real list behind it.
+void run_build_arm(void* self, ID3D12Device* pc, void* proxy, PrebuildFn prebuild, BatchedBuildFn build) {
+    note("build arm: one synthetic bottom-level build through the game's export sequence");
+
+    // Synthetic geometry: four triangles on a tetrahedron (12 vertices, no index buffer, no asset).
+    const float vertices[12 * 3] = {
+        0.0f, 0.0f, 0.0f,  1.0f, 0.0f, 0.0f,  0.0f, 1.0f, 0.0f,   // face 0
+        1.0f, 0.0f, 0.0f,  0.0f, 1.0f, 0.0f,  0.0f, 0.0f, 1.0f,   // face 1
+        1.0f, 0.0f, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 1.0f, 0.0f,   // face 2
+        0.0f, 1.0f, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 1.0f, 1.0f,   // face 3
+    };
+    GpuBuf vb = make_default_buffer(pc, sizeof(vertices));
+    GpuBuf staging = make_upload_buffer(pc, sizeof(vertices));
+    check(vb.resource && staging.resource && staging.mapped && vb.va && vb.va < (1ull << 40),
+          "synthetic vertex buffer is a default-heap arena range below 2^40");
+    if (!vb.resource || !staging.mapped) {
+        vb.release();
+        staging.release();
+        return;
+    }
+    std::memcpy(staging.mapped, vertices, sizeof(vertices));
+    std::printf("INFO geometry: 12 vertices, 12-byte stride, 4 triangles (destination rule: VA below 2^40)\n");
+
+    // Queue, fence and a real list for the copies; the builder's list is the console-layout proxy below.
+    ID3D12CommandQueue* queue = nullptr;
+    D3D12_COMMAND_QUEUE_DESC qdesc{};
+    qdesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    ID3D12Fence* fence = nullptr;
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    ID3D12CommandAllocator* util_allocator = nullptr;
+    ID3D12GraphicsCommandList* util_list = nullptr;
+    bool ok = SUCCEEDED(pc->CreateCommandQueue(&qdesc, IID_PPV_ARGS(&queue))) && queue &&
+              event && SUCCEEDED(pc->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))) && fence &&
+              SUCCEEDED(pc->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&util_allocator)));
+    if (ok && util_allocator)
+        ok = SUCCEEDED(pc->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, util_allocator, nullptr,
+                                             IID_PPV_ARGS(&util_list)));
+    check(ok, "queue, fence and copy list created on the Vulkan device");
+    if (!ok) {
+        vb.release();
+        staging.release();
+        return;
+    }
+    util_list->CopyBufferRegion(vb.resource, 0, staging.resource, 0, sizeof(vertices));
+    check(submit_wait(queue, fence, event, util_list, 1), "synthetic geometry copied into the arena buffer");
+    util_allocator->Reset();
+    util_list->Reset(util_allocator, nullptr);
+
+    D3D12_RAYTRACING_GEOMETRY_DESC geom{};
+    geom.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+    geom.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+    geom.Triangles.VertexBuffer.StartAddress = vb.va;
+    geom.Triangles.VertexBuffer.StrideInBytes = 12;
+    geom.Triangles.VertexCount = 12;
+    geom.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+    geom.Triangles.IndexFormat = DXGI_FORMAT_UNKNOWN;
+    geom.Triangles.Transform3x4 = 0;
+    geom.Triangles.IndexBuffer = 0;
+    geom.Triangles.IndexCount = 0;
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+    inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+    inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
+    inputs.NumDescs = 1;
+    inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    inputs.pGeometryDescs = &geom;
+
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO preinfo{};
+    Call pre = guarded_prebuild(prebuild, self, &inputs, nullptr, &preinfo);
+    note("prebuild " + describe(pre));
+    if (pre.faulted) {
+        vb.release();
+        staging.release();
+        return;
+    }
+    std::printf("INFO prebuild: result %llu bytes, scratch %llu bytes, update scratch %llu bytes\n",
+                static_cast<unsigned long long>(preinfo.ResultDataMaxSizeInBytes),
+                static_cast<unsigned long long>(preinfo.ScratchDataSizeInBytes),
+                static_cast<unsigned long long>(preinfo.UpdateScratchDataSizeInBytes));
+    check(preinfo.ResultDataMaxSizeInBytes > 0 && preinfo.ResultDataMaxSizeInBytes % 64 == 0,
+          "prebuild gives a non-zero result size, a multiple of 64");
+    check(preinfo.ScratchDataSizeInBytes > 0, "prebuild gives non-zero scratch");
+
+    const std::uint64_t result_size = preinfo.ResultDataMaxSizeInBytes ? preinfo.ResultDataMaxSizeInBytes : 65536;
+    const std::uint64_t scratch_size = preinfo.ScratchDataSizeInBytes ? preinfo.ScratchDataSizeInBytes : 65536;
+    GpuBuf dest = make_default_buffer(pc, result_size);
+    GpuBuf scratch = make_default_buffer(pc, scratch_size);
+    check(dest.resource && scratch.resource && dest.va && dest.va < (1ull << 40) &&
+              dest.va % 256 == 0 && scratch.va && scratch.va < (1ull << 40),
+          "destination and scratch are arena ranges below 2^40 (destination 256-byte aligned)");
+    if (!dest.resource || !scratch.resource) {
+        vb.release();
+        staging.release();
+        dest.release();
+        scratch.release();
+        return;
+    }
+    std::printf("INFO destination VA in the console arena, sized by the builder's own prebuild\n");
+
+    // The console-layout command list: created through the proxy's measured slot 73, so the object the builder writes
+    // its inline fields into is the same proxy the title passes. The real list behind it is what the queue executes.
+    auto* proxy_vtbl = *reinterpret_cast<void***>(proxy);
+    ID3D12CommandAllocator* allocator = nullptr;
+    struct XboxListDesc {
+        UINT Type;
+        UINT NodeMask;
+    } list_desc{D3D12_COMMAND_LIST_TYPE_DIRECT, 0};
+    const IID iid_list = __uuidof(ID3D12GraphicsCommandList);
+    ID3D12GraphicsCommandList* list = nullptr;
+    const HRESULT lhr = SUCCEEDED(pc->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                             IID_PPV_ARGS(&allocator)))
+                            ? reinterpret_cast<CreateListXFn>(proxy_vtbl[73])(
+                                  proxy, &list_desc, allocator, nullptr, &iid_list,
+                                  reinterpret_cast<void**>(&list))
+                            : E_FAIL;
+    check(SUCCEEDED(lhr) && list && rt::d3d12_xs::is_command_list_proxy(list),
+          "console-layout command list created through device slot 73" + (SUCCEEDED(lhr) ? "" : " (" + hex(lhr) + ")"));
+    ID3D12GraphicsCommandList* real_list = list ? rt::d3d12_xs::command_list_proxy_real_list(list) : nullptr;
+    ID3D12GraphicsCommandList6* list6 = nullptr;
+    if (list)
+        list->QueryInterface(__uuidof(ID3D12GraphicsCommandList6), reinterpret_cast<void**>(&list6));
+    check(list6 != nullptr, "the list proxy answers ID3D12GraphicsCommandList6");
+
+    palmetto::xdxr::BatchedDesc2 batched{};
+    batched.dest_acceleration_structure_data = dest.va;
+    std::memcpy(&batched.inputs, &inputs, sizeof(batched.inputs));
+    batched.source_acceleration_structure_data = 0;
+    batched.scratch_acceleration_structure_data = scratch.va;
+    batched.num_postbuild_info_descs = 0;
+    batched.postbuild_info_descs = nullptr;
+
+    rt::d3d12_xs::reset_device_proxy_stats();
+    Call built = (list6 && list) ? guarded_batched(build, self, list6, 1, &batched) : Call{};
+    note("BuildRaytracingAccelerationStructureBatched2X (1 element) " + describe(built));
+
+    if (real_list) {
+        real_list->Close();
+        ID3D12CommandList* lists[1] = {real_list};
+        queue->ExecuteCommandLists(1, lists);
+        queue->Signal(fence, 2);
+        fence->SetEventOnCompletion(2, event);
+        check(WaitForSingleObject(event, 60000) == WAIT_OBJECT_0,
+              "the build submitted and the queue reached the fence");
+    }
+
+    // Read the destination back through a copy: the arena range is device-local.
+    GpuBuf readback = make_upload_buffer(pc, result_size);  // host-readable staging for the copy back
+    std::uint64_t changed = 0, last = 0;
+    if (readback.resource) {
+        util_allocator->Reset();
+        util_list->Reset(util_allocator, nullptr);
+        util_list->CopyBufferRegion(readback.resource, 0, dest.resource, 0, result_size);
+        check(submit_wait(queue, fence, event, util_list, 3), "the destination copied back to host memory");
+        for (std::uint64_t i = 0; i < result_size; ++i)
+            if (readback.mapped[i] != 0) {
+                ++changed;
+                last = i + 1;
+            }
+        std::printf("INFO destination after the build: %llu of %llu bytes are non-zero, last at +%#llx\n",
+                    static_cast<unsigned long long>(changed), static_cast<unsigned long long>(result_size),
+                    static_cast<unsigned long long>(last));
+    }
+    if (built.faulted) {
+        // Measured: the shipped build path stops inside the package helper before it records a dispatch (console list
+        // slot 148, AllocateUploadMemory, is a stub on the list proxy), so the destination must be untouched. The route
+        // this slice adds answers the same exports from the layer's own builder instead (docs/bvh_route.md).
+        note("measured blocker: the build path is refused inside the package helper, before a dispatch is recorded");
+        check(changed == 0, "a refused build leaves the destination untouched");
+    } else {
+        check(changed > 0, "the builder's build wrote the destination");
+    }
+    check(last <= result_size, "the build stayed inside the prebuild-sized destination");
+    note("device slots hit after build (slot x count):" + slot_hits_text(proxy));
+    note("console list slots hit: 14x" + std::to_string(rt::d3d12_xs::list_slot_hits(14)) +
+         " 25x" + std::to_string(rt::d3d12_xs::list_slot_hits(25)) +
+         " 33x" + std::to_string(rt::d3d12_xs::list_slot_hits(33)) +
+         " 35x" + std::to_string(rt::d3d12_xs::list_slot_hits(35)) +
+         " 45x" + std::to_string(rt::d3d12_xs::list_slot_hits(45)) +
+         " 146x" + std::to_string(rt::d3d12_xs::list_slot_hits(146)));
+
+    readback.release();
+    if (fence) fence->Release();
+    if (event) CloseHandle(event);
+    if (queue) queue->Release();
+    if (list6) list6->Release();
+    if (list) list->Release();
+    if (allocator) allocator->Release();
+    if (util_list) util_list->Release();
+    if (util_allocator) util_allocator->Release();
+    vb.release();
+    staging.release();
+    dest.release();
+    scratch.release();
+}
+
+std::string slot_hits_text(const void* proxy) {
+    const unsigned n = rt::d3d12_xs::device_proxy_slot_count(proxy) + 32;
+    std::string dev;
+    for (unsigned s = 0; s < n; ++s)
+        if (auto h = rt::d3d12_xs::device_slot_hits(s)) dev += " " + std::to_string(s) + "x" + std::to_string(h);
+    return dev.empty() ? " none" : dev;
+}
 
 }  // namespace
 
@@ -882,6 +1212,17 @@ int main() {
         note("OutputDebugString calls: " + std::to_string(g_debug_strings) + ", TerminateProcess calls: " +
              std::to_string(g_terminate_calls));
         check(!c.faulted || c.code == kTerminateCalled, "constructor returns or gives up through TerminateProcess, no fault");
+
+        if (!c.faulted && env("PALMETTO_BVH_BUILD") == "1") {
+            auto prebuild = reinterpret_cast<PrebuildFn>(symbol(bvh, kPrebuild));
+            auto build = reinterpret_cast<BatchedBuildFn>(symbol(bvh, kBatchedBuild));
+            check(prebuild && build, "the prebuild and batched-build exports are present");
+            if (prebuild && build) {
+                rt::d3d12_xs::reset_device_proxy_stats();
+                run_build_arm(object.data(), pc, proxy, prebuild, build);
+                print_slot_hits(proxy);
+            }
+        }
 
         if (!c.faulted) {
             rt::d3d12_xs::reset_device_proxy_stats();

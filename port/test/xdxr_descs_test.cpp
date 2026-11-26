@@ -1,10 +1,16 @@
 // src/xdxr_descs.h: the XDXR build descriptions measured in XboxBvhBuilder.dll (docs/xdxr.md). The layouts are
 // static_asserts in the header; this checks the stream lookup and the flag defaults against the DLL's measured
 // behaviour, and, where the Windows SDK is available, that the public part matches d3d12.h. No GPU, no game files.
+// src/xdxr_route.h: the builder-shaped prebuild and build answers from the layer's own XDXR layout
+// (docs/bvh_route.md). Synthetic descriptions only; no GPU and no game data.
 #include "../src/xdxr_descs.h"
+#include "../src/xdxr_layout.h"
+#include "../src/xdxr_route.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #if defined(_WIN32) && __has_include(<d3d12.h>)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -94,6 +100,238 @@ int record_views() {
     return 0;
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// The builder-shaped route (port/src/xdxr_route.h). Synthetic descriptions only: the checks are arithmetic over the
+// layer's XdxrLayout and the plan's fields, no GPU and no game data.
+// ---------------------------------------------------------------------------------------------------------------
+
+namespace {
+
+route::GeometryDesc triangle_geometry(std::uint32_t vertex_count, bool indexed = false,
+                                      std::uint32_t index_count = 0) {
+    route::GeometryDesc geometry;
+    geometry.type = route::kGeometryTriangles;
+    geometry.flags = route::kGeometryFlagOpaque;
+    geometry.vertex_va = 0x10000;
+    geometry.vertex_stride = 12;
+    geometry.vertex_count = vertex_count;
+    geometry.vertex_format = route::kFormatR32G32B32Float;
+    geometry.index_va = indexed ? 0x20000 : 0;
+    geometry.index_count = index_count;
+    geometry.index_format = indexed ? route::kFormatR32Uint : route::kFormatUnknown;
+    return geometry;
+}
+
+BuildInputs bottom_level(const route::GeometryDesc* descs, std::uint32_t count,
+                                std::uint32_t flags = 0) {
+    BuildInputs inputs;
+    inputs.type = route::kBottomLevel;
+    inputs.flags = flags;
+    inputs.num_descs = count;
+    inputs.descs_layout = route::kLayoutArray;
+    inputs.descs = reinterpret_cast<std::uint64_t>(descs);
+    return inputs;
+}
+
+int route_prebuild() {
+    route::GeometryDesc geoms[2] = {triangle_geometry(36), triangle_geometry(0, true, 18)};
+    const BuildInputs blas = bottom_level(geoms, 2);
+
+    // The switch is off by default: a caller keeps the package helper's answer.
+    CHECK(!route::route_armed());
+    CHECK(route::prebuild(blas, nullptr, false).refusal == route::Refusal::disabled);
+
+    // The sizes are the layer's own layout for the measured element count (36/3 + 18/3 = 18 triangles).
+    const route::PrebuildAnswer answer = route::prebuild(blas, nullptr, true);
+    palmetto::XdxrLayout expected;
+    expected.compute(18, false, false);
+    CHECK(answer.ok());
+    CHECK(answer.result_size == expected.size);
+    CHECK(answer.scratch_size == expected.scratch && answer.update_scratch_size == expected.scratch);
+
+    // MINIMIZE_MEMORY gives the BOX16 layout, and the result is smaller (docs/bvh.md "BOX16 nodes").
+    palmetto::XdxrLayout box16;
+    box16.compute(18, false, true);
+    const route::PrebuildAnswer minimized =
+        route::prebuild(bottom_level(geoms, 2, route::kBuildMinimizeMemory), nullptr, true);
+    CHECK(minimized.ok() && minimized.result_size == box16.size && box16.size < expected.size);
+
+    // A top-level build lays out instances, and keeps BOX32 whatever the flags.
+    BuildInputs tlas;
+    tlas.type = route::kTopLevel;
+    tlas.num_descs = 7;
+    palmetto::XdxrLayout tlas_layout;
+    tlas_layout.compute(7, true, false);
+    const route::PrebuildAnswer top = route::prebuild(tlas, nullptr, true);
+    CHECK(top.ok() && top.result_size == tlas_layout.size);
+
+    // The measured refusals: the type and layout values, a flag outside the public bits, a bad index format, a
+    // count that is not whole triangles, and a count the layout cannot hold.
+    BuildInputs bad = blas;
+    bad.type = 2;
+    CHECK(route::prebuild(bad, nullptr, true).refusal == route::Refusal::input_type);
+    bad = blas;
+    bad.descs_layout = 2;
+    CHECK(route::prebuild(bad, nullptr, true).refusal == route::Refusal::descs_layout);
+    bad = bottom_level(geoms, 2, 0x40);
+    CHECK(route::prebuild(bad, nullptr, true).refusal == route::Refusal::unknown_flag);
+    route::GeometryDesc bad_index = triangle_geometry(3);
+    bad_index.index_format = 99;
+    bad_index.index_count = 3;
+    CHECK(route::prebuild(bottom_level(&bad_index, 1), nullptr, true).refusal == route::Refusal::index_format);
+    route::GeometryDesc not_triangles = triangle_geometry(10);
+    CHECK(route::prebuild(bottom_level(&not_triangles, 1), nullptr, true).refusal ==
+          route::Refusal::triangle_count);
+    route::GeometryDesc huge = triangle_geometry(0xfffffff0u);
+    route::GeometryDesc huge2 = triangle_geometry(0xfffffff0u);
+    route::GeometryDesc two[2] = {huge, huge2};
+    CHECK(route::prebuild(bottom_level(two, 2), nullptr, true).refusal == route::Refusal::counts);
+    return 0;
+}
+
+int route_plan() {
+    route::GeometryDesc geometry = triangle_geometry(12);  // 4 triangles
+    BuildInputs inputs = bottom_level(&geometry, 1);
+    PostbuildInfoDesc postbuilds[3] = {};
+    postbuilds[0].info_type = 0;  // COMPACTED_SIZE
+    postbuilds[1].info_type = 3;  // CURRENT_SIZE
+    postbuilds[2].info_type = 1;  // TOOLS_VISUALIZATION: the shipped builder ignores it
+    BatchedDesc2 batched[2] = {};
+    batched[0].dest_acceleration_structure_data = 0x100000;  // 256-byte aligned and below 2^40
+    batched[0].inputs = inputs;
+    batched[0].scratch_acceleration_structure_data = 0x200000;
+    batched[0].num_postbuild_info_descs = 3;
+    batched[0].postbuild_info_descs = postbuilds;
+    // A top-level element with an ARRAY_OF_POINTERS instance list.
+    const std::uint64_t instance_pointers[2] = {0x300000, 0x300100};
+    batched[1].dest_acceleration_structure_data = 0x400000;
+    batched[1].inputs.type = route::kTopLevel;
+    batched[1].inputs.num_descs = 2;
+    batched[1].inputs.descs_layout = route::kLayoutArrayOfPointers;
+    batched[1].inputs.descs = reinterpret_cast<std::uint64_t>(instance_pointers);
+    batched[1].scratch_acceleration_structure_data = 0x500000;
+
+    route::BuildPlan plan = route::plan_batched(batched, 2, true);
+    CHECK(plan.ok());
+    CHECK(plan.records.size() == 2);
+    const route::BuildRecord& blas = plan.records[0];
+    CHECK(!blas.top_level && !blas.update && !blas.pointer_layout);
+    CHECK(blas.dest_va == 0x100000 && blas.scratch_va == 0x200000 && blas.source_va == 0);
+    CHECK(blas.triangles.size() == 1);
+    CHECK(blas.triangles[0].vertex_va == 0x10000 && blas.triangles[0].vertex_count == 12);
+    CHECK(blas.triangles[0].vertex_stride == 12);
+    CHECK(blas.postbuilds.size() == 2 && blas.postbuilds[0].info_type == 0 &&
+          blas.postbuilds[1].info_type == 3);
+    CHECK(plan.ignored_postbuilds == 1);
+    const route::BuildRecord& tlas = plan.records[1];
+    CHECK(tlas.top_level && tlas.pointer_layout && tlas.instance_count == 2);
+    CHECK(tlas.instances_va == reinterpret_cast<std::uint64_t>(instance_pointers));
+
+    // Updates: PERFORM_UPDATE needs ALLOW_UPDATE, and an in-place update (no source) is the destination itself.
+    BatchedDesc2 update = batched[0];
+    update.inputs.flags = route::kBuildPerformUpdate;
+    CHECK(route::plan_batched(&update, 1, true).refusal == route::Refusal::update_flags);
+    update.inputs.flags = route::kBuildPerformUpdate | route::kBuildAllowUpdate;
+    update.source_acceleration_structure_data = 0x100000;
+    const route::BuildPlan updated = route::plan_batched(&update, 1, true);
+    CHECK(updated.ok() && updated.records[0].update && updated.records[0].source_va == 0x100000);
+
+    // The destination rules the shipped builder enforces, plus the layout's own address rule.
+    BatchedDesc2 bad = batched[0];
+    bad.dest_acceleration_structure_data = 0x100001;  // not 256-byte aligned
+    CHECK(route::plan_batched(&bad, 1, true).refusal == route::Refusal::alignment);
+    bad.dest_acceleration_structure_data = std::uint64_t(1) << 40;
+    CHECK(route::plan_batched(&bad, 1, true).refusal == route::Refusal::address);
+    bad = batched[0];
+    bad.scratch_acceleration_structure_data = 0;
+    CHECK(route::plan_batched(&bad, 1, true).refusal == route::Refusal::address);
+
+    // The postbuild types: the shipped builder throws for offline statistics, and the layer refuses serialization.
+    PostbuildInfoDesc offline = {};
+    offline.info_type = kPostbuildInfoOfflineStatistics;  // 0x10
+    BatchedDesc2 with_postbuild = batched[0];
+    with_postbuild.num_postbuild_info_descs = 1;
+    with_postbuild.postbuild_info_descs = &offline;
+    CHECK(route::plan_batched(&with_postbuild, 1, true).refusal == route::Refusal::offline_statistics);
+    offline.info_type = 2;  // SERIALIZATION
+    CHECK(route::plan_batched(&with_postbuild, 1, true).refusal == route::Refusal::serialization);
+
+    // A geometry pointer list: the route reads the list on the CPU and refuses a null entry by name.
+    const route::GeometryDesc* pointers[2] = {&geometry, &geometry};
+    BuildInputs pointer_inputs = inputs;
+    pointer_inputs.num_descs = 2;
+    pointer_inputs.descs_layout = route::kLayoutArrayOfPointers;
+    pointer_inputs.descs = reinterpret_cast<std::uint64_t>(pointers);
+    BatchedDesc2 pointer_build = batched[0];
+    pointer_build.inputs = pointer_inputs;
+    const route::BuildPlan pointer_plan = route::plan_batched(&pointer_build, 1, true);
+    CHECK(pointer_plan.ok() && pointer_plan.records[0].triangles.size() == 2);
+    pointers[1] = nullptr;
+    CHECK(route::plan_batched(&pointer_build, 1, true).refusal == route::Refusal::pointers_unreadable);
+
+    // A vertex format the GPU builder cannot read is refused at plan time.
+    route::GeometryDesc xy = triangle_geometry(3);
+    xy.vertex_format = route::kFormatR16Uint;
+    BatchedDesc2 xy_build = batched[0];
+    xy_build.inputs = bottom_level(&xy, 1);
+    CHECK(route::plan_batched(&xy_build, 1, true).refusal == route::Refusal::vertex_format);
+
+    // The non-batched export is the same route: the shipped one wraps the public desc into a BATCHED_DESC2.
+    route::BuildDesc single = {};
+    single.dest_acceleration_structure_data = 0x100000;
+    single.inputs = inputs;
+    single.scratch_acceleration_structure_data = 0x200000;
+    PostbuildInfoDesc compacted = {};
+    compacted.info_type = 0;
+    const route::BuildPlan single_plan = route::plan_single(single, 1, &compacted, true);
+    CHECK(single_plan.ok() && single_plan.records.size() == 1 && single_plan.records[0].postbuilds.size() == 1);
+
+    // The stream description changes no size here; its measured records are reported, and the alternate
+    // bottom-level path the shipped builder takes is noted (docs/bvh_route.md "limits").
+    StreamRecord0 fast = {};
+    fast.type = 0;
+    fast.value_08 = 11.0f;
+    StreamRecord1 level = {};
+    level.type = 1;
+    level.level_0d = 4;
+    StreamRecord records[3] = {};
+    std::memcpy(&records[0], &fast, sizeof fast);
+    std::memcpy(&records[1], &level, sizeof level);
+    records[2].type = 0x7;  // an unknown type stops the walk
+    StreamDesc stream{sizeof records, records};
+    BatchedDesc2 streamed = batched[0];
+    streamed.inputs.flags = route::kBuildMinimizeMemory;
+    streamed.stream = stream;
+    const route::BuildPlan streamed_plan = route::plan_batched(&streamed, 1, true);
+    CHECK(streamed_plan.ok());
+    CHECK(streamed_plan.streams[0].record0 && streamed_plan.streams[0].record1);
+    CHECK(streamed_plan.streams[0].level == 4);
+    CHECK(streamed_plan.streams[0].alternate_bottom_level_path);
+    route::BuildPlan off = route::plan_batched(batched, 2, false);
+    CHECK(off.refusal == route::Refusal::disabled && off.records.empty());
+    return 0;
+}
+
+int route_switch_environment() {
+#if defined(_WIN32)
+    _putenv_s("PALMETTO_BVH_ROUTE", "own");
+#else
+    setenv("PALMETTO_BVH_ROUTE", "own", 1);
+#endif
+    CHECK(route::route_armed());
+    const route::GeometryDesc geometry = triangle_geometry(3);
+    CHECK(route::prebuild(bottom_level(&geometry, 1), nullptr, route::route_armed()).ok());
+#if defined(_WIN32)
+    _putenv_s("PALMETTO_BVH_ROUTE", "");
+#else
+    unsetenv("PALMETTO_BVH_ROUTE");
+#endif
+    CHECK(!route::route_armed());
+    return 0;
+}
+
+}  // namespace
+
 #ifdef XDXR_HAVE_D3D12
 // The public part of BATCHED_DESC2 is the public build desc, as the DLL's standard-build export copies it.
 static_assert(sizeof(D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS) == sizeof(BuildInputs));
@@ -143,7 +381,8 @@ int public_desc_copy() {
 }  // namespace
 
 int main() {
-    if (stream_lookup() || flag_defaults() || record_views())
+    if (stream_lookup() || flag_defaults() || record_views() || route_prebuild() || route_plan() ||
+        route_switch_environment())
         return 1;
 #ifdef XDXR_HAVE_D3D12
     if (public_desc_copy())
