@@ -450,6 +450,27 @@ int main() {
     }
 
     {
+        // docs/vertex_buffer_va.md section 17: the content-probe arming rule and its bound. Off by default, only a draw
+        // of a title-import submission (the stage-3 content window) arms the per-draw diagnostics, and the ordinal bound
+        // stops the arming; the default bound is nine window draws (the measured three 3-draw content submissions) and
+        // the hard bound is twelve.
+        expect(!frame_dump::content_probe_enabled_from(nullptr), "an unset content probe stays off");
+        expect(!frame_dump::content_probe_enabled_from(""), "an empty content probe value stays off");
+        expect(!frame_dump::content_probe_enabled_from("0"), "a zero content probe value stays off");
+        expect(frame_dump::content_probe_enabled_from("1"), "a set content probe arms");
+        expect(!frame_dump::content_probe_arms(false, true, 0, 9), "the probe off arms no content draw");
+        expect(!frame_dump::content_probe_arms(true, false, 0, 9), "a draw outside the content window stays unarmed");
+        expect(frame_dump::content_probe_arms(true, true, 0, 9), "the first window draw arms");
+        expect(frame_dump::content_probe_arms(true, true, 8, 9), "the last draw inside the bound arms");
+        expect(!frame_dump::content_probe_arms(true, true, 9, 9), "the draw at the bound stays unarmed");
+        expect(!frame_dump::content_probe_arms(true, true, 0, 0), "a zero bound arms nothing");
+        expect(frame_dump::content_probe_draw_limit_from(nullptr) == 9, "the content probe bound defaults to 9");
+        expect(frame_dump::content_probe_draw_limit_from("") == 9, "an empty bound keeps the default");
+        expect(frame_dump::content_probe_draw_limit_from("4") == 4, "the bound is settable");
+        expect(frame_dump::content_probe_draw_limit_from("999") == 12, "the bound is capped at 12");
+    }
+
+    {
         // docs/vertex_buffer_va.md section 12: the two opt-in submission pacing knobs' truth table. Both are off by
         // default, "0" is off, and the delay is decimal microseconds; the queue reads them once at startup.
         const palmetto::SubmissionPace none = palmetto::submission_pace_from(nullptr, nullptr);

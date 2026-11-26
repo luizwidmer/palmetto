@@ -3750,6 +3750,10 @@ private:
         // presents the presenter capture misses. A no-op unless that registration imported something or an armed
         // submission is pending.
         context_.title_import_capture_tick(imported_title_spans);
+        // Diagnostic (docs/vertex_buffer_va.md section 17): the content window this submission is in, read once here so
+        // the content probe's command dump and the PS-only control can arm on the submission itself (the content draws'
+        // global indices vary per boot).
+        const bool content_window = context_.title_import_capture_active();
         // Diagnostic (docs/frame_capture.md): which control drew after the frame's commands. The one-shot readback below
         // copies the target after them, so its line is labelled as the control's readback; that axis measures coverage
         // independently of the title pixel shader.
@@ -3984,6 +3988,9 @@ private:
         // writer measured. Off, this is one false branch; the recorded commands are unchanged either way.
         if (frame_dump::enabled())
             frame_dump::submission(std::span<const PreparedList>(prepared.data(), lists.size()));
+        // Diagnostic (docs/vertex_buffer_va.md section 17): the content probe's command table for the content submits.
+        // A no-op unless PALMETTO_CONTENT_PROBE is set; independent of PALMETTO_FRAME_DUMP.
+        frame_dump::content_submission(std::span<const PreparedList>(prepared.data(), lists.size()), content_window);
         // Diagnostic (docs/frame_capture.md): the controls. Find whether this is the submission that holds the draw
         // PALMETTO_FRAME_DUMP_AT_DRAW names, and that draw's colour target and recorded command, so the project-built
         // full-screen triangle (PALMETTO_FRAME_DUMP_CONTROL) or the title's own vertices with a substituted pixel
@@ -3994,7 +4001,9 @@ private:
         frame_dump::ArmedTarget control_target;
         if (frame_dump::control_enabled() || frame_dump::ps_control_enabled() || upscale_standin::enabled()) {
             const std::span<const PreparedList> submission(prepared.data(), lists.size());
-            armed = frame_dump::armed_submission(submission);
+            // Diagnostic (docs/vertex_buffer_va.md section 17): in the content window the first draw of the submission is
+            // the armed one, so the PS-only control measures the content draw's own geometry/raster state.
+            armed = frame_dump::armed_submission(submission, content_window && frame_dump::content_probe_enabled());
             if (armed.armed) {
                 control_target = frame_dump::armed_target(submission, armed.first, armed.at);
                 control_armed = control_target.found;

@@ -2777,6 +2777,15 @@ void start_writer_watch(std::uintptr_t image_base, std::size_t image_size) {
 //  * game+0x455964C (after the constant helper's 0x50-slot allocation of the table block): RAX is the returned block,
 //    R12 the requested size, RBP/R13 the table's width/height and [RSP+0x28] the descriptor object being built. It
 //    reports the block, the request, the job the executor is running, and whether the two ranges overlap.
+//  * game+0x1847A1 (after the command object's slot-0x20 getter returns, armed at the stage-3 poll before the pass that
+//    crashes): RAX is the format key the flush uses as the job's format, RCX the command object whose slot 0x20 is
+//    game+0x23E550 (`mov eax,0xa; ret`) and RSI the object whose slot 0x10 creates the job. This is the class input at
+//    its source, measured before the job exists; docs/vertex_buffer_va.md section 16.
+//  * game+0x45594F0 (the constant helper's entry: class, plane count, dims): besides those inputs, the first four
+//    entries print the class-origin chain - the job's +0x28/+0x30/+0x58 objects with the vtable and the slots the
+//    decompiled code calls (job+0x58 slot 8 is the class, job+0x30 slot 0x20 is the format key the job was built
+//    with, slot 0x40 the table builder), plus the format object's own bytes. The stage-3 entry prints the same chain
+//    once. This is docs/vertex_buffer_va.md section 16.
 //  * game+0x515ABB0 (the title's block free entry, RDX = pointer - the site PALMETTO_EXECUTOR_WATCH names), off unless
 //    PALMETTO_ALLOC_WATCH_FREE=1, armed at the stage-3 entry and printed only for a pointer within 4 KiB of the job or
 //    the block, so a free that could have put the live job on the free list is dated against the block.
@@ -2791,13 +2800,15 @@ constexpr std::uint32_t kAllocWatchBlockAllocRva = 0x455964C;      // after the 
 constexpr std::uint32_t kAllocWatchFreeRva = 0x515ABB0;            // the title allocator's block free entry
 constexpr std::uint32_t kAllocWatchHelperEntryRva = 0x45594F0;     // the constant helper: class, plane count, dims
 constexpr std::uint32_t kAllocWatchEntryWrittenRva = 0x4559684;    // the 0x20-byte descriptor entry just written
+constexpr std::uint32_t kAllocWatchFormatKeyRva = 0x1847A1;        // after the command object's format-getter call
 constexpr std::uint32_t kAllocWatchStateMachineRva = 0x71273C8;    // the state-machine object pointer, stage at +0x10
 constexpr std::uint32_t kAllocWatchAllocatorGlobalRva = 0xABCC310; // the title's default allocator object pointer
-constexpr unsigned kAllocWatchSites = 6;
+constexpr unsigned kAllocWatchSites = 7;
 constexpr unsigned kAllocWatchLines = 24;
 
 enum AllocWatchSite : unsigned { alloc_watch_executor = 0, alloc_watch_job = 1, alloc_watch_block = 2,
-                                 alloc_watch_free = 3, alloc_watch_helper = 4, alloc_watch_entry = 5 };
+                                 alloc_watch_free = 3, alloc_watch_helper = 4, alloc_watch_entry = 5,
+                                 alloc_watch_formatkey = 6 };
 
 struct AllocWatch {
     std::uintptr_t image_base = 0;
@@ -2998,6 +3009,8 @@ void alloc_watch_job_hit(CONTEXT& context) {
     executor_watch_print(text + "\n");
 }
 
+std::string alloc_watch_class_chain(const char* what, std::uintptr_t job);
+
 // One executor entry. Before stage 3 it is only a counter; at the first stage-3 pass it names the job and arms the
 // job and block points (and the free point when asked), then logs the job whenever it changes.
 void alloc_watch_executor_hit(CONTEXT& context) {
@@ -3033,6 +3046,7 @@ void alloc_watch_executor_hit(CONTEXT& context) {
         if (job) {
             text += "\n  job: " + writer_watch_region(job) + "\n    " + writer_watch_page_mapping(job);
             text += writer_watch_memory_lines("job", job, 0x100);
+            text += alloc_watch_class_chain("stage-3 entry", job);
         }
         if (job && recent) text += "\n  this job is one of the recently allocated flush jobs";
         const auto allocator = static_cast<std::uintptr_t>(
@@ -3085,13 +3099,46 @@ void alloc_watch_free_hit(CONTEXT& context) {
     executor_watch_print(text + "\n");
 }
 
+// The class-origin chain, read at the helper's entry or at a stage-3 job: the class ECX is the job's slot-0x28 method
+// (game+0x6fecc0), which returns (*(job+0x58))->slot 8; job+0x58 is the format object the job constructor looked up in
+// the command object's format cache, keyed by the format the command object returns from its slot 0x20. job+0x30 is
+// that command object (its slot 0x40 is the table builder), and job+0x28 is the object the flush stored from its own
+// `this+0x78`. Printing each pointer with its vtable, and the vtable slots the decompiled code calls, lets one boot name
+// every object of the chain against the static reading; the format object's own bytes are dumped because its slot 8
+// is the class the helper receives.
+std::string alloc_watch_class_chain(const char* what, std::uintptr_t job) {
+    const auto qword = [](std::uintptr_t object, unsigned offset) -> std::uintptr_t {
+        return object ? static_cast<std::uintptr_t>(executor_watch_read_u64(object + offset)) : 0;
+    };
+    const auto object = [](std::uintptr_t value) -> std::uintptr_t { return value; };
+    const auto labelled = [](std::uintptr_t address, const char* missing) -> std::string {
+        if (!address) return missing;
+        return executor_watch_hex(address) + " (" + rt::shims::module_offset(address) + ")";
+    };
+    const std::uintptr_t job_28 = qword(job, 0x28), job_30 = qword(job, 0x30), job_58 = qword(job, 0x58);
+    const std::uintptr_t vt_28 = qword(job_28, 0), vt_30 = qword(job_30, 0), vt_58 = qword(job_58, 0);
+    std::string text = std::string("\n  class chain (") + what + "): job " + labelled(job, "0");
+    text += "\n    job+0x28 " + labelled(object(job_28), "0") + " vtable " + labelled(vt_28, "0");
+    text += "\n    job+0x30 " + labelled(object(job_30), "0") + " vtable " + labelled(vt_30, "0") +
+            " slot0x20 " + labelled(vt_30 ? qword(vt_30, 0x20) : 0, "0") +
+            " slot0x40 " + labelled(vt_30 ? qword(vt_30, 0x40) : 0, "0");
+    text += "\n    job+0x58 " + labelled(object(job_58), "0") + " vtable " + labelled(vt_58, "0") +
+            " slot8 " + labelled(vt_58 ? qword(vt_58, 0x8) : 0, "0") +
+            " slot0x10 " + labelled(vt_58 ? qword(vt_58, 0x10) : 0, "0");
+    if (job_58) text += writer_watch_memory_lines("format-object", job_58, 0x40);
+    if (job_30) text += writer_watch_memory_lines("command-object", job_30, 0x80);
+    return text;
+}
+
 // The constant helper's entry: the class (ECX, the value the job's slot-0x28 method returns), the plane count (EDX),
 // the dimensions pointer (R8) and the allocator argument (stack). This is the input side of the size computation whose
-// result the block point measures, so the zero size is attributed to either the plane count or the class stride.
+// result the block point measures, so the zero size is attributed to either the plane count or the class stride. The
+// first four entries also print the class-origin chain (alloc_watch_class_chain) for the executor's current job.
 void alloc_watch_helper_hit(CONTEXT& context) {
     AllocWatch& watch = alloc_watch();
     const unsigned hit = watch.hits[alloc_watch_helper].fetch_add(1, std::memory_order_relaxed) + 1;
-    if (watch.logged[alloc_watch_helper].fetch_add(1, std::memory_order_relaxed) >= kAllocWatchLines) return;
+    const unsigned logged = watch.logged[alloc_watch_helper].fetch_add(1, std::memory_order_relaxed);
+    if (logged >= kAllocWatchLines) return;
     const auto rsp = static_cast<std::uintptr_t>(context.Rsp);
     const auto allocator_arg = static_cast<std::uintptr_t>(executor_watch_read_u64(rsp + 0x28));
     const auto dims = static_cast<std::uintptr_t>(context.R8);
@@ -3107,6 +3154,10 @@ void alloc_watch_helper_hit(CONTEXT& context) {
     if (dims && dims < 0x7FFFFFFFFFFFull) {
         text += "\n  dims at " + executor_watch_hex(dims) + ": width " + std::to_string(executor_watch_read_u32(dims)) +
                 " height " + std::to_string(executor_watch_read_u32(dims + 4));
+    }
+    if (logged < 4) {
+        const auto job = static_cast<std::uintptr_t>(watch.executor_job.load(std::memory_order_relaxed));
+        if (job) text += alloc_watch_class_chain("helper entry", job);
     }
     executor_watch_print(text + "\n");
 }
@@ -3137,6 +3188,41 @@ void alloc_watch_entry_hit(CONTEXT& context) {
     executor_watch_print(text + "\n");
 }
 
+// The format key at its source: the instruction after the command object's slot-0x20 getter returns (game+0x1847A1).
+// RAX is the key the flush then uses as the job's format, RCX the command object the getter ran on (that vtable's slot
+// 0x20 is the decompiled `mov eax,0xa; ret` at game+0x23E550) and RSI the object whose slot 0x10 creates the job. This
+// is the one value the zero-byte request's class is computed from, measured before the job exists; the command object's
+// own +0x38 dims are printed with it so the same boot ties key and 256x1 table together.
+void alloc_watch_formatkey_hit(CONTEXT& context) {
+    AllocWatch& watch = alloc_watch();
+    const unsigned hit = watch.hits[alloc_watch_formatkey].fetch_add(1, std::memory_order_relaxed) + 1;
+    const unsigned logged = watch.logged[alloc_watch_formatkey].fetch_add(1, std::memory_order_relaxed);
+    if (logged >= kAllocWatchLines) return;
+    const auto key = static_cast<unsigned>(context.Rax & 0xFFFFFFFFu);
+    const auto command = static_cast<std::uintptr_t>(context.Rcx);
+    const auto creator = static_cast<std::uintptr_t>(context.Rsi);
+    const auto caller = static_cast<std::uintptr_t>(
+        executor_watch_read_u64(static_cast<std::uintptr_t>(context.Rsp) + 0x58));  // 3 pushes + 0x40
+    const auto command_vtable = static_cast<std::uintptr_t>(executor_watch_read_u64(command));
+    const auto creator_vtable = static_cast<std::uintptr_t>(executor_watch_read_u64(creator));
+    char line[400];
+    std::snprintf(line, sizeof line,
+                  "[rt] alloc watch t=%.3f FORMAT KEY hit %u tid %lu key 0x%x command %s vtable %s creator %s "
+                  "vtable %s caller %s",
+                  executor_watch_seconds(), hit, static_cast<unsigned long>(GetCurrentThreadId()), key,
+                  executor_watch_hex(command).c_str(), rt::shims::module_offset(command_vtable).c_str(),
+                  executor_watch_hex(creator).c_str(), rt::shims::module_offset(creator_vtable).c_str(),
+                  rt::shims::module_offset(caller).c_str());
+    std::string text = line;
+    if (command_vtable) {
+        const auto slot_20 = static_cast<std::uintptr_t>(executor_watch_read_u64(command_vtable + 0x20));
+        text += "\n  command vtable+0x20 " + executor_watch_hex(slot_20) + " (" + rt::shims::module_offset(slot_20) + ")";
+    }
+    text += "\n  command+0x38 dims width " + std::to_string(executor_watch_read_u32(command + 0x38)) + " height " +
+            std::to_string(executor_watch_read_u32(command + 0x3c));
+    executor_watch_print(text + "\n");
+}
+
 LONG CALLBACK alloc_watch_exception(EXCEPTION_POINTERS* info) {
     if (!info || !info->ExceptionRecord || !info->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
     CONTEXT& context = *info->ContextRecord;
@@ -3156,7 +3242,8 @@ LONG CALLBACK alloc_watch_exception(EXCEPTION_POINTERS* info) {
         else if (slot == alloc_watch_block) alloc_watch_block_hit(context);
         else if (slot == alloc_watch_free) alloc_watch_free_hit(context);
         else if (slot == alloc_watch_helper) alloc_watch_helper_hit(context);
-        else alloc_watch_entry_hit(context);
+        else if (slot == alloc_watch_entry) alloc_watch_entry_hit(context);
+        else alloc_watch_formatkey_hit(context);
         // The original instruction runs, then the trap flag brings us back here to put the int3 back.
         alloc_watch_write_byte(slot, watch.original[slot].load());
         alloc_watch_repoke_slot = slot + 1;
@@ -3208,23 +3295,24 @@ void start_alloc_watch(std::uintptr_t image_base, std::size_t image_size) {
             return;
         }
         if (watch.armed.exchange(true)) return;
+        const bool key_armed = alloc_watch_install(watch, alloc_watch_formatkey, watch.image_base + kAllocWatchFormatKeyRva);
         const bool armed = alloc_watch_install(watch, alloc_watch_executor, watch.image_base + kAllocWatchExecutorRva);
         std::fprintf(stderr,
-                     "[rt] alloc watch t=%.3f stage 3 read: %s the executor entry image+0x%x; job point image+0x%x, "
-                     "block point image+0x%x, helper entry image+0x%x and entry-written image+0x%x arm at its first "
-                     "entry, free point image+0x%x %s\n",
-                     executor_watch_seconds(), armed ? "int3 over" : "FAILED to arm", kAllocWatchExecutorRva,
-                     kAllocWatchJobAllocRva, kAllocWatchBlockAllocRva, kAllocWatchHelperEntryRva,
-                     kAllocWatchEntryWrittenRva, kAllocWatchFreeRva,
+                     "[rt] alloc watch t=%.3f stage 3 read: %s the format-getter return image+0x%x; %s the executor "
+                     "entry image+0x%x; job point image+0x%x, block point image+0x%x, helper entry image+0x%x and "
+                     "entry-written image+0x%x arm at its first entry, free point image+0x%x %s\n",
+                     executor_watch_seconds(), key_armed ? "int3 over" : "FAILED to arm", kAllocWatchFormatKeyRva,
+                     armed ? "int3 over" : "FAILED to arm", kAllocWatchExecutorRva, kAllocWatchJobAllocRva,
+                     kAllocWatchBlockAllocRva, kAllocWatchHelperEntryRva, kAllocWatchEntryWrittenRva, kAllocWatchFreeRva,
                      watch.free_requested.load() ? "requested" : "off (PALMETTO_ALLOC_WATCH_FREE unset)");
         std::fflush(stderr);
     }).detach();
     std::fprintf(stderr,
-                 "[rt] alloc watch: waiting for machine stage 3 (no int3 before it; stage-gated executor point "
-                 "image+0x%x, then job image+0x%x, block image+0x%x, helper entry image+0x%x, entry-written "
-                 "image+0x%x, free image+0x%x %s)\n",
-                 kAllocWatchExecutorRva, kAllocWatchJobAllocRva, kAllocWatchBlockAllocRva, kAllocWatchHelperEntryRva,
-                 kAllocWatchEntryWrittenRva, kAllocWatchFreeRva,
+                 "[rt] alloc watch: waiting for machine stage 3 (no int3 before it; stage-gated format-getter return "
+                 "point image+0x%x, executor point image+0x%x, then job image+0x%x, block image+0x%x, helper entry "
+                 "image+0x%x, entry-written image+0x%x, free image+0x%x %s)\n",
+                 kAllocWatchFormatKeyRva, kAllocWatchExecutorRva, kAllocWatchJobAllocRva, kAllocWatchBlockAllocRva,
+                 kAllocWatchHelperEntryRva, kAllocWatchEntryWrittenRva, kAllocWatchFreeRva,
                  watch.free_requested.load() ? "requested" : "off (PALMETTO_ALLOC_WATCH_FREE unset)");
     std::fflush(stderr);
 }

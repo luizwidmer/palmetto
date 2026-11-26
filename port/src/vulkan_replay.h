@@ -1472,6 +1472,36 @@ inline bool draw_readback_arms(bool listed_draw, bool title_import_submission) {
     return listed_draw || title_import_submission;
 }
 
+// Diagnostic (docs/vertex_buffer_va.md section 17): PALMETTO_CONTENT_PROBE=1 attaches the existing per-draw diagnostics
+// (the frame dump's command table, the colour path, the vertex path, the sampled-table dump and the PS-only control) to
+// the draws of the submissions the title-import trigger marks - the stage-3 content submits - instead of to a draw index
+// PALMETTO_READBACK_AT_DRAW lists. The index is not usable for that: section 10.2 measured the content draws at
+// 3,642-5,209 across boots, so the trigger is the submission. The window is bounded by PALMETTO_CONTENT_PROBE_DRAWS
+// (default 9, at most 12) window draws; later content draws keep the plain target readback. Pure arming rule;
+// frame_dump_test pins the truth table.
+inline bool content_probe_enabled_from(const char* value) {
+    return value && *value && value[0] != '0' && value[0] != 'n';
+}
+
+inline bool content_probe_enabled() {
+    static const bool on = content_probe_enabled_from(std::getenv("PALMETTO_CONTENT_PROBE"));
+    return on;
+}
+
+inline unsigned content_probe_draw_limit_from(const char* value) {
+    const unsigned long long parsed = value && *value ? std::strtoull(value, nullptr, 0) : 9ull;
+    return static_cast<unsigned>(std::min<unsigned long long>(parsed, 12ull));
+}
+
+inline unsigned content_probe_draw_limit() {
+    static const unsigned limit = content_probe_draw_limit_from(std::getenv("PALMETTO_CONTENT_PROBE_DRAWS"));
+    return limit;
+}
+
+inline bool content_probe_arms(bool enabled, bool content_window, unsigned long long ordinal, unsigned limit) {
+    return enabled && content_window && ordinal < limit;
+}
+
 // The descriptor-table V#s a draw's s8 table holds at the slot the module reads as matrix A (s8+0) and at the next one
 // (s8+0x40), decoded from the arena. Used by the readback arming line so both draws of the frame can be compared; reads
 // only.
@@ -3236,6 +3266,43 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
         static std::atomic<unsigned long long> draws_seen{0};
         const unsigned long long seen = draws_seen.fetch_add(1, std::memory_order_relaxed);
         const unsigned n = logged.fetch_add(1, std::memory_order_relaxed);
+        // Diagnostic (docs/vertex_buffer_va.md section 17): the content-probe trigger. The submission's lists imported
+        // title pages at first use, so it is a stage-3 content submit; its draws arm the per-draw diagnostics up to the
+        // bound. The probe is off by default and the bound only counts window draws.
+        const bool title_import_armed = vk.title_import_capture && vk.title_import_capture();
+        bool content_probe = false;
+        if (frame_dump::content_probe_enabled() && title_import_armed) {
+            static std::atomic<unsigned long long> content_probe_ordinal{0};
+            const unsigned long long ordinal = content_probe_ordinal.fetch_add(1, std::memory_order_relaxed);
+            content_probe = frame_dump::content_probe_arms(true, title_import_armed, ordinal,
+                                                          frame_dump::content_probe_draw_limit());
+        }
+        // Every per-draw dump below arms on this: the draw PALMETTO_READBACK_AT_DRAW lists, or a content-probe draw.
+        const bool probe_armed = frame_dump::readback_armed_at(seen) || content_probe;
+        if (content_probe) {
+            // The compact per-draw table row: what the replay prepares and (in emit) executes for this content draw,
+            // with the host pipeline the shim built. The full command table of the submission is dump_content()'s.
+            std::fprintf(stderr,
+                         "[rt] replay: content probe: draw %llu pipeline 0x%llx ps %s %u image(s) vs %u load(s) "
+                         "host pipeline %d colour(s) %zu depth format %d; area %ux%u layers %u; viewport %.1fx%.1f at "
+                         "%.1f,%.1f depth %.3f..%.3f; scissor %d,%d..%d,%d; topology %u; %s %u/%u first %u; "
+                         "root args s0..s31 %u non-zero\n",
+                         seen, static_cast<unsigned long long>(draw.pipeline),
+                         pipeline->has_pixel_stage ? "present" : "absent", pipeline->ps_images, pipeline->vs_loads,
+                         pipeline->pipeline ? 1 : 0, pipeline->color_formats.size(),
+                         static_cast<int>(pipeline->depth_format), p.area.width, p.area.height, p.layers,
+                         static_cast<double>(draw.viewport.width), static_cast<double>(draw.viewport.height),
+                         static_cast<double>(draw.viewport.x), static_cast<double>(draw.viewport.y),
+                         static_cast<double>(draw.viewport.min_depth), static_cast<double>(draw.viewport.max_depth),
+                         draw.scissor.left, draw.scissor.top, draw.scissor.right, draw.scissor.bottom, draw.topology,
+                         draw.indexed ? "indices" : "vertices", draw.count, draw.instances, draw.first,
+                         [&draw] {
+                             unsigned nonzero = 0;
+                             for (const std::uint32_t value : draw.user_data)
+                                 if (value) ++nonzero;
+                             return nonzero;
+                         }());
+        }
         if (n < 8) {
             std::fprintf(stderr, "[rt] replay: draw attachments:");
             for (std::size_t slot = 0; slot < p.colors.size(); ++slot) {
@@ -3265,7 +3332,6 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
         // frame's own bytes can be compared with what the present blits. A submission whose lists named title memory at
         // first use (the stage-3 content submits, docs/vertex_buffer_va.md section 10) arms every draw it holds, because
         // the presenter captures miss the presents that follow it.
-        const bool title_import_armed = vk.title_import_capture && vk.title_import_capture();
         if (frame_dump::draw_readback_arms(frame_dump::readback_armed_at(seen), title_import_armed) &&
             vk.capture_attachment && !p.colors.empty() &&
             p.colors[0].id && p.colors[0].binding.image) {
@@ -3289,7 +3355,7 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
         // Diagnostic (docs/frame_capture.md): every armed draw's sampled textures. Prints the descriptor tables' keys
         // the shim decodes from the console heap mirror and arms a readback of each sampled image, so a black target can
         // be told apart from black sampled content. Bounded; off unless PALMETTO_FRAME_DUMP_SAMPLE is set.
-        if (frame_dump::readback_armed_at(seen) && frame_dump::sample_enabled() && vk.sampled_table && vk.capture_sample) {
+        if (probe_armed && frame_dump::sample_enabled() && vk.sampled_table && vk.capture_sample) {
             std::fprintf(stderr, "[rt] replay: frame dump sample: draw %llu\n", seen);
             for (const std::uint64_t table_va : frame_dump::descriptor_tables(draw, pipeline->table_windows)) {
                 SampledTable table;
@@ -3400,7 +3466,7 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
         // Diagnostic (docs/frame_capture.md, the colour path): what the armed draw's pixel shader consumes. The image
         // count says whether the shader samples images at all (a constant-output PS reads none); the non-zero push-constant
         // dwords are the only per-draw scalars it can receive (s0..s31). Bounded, reads only.
-        if (frame_dump::readback_armed_at(seen) && frame_dump::sample_enabled()) {
+        if (probe_armed && frame_dump::sample_enabled()) {
             unsigned nonzero_constants = 0;
             std::fprintf(stderr, "[rt] replay: colour path: ps %s, %u image sample(s) -> %s; non-zero push constants:",
                          pipeline->has_pixel_stage ? "present" : "absent", pipeline->ps_images,
@@ -3548,7 +3614,7 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
         // resolved, the input layout bound to the Vulkan pipeline, the raw vertex and index bytes the draw reads (through
         // the title-memory hook) and the constants, so the translated vertex shader's inputs can be evaluated off the
         // boot. Off unless PALMETTO_VERTEX_PATH is set; bounded and reads only.
-        if (frame_dump::readback_armed_at(seen) && frame_dump::vertex_path_enabled()) {
+        if (probe_armed && frame_dump::vertex_path_enabled()) {
             VertexPathInfo info;
             if (pipeline->describe_vertex_path) pipeline->describe_vertex_path(info);
             std::fprintf(stderr,
@@ -3822,7 +3888,7 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
         if (frame_dump::colour_path_enabled()) {
             static std::atomic<bool> colour_first_done{false};
             static std::atomic<unsigned> colour_first_tries{0};
-            const bool armed = frame_dump::readback_armed_at(seen);
+            const bool armed = probe_armed;
             const bool first = !colour_first_done.load(std::memory_order_relaxed) &&
                                colour_first_tries.fetch_add(1, std::memory_order_relaxed) < 8;
             if ((armed || first) && frame_dump::print_colour_source(vk, draw, *pipeline, seen))
@@ -5053,16 +5119,19 @@ inline bool ps_control_cull_none() {
 }
 
 // One submission's place in the draw sequence, for the control draw: whether it holds the draw the readback and the
-// control name, and the global index of its first draw.
+// control name, and the global index of its first draw. With `content_window` (PALMETTO_CONTENT_PROBE, docs/
+// vertex_buffer_va.md section 17) the first three window submissions arm their draw 0, 1 and 2 instead, because a
+// content draw's global index varies per boot and the trigger is the submission.
 struct Armed {
     bool armed = false;
     unsigned long long first = 0;
     unsigned long long at = 0;
 };
 
-inline Armed armed_submission(std::span<const PreparedList> lists) {
+inline Armed armed_submission(std::span<const PreparedList> lists, bool content_window = false) {
     static std::mutex mutex;
     static unsigned long long next_draw = 0;
+    static unsigned long long content_armed = 0;
     Armed out;
     out.at = dump_at_draw();
     std::lock_guard lock(mutex);
@@ -5070,6 +5139,16 @@ inline Armed armed_submission(std::span<const PreparedList> lists) {
     std::size_t draws = 0;
     for (const auto& list : lists) draws += list.draw_count;
     next_draw += draws;
+    if (content_window) {
+        // The window's first three submissions arm one draw each, at succeeding ordinals (0, 1, 2), so the control
+        // measures a different one of the frame's three content draws in each submission - the three distinct pipelines -
+        // instead of only the first. Bounded to three submissions so a widened PALMETTO_READBACK_AFTER cannot turn the
+        // control into a per-frame draw.
+        out.armed = draws != 0 && content_armed < 3;
+        out.at = out.first + std::min<unsigned long long>(content_armed, draws - 1);
+        if (out.armed) ++content_armed;
+        return out;
+    }
     out.armed = draws != 0 && out.first <= out.at && out.at < next_draw;
     return out;
 }
@@ -5527,6 +5606,35 @@ inline void submission(std::span<const PreparedList> lists) {
                      "copy %u, resolve %u, other %u\n",
                      window, static_cast<unsigned long long>(state.target), state.writes[0], state.writes[1],
                      state.writes[2], state.writes[3], state.writes[4]);
+    }
+}
+
+// Diagnostic (docs/vertex_buffer_va.md section 17): PALMETTO_CONTENT_PROBE=1 prints the command table of every
+// submission the content window holds (bounded to three), so the stage-3 content draws are measured command by command:
+// each command's kind and fields (print_command: pipeline, render targets and formats, viewport/scissor, topology,
+// vertex/index views, the recorded user-data dwords) and, per draw target, the ordered writers - whether the last write
+// is a draw and whether a clear/copy writes after it. Separate from submission() so the draw-index-selected dump and its
+// tracking window are not perturbed. The draw indices printed are the same global zero-based ones the readback lines
+// print; the counter advances on every submission, not only in the window.
+inline void content_submission(std::span<const PreparedList> lists, bool content_window) {
+    if (!content_probe_enabled()) return;
+    static std::mutex mutex;
+    static unsigned long long next_draw = 0;
+    static unsigned dumps = 0;
+    std::lock_guard lock(mutex);
+    const unsigned long long first = next_draw;
+    std::size_t draws = 0;
+    for (const auto& list : lists) draws += list.draw_count;
+    next_draw += draws;
+    if (!content_window || !draws || dumps >= 3) return;
+    ++dumps;
+    std::fprintf(stderr,
+                 "[rt] replay: content probe: content submission %u of at most 3: draws %llu..%llu over %zu list(s)\n",
+                 dumps, first, next_draw - 1, lists.size());
+    unsigned long long base = first;
+    for (std::size_t i = 0; i < lists.size(); ++i) {
+        print_list(lists[i], base, i, lists.size(), UINT64_MAX);
+        base += lists[i].draw_count;
     }
 }
 

@@ -1339,3 +1339,440 @@ XMem range registry, the three catches in 15.3, the allocator identity in 15.2, 
 `game+0x658DA80`) and the two A/B boots. The title functions were decompiled with this project's Ghidra tooling from the
 user's own image; no peer code was used and no game data is added. RVAs, VAs, field offsets, register values, class
 numbers, sizes, module names, counts and outcomes only.
+
+## 16. The class is a compile-time entry in the title's own format table; game+0x23E550 returns the literal 10 and the row-stride switch has no case for it
+
+**Status: measured, and negative for a layer input. The zero-byte request's class (0xa) is a constant the title compiles
+in twice: the image's own format table at game+0x658DC80 has a 16-byte record keyed 0xa, whose three words are
+materialised into the format object the job holds, and the constant-upload command object answers its slot 0x20 with the
+literal 10 (`mov eax,0xa; ret` at game+0x23E550). The job's slot 0x28 returns that format object's `+8` dword, and the
+title's own row-stride switch game+0x1555C10 has no case for 0xa, so the helper asks for 0 bytes and section 14's
+0x1000-byte copy overruns the block. No D3D12 description and no answer of this layer is in the chain. The default path
+is unchanged: the slice adds probe sites only.**
+
+### 16.1 What this slice changes
+
+| file | change |
+|---|---|
+| `port/src/main.cpp` | `PALMETTO_ALLOC_WATCH` gains a seventh int3 site and two payloads. The site at `game+0x1847A1` is the instruction after the constant-upload command object's slot-0x20 getter returns; the same 20 ms stage-3 poll arms it before the executor entry, so it catches the class key before the job exists, and it prints the key, the command object and creator object with their vtables and the slots the decompiled code calls, the command object's `+0x38` dims and the caller. The first four helper entries and the stage-3 entry print the class-origin chain (`job+0x28`/`+0x30`/`+0x58` with their vtables and called slots, the format object's 0x40 bytes and the command object's 0x80 bytes). All bounded (24 lines per site class, then counters) and under the writer watch's restore/trap/re-poke discipline; the executor site is still skipped when `PALMETTO_WRITER_WATCH` is on. No layer call or answer changes |
+| `docs/vertex_buffer_va.md` | this section |
+
+### 16.2 The class from the format-table record to the zero request
+
+Two ends are measured: the static reading of the decompiled functions and of the image's own `.rdata` table, and one
+`PALMETTO_ALLOC_WATCH` boot (`boot-s16-probe1`) that reads the same objects at run time. The table's rows are this
+section's evidence; the addresses in the right-hand column are that boot's.
+
+| # | step | what the code does (decompiled) | measured in `boot-s16-probe1` |
+|---:|---|---|---|
+| 1 | format table record | `game+0x658DC80` is an array of 0x18-byte records ending in a zero record; record 8 is `0x000010020000000a, game+0x1336700, game+0x1336700` | the row's three qwords are exactly the format object's `+0x8`/`+0x10`/`+0x18` |
+| 2 | cache seeding | `game+0x1B373F0` walks the records and `game+0x1B37440` allocates a 0x20-byte object with vtable `game+0x6597C60`, writes the record's three qwords at `+8`/`+0x10`/`+0x18` and appends it to the owner's `+0x98` array (count `+0xa0`); the loop is called from `game+0x1DC6D09` | format object vtable `game+0x6597C60`, `+0x8` = `0x000010020000000a` |
+| 3 | the virtual key | `game+0x23E550` is slot 0x20 of the command object's vtable `game+0x66314B0`, and its whole body is `mov eax,0xa; ret` | `game+0x1847A1`: key 0xa, command object vtable `game+0x66314B0`, `vtable+0x20` = `game+0x23E550`, command `+0x38` = 256x1 |
+| 4 | job creation | `game+0x184770` (reached from `game+0x1837A2`) takes the key from step 3 and calls the creator object's slot 0x10 `game+0x184EB0` with it | creator object vtable `game+0x658DB60` |
+| 5 | job constructor | `game+0x185570` stores the command object at `job+0x30`, the creator's `+0x78` at `job+0x28` and the format object the creator's slot 0xa8 `game+0x185010` found by matching slot 8 against the key at `job+0x58` | job vtable `game+0x658DA80`, `job+0x30` = the step-3 command object, `job+0x58` vtable `game+0x6597C60` |
+| 6 | the class getter | the format object's slot 8 is `game+0x6FECE0` (`return *(u32 *)(this + 8)`); slot 0x10 is `game+0x80B2C0` (returns `*(u64 *)(this + 0x10)`) | `+0xc` dword 0x1002, `+0x10`/`+0x18` = `game+0x1336700` |
+| 7 | job slot 0x28 | `game+0x6FECC0`: `mov rcx,[rcx+0x58]; mov rax,[rcx]; jmp qword ptr [rax+8]` | the executor's class is 0xa |
+| 8 | helper entry | `game+0x45594F0`, called from the executor at `game+0x1335D30` | ECX 0xa, plane count EDX 1, dims 256x1 |
+| 9 | size computation | `game+0x455A610` sums `game+0x1555B60` over the planes; for this class that is `height * game+0x1555C10(0xa, 256)` | 1 x (1 x 0) = 0 |
+| 10 | allocation and entry | the helper's allocator call at `game+0x4559649` asks for the step-9 size and the entry at `game+0x4559684` stores stride and size | request 0x0, entry `{256, 1, 0, 0, block}`, block at job+0xA0 this boot |
+| 11 | the copy | `game+0x550E2D0` (slot 0x40 of the command object) copies `this->+0x38 << 4` = 0x1000 bytes into `entry+0x18` | section 14's measured copy, now into the step-10 block |
+
+The `.rdata` table itself, record by record (class = the low dword, second = the high dword of the row's first qword,
+then the two words; all RVAs relative to the image):
+
+| record | class | second dword | first word | second word |
+|---:|---:|---:|---|---|
+| 1 | 1 | 0x41c | `game+0x1336700` | `game+0x1336700` |
+| 2 | 2 | 0x457 | `game+0x1336700` | `game+0x1336700` |
+| 3 | 3 | 0x41c | `game+0x4583830` | `game+0x4589760` |
+| 4 | 4 | 0x457 | `game+0x4583830` | `game+0x4589760` |
+| 5 | 9 | 0x141 | `game+0x1336700` | `game+0x1336700` |
+| 6 | 0x15 | 0x41c | `game+0x4583A50` | 0 |
+| 7 | 0x15 | 0x41c | `game+0x4589790` | 0 |
+| 8 | **0xa** | **0x1002** | `game+0x1336700` | `game+0x1336700` |
+| 9 | 0x65 | 0x41c | `game+0x4583AD0` | 0 |
+| 10 | 0x65 | 0x41c | `game+0x4583AD0` | 0 |
+| 11 | 0x32 | 0x47 | `game+0x1336700` | `game+0x1336700` |
+| 12 | 0x33 | 0x4a | `game+0x1336700` | `game+0x1336700` |
+| 13 | 0x34 | 0x4d | `game+0x1336700` | `game+0x1336700` |
+| 14 | 0x35 | 0x62 | `game+0x1336700` | `game+0x1336700` |
+| 15 | 0xc8 | 0x13d | `game+0x1336700` | `game+0x1336700` |
+| 16 | 0xc9 | 0x13d | `game+0x1336700` | `game+0x1336700` |
+| 17 | 0 | 0 | 0 | 0 |
+
+So the class value is not written by the renderer, by a resource description or by an asset: it is a word of a
+compile-time table inside the image, materialised once at renderer init (`game+0x1DC6D09`), and the object that answers
+it as a class is a function whose whole body is `mov eax,0xa; ret`. The job's format lookup then only has to match it:
+the cache finder `game+0x185010` returns the record-8 object whose slot 8 is 0xa, and `job+0x58` holds that object.
+
+### 16.3 The row-stride switch's coverage
+
+The decompiled `game+0x1555C10` (`class = param_1 & 0xfff`, `width = param_2`) is a byte-per-row switch. At the
+measured width 256 its answers are:
+
+| class | `game+0x1555C10(class, 256)` | in the format table above |
+|---|---:|---|
+| 1, 2 | 0x400 | yes (4 bytes per unit) |
+| 3, 4 | 0x300 | yes (3 bytes per unit) |
+| 9 | 0x100 | yes (1 byte per unit) |
+| **0xa** | **0** | **yes - the job's class** |
+| 0x15 | 0x200 | yes (2 bytes per unit) |
+| 0x32, 0x3f | 0x200 untiled / 0x80 at high nibble 0xa000 | 0x32 only |
+| 0x33, 0x34, 0x35, 0x40, 0x41 | 0x400 untiled / 0x100 at high nibble 0xa000 | 0x33, 0x34, 0x35 |
+| 0x36, 0x37, 0x3a, 0x3c, 0x3e, 0x42 | 0x80 | no (another table's formats) |
+| 0x38, 0x39 | 0x40 | no |
+| 0x3d | 0x100 | no |
+| 0x65 (100/101 family) | 0x100 | yes (two records) |
+| 0xc8, 0xc9 (200/201 family) | 0x100 | yes |
+| every other low-12 value | 0 | - |
+
+Among the 16 values of the image's own format table, **0xa is the only one the switch answers 0 for**. The copied data
+is 16 bytes per element (0x100 x float4 = 0x1000, section 14.3), and the row's second dword `0x00001002` reads as the
+target format byte `2` in its low byte and 0x10 in its high word; that byte is the title's format numbering for
+`R32G32B32A32_FLOAT` (16 bytes per element), the numbering this title copies straight into
+`D3D12_RESOURCE_DESC.Format` (3D textures, section 2). A case for 0xa returning `256 * 16 = 0x1000` would make the
+block and the copy agree exactly; the switch does not have one.
+
+### 16.4 Verdict and the fix decision
+
+- **A compile-time title constant, measured at both ends.** Step 3's `mov eax,0xa; ret` and the record-8 table word
+  measured in steps 2 and 6 are the only inputs; the boot reads the same key, the same command-object vtable, the same
+  format object and the same class. No D3D12 description, no resource-creation argument, no heap-creation argument and
+  no answer of this layer is between the format table and the zero-byte request.
+- **No default-path change.** The layer cannot change a `mov eax,0xa` or a word of the image's `.rdata`, and it cannot
+  size a block the title's own allocator allocates from its own arena; a guard, delay or fence would not turn a 0-byte
+  request into the 0x1000-byte request the copy needs. This is the same decision section 15 took, now with the class's
+  producer named.
+- **The console-faithful alternative is named, not answered.** The record exists in the image's own table, so the same
+  image on the console takes the same class; the honest reading is that this build's row-stride switch is inconsistent
+  with its own format table for 0xa (a title-side mismatch between two title components), and no console service or
+  layer answer participates. The only fixes are title-side (a switch case, or a different upload path); the layer has no
+  measured input to model. The next falsifier is a boot on a build whose switch handles 0xa, or a renderer path that
+  does not take this command object's slot-0x40 copy - neither is a shim answer.
+- **What our runtime still participates in, unchanged from section 15.** The block and the job live in pages the
+  `XMemVirtualAlloc` pass-through created, and the range decision inside the arena is the title allocator's; the class,
+  both sizes and the copy length are the title's own code and data.
+
+### 16.5 The boots and the A/B
+
+The probe arm is the section-12 content environment, 300 s timeout, `PALMETTO_ALLOC_WATCH=1`; the A/B arm is the same
+environment with the switch unset, repeated until a boot read machine stage 3 (the race sections 10-15 record). Both
+boots stop with 0xC0000005 and neither loses the device.
+
+| arm | binary sha256 (first 16) | wall | stage 3 | stop / trace t | `ExecuteCommandLists` ok / refused | content readback, first capture per target | write control | presents / readback windows | presenter captures | device lost |
+|---|---|---:|---:|---|---:|---|---:|---:|---:|---|
+| A: `boot-s16-probe1`, probe on | `8B4C22C92CB69CC7` | 61.8 s | 56.9 s | `0x538d0e6` read `0x18`, 59.89 s | 3,639 / 0 | `0 0 0`, 0/16,384 - `51 102 204`, 16,384/16,384 - `0 0 0`, 0/16,384 | `51 102 204`, 16,384/16,384 | 1,801 / 6 | 10, all mean rgb 0.00 | no |
+| B: `boot-s16-offb1`, default path | `8B4C22C92CB69CC7` | 73.2 s | 67.4 s | `0x515b22d` read `0x3f800000`, 71.07 s | 4,883 / 0 | `0 0 0`, 0/16,384 - `51 102 204`, 16,384/16,384 - `0 0 0`, 0/16,384 | `51 102 204`, 16,384/16,384 | 2,201 / 6 | 12, all mean rgb 0.00 | no |
+
+The probe arm measures the chain in section 16.2 and the section-15 mechanism unchanged: the requested block size is 0,
+the entry is `{256, 1, 0, 0, block}`, and the block starts at `job+0xA0` (the section-15 third-catch layout), so the
+0x1000-byte copy runs past the block into the allocator's own nodes and the stop is the allocator's classed-tree read
+`game+0x538D0E6` (section 15's third stop family). The three content readbacks are two black targets plus one target whose
+window holds the layer's write-control colour (`51 102 204`, 16,384/16,384); the write control itself reads
+`51 102 204` on every target, and every presenter capture is mean rgb 0.00. The default-path arm, the same binary with
+the switch unset, reaches stage 3 later, runs further (4,883 command lists to the probe arm's 3,639), stops in the same
+title allocator family at `game+0x515B22D` reading `0x3F800000`, and repeats the same three content readbacks, the
+`51 102 204` write control, the 12 black presenter captures and no device loss. So the probe payload does not move the
+default path: both arms stop in the title's own allocator code with no layer frame, and neither measures a title pixel.
+The off arm is the fifth off boot: the stage-3 reach is the race sections 10-15 record (three off boots stopped before
+stage 3, one reached it and lost the Vulkan device during a 2.3 s `ExecuteCommandLists` before any content readback); the
+reported pair is the clean one.
+
+### 16.6 Limits
+
+- **One class in the stage-3 window, one boot.** The probe boots of this slice reached one executor pass, one job and
+  one helper entry before the stop, so the measured class table is that job's (0xa) plus the static coverage of 16.3.
+  Other jobs' classes in later windows were not enumerated; the probe's helper payload would print them (bounded at 24
+  entries) if a boot reached them.
+- **The table's second dword is a cross-page reading.** The facts measured here are the record's bytes, the class 0xa,
+  the 0-byte request, the 0x1000-byte copy and the stop. Reading `0x1002` as the target format byte 2 plus 0x10 leans on
+  the earlier measurement that this title copies its format byte into `D3D12_RESOURCE_DESC.Format`
+  ([3d_textures.md](3d_textures.md) section 2); the stride switch and the record are the deciding evidence regardless.
+- **The format-object creator was read, not caught.** `game+0x1B373F0` -> `game+0x1B37440` is the decompiled seeding
+  path and the measured object's three words match record 8 exactly; the boot did not trap the seeding call itself.
+- **The probe perturbs the window.** Two more int3 sites than section 15 (the format-getter return and the executor
+  entry) and a longer payload; stage 3 arrived at 56.9 s and the stop at 59.89 s in this boot, and the off arm needed
+  attempts before it read stage 3. The measurements are at the allocation and the format site, before the copy, so the
+  stop site does not decide them.
+- **The copy length is section 14's measurement.** This section measures the class, the requested size, the entry and
+  the block; the 0x1000 length and its exact range stay section 14's CRT arithmetic.
+- **No console cross-check.** No reference page describes this format table or the record, so the console meaning of
+  class 0xa is read from the image's own table, not from a peer.
+
+### 16.7 Tests and gates
+
+- **No test target changed.** The slice adds diagnostic sites and payloads behind `PALMETTO_ALLOC_WATCH`; the default
+  path is unchanged and no pure helper was added, so the existing targets keep covering the changed tree (sections 11.7,
+  12.7, 13.9, 14.8 and 15.8 made the same call). The gate subset on the changed tree exits 0: `frame_dump_test`,
+  `unimplemented_policy_test`, `graphics_record_test`, `graphics_pso_test`, `buffer_va_index_test`, `dstorage_test`,
+  `xapu_chad_test`, `deferred_compile_test`, `arena_size_test`, `xbox_present_test` and `xs_proxy_mock_test`;
+  `d3d12_fence_timing_test` remains the documented pre-existing crash.
+- Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, and every
+  `tests/test_docs_*.py` check passes. No new environment variable was added (the section names the existing
+  `PALMETTO_ALLOC_WATCH` and `PALMETTO_WRITER_WATCH`, which the environment-variable page already carries).
+
+### 16.8 Attribution
+
+This section was implemented from this project's own measurements: the decompiled chain at `game+0x184770`,
+`game+0x184EB0`, `game+0x184F60`, `game+0x185570`, `game+0x185010`, `game+0x23E550`, `game+0x1B373F0`,
+`game+0x1B37440`, `game+0x6FECC0`, `game+0x6FECE0`, `game+0x80B2C0`, `game+0x66314B0`, `game+0x6597C60`,
+`game+0x658DB60`, `game+0x1555C10`, `game+0x1555B60`, `game+0x455A610` and `game+0x550E2D0`, the image's own `.rdata`
+format table at `game+0x658DC80` (its records as RVAs and header words, no payload), and the one probe boot
+`boot-s16-probe1` with the class-origin payload. The title functions were decompiled with this project's Ghidra tooling
+from the user's own image; no peer code was used and no game data is added. RVAs, VAs, field offsets, register values,
+class numbers, sizes, module names, counts and outcomes only.
+
+## 17. The stage-3 content draws: three passes into two 4K targets, a title-drawn black clear, and no covered pixel under the constant-output control
+
+**Status: measured. The content window's draws are recorded command by command, their targets, viewports, draw kinds,
+input layouts, descriptors and root arguments are tabulated, and the black is placed: the title itself clears the
+presented target to black before the compose draw, the draws are the last writers of both targets (no clear or copy
+after them), the readback path is validated by its write control, and a substituted constant-output pixel shader drawn
+with each content draw's own vertices, pipeline and raster state writes **no non-black pixel over the whole 4K target** -
+with the documented-default culling and again with culling switched off. The pixel shaders' data, the clear/copy order,
+the target identity, the readback path, the viewport/scissor and the cull state are therefore not the measured reason
+the frame is black: the content geometry produces no covered fragment. The remaining candidate is the vertex stage's own
+transform, whose falsifier and the arms run so far are named in 17.6.**
+
+### 17.1 What this slice changes
+
+| file | change |
+|---|---|
+| `port/src/vulkan_replay.h` | `PALMETTO_CONTENT_PROBE` and `PALMETTO_CONTENT_PROBE_DRAWS`: the pure arming helpers `content_probe_enabled_from` / `content_probe_draw_limit_from` / `content_probe_arms`, a bounded per-draw row for every armed content draw (`content probe: draw`), and `content_submission()`, the command table of each content submission (bounded to three) with the per-command fields and the ordered writers of every draw target. The per-draw diagnostics the replay already had (colour path, vertex path, sampled tables) now arm on the content window's draws as well as on a `PALMETTO_READBACK_AT_DRAW` index; `armed_submission` arms the window's first three submissions at draw ordinals 0, 1 and 2, so the PS-only control measures a different one of the frame's three passes in each submission |
+| `port/src/vulkan_backend.h` | the content-window read once per submission (`title_import_capture_active`), the `content_submission()` call and the PS-only control's content-window arming |
+| `port/test/frame_dump_test.cpp` | 14 checks: the content-probe enable value (unset/empty/zero/one), the arming truth table (probe off, outside the window, first draw, last draw inside the bound, the draw at the bound, a zero bound) and the draw bound (default 9, empty, settable, capped at 12) |
+| `docs/vertex_buffer_va.md` | this section |
+
+All switches are off by default. With them unset the recorded commands, the rendered output and the default path are
+identical: the probe only reads, and the one command it can add is the off-by-default PS-only control the shim already
+builds.
+
+### 17.2 The per-draw table
+
+One content submission (boot `d2`, list 2 of its 4 command lists) holds the frame's three passes. The table is what the
+replay prepared for each draw and what the command table of 17.3 shows it emitted. Draw indices are the command dump's;
+the content-probe row for the same draws prints one higher in this arm because the PS-only control's re-prepared draw
+goes through the same prepare path (17.7 names that instrument artefact).
+
+| # | draw (s1 / s2) | title pipeline | shaders (translated corpus) | PS image samples / VS loads | colour target | draw | input | root arguments |
+|---:|---|---|---|---|---|---|---|---|
+| A | 4468 / 4471 | 0x1874ebe0770 | `fspx/lib_vs_00821` + `fspx/lib_ps_00820` | 0 / 77 | intermediate 0x18def1eef70, format 37, 3840x2160 | triangle list, 3 vertices / 1 instance | vb0 4,080 B stride 24; 3 vertices read | 2 of 32 dwords non-zero (s0/s1, the 64-bit table VA pair) |
+| B | 4469 / 4472 | 0x187538c1920 | `fspx/lib_vs_00107` + `fspx/lib_ps_00106` | 0 / 157 | intermediate 0x18def1eef70, format 37, 3840x2160 | triangle strip, 30 indices / 1 instance | u16 index buffer 393,216 B; vb0 1,179,648 B stride 16; loc0/loc1 RGBA8 4 B, loc2 R16G16B16A16 8 B; layout problems 0x0 | 2 of 32 dwords non-zero |
+| C | 4470 / 4473 | 0x187535e42c0 | `fspx/lib_vs_00823` + `fspx/lib_ps_00822` | 6 / 213 | display 0x1871d799100 (s2 0x1871d799370), format 37, 3840x2160 | triangle list, 3 vertices / 1 instance | vb0 4,080 B stride 24; 3 vertices read | 2 of 32 dwords non-zero |
+
+Every row shares the rest of the measured state: one colour target at 3840x2160, no depth attachment (pipeline depth
+format `VK_FORMAT_UNDEFINED`), viewport 3840x2160 at 0,0 with depth 0..1, scissor 0,0..3840,2160 (the whole target), a
+built host pipeline, and the fixed-function stand-in every slot-57 pipeline carries (blend off, depth/stencil off,
+back-face culling with clockwise front, triangle topology, one sample) because every fixed-function field of the
+undecoded state record is refused by name ([state_blob.md](state_blob.md)). The descriptor tables are:
+
+| # | table VA | table shape | slot 0 V# | the block the V# names | what the pull reads |
+|---:|---|---|---|---|---|
+| A | 0x1871f3ee200 | 64 slots, 0 T#, 8 data/V# slots | 0x9af210 | 96-byte raw (`32_UINT`) block | 3 of 24 dwords non-zero; the 4 dwords at block+0x20 are zero ([colour_path.md](colour_path.md)'s black-by-design constant pass) |
+| B | 0x1871f3ee1a0 | 64 slots, 0 T#, 8 data/V# slots | 0x9ae1c0 | 64-byte raw block | 12 of 16 dwords non-zero after the table pull; block+0x20 = `38000c1b ab1ffffe 00000000 b3eae81e` |
+| C | 0x1871f3ed140 | 64 slots, 1 T#, 8 data/V# slots | 0x9ad210 | 96-byte raw block | the one T# is slot 1, resolving to draw A/B's target image (the intermediate), 3840x2160 format 37 |
+
+Two more properties of the table are measured and matter below: the intermediate's own pages and draw B's vertex/index
+pages are imported from the title's memory in place at first use (the two `title pages imported at first use` spans in
+the same boot, 0x120000 and 0x60000 bytes), and the content draw's vertex bytes are non-zero and varied (component
+classes over the 16-byte record: all four components varied, 242/256 records non-zero).
+
+### 17.3 The command table of a content submission
+
+The submission's draw list in replay order (boot `d2`, submission 1; submission 2 is the same shape with different
+resource addresses). The ordered writers of each draw target are printed by the same dump and are quoted after the
+table.
+
+| # | command | what it is |
+|---:|---|---|
+| 0 | barrier | a compute-visible resource's layout pair; no content write |
+| 1 | dispatch | a 5 x 5 x 33 compute dispatch (the frame's own tile/visibility pass) with its own user data |
+| 2 | barrier | the display target, layout 31 -> 2 |
+| 3 | clear | the **display target** cleared to `0.000 0.000 0.000 0.000`, whole view, by the title |
+| 4 | barrier | the intermediate, layout 6 -> 2 |
+| 5 | barrier | the intermediate, layout 2 -> 6 |
+| 6 | barrier | the intermediate, layout 6 -> 2 |
+| 7 | draw A | sibling constant pass -> intermediate |
+| 8 | draw B | the content pass -> intermediate |
+| 9 | barrier | the intermediate, layout 2 -> 6 (render target -> shader read) |
+| 10 | draw C | compose pass, samples the intermediate -> display target |
+| - | barrier | list 3 holds one barrier returning the display target to layout 2 -> 31 |
+
+The writers: the intermediate's writers are `#7 draw`, `#8 draw` with the last writer `#8` and no write after the last
+draw; the display target's writers are `#3 clear`, `#10 draw` with the last writer `#10` and no write after the last
+draw. So nothing clears or copies either target after the draws - the display target's black is the title's own clear
+plus whatever the compose draw writes over it, and the intermediate's content is only what draws A and B write.
+
+### 17.4 The measured pixels
+
+Three boots, one binary. The content arm `c2` reads the 128x128 centre window of every armed content draw and its
+write control; the control arms `d2` and `f3` read the **whole 3840x2160 target** (8,294,400 pixels) for the frame's
+own content and again after the substituted-PS control draw (`d2` with the title's documented-default state, `f3` with
+the control's culling switched off).
+
+| arm | target | first capture | write control on the same target |
+|---|---|---:|---|
+| `c2` | intermediate, draws A and B | `mean 0 0 0, non-black 0/16,384, alpha 0/16,384` | skipped (the image is the compose draw's armed sampled input) |
+| `c2` | display, draw C | `mean 0 0 0, non-black 0/16,384, alpha 0/16,384` | `mean 51 102 204, non-black 16,384/16,384, peak 204` |
+| `c2` | the intermediate as the compose draw's sampled T# (pre-draw and post-submission copies) | `mean 0 0 0, non-black 0/16,384` | - (title texture, never modified) |
+| `d2` | the intermediate, whole target | `mean 0 0 0, non-black 0/8,294,400`, all 64 tile counts 0 | skipped (armed sampled input) |
+| `d2` | the display target, whole target, frame content | `mean 0 0 0, non-black 0/8,294,400`, all 64 tile counts 0 | skipped (armed sampled input in this arm) |
+| `d2` | the intermediate after the constant-output PS control on draw A | `mean 0 0 0, non-black 0/8,294,400`, all 64 tile counts 0 | skipped |
+| `d2` | the intermediate after the constant-output PS control on draw B | `mean 0 0 0, non-black 0/8,294,400`, all 64 tile counts 0 | skipped |
+| `f3` | the intermediate, whole target, frame content | `mean 0 0 0, non-black 0/8,294,400`, all 64 tile counts 0 | skipped |
+| `f3` | the intermediate after the constant-output PS control (culling off) on draw A | `mean 0 0 0, non-black 0/8,294,400`, all 64 tile counts 0 | skipped |
+| `f3` | the intermediate after the constant-output PS control (culling off) on draw B | `mean 0 0 0, non-black 0/8,294,400`, all 64 tile counts 0 | skipped |
+| `f3` | the display target, whole target, frame content | `mean 0 0 0, non-black 0/8,294,400`, all 64 tile counts 0 | skipped |
+
+All 12 presenter captures in `c2` read `mean rgb 0.00 0.00 0.00`. The constant-output control is the project's own
+`fs_solid` pixel shader (32 160 240, alpha 1) substituted into the armed draw's pipeline; the vertex stage, input
+layout, vertex/index buffers, counts, viewport, scissor, render target and fixed-function state are the title's own
+recorded draw (the same instrument [frame_capture.md](frame_capture.md) section 6 used to prove coverage on the loading
+frame). Its target reading back zero over the whole 4K image is the measurement this section adds: the target's
+8,294,400 pixels are copied and every one of them is zero, so the draw that produced them covered none of them.
+
+### 17.5 The black-frame verdict
+
+1. **The display target is cleared to black by the title itself**, command #3, every content submission, whole view.
+   That is a legitimate title-side clear (a background/compose clear), not a layer write, and it stays black because
+   no covered fragment of draw C lands on it.
+2. **No clear, copy or resolve writes either target after its draws.** The draw sequence of 17.3 is the complete writer
+   order; the black is not a later overwrite, and the previous slices' "written after the last draw" candidate is
+   measured negative here.
+3. **The readback path is validated on the same resource geometry.** The display target's write control reads
+   `51 102 204` over its 128x128 window in `c2`; the earlier slices' 4K format-37 controls agree. The zero is the
+   target's content, not a copy, mapping or format artefact.
+4. **The content draws produce no coverage.** The constant-output control drawn with each intermediate pass's own
+   vertices, pipeline, raster state, viewport and target writes 0 of 8,294,400 pixels for both draw A and draw B. A
+   pixel shader that outputs a constant colour and writes nothing can only be a raster result: no fragment of the
+   recorded geometry survives to the target. So the black is not the title pixel shaders' colour arithmetic, not a
+   zero blend/alpha output and not a masked/targeted wrong render target - there is no covered pixel for any of those
+   to colour. The same control with its documented-default back-face culling switched off (`f3`) also writes 0 of
+   8,294,400 pixels for both passes, so culling is not what discards the geometry: the cull axis is closed.
+5. **Why black then follows for the display.** Draw C (the compose/upscale pass, `lib_ps_00822`) samples the
+   intermediate through its only T# (slot 1), whose content reads zero (17.4), and writes over the title's own black
+   clear. Even a correctly rasterised compose pass has a black input; and with the geometry feed unproven for the
+   translated stages, draw C's own coverage is not established either.
+
+### 17.6 The remaining candidate and its falsifier
+
+The measured negative is that the content geometry does not rasterise; the candidate the measurements point at is the
+**vertex-stage feed of the translated FSPX passes**. All three passes are translated FSPX programs: the port's
+translation reads the console driver block/root arguments out of the 32-dword user-data block, the graphics stages form
+their fetches from the s0/s1 pair, and the graphics bind point's console layout (the console slots from s8) is a
+separate, opt-in feed (`PALMETTO_GRAPHICS_CONSOLE_ROOT`) that stays off by default. In this boot every content draw's
+recorded block is 2 of 32 dwords non-zero - the descriptor-table VA pair - and s8..s31 are zero, which is exactly the
+shape whose earlier A/B ([vertex_constant_feed.md](vertex_constant_feed.md) section 5) was measured on the loading
+frame, not on a content pass.
+
+Falsifier (one boot): the same arm with `PALMETTO_VERTEX_STREAM_DESCRIPTOR=1`, the documented geometry fix that
+synthesises the console driver block's vertex-stream V# from the draw's bound vertex view and emits it at s0/s1
+([vertex_path.md](vertex_path.md)), plus the PS-only control and the full-target readback. If the control then writes
+32 160 240 over the content geometry's rectangle, the missing driver-block feed is the measured cause of the zero
+coverage; if it stays at 0/8,294,400 the next one-line arm is the cull axis
+(`PALMETTO_FRAME_DUMP_PS_CONTROL_CULL_NONE`, [frame_capture.md](frame_capture.md) section 8), because the documented
+stand-in's back-face culling is the other state that can discard an otherwise-covered triangle.
+
+That first form of the falsifier was run and is **negative for the arm, not for the hypothesis**: with
+`PALMETTO_VERTEX_STREAM_DESCRIPTOR=1` two boots (`e1`, `e2`) did not reach stage 3. The geometry fix writes its
+driver blocks from the second it starts (`vertex stream descriptor: ... driver block ... (emitted at s0/s1)`), and the
+title's own state words then read garbage (from 62 s on, `init` changes from 2 to values like `1043002015` and
+`1998005352`, and `boot-media gate` likewise), with the stop an execute fault at a heap address (`e1`:
+`0x313975619e`). The fix's own page already records that it stalls the boot; the honest statement is that this arm
+cannot carry the content-window acceptance, so the feed falsifier needs an arm that changes only the substituted
+control draw and leaves the title's draw state as the default path records it.
+
+The arm that does change only the control draw is the cull axis, the other state that can discard a covered triangle:
+`PALMETTO_FRAME_DUMP_PS_CONTROL_CULL_NONE=1` rebuilds only the substituted control pipeline with back-face culling
+off, every other title field kept. That arm ran (`f3`, its third attempt) and reached the content window: the
+constant-output control with culling off writes **0 of 8,294,400 pixels** for draw A and for draw B, all 64 tiles
+zero, and the frame's own display target reads 0 of 8,294,400 as in `d2`. So the documented stand-in's winding is not
+what discards the content geometry either, and the cull axis is closed.
+
+With the pixel shader (constant-output control), the clear/copy order, the target identity, the readback path, the
+viewport/scissor and the cull state all measured negative, the remaining candidate is the **vertex stage's own
+transform**: the clip positions the translated `lib_vs_00821`/`lib_vs_00107` modules write, which are built from the
+inputs already measured above - the bound vertex/index data (non-zero, imported in place), the descriptor table's V#
+blocks (the s0/s1 pair, non-zero after the pull) and the rest of the 32-dword user-data block (30 of 32 dwords zero).
+The next falsifier is the vertex-path dump's position read at the content draws (a bounded read of the clip-position
+output or of the fetch slots the module uses) and, if a feed is missing there, the console-layout A/B
+(`PALMETTO_GRAPHICS_CONSOLE_ROOT=1`, which changes the recorded user-data block only). The driver-block form of the
+same falsifier (`PALMETTO_VERTEX_STREAM_DESCRIPTOR=1`) is named above as negative for the arm: it corrupts the title's
+own state before stage 3 in this environment, so it cannot carry the acceptance.
+
+No layer fix is made: the default path is unchanged, no measured conversion bug is named in this window yet, and the
+fix candidate above is a default-path policy decision whose acceptance this content window now makes measurable (the
+full-target control and the frame's own pixels), not a blind change.
+
+### 17.7 The boots
+
+One boot per arm, under the boot lock, the section-12 content environment (`PALMETTO_STAGE3_PUMP`, deferred compile,
+presenter captures, centre-window readback, PPM files), 300 s timeout, one binary for `c1`, `c2`, `d1` and `d2`
+(SHA-256 `9458919E3135ABBE...`). The stage-3 reach is the environmental race sections 10-16 record; the arms below that
+did not read stage 3 are tabulated so the reach is not assumed.
+
+| arm | switches added | wall | stage 3 | content window | verdict / trace t | what it measured |
+|---|---|---:|---:|---|---|---|
+| `c1` | content probe, sample, colour, vertex path | 162.7 s | 94 s | not reached | STOP `game+0x54bde92` write 0x14 | no content draw before the stop |
+| `c2` | the same | 89.7 s | 68.1 s | 2 submissions, draws 5368-5373 | STOP `game+0x515acf5` read 0x18, 85.9 s | command table, per-draw table, colour/vertex/sample dumps, 6 window readbacks and controls, 4 readback PPMs |
+| `d1` | + PS-only control, full-target readback | 83.0 s | none | not reached | STOP `game+0x28cd3cc` read | no content draw before the stop |
+| `d2` | the same | 124.5 s | 64 s | 2 submissions, draws 4468-4473 | STOP `game+0x13360a3` read -1, 121.2 s | PS-only control on draws A and B, full 4K target readbacks, colour/vertex dumps |
+| `e1` | `d2` + `PALMETTO_VERTEX_STREAM_DESCRIPTOR=1` | 89.0 s | none | not reached | STOP `0x313975619e` execute | the geometry fix writes driver blocks from 62 s and the title's own state words read garbage; no content draw before the stop |
+| `e2` | the same | (killed) | none | not reached | - | same state corruption from 68 s; the arm was stopped |
+| `f1` | `d2` with `PALMETTO_FRAME_DUMP_PS_CONTROL_CULL_NONE=1` | 89.6 s | 56 s | not reached | STOP `game+0xb87495` read | stage 3 reached, the title's state words read garbage from 66 s, no content draw before the stop |
+| `f2` | the same | 68.9 s | none | not reached | STOP `0x0` execute | no stage 3 |
+| `f3` | the same | 171.2 s | 56 s | 2 submissions, draws 4426-4433 | STOP `game+0x515acf5` read 0x18 | cull-off control on draws A and B: 0/8,294,400 each, all tiles zero; the frame's display target 0/8,294,400 |
+
+`ExecuteCommandLists` in `c2`: 5,379 accepted, 0 refused; `d2`: the same binary, 0 refused. No arm records a
+`Vulkan device was lost` line. The readback PPM files (`c2`, four 128x128 windows) are all zero where the frame drew.
+The content window holds **two** submissions in both measured arms; a third content submission did not arrive before
+the stop.
+
+### 17.8 Limits
+
+- **One to three boots per arm.** The stage-3 reach is the race sections 10-16 record (`c1` and `d1` read stage 3 but
+  stopped before the content window; the cull-off arm reached it on its third attempt; the driver-block arm corrupted
+  the title's own state in both of its attempts). The content-window measurements are three boots and two submissions
+  each.
+- **The content probe's draw index is one higher than the command dump's in PS-control arms.** The control's
+  re-prepared draw goes through the same `prepare_draw`, so it is counted by the probe (its row prints pipeline 0x2,
+  the reserved control pipeline id) and shifts the per-draw indices; the command dump's indices are the frame's own.
+- **The sample dump's V# read happens before `prepare_draw`'s page pull** and reads the pre-pull arena mirror (zeros
+  for the blocks whose pages were not yet copied this submission); the colour-path reader pulls the table first and is
+  the one that reflects what the shader sees. The two lines in the same boot differ by exactly that pull and the
+  colour-path value is the one used above.
+- **The full-target arm's write control is skipped on every captured target**, because the sampled-texture arming
+  marks the intermediate and the display target as sampled inputs in that arm; the copy path's validation is the
+  content arm's display-target control (`51 102 204`, 16,384/16,384) and the earlier slices' 4K format-37 controls.
+- **The display target's own compose coverage is not controlled.** The three ordinals covered draw A and draw B; the
+  compose draw C was never the armed control draw in these two submissions. Its input and the title's clear are
+  measured, its raster is not.
+- **The PS output arithmetic is not traced at content.** The structural reading is the earlier pages' (lib_ps_00820 and
+  lib_ps_00822); this section's claim about the pixel shaders is only the measured one - the constant-output control
+  writes nothing, so the black is not their colour result.
+- **The pixel data windows are single-boot.** The V# block values, the 2-of-32 user-data shape and the imported spans
+  are one boot's; the draw structure and the zero readbacks repeat in the second content boot (`c2` vs `d2`) and in
+  sections 10-15's five earlier content arms.
+
+### 17.9 Tests and gates
+
+- `port/test/frame_dump_test.cpp` gains 14 checks for the content-probe arming rule, its enable value and its draw
+  bound; the target exits 0.
+- Gate subset on the changed tree, all exit 0: `frame_dump_test`, `unimplemented_policy_test` (98 checks),
+  `graphics_record_test` (180 checks), `graphics_pso_test` (312 checks), `buffer_va_index_test`, `dstorage_test`
+  (224 checks), `xapu_chad_test` (87 checks), `deferred_compile_test` (18 checks), `arena_size_test`,
+  `xbox_present_test`, `xs_proxy_mock_test`; `d3d12_fence_timing_test` remains the documented pre-existing crash.
+- Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, and every
+  `tests/test_docs_*.py` check passes (the environment-variable check requires the new switches to be named in a page,
+  which this section does: `PALMETTO_CONTENT_PROBE`, `PALMETTO_CONTENT_PROBE_DRAWS`, and the reused
+  `PALMETTO_FRAME_DUMP_CONTROL_PS`, `PALMETTO_READBACK_FULL` and `PALMETTO_VERTEX_STREAM_DESCRIPTOR`).
+
+### 17.10 Attribution
+
+This section was implemented from this project's own measurements: the content-probe trigger's imports, the per-command
+and per-draw tables, the writer order, the readback and full-target pixel statistics, the PS-only control's zero
+coverage, the translated module names and the two boots above. The shader names are the shader corpus's own index names;
+the structural reading of the pixel shaders is the earlier pages' and is cited, not re-derived here. The title functions
+and the fixed-function stand-in are the earlier slices' measurements ([state_blob.md](state_blob.md),
+[frame_capture.md](frame_capture.md)). No peer code was used and no game data is added: RVAs, VAs, resource ids,
+counts, formats, viewport/scissor values and outcomes only.
