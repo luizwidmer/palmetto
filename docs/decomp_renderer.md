@@ -773,4 +773,153 @@ runtime itself prints; and the existing emulation the device documents in [d3d12
 added: RVAs, VAs, format numbers, flag words, dimensions, counts, program hashes and outcomes only.
 
 
+## 13. The Series-S arms still stop before stage 3: the loss is not the upscale shape, and this slice cannot name it
+
+**Status: measured, negative.** Section 12 left three questions: what loses the Vulkan device in the Series-S window,
+whether the shape's render-target-usage backing is what destabilises it, and whether the kind-7 branch and stage 3 can
+be made to coincide so the class-0xa question is answered. This section takes the first two to measured answers and the
+third to a bounded negative. The loss is not the shape: a control arm that never creates the Series-S shape loses the
+device the same way, and the shape's backing image is byte-identical to the UAV-only R9G9B9E5 emulation the title
+already creates. Nothing in the tree removes the fault: the validation layer cannot reach the faulting window on this
+host, and the driver's own `VK_EXT_device_fault` report crashes inside the driver when asked. Every Series-S arm still
+stops in the loading window at machine stage 2, so the class-0xa command still has no coincidence to be measured
+against, and its absence stays an absence of the executor pass rather than a skip.
+
+### 13.1 The arms
+
+Every arm is the section-12 content environment, one boot under the shared boot lock, light probe set (no
+`PALMETTO_DUMP_REGS`/`PALMETTO_FAULT_MEM`), presenter captures and centre readbacks; the Series-S arms add
+`PALMETTO_CONSOLE_TYPE=6`. All three ran the section-12 tree plus a later-reverted fault-report diagnostic: `df1` and
+`fsr9` never switch it on, `df2` does (13.4). The binary's SHA-256 starts `0896475FEEE5D0E4`. Reports, logs and
+captures stay outside the repository at D:\leonida-work\fsrstable.
+
+| arm | console type | window | wall | machine stage 3 | stop | device lost | shape creation | FSR programs | class-0xa | captures |
+|---|---|---:|---:|---|---|---|---|---:|---|---|
+| `df1` | 6 | 90 s | 90.2 s, killed | no (machine 2 at 86.4 s) | timeout | yes, ~82 s | created at 78.0 s | 0 of 29 | none | 13, black |
+| `df2` | 6 | 120 s | 55.9 s | no | `host:nvoglv64.dll+0xE86D7C` write `0x0` (the fault-report call, 13.4) | yes | created | 0 of 29 | none | - |
+| `fsr9` | 6 | 180 s | 66.9 s | no (machine 2, loading 2 since 58.0 s) | `game+0x86F981` read `0x20787463C1` | yes, ~64 s | created at ~58 s | 0 of 29 | none | 13, black |
+
+The three Series-S arms of section 12 (`fsr1`, `fsr2`, `fsr7`) stopped in the same loading window for the same reason;
+`game+0x86F981` is the pre-stage-3 family section 11.5 already measures. No arm of either section reaches machine
+stage 3 with the console answer active.
+
+### 13.2 What the loss is, and what it is not
+
+- **It is a GPU-side error in executed work.** Each detected loss is a Vulkan `VK_ERROR_DEVICE_LOST` (the layer's own
+  `[rt] replay: the Vulkan device was lost` line), and the Windows system log carries the NVIDIA driver's GPU-context
+  error (nvlddmkm event ID 153, `Error occurred on GPUID: 100`) as a pair at the same instant: `df1` at
+  12:52:39.750/12:52:41.520 inside its 90 s window, `df2` at 12:54:06/07, `fsr9` at 13:08:38/39, section 12's
+  post-reboot `ctl4` at 12:30:31/33 and `fsr7` at 12:35:59/12:36:01. That driver event is what a GPU fault or a lost
+  context logs, not what a creation refusal or a layer bookkeeping error logs; the timing also puts it in the window
+  whose submissions run the content work, not next to a refused creation.
+- **The event does not require a detected loss.** Section 11's Series-S arms `s61`/`s62` show the same driver event
+  family (11:06:13/15 and 11:07:15/17) while the layer never reported a loss, because the title's own CPU-side stop
+  came before any wait reached the GPU. The event is the GPU half of the fault; whether a boot reports it depends on
+  whether it waits afterwards.
+- **It is not the Series-S shape.** Section 12's control arm `ctl4` has no `PALMETTO_CONSOLE_TYPE`, no Series-S shape
+  line and no FidelityFX mapping, and lost the device at 12:30:31/33, stopping at a `0x0` execute. A control arm cannot
+  fault through a resource it never creates, so at least one member of this fault family is independent of the shape
+  and the console branch.
+- **It derails the boot after the fact.** `df1` lost the device at ~82 s, its own handler recorded an exception at
+  `game+0x43A6B7A` reading `0x27600000036` at 84 s, and the boot was still at machine 2 when the 90 s window killed it.
+  `fsr9` stopped at `game+0x86F981` reading `0x20787463C1` about two seconds after its loss.
+
+### 13.3 The render-target-usage hypothesis is refuted at the creation
+
+The shape's render-target flag was the section-12 change, so this slice first asked whether that flag's backing is the
+destabiliser. It cannot be, at the image level:
+
+- `texture_format` in `port/shims/d3d12_vulkan_device.cpp` serves both the Series-S shape and the UAV-only R9G9B9E5
+  texture as one `Format`: the mutable `VK_FORMAT_R32_UINT` backing with `uint_backed =
+  VK_FORMAT_E5B9G9R9_UFLOAT_PACK32`.
+- `TextureCreateInfo` then builds one `VkImageCreateInfo` for both: `TRANSFER_SRC|TRANSFER_DST`, `COLOR_ATTACHMENT`,
+  `STORAGE` and `SAMPLED`; `MUTABLE_FORMAT|EXTENDED_USAGE`; view formats `{R32_UINT, E5B9G9R9}`; one sample, one mip,
+  one layer. The render-target flag's own `COLOR_ATTACHMENT` addition is redundant: the unordered-access half already
+  adds the same usage, because the backing format (`R32_UINT`) is colour-attachment-usable on this host.
+- So "create the shape without render-target usage" removes no image usage, and the only difference the flag makes in
+  the layer is the D3D12 flag in its binding plus the render-target view refused by name. The empirical half of the
+  answer is the control arm above, which never creates the shape at all.
+
+What remains is the GPU work the boot submits after the shape is served. In all three Series-S arms the loss follows
+the shape's creation by 4-7 s (`df1` shape 78.0 s, loss ~82 s; `fsr9` shape ~58 s, loss ~64 s; section 12's `fsr7`
+shape ~48 s, loss ~55.9 s), while the control arm's loss lands in the same loading-window phase without a shape. This
+slice does not separate those two observations, and it does not claim the FSR path causes the fault.
+
+### 13.4 Two attempts to name the fault, with their measured limits
+
+**The validation layer does not reach the window.** The section-12 validation arm (`fsr3v`, `PALMETTO_VK_VALIDATION=1`,
+light, 180 s) recorded 76,128 D3D12 calls and was still at loading 1/session 0 at 178 s, printing no validation
+message. A normal boot reaches the fault window at about 144,000 calls in 57 s (about 2,500 calls/s); the validation
+arm ran at about 420 calls/s and had not entered the loading window at 180 s, so the projection to reach the window is
+past 600 s - not a bounded arm under the shared boot lock on this host.
+
+**The driver's fault report crashes the driver.** `VK_EXT_device_fault` is listed by the GPU (`deviceFault = true`,
+`deviceFaultVendorBinary = true`), so a bounded opt-in report was implemented for this slice: enable the extension and
+its `deviceFault` feature, and on the first loss ask `vkGetDeviceFaultInfoEXT` for the address and vendor infos. In
+`df2` the report call crashed inside the NVIDIA driver: `nvoglv64.dll+0xE86D7C` writing `0x0`, with the stack
+`report_device_fault` <- `VulkanContext::mark_device_lost` <- `VulkanQueue::submit` <- `execute_now` <- `execute` <-
+`ExecuteCommandLists` <- the title, symbol-resolved against this build's own PDB. This driver will not answer the
+question, and the diagnostic was reverted: the tree carries no device-fault switch.
+
+The next falsifier for this question is `VK_NV_device_diagnostic_checkpoints` (listed by the same GPU, revision 2): one
+checkpoint per submission, then `vkGetQueueCheckpointDataNV` after a loss, would name the submission that faulted even
+when the fault report cannot. It was not implemented here because a checkpoint query is one more driver call on a lost
+device, the call family that just crashed.
+
+### 13.5 The Series-S arms and the class-0xa question
+
+- **No stage 3.** `df1`, `df2` and `fsr9` are all at machine 2 with loading 2 and session 1 in their last state traces
+  (`df1` at 86.4 s with loading 2 since 78.0 s; `fsr9` at 64.0 s with loading 2 since 58.0 s). The stage-3 pump never
+  fires: the alloc watch starts at `[rt] alloc watch: waiting for machine stage 3` and stays waiting.
+- **The class-0xa command is absent, and for the honest reason.** `PALMETTO_ALLOC_WATCH` saw no stage-3 executor entry
+  in any arm, so no FORMAT KEY key 0xa, no BLOCK ALLOC of 0 bytes for the 256x1 entry and no ENTRY WRITTEN with stride
+  0. The executor pass is not reached; nothing measured says the kind-7 branch skips the command.
+- **The FSR programs stay at 0 of 29.** Each arm records 2,689 slot-67 program calls (2,680 distinct kind-6 program
+  hashes) and 0 of the 29 translated `amd_fidelityfx_upscaler_xbox` corpus hashes, with the FidelityFX DLL mapped. The
+  section-12 count is unchanged.
+- **No pixels move.** Every presenter capture in every arm is mean RGB 0.00 (13 per arm): the shape is created and
+  nothing presents through it.
+- **Goal verdict.** Stage 3 and the Series-S answer do not coincide in this slice either, so the class-0xa question
+  section 11 raised stays unanswered. The question needs an arm that survives the loading window to the stage-3
+  executor pass with `PALMETTO_CONSOLE_TYPE=6`; no such arm exists in this tree's measurements.
+
+### 13.6 Limits
+
+- **The host GPU/driver state is the limiting variable.** Every post-reboot arm that ran lost the device: section 12's
+  `ctl4` (12:29) and `fsr7` (12:35), this section's `df1` (12:51), `df2` (12:53) and `fsr9` (13:07). Before the host
+  reboot at 12:07, four arms reached machine stage 3 without a detected loss (`def3`, `s61`, `s62`, and the control
+  `ctl1` that records the class-0xa sequence) while `def1`, `def2`, `fsr1` and `fsr2` did lose it, so the pre-reboot
+  window was not clean either and the loss is not proven to come from the reboot. The samples are small on both sides
+  (five post-reboot losses, four pre-reboot survivals), so this is a variable to name, not a proven cause.
+- **The samples are small and the boot is a race.** Three Series-S arms here and three in section 12 all stop before
+  stage 3; nothing measured here shows a longer or luckier window could not reach it.
+- **The driver event has no address.** "GPU-side error" is inferred from the nvlddmkm event and the detected loss; the
+  fault address is exactly what the two attempts in 13.4 could not obtain.
+- **The binary of the arms is not the final tree.** It is the section-12 tree plus a reverted diagnostic that the arms
+  do not switch on; the Series-S creation and dispatch path they exercise is the section-12 one. No game data is added:
+  RVAs, format numbers, flag words, event IDs, counts, hashes and outcomes only.
+
+### 13.7 Tests and gates
+
+- **No code change survives this section.** The validation switch and the fault-report diagnostic were probes; the
+  diagnostic's source change is reverted, so the section is a docs-only change and the section-12 code paths are
+  untouched.
+- **Tests.** `_setup\build_gta6rt.cmd` prints `PALMETTO_OK` and `_setup\build_tests.cmd` prints `TESTS_BUILT` on this
+  tree; the 17 fast gate-relevant CTest targets (graphics_record, graphics_pso, buffer_va_index, deferred_compile, the
+  three pe_loader targets, unimplemented_policy, dstorage, the six xs_proxy_mock variants, xapu_chad and frame_dump)
+  pass, and every `tests/test_docs_*.py` check passes. The two GPU-bound gate binaries (`d3d12_fence_timing_test`,
+  `xbox_present_test`) were built but not run in this session: the host's GPU state is the measured limiting variable
+  (13.6), and another device loss was not worth risking for a docs-only change.
+- **The arms' artifacts** (reports, logs, captures) stay outside the repository at D:\leonida-work\fsrstable; the
+  uncommitted files at the end of the slice are this page and the parallel movie probe's `port/src/main.cpp` changes,
+  which are not this section's.
+
+### 13.8 Attribution
+
+This section was implemented from this project's own measurements: the boot logs of the arms above, the Windows
+system log's NVIDIA driver events, the crash stacks symbol-resolved against this build's PDB, and the device code the
+section-12 page already documents. The Vulkan feature names (`VK_EXT_device_fault`,
+`VK_NV_device_diagnostic_checkpoints`) and their query calls are the Vulkan specification's, not a peer project's. No
+peer code was used and no game data is added: RVAs, format numbers, flag words, dimensions, counts, program hashes and
+outcomes only.
 
