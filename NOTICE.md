@@ -63,6 +63,16 @@ untime/shims/d3d12_xs_pso_stream.* and the translator work at commits db19bbd34 
 (Moriz82) and 154e4ec03 (Jan Trencansky), plus the peer ports' published stage tables. No code is copied; the stream
 builder and the recorded shapes are our own measurements.
 
+### Peer-port first-visible-frame evidence (reference only)
+
+The first-visible-frame research ([docs/first_visible.md](docs/first_visible.md)) read the public peers' status pages,
+READMEs and docs as evidence of behaviour: five-star-recomp (GPL-3.0-or-later, clone `0bfa755`), XCL (GPL-2.0-only,
+clone `6d12f58`), PercyScarlett (GPL-2.0-only, clone `e44c465`), VIctory (GPL-3.0-or-later, clone `13f91ca`),
+victory-fork (GPL-3.0-or-later, clone `9c184b3`), and the public tracker at
+<https://vuyp.github.io/gta6-pc-race/>. No code, comment text, identifier table or measurement table from those projects
+is copied into this repository; the page quotes short public status sentences as evidence and maps them to this
+project's own measurements. Those projects remain the copyright of their contributors under their own licences.
+
 ### Root-signature packing evidence (reference only)
 
 The root-signature packing slice ([docs/root_packing.md](docs/root_packing.md)) cross-checked the directly-indexed heap and
