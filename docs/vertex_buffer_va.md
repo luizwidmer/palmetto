@@ -706,3 +706,232 @@ This section was implemented from this project's own measurements: the int3 arms
 the executor disassembly at the four sites above, the fault registers and memory, the two pacing arms and the readbacks.
 The stop sites and the executor were decompiled with the project's Ghidra tooling from the user's own image; no peer code
 was used and no game data is added. RVAs, VAs, field offsets, register values, counts, shapes and outcomes only.
+
+## 13. The writer is a host-CRT fill of 1.0f over the live job, on the executor thread; the prewarm knob leaves one submit stall; the later content frames are still black
+
+**Status: measured. The writer is named.** Section 12 left three open items: its data points were armed from inside the
+int3 handler with `GetThreadContext`/`SetThreadContext` on the current thread and never fired (not even the job's
+`+0x40` state dword), the arm had no live same-boot control, and the stage-3 content frame was only read where the
+section-10 trigger armed it. This section corrects the arming method, proves it with a same-pass control in the
+executor thread in the same boot, catches the store that replaces the job's vtable - **a host-CRT `memcpy` of a
+1.0f block executed by the executor thread itself, 2 ms after the stage-3 entry** - excludes an alias or GPU import
+for that page in the captured boot, measures the deferred-compile submit-wait knob (the wait count collapses, the one
+real driver build does not), reads three content submissions instead of two, and serialises only at the content
+boundary. The boot still stops in the same title-side family and the content stays black at every later capture.
+Counts, RVAs, VAs, module names and register values only; no game data and no package paths.
+
+### 13.1 What this slice changes
+
+| file | change |
+|---|---|
+| `port/src/main.cpp` | `PALMETTO_WRITER_WATCH` v2: the four write points are armed in the exception's own `CONTEXT` record (the one `NtContinue` restores) instead of a `SetThreadContext` on the current thread; at machine stage 3, DR1/DR2 become a **same-pass control** on the graph lock word the executor's first call writes (`graph+0x18`, `graph+0x20`) and DR3 keeps the job state dword; the every-thread sweep arms the job's first qword in every thread with no per-thread creation-window guard, its first round delayed 1500 ms (`PALMETTO_WRITER_SWEEP_DELAY_MS`; `PALMETTO_WRITER_SWEEP=0` disables it) after the undelayed arm moved the stop out of the vtable window; a 1 ms poller dates the first-qword change; the stage-3 entry prints the job page's mapping, the loaded modules' bases and names, and every writer line resolves the storing RIP through `rt::shims::module_offset` |
+| `port/src/vulkan_backend.h` | `PALMETTO_READBACK_AFTER=<n>` widens the section-10 content-capture window (`palmetto::title_import_capture_window_from`, default 3, bounded 512); `PALMETTO_PACE_CONTENT=1` is a third pacing knob that drains the queue only after a submission inside that window; both mappings are pure and tested |
+| `port/src/deferred_compile.h` | `CompileQueue` takes a `newest_first` order: the workers take the newest queued build, so a pipeline the title creates immediately before naming it is compiled before older queued builds |
+| `port/shims/d3d12_vulkan_device.cpp` | `PALMETTO_PIPELINE_PREWARM=1`: the compile queue runs newest-first and the submit path treats a deferred task the worker already finished as prebuilt instead of counting a submit wait. The deferred switch (`PALMETTO_PIPELINE_DEFER_COMPILE`) is still the only way in; the default order and counters are unchanged |
+| `port/test/frame_dump_test.cpp` | the pacing truth table gains the content-boundary knob; the readback-window mapping is pinned (default, empty, "0", a value, the bound) |
+| `port/test/deferred_compile_test.cpp` | the newest-first order against the default FIFO order (one blocked worker, two queued tasks: the newest runs first only under the prewarm order) |
+
+All switches are off by default. No layer call is changed when they are unset.
+
+### 13.2 The method correction, with the same-boot control
+
+Section 12 armed from inside the handler and read silence; this slice arms the *exception context* that the handler
+returns with, and the same boots show the difference on a control that must fire. The loading-phase job state dword
+`+0x40` (the caller stores 2 after a returning pass) fired **both** times it was armed this way
+(`game+0x186435`, value after `0xc0010100000002`), which section 12 never observed with its method. At stage 3 the
+same-pass control is stronger: the executor's first call after its two entry virtual calls is the graph lock helper on
+`graph+0x18`, and its write fired in the executor thread in the same pass as the job-first-qword point.
+
+| arm | points armed in the executor thread | loading-phase state control | stage-3 same-pass control | every-thread sweep |
+|---|---|---|---|---|
+| `boot-s13-w` (no sweep delay) | object[0], graph+0x18, graph+0x20, job+0x40 | fired 2x | **fired 2x** (`game+0x4ba0`, value after `0x7e9800000001`) | 104/104 threads armed, 0 failed |
+| `boot-s13-we` (sweep delayed 1500 ms) | the same four | fired 2x | **fired 1x** (`game+0x4ba0`, value after `0x7e0c00000001`) | 104/104 threads armed, 0 failed, first round after the hit |
+| `boot-s13-wi` (no writer watch, the plain default) | none | - | - | - |
+
+The evidence that the section-12 arm was the failure and this one is live is therefore in the same boot as the job
+point, which is what section 12 said its negative lacked.
+
+**The observer effect, named.** With the sweep's first round at the stage-3 entry, both writer boots that reached
+stage 3 stopped outside the object-vtable window (`0x515acf5`, read `0x18`, inside the allocator path the same
+executor pass calls), while a boot with no writer probe stopped at `0x13360a3` at the same stage-3 second (64.7 s).
+The sweep suspends every thread once, so its first round is now 1500 ms after the entry; the hit boot then reached
+`0x13360a3` and the store was measured at +2 ms - before the sweep - in the executor thread itself, whose four points
+were armed from the entry. The sweep's contribution is the non-hit boots' negative: no other thread was measured
+making the store.
+
+### 13.3 The writer, named
+
+`boot-s13-we` (trace t, same binary `00D83662...`): stage 3 at 52.2 s, executor entry at steady t `97842.450`, the
+same-pass control at `97842.466`, and then
+
+```
+[rt] writer watch t=97842.467 OBJECT VTABLE WRITER hit 4 slot 0 tid 32268 writer 0x7ff95435cd56 value after 0x3f8000003f800000 machine stage 3 job 0x2ea1833e440
+  bytes before writer rip: c5 fd 7f 99 c0 00 00 00 c5 fd 7f a1 e0 00 00 00
+  rax 2ea1833d550 rbx 2ea1833d550 rcx 2ea1833e360 rdx e51b1fea20 rsi 0 rdi 2ea17680f40 r8 1f0 r9 fffffffffffffff0
+[rt] writer watch t=97842.472 POLLER: object first qword changed ... was game+0x658da80 now 0x3f8000003f800000
+[rt] writer watch t=97842.472 job state writer (control) hit 5 slot 3 tid 32268 writer 0x7ff95435cdbd value after 0x3f8000003f800000
+```
+
+- `tid 32268` is the executor thread; the trap is the DR0 point armed in that same pass, and the poller confirms the
+  change at the same tick.
+- The 16 bytes before RIP are a complete instruction pair: `vmovdqu ymm3,[rcx+0xC0]` then `vmovdqu ymm4,[rcx+0xE0]`.
+  `RCX = 0x2ea1833e360`, so `RCX+0xE0 = 0x2ea1833e440` is the job: the store that replaced the vtable is a 32-byte
+  AVX store of `ymm4`. The state control at `job+0x40` is hit `0x67` bytes later in the same loop with the same
+  value, i.e. the loop covers the job object.
+- The writing module is named by that byte pair: it is byte-identical to the code at RVA `0x1cd46..0x1cd55` of the
+  host CRT `vcruntime140.dll` (the `memcpy`/`memmove` 256-byte unrolled AVX copy loop: `vmovdqu ymm1..4,[rdx+...]`,
+  `vmovdqa [rcx+...],ymm1..4`, `add rcx,100h`). The implied image base is `0x7ff954340000`, a 64 KiB-aligned module
+  base, and `VCRUNTIME140.dll` loads at exactly that base in this host's module table (`boot-s13-wg`); module bases on
+  this host were measured stable across two processes (`vcruntime140.dll` and `ucrtbase.dll` at the same bases in both
+  runs), so the storing instruction is `vcruntime140.dll+0x1cd56`.
+- The copy's source is `RDX+0xE0` with `RDX = 0xe51b1fea20` - the executor thread's own stack - so the block copied
+  into the job is a **stack-local all-1.0f constant block**: the job's first qword, `job+0x40` and the intervening
+  qwords all become `0x3f800000`. That is the same `float4(1,1,1,0)`-family constant block section 10 measured in the
+  fault dump, now measured at the store that writes it.
+
+Plain answer to "who corrupts the renderer job": **title-side code on the executor thread itself, via the host CRT's
+`memcpy`, copies a 1.0f constant block over a command object the executor still holds**. The job's block is live and
+the new `memcpy` destination overlaps it (a freed-and-reused command block, or a size/pointer that reaches the live
+one); the store is not the layer's. `palmetto.exe` does not contain the instruction pair (byte scan of the built
+image: 0 hits), the copy's source is the title thread's stack, and the writing instruction is inside the host CRT.
+
+### 13.4 Alias and GPU-import test for the same page
+
+- The job page is `MEM_COMMIT`, `MEM_PRIVATE`, `PAGE_READWRITE`, `file-backed no`, inside the title heap's private
+  reservation (`region allocation 1ce63a00000 size 212c9000 type 0x20000 protect 0x4`), so no section or image maps
+  it and there is no file-backed alias of the page.
+- The boot's title-page imports are two ranges, `VA 0x2e922c00800 + 0x120000` and `VA 0x2e922d20880 + 0x60000`; the
+  job at `0x2ea1833e440` is in neither, so the layer did not import this page as a host-pointer Vulkan buffer and a
+  driver/GPU write into it is not the mechanism in this boot.
+- And the store itself was measured on the CPU by a debug register, so the mechanism is a user-mode host-CRT store,
+  not a DMA fill.
+
+The capture above is from the build before the module resolver was added (`00D83662...`); the later build prints the writer RIP as a module+offset, and it compiled and printed the module table at stage 3 in `boot-s13-wg`, but that boot did not hit the vtable store, so the resolved label has not yet been observed firing. The limit: the `memcpy` caller is not named. The title-image stack scan found no main-image frame (`(none)`), and
+the scan filters to the main image only, so a caller in one of the title's mapped DLLs would not be printed; the
+executor thread's own points were live, so the caller is on the executor thread, but which title function called
+`memcpy` is the next falsifier.
+
+### 13.5 The deferred-compile submit waits, removed as a knob
+
+The section-12 environment defers compute-pipeline compilation (4 workers, bound 4,096, 2,742 submissions, ~2,420
+pending). Every submission that names a deferred pipeline first waits for it. In the default arm the submit counter
+reports 163 waits, of which one is a driver build (498.7 ms) and the rest are ~15-20 us checks of tasks already
+finished. The knob is `PALMETTO_PIPELINE_PREWARM=1` with `PALMETTO_PIPELINE_COMPILE_WORKERS=8`: the queue serves the
+newest build first and a finished task is not counted as a wait.
+
+| measurement | default, 4 workers (`boot-s13-wi`) | prewarm + 8 workers (`boot-s13-pre`) |
+|---|---:|---:|
+| verdict | STOP `game+0x13360a3` read -1, trace t 69.02 s | STOP `game+0x13360a3` read -1, trace t 60.70 s |
+| stage 3 (machine current 3) | 64.7 s | 57.0 s |
+| deferred: submitted / built / pending | 2,742 / 317 / 2,425 of 4,096 | 2,742 / 167 / 2,575 of 4,096 |
+| submit waits / max single | **163 / 498.7 ms** | **1 / 585.8 ms** |
+| content submissions / draws | 2 / 6 | 2 / 6 |
+| content-frame first capture per target | `0 0 0`, 0/16,384 | `0 0 0`, 0/16,384 |
+| write control on the same target | `51 102 204`, 16,384/16,384, peak 204 | `51 102 204`, 16,384/16,384, peak 204 |
+| presenter captures / pixels | 12, every mean rgb 0.00 | 10, every mean rgb 0.00 |
+| device-lost lines | 0 | 0 |
+
+So the knob removes the 162 cheap submit-side queue checks but **not the one real driver build**: the pipeline the
+stage-3 submission names is created in the same burst the title is submitting from, so the newest-first worker cannot
+finish it before the submission. The remaining stall is 585.8 ms, ~87 ms longer than the default arm's single build
+(different boot, one sample). The race is therefore not caused by the wait *count*, and the wait *stall* remains:
+the next lever would have to build at the recording site (out of this slice's files), not in the compile queue. The
+default path is untouched; the knob is opt-in and reports honestly.
+
+### 13.6 The later content frames
+
+The section-10 trigger arms the import submission and the next two; both measured content submissions were captured
+from it (`boot-s13-wi`: draws 5204, 5206, 5209, six draws). `PALMETTO_READBACK_AFTER=64` widened the window and the
+same boot's content arrived in **three** submissions:
+
+| measurement | `boot-s13-wi` (window 3) | `boot-s13-late2` (window 64, prewarm) | `boot-s13-pace` (window 64, `PALMETTO_PACE_CONTENT=1`) |
+|---|---:|---:|---:|
+| stop | `game+0x13360a3`, t 69.02 s | `game+0x1335dcb`, t 60.69 s | `game+0x1335dcb`, t 60.89 s |
+| stage 3 | 64.7 s | 57.3 s | 57.3 s |
+| content submissions / captured draws | 2 / 6 | **3 / 9** | **3 / 9** |
+| first capture per distinct target | `0 0 0` (3 targets) | `0 0 0` (3 targets) | `0 0 0` (3 targets) |
+| later capture of the same target | `51 102 204` (the within-boot artefact) | `51 102 204` | `51 102 204` |
+| write control on every capture | `51 102 204`, 16,384/16,384, peak 204 | the same | the same |
+| readback PPM files | 4 | 9 | 9 |
+| content-boundary drains / cost | - | - | 6, 19-63 us each (the queue was already idle) |
+| presenters | 2,612 presents, 12 captures, all black | 1,730 presents, 9 captures, all black | 2,358 presents, 12 captures, all black |
+
+Every later content submission's first capture of each distinct target is still all-zero; the only non-zero value a
+later capture holds is the layer's own write-control colour, which the instrument clears the target to after a
+capture (the named in-window artefact of section 10.2) - no title pixel is measured at any later content point. The
+content-boundary drain moves the stop to the other call in the same executor (`0x1335dcb`) and lets the boot live
+only ~3.6 s past stage 3, with the same number of content submissions as the window alone, so it does not serialise
+the race away.
+
+**Answer to the picture question:** within the stage-3 window the black is the frame the title draws, not a first
+transition frame that later opens: three separate content submissions, up to 9 readbacks and 9 written windows, and
+every first-capture texel is zero (or the layer's own control colour). The boot does not reach a fourth content
+submission or a later stage, so nothing here says the title's picture stays black forever; it says no non-black
+content frame exists in this window.
+
+### 13.7 The boots
+
+One boot per arm, under the boot lock, the section-12 content environment plus the arm's switches, 300 s timeout, one
+binary per build group. All stop with 0xC0000005; no arm lost the device.
+
+| arm | binary sha256 (first 16) | wall | stage 3 | stop / trace t | imports | content readbacks | deferred waits / max | present captures |
+|---|---|---:|---:|---|---:|---:|---:|---:|
+| `boot-s13-wi` default | `A7F0F57496FAAF25` | 95.9 s | 64.7 s | `0x13360a3` read -1, 69.02 s | 2 | 6 black | 163 / 498.7 ms | 12 black |
+| `boot-s13-w` writer v2, no sweep delay | `10C4825D04BBCDC3` | 113.6 s | 81.2 s | `0x515acf5` read `0x18`, 86.41 s | 2 | 6 black | 95 / 506.5 ms | 11 black |
+| `boot-s13-we` writer v2, sweep at +1500 ms | `00D83662ECD4824E` | 82.2 s | 52.2 s | `0x13360a3` read -1, 55.68 s | 2 | 6 black | 144 / 480.7 ms | 9 black |
+| `boot-s13-pre` prewarm + 8 workers | `761488B015B6E497` | 80.2 s | 57.0 s | `0x13360a3` read -1, 60.70 s | 2 | 6 black | **1 / 585.8 ms** | 10 black |
+| `boot-s13-late2` window 64 + prewarm | `761488B015B6E497` | 74.1 s | 57.3 s | `0x1335dcb` read -1, 60.69 s | 2 | 9, firsts black | 1 / 652.3 ms | 9 black |
+| `boot-s13-pace` window 64 + content drain | `761488B015B6E497` | 87.1 s | 57.3 s | `0x1335dcb` read -1, 60.89 s | 2 | 9, firsts black | 150 / 508.6 ms | 12 black |
+
+The plain default arm (`boot-s13-wi`, sha `A7F0F574...`) is the section-13 control: 172,512 D3D12 calls, 4,096
+submissions by 39.1 s, state words init 3 / loading 2 / session 3 and machine current 3 next 3 at the stop - the
+furthest the title gets is unchanged. Its binary is an earlier build than the later arms; the only code difference is
+inside the writer probe, which is off in this arm, and the pure-knob code the default path does not enter. Boots that
+never reached the stage-3 executor entry (`boot-s13-wb`, `boot-s13-wd`, `boot-s13-wf`) are not evidence for the
+writer and are not tabulated; their failure is the same environment variance sections 10-12 recorded, and the writer
+arms' stop distribution (two `0x515acf5`, one `0x13360a3`, one `0x1335dcb`) matches the family section 10.3 already
+measured across the arena A/B. The two writer arms that reached stage 3 without a vtable hit (`boot-s13-wc`,
+`boot-s13-wg`) are the non-hit samples behind the negative that no other armed thread was measured storing.
+
+### 13.8 Limits and the next falsifier
+
+- **One boot per arm.** Stage 3 ranged 52.2-81.2 s across the arms and the stop moved within the family; the
+  writer catch is one boot and the content windows are one boot each.
+- **The `memcpy` caller is unnamed.** The next falsifier is the same arm with the writer stack scanned with
+  `RtlVirtualUnwind` and every frame resolved by module (main image, game DLLs, host modules), armed before the +2 ms
+  store; that names the title function that copies the 1.0f block, and the block's source and length.
+- **The module base confirmation is cross-boot.** The byte-exact RVA match and the aligned module base agree on
+  `vcruntime140.dll+0x1cd56`; the module table that shows the base is another boot's, so the next writer catch should
+  print the module table into the same log line (the probe now does).
+- **The content window perturbs.** Every armed submission is followed by a queue drain and a control clear, so the
+  window arm's stop moved to `0x1335dcb`; the black pixels are still measured under a synchronisation the title's
+  console does not have.
+- **No later stage.** Stage 4 is not reached in any arm, so "the picture stays black" is a statement about this
+  window only.
+- **The prewarm knob is not console-faithful and does not remove the stall.** It is opt-in and the default is
+  unchanged; a real no-wait arm needs the build at the recording site.
+
+### 13.9 Tests and gates
+
+- `port/test/frame_dump_test.cpp` gains the content-boundary pacing row (own knob, all others off) and five checks
+  for `palmetto::title_import_capture_window_from` (default 3, empty, "0", a value, the 512 bound); the target exits
+  0.
+- `port/test/deferred_compile_test.cpp` gains the newest-first order check (default FIFO runs the oldest queued build
+  first; the prewarm order runs the newest), and the target exits 0 with 18 checks.
+- Gate subset on the changed tree: `frame_dump_test`, `deferred_compile_test`, `unimplemented_policy_test`,
+  `graphics_record_test`, `graphics_pso_test`, `buffer_va_index_test`, `dstorage_test`, `xapu_chad_test`,
+  `arena_size_test`, `xbox_present_test` and `xs_proxy_mock_test` all exit 0; `d3d12_fence_timing_test` remains the
+  documented pre-existing crash.
+- Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, and every
+  `tests/test_docs_*.py` check passes (the environment-variable check requires the new switches to be named in a page,
+  which this section does: `PALMETTO_WRITER_SWEEP`, `PALMETTO_WRITER_SWEEP_DELAY_MS`, `PALMETTO_READBACK_AFTER`,
+  `PALMETTO_PACE_CONTENT` and `PALMETTO_PIPELINE_PREWARM`).
+
+### 13.10 Attribution
+
+This section was implemented from this project's own measurements: the context-record arming, the same-pass control,
+the every-thread sweep and its delay, the 1 ms poller, the module table and the `vcruntime140.dll` byte match, the
+prewarm arm, the widened content window, the content-boundary drain and the boots named above. The executor, the job
+layout, the graph lock helper and the stop sites were decompiled with the project's Ghidra tooling from the user's own
+image; the host CRT instruction pair was re-read from the system's own `vcruntime140.dll`. No peer code was used and no
+game data is added. RVAs, VAs, field offsets, register values, module names, counts and outcomes only.

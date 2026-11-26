@@ -1479,6 +1479,21 @@ inline std::size_t pipeline_compile_queue_bound() {
     return bound;
 }
 
+// PALMETTO_PIPELINE_PREWARM=1 (docs/vertex_buffer_va.md section 13): the deferred compile queue serves the newest
+// queued build first and the submit path knows a deferred pipeline the worker already finished, so a pipeline the
+// title created just before naming it is ready before the submission instead of stalling it. The deferred switch is
+// still the only way in (PALMETTO_PIPELINE_DEFER_COMPILE); this only changes the order the queue's workers take and
+// the counter's meaning. Off by default: the default order and counters are the measured FIFO arm.
+inline bool pipeline_prewarm_enabled() {
+    static const bool enabled = [] {
+        char value[8] = {};
+        size_t length = 0;
+        if (getenv_s(&length, value, "PALMETTO_PIPELINE_PREWARM") != 0 || length <= 1) return false;
+        return value[0] != '0';
+    }();
+    return enabled;
+}
+
 // PALMETTO_PIPELINE_CALL_STATS=<seconds>: a per-thread report of who enters pipeline creation and how long each caller
 // spends inside the driver's vkCreate*Pipelines call, every <seconds> (default 5, off when unset or "0"). Measurement
 // only: off is the default path exactly.
@@ -1544,7 +1559,7 @@ inline double pipeline_call_stats_interval_s() {
     // docs/deferred_compile.md: off-thread compute-pipeline compilation. The queue is bounded and its workers start on
     // the first deferred creation; the map holds the task per PSO id, so the submission path can find (and wait for)
     // the pipeline a list names. The counters answer "who blocks in pipeline creation and for how long".
-    palmetto::CompileQueue compile_queue{pipeline_compile_queue_bound()};
+    palmetto::CompileQueue compile_queue{pipeline_compile_queue_bound(), pipeline_prewarm_enabled()};
     std::atomic<bool> compile_queue_started{false};
     std::mutex deferred_compute_mutex;
     std::unordered_map<std::uintptr_t, std::shared_ptr<palmetto::CompileQueue::Task>> deferred_compute_tasks;
@@ -7372,6 +7387,14 @@ void DeviceState::prepare_deferred_compute_pipelines(std::span<const palmetto::C
                 if (it != deferred_compute_tasks.end()) task = it->second;
             }
             if (!task) continue;  // not deferred: the replay map already holds its handle
+            // Prewarm (docs/vertex_buffer_va.md section 13): with the newest-first queue the worker has already built
+            // the pipeline this submission names, so no submit-thread wait happens. A finished task is not counted as
+            // a wait; the queue's own counters still record the build.
+            if (pipeline_prewarm_enabled() &&
+                task->state() == palmetto::CompileQueue::Task::State::done) {
+                deferred_built_count.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
             const double started = palmetto::timeline::seconds();
             const bool built = compile_queue.wait_or_build(task);
             palmetto::timeline::line("compile wait submit built=%d us=%.0f", built ? 1 : 0,

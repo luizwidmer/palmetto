@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <exception>
 #include <filesystem>
 #include <chrono>
@@ -1863,50 +1864,64 @@ void start_title_write_watch(std::uintptr_t image_base, std::size_t image_size) 
 }
 
 // ---- Renderer writer watch (PALMETTO_WRITER_WATCH) ---------------------------------------------------------------
-// docs/vertex_buffer_va.md section 12. Section 11 armed its int3 on the executor entry while PALMETTO_EXECUTOR_WATCH
-// armed a hardware execution breakpoint at the same linear address; the measured result was that the int3 never
-// trapped while the hardware breakpoint at the identical address fired 51,097 times, and a control int3 at another
-// address trapped normally in the same environment. The hardware fault is a debug fault, and the resume path sets
-// EFLAGS.RF, which makes the processor ignore the debug exception of the next instruction (the INT3). The two routes
-// therefore cannot share an address: this probe arms no debug register at its site, and section 12 measures the int3
-// trap that way (2 executor entries in the first 19 s, and in every later arm).
+// docs/vertex_buffer_va.md section 13. Section 12 armed four hardware write points from inside the int3 handler with
+// GetThreadContext/SetThreadContext on the current thread and never saw a store - not even the job's +0x40 state
+// dword that the job executor stores after a returning pass. Two measurements here correct that arm before its
+// silence is read as "no writer":
 //
-// It also corrects section 11's object. The executor's own disassembly begins
-//   game+0x1335A4E  MOV RAX,qword ptr [RCX] ; CALL qword ptr [RAX+0x28]
-//   game+0x1335A51  MOV RSI,RCX
-// and the stop's call is
-//   game+0x133609A  MOV RAX,qword ptr [RSI] ; MOV RCX,RSI ; CALL qword ptr [RAX+0xB0]
-// so the object whose vtable the executor virtual-calls through is its argument itself: RCX at the entry, kept in RSI
-// for the whole function. The stop's RAX = 0x3F8000003F800000 is that object's first qword. Section 11 watched
-// *(*(RCX+0x28)+0x10) (the graph's +0x10) instead, a different object, which is why no store ever appeared on it.
+//  * the points are armed in the exception's own CONTEXT record (Dr0..Dr3, Dr6 = 0, Dr7), which is the context
+//    NtContinue restores when the handler returns EXCEPTION_CONTINUE_EXECUTION. That is the context the title's code
+//    resumes with; a SetThreadContext on the current thread from inside the handler is a different object and section
+//    12 never proved the two agree.
+//  * the four points now include a SAME-PASS CONTROL on title heap memory the executor definitely writes: after the
+//    entry's two virtual calls it calls the graph lock helper on [job+0x28]+0x18 (game+0x1335AE6 -> FUN_14515adb0
+//    with lVar11 = graph+0x18), so DR1/DR2 watch graph+0x18 and graph+0x20 aligned down and their #DB proves the data
+//    points are live in this thread, in this pass, in the same boot as the object-first-qword point. The same-pass
+//    control is armed only when the machine stage reads 3 (the measured content window); before that the arm is the
+//    section-12 one (object[0], graph field +0x28, state +0x40, referenced field +0x30).
 //
-//  * an int3 over the entry, re-written on the single-step after each pass. RCX = the job/command object; the probe
-//    logs its first sight (first qword, the state dword at +0x40 the job executor compares with 3, the graph at
-//    +0x28, the object's region) and the machine stage word (the state machine object's current stage at +0x10), so
-//    a stage-3 entry is distinguishable from a loading-phase one;
-//  * four hardware data write points in the executor thread itself, set from the entry through
-//    GetThreadContext(GetCurrentThread())/SetThreadContext(GetCurrentThread()) - no thread is suspended: DR0 the
-//    object's first qword (the vtable the stop calls through), DR1 the graph field at +0x28, DR2 the state dword at
-//    +0x40 (the caller writes it after every pass, so its #DB proves the points are live in this thread) and DR3 the
-//    referenced field at +0x30. Every store to any of the four traps after it executed and is logged with the
-//    writer's thread, instruction, bytes, registers, title stack and the value the store left;
-//  * per-object first-qword history: a vtable that changed between two passes is logged with its tick.
+// The writer search itself is unchanged in what it looks for and wider in where it looks:
+//  * DR0 is the job first qword (the vtable the stop later calls through) and the pass's first-qword change is
+//    printed with both values and the steady tick;
+//  * when the machine word first reads 3, a sweep arms the job's first qword in EVERY thread of the process the
+//    moment it sees it - no creation-window guard, no per-thread delay: a thread created after the first round is
+//    armed on the round that first sees it, and every arm logs its thread id. Its first round is delayed 1500 ms
+//    (PALMETTO_WRITER_SWEEP_DELAY_MS; PALMETTO_WRITER_SWEEP=0 disables it): the undelayed arm moved a stage-3 boot of
+//    the same second from the object-vtable window into the allocator window, and the measured stop is 2-8 s after the
+//    entry. The executor thread is skipped there because its four points are armed from the entry;
+//  * the stage-3 entry also names the job page's mapping (VirtualQuery allocation/state/type/protect and whether a
+//    file section maps there - never the file name, which is game data), the process's loaded modules with their bases
+//    and base names, and starts a 1 ms poller that prints the tick at which the first qword changes. The writer line
+//    resolves the storing RIP through rt::shims::module_offset, so the store that replaces the vtable is named with
+//    its host module and offset, not only its raw address;
+//  * the layer imports title pages as VK_EXT_external_memory_host buffers with write usage (d3d12_vulkan_device.cpp,
+//    import_title_pages), so a GPU write into an imported page is the one non-CPU producer this probe cannot see with
+//    a debug register. The page's mapping and the boot's own "title pages imported at first use" lines are the test:
+//    a MEM_PRIVATE page no import names excludes that path in the doc, and a page an import names does not.
 //
-// Off unless PALMETTO_WRITER_WATCH is set; =<rva> overrides the entry site. RVAs, field offsets, counts and register
-// values only; no game data.
+// Off unless PALMETTO_WRITER_WATCH is set; =<rva> overrides the entry site. PALMETTO_WRITER_SWEEP=0 disables the
+// every-thread arm. RVAs, field offsets, counts and register values only; no game data.
 constexpr std::uint32_t kWriterWatchStateMachineRva = 0x71273C8;  // kTitleStateMachineRva below: the same global
+constexpr std::uint32_t kWriterWatchEntryRva = 0x1335A20;         // the per-command renderer executor
 
 struct WriterWatch {
     std::atomic<std::uintptr_t> entry{0};
     std::atomic<unsigned char> original_byte{0};
     std::atomic<std::uintptr_t> job{0};          // the object the executor calls through (RCX at the entry)
-    std::atomic<std::uintptr_t> armed_job{0};    // the job whose four write points are armed in this thread
-    std::atomic<std::uintptr_t> job_first{0};     // the job's first qword as last seen at an entry
-    std::atomic<std::uintptr_t> sweep_job{0};    // once a stage-3 entry names a job, its write point is armed in every thread
-    std::atomic<unsigned> sweep_threads{0};      // threads the sweep has configured with a point
-    std::atomic<unsigned> sweep_passes{0};
+    std::atomic<std::uintptr_t> armed_job{0};    // the job whose four points are armed in the executor thread
+    std::atomic<std::uint64_t> job_first{0};     // the job's first qword as last seen at an entry
+    std::atomic<std::uintptr_t> graph{0};        // *(job+0x28) at the stage-3 entry, the same-pass control's base
+    // The four points as armed: the address (0 = slot unused) and what it means (kind: 0 object first qword,
+    // 1/2 graph same-pass control, 3 job state control).
+    std::atomic<std::uintptr_t> point[4]{};
+    std::atomic<unsigned> point_kind[4]{};
     std::atomic<unsigned> entries{0}, logged{0}, job_changes{0}, data_points_armed{0};
-    std::atomic<unsigned> writes{0}, vtable_writes{0}, state_writes{0}, other_writes{0};
+    std::atomic<unsigned> writes{0}, vtable_writes{0}, state_writes{0}, graph_control_writes{0}, other_writes{0};
+    std::atomic<unsigned> same_pass_control_hits{0};
+    std::atomic<unsigned> sweep_seen{0}, sweep_armed{0}, sweep_skipped{0}, sweep_failed{0};
+    std::atomic<unsigned> poller_changes{0};
+    std::atomic<unsigned> executor_tid{0};
+    std::atomic<bool> stage3_entry{false};
 };
 
 WriterWatch& writer_watch() {
@@ -1914,7 +1929,20 @@ WriterWatch& writer_watch() {
     return watch;
 }
 
+std::mutex& writer_sweep_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::vector<DWORD>& writer_sweep_armed() {
+    static std::vector<DWORD> tids;
+    return tids;
+}
+
 thread_local std::uintptr_t writer_repoke_address = 0;
+
+void writer_watch_start_poller(std::uintptr_t job, std::uint64_t first);
+void writer_watch_start_sweep(std::uintptr_t job, std::uint64_t first);
 
 std::string writer_watch_prefix(const char* what) {
     char buffer[96];
@@ -1943,105 +1971,147 @@ std::string writer_watch_region(std::uintptr_t address) {
     return text;
 }
 
-// Sets this thread's four data write points. The current thread needs no suspension: GetThreadContext and
-// SetThreadContext address CONTEXT_DEBUG_REGISTERS of the calling thread directly. RWn = 01 (write), LENn = 11
-// (8 bytes), Ln = 1. Returns how many points were armed (0 = the method failed on this host).
-unsigned writer_watch_arm_current_thread(std::uintptr_t qword0, std::uintptr_t qword1, std::uintptr_t qword2,
-                                         std::uintptr_t qword3) {
-    CONTEXT context{};
-    context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-    const HANDLE self = GetCurrentThread();
-    if (!GetThreadContext(self, &context)) return 0;
-    context.Dr0 = qword0;
-    context.Dr1 = qword1;
-    context.Dr2 = qword2;
-    context.Dr3 = qword3;
-    context.Dr6 = 0;
-    DWORD dr7 = 0;
-    unsigned armed = 0;
-    const std::uintptr_t points[4] = {qword0, qword1, qword2, qword3};
+// The job page's mapping: state, type, protect and whether the pages are file/section-backed. The file name is never
+// printed (it is a game path); "file-backed yes" is the whole claim a test of the non-CPU/aliased-writer hypothesis
+// needs, because only a section or image mapping can alias the page at another VA or back it with non-private memory.
+// The process's modules at the stage-3 entry, base and size and base name only (a file name is not game data; the full
+// path is never printed). It lets the vtable writer's host address be resolved to a module+offset from the same boot:
+// the writer of the object's first qword was measured in a host module, and which one is the mechanism question.
+std::string writer_watch_modules() {
+    std::string text = "modules:";
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+    if (snapshot == INVALID_HANDLE_VALUE) return text + " ?";
+    MODULEENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    unsigned shown = 0;
+    if (Module32First(snapshot, &entry))
+        do {
+            WCHAR name[MAX_MODULE_NAME32 + 1] = {};
+            std::wcsncpy(name, entry.szModule, MAX_MODULE_NAME32);
+            char utf8[MAX_MODULE_NAME32 * 3 + 1] = {};
+            const int length = WideCharToMultiByte(CP_UTF8, 0, name, -1, utf8, sizeof(utf8), nullptr, nullptr);
+            char one[320];
+            std::snprintf(one, sizeof one, " %llx+%llx %s", static_cast<unsigned long long>(
+                                                           reinterpret_cast<std::uintptr_t>(entry.modBaseAddr)),
+                          static_cast<unsigned long long>(entry.modBaseSize), length > 1 ? utf8 : "?");
+            text += one;
+            if (++shown >= 48) break;
+        } while (Module32Next(snapshot, &entry));
+    CloseHandle(snapshot);
+    return text;
+}
+
+std::string writer_watch_page_mapping(std::uintptr_t address) {
+    const std::uintptr_t page = address & ~static_cast<std::uintptr_t>(0xFFF);
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(reinterpret_cast<const void*>(page), &info, sizeof info) != sizeof info) return "page ?";
+    char text[240];
+    std::snprintf(text, sizeof text,
+                  "page %llx state 0x%lx type 0x%lx protect 0x%lx alloc %llx file-backed %s",
+                  static_cast<unsigned long long>(page), static_cast<unsigned long>(info.State),
+                  static_cast<unsigned long>(info.Type), static_cast<unsigned long>(info.Protect),
+                  static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(info.AllocationBase)),
+                  info.Type == MEM_PRIVATE ? "no (private)" : "yes (a section/image can alias it)");
+    return text;
+}
+
+// The DR7 value for up to four 8-byte write-only points (RWn = 01, LENn = 11, Ln = 1). A null or misaligned point
+// leaves its slot off; the caller's point array is aligned down before it gets here.
+std::uint32_t writer_watch_dr7(const std::uintptr_t points[4]) {
+    std::uint32_t dr7 = 0;
     for (unsigned slot = 0; slot < 4; ++slot) {
         if (!points[slot] || (points[slot] & 7u) != 0) continue;
-        dr7 |= 1u << (slot * 2);              // Ln
-        dr7 |= 1u << (16 + slot * 4);         // RWn = 01, write
-        dr7 |= 3u << (18 + slot * 4);         // LENn = 11, 8 bytes
-        ++armed;
+        dr7 |= 1u << (slot * 2);
+        dr7 |= 1u << (16 + slot * 4);
+        dr7 |= 3u << (18 + slot * 4);
     }
-    context.Dr7 = dr7;
-    if (SetThreadContext(self, &context) == FALSE) return 0;
+    return dr7;
+}
+
+// Arms the four points in the exception context the handler is about to resume with. This is the method correction:
+// the context record is what NtContinue restores, so these are the registers the title's code runs with. Returns how
+// many points were armed (0 = the method failed on this host or every point was null).
+unsigned writer_watch_arm_context(CONTEXT& context, const std::uintptr_t points[4]) {
+    context.Dr0 = points[0];
+    context.Dr1 = points[1];
+    context.Dr2 = points[2];
+    context.Dr3 = points[3];
+    context.Dr6 = 0;
+    context.Dr7 = writer_watch_dr7(points);
+    unsigned armed = 0;
+    for (unsigned slot = 0; slot < 4; ++slot)
+        if (points[slot] && (points[slot] & 7u) == 0) ++armed;
     return armed;
 }
 
-// Arms the object's first-qword write point (DR0, 8 bytes, write) in one other thread. The stage-3 arm measures that
-// the executor thread itself does not do the store, so the point has to be live in the thread that does; a suspend /
-// Get/SetThreadContext / resume is the only way to put it there. False when the thread is gone.
-bool writer_watch_arm_thread(DWORD tid, std::uintptr_t job) {
-    const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, tid);
-    if (!thread) return false;
-    bool armed = false;
-    if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
-        CONTEXT context{};
-        context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-        if (GetThreadContext(thread, &context)) {
-            DWORD dr7 = context.Dr7;
-            dr7 &= ~(0x1u | 0x2u | (0x3u << 16) | (0x3u << 18));  // clear L0, G0, RW0 and LEN0
-            if (job && (job & 7u) == 0) {
-                context.Dr0 = job;
-                dr7 |= 0x1u | (0x1u << 16) | (0x3u << 18);  // L0, RW0 = write, LEN0 = 8 bytes
-            }
-            context.Dr7 = dr7;
-            context.Dr6 = 0;
-            armed = SetThreadContext(thread, &context) != FALSE;
-        }
-        ResumeThread(thread);
-    }
-    CloseHandle(thread);
-    return armed;
-}
-
-// Names a data-point hit, after the storing instruction executed: which of the four points, the writer's thread,
-// instruction and bytes, the value the store left and the title stack.
-void writer_watch_data(const CONTEXT& context) {
+// One data-point hit, after the storing instruction executed: which point, the writer's thread, instruction, the
+// value the store left and the title stack. The same-pass control's hit is the method's proof and is logged first;
+// the object-first-qword hit is the finding.
+void writer_watch_data(CONTEXT& context) {
     WriterWatch& watch = writer_watch();
-    const auto job = static_cast<std::uintptr_t>(watch.job.load(std::memory_order_relaxed));
     const DWORD dr6 = context.Dr6;
     unsigned slot = 4;
-    std::uintptr_t address = 0;
     for (unsigned bit = 0; bit < 4; ++bit) {
         if ((dr6 & (1u << bit)) == 0) continue;
         slot = bit;
-        const std::uintptr_t points[4] = {job, job ? job + 0x28 : 0, job ? job + 0x40 : 0, job ? job + 0x30 : 0};
-        address = points[bit];
         break;
     }
     if (slot == 4) return;
-    const bool vtable = slot == 0;
-    const bool state = slot == 2;
-    if (vtable) watch.vtable_writes.fetch_add(1, std::memory_order_relaxed);
-    else if (state) watch.state_writes.fetch_add(1, std::memory_order_relaxed);
-    else watch.other_writes.fetch_add(1, std::memory_order_relaxed);
+    const std::uintptr_t address = watch.point[slot].load(std::memory_order_relaxed);
+    const unsigned kind = watch.point_kind[slot].load(std::memory_order_relaxed);
+    if (kind == 0) watch.vtable_writes.fetch_add(1, std::memory_order_relaxed);
+    else if (kind == 3) watch.state_writes.fetch_add(1, std::memory_order_relaxed);
+    else if (kind == 5) watch.same_pass_control_hits.fetch_add(1, std::memory_order_relaxed);
+    else watch.graph_control_writes.fetch_add(1, std::memory_order_relaxed);
     const unsigned hits = watch.writes.fetch_add(1, std::memory_order_relaxed) + 1;
-    // The vtable point is the finding this watch is for; keep every one of the first 24 and then sample. The state
-    // point writes on every pass (the caller stores 2 in +0x40), so it is sampled thinly and its first three hits are
-    // logged as the method's in-thread control.
-    if (vtable) {
+    if (kind == 5) {
+        // The same-pass control has to be cheap: the graph lock it watches is a hot word, so a trapped store there must
+        // cost one terse line and then be disarmed, or the control itself perturbs the pass it is measuring. Two hits
+        // are logged; after the second the two control points are cleared in this context, so the hot word traps no more.
+        const std::uint64_t control = watch.same_pass_control_hits.load(std::memory_order_relaxed);
+        if (control > 1) {
+            context.Dr1 = 0;
+            context.Dr2 = 0;
+            context.Dr7 &= ~((1u << 2) | (1u << 4) | (0xFu << 20) | (0xFu << 24));
+            return;
+        }
+        std::uint64_t control_value = 0;
+        executor_watch_read_block(address, &control_value, sizeof control_value);
+        std::fprintf(stderr,
+                     "[rt] writer watch t=%.3f SAME-PASS CONTROL hit %llu: tid %lu writer %s value after %s at %s "
+                     "machine stage %u\n",
+                     executor_watch_seconds(), static_cast<unsigned long long>(control),
+                     static_cast<unsigned long>(GetCurrentThreadId()),
+                     executor_watch_label(static_cast<std::uint64_t>(context.Rip), executor_watch_image_base,
+                                          executor_watch_image_size).c_str(),
+                     executor_watch_hex(control_value).c_str(), executor_watch_hex(address).c_str(),
+                     writer_watch_stage());
+        std::fflush(stderr);
+        // One hit is the proof; the control is disarmed at once so the hot lock word cannot become the measurement.
+        context.Dr1 = 0;
+        context.Dr2 = 0;
+        context.Dr7 &= ~((1u << 2) | (1u << 4) | (0xFu << 20) | (0xFu << 24));
+        return;
+    }
+    if (kind == 0) {
         if (hits > 24 && hits % 1024 != 0) return;
-    } else if (state) {
+    } else if (kind == 3) {
         if (watch.state_writes.load(std::memory_order_relaxed) > 3) return;
-    } else {
-        if (hits > 8) return;
+    } else if (hits > 8) {
+        return;
     }
     std::uint64_t value = 0;
     executor_watch_read_block(address, &value, sizeof value);
-    std::string text = writer_watch_prefix(vtable ? "OBJECT VTABLE WRITER" : (state ? "job state writer (control)"
-                                                                                    : "referenced field writer")) +
-                       " hit " + std::to_string(hits) + " point " + std::to_string(slot) + " tid " +
-                       std::to_string(GetCurrentThreadId()) + " writer " +
-                       executor_watch_label(static_cast<std::uint64_t>(context.Rip), executor_watch_image_base,
-                                            executor_watch_image_size) +
-                       " value after " + executor_watch_label(value, executor_watch_image_base,
-                                                              executor_watch_image_size) +
-                       " machine stage " + std::to_string(writer_watch_stage());
+    const char* label = kind == 0   ? "OBJECT VTABLE WRITER"
+                        : kind == 3 ? "job state writer (control)"
+                        : kind == 5 ? "SAME-PASS CONTROL: graph lock writer"
+                                    : "referenced field writer";
+    const std::string writer = rt::shims::module_offset(static_cast<std::uint64_t>(context.Rip));
+    std::string text = writer_watch_prefix(label) + " hit " + std::to_string(hits) + " slot " + std::to_string(slot) +
+                       " tid " + std::to_string(GetCurrentThreadId()) + " writer " + writer + " value after " +
+                       executor_watch_label(value, executor_watch_image_base, executor_watch_image_size) +
+                       " machine stage " + std::to_string(writer_watch_stage()) + " job " +
+                       executor_watch_hex(watch.job.load(std::memory_order_relaxed));
     // The breakpoint fires after the store, so the store is the instruction that ends at RIP: the bytes before RIP
     // name it without a disassembler.
     unsigned char bytes[16] = {};
@@ -2064,32 +2134,24 @@ void writer_watch_data(const CONTEXT& context) {
                   static_cast<unsigned long long>(context.R14), static_cast<unsigned long long>(context.R15));
     text += registers;
     text += "\n  " + writer_watch_prefix("writer stack") + executor_watch_title_stack(context.Rsp);
+    const auto job = static_cast<std::uintptr_t>(watch.job.load(std::memory_order_relaxed));
     if (job) text += executor_watch_memory_dump("job", job, 0x80);
     executor_watch_print(text + "\n");
 }
 
 // One executor entry: RCX is the job/command object the executor calls through. Log a new job class with its chain
-// and machine stage, notice a first qword that changed between two passes, and arm the four write points in this
-// thread for the object.
+// and machine stage, notice a first qword that changed between passes, and arm the four points in the resume context.
 void writer_watch_entry(CONTEXT& context) {
     WriterWatch& watch = writer_watch();
     const unsigned hit = watch.entries.fetch_add(1, std::memory_order_relaxed) + 1;
-    const auto job = static_cast<std::uintptr_t>(context.Rcx);
+    // The int3 is at the entry's first byte, so the prologue has not run and RSP points at the return address. The
+    // section-12 arm is kept for the loading phase; the stage-3 arm below replaces its two non-finding points.
+    CONTEXT& resume = context;
+    const auto job = static_cast<std::uintptr_t>(resume.Rcx);
     if (!job) return;
     std::uint64_t first = 0;
     if (!executor_watch_read_block(job, &first, sizeof first)) return;
-    // A stage-3 entry names the object the renderer is about to call through; from here the write point is armed in
-    // every thread (the executor thread's own four points are below), because the stage-3 arm measured that the
-    // executor thread does not do the store itself.
     const unsigned stage = writer_watch_stage();
-    if (stage >= 3 && stage != 0xFFFF &&
-        static_cast<std::uintptr_t>(watch.sweep_job.load(std::memory_order_relaxed)) != job) {
-        watch.sweep_job.store(job);
-        executor_watch_print(writer_watch_prefix("stage-3 entry named the executor object; arming its write point in "
-                                                 "every thread") +
-                             " job " + executor_watch_hex(job) + " at hit " + std::to_string(hit) + " machine stage " +
-                             std::to_string(stage) + "\n");
-    }
     const auto last_job = static_cast<std::uintptr_t>(watch.job.load(std::memory_order_relaxed));
     if (job != last_job) {
         // The pass that used the last job has returned; read its first qword again. A vtable replaced while the
@@ -2117,19 +2179,18 @@ void writer_watch_entry(CONTEXT& context) {
             const std::uint64_t graph = executor_watch_read_u64(job + 0x28);
             std::string text = writer_watch_prefix("executor object") + " job " + executor_watch_hex(job) + " hit " +
                                std::to_string(hit) + " change " + std::to_string(change) + " tid " +
-                               std::to_string(GetCurrentThreadId()) + " machine stage " +
-                               std::to_string(writer_watch_stage()) + " state " + std::to_string(state) + " graph " +
+                               std::to_string(GetCurrentThreadId()) + " machine stage " + std::to_string(stage) +
+                               " state " + std::to_string(state) + " graph " +
                                executor_watch_label(graph, executor_watch_image_base, executor_watch_image_size) +
                                " object[0] " +
                                executor_watch_label(first, executor_watch_image_base, executor_watch_image_size) +
-                               "\n  " + writer_watch_region(job) + executor_watch_memory_dump("job", job, 0x80);
+                               "\n  " + writer_watch_region(job) + "\n  " + writer_watch_page_mapping(job) +
+                               executor_watch_memory_dump("job", job, 0x80);
             executor_watch_print(text + "\n");
         }
     } else {
         const std::uint64_t before = watch.job_first.load(std::memory_order_relaxed);
-        if (first == before) {
-            // same object, same vtable: the points stay armed; nothing to do
-        } else {
+        if (first != before) {
             watch.job_first.store(first);
             const unsigned hits = watch.vtable_writes.fetch_add(1, std::memory_order_relaxed) + 1;
             if (hits <= 24 || hits % 1024 == 0) {
@@ -2144,23 +2205,225 @@ void writer_watch_entry(CONTEXT& context) {
             }
         }
     }
-    if (job == static_cast<std::uintptr_t>(watch.armed_job.load(std::memory_order_relaxed))) return;
-    const unsigned armed = writer_watch_arm_current_thread(job, job + 0x28, job + 0x40, job + 0x30);
+    // The four points. Qword addresses are aligned down: a DR7 8-byte watch requires alignment and the store to the
+    // object's first qword overlaps the aligned word either way.
+    std::uintptr_t points[4] = {job & ~static_cast<std::uintptr_t>(7),
+                                job ? (job + 0x28) & ~static_cast<std::uintptr_t>(7) : 0,
+                                job ? (job + 0x40) & ~static_cast<std::uintptr_t>(7) : 0,
+                                job ? (job + 0x30) & ~static_cast<std::uintptr_t>(7) : 0};
+    unsigned kinds[4] = {0, 1, 3, 2};
+    const std::uint64_t graph = executor_watch_read_u64(job + 0x28);
+    if (stage == 3 && graph && (graph & 7) == 0) {
+        // The same-pass control: the executor's first job after the entry's virtual calls is the graph lock helper on
+        // graph+0x18 (FUN_14515adb0, called from game+0x1335AE6). A write there is made by this thread in this pass.
+        points[1] = (static_cast<std::uintptr_t>(graph) + 0x18) & ~static_cast<std::uintptr_t>(7);
+        points[2] = (static_cast<std::uintptr_t>(graph) + 0x20) & ~static_cast<std::uintptr_t>(7);
+        points[3] = (job + 0x40) & ~static_cast<std::uintptr_t>(7);
+        kinds[1] = 5;
+        kinds[2] = 5;
+        kinds[3] = 3;
+        if (!watch.stage3_entry.exchange(true)) {            watch.graph.store(static_cast<std::uintptr_t>(graph));
+            watch.executor_tid.store(GetCurrentThreadId());
+            std::uint64_t lock_word = 0;
+            executor_watch_read_block(points[1], &lock_word, sizeof lock_word);
+            std::uint64_t lock_word2 = 0;
+            executor_watch_read_block(points[2], &lock_word2, sizeof lock_word2);
+            std::string text = writer_watch_prefix("STAGE 3 ENTRY") + " job " + executor_watch_hex(job) +
+                               " tid " + std::to_string(GetCurrentThreadId()) + " graph " +
+                               executor_watch_hex(graph) + " same-pass control at graph+0x18 " +
+                               executor_watch_hex(points[1]) + " (now " + executor_watch_hex(lock_word) + ") and graph+0x20 " +
+                               executor_watch_hex(points[2]) + " (now " + executor_watch_hex(lock_word2) + ")" +
+                               "\n  " + writer_watch_region(job) + "\n  " + writer_watch_page_mapping(job) +
+                               "\n  " + writer_watch_page_mapping(points[1]) +
+                               executor_watch_memory_dump("job", job, 0x80) +
+                               executor_watch_memory_dump("graph", static_cast<std::uintptr_t>(graph), 0x60) +
+                               "\n  " + writer_watch_modules();
+            executor_watch_print(text + "\n");
+            writer_watch_start_poller(job, first);
+            writer_watch_start_sweep(job, first);
+        }
+    }
+    for (unsigned slot = 0; slot < 4; ++slot) {
+        watch.point[slot].store(points[slot], std::memory_order_relaxed);
+        watch.point_kind[slot].store(kinds[slot], std::memory_order_relaxed);
+    }
+    const unsigned armed = writer_watch_arm_context(resume, points);
     if (!armed) {
         if (watch.data_points_armed.load(std::memory_order_relaxed) == 0)
             std::fprintf(stderr,
-                         "[rt] writer watch: the four write points could not be armed in this thread "
-                         "(GetThreadContext/SetThreadContext on the current thread): the data watch is a method "
-                         "failure on this host\n");
+                         "[rt] writer watch: no write point could be armed in the resume context: the data watch is a "
+                         "method failure on this host\n");
         return;
     }
     watch.armed_job.store(job);
     const unsigned total = watch.data_points_armed.fetch_add(1, std::memory_order_relaxed) + 1;
     if (total <= 12 || total % 2048 == 0)
-        executor_watch_print(writer_watch_prefix("armed the four write points in the executor thread") + " for job " +
+        executor_watch_print(writer_watch_prefix("armed the four write points in the resume context") + " for job " +
                              executor_watch_hex(job) + " at hit " + std::to_string(hit) + ", " + std::to_string(armed) +
-                             " point(s), " + std::to_string(total) + " arm(s), machine stage " +
-                             std::to_string(writer_watch_stage()) + "\n");
+                             " point(s) (object first qword, graph same-pass control, job state), " +
+                             std::to_string(total) + " arm(s), machine stage " + std::to_string(stage) + "\n");
+}
+
+// Arms the object's first qword in a suspended thread. One 8-byte write point (DR0).
+bool writer_watch_arm_thread(HANDLE thread, std::uintptr_t qword) {
+    CONTEXT context{};
+    context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    if (!GetThreadContext(thread, &context)) return false;
+    context.Dr0 = qword;
+    context.Dr1 = 0;
+    context.Dr2 = 0;
+    context.Dr3 = 0;
+    context.Dr6 = 0;
+    context.Dr7 = (qword && (qword & 7u) == 0) ? (0x1u | (0x1u << 16) | (3u << 18)) : 0;
+    return SetThreadContext(thread, &context) != FALSE;
+}
+
+// The stage-3 every-thread sweep: no creation-window guard and no per-thread delay. Every thread id the process has
+// when it is first seen is armed on that round (100 ms), and each arm logs its thread id; a thread created later is
+// armed the round that first sees it. The executor thread is skipped by id: its four points are armed from the entry
+// and a second SetThreadContext would replace them with the single sweep point.
+//
+// The sweep start is delayed (PALMETTO_WRITER_SWEEP_DELAY_MS, default 1500) because the measured arm without the
+// delay moved the stop from the object-vtable window (game+0x13360A3, the same arm with no writer probe) into the
+// allocator window: suspending 100+ threads at the stage-3 entry is a perturbation of the exact transition being
+// measured. The delay is on the sweep, not on a thread: a thread seen after the sweep starts is armed immediately (the
+// per-thread creation-window guard section 12 could not rule out is still gone). The measured stop is 2-8 s after the
+// entry, so the sweep is armed for the window. PALMETTO_WRITER_SWEEP=0 disables the sweep.
+unsigned writer_watch_sweep_delay_ms() {
+    static const unsigned delay = [] {
+        const char* value = std::getenv("PALMETTO_WRITER_SWEEP_DELAY_MS");
+        if (!value || !*value) return 1500u;
+        const long parsed = std::strtol(value, nullptr, 10);
+        if (parsed < 0) return 1500u;
+        return parsed > 60000 ? 60000u : static_cast<unsigned>(parsed);
+    }();
+    return delay;
+}
+
+bool writer_watch_sweep_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("PALMETTO_WRITER_SWEEP");
+        return !(value && *value == '0');
+    }();
+    return enabled;
+}
+
+void writer_watch_start_sweep(std::uintptr_t job, std::uint64_t first) {
+    if (!writer_watch_sweep_enabled()) {
+        executor_watch_print(writer_watch_prefix("every-thread sweep disabled") + " by PALMETTO_WRITER_SWEEP=0\n");
+        return;
+    }
+    const std::uintptr_t qword = job & ~static_cast<std::uintptr_t>(7);
+    const unsigned delay_ms = writer_watch_sweep_delay_ms();
+    std::thread([qword, first, delay_ms] {
+        // The stage-3 entry is left unperturbed for the delay: the sweep's first suspension round is what moves the
+        // stop out of the object-vtable window in the measured arms. The per-thread rule after it is unchanged.
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        const auto started = std::chrono::steady_clock::now();
+        auto elapsed = [&] {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        };
+        while (elapsed() < 240.0) {
+            const DWORD self = GetCurrentThreadId();
+            const DWORD executor = writer_watch().executor_tid.load(std::memory_order_relaxed);
+            std::vector<DWORD> fresh;
+            {
+                const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+                if (snapshot != INVALID_HANDLE_VALUE) {
+                    THREADENTRY32 entry{};
+                    entry.dwSize = sizeof(entry);
+                    const DWORD pid = GetCurrentProcessId();
+                    if (Thread32First(snapshot, &entry))
+                        do {
+                            if (entry.th32OwnerProcessID != pid || entry.th32ThreadID == self) continue;
+                            if (entry.th32ThreadID == executor) continue;
+                            bool known = false;
+                            {
+                                std::lock_guard lock(writer_sweep_mutex());
+                                for (const DWORD tid : writer_sweep_armed())
+                                    if (tid == entry.th32ThreadID) {
+                                        known = true;
+                                        break;
+                                    }
+                            }
+                            if (!known && fresh.size() < 512) fresh.push_back(entry.th32ThreadID);
+                        } while (Thread32Next(snapshot, &entry));
+                    CloseHandle(snapshot);
+                }
+            }
+            WriterWatch& watch = writer_watch();
+            for (const DWORD tid : fresh) {
+                watch.sweep_seen.fetch_add(1, std::memory_order_relaxed);
+                const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT |
+                                                     THREAD_QUERY_INFORMATION,
+                                                 FALSE, tid);
+                bool armed = false;
+                if (thread) {
+                    if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
+                        armed = writer_watch_arm_thread(thread, qword);
+                        ResumeThread(thread);
+                    }
+                    CloseHandle(thread);
+                }
+                {
+                    std::lock_guard lock(writer_sweep_mutex());
+                    if (writer_sweep_armed().size() < 1024) writer_sweep_armed().push_back(tid);
+                }
+                if (armed) {
+                    const unsigned total = watch.sweep_armed.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (total <= 24 || total % 64 == 0)
+                        executor_watch_print(writer_watch_prefix("swept a thread") + " tid " + std::to_string(tid) +
+                                             " armed the object first qword " + executor_watch_hex(qword) +
+                                             " (no creation-window guard), " + std::to_string(total) +
+                                             " thread(s) armed, machine stage " + std::to_string(writer_watch_stage()) +
+                                             "\n");
+                } else {
+                    watch.sweep_failed.fetch_add(1, std::memory_order_relaxed);
+                    if (watch.sweep_failed.load(std::memory_order_relaxed) <= 3)
+                        executor_watch_print(writer_watch_prefix("swept a thread") + " tid " + std::to_string(tid) +
+                                             " could not be armed\n");
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }).detach();
+    executor_watch_print(writer_watch_prefix("every-thread sweep started") + " for the object first qword " +
+                         executor_watch_hex(qword) + " (job " + executor_watch_hex(job) + ", first qword " +
+                         executor_watch_label(first, executor_watch_image_base, executor_watch_image_size) +
+                         "): no per-thread creation-window guard, executor thread skipped, first round after " +
+                         std::to_string(delay_ms) + " ms\n");
+}
+
+// Dates the store: a 1 ms poll of the object's first qword from the stage-3 entry, printed on every change with the
+// steady tick the title probes and PALMETTO_TIMELINE share.
+void writer_watch_start_poller(std::uintptr_t job, std::uint64_t first) {
+    std::thread([job, first] {
+        std::uint64_t last = first;
+        std::uint64_t previous_tick = executor_watch_seconds();
+        for (int sample = 0; sample < 240000; ++sample) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::uint64_t now = 0;
+            if (!executor_watch_read_block(job, &now, sizeof now)) {
+                executor_watch_print(writer_watch_prefix("poller") + " job " + executor_watch_hex(job) +
+                                     " is not readable any more at t=" + executor_watch_hex(0) + "\n");
+                return;
+            }
+            if (now == last) continue;
+            const std::uint64_t tick = static_cast<std::uint64_t>(executor_watch_seconds());
+            WriterWatch& watch = writer_watch();
+            const unsigned change = watch.poller_changes.fetch_add(1, std::memory_order_relaxed) + 1;
+            executor_watch_print(
+                writer_watch_prefix("POLLER: object first qword changed") + " job " + executor_watch_hex(job) +
+                " was " + executor_watch_label(last, executor_watch_image_base, executor_watch_image_size) + " now " +
+                executor_watch_label(now, executor_watch_image_base, executor_watch_image_size) + " at t=" +
+                executor_watch_hex(tick) + " (previous sample " + executor_watch_hex(previous_tick) + "), change " +
+                std::to_string(change) + ", machine stage " + std::to_string(writer_watch_stage()) + "\n  " +
+                writer_watch_page_mapping(job) + executor_watch_memory_dump("job", job, 0x80) + "\n");
+            last = now;
+            previous_tick = tick;
+            if (change >= 12) return;
+        }
+    }).detach();
 }
 
 LONG CALLBACK writer_watch_exception(EXCEPTION_POINTERS* info) {
@@ -2182,6 +2445,10 @@ LONG CALLBACK writer_watch_exception(EXCEPTION_POINTERS* info) {
         return EXCEPTION_CONTINUE_EXECUTION;
     }
     if (code == EXCEPTION_SINGLE_STEP) {
+        // A data hit and the trap-flag single-step of the restored instruction can be the same exception. Handle the
+        // data hit first, then the re-poke, and clear Dr6 either way.
+        const bool data_hit = (context.Dr6 & 0xFu) != 0;
+        if (data_hit) writer_watch_data(context);
         if (writer_repoke_address) {
             const std::uintptr_t address = writer_repoke_address;
             writer_repoke_address = 0;
@@ -2191,10 +2458,10 @@ LONG CALLBACK writer_watch_exception(EXCEPTION_POINTERS* info) {
                 *reinterpret_cast<unsigned char*>(address) = 0xCC;
                 VirtualProtect(reinterpret_cast<void*>(address), 1, old, &old);
             }
+            context.Dr6 = 0;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
-        if ((context.Dr6 & 0xFu) != 0) {  // a hit on one of this thread's four write points
-            writer_watch_data(context);
+        if (data_hit) {
             context.Dr6 = 0;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
@@ -2203,12 +2470,12 @@ LONG CALLBACK writer_watch_exception(EXCEPTION_POINTERS* info) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-// Puts the int3 over the executor entry and starts the reporter. Nothing is suspended: the write points are armed
-// from the entry in the thread that runs the executor, with GetThreadContext(GetCurrentThread()).
+// Puts the int3 over the executor entry and starts the reporter. The write points are armed in the exception's own
+// CONTEXT record, and the stage-3 pass adds the every-thread sweep and the change poller.
 void start_writer_watch(std::uintptr_t image_base, std::size_t image_size) {
     const char* spec = std::getenv("PALMETTO_WRITER_WATCH");
     if (!spec || !*spec || *spec == '0') return;
-    std::uint64_t entry_rva = 0x1335A20ull;
+    std::uint64_t entry_rva = kWriterWatchEntryRva;
     if (!(spec[0] == '1' && spec[1] == '\0')) {
         char* end = nullptr;
         const std::uint64_t value = std::strtoull(spec, &end, 16);
@@ -2233,105 +2500,29 @@ void start_writer_watch(std::uintptr_t image_base, std::size_t image_size) {
     *byte = 0xCC;
     VirtualProtect(byte, 1, old, &old);
     AddVectoredExceptionHandler(1, writer_watch_exception);
-    // The sweep: once a stage-3 entry has named the object, arm its first-qword write point in every other thread and
-    // keep picking up threads created later, so the store is named whichever thread does it. Fixed arrays only: no
-    // allocation between SuspendThread and ResumeThread, and a thread is skipped for 500 ms after its first sight (the
-    // creation-window guard section 11 needed).
-    std::thread([] {
-        static constexpr unsigned kMaxThreads = 4096;
-        static DWORD configured[kMaxThreads];
-        static DWORD seen_tid[kMaxThreads];
-        static ULONGLONG seen_at[kMaxThreads];
-        unsigned configured_count = 0, seen_count = 0;
-        std::uintptr_t configured_job = 0;
-        for (;;) {
-            WriterWatch& watch = writer_watch();
-            const std::uintptr_t job = static_cast<std::uintptr_t>(watch.sweep_job.load(std::memory_order_relaxed));
-            if (!job) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                continue;
-            }
-            const bool fresh_arm = job != configured_job;
-            if (fresh_arm) {
-                configured_job = job;
-                configured_count = 0;
-            }
-            const unsigned pass = watch.sweep_passes.fetch_add(1, std::memory_order_relaxed) + 1;
-            const ULONGLONG now = GetTickCount64();
-            unsigned refused = 0, added = 0;
-            const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-            if (snapshot != INVALID_HANDLE_VALUE) {
-                THREADENTRY32 entry{};
-                entry.dwSize = sizeof entry;
-                const DWORD pid = GetCurrentProcessId();
-                const DWORD self = GetCurrentThreadId();  // never suspend this sweep
-                if (Thread32First(snapshot, &entry))
-                    do {
-                        if (entry.th32OwnerProcessID != pid || entry.th32ThreadID == self) continue;
-                        bool already = false;
-                        for (unsigned i = 0; i < configured_count; ++i)
-                            if (configured[i] == entry.th32ThreadID) {
-                                already = true;
-                                break;
-                            }
-                        if (already) continue;
-                        int seat = -1;
-                        for (unsigned i = 0; i < seen_count; ++i)
-                            if (seen_tid[i] == entry.th32ThreadID) {
-                                seat = static_cast<int>(i);
-                                break;
-                            }
-                        if (seat < 0) {
-                            if (seen_count < kMaxThreads) {
-                                seen_tid[seen_count] = entry.th32ThreadID;
-                                // The threads that exist when the stage-3 object appears are old (the boot is past
-                                // loading), so the arm-pass can configure them immediately; only a thread first seen
-                                // on a later scan waits for the creation-window guard.
-                                seen_at[seen_count] = fresh_arm ? now - 1000 : now;
-                                seat = static_cast<int>(seen_count);
-                                ++seen_count;
-                            }
-                            if (!fresh_arm) continue;  // first sight: wait one scan before suspending it
-                        }
-                        if (now - seen_at[seat] < 500) continue;
-                        if (writer_watch_arm_thread(entry.th32ThreadID, job)) {
-                            if (configured_count < kMaxThreads) {
-                                configured[configured_count++] = entry.th32ThreadID;
-                                ++added;
-                            }
-                            watch.sweep_threads.store(configured_count, std::memory_order_relaxed);
-                        } else {
-                            ++refused;
-                        }
-                    } while (Thread32Next(snapshot, &entry));
-                CloseHandle(snapshot);
-            }
-            if (added || (pass == 1 || pass % 20 == 0))
-                std::fprintf(stderr,
-                             "[rt] writer watch sweep: %u thread(s) carry the object write point (%u new, %u refused "
-                             "this pass), job %s\n",
-                             configured_count, added, refused, executor_watch_hex(job).c_str());
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
-        }
-    }).detach();
     std::thread([] {
         for (int sample = 1; sample <= 120; ++sample) {
             std::this_thread::sleep_for(std::chrono::seconds(10));
             WriterWatch& watch = writer_watch();
             std::fprintf(stderr,
                          "[rt] writer watch at %d s: executor entries %u (job logs %u), job changes %u (data arm(s) "
-                         "%u, sweep %u threads / %u passes), data hits %u (vtable %u, state %u, other %u), machine "
-                         "stage %u, site byte %02x\n",
+                         "%u), data hits %u (vtable %u, same-pass control %u, state %u, graph control %u), same-pass "
+                         "control hits %u, sweep seen %u armed %u failed %u, poller changes %u, machine stage %u, "
+                         "site byte %02x\n",
                          sample * 10, watch.entries.load(std::memory_order_relaxed),
                          watch.logged.load(std::memory_order_relaxed),
                          watch.job_changes.load(std::memory_order_relaxed),
                          watch.data_points_armed.load(std::memory_order_relaxed),
-                         watch.sweep_threads.load(std::memory_order_relaxed),
-                         watch.sweep_passes.load(std::memory_order_relaxed),
                          watch.writes.load(std::memory_order_relaxed),
                          watch.vtable_writes.load(std::memory_order_relaxed),
+                         watch.same_pass_control_hits.load(std::memory_order_relaxed),
                          watch.state_writes.load(std::memory_order_relaxed),
-                         watch.other_writes.load(std::memory_order_relaxed), writer_watch_stage(),
+                         watch.graph_control_writes.load(std::memory_order_relaxed),
+                         watch.same_pass_control_hits.load(std::memory_order_relaxed),
+                         watch.sweep_seen.load(std::memory_order_relaxed),
+                         watch.sweep_armed.load(std::memory_order_relaxed),
+                         watch.sweep_failed.load(std::memory_order_relaxed),
+                         watch.poller_changes.load(std::memory_order_relaxed), writer_watch_stage(),
                          *reinterpret_cast<const unsigned char*>(static_cast<std::uintptr_t>(watch.entry.load())));
             std::fflush(stderr);
         }
@@ -2340,7 +2531,7 @@ void start_writer_watch(std::uintptr_t image_base, std::size_t image_size) {
     executor_watch_read_block(site + 1, bytes, 7);
     std::fprintf(stderr,
                  "[rt] writer watch: int3 over the executor entry image+0x%llx (original byte %02x, next bytes %02x "
-                 "%02x %02x), no debug register armed at the site\n",
+                 "%02x %02x), no debug register armed at the site; write points are armed in the exception context\n",
                  static_cast<unsigned long long>(entry_rva), watch.original_byte.load(), bytes[0], bytes[1], bytes[2]);
     std::fflush(stderr);
 }

@@ -453,15 +453,36 @@ int main() {
         // docs/vertex_buffer_va.md section 12: the two opt-in submission pacing knobs' truth table. Both are off by
         // default, "0" is off, and the delay is decimal microseconds; the queue reads them once at startup.
         const palmetto::SubmissionPace none = palmetto::submission_pace_from(nullptr, nullptr);
-        expect(!none.idle_after_execute && none.delay_us == 0, "no value leaves both pacing knobs off");
-        const palmetto::SubmissionPace zero = palmetto::submission_pace_from("0", "0");
-        expect(!zero.idle_after_execute && zero.delay_us == 0, "\"0\" leaves both pacing knobs off");
+        expect(!none.idle_after_execute && !none.idle_at_content_boundary && none.delay_us == 0,
+               "no value leaves all pacing knobs off");
+        const palmetto::SubmissionPace zero = palmetto::submission_pace_from("0", "0", "0");
+        expect(!zero.idle_after_execute && !zero.idle_at_content_boundary && zero.delay_us == 0,
+               "\"0\" leaves all pacing knobs off");
         const palmetto::SubmissionPace idle = palmetto::submission_pace_from("1", nullptr);
-        expect(idle.idle_after_execute && idle.delay_us == 0, "only the idle knob is set");
+        expect(idle.idle_after_execute && !idle.idle_at_content_boundary && idle.delay_us == 0,
+               "only the idle knob is set");
         const palmetto::SubmissionPace delayed = palmetto::submission_pace_from(nullptr, "1000");
-        expect(!delayed.idle_after_execute && delayed.delay_us == 1000, "the delay is decimal microseconds");
+        expect(!delayed.idle_after_execute && !delayed.idle_at_content_boundary && delayed.delay_us == 1000,
+               "the delay is decimal microseconds");
         const palmetto::SubmissionPace both = palmetto::submission_pace_from("1", "25");
-        expect(both.idle_after_execute && both.delay_us == 25, "both knobs together keep both values");
+        expect(both.idle_after_execute && both.delay_us == 25 && !both.idle_at_content_boundary,
+               "both knobs together keep both values");
+        // docs/vertex_buffer_va.md section 13: the content-boundary drain is its own knob, so the narrow arm is chosen
+        // without also draining every submission.
+        const palmetto::SubmissionPace content = palmetto::submission_pace_from(nullptr, nullptr, "1");
+        expect(content.idle_at_content_boundary && !content.idle_after_execute && content.delay_us == 0,
+               "the content-boundary drain arms only itself");
+    }
+
+    {
+        // docs/vertex_buffer_va.md section 13: the content-frame readback window. The default is the measured three
+        // submissions; PALMETTO_READBACK_AFTER widens it for later stage-3 frames and is bounded; an unusable value
+        // falls back to the default, so an unset or malformed environment keeps the measured arm.
+        expect(palmetto::title_import_capture_window_from(nullptr) == 3, "the content readback window defaults to 3");
+        expect(palmetto::title_import_capture_window_from("") == 3, "an empty window value keeps the default");
+        expect(palmetto::title_import_capture_window_from("0") == 3, "a zero window value keeps the default");
+        expect(palmetto::title_import_capture_window_from("12") == 12, "PALMETTO_READBACK_AFTER sets the window");
+        expect(palmetto::title_import_capture_window_from("9999") == 512, "the window is bounded");
     }
 
     if (failures) return 1;

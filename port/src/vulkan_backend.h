@@ -1055,6 +1055,27 @@ struct AttachmentCapture {
     std::uint64_t draw = 0;
 };
 
+// ---- Content-frame readback window (PALMETTO_READBACK_AFTER) ------------------------------------------------
+// docs/vertex_buffer_va.md section 13. The section-10 trigger arms the submission whose lists imported title pages at
+// first use plus the next two, because the content came in two submissions in every measured boot. To answer whether
+// the black frame is the first transition or the content, the window is a switch: PALMETTO_READBACK_AFTER=<n> arms the
+// import submission and the next n-1, so later stage-3 content submissions are read back and written out as windows.
+// The pure mapping is tested (port/test/frame_dump_test.cpp) so the window can be pinned without a device. Default 3:
+// the measured arm and the default path are unchanged.
+inline unsigned title_import_capture_window_from(const char* value) {
+    constexpr unsigned kDefaultWindow = 3;
+    constexpr unsigned kMaxWindow = 512;
+    if (!value || !*value) return kDefaultWindow;
+    const unsigned long parsed = std::strtoul(value, nullptr, 10);
+    if (parsed < 1) return kDefaultWindow;
+    return parsed > kMaxWindow ? kMaxWindow : static_cast<unsigned>(parsed);
+}
+
+inline unsigned title_import_capture_window() {
+    static const unsigned window = title_import_capture_window_from(std::getenv("PALMETTO_READBACK_AFTER"));
+    return window;
+}
+
 // Per device: what the queues share. Resources are registered by their stable ID (the COM resource pointer).
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -1956,11 +1977,16 @@ public:
     // and the next two submissions are armed with it (the content is submitted over several frames). While armed, the
     // replay arms a colour-target readback on every draw the submission holds; the presenter capture's fixed schedule
     // misses the presents that follow the content submits, so this readback is how the content frame is read.
+    // PALMETTO_READBACK_AFTER widens the window (section 13) so later stage-3 content frames are read too.
     void title_import_capture_tick(std::size_t imported) {
-        if (imported) title_import_capture_pending_.store(3, std::memory_order_relaxed);
+        if (imported) title_import_capture_pending_.store(title_import_capture_window(), std::memory_order_relaxed);
         const unsigned pending = title_import_capture_pending_.load(std::memory_order_relaxed);
         title_import_capture_active_.store(pending != 0, std::memory_order_relaxed);
         if (pending) title_import_capture_pending_.fetch_sub(1, std::memory_order_relaxed);
+    }
+    // True while the submission being prepared is inside the content-capture window (section 13's narrow pacing arm).
+    bool title_import_capture_active() const {
+        return title_import_capture_active_.load(std::memory_order_relaxed);
     }
     // The byte range of an imported title buffer that holds `va`, cut to the range's end.
     bool imported_title_range(std::uint64_t va, std::uint64_t& size, VkBuffer& buffer, VkDeviceSize& offset) const {
@@ -3204,30 +3230,36 @@ inline bool submission_launches_a_shader(std::span<const CommandList* const> lis
     return false;
 }
 
-// ---- Submission pacing knobs (PALMETTO_PACE_IDLE / PALMETTO_PACE_DELAY_US) -------------------------------------
+// ---- Submission pacing knobs (PALMETTO_PACE_IDLE / PALMETTO_PACE_DELAY_US / PALMETTO_PACE_CONTENT) --------------
 // docs/vertex_buffer_va.md section 12: the renderer stop is a CPU-side lifetime race in the title's job/command
-// graph, not a layer answer, so the measurement question is whether the reuse is timing-induced. These two knobs
-// slow the layer's own submission path on purpose. Both are off by default and the default path is unchanged:
+// graph, not a layer answer, so the measurement question is whether the reuse is timing-induced. These knobs slow the
+// layer's own submission path on purpose. All are off by default and the default path is unchanged:
 // PALMETTO_PACE_IDLE drains the queue after each accepted ExecuteCommandLists (vkQueueWaitIdle, so the submitting
 // thread does not run ahead of the GPU; emulation-only - a console submission is asynchronous), and
 // PALMETTO_PACE_DELAY_US sleeps that many microseconds after the submission, spacing the title's producer thread.
+// Section 13's narrow arm is PALMETTO_PACE_CONTENT=1: drain only after a submission inside the content-capture window
+// (the stage-3 command-graph boundary the title's own console semantics would allow at a graph boundary), not after
+// every submission.
 struct SubmissionPace {
     bool idle_after_execute = false;
+    bool idle_at_content_boundary = false;
     std::uint64_t delay_us = 0;
 };
 
-// The pure mapping of the two values; the device reads it once at startup. Kept separate so a test can pin the
+// The pure mapping of the three values; the device reads it once at startup. Kept separate so a test can pin the
 // truth table without an environment or a device (port/test/frame_dump_test.cpp).
-inline SubmissionPace submission_pace_from(const char* idle, const char* delay) {
+inline SubmissionPace submission_pace_from(const char* idle, const char* delay, const char* content = nullptr) {
     SubmissionPace pace;
     pace.idle_after_execute = idle && *idle && *idle != '0';
+    pace.idle_at_content_boundary = content && *content && *content != '0';
     if (delay && *delay) pace.delay_us = std::strtoull(delay, nullptr, 10);
     return pace;
 }
 
 inline const SubmissionPace& submission_pace() {
     static const SubmissionPace pace =
-        submission_pace_from(std::getenv("PALMETTO_PACE_IDLE"), std::getenv("PALMETTO_PACE_DELAY_US"));
+        submission_pace_from(std::getenv("PALMETTO_PACE_IDLE"), std::getenv("PALMETTO_PACE_DELAY_US"),
+                             std::getenv("PALMETTO_PACE_CONTENT"));
     return pace;
 }
 
@@ -3445,7 +3477,8 @@ public:
         if (!held && result == ReplayResult::success) {
             const SubmissionPace& pace = submission_pace();
             if (pace.delay_us) std::this_thread::sleep_for(std::chrono::microseconds(pace.delay_us));
-            if (pace.idle_after_execute) {
+            if (pace.idle_after_execute ||
+                (pace.idle_at_content_boundary && context_.title_import_capture_active())) {
                 const double idle_started = timeline::seconds();
                 const VkResult idle = context_.vk.vkQueueWaitIdle(queue_);
                 timeline::line("pace idle ok=%d us=%.0f", idle == VK_SUCCESS ? 1 : 0,

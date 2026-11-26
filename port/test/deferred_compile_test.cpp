@@ -313,6 +313,46 @@ static int test_submit_builds_queued_task() {
     return 0;
 }
 
+// docs/vertex_buffer_va.md section 13: PALMETTO_PIPELINE_PREWARM's newest-first order. One worker is blocked in the
+// first build; of the two tasks queued behind it, the newest runs first under the prewarm order and the oldest first
+// under the default (the measured FIFO order the section-12 arms used).
+static int test_newest_first() {
+    for (const bool newest_first : {false, true}) {
+        dc::CompileQueue queue(8, newest_first);
+        CHECK(queue.start(1));
+        Gate gate;
+        std::mutex mutex;
+        std::vector<int> order;
+        const auto record = [&](int id, bool wait_gate) {
+            return [&, id, wait_gate] {
+                if (wait_gate) gate.wait();
+                std::lock_guard lock(mutex);
+                order.push_back(id);
+                return true;
+            };
+        };
+        const auto first = queue.submit(record(1, true));
+        CHECK(first != nullptr);
+        for (int i = 0; i < 2000 && first->state() == dc::CompileQueue::Task::State::queued; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        CHECK(first->state() == dc::CompileQueue::Task::State::building);
+        const auto second = queue.submit(record(2, false));
+        const auto third = queue.submit(record(3, false));
+        CHECK(second && third);
+        gate.open_now();
+        CHECK(queue.wait(first));
+        CHECK(queue.wait(second));
+        CHECK(queue.wait(third));
+        std::lock_guard lock(mutex);
+        CHECK(order.size() == 3);
+        CHECK(order[0] == 1);
+        CHECK(order[1] == (newest_first ? 3 : 2));
+        CHECK(order[2] == (newest_first ? 2 : 3));
+        queue.stop();
+    }
+    return 0;
+}
+
 int main() {
     int result = test_unstarted();
     if (!result) result = test_state_machine();
@@ -320,6 +360,7 @@ int main() {
     if (!result) result = test_worker_concurrency();
     if (!result) result = test_cancel_and_shutdown();
     if (!result) result = test_submit_builds_queued_task();
+    if (!result) result = test_newest_first();
     if (!result) result = test_stats();
     if (!result) result = test_queue_report_extra();
     if (result) return result;

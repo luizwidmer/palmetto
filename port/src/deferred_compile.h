@@ -74,7 +74,13 @@ public:
 
     // bound: the most tasks allowed outstanding (queued + building) before submit refuses. 0 means "no bound"; the
     // device always passes a finite one so a burst cannot grow without limit.
-    explicit CompileQueue(std::size_t bound = 256) : bound_(bound) {}
+    // newest_first (docs/vertex_buffer_va.md section 13): the workers take the newest queued build instead of the
+    // oldest. A title creates a burst of compute PSOs and submits a pipeline shortly after creating it; oldest-first
+    // leaves that pipeline behind the whole burst and the submission waits for it, newest-first compiles the
+    // just-created pipelines first, so the pipeline the upcoming submission names is ready before the title reaches
+    // ExecuteCommandLists (the prewarm switch). Off by default: the default is the measured FIFO order.
+    explicit CompileQueue(std::size_t bound = 256, bool newest_first = false)
+        : bound_(bound), newest_first_(newest_first) {}
     ~CompileQueue() { stop(); }
     CompileQueue(const CompileQueue&) = delete;
     CompileQueue& operator=(const CompileQueue&) = delete;
@@ -289,14 +295,21 @@ private:
                     if (stopping_) return;
                     continue;
                 }
-                task = std::move(queue_.front());
-                queue_.pop_front();
+                if (newest_first_ && queue_.size() > 1) {
+                    // The device's prewarm order: the newest creation is the one a submission is closest to naming.
+                    task = std::move(queue_.back());
+                    queue_.pop_back();
+                } else {
+                    task = std::move(queue_.front());
+                    queue_.pop_front();
+                }
             }
             build_task(task);
         }
     }
 
     const std::size_t bound_;
+    const bool newest_first_;
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<std::shared_ptr<Task>> queue_;
