@@ -3941,6 +3941,11 @@ constexpr std::uint32_t kTitleMovieSlot0EntityRva = 0x9165BA0;  // qword: player
 constexpr std::uint32_t kTitleMovieSlot0ActiveRva = 0x916622C;  // byte: player slot 0 + 0x694, set by the request
 constexpr std::uint32_t kTitleMovieSlot0ArmedRva = 0x916618A;   // byte: player slot 0 + 0x5f2, per-frame armed flag
 constexpr std::uint32_t kTitleMovieSlot0MediaIdRva = 0x9166060; // dword: player slot 0 + 0x4c8, the request's media id
+// The player slot's base RVA (the entity qword above is base+8) and the slot words the four play steps gate on
+// (docs/decomp_first_ui.md section 13.1's conditions). The entity's own state byte is at entity+0x1c4: the movie
+// middleware's player state machine, 1 created, 2/4 queued, 3 probe retry, 5 metadata read, 6 playback open due,
+// 7 Bink open done, 8 frame buffers configuring, 9 playing, 0xa transfer, 0xb error with the code at +0x240.
+constexpr std::uint32_t kTitleMovieSlot0BaseRva = 0x9165B98;
 // The front-end manager the movie/UI request path runs through (docs/decomp_first_ui.md section 14). The title's
 // front-end module init FUN_1422082D0(2) calls FUN_143DA1560 -> FUN_143DA1A80, which creates the manager singleton
 // FUN_1419DB790() (0x98 bytes, vtable 0x654CF30) and stores it in the image global 0x98C0F20. The singleton's vtable
@@ -3985,6 +3990,13 @@ bool title_address_readable(std::uintptr_t address) {
 std::uint16_t title_read_u16_at(std::uintptr_t address, bool& ok) {
     ok = title_address_readable(address);
     std::uint16_t value = 0;
+    if (ok) std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+    return value;
+}
+
+std::uint32_t title_read_u32_at(std::uintptr_t address, bool& ok) {
+    ok = title_address_readable(address);
+    std::uint32_t value = 0;
     if (ok) std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
     return value;
 }
@@ -5477,6 +5489,32 @@ void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_siz
                 title_read_u32(image_base, kTitleMovieSlot0ArmedRva, ok_movie_slot_armed);
             const std::uint32_t movie_media_id =
                 title_read_u32(image_base, kTitleMovieSlot0MediaIdRva, ok_movie_media_id);
+            // The movie player's own state machine and the player-slot gates (docs/decomp_first_ui.md section 15):
+            // entity+0x1c4 is the state byte every play step gates on, entity+0x50 the Bink player handle, the
+            // +0x1b8/+0x23d/+0x23e/+0x240 bytes the per-frame decode's gate, the metadata probe's result, the
+            // playback open's result and the error code the error transition stores; the slot words are the rest
+            // of section 13.1's conditions.
+            std::uint32_t movie_state = 0, movie_next_state = 0, movie_buffers = 0, movie_probe = 0, movie_open = 0,
+                          movie_error = 0;
+            std::uint64_t movie_player_handle = 0;
+            bool ok_movie_state = false, ok_movie_next_state = false, ok_movie_buffers = false, ok_movie_probe = false,
+                 ok_movie_open = false, ok_movie_error = false, ok_movie_player_handle = false;
+            if (ok_movie_entity && movie_entity) {
+                const auto movie_entity_va = static_cast<std::uintptr_t>(movie_entity);
+                movie_state = title_read_u32_at(movie_entity_va + 0x1c4, ok_movie_state) & 0xFF;
+                movie_next_state = title_read_u32_at(movie_entity_va + 0x1c5, ok_movie_next_state) & 0xFF;
+                movie_buffers = title_read_u32_at(movie_entity_va + 0x1b8, ok_movie_buffers) & 0xFF;
+                movie_probe = title_read_u32_at(movie_entity_va + 0x23d, ok_movie_probe) & 0xFF;
+                movie_open = title_read_u32_at(movie_entity_va + 0x23e, ok_movie_open) & 0xFF;
+                movie_error = title_read_u32_at(movie_entity_va + 0x240, ok_movie_error) & 0xFF;
+                movie_player_handle = title_read_u64_at(movie_entity_va + 0x50, ok_movie_player_handle);
+            }
+            const std::uint32_t kMovieSlotGateRva[6] = {0x5f0, 0x5f1, 0x5fb, 0x515, 0x8ae, 0x5c0};
+            std::uint32_t movie_slot_gate[6] = {};
+            bool ok_movie_slot_gate[6] = {};
+            for (unsigned i = 0; i < 6; ++i)
+                movie_slot_gate[i] =
+                    title_read_u32(image_base, kTitleMovieSlot0BaseRva + kMovieSlotGateRva[i], ok_movie_slot_gate[i]);
             bool ok_fe_manager = false, ok_fe_ready = false, ok_fe_context = false, ok_fe_running = false;
             const std::uint64_t fe_manager = title_read_u64(image_base, kTitleFrontEndManagerRva, ok_fe_manager);
             const std::uint32_t fe_ready = title_read_u32(image_base, kTitleFrontEndReadyRva, ok_fe_ready);
@@ -5558,6 +5596,23 @@ void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_siz
                          static_cast<unsigned long long>(movie_entity), ok_movie_slot_active ? "" : "?",
                          movie_slot_active & 0xFF, ok_movie_slot_armed ? "" : "?", movie_slot_armed & 0xFF,
                          ok_movie_media_id ? "" : "?", movie_media_id);
+            std::fprintf(stderr,
+                         "[rt] state trace at %.1f s: movie player state %s0x%x next %s0x%x handle %s0x%llx"
+                         " buffers %s0x%x probe %s0x%x open %s0x%x error %s0x%x\n",
+                         at, ok_movie_state ? "" : "?", movie_state, ok_movie_next_state ? "" : "?", movie_next_state,
+                         ok_movie_player_handle ? "" : "?",
+                         static_cast<unsigned long long>(movie_player_handle), ok_movie_buffers ? "" : "?", movie_buffers,
+                         ok_movie_probe ? "" : "?", movie_probe, ok_movie_open ? "" : "?", movie_open,
+                         ok_movie_error ? "" : "?", movie_error);
+            std::fprintf(stderr,
+                         "[rt] state trace at %.1f s: movie slot gates 0x5f0 %s0x%x 0x5f1 %s0x%x 0x5fb %s0x%x"
+                         " 0x515 %s0x%x 0x8ae %s0x%x 0x5c0 %s0x%x\n",
+                         at, ok_movie_slot_gate[0] ? "" : "?", movie_slot_gate[0],
+                         ok_movie_slot_gate[1] ? "" : "?", movie_slot_gate[1],
+                         ok_movie_slot_gate[2] ? "" : "?", movie_slot_gate[2],
+                         ok_movie_slot_gate[3] ? "" : "?", movie_slot_gate[3],
+                         ok_movie_slot_gate[4] ? "" : "?", movie_slot_gate[4],
+                         ok_movie_slot_gate[5] ? "" : "?", movie_slot_gate[5]);
             ++sample;
             // The front-end manager the movie/UI request path runs through (docs/decomp_first_ui.md section 14): the
             // singleton pointer proves FUN_143DA1A80 ran; the ready/context/running words prove its service checks and the
@@ -6309,16 +6364,19 @@ int wmain(int argc, wchar_t** argv) {
             }
         }
         // PALMETTO_MOVIE_PROBE=<group>: bounded opt-in int3 entry probes on the movie/Bink path
-        // (docs/decomp_first_ui.md sections 13-14). "player" is the four middleware play steps the component's per-player
-        // update drives: per-frame decode 0x2EF0E0, probe/metadata open 0x442EA70, playback open 0x199EF20 and
-        // frame-buffer registration 0x442F760. "trigger" is the game-side request chain: module init 0x577F500, play
-        // request 0x3A16260, descriptor helper 0x18501E0 and stop 0x3A1A860. "frontend" is the front-end manager the
-        // request's UI owner runs through: manager create/init 0x3DA1A80, manager teardown 0x3DA2FB0, member destroy
-        // 0x3DADD00 and the last service getter of the per-frame render FUN_1403DB3F0 0x3DB492 (the site whose indirect
-        // jump is the measured stop). Same one-shot machinery and logging as PALMETTO_POKE_LOG; a hit means the measured
-        // boot reached a path that the static negative says it does not, so the probe set is a reach signal, not a
-        // hot-path trace. Off when unset.
+        // (docs/decomp_first_ui.md sections 13-15). "player" is the four middleware play steps the component's
+        // per-player update drives: per-frame decode 0x2EF0E0, probe/metadata open 0x442EA70, playback open 0x199EF20
+        // and frame-buffer registration 0x442F760. "player2" is the four steps around them: the player prepare
+        // 0x199EF10, the player wrapper 0x18AA500, the frame-buffer configure 0x442F0B0 and the finalise-to-playing
+        // step 0x5536E00 (the state machine's 8 -> 9 transition). "trigger" is the game-side request chain: module
+        // init 0x577F500, play request 0x3A16260, descriptor helper 0x18501E0 and stop 0x3A1A860. "frontend" is the
+        // front-end manager the request's UI owner runs through: manager create/init 0x3DA1A80, manager teardown
+        // 0x3DA2FB0, member destroy 0x3DADD00 and the last service getter of the per-frame render FUN_1403DB3F0
+        // 0x3DB492 (the site whose indirect jump is the measured stop). Same one-shot machinery and logging as
+        // PALMETTO_POKE_LOG; a hit means the measured boot reached a path that the static negative says it does not,
+        // so the probe set is a reach signal, not a hot-path trace. Off when unset.
         constexpr std::uint32_t kMoviePlayerProbeSites[] = {0x2EF0E0, 0x442EA70, 0x199EF20, 0x442F760};
+        constexpr std::uint32_t kMoviePlayerStep2ProbeSites[] = {0x199EF10, 0x18AA500, 0x442F0B0, 0x5536E00};
         constexpr std::uint32_t kMovieTriggerProbeSites[] = {0x577F500, 0x3A16260, 0x18501E0, 0x3A1A860};
         constexpr std::uint32_t kMovieFrontEndProbeSites[] = {0x3DA1A80, 0x3DA2FB0, 0x3DADD00, 0x3DB492};
         auto poke_log_sites = [&main_module](const std::uint32_t* rvas, unsigned count) {
@@ -6365,6 +6423,9 @@ int wmain(int argc, wchar_t** argv) {
             if (value == L"player") {
                 std::printf("[rt] PALMETTO_MOVIE_PROBE=player: %u movie play-step probe(s)\n",
                             poke_log_sites(kMoviePlayerProbeSites, 4));
+            } else if (value == L"player2") {
+                std::printf("[rt] PALMETTO_MOVIE_PROBE=player2: %u movie frame-buffer/finalise probe(s)\n",
+                            poke_log_sites(kMoviePlayerStep2ProbeSites, 4));
             } else if (value == L"trigger") {
                 std::printf("[rt] PALMETTO_MOVIE_PROBE=trigger: %u movie request-chain probe(s)\n",
                             poke_log_sites(kMovieTriggerProbeSites, 4));
@@ -6372,8 +6433,8 @@ int wmain(int argc, wchar_t** argv) {
                 std::printf("[rt] PALMETTO_MOVIE_PROBE=frontend: %u front-end manager probe(s)\n",
                             poke_log_sites(kMovieFrontEndProbeSites, 4));
             } else {
-                std::printf("[rt] PALMETTO_MOVIE_PROBE: unknown group (use player, trigger or frontend); no probe "
-                            "installed\n");
+                std::printf("[rt] PALMETTO_MOVIE_PROBE: unknown group (use player, player2, trigger or frontend); no "
+                            "probe installed\n");
             }
         }
         // PALMETTO_BACK_IMAGES=1 commits zeroed memory over the console image-address range, which starts at 4 GiB. Our

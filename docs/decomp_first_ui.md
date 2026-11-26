@@ -813,3 +813,174 @@ So the request path now reaches two of the four middleware play steps and starts
 - **Tests and gates**: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`; `_setup\build_tests.cmd` prints `TESTS_BUILT`; the GPU-free gate subset exits 0 (`unimplemented_policy_test` 98, `graphics_record_test` 180, `graphics_pso_test` 350, `xbox_present_test` all cases, `dstorage_test` 234, `xapu_chad_test` 87, `deferred_compile_test` 18, `frame_dump_test`, `xs_proxy_mock_test`, `buffer_va_index_test`); the pre-existing quarantined `d3d12_fence_timing_test` crash is unchanged ([testing.md](testing.md) line 95 - not a gate check); the docs checks (`tests/test_docs_*.py`) pass. No shim, test source or build target changed in this slice.
 - **Evidence (outside the repository)**: `D:\leonida-work\fsrstable\boot-movieplay1` (the stop), `boot-moviefe1` (the front-end probes and state trace), `boot-movierepro1` and `boot-movieplay2` (the play-step arms) with their `stderr.log`/`stdout.log`/`summary.txt`/`boot.jsonl`, `capture-movierepro1` (11 captures + `index.txt`), and the static work under `D:\leonida-work\moviecrash` (decompiles of the manager, its vtable slots and the call-chain functions; `.pdata` function map; the exception stacks). No game data: RVAs, runtime pointers, vtable words, counts, times and image means only.
 - **No git write**: the lead commits this slice's two uncommitted files (`port/src/main.cpp`, `docs/decomp_first_ui.md`). The tree otherwise has no uncommitted files from this slice.
+
+## 15. Measured: the movie player opens and reaches the playing state, and the first display job is the class-0xa constant upload that kills the renderer executor
+
+**Status: measured, negative on the picture, with the movie arm's stop attributed and the player state machine decoded.** Section 14
+left the movie chain at two of the four play steps with the boot stopping later in the renderer executor, and named one
+falsifier: a boot that passes the executor stop and fires frame-buffer registration `0x442F760` and per-frame decode
+`0x2EF0E0`. This section measures what happens between the play steps and that stop. The player state machine is decoded
+statically (every state byte writer), two new diagnostics read it at run time, and three light arms run it. In the arm that
+reaches the full chain the Bink player **opens** (`BinkOpenWithOptions` returns a non-null handle, state byte `0x9`) and
+about 1.3 s later the renderer submits the first display job; that job builds the title's class-0xa 256x1 constant upload,
+the block is allocated with a declared size of zero and the 0x1000-byte copy runs into the live command object, and the
+executor faults through the overwritten job header 0.1 s into the pass. Frame-buffer registration and per-frame decode
+still have **0 hits** and every capture is black, so no movie pixel is claimed. The writer/mechanism is the same title-side
+zero-size overrun the content arms name ([vertex_buffer_va.md](vertex_buffer_va.md) sections 14-16); no layer answer or
+layer-owned write is in the chain.
+
+### 15.1 The player state machine (static)
+
+`entity+0x1c4` is the movie middleware's player state byte; every one of its writers is a small lock-free setter (an
+`xchg`/`mov` of the byte, functions in the `0x442E..`/`0x442F..` range) and the two higher-level ones live in the engine
+frame and the playback-open wrapper. The component `0x3A18620` calls the setters and the play steps in a fixed order.
+
+| state | setter RVA | in the chain it is |
+|---|---|---|
+| `0x1` | `0x16136E0` | entity created / request binds the slot |
+| `0x2` | `0x442EE40` | the playback-open work item is built (`0x442EDC0` -> `0x442EE40`) |
+| `0x3` | `0x442EFD0` | the playback-open worker asks for the metadata probe again |
+| `0x4` | `0x442EF10` | the probe work item is built (`0x442EE50`) |
+| `0x5` | `0x442FD00` | worker command 4 (metadata/probe open `0x442EA70`) has run |
+| `0x6` | `0x442FE60` | component `0x3A1916F`: the next step (prepare/playback open) may run |
+| `0x7` | `0x442F0A0` | `BinkOpenWithOptions` succeeded in `0x199EF20` and `BinkGetFrameBuffersInfo` ran |
+| `0x8` | `0x442F160` | frame-buffer configure `0x442F0B0` ran |
+| `0x9` | inline in `0x5536E00` | finalise: `BinkPause`/`BinkSetWillLoop`, the playing state the decoder gates on |
+| `0xa` | `0x442E8A0` | transfer/pause helper |
+| `0xb` | `0x19463D0` | error; the code is stored at `entity+0x240` (metadata probe or playback-open failure) |
+
+The component-side order the arms measure (decompiled at `0x3A18620`): it posts the metadata/probe command and calls the
+`0x442FE60` setter at `0x3A1916F`; the armed branch at `0x3A19174` posts the playback open (`0x442EDC0` at `0x3A191F8`, once,
+`slot[0x5f1] = 1`) and then calls player prepare `0x199EF10` while the state is still `0x6`; at state `0x7` it calls
+frame-buffer configure `0x442F0B0` (`0x3A1924F`/`0x3A19285`/`0x3A192E6`/`0x3A19392`) which sets `0x8`; the per-frame call to
+`0x5536E00` at `0x3A19B5F` turns `0x8` into `0x9`. The player wrapper `0x18AA500` and the `slot[0x515]` gate
+(`entity+0x1c5 == 3`) are a separate one-shot open path the measured arms did not take.
+
+**Frame-buffer registration has one caller.** `0x442F760` (`BinkRegisterFrameBuffers`) is called only from inside the
+per-frame decode wrapper `0x2EF0E0` (`0x2EF130` and `0x2EF3AD`), so it can fire only once the renderer's draw calls the
+decode. The player must first be in state `0x9` and the draw must execute, which is why this section measures the display
+job and not a shim answer.
+
+### 15.2 The diagnostics this slice adds
+
+`port/src/main.cpp` only, both opt-in and off by default; no shim, layer answer or default path changes:
+
+- the `PALMETTO_STATE_TRACE` movie block gains two lines: the player state byte `entity+0x1c4`, the byte after it, the Bink
+  handle at `entity+0x50`, the `+0x1b8` decode gate, the probe and open results (`+0x23d`, `+0x23e`) and the error code
+  (`+0x240`); and the player-slot gates the component reads (`slot+0x5f0`, `+0x5f1`, `+0x5fb`, `+0x515`, `+0x8ae`,
+  `+0x5c0`; slot 0 base RVA `0x9165B98`). A small `title_read_u32_at` helper is added for the entity reads.
+- `PALMETTO_MOVIE_PROBE=player2` is a fourth four-site group through the existing one-shot poke-log machinery: player
+  prepare `0x199EF10`, player wrapper `0x18AA500`, frame-buffer configure `0x442F0B0` and the finalise step `0x5536E00`.
+  `player`, `trigger` and `frontend` are unchanged.
+
+### 15.3 The measured arms
+
+One boot per arm under `_setup/boot_lock.ps1`, the standard content environment from `boot_arm.ps1`, `-Light`, one at a
+time; logs, captures and readbacks outside the repository. `moviebink1` uses the section-14 binary; `moviepix2` and
+`moviepix3` use this slice's build.
+
+| arm | binary sha256 (first 16) | wall | stage 3 | movie arm | probes and state (measured) | stop / trace t | device lost | captures |
+|---|---|---:|---:|---|---|---|---:|---:|
+| `moviebink1` | `859699C2B5B11BEF` | 62.3 s | **no** | slot armed at the 58.0 s sample; metadata probe `0x442EA70` x1 | `0x28CD3CC` read `0x833DC0F950`, 60.76 s | 1 | 11, all mean rgb 0.00 |
+| `moviepix2` | `4238F141ED2FBD52` | 55.9 s | 51.4 s | 50.0 s state `0x3` (probe 1 open 1); 52.0 s state `0x5`; prepare `0x199EF10` x1, configure `0x442F0B0` x1, finalise `0x5536E00` x144 (per-frame), wrapper `0x18AA500` 0 | `0x1335DCB` read -1, 54.36 s | 0 | 9, all mean rgb 0.00 |
+| `moviepix3` | `4238F141ED2FBD52` | 58.8 s | 54.3 s | 52.0 s and 54.0 s state `0x1`; metadata probe x3 and playback open `0x199EF20` x1 between the 54.0 s and 56.0 s samples; **56.0 s state `0x9`, handle non-null, open 1** | `0x13360A3` read -1, 57.38 s | 0 | 9, all mean rgb 0.00 |
+
+Reading: the component update only runs after stage 3 (the state stayed `0x1` through the 54.0 s sample and the whole
+chain advanced inside the next two seconds). In `moviepix3` the chain is complete at the 56.0 s sample: state `0x9`, a
+non-null Bink handle (`0x29F0752DA00`), the probe and open result bytes both 1. `moviebink1` is the stage-3 race's losing
+draw (it also carries one `replay: the Vulkan device was lost` line); it is arm selection, not evidence against the chain.
+
+### 15.4 The stop in the movie arm: the first display job is the class-0xa constant upload
+
+`moviepix3` ran `PALMETTO_ALLOC_WATCH=1`, so the same boot that read state `0x9` also measured the executor's first
+stage-3 entry and the constant upload it runs. In chronological order, with the steady clock the runtime prints:
+
+| t (steady) | event |
+|---|---|
+| 9669.668 | FORMAT KEY hit: key `0xa`, command object vtable `+0x20` = `0x23E550`, dims 256x1, caller `0x1837A2` (the command-graph opcode dispatch) |
+| 9669.669 | STAGE 3 ENTRY: first executor entry, job from `0x186424`, tid 43588 |
+| 9669.692 | HELPER ENTRY: class `0xa`, plane count 1, dims 256x1, allocator arg 0 |
+| 9669.702 | BLOCK ALLOC: requested **0x0** bytes, width 256, height 1, caller `0x1335D35`; **job - block = 0xEF0**, "overlap YES" |
+| 9669.742 | ENTRY WRITTEN: stride 0x0, size 0x0, block recorded in the entry |
+| 57.38 s (trace) | first exception: `game+0x13360A3` (`MOV RAX,[RSI]; CALL [RAX+0xB0]`), read at `0xFFFFFFFFFFFFFFFF`, trace t 57.376716 |
+
+The geometry decides the stop: the block is 0xEF0 bytes **before** the command object and the constant upload copies
+0x1000 bytes from there, so its last 0x110 bytes land on the object's header - the vtable word at `job+0`, the state dword
+and the fields the executor calls through - and the executor's next call through that header faults. The value it reads is
+a small negative word (the fault address is -1), so the copied table word at that offset is not a pointer. In the earlier
+section-14 arm (`movierepro1`) the same zero-size block landed 0xA0 bytes *after* the job and the overrun covered the
+descriptor object instead, which is why that boot stopped at `0x1335DCB` in the descriptor release; both arms are one
+producer with two geometries. The 0x1000-byte copy itself is the host-CRT store section 14 measures from the executor
+thread's stack; this arm reproduces its allocation geometry in the movie display job and the crash 0.1 s later.
+
+### 15.5 The writer/mechanism verdict, and the reach switches
+
+- **Title-side, not a layer write.** The class `0xa` is the title's own compile-time format-table entry, the row-stride
+  switch `0x1555C10` has no case for it, and the zero-byte request, the block and the 0x1000-byte copy are all title code
+  over title-private memory ([vertex_buffer_va.md](vertex_buffer_va.md) sections 14-16). The layer's only participation is
+  that the arena pages were served by the `XMemVirtualAlloc` pass-through; the in-arena size class, block address and copy
+  length are the title's own. No layer call is between the executor entry and the fault.
+- **The Bink memory/file reach switches are a measured negative.** `PALMETTO_XMEM_CALLERS=1` and `PALMETTO_FILE_TRACE=1`
+  ran on `moviepix2` and `moviepix3`; in both, no `xmem_caller` and no `file_open` event names the Bink library, even in
+  `moviepix3` where `BinkOpenWithOptions` returned a non-null handle and the player reached state `0x9`. The movie's
+  allocator/file path is therefore title-callback side on this boot (the title imports `BinkSetMemory` and
+  `BinkSetOSFileCallbacks`, and the module init `0x577F500` builds the callback descriptors `0x141502D10`,
+  `0x1404F9E90`, `0x14169C4E0`), not a call into our shims. The falsifier for that reading is a probe on those setters;
+  the negative itself is measured.
+- **The executor stop is not passed.** `0x442F760` and `0x2EF0E0` stay at 0 hits in every arm, and the display job's pass
+  dies before the draw that would call the decode wrapper. Passing it needs the zero-size overrun avoided, which is the
+  title-side branch the class-origin slice (`docs/vertex_buffer_va.md` section 16 and the open class-branch work) names;
+  the layer has no measured input to that branch.
+
+### 15.6 Verdict, limits and the next falsifier
+
+- **Verdict: the movie chain now reaches the playing state and its first display job; the picture is still unreachable in
+  this tree.** The advance over section 14 is measured: not just two play-step entries, but the completed open
+  (`BinkOpenWithOptions` handle non-null), the configure step and the finalise to state `0x9`; and the first renderer job
+  after that state is the class-0xa constant upload whose zero-size block overruns into the live command object.
+- **Limits.** The state trace samples every 2 s, so the exact transition times between `0x1` and `0x9` are bounded by the
+  sample gap, not measured per step; the same progression in `moviepix2` is read from its probe hits, not from a state
+  sample. The copied table word at the job offset is not re-read (`PALMETTO_WRITER_WATCH` was off in these arms); the
+  evidence for the stop is the measured allocation geometry plus the crash 0.1 s later in the executor call that reads the
+  job's first qword, in the family the content arms attribute. The movie-display-job attribution rests on the first
+  executor entry of the boot coinciding with the class-0xa allocation in the same pass and with state `0x9` 1.3 s earlier;
+  the content arms show the same executor and the same family for the renderer's own draws. `moviebink1` lost the device
+  once (one arm, not two in a row) and is not used as evidence.
+- **Next falsifier.** A boot in which the class-0xa constant upload is not created for this job (a runtime answer or title
+  branch that avoids the class, or a block allocated with a non-zero size) should let the executor pass run and fire
+  `0x442F760` and `0x2EF0E0`; the moment `0x2EF0E0` is entered, the same boot's `PALMETTO_XMEM_CALLERS`/`FILE_TRACE`
+  answer whether the decoder allocates or opens anything through the shims, and the presenter capture answers the frame.
+  A boot that fires `0x2EF0E0` while the executor still crashes on the class-0xa word would move the attribution off this
+  overrun.
+
+### 15.7 Tests and gates
+
+- **No test target changed.** The slice adds diagnostics behind their switches (the state-trace fields and the `player2`
+  probe group); the default path, every shim and every build target are unchanged, and no pure helper was added to test.
+- **Gates on the changed tree**: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`; `_setup\build_tests.cmd` prints
+  `TESTS_BUILT`; the GPU-free gate subset exits 0 (`unimplemented_policy_test` 98, `graphics_record_test` 180,
+  `graphics_pso_test` 350, `xbox_present_test` all cases, `dstorage_test` 234, `xapu_chad_test` 87,
+  `deferred_compile_test` 18, `frame_dump_test`, `xs_proxy_mock_test`, `buffer_va_index_test`, `xmem_test` 305,
+  `arena_size_test`); the pre-existing quarantined `d3d12_fence_timing_test` crash is unchanged
+  ([testing.md](testing.md) line 95 - not a gate check); the docs checks (`tests/test_docs_*.py`, run with the session's
+  broken `GIT_CONFIG_*` variables cleared) pass (33 passed, 205 subtests).
+- **Attribution.** This section was implemented from this project's own measurements: the decompiled state setters and the
+  component's call order, the three probe arms, the state trace, the allocation watch payload and the exception stacks.
+  The title functions were decompiled with the project's Ghidra tooling from the user's own image; the host CRT is the
+  system's own module. No peer code was used and no game data is added: RVAs, VAs, field offsets, register values, counts,
+  times and image means only.
+
+### 15.8 Evidence and uncommitted files
+
+- **Source change**: `port/src/main.cpp` only (the `title_read_u32_at` helper, the two movie state-trace lines and the
+  `PALMETTO_MOVIE_PROBE=player2` group). Opt-in; the default path is unchanged.
+- **This page**: the section above. `docs/README.md` needs one index row; that file is outside this slice's write scope,
+  so the lead adds it.
+- **Evidence (outside the repository)**: `D:\leonida-work\fsrstable\boot-moviebink1`, `boot-moviepix2` and
+  `boot-moviepix3` with `stderr.log`/`stdout.log`/`summary.txt`/`boot.jsonl`, `capture-moviebink1`,
+  `capture-moviepix2`, `capture-moviepix3` (all-mean-0.00 captures + `index.txt`); the static decompiles under
+  `D:\leonida-work\decomp\out-moviepix-steps`, `out-moviepix-trans`, `out-moviepix-trans2` and the earlier movie work
+  under `D:\leonida-work\moviecrash` and `D:\leonida-work\decomp\out-movieui`/`out-movietrigger*`. No game data: RVAs,
+  VAs, runtime pointers, register values, counts, times and image means only.
+- **No git write**: the lead commits this slice's two uncommitted files (`port/src/main.cpp`,
+  `docs/decomp_first_ui.md`). The tree otherwise has no uncommitted files from this slice.
