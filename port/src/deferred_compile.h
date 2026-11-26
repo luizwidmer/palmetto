@@ -18,6 +18,7 @@
 // the duration histogram. It is off unless a caller constructs it (the device's switch is
 // PALMETTO_PIPELINE_CALL_STATS), and it is GPU-free and testable too.
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -124,19 +125,34 @@ public:
     bool wait(const std::shared_ptr<Task>& task) {
         if (!task) return false;
         const auto started = Clock::now();
-        bool ok = false;
+        const bool ok = wait_finished(task);
+        record_wait(started);
+        return ok;
+    }
+
+    // The submission's wait, for a caller that needs *that* pipeline rather than the whole queue ahead of it: when the
+    // task is still queued the caller builds it on its own thread and returns; only a task a worker already owns is
+    // waited for. The plain wait above is correct but FIFO: a boot that defers thousands of compute pipelines (docs/
+    // deferred_compile.md section 3.1 bounds it at 4,096, the measured arm uses that) makes the submission that names
+    // one wait for every older queued build, which the title's own 30-pass hang watchdog cannot outlast (docs/
+    // 3d_textures.md section 11). Claiming the task bounds the submit stall to one driver build. The counters still
+    // record the call as one submit wait, so the report keeps its meaning.
+    bool wait_or_build(const std::shared_ptr<Task>& task) {
+        if (!task) return false;
+        const auto started = Clock::now();
+        bool claimed = false;
         {
-            std::unique_lock lock(task->mutex_);
-            task->cv_.wait(lock, [&] { return task->state_ != Task::State::queued && task->state_ != Task::State::building; });
-            ok = task->state_ == Task::State::done;
+            std::lock_guard lock(mutex_);
+            if (!stopping_) {
+                const auto it = std::find(queue_.begin(), queue_.end(), task);
+                if (it != queue_.end()) {
+                    queue_.erase(it);
+                    claimed = true;
+                }
+            }
         }
-        const std::uint64_t us = static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - started).count());
-        ++waits_;
-        wait_us_.fetch_add(us, std::memory_order_relaxed);
-        std::uint64_t longest = wait_us_max_.load(std::memory_order_relaxed);
-        while (us > longest && !wait_us_max_.compare_exchange_weak(longest, us, std::memory_order_relaxed)) {
-        }
+        const bool ok = claimed ? build_task(task) : wait_finished(task);
+        record_wait(started);
         return ok;
     }
 
@@ -192,6 +208,69 @@ public:
     std::uint64_t longest_wait_us() const { return wait_us_max_.load(std::memory_order_relaxed); }
 
 private:
+    // Blocks until the task has finished, whichever thread built it.
+    bool wait_finished(const std::shared_ptr<Task>& task) {
+        std::unique_lock lock(task->mutex_);
+        task->cv_.wait(lock, [&] { return task->state_ != Task::State::queued && task->state_ != Task::State::building; });
+        return task->state_ == Task::State::done;
+    }
+
+    // Books one submit-path wait (both waits above call it, so the report's "submit waits" is the submission's own
+    // stall whether it was a queue wait or a build on the submitting thread).
+    void record_wait(Clock::time_point started) {
+        const std::uint64_t us = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - started).count());
+        ++waits_;
+        wait_us_.fetch_add(us, std::memory_order_relaxed);
+        std::uint64_t longest = wait_us_max_.load(std::memory_order_relaxed);
+        while (us > longest && !wait_us_max_.compare_exchange_weak(longest, us, std::memory_order_relaxed)) {
+        }
+    }
+
+    // One build, whichever thread runs it (a compile worker, or the submitting thread from wait_or_build). The caller
+    // has taken the task out of the queue; this marks it building, runs the closure, books the counters and wakes the
+    // waiters. A task cancelled between the claim and the mark is skipped, which is what the worker always did.
+    bool build_task(const std::shared_ptr<Task>& task) {
+        bool skipped = false;
+        {
+            std::lock_guard lock(task->mutex_);
+            if (task->state_ == Task::State::cancelled) skipped = true;
+            else task->state_ = Task::State::building;
+        }
+        if (skipped) {
+            task->cv_.notify_all();
+            outstanding_.fetch_sub(1, std::memory_order_relaxed);
+            return false;
+        }
+        const auto started = Clock::now();
+        bool ok = false;
+        if (task->build_) {
+            // The closure owns the device call. A driver that throws is a failed pipeline, not a dead worker.
+            try {
+                ok = task->build_();
+            } catch (...) {
+                ok = false;
+            }
+        }
+        const std::uint64_t us = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - started).count());
+        task->build_ = nullptr;  // release whatever the closure captured before the caller is woken
+        {
+            std::lock_guard lock(task->mutex_);
+            task->state_ = ok ? Task::State::done : Task::State::failed;
+            task->build_us_ = us;
+        }
+        if (ok) ++built_;
+        else ++failed_;
+        builds_us_.fetch_add(us, std::memory_order_relaxed);
+        std::uint64_t longest = longest_build_us_.load(std::memory_order_relaxed);
+        while (us > longest && !longest_build_us_.compare_exchange_weak(longest, us, std::memory_order_relaxed)) {
+        }
+        outstanding_.fetch_sub(1, std::memory_order_relaxed);
+        task->cv_.notify_all();
+        return ok;
+    }
+
     void worker_loop() {
         {
             std::function<void()> mark;
@@ -213,43 +292,7 @@ private:
                 task = std::move(queue_.front());
                 queue_.pop_front();
             }
-            bool skipped = false;
-            {
-                std::lock_guard lock(task->mutex_);
-                if (task->state_ == Task::State::cancelled) skipped = true;
-                else task->state_ = Task::State::building;
-            }
-            if (skipped) {
-                task->cv_.notify_all();
-                outstanding_.fetch_sub(1, std::memory_order_relaxed);
-                continue;
-            }
-            const auto started = Clock::now();
-            bool ok = false;
-            if (task->build_) {
-                // The closure owns the device call. A driver that throws is a failed pipeline, not a dead worker.
-                try {
-                    ok = task->build_();
-                } catch (...) {
-                    ok = false;
-                }
-            }
-            const std::uint64_t us = static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - started).count());
-            task->build_ = nullptr;  // release whatever the closure captured before the caller is woken
-            {
-                std::lock_guard lock(task->mutex_);
-                task->state_ = ok ? Task::State::done : Task::State::failed;
-                task->build_us_ = us;
-            }
-            if (ok) ++built_;
-            else ++failed_;
-            builds_us_.fetch_add(us, std::memory_order_relaxed);
-            std::uint64_t longest = longest_build_us_.load(std::memory_order_relaxed);
-            while (us > longest && !longest_build_us_.compare_exchange_weak(longest, us, std::memory_order_relaxed)) {
-            }
-            outstanding_.fetch_sub(1, std::memory_order_relaxed);
-            task->cv_.notify_all();
+            build_task(task);
         }
     }
 

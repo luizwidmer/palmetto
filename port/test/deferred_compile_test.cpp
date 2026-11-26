@@ -253,12 +253,73 @@ static int test_queue_report_extra() {
     return 0;
 }
 
+// The submission's wait builds a deferred task it needs itself instead of waiting for the FIFO queue ahead of it: with
+// one worker blocked in an older build, a task still queued is claimed and built on the calling thread (docs/
+// 3d_textures.md section 11 measures why: a deferred boot queues thousands of compute pipelines, and the FIFO wait at a
+// submission blocks past the title's hang watchdog).
+static int test_submit_builds_queued_task() {
+    dc::CompileQueue queue(8);
+    CHECK(queue.start(1));
+    Gate gate;
+    std::atomic<bool> first_ran{false};
+    const auto first = queue.submit([&] {
+        gate.wait();
+        first_ran = true;
+        return true;
+    });
+    CHECK(first != nullptr);
+    // The worker has claimed the first build and is blocked in it: any later task stays queued.
+    for (int i = 0; i < 2000 && first->state() == dc::CompileQueue::Task::State::queued; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(first->state() == dc::CompileQueue::Task::State::building);
+    std::atomic<bool> second_ran{false};
+    const auto caller = std::this_thread::get_id();
+    std::thread::id second_built_on;
+    const auto second = queue.submit([&] {
+        second_built_on = std::this_thread::get_id();
+        second_ran = true;
+        return true;
+    });
+    const auto third = queue.submit([] { return true; });
+    CHECK(second && third);
+    CHECK(second->state() == dc::CompileQueue::Task::State::queued);
+    // The calling thread builds the task it names; the older blocked build and the later queued one are untouched.
+    CHECK(queue.wait_or_build(second));
+    CHECK(second_ran);
+    CHECK(second_built_on == caller);
+    CHECK(second->state() == dc::CompileQueue::Task::State::done);
+    CHECK(queue.built() == 1);
+    CHECK(queue.waits() == 1);
+    CHECK(!first_ran);  // the worker is still in the older build
+    CHECK(third->state() == dc::CompileQueue::Task::State::queued);
+    // A task that has already finished is not built again.
+    CHECK(queue.wait_or_build(second));
+    CHECK(queue.built() == 1);
+    CHECK(queue.waits() == 2);
+    // A cancelled queued task is claimed and skipped: the caller is told it did not build.
+    const auto fourth = queue.submit([] { return true; });
+    CHECK(fourth != nullptr);
+    queue.cancel(fourth);
+    CHECK(!queue.wait_or_build(fourth));
+    CHECK(fourth->state() == dc::CompileQueue::Task::State::cancelled);
+    // A null task is a failure, as wait()'s contract says.
+    CHECK(!queue.wait_or_build(nullptr));
+    gate.open_now();
+    // A build the worker owns is waited for normally (the worker finishes it once the gate opens).
+    CHECK(queue.wait_or_build(first));
+    CHECK(first_ran);
+    CHECK(queue.wait(third));
+    queue.stop();
+    return 0;
+}
+
 int main() {
     int result = test_unstarted();
     if (!result) result = test_state_machine();
     if (!result) result = test_bound_and_fallback();
     if (!result) result = test_worker_concurrency();
     if (!result) result = test_cancel_and_shutdown();
+    if (!result) result = test_submit_builds_queued_task();
     if (!result) result = test_stats();
     if (!result) result = test_queue_report_extra();
     if (result) return result;

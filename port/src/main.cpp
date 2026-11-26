@@ -1584,6 +1584,14 @@ std::uint64_t title_read_u64(std::uintptr_t image_base, std::uint32_t rva, bool&
     return value;
 }
 
+// The same read for a VA (the heartbeat below is above 4 GiB: image+0x1471B6338 does not fit a 32-bit RVA).
+std::uint64_t title_read_u64_at(std::uintptr_t address, bool& ok) {
+    ok = title_address_readable(address);
+    std::uint64_t value = 0;
+    if (ok) std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+    return value;
+}
+
 bool title_rva_is_state_owner(std::uint32_t rva) {
     for (const std::uint32_t owner : kTitleStateOwners)
         if (rva == owner) return true;
@@ -1678,6 +1686,313 @@ void state_trace_census(std::uintptr_t image_base, std::uintptr_t image_size, do
                      stack.empty() ? " (none)" : stack.c_str());
         ++owners;
     }
+}
+
+// ---- Stage-3 pump probe (PALMETTO_STAGE3_PUMP) ---------------------------------------------------------------------
+// docs/3d_textures.md section 10.6: with the placed-address fix the boot requests and enters stage 3 and about 29 s
+// later the title's own hang watchdog aborts at game+0x2215C35 because its heartbeat at image+0x1471B6338 has not
+// advanced through 0x1E one-second passes. The per-frame pump FUN_1453EBE50 runs the transition executor FUN_1453EBFE0,
+// whose stage-3 entry calls FUN_140812620: if one of those calls does not return, the thread that pumps the state machine
+// never reaches the per-frame tick that pets the heartbeat. The stage-3 second is not stable between boots (66.0 s and
+// 106.0 s measured), so this probe watches the state machine's current-stage word (the object at [[image+0x71273C8]],
+// current u16 at +0x10) and samples at the named offsets after it first reads 3. The sample unwinds every other
+// thread's REAL call chain with RtlVirtualUnwind: the stack-word scans of PALMETTO_WAIT_SAMPLE and
+// PALMETTO_THREAD_STACKS pick stale return addresses out of a suspended title thread's stack, so they could not name the
+// pump. It also prints the heartbeat's observed change count and age, so "the pump is not ticking" is a measurement, not
+// an inference. Off unless the switch names offsets ("2,5,10,20,40"; "1" means that set); a diagnostic only.
+// The hang watchdog's heartbeat. Section 10.6 wrote it as `image+0x1471B6338`, which is the Ghidra address of the
+// instruction's RIP-relative operand (the image is based at 0x140000000): the image RVA is 0x71B6338, the same
+// correction the watchdog's other globals need (the state machine pointer reads 0x1471273C8 = image+0x71273C8). A read
+// of image+0x1471B6338 is past the image's mapping, which is how the first probe boot measured the wrong address.
+constexpr std::uint64_t kTitleHeartbeatRva = 0x71B6338ull;
+
+// The functions a stage-3 sample tags by name: the pump's entries, the transition executor and the per-stage processors,
+// the stage entries, the heartbeat's pet function and the two measured per-frame call sites, and the hang watchdog. The
+// ranges are the .pdata extents of those functions.
+struct Stage3Tag {
+    std::uint32_t begin, end;
+    const char* name;
+};
+constexpr Stage3Tag kStage3Tags[] = {
+    {0x53EBE50, 0x53EBE98, "pump"},          {0x53EBEA0, 0x53EBFD3, "pump-loop"},
+    {0x53EBFE0, 0x53EC0B4, "transition"},    {0x53EC0F0, 0x53EC1BE, "state-processor"},
+    {0x812620, 0x812764, "stage3-entry"},    {0x81B270, 0x81B2FB, "stage2-entry"},
+    {0x22159F0, 0x2215A13, "heartbeat-pet"}, {0x120790, 0x1209A8, "frame-tick"},
+    {0xC9E350, 0xC9E5D6, "progress-tick"},   {0x2215A60, 0x2215E09, "hang-watchdog"},
+    // The stage-3 post-entry path the pump takes (section 11) and the frame/loading path whose wait the probe names:
+    // the runtime frame update, its frame pump, the per-frame tick dispatcher and the state-machine wrapper.
+    {0x81AFB0, 0x81AFED, "stage3-post"},      {0x1D83960, 0x1D839FA, "session-dispatch"},
+    {0x21B7070, 0x21B719A, "session3-poll"},  {0x56A1D54, 0x56A1EC5, "frame-update"},
+    {0x5A91BD0, 0x5A91C24, "frame-pump"},     {0x1D109B0, 0x1D109DD, "tick-dispatch"},
+    {0x661E0, 0x661FB, "machine-wrapper"},    {0x11FD60, 0x11FDCF, "load-monitor-tick"},
+    {0x4FD1B20, 0x4FD227C, "loading-update"}, {0x4FD1AD0, 0x4FD1AF0, "loading-task"},
+    {0x23CEFE0, 0x23CF20A, "loading-worker"}, {0x23CF210, 0x23CF3D7, "task-executor"},
+};
+
+struct UnwoundThread {
+    DWORD tid = 0;
+    std::uint64_t start = 0;
+    unsigned count = 0;
+    std::uint64_t rip = 0, rsp = 0, rcx = 0, rdx = 0, r8 = 0;
+    std::uint64_t frames[40] = {};
+};
+
+// The call chain a suspended thread is in, from the .pdata unwind info (RtlLookupFunctionEntry/RtlVirtualUnwind). A leaf
+// function has no entry, so its return address is the word at RSP. Bounded and fault-tolerant: a bad stack or a frame
+// without unwind info ends the walk instead of faulting the process. No C++ objects here, so __try is legal.
+unsigned unwind_call_chain(CONTEXT context, std::uint64_t* frames, unsigned cap) {
+    unsigned count = 0;
+    while (count < cap) {
+        if (context.Rip == 0) break;
+        __try {
+            frames[count++] = context.Rip;
+            std::uint64_t function_image_base = 0;
+            const PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry((DWORD64)context.Rip, &function_image_base, nullptr);
+            if (!entry) {
+                std::uint64_t return_address = 0;
+                if (!read_thread_word(context.Rsp, return_address)) break;
+                context.Rip = return_address;
+                context.Rsp += 8;
+                continue;
+            }
+            PVOID handler_data = nullptr;
+            DWORD64 establisher_frame = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, function_image_base, (DWORD64)context.Rip, entry, &context,
+                             &handler_data, &establisher_frame, nullptr);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
+    }
+    return count;
+}
+
+// The tag names a chain reaches, space-separated (empty when it reaches none).
+std::string stage3_chain_tags(const UnwoundThread& thread, std::uintptr_t image_base) {
+    std::string tags;
+    for (unsigned i = 0; i < thread.count; ++i) {
+        if (thread.frames[i] < image_base) continue;
+        const auto rva = static_cast<std::uint32_t>(thread.frames[i] - image_base);
+        for (const Stage3Tag& tag : kStage3Tags)
+            if (rva >= tag.begin && rva < tag.end && tags.find(tag.name) == std::string::npos)
+                tags += (tags.empty() ? "" : " ") + std::string(tag.name);
+    }
+    return tags;
+}
+
+// The wait a thread is in, when its deepest frame is a host wait API: the API, the timeout it passes, and the object
+// the handle names (type and current state). A chain otherwise says only where it stopped; this says what it waits for,
+// which is what separates "parked worker on its own event" from "waiting for a completion nobody owes".
+std::string stage3_wait_text(const UnwoundThread& thread, const std::vector<WaitSampleApi>& apis) {
+    const char* api = wait_api_name(apis.data(), (unsigned)apis.size(), thread.rip);
+    if (!api) return {};
+    WaitThreadSample sample;
+    sample.tid = thread.tid;
+    sample.rip = thread.rip;
+    sample.rsp = thread.rsp;
+    sample.rcx = thread.rcx;
+    sample.rdx = thread.rdx;
+    sample.r8 = thread.r8;
+    std::string text = std::string(" wait ") + api;
+    if (const char* timeout = wait_timeout_text(api, sample)) text += std::string(" timeout ") + timeout;
+    if (wait_takes_handle(api) && !std::strstr(api, "WaitForMultipleObjects")) {
+        char handle[32], type[64] = {}, state[64] = {};
+        std::snprintf(handle, sizeof handle, "0x%llx", static_cast<unsigned long long>(thread.rcx));
+        text += std::string(" handle ") + handle;
+        wait_object_type((HANDLE)(std::uintptr_t)thread.rcx, type, sizeof(type));
+        if (type[0]) text += std::string(" (") + type + ")";
+        palmetto::wait_trace::object_state_text((HANDLE)(std::uintptr_t)thread.rcx, type, state, sizeof(state));
+        if (state[0]) text += std::string(" state ") + state;
+    }
+    return text;
+}
+
+// One stage-3 sample: every other thread's suspended context unwound into its real call chain, grouped by chain, with
+// the machine words and the heartbeat at that instant. The machine fields are current stage +0x10, requested stage
+// +0x12, pending request +0x14 and flags +0x16.
+void stage3_pump_sample_once(std::uintptr_t image_base, const char* label, double stage3_at,
+                             unsigned heartbeat_changes_at_stage3, unsigned heartbeat_changes, double heartbeat_changed_at) {
+    std::vector<DWORD> tids;
+    {
+        const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) return;
+        THREADENTRY32 entry{};
+        entry.dwSize = sizeof(entry);
+        const DWORD pid = GetCurrentProcessId();
+        const DWORD self = GetCurrentThreadId();
+        if (Thread32First(snapshot, &entry))
+            do {
+                if (entry.th32OwnerProcessID == pid && entry.th32ThreadID != self && tids.size() < 256)
+                    tids.push_back(entry.th32ThreadID);
+            } while (Thread32Next(snapshot, &entry));
+        CloseHandle(snapshot);
+    }
+    static NtQueryInformationThreadFn query_thread = reinterpret_cast<NtQueryInformationThreadFn>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
+    std::vector<UnwoundThread> threads;
+    threads.reserve(tids.size());  // allocated before any thread is suspended
+    for (const DWORD tid : tids) {
+        const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+        if (!thread) continue;
+        if (SuspendThread(thread) == (DWORD)-1) {
+            CloseHandle(thread);
+            continue;
+        }
+        CONTEXT context{};
+        context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        UnwoundThread sample;
+        sample.tid = tid;
+        if (GetThreadContext(thread, &context)) {
+            if (query_thread) {
+                void* start = nullptr;
+                if (query_thread(thread, 9 /*ThreadQuerySetWin32StartAddress*/, &start, sizeof(start), nullptr) >= 0)
+                    sample.start = (std::uint64_t)(std::uintptr_t)start;
+            }
+            sample.rip = context.Rip;
+            sample.rsp = context.Rsp;
+            sample.rcx = context.Rcx;
+            sample.rdx = context.Rdx;
+            sample.r8 = context.R8;
+            sample.count = unwind_call_chain(context, sample.frames, 40);
+        }
+        ResumeThread(thread);
+        CloseHandle(thread);
+        if (sample.count) threads.push_back(sample);
+    }
+    // Everything below runs with every thread resumed: module_offset() takes the shim registry lock.
+    bool ok_machine = false;
+    const std::uint64_t machine = title_read_u64(image_base, kTitleStateMachineRva, ok_machine);
+    bool ok_current = false, ok_next = false, ok_pending = false, ok_flags = false, ok_heartbeat = false;
+    std::uint16_t current = 0, next = 0, pending = 0, flags = 0;
+    if (ok_machine && machine && (machine & 7) == 0) {
+        current = title_read_u16_at(static_cast<std::uintptr_t>(machine) + 0x10, ok_current);
+        next = title_read_u16_at(static_cast<std::uintptr_t>(machine) + 0x12, ok_next);
+        pending = title_read_u16_at(static_cast<std::uintptr_t>(machine) + 0x14, ok_pending);
+        flags = title_read_u16_at(static_cast<std::uintptr_t>(machine) + 0x16, ok_flags);
+    }
+    const std::uint64_t heartbeat = title_read_u64_at(image_base + static_cast<std::uintptr_t>(kTitleHeartbeatRva), ok_heartbeat);
+    bool ok_init = false, ok_loading = false, ok_session = false;
+    const std::uint32_t init = title_read_u32(image_base, kTitleInitStateRva, ok_init);
+    const std::uint32_t loading = title_read_u32(image_base, kTitleLoadingStateRva, ok_loading);
+    const std::uint32_t session = title_read_u32(image_base, kTitleSessionStateRva, ok_session);
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - sampler_epoch()).count();
+    std::fprintf(stderr,
+                 "[rt] stage3 pump at %s (stage 3 at %.1f s, this sample %+.1f s): %zu thread(s); machine current %s%u"
+                 " next %s%u pending %s0x%x flags %s0x%x; heartbeat %s0x%llx advances %u (%u since stage 3, last"
+                 " %.1f s ago); init %s%u loading %s%u session %s%u\n",
+                 label, stage3_at, now - stage3_at, threads.size(), ok_current ? "" : "?", current, ok_next ? "" : "?",
+                 next, ok_pending ? "" : "?", pending, ok_flags ? "" : "?", flags, ok_heartbeat ? "" : "?", heartbeat,
+                 heartbeat_changes, heartbeat_changes - heartbeat_changes_at_stage3,
+                 heartbeat_changed_at > 0.0 ? now - heartbeat_changed_at : -1.0, ok_init ? "" : "?", init,
+                 ok_loading ? "" : "?", loading, ok_session ? "" : "?", session);
+    std::map<std::string, std::pair<unsigned, std::string>> distinct;
+    std::vector<WaitSampleApi> wait_apis;
+    resolve_wait_apis(wait_apis);
+    std::map<std::string, std::string> distinct_wait;  // the first thread's wait in each chain
+    for (const UnwoundThread& thread : threads) {
+        std::string signature;
+        for (unsigned i = 0; i < thread.count; ++i)
+            signature += " " + rt::shims::module_offset(static_cast<std::uintptr_t>(thread.frames[i]));
+        auto& slot = distinct[signature];
+        ++slot.first;
+        if (slot.first <= 8) slot.second += (slot.second.empty() ? "" : ",") + std::to_string(thread.tid);
+        if (slot.first == 1) distinct_wait[signature] = stage3_wait_text(thread, wait_apis);
+    }
+    unsigned shown = 0;
+    for (const auto& [signature, slot] : distinct) {
+        if (shown++ == 120) {
+            std::fprintf(stderr, "[rt] stage3 pump at %s: %u more distinct chain(s) not shown\n", label,
+                         static_cast<unsigned>(distinct.size() - shown + 1));
+            break;
+        }
+        std::fprintf(stderr, "[rt] stage3 pump at %s: %ux tid %s%s\n    %s\n", label, slot.first, slot.second.c_str(),
+                     distinct_wait[signature].c_str(), signature.c_str());
+    }
+    // The chains that reach the pump or a per-frame tick are the dissection: name them again with the thread's start
+    // address and tag, so a chain is never confused with a task-pool worker that merely shares its stack shape.
+    for (const UnwoundThread& thread : threads) {
+        const std::string tags = stage3_chain_tags(thread, image_base);
+        if (tags.empty()) continue;
+        std::string chain;
+        for (unsigned i = 0; i < thread.count; ++i)
+            chain += " " + rt::shims::module_offset(static_cast<std::uintptr_t>(thread.frames[i]));
+        const std::string wait = stage3_wait_text(thread, wait_apis);
+        std::fprintf(stderr, "[rt] stage3 pump at %s: tid %lu start %s reaches [%s]%s\n    %s\n", label,
+                     static_cast<unsigned long>(thread.tid), rt::shims::module_offset(thread.start).c_str(),
+                     tags.c_str(), wait.c_str(), chain.c_str());
+    }
+}
+
+// Starts the stage-3 pump probe when PALMETTO_STAGE3_PUMP names offsets after the machine word first reads 3.
+void start_stage3_pump_probe(std::uintptr_t image_base, const char* spec) {
+    std::vector<double> offsets;
+    for (const char* at = spec; at && *at;) {
+        char* end = nullptr;
+        const double value = std::strtod(at, &end);
+        if (end == at) break;
+        if (value > 0.0 && value < 600.0) offsets.push_back(value);
+        at = *end == ',' ? end + 1 : end;
+        if (*end == '\0') break;
+    }
+    if (offsets.empty()) {
+        if (std::strcmp(spec, "1") == 0) offsets = {2.0, 5.0, 10.0, 20.0, 40.0};
+        else return;
+    }
+    std::thread([image_base, offsets] {
+        const auto started = sampler_epoch();
+        auto elapsed = [&] {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        };
+        // The heartbeat is petted by a per-frame tick; watching it from here dates its stop without a debugger. The
+        // poll is 25 ms, so a change is seen within one frame of the store.
+        bool heartbeat_seen = false;
+        std::uint64_t heartbeat_last = 0;
+        unsigned heartbeat_changes = 0;
+        double heartbeat_changed_at = 0.0;
+        double stage3_at = -1.0;
+        unsigned heartbeat_changes_at_stage3 = 0;
+        std::size_t next_offset = 0;
+        while (elapsed() < 600.0) {
+            bool ok_heartbeat = false;
+            const std::uint64_t heartbeat = title_read_u64_at(image_base + static_cast<std::uintptr_t>(kTitleHeartbeatRva), ok_heartbeat);
+            if (ok_heartbeat && (!heartbeat_seen || heartbeat != heartbeat_last)) {
+                if (heartbeat_seen) ++heartbeat_changes;
+                heartbeat_last = heartbeat;
+                heartbeat_seen = true;
+                heartbeat_changed_at = elapsed();
+            }
+            if (stage3_at < 0.0) {
+                bool ok_machine = false;
+                const std::uint64_t machine = title_read_u64(image_base, kTitleStateMachineRva, ok_machine);
+                bool ok_current = false;
+                const std::uint16_t current =
+                    (ok_machine && machine && (machine & 7) == 0)
+                        ? title_read_u16_at(static_cast<std::uintptr_t>(machine) + 0x10, ok_current)
+                        : 0;
+                if (ok_current && current == 3) {
+                    stage3_at = elapsed();
+                    heartbeat_changes_at_stage3 = heartbeat_changes;
+                    bool ok_next = false, ok_init = false, ok_loading = false, ok_session = false;
+                    const std::uint16_t next = title_read_u16_at(static_cast<std::uintptr_t>(machine) + 0x12, ok_next);
+                    const std::uint32_t init = title_read_u32(image_base, kTitleInitStateRva, ok_init);
+                    const std::uint32_t loading = title_read_u32(image_base, kTitleLoadingStateRva, ok_loading);
+                    const std::uint32_t session = title_read_u32(image_base, kTitleSessionStateRva, ok_session);
+                    std::fprintf(stderr,
+                                 "[rt] stage3 pump: machine current 3 at %.1f s (next %s%u, init %s%u, loading %s%u,"
+                                 " session %s%u, heartbeat 0x%llx after %u advances); sampling at %zu offset(s)\n",
+                                 stage3_at, ok_next ? "" : "?", next, ok_init ? "" : "?", init, ok_loading ? "" : "?",
+                                 loading, ok_session ? "" : "?", session,
+                                 static_cast<unsigned long long>(heartbeat_last), heartbeat_changes, offsets.size());
+                }
+            } else if (next_offset < offsets.size() && elapsed() - stage3_at >= offsets[next_offset]) {
+                char label[48];
+                std::snprintf(label, sizeof label, "stage3+%.1f", offsets[next_offset]);
+                stage3_pump_sample_once(image_base, label, stage3_at, heartbeat_changes_at_stage3,
+                                        heartbeat_changes, heartbeat_changed_at);
+                ++next_offset;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+    }).detach();
 }
 
 // ---- Stage-2 wait wake probe (PALMETTO_STAGE2_WAKE) -----------------------------------------------------------------
@@ -3158,6 +3473,11 @@ int wmain(int argc, wchar_t** argv) {
         // Off when unset.
         if (const char* spec = std::getenv("PALMETTO_STATE_TRACE"); spec && *spec)
             start_title_state_trace(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, spec);
+        // PALMETTO_STAGE3_PUMP=<seconds,...>: wait for the state machine's current stage to read 3, then unwind every
+        // other thread's call chain at those offsets after it and print the chains that reach the pump, the transition
+        // executor or the per-frame heartbeat tick (diagnostic; see the stage-3 pump probe above). Off when unset.
+        if (const char* spec = std::getenv("PALMETTO_STAGE3_PUMP"); spec && *spec)
+            start_stage3_pump_probe(reinterpret_cast<std::uintptr_t>(main_module.base), spec);
         // PALMETTO_STAGE2_WAKE=<seconds>: signal the measured stage-2 tracker event once at the named second and log the
         // tracker fields before/after (diagnostic; see the stage-2 wake probe above). Off when unset.
         if (const char* spec = std::getenv("PALMETTO_STAGE2_WAKE"); spec && *spec) {

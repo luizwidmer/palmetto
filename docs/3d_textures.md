@@ -394,3 +394,176 @@ the entered handler). The wait samples put 96 threads (75 in a wait or busy titl
 This slice was implemented from this project's own measurements: the crash registers, the decompiled chain above, the
 in-process poke boots and the 300 s boot's counters. No peer code was used and no game data is added: RVAs, field
 offsets, counts, shapes and outcomes only.
+
+## 11. The stage-3 hang, measured and fixed: the frame thread was inside the session-3 loading poll because a deferred-compile submission had blocked; the stop moves to a refused vertex-buffer draw
+
+**Status: measured, attributed and fixed in our structure; the boot now passes stage-3 entry with the heartbeat and the
+frame loop still running, and stops at a new title site.** Section 10.6 left the boot in the title's own hang watchdog
+at `game+0x2215C35`, with the per-frame pump apparently stopped after stage 3 was entered. This section proves that the
+title-side wait was a symptom: on the thread that runs the frame loop, the stage-3 post-transition handler calls the
+session dispatcher, whose state-3 handler is a 33 ms poll on the loading progress record; the loading task that should
+advance that record was blocked *behind our own deferred-compile submission wait* (FIFO against thousands of queued
+builds). The submission never returned, the loading completion never arrived, the heartbeat stopped, and the watchdog
+aborted thirty passes later. The fix builds the deferred pipeline a submission names on the submitting thread instead
+of waiting for every older queued build. With it, the same 300 s arm enters stage 3, keeps the heartbeat and the
+present loop alive, and stops at `game+0x13360A3` (`read` of `0xFFFFFFFFFFFFFFFF`) after three `ExecuteCommandLists`
+refusals that name a vertex buffer the replay has no arena mapping for. Section 11.7 names that next wall.
+
+### 11.1 What ran
+
+| boot | fix | probe switches | stage word 3 (probe) | stop | wall |
+|---|---|---|---:|---|---:|
+| `boot-stage3pump300` | none | none (the env array was mis-quoted, so only the standard arm ran) | 110.0 s | watchdog `game+0x2215C35`, t 162.5 s | 165.1 s |
+| `boot-stage3pump300b` | none | `PALMETTO_STAGE3_PUMP=2,5,10,20,40`, wait sample 76/96 | 69.1 s | watchdog, t 99.1 s | 101.1 s |
+| `boot-stage3diag` | none | the same probe plus `PALMETTO_WAIT_TRACE=75,95,115,135` | 75.5 s | watchdog, t 106.2 s | 106.2 s |
+| `boot-stage3final300` | none | the same probe, captures on | 92.1 s | watchdog, t 121.2 s | 123.2 s |
+| `boot-stage3fix300` | **4,096-bound submit-wait fix** | the same probe, captures on | 69.6 s | **`game+0x13360A3`, read `0xffffffffffffffff`, t 73.6 s** | 75.7 s |
+
+All five are one boot at a time under `_setup/boot_lock.ps1` (`-Who stage3`), harness `tooling/boot_report.py`, logs and
+captures outside the repository in `D:\leonida-work\threedee`. The standard environment is section 10.5's: the
+deferred-compile arm (`PALMETTO_PIPELINE_DEFER_COMPILE=1`, `PALMETTO_PIPELINE_COMPILE_BOUND=4096`,
+`PALMETTO_PIPELINE_COMPILE_WORKERS=4`), `PALMETTO_SHADERS`, `PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`,
+`PALMETTO_SEED_GLOBAL=75DF268:D8`, `PALMETTO_STATE_TRACE=2,<timeout>`, `PALMETTO_STAGE2_READY=20`,
+`PALMETTO_PIPELINE_CALL_STATS=5`, `PALMETTO_DUMP_REGS=1`, `PALMETTO_FAULT_MEM=1`, `PALMETTO_ARENA_LOG=1`, the arena
+default of 1024 MiB (no arena switch set) and one presenter capture per arm. The fixed binary is SHA-256
+`96593942...A762C5`; the pre-fix measurement arm is `96F273B0...B99A8`.
+
+The five arms put stage 3 between 69.1 s and 110.0 s (the shared machine's load) but the same pre-fix stop site, and
+the watchdog aborts 30 s after the heartbeat's last advance in every pre-fix arm but the first, where the deferred
+driver compile (a single build of 62.9 s) stretched the watchdog's one-second passes.
+
+### 11.2 The probe: unwinding the pump thread, and a wrong address in section 10.6
+
+The earlier arms could not name the pump: `PALMETTO_WAIT_SAMPLE` and `PALMETTO_THREAD_STACKS` scan raw stack words, and a
+suspended title thread's stack holds stale return addresses, so the 80 s detail in section 10.6 shows frames from calls
+that had already returned. `port/src/main.cpp` gains an opt-in probe, `PALMETTO_STAGE3_PUMP=<offsets>` (unset: no thread
+starts and the default path is unchanged). It polls the state machine object at `[[image+0x71273C8]]` every 25 ms and,
+when the current-stage u16 at `+0x10` first reads 3, samples every other thread's **real** call chain at the named
+offsets after that moment (`2,5,10,20,40`; only the first two offsets ran before the fixed boot stopped). The chain is
+walked with `RtlLookupFunctionEntry`/`RtlVirtualUnwind` from each suspended thread's context, grouped by identical chain,
+and tagged with the functions this section names. The probe also reads the hang watchdog's heartbeat and prints how many
+times it advanced and when it last changed, so "the pump stopped" is a measurement.
+
+The heartbeat needs a correction of section 10.6's own text: `image+0x1471B6338` there is the Ghidra address of the
+watchdog instruction's RIP-relative operand (the image is based at `0x140000000`), and the image **RVA is `0x71B6338`**
+(the state machine pointer in the same decompile is `0x1471273C8` = `image+0x71273C8`, the address the state trace has
+always used). A read of `image+0x1471B6338` is past the image mapping; the first probe boot measured that wrong address
+and read a constant 0. With the correct RVA the heartbeat reads a QPC value that advances once per frame, ~24 times a
+second.
+
+### 11.3 The stop before the fix, dissected
+
+`boot-stage3final300` (and the diagnostic arm) put stage 3 at 92.1 s (75.5 s in the diagnostic arm). Three thread chains
+explain the whole stop; each was confirmed against the code's own call sites and, in the diagnostic arm, against
+`PALMETTO_WAIT_TRACE`'s outstanding-wait table.
+
+| thread | unwound chain (deepest first, RVAs) | what it is |
+|---|---|---|
+| frame loop, tid 32072 | `NtDelayExecution`(`SleepEx(33)`) <- `game+0x21B70A5` <- `0x1D83996` <- `0x81AFB9` <- `0x53EC079` <- `0x53EBF66` <- `0x661F0` <- `0x1D109C9` <- `0x5A91C0D` <- `0x56A1E5A` | the frame thread: `0x56A1D54` (game frame update) -> `0x5A91BD0` (runtime frame pump) -> `0x1D109B0` (per-frame tick dispatch) -> `0x661E0` (state-machine wrapper) -> pump `0x53EBEA0` -> transition executor `0x53EBFE0` -> stage-3 post-transition handler `0x81AFB0` -> session dispatcher `0x1D83960` -> **`0x21B7070`**, a `while (!pred) { SleepEx(33); tick(); }` loop |
+| loading task, tid 47728 | `NtWaitForSingleObject(INF)` on a semaphore <- `0x56A0D` thunk <- `0x4E7F358` <- `0x6259` <- `0xCD73D9` <- `0xCD72E7` <- `0x24848BD` <- `0xC9E603` <- ... <- `0x11FDBD` <- `0x4FD1E88` <- `0x4FD1AE5` <- `0x23CF247` <- `0x23CF104` | the title task-pool thread running the loading task `0x4FD1AD0`: its loading update `0x4FD1B20` -> monitor tick `0x11FD60` -> the registered frame tick `0x120790` (which pets the heartbeat at `0x120799`) -> progress tick -> the title's own completion wait |
+| submitting title thread, tid 49400 | `NtWaitForAlertByThreadId(INF)` <- `MSVCP140+0x176ea` <- `rt::d3d12::DeviceState::prepare_deferred_compute_pipelines` <- `VulkanContext::prepare_pipelines` <- `VulkanQueue::execute_now` <- `VulkanQueue::execute` <- `rt::d3d12::CommandQueue::ExecuteCommandLists` <- `child_slot<0,35>` <- `game+0x24821E3` | the title thread that submits a command list naming a deferred compute pipeline: **blocked inside our shim** in the compile queue's wait |
+
+The console slot-35 handler (`child_slot<0,35>`, `port/shims/d3d12_xs_device.cpp`) calls the PC
+`ExecuteCommandLists`, which calls the queue hook that waits for the deferred pipeline. The probe resolves those shim
+frames by symbol, so this is our call, not a title guess.
+
+The timeline is one event, not three coincidences. The loading word moves 1 -> 2 at 90.0 s, the same instant the
+loading task's completion wait starts (the wait trace's outstanding entry is 2,063 ms old at the 75 s dump and 22,063 ms
+at the 95 s dump in the diagnostic arm) and the submitting thread enters our wait. The heartbeat's last advance is
+90.1 s. Stage 3 is entered at 92.1 s, and the frame thread's own clock in the pump's session-3 poll never completes
+because the loading progress record the loader should advance is frozen. The watchdog's passes then run from 90.1 s to
+121.2 s (30 one-second passes plus the last-pet offset) and the null write at `game+0x2215C35` follows.
+
+The wait trace names the completion the loader waits for: a title semaphore, `handle 0x96c` in the diagnostic arm
+(`handle 0x948` in the final arm), 16 wait entries, 15 releases, the last release at 72,906 ms from title code (the
+release site `game+0x6380` is the return after the image's `ReleaseSemaphore` thunk inside a shared dispatch helper), and
+the outstanding wait has no matching set call. So the missing completion is title-side, but it is missing **because the
+submission that would complete it is parked in our wait**.
+
+### 11.4 The fix
+
+`port/src/deferred_compile.h`'s `CompileQueue` gains `wait_or_build(task)`: the submission path calls it, and when the
+task a submission names is still queued, the **submitting thread claims that task out of the FIFO and builds it
+itself**; only a task a compile worker has already started is waited for. The worker loop and the new path share one
+build body, so the counters (built/failed, build time, longest build, outstanding, the bound) and the waiter's condition
+variable keep their meaning. `port/shims/d3d12_vulkan_device.cpp`'s `prepare_deferred_compute_pipelines` calls
+`wait_or_build`, and the queue bookkeeping records the call in the same "submit waits" counters as before.
+
+Why this is the right shape: the deferred design ([deferred_compile.md](deferred_compile.md) section 3.1) says a
+submission that first names a deferred pipeline waits for it on the submitting thread, "which is exactly where a D3D12
+runtime is allowed to wait". That contract is a wait for *one* driver build, not for every older queued build. The
+measured arm defers 2,742 compute pipelines at the 4,096 bound, the four workers build ~320 in 90 s, and the submitted
+list names a pipeline that is still queued; the plain wait then blocks for the whole queue ahead of it. Claiming the
+task keeps the wait at one build. The switch surface is unchanged: `PALMETTO_PIPELINE_DEFER_COMPILE=0` (the default) never
+reaches this code, and the synchronous fallback path (queue at its bound) is untouched.
+
+### 11.5 The boot after the fix
+
+`boot-stage3fix300`, same environment and probe as `boot-stage3final300`, binary `96593942...A762C5`:
+
+| measurement | before the fix (`boot-stage3final300`) | after the fix (`boot-stage3fix300`) |
+|---|---|---|
+| verdict / stop | STOP `game+0x2215C35` (watchdog null write), t 121.2 s, wall 123.2 s | **STOP `game+0x13360A3`, read `0xffffffffffffffff`, t 73.6 s, wall 75.7 s**; the watchdog stop is gone |
+| init / loading / session words | init 3 at 94.0 s, loading 2 at 90.0 s, session 3 at 94.0 s | init 3 at 70.0 s, loading 2 at 68.0 s, session 3 at 70.0 s |
+| machine word (current / next) | 3 / 3 at 92.1 s, pending `0xffff` | 3 / 3 at 69.6 s, pending `0xffff`; stage 4 is still not requested |
+| heartbeat | 2,462 advances at stage 3, then **0 since** (last advance 90.1 s) | 1,719 advances at stage 3, then **1 advance after stage 3** (the sample 2 s later reads it 2.0 s old); the watchdog never fires |
+| deferred submit waits | 0 (the FIFO wait never returned, so the counter never moved) | **42, max single 563.8 ms** |
+| deferred submitted / built / pending | 2,742 / 323 / 2,419 | 2,742 / 320 / 2,422 (last periodic line) |
+| D3D12 calls | 189,061 | 199,837 |
+| PresentX | 3,300; the last present is between the 88.0 s and 90.0 s state lines (before stage 3) | 3,411; the last present is at the end of the boot, **after stage 3** |
+| captures | 1 frame, 2564x1421, mean rgb 0.00 (black) | 1 frame, 2564x1421, mean rgb 0.00 (black); no non-black capture |
+| new layer lines | none after the stage-3 entry | 3 x `ExecuteCommandLists failed: unknown resource; nothing was submitted` |
+
+The heartbeat line deserves its plain reading: after the fix it advanced once after the machine word read 3 and then did
+not advance again for the 2 s the sample covers, because the frame thread is inside the stage-3 transition (the session-3
+poll runs with 33 ms sleep passes) and the boot dies 4 s after stage 3. It is 1 advance versus 0 in the pre-fix arm; a
+longer arm is the falsifier that would show the cadence returning to ~24/s once the load has nothing left to do.
+
+### 11.6 The new wall
+
+The three refusals are one shape: a draw's `draw.vertex_buffer` names title VA `0x15c08800900` (size `0x120000`) or
+`0x15c08800980` (size `0x11ff80`), the replay's `buffer_at` lookup has no arena mapping for it, the whole command list
+(`list 2 of 4`, 11 commands) is refused in prepare, and `ExecuteCommandLists` returns failure with nothing submitted.
+The boot then stops at `game+0x13360A3` in `game+0x1335A20..0x13361ED` (a read of `0xFFFFFFFFFFFFFFFF`) with an eleven-frame
+title stack from the same renderer path (`0x1829C0`..`0x184395`), i.e. the title faults on its own failed submission
+rather than in our layer. This is the first boot that reaches stage-3 rendering at all; the vertex buffer's
+registration path is the next slice's measurement, not this one's claim.
+
+### 11.7 Limits
+
+- **One boot per arm.** Stage 3 ranged 69.1-110.0 s across five arms on the shared machine, and the deferred driver
+  compile's worst single build was 62.9-65.1 s in three of them; the stop sites did not move but every timing did.
+- **The causal link is measured as one changed input, one changed boot.** The loader's completion and the submitting
+  thread's wait start in the same second and the fix removes the hang, but no signal trace proves the semaphore is
+  released by the refused submission itself; the named next falsifier is a wait-trace arm on the fixed binary that
+  correlates the semaphore's set calls with the submit returns.
+- **The 33 ms poll is not the fault.** Before the fix it was the visible block, but it is the title waiting for real
+  loading progress; the boot now runs it while the loader advances. Making the poll return without the record would be a
+  fake completion, and this slice does not.
+- **The capture is still black.** Rendering remains outside this slice: one capture per arm, mean rgb 0.00.
+- **The fix changes the deferred path's wait shape, not the default path.** With `PALMETTO_PIPELINE_DEFER_COMPILE`
+  unset the compile queue is not used and the boot path is section 4's.
+- **The `game+0x13360A3` crash is not attributed beyond its stack and the three refusals.** Section 11.6 names the
+  falsifier.
+
+### 11.8 Tests and gates
+
+- `port/test/deferred_compile_test.cpp` gains `test_submit_builds_queued_task`, in the file's `CHECK` group: with one
+  worker blocked in an older build, a task that is still queued is claimed and built on the calling thread (the calling
+  thread's id is the one that runs the closure), the older build and the later queued task are untouched, the counters
+  move once, a finished task is not rebuilt, a cancelled queued task is claimed and skipped (the caller gets false), a
+  null task returns false, and a task a worker already owns is waited for normally.
+- The target exits 0 (`deferred compile: ok (18 check(s))`; the printed count is the file's `CHECK_COUNT` group, the new
+  group uses the file's `CHECK` style).
+- Gate subset: `frame_dump_test`, `unimplemented_policy_test`, `graphics_record_test`, `graphics_pso_test`,
+  `xbox_present_test`, `buffer_va_index_test`, `dstorage_test`, `xapu_chad_test`, `xs_proxy_mock_test`,
+  `arena_size_test` and `deferred_compile_test` exit 0; `d3d12_fence_timing_test` remains the documented pre-existing
+  crash.
+- Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, and the
+  `tests/test_docs_*.py` checks pass.
+
+### 11.9 Attribution
+
+This slice was implemented from this project's own measurements: the unwound chains, the probe and wait-trace arms, the
+300 s boots and the A/B above. No peer code was used and no game data is added: RVAs, field offsets, counts, shapes and
+outcomes only.

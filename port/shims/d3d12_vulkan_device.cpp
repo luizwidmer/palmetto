@@ -7336,8 +7336,11 @@ void DeviceState::stop_compile_workers() {
 }
 
 // The queue hook (vulkan_backend.h prepare_pipelines, called from VulkanQueue::execute_now before the lists are
-// prepared): wait for a deferred compute pipeline only when a submitted list actually names one, on the thread that
-// submits. Called with no Vulkan lock held; the compile worker publishes the handle under resource_mutex_ itself.
+// prepared): make a deferred compute pipeline a submitted list actually names ready, on the thread that submits. It
+// claims and builds *that* pipeline when it is still queued rather than waiting for the FIFO queue ahead of it: with
+// the measured deferred arm (2,742 compute pipelines deferred, ~320 built in 90 s) the plain wait blocks the
+// submission for minutes, and the title's own 30-pass hang watchdog aborts the boot first (docs/3d_textures.md section
+// 11). Called with no Vulkan lock held; the build publishes the handle under resource_mutex_ itself.
 void DeviceState::prepare_deferred_compute_pipelines(std::span<const palmetto::CommandList* const> lists) {
     if (!pipeline_defer_compile_enabled()) return;
     for (const palmetto::CommandList* list : lists) {
@@ -7357,7 +7360,7 @@ void DeviceState::prepare_deferred_compute_pipelines(std::span<const palmetto::C
                 if (it != deferred_compute_tasks.end()) task = it->second;
             }
             if (!task) continue;  // not deferred: the replay map already holds its handle
-            if (compile_queue.wait(task)) {
+            if (compile_queue.wait_or_build(task)) {
                 deferred_built_count.fetch_add(1, std::memory_order_relaxed);
             } else if (deferred_failed_count.fetch_add(1, std::memory_order_relaxed) == 0) {
                 std::fprintf(stderr,
