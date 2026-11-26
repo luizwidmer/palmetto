@@ -2295,6 +2295,7 @@ public:
         control.pipeline = pipeline;
         control.variant = nullptr;   // a control draw never needs the unbound-slot variants
         control.with_ps = nullptr;
+        control.with_cull = nullptr;  // docs/vertex_buffer_va.md section 22: a control draw is never re-substituted
         frame_dump_ps_control_pipeline_ = std::move(control);
         return true;
     }

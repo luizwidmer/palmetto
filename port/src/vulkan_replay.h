@@ -828,6 +828,12 @@ struct GraphicsPipeline {
     // vs degenerate-geometry question can be answered. Null when the shim did not offer it or the recipe has no
     // fragment stage; consumed only by the env-gated diagnostic.
     std::function<VkPipeline(VkShaderModule ps, bool cull_none)> with_ps;
+    // Diagnostic (docs/vertex_buffer_va.md section 22): the same pipeline (the title's own modules, no substitution)
+    // with only its rasterizer cull pair replaced, keyed in the shim's own cache by (cull mode, front face), so a real
+    // pipeline cull variant can never collide with the PS-substitution cache above. Null when the shim offers none; the
+    // substituted control's copy clears it, so a control draw is refused rather than re-substituted. Consumed only by
+    // the env-gated content-window selection.
+    std::function<VkPipeline(std::uint32_t cull_mode, bool front_ccw)> with_cull;
     // Diagnostic (docs/vertex_path.md): the vertex path of an armed draw - the shader-corpus identity the PSO resolved and
     // the input layout actually bound to the Vulkan pipeline. Filled by the shim; read only by the env-gated dump.
     std::function<void(struct VertexPathInfo& out)> describe_vertex_path;
@@ -1561,6 +1567,72 @@ inline unsigned long long content_probe_arm_ordinal(unsigned long long window_su
 inline bool content_probe_window_arm(bool enabled, bool content_window, unsigned long long window_submission, int fixed) {
     if (!enabled || !content_window) return false;
     return fixed >= 0 ? window_submission == 0 : window_submission < 3;
+}
+
+// Diagnostic (docs/vertex_buffer_va.md section 22): PALMETTO_CONTENT_CULL_VARIANT=1 selects a cull-only pipeline variant
+// for the content-window draws - the stage-3 submissions the title-import trigger marks, the same gate section 18's
+// console feed uses. The variant is the title's own pipeline (its modules, input layout and attachment formats) with
+// only the rasterizer cull pair replaced by the measured one (section 21: cull none, clockwise front); the shim builds
+// it in its own cache keyed by (cull mode, front face), so it can never collide with the PS-substitution cache. Every
+// draw outside the window and every draw with the switch unset keeps the documented stand-in byte-identically. Pure
+// arming rules; frame_dump_test pins them.
+inline bool content_cull_variant_enabled_from(const char* value) {
+    return value && *value && value[0] != '0' && value[0] != 'n';
+}
+
+inline bool content_cull_variant_enabled() {
+    static const bool on = content_cull_variant_enabled_from(std::getenv("PALMETTO_CONTENT_CULL_VARIANT"));
+    return on;
+}
+
+// The measured cull pair ([raster_state.md](raster_state.md) section 2, [vertex_buffer_va.md](vertex_buffer_va.md)
+// section 21): cull none with a clockwise front face. The observation cannot separate this value from
+// (back, counter-clockwise front) or (front, clockwise front), so it is the minimal one the same measurement names.
+inline constexpr std::uint32_t content_cull_variant_cull_mode = 0;  // VK_CULL_MODE_NONE
+inline constexpr bool content_cull_variant_front_ccw = false;
+
+// The shim's cull-only variant cache key: the cull mode bits and the front-face flag, both axes the variant changes.
+// The PS-substitution cache (`with_ps`) keys only cull mode 0/1 in its own map; this key's measured value (NONE,
+// clockwise = 0) is exactly the substituted control's default key, which is why the two caches must stay separate.
+// Pure; frame_dump_test pins the encoding.
+inline std::uint32_t cull_variant_key(std::uint32_t cull_mode, bool front_ccw) {
+    return (cull_mode & 0x3u) | (front_ccw ? 0x10u : 0u);
+}
+
+// What a draw's cull-only selection is. `off`: the switch is unset; `outside_window`: the draw is not in the
+// title-import content window; `mesh`: a mesh pipeline (no mesh draw was measured); `unbound`: the draw already takes
+// the unbound-attachment variant, which the cull variant does not compose with; `unsupported`: the shim offered no
+// cull-only variant for this pipeline (the substituted PS control, or a recipe whose build failed); `apply`: the
+// measured pair replaces only the cull fields. Pure; frame_dump_test pins the truth table.
+enum class ContentCullVariant : std::uint8_t {
+    off,
+    outside_window,
+    mesh,
+    unbound,
+    unsupported,
+    apply,
+};
+
+inline ContentCullVariant content_cull_variant_selection(bool enabled, bool content_window, bool mesh, bool unbound,
+                                                         bool offered) {
+    if (!enabled) return ContentCullVariant::off;
+    if (!content_window) return ContentCullVariant::outside_window;
+    if (mesh) return ContentCullVariant::mesh;
+    if (unbound) return ContentCullVariant::unbound;
+    if (!offered) return ContentCullVariant::unsupported;
+    return ContentCullVariant::apply;
+}
+
+inline const char* content_cull_variant_name(ContentCullVariant selection) {
+    switch (selection) {
+        case ContentCullVariant::off: return "off";
+        case ContentCullVariant::outside_window: return "outside the content window";
+        case ContentCullVariant::mesh: return "a mesh pipeline was not measured";
+        case ContentCullVariant::unbound: return "the draw takes the unbound-attachment variant";
+        case ContentCullVariant::unsupported: return "the shim offers no cull-only variant";
+        case ContentCullVariant::apply: return "apply the measured cull pair";
+    }
+    return "unknown";
 }
 
 // The descriptor-table V#s a draw's s8 table holds at the slot the module reads as matrix A (s8+0) and at the next one
@@ -4208,6 +4280,62 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
     if (unbound) {
         p.pipeline = pipeline->variant ? pipeline->variant(unbound) : VK_NULL_HANDLE;
         if (!p.pipeline) return ReplayResult::unsupported;
+    }
+
+    // Diagnostic (docs/vertex_buffer_va.md section 22): the per-draw cull-only variant. A draw of a title-import content
+    // submission takes the title's own pipeline with only the measured cull pair replaced (cull none, clockwise front),
+    // so exactly the window's measured draws rasterise with the measured state. The window is the same gate section 18's
+    // console feed uses (`title_import_capture`, set before this submission is prepared), and the selection is
+    // per draw, so the pipelines the loading frames built are untouched - a creation-time rule could not be scoped this
+    // way because they are created long before the window. Off by default; every refusal is named once per kind, and a
+    // draw who does not qualify keeps its pipeline handle byte-identically.
+    if (frame_dump::content_cull_variant_enabled()) {
+        const bool content_window = vk.title_import_capture && vk.title_import_capture();
+        const frame_dump::ContentCullVariant selection = frame_dump::content_cull_variant_selection(
+            true, content_window, pipeline->mesh, unbound != 0, pipeline->with_cull != nullptr);
+        switch (selection) {
+            case frame_dump::ContentCullVariant::apply: {
+                const VkPipeline cull_variant = pipeline->with_cull(frame_dump::content_cull_variant_cull_mode,
+                                                                   frame_dump::content_cull_variant_front_ccw);
+                if (cull_variant) {
+                    p.pipeline = cull_variant;
+                    static std::atomic<unsigned> applied{0};
+                    if (applied.fetch_add(1, std::memory_order_relaxed) < 8)
+                        std::fprintf(stderr,
+                                     "[rt] replay: content cull variant: draw pipeline 0x%llx: the measured cull pair "
+                                     "(mode %u, front %s) replaces only this window draw's pipeline cull fields\n",
+                                     static_cast<unsigned long long>(draw.pipeline),
+                                     frame_dump::content_cull_variant_cull_mode,
+                                     frame_dump::content_cull_variant_front_ccw ? "counter-clockwise" : "clockwise");
+                } else {
+                    static std::atomic<bool> failed{false};
+                    if (!failed.exchange(true))
+                        std::fprintf(stderr,
+                                     "[rt] replay: content cull variant: draw pipeline 0x%llx keeps its pipeline: the "
+                                     "shim could not build the cull-only variant for this pipeline\n",
+                                     static_cast<unsigned long long>(draw.pipeline));
+                }
+                break;
+            }
+            case frame_dump::ContentCullVariant::off:
+            case frame_dump::ContentCullVariant::outside_window:
+                break;  // silent: the default path and every pre-content draw
+            default: {
+                bool first_of_kind = false;
+                {
+                    static std::mutex refuse_mutex;
+                    static std::set<int> printed;
+                    const std::lock_guard lock(refuse_mutex);
+                    first_of_kind = printed.size() < 4 && printed.insert(static_cast<int>(selection)).second;
+                }
+                if (first_of_kind)
+                    std::fprintf(stderr,
+                                 "[rt] replay: content cull variant: draw pipeline 0x%llx keeps its pipeline: %s\n",
+                                 static_cast<unsigned long long>(draw.pipeline),
+                                 frame_dump::content_cull_variant_name(selection));
+                break;
+            }
+        }
     }
 
     // An unbound vertex-buffer slot reads zeros, as in D3D12: the zero page with stride 0. Per-instance slots with

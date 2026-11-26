@@ -562,6 +562,105 @@ int main() {
     }
 
     {
+        // docs/vertex_buffer_va.md section 22: the per-draw cull-only variant for content-window draws. The switch is
+        // off by default and only a draw of the title-import content window is selected; mesh draws, draws that already
+        // take the unbound-attachment variant, and pipelines with no cull-only variant offered are refused by name. The
+        // pure selection is what prepare_draw feeds from the window gate, the pipeline and the shim's offer.
+        expect(!frame_dump::content_cull_variant_enabled_from(nullptr), "an unset cull variant switch stays off");
+        expect(!frame_dump::content_cull_variant_enabled_from(""), "an empty cull variant value stays off");
+        expect(!frame_dump::content_cull_variant_enabled_from("0"), "a zero cull variant value stays off");
+        expect(!frame_dump::content_cull_variant_enabled_from("n"), "a no cull variant value stays off");
+        expect(frame_dump::content_cull_variant_enabled_from("1"), "a set cull variant switch arms");
+        expect(frame_dump::content_cull_variant_enabled_from("true"), "any other non-zero value arms");
+        // The measured pair (section 21): cull none, clockwise front; the key of that pair is 0.
+        expect(frame_dump::content_cull_variant_cull_mode == 0u, "the measured cull mode is NONE");
+        expect(!frame_dump::content_cull_variant_front_ccw, "the measured front face is clockwise");
+        expect(frame_dump::cull_variant_key(frame_dump::content_cull_variant_cull_mode,
+                                            frame_dump::content_cull_variant_front_ccw) == 0u,
+               "the measured pair is the cache's zero key");
+        // Variant identity: the key carries BOTH axes the variant changes (mode and front face), and cull modes are
+        // masked to the two enum bits. The measured pair's key 0 and (front, clockwise)'s key 1 are exactly the
+        // with_ps cache's two keys, which is why the shim keeps the cull-only variants in a separate map.
+        expect(frame_dump::cull_variant_key(0, false) == 0u, "NONE/clockwise keys 0");
+        expect(frame_dump::cull_variant_key(0, true) == 0x10u, "NONE/counter-clockwise keys 0x10");
+        expect(frame_dump::cull_variant_key(1, false) == 1u, "front/clockwise keys 1, the PS cache's cull_none key");
+        expect(frame_dump::cull_variant_key(2, false) == 2u, "back/clockwise keys 2");
+        expect(frame_dump::cull_variant_key(3, true) == 0x13u, "front-and-back/counter-clockwise keys 0x13");
+        expect(frame_dump::cull_variant_key(0xFFFFFFFCu, false) == 0u, "the cull mode is masked to its enum bits");
+        expect(frame_dump::cull_variant_key(1, false) != frame_dump::cull_variant_key(1, true),
+               "the front face is part of the variant's identity");
+        expect(frame_dump::cull_variant_key(1, false) != frame_dump::cull_variant_key(2, false),
+               "the cull mode is part of the variant's identity");
+        {
+            // Six pairs the cache can hold at once, all distinct.
+            const std::uint32_t keys[] = {
+                frame_dump::cull_variant_key(0, false), frame_dump::cull_variant_key(0, true),
+                frame_dump::cull_variant_key(1, false), frame_dump::cull_variant_key(1, true),
+                frame_dump::cull_variant_key(2, false), frame_dump::cull_variant_key(2, true)};
+            bool distinct = true;
+            for (std::size_t i = 0; i < std::size(keys); ++i)
+                for (std::size_t j = i + 1; j < std::size(keys); ++j) distinct = distinct && keys[i] != keys[j];
+            expect(distinct, "the (cull mode, front face) cache keys are distinct");
+        }
+        // The window selection. The switch off is the fallback that keeps every draw on the documented stand-in.
+        expect(frame_dump::content_cull_variant_selection(false, true, false, false, true) ==
+                   frame_dump::ContentCullVariant::off,
+               "the switch off selects nothing even inside the window");
+        expect(frame_dump::content_cull_variant_selection(false, false, false, false, false) ==
+                   frame_dump::ContentCullVariant::off,
+               "the switch off is the fallback whatever the draw is");
+        expect(frame_dump::content_cull_variant_selection(true, false, false, false, true) ==
+                   frame_dump::ContentCullVariant::outside_window,
+               "a draw outside the content window keeps its pipeline");
+        expect(frame_dump::content_cull_variant_selection(true, true, true, false, true) ==
+                   frame_dump::ContentCullVariant::mesh,
+               "a mesh draw is refused: no mesh draw was measured");
+        expect(frame_dump::content_cull_variant_selection(true, true, false, true, true) ==
+                   frame_dump::ContentCullVariant::unbound,
+               "a draw that takes the unbound-attachment variant is refused by name");
+        expect(frame_dump::content_cull_variant_selection(true, true, false, false, false) ==
+                   frame_dump::ContentCullVariant::unsupported,
+               "a pipeline with no cull-only variant offered is refused by name");
+        expect(frame_dump::content_cull_variant_selection(true, true, false, false, true) ==
+                   frame_dump::ContentCullVariant::apply,
+               "a window draw with the switch set and an offer applies the measured pair");
+        expect(frame_dump::content_cull_variant_selection(true, true, true, true, true) ==
+                   frame_dump::ContentCullVariant::mesh,
+               "a mesh draw is refused before the unbound question");
+        expect(frame_dump::content_cull_variant_selection(true, true, false, true, false) ==
+                   frame_dump::ContentCullVariant::unbound,
+               "the unbound refusal comes before the offer question");
+        // The rule is total: every combination returns a decision, and `apply` is exactly the arm above.
+        unsigned applies = 0;
+        for (unsigned bits = 0; bits < 16; ++bits) {
+            const bool enabled = (bits & 1u) != 0, window = (bits & 2u) != 0;
+            const bool mesh = (bits & 4u) != 0, unbound = (bits & 8u) != 0;
+            for (const bool offered : {false, true}) {
+                const frame_dump::ContentCullVariant selection =
+                    frame_dump::content_cull_variant_selection(enabled, window, mesh, unbound, offered);
+                if (selection == frame_dump::ContentCullVariant::apply) ++applies;
+                if (selection == frame_dump::ContentCullVariant::apply)
+                    expect(enabled && window && !mesh && !unbound && offered,
+                           "only the armed, in-window, plain offer applies");
+            }
+        }
+        expect(applies == 1, "exactly one of the reviewable combinations applies");
+        // Each decision has a distinct name, so a boot's refusal line is not ambiguous.
+        const frame_dump::ContentCullVariant decisions[] = {
+            frame_dump::ContentCullVariant::off, frame_dump::ContentCullVariant::outside_window,
+            frame_dump::ContentCullVariant::mesh, frame_dump::ContentCullVariant::unbound,
+            frame_dump::ContentCullVariant::unsupported, frame_dump::ContentCullVariant::apply};
+        bool named = true;
+        for (std::size_t i = 0; i < std::size(decisions); ++i) {
+            const char* name = frame_dump::content_cull_variant_name(decisions[i]);
+            named = named && name && *name;
+            for (std::size_t j = i + 1; j < std::size(decisions); ++j)
+                named = named && std::strcmp(name, frame_dump::content_cull_variant_name(decisions[j])) != 0;
+        }
+        expect(named, "every selection has its own non-empty name");
+    }
+
+    {
         // docs/vertex_buffer_va.md section 12: the two opt-in submission pacing knobs' truth table. Both are off by
         // default, "0" is off, and the delay is decimal microseconds; the queue reads them once at startup.
         const palmetto::SubmissionPace none = palmetto::submission_pace_from(nullptr, nullptr);

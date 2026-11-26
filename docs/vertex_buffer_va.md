@@ -2607,3 +2607,167 @@ place census are [state_blob.md](state_blob.md) section 9's and [raster_state.md
 renderer class/descriptor tables are [decomp_renderer.md](decomp_renderer.md) sections 2 and 4.3's; the content window's
 draw table is section 17's. No peer code was used and no game data is added: record shapes, offsets, counts, formats,
 statistics and outcomes only; the state containers' varying words are reported as regions and counts, never as values.
+
+
+## 22. The content-window draws take a per-draw cull-only pipeline variant: implemented behind a switch, its A/B deferred
+
+**Status: implemented behind an opt-in switch, GPU-free gates and docs checks green, and no boot was run: the host
+GPU/driver is unstable after a crash (the recent arms lose the device on NVIDIA event-153 faults, and the driver's own
+fault-report API crashes it), so this session is code-only and the A/B in 22.6 is prepared, not run.** Section 21 named
+the mechanism and left it unedited: the content pipelines are created during the loading frame, so a creation-time rule
+cannot be window-scoped (21.6), and the existing substituted-pipeline variant cannot carry the real pipeline's cull pair
+because it keys only cull mode (`variant_with_ps`, `cull_none ? 1 : 0`) and builds the control's substituted fragment
+module. This slice implements the separate cull-only variant: the title's own pipeline with only its rasterizer cull
+pair replaced by the measured one (cull none, clockwise front, 21.3), cached by (cull mode, front face), selected per
+draw for the title-import content window behind `PALMETTO_CONTENT_CULL_VARIANT=1`, and refused by name for the cases
+that were not measured. The A/B's before is section 21's measured baseline (`0/8,294,400` for the window's own draws
+under the documented stand-in); the after is **not claimed** here: no content-window pixel was measured this session.
+
+### 22.1 What this slice changes
+
+| file | change |
+|---|---|
+| `port/src/vulkan_replay.h` | `GraphicsPipeline::with_cull`, the cull-only variant hook; the `PALMETTO_CONTENT_CULL_VARIANT` parse (`content_cull_variant_enabled_from`, `content_cull_variant_enabled`), the measured pair constants, the cache key `cull_variant_key`, the `ContentCullVariant` decision with its pure rule `content_cull_variant_selection` and names; `prepare_draw` selects the variant after the unbound-slot decision |
+| `port/src/vulkan_backend.h` | `frame_dump_ps_pipeline` clears `with_cull` on the substituted control's copy, so the appended PS control is refused by name instead of being re-substituted |
+| `port/shims/d3d12_vulkan_device.cpp` | `build()`'s cull override; `variant_with_cull` with its own `cull_variants_` cache keyed by (cull mode, front face); the hook on both pipeline-registration paths (created and recipe-cache-adopted PSOs); the variants destroyed with their PSO |
+| `port/test/frame_dump_test.cpp` | 61 checks: the switch parse, the measured pair, the key encoding and distinctness, the six selection arms, a total-rule sweep and the named decisions |
+| `docs/vertex_buffer_va.md` | this section |
+
+All switches are off by default and nothing on the normal draw path calls the new hook. With
+`PALMETTO_CONTENT_CULL_VARIANT` unset, `prepare_draw` never reads the window gate for this purpose, `build()` is not
+called with the cull override, and the PS-substitution path (`with_ps`, `variant_with_ps`) is byte-identical to its
+section-20 shape.
+
+### 22.2 The mechanism: where the window is known, and what the existing variants cannot carry
+
+The window gate is the one sections 17 and 18 already read. `VulkanQueue::execute_now` calls
+`title_import_capture_tick(imported_title_spans)` before `prepare_pipelines` and before the lists are prepared; that
+sets `title_import_capture_active_`, which `VulkanContext` exposes to the replay as `vk.title_import_capture()`. The
+replay already asks that function inside `prepare_draw` for the content probe (section 17) and the console graphics
+root feed (section 18), so at the draw-prepare hook point the replay knows, per draw, whether the submission is a
+title-import content submission. That property is exactly what a creation-time rule lacks: the PSOs are built during the
+loading frame, long before the window, so the window scoping has to be per draw.
+
+The pipeline a draw binds is resolved in `prepare_draw` from the shim's registered `GraphicsPipeline`, and
+`p.pipeline` starts as its main `VkPipeline`. Two existing mechanisms already replace that handle for a draw: the
+unbound-attachment variant (`variant`, keyed by the unbound slot bits) and the PS-only control (`with_ps`, the same
+recipe with the fragment stage replaced by `fs_solid`, cached in `ps_variants_` keyed by `cull_none ? 1 : 0`). Neither
+is the cull-only variant this slice needs. The PS cache keys only one axis and its `build(0, ps, cull_none)` call passes
+a substituted module, so reusing it for a real-pipeline cull variant would either collide with the control's module or
+build a substituted pipeline that is no longer the title's - which is precisely the collision section 21.6 named. The
+measured pair's key, (NONE, clockwise), is 0: the substituted control's default key. The caches must therefore be
+separate, and the identity of a cull-only variant is the pair (cull mode, front counter-clockwise) in its own map.
+
+`build()` is the one place the shim turns a `GraphicsRecipe` into `VkPipeline`. It copies `recipe_.raster` into
+`VkPipelineRasterizationStateCreateInfo` and until this slice only the substituted variant's `cull_none` flag touched
+it. A cull-only variant needs exactly one more override there and nothing else: the stages, modules, input layout,
+attachment formats and the sample state stay the title's.
+
+### 22.3 The implementation
+
+- `GraphicsPipeline::with_cull` is a `std::function<VkPipeline(std::uint32_t cull_mode, bool front_ccw)>` filled by the
+  shim on every graphics PSO, including recipe-cache-adopted ones. It is null on the substituted control's copy, which
+  is how a control draw is kept out of the selection.
+- The shim's `variant_with_cull(cull_mode, front_ccw)` holds `variants_mutex_`, looks the pair up in `cull_variants_`
+  (key = `cull_variant_key`, the two low cull-mode bits plus a front-face bit at 0x10), builds on miss with a
+  `CullOverride` that replaces only `cullMode` and `frontFace` in the copied raster state, and caches a failed build as
+  a null entry so a content window does not retry it per draw. The map is destroyed with the PSO, after the PS-control
+  variants and before the main handle.
+- `prepare_draw` applies the selection after the unbound-attachment decision (so a draw that already took that variant
+  is refused rather than half-composed), reads the window gate only while the switch is set, and replaces `p.pipeline`
+  with the variant on success. The decision is the pure `content_cull_variant_selection(enabled, content_window, mesh,
+  unbound, offered)`; every non-applied in-window case is logged once per kind and leaves the handle untouched.
+- The rule, by case: `off` when the switch is unset; `outside_window` for any draw outside the title-import window;
+  `mesh` for a mesh pipeline (no mesh draw was measured); `unbound` for a draw that already takes the unbound-attachment
+  variant (the two caches do not compose); `unsupported` when the shim offers no cull-only variant (the substituted
+  control, or a recipe that could not be built); `apply` otherwise. The `apply` arm logs the pipeline id and the pair
+  for up to eight window draws per boot; the refusal arms log one line each and never affect the handle.
+
+| case | decision | boot line |
+|---|---|---|
+| switch unset | `off` | none: the default path is silent |
+| draw outside the content window | `outside_window` | none: every pre-content draw keeps its pipeline |
+| mesh pipeline | `mesh` | one refusal naming the draw's pipeline |
+| unbound-attachment variant already chosen | `unbound` | one refusal naming the draw's pipeline |
+| shim offers no cull-only variant (PS control, or no recipe) | `unsupported` | one refusal naming the draw's pipeline |
+| variant built | `apply` | up to eight application lines with pipeline id and pair |
+| variant build failed | `apply`, then keeps the handle | one line: the shim could not build it |
+
+### 22.4 What the selection is not
+
+- It is a submission-class rule, not a record-class one. The window's draws are selected by the title-import gate, so
+  every non-mesh draw of a window submission takes the variant; the record-shape narrowing of section 21 is not
+  repeated here (the replay does not carry the slot-57 record's shape). The boot's line names the pipeline each
+  application reached, and a narrower selection is the next narrowing if the A/B shows an unmeasured draw changed.
+- It is not a decode. The variant says which pair the measured draws were observed under, not which word encoded it;
+  the field-place refusal of 21.3 and 21.6 stands.
+- It is not a default. The switch is off, a window draw without it keeps its pipeline handle, and every pre-content
+  draw is untouched with the switch on as well.
+- The pair is the minimal observation-consistent value (21.3). The (BACK, counter-clockwise front) and (FRONT,
+  clockwise front) alternatives are not selectable here because nothing measured them apart; the cache key accepts
+  them, the arming rule applies only the measured one.
+
+### 22.5 Tests and gates
+
+This session ran code-only gates, no boot and no GPU test.
+
+- `_setup\build_gta6rt.cmd` printed `PALMETTO_OK`; `_setup\build_tests.cmd` printed `TESTS_BUILT`. The code-only
+  `palmetto.exe` this gate built from this tree (tree `ed0ea7b05` plus this section's uncommitted diff) is SHA-256
+  `9BC9998A04BA32318C0729B92562DC0A9F8F393CC2CE0EDFC0F3275F6C6E3180`; a later merge changes it, so the A/B records its
+  own.
+- `frame_dump_test` exits 0 with the 61 new checks: the switch parse (unset, empty, `0`, `n`, `1`, any other value), the
+  measured pair (mode NONE, clockwise), the key encoding (`0`, `0x10`, `1`, `2`, `0x13`, cull-mode masking, both axes
+  distinct, six pairs distinct) and the selection's six arms, its precedence (mesh before unbound before the offer), a
+  16-combination sweep whose only `apply` is the armed in-window plain offer, and the distinct non-empty names.
+- `graphics_pso_test` passes its **350 checks**; its section-21 record-selection checks are untouched.
+  `graphics_record_test`, `unimplemented_policy_test`, `xs_proxy_mock_test`, `xbox_present_test`, `buffer_va_index_test`,
+  `dstorage_test`, `xapu_chad_test` and `deferred_compile_test` exit 0 unchanged.
+- All twelve `tests/test_docs_*.py` checks pass on this tree; the new switch `PALMETTO_CONTENT_CULL_VARIANT` is named
+  here, and the reused `PALMETTO_CONTENT_PROBE`, `PALMETTO_CONTENT_PROBE_ARM`, `PALMETTO_FRAME_DUMP_PS_CONTROL`,
+  `PALMETTO_FRAME_DUMP_PS_CONTROL_CULL_NONE`, `PALMETTO_GRAPHICS_CONSOLE_ROOT` and `PALMETTO_SLOT70_PUBLISH` are named
+  in their own pages.
+- `d3d12_fence_timing_test` is not run: it is the documented pre-existing GPU crash, and this session has no device.
+- What the GPU-free tests cannot cover: the shim's actual `VkPipeline` build and the cache's identity are device-side.
+  The pure key and selection rules are pinned, but that the built variant is the title's pipeline with only the cull
+  pair changed, and that the PSO keeps it alive, are exercised only by the A/B's boot (22.6).
+
+### 22.6 The A/B plan, ready for a stable host
+
+One boot per attempt under the boot lock (`_setup\boot_lock.ps1 -Acquire -Who cullvariant`, released after), the
+section-20 content environment (stage-3 pump, deferred compile, presenter captures every 200 frames, full-target
+readback, console graphics root feed, slot-70 publication), a 300 s timeout. The host's failure mode has to be recorded
+with every attempt: a boot that loses the device is not a measurement of this variant (the host loses it on NVIDIA
+event-153 faults regardless), and an honest negative is acceptable.
+
+| arm | environment beyond the content environment | what it should show |
+|---|---|---|
+| `C` control | `PALMETTO_CONTENT_CULL_VARIANT` unset; content probe armed | no `content cull variant:` line; the window's own draws `0/8,294,400` (section 21's `A01` baseline); the same stop family |
+| `A` variant | `=1`; same content probe | one application line per window draw (pipeline ids and the pair); the window's readbacks compared with `C`; the same stop family |
+| `B` calibration | `C` plus `PALMETTO_FRAME_DUMP_PS_CONTROL_CULL_NONE=1` (section 20's `ch1` shape) | the substituted control paints `4,147,200/8,294,400`, so the geometry, console feed and publication station are unchanged since sections 20-21 |
+
+The shared environment is the content probe (`PALMETTO_CONTENT_PROBE=1`, `PALMETTO_CONTENT_PROBE_ARM=2` so the compose
+draw is controlled), the PS control's module (`PALMETTO_FRAME_DUMP_PS_CONTROL=<fs_solid.spv>`), the console feed and
+publication (`PALMETTO_GRAPHICS_CONSOLE_ROOT=1`, `PALMETTO_SLOT70_PUBLISH=1`) and `PALMETTO_READBACK_FULL=1` with the
+default three-submission capture window. Readbacks to collect: the content-probe per-draw lines (pipeline id, PS
+presence, area, viewport), each window draw's full-target statistics (RGB mean, non-black count, peak, the alpha
+statistics and the 8x8 tiles), the final display target's statistics, the presenter captures, the stop line and state
+words (`init`, `loading`, `session`, the machine's `current`/`next`), and whether `Vulkan device was lost` appears.
+
+The acceptance has three parts: the `A` arm logs an application line for each window draw; at least one readback
+statistic of the window's own target differs from `C`; and the stop family is the section-20 host exception (not a new
+crash family and not a device-lost attributed to the variant). The falsifier for the readback is a clean boot whose
+window readbacks are identical to `C` with the application lines present: then the real draws' rasterisation is not
+observable through the colour target, because the pre-content loop's colour input is zero by design
+([colour_path.md](colour_path.md)), and the honest negative stands. The next measurement after that is a coverage
+readback that does not depend on the title's black PS - a depth or alpha readback of the real window draw, or a PS
+control built from the same cull override (a shim addition this slice does not make). The picture itself does not move
+under either arm: the compose pass samples a zero intermediate in the same submission (20.4), so a non-black presented
+frame needs the feed change, which is a different slice.
+
+### 22.7 Attribution
+
+This section was implemented from this project's own measurements: sections 17-21's content-window draw table, the
+window gate's measurement, the substituted-control cache and its key, and the measured cull pair
+([raster_state.md](raster_state.md) section 2, [state_blob.md](state_blob.md) section 9, [frame_capture.md](frame_capture.md))
+with the record decode refused in 21.3. The A/B reuses the content probe and the PS-only control, not a new probe. No
+peer code was used and no game data is added: pipeline ids, counts, switches and outcomes only.

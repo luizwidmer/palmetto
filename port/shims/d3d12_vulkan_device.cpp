@@ -5834,6 +5834,9 @@ public:
             }
         }
         for (const auto& [cull, built] : ps_variants_) vk.vkDestroyPipeline(dev, built, nullptr);  // PS-only control
+        // docs/vertex_buffer_va.md section 22: the cull-only content-window variants (a failed build is cached as null).
+        for (const auto& [pair, built] : cull_variants_)
+            if (built) vk.vkDestroyPipeline(dev, built, nullptr);
         for (const auto& [unbound, built] : variants_) vk.vkDestroyPipeline(dev, built, nullptr);
         if (!shared_graphics_) {
             if (graphics_.pipeline) vk.vkDestroyPipeline(dev, graphics_.pipeline, nullptr);
@@ -5918,6 +5921,11 @@ public:
                   std::begin(graphics_.console_parameter));
         graphics_.variant = [this](std::uint32_t unbound) { return variant(unbound); };
         graphics_.with_ps = [this](VkShaderModule ps, bool cull_none) { return variant_with_ps(ps, cull_none); };
+        // Diagnostic (docs/vertex_buffer_va.md section 22): the same recipe with only its cull pair replaced, keyed by
+        // (cull mode, front face) in its own cache. Only read by the env-gated content-window rule.
+        graphics_.with_cull = [this](std::uint32_t cull_mode, bool front_ccw) {
+            return variant_with_cull(cull_mode, front_ccw);
+        };
         graphics_.describe_vertex_path = [shared](palmetto::VertexPathInfo& out) { out = shared->vertex_path; };
         recipe_ = shared->recipe;
         // The recipe's stage create infos chain their required-subgroup-size structs; point the copy at its own so a
@@ -6833,6 +6841,11 @@ public:
         // Diagnostic (docs/frame_capture.md): the frame dump's PS-only control, the same recipe with another pixel
         // shader. Only read by the env-gated diagnostic; nothing on the normal draw path calls it.
         graphics_.with_ps = [this](VkShaderModule ps, bool cull_none) { return variant_with_ps(ps, cull_none); };
+        // Diagnostic (docs/vertex_buffer_va.md section 22): the same recipe with only its cull pair replaced, keyed by
+        // (cull mode, front face) in its own cache. Only read by the env-gated content-window rule.
+        graphics_.with_cull = [this](std::uint32_t cull_mode, bool front_ccw) {
+            return variant_with_cull(cull_mode, front_ccw);
+        };
 
         if (code_stage) {
             VkDeviceSize offset = 0;
@@ -7169,8 +7182,15 @@ private:
     // recipe's stages, and the create info then points at the recipe's own list, so the default build is unchanged.
     // `cull_none` (diagnostic, substituted variants only): turn back-face culling off, to tell a culled winding from
     // degenerate geometry.
+    // Diagnostic (docs/vertex_buffer_va.md section 22): a cull-only variant replaces only the recipe's rasterizer cull
+    // pair; `set` keeps every other build path byte-identical (a default-constructed override changes nothing).
+    struct CullOverride {
+        bool set = false;
+        std::uint32_t mode = 0;  // VkCullModeFlagBits
+        bool front_ccw = false;
+    };
     VkPipeline build(std::uint32_t unbound, VkShaderModule substitute_ps = VK_NULL_HANDLE,
-                     bool cull_none = false) const {
+                     bool cull_none = false, CullOverride cull_override = {}) const {
         // The stride state is last: a pipeline without vertex bindings (a full-screen pass that builds its vertices
         // from SV_VertexID) leaves it out, since no vkCmdBindVertexBuffers2 would ever set it
         // (VUID-vkCmdDraw-pStrides-04913).
@@ -7228,6 +7248,12 @@ private:
         VkPipelineMultisampleStateCreateInfo multisample = r.multisample;
         VkPipelineRasterizationStateCreateInfo raster = r.raster;
         if (cull_none) raster.cullMode = VK_CULL_MODE_NONE;  // diagnostic only: the substituted variant's cull axis
+        // Diagnostic only (docs/vertex_buffer_va.md section 22): the cull-only variant's measured pair. Only the raster
+        // state is copied above, so the recipe and the stages stay the title's own.
+        if (cull_override.set) {
+            raster.cullMode = static_cast<VkCullModeFlagBits>(cull_override.mode);
+            raster.frontFace = cull_override.front_ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
+        }
         VkPipelineRasterizationConservativeStateCreateInfoEXT conservative{
             VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_CONSERVATIVE_STATE_CREATE_INFO_EXT};
         if (r.conservative) {
@@ -7332,6 +7358,26 @@ private:
         return pipeline;
     }
 
+    // Diagnostic (docs/vertex_buffer_va.md section 22): the title's own pipeline with only its rasterizer cull pair
+    // replaced, built once per (cull mode, front face) and kept until the PSO is released, like variant(). Its own cache,
+    // separate from the PS-substitution one above, so a real-pipeline cull variant can never collide with the
+    // substituted control's module. A failed build is cached as a null entry, so a content window does not retry it on
+    // every draw.
+    VkPipeline variant_with_cull(std::uint32_t cull_mode, bool front_ccw) {
+        std::lock_guard lock(variants_mutex_);
+        const std::uint32_t key = palmetto::frame_dump::cull_variant_key(cull_mode, front_ccw);
+        if (const auto it = cull_variants_.find(key); it != cull_variants_.end()) return it->second;
+        CullOverride override_state;
+        override_state.set = true;
+        override_state.mode = cull_mode;
+        override_state.front_ccw = front_ccw;
+        const VkPipeline pipeline = build(0, VK_NULL_HANDLE, false, override_state);
+        if (!pipeline)
+            log_once("the cull-only content-window pipeline variant could not be built from this recipe", 0);
+        cull_variants_.emplace(key, pipeline);
+        return pipeline;
+    }
+
     DeviceState& device_;
     palmetto::ComputePipeline pipeline_;
     palmetto::GraphicsPipeline graphics_;
@@ -7339,6 +7385,9 @@ private:
     std::mutex variants_mutex_;
     std::map<std::uint32_t, VkPipeline> variants_;
     std::map<std::uint32_t, VkPipeline> ps_variants_;  // docs/frame_capture.md, the PS-only control by cull mode
+    // docs/vertex_buffer_va.md section 22: the cull-only content-window variant by (cull mode, front face); a null value
+    // is a cached failed build.
+    std::map<std::uint32_t, VkPipeline> cull_variants_;
     bool ps_variant_failed_ = false;
     VkShaderModule module_ = VK_NULL_HANDLE;
     std::vector<VkShaderModule> modules_;
