@@ -235,12 +235,23 @@ int check_title_placed(ID3D12Device* device, const char* kind, void* pages, UINT
     Ref<ID3D12Resource> placed_texture;
     EXPECT_HR(rt::d3d12::create_buffer_at_host_address(device, pages, texture, 0x6u, IID_PPV_ARGS(&placed_texture.p)), S_OK);
     EXPECT(placed_texture.p != nullptr && placed_texture->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D);
+    // The console's placed texture is the title's pages: GetGPUVirtualAddress answers the title's placement address
+    // (the PC answer for a texture is none), because the title writes the texels through it (docs/3d_textures.md).
+    // The committed stand-in above is not backed by those pages, so the views below still read the stand-in.
+    EXPECT(placed_texture->GetGPUVirtualAddress() == reinterpret_cast<D3D12_GPU_VIRTUAL_ADDRESS>(pages));
     // The layout is validated as a CreateCommittedResource state: RENDER_TARGET (2) on a texture without
     // ALLOW_RENDER_TARGET is refused, and the COMMON retry still gives the title its texture. A description the
     // checks refuse outright (more mips than the size has) is refused, not created.
     Ref<ID3D12Resource> target_layout;
     EXPECT_HR(rt::d3d12::create_buffer_at_host_address(device, pages, texture, 0x2u, IID_PPV_ARGS(&target_layout.p)), S_OK);
     EXPECT(target_layout.p != nullptr);
+    // The PC paths are unchanged: an ordinary committed texture still answers no GPU VA, as the host runtime does.
+    Ref<ID3D12Resource> ordinary_texture;
+    const D3D12_HEAP_PROPERTIES texture_heap{D3D12_HEAP_TYPE_DEFAULT};
+    EXPECT(SUCCEEDED(device->CreateCommittedResource(&texture_heap, D3D12_HEAP_FLAG_NONE, &texture,
+                                                     D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                     IID_PPV_ARGS(&ordinary_texture.p))));
+    EXPECT(ordinary_texture.p != nullptr && ordinary_texture->GetGPUVirtualAddress() == 0);
     D3D12_RESOURCE_DESC too_many_mips = texture;
     too_many_mips.MipLevels = 12;
     Ref<ID3D12Resource> refused_texture;

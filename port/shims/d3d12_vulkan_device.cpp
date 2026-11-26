@@ -3733,6 +3733,12 @@ public:
     // per resource; a description with more than one subresource imports subresource 0 only, because the title's linear
     // subresource order is not measured yet (the measured textures are 1-mip).
     void set_placed_pages(std::uint64_t address) { placed_pages_ = address; }
+    // The console's answer to GetGPUVirtualAddress for a title-placed texture (device slot 133): the title's own
+    // placement address, as the console's placed pages are CPU-addressable (Xbox unified memory). The PC committed
+    // stand-in is not backed by those pages; this is the console translation only, chosen in
+    // DeviceState::create_at_host_address and never on the PC paths (docs/3d_textures.md).
+    void set_console_placed_va(std::uint64_t address) { console_placed_va_ = address; }
+    bool has_console_placed_va() const { return console_placed_va_ != 0; }
     // Returns true when the import must be tried again at the next submission: the fill runs on the title's thread
     // after it creates the texture, so the first submissions after creation can still see all-zero or uncommitted
     // pages. Bounded (a fixed attempt budget), and every give-up is logged once.
@@ -4430,8 +4436,24 @@ public:
     // runtime).
     // Buffers only, as on D3D12; textures have no GPU VA (images are reached through descriptors). An acceleration
     // structure reports its real device address (instance descriptors and builds hand it to the driver); other
-    // buffers report their console VA into the GPU address arena.
-    D3D12_GPU_VIRTUAL_ADDRESS STDMETHODCALLTYPE GetGPUVirtualAddress() override { return accel_ ? gpu_va_ : va_; }
+    // buffers report their console VA into the GPU address arena. A title-placed texture on the console's placed path
+    // (device slot 133) answers the title's placement address instead of the PC's texture null: the console's placed
+    // pages are CPU-addressable and the title writes the texels through this address (docs/3d_textures.md). One bounded
+    // line names the answer and the proxy's vtable pointer, so the title's call site can be tied to this object.
+    D3D12_GPU_VIRTUAL_ADDRESS STDMETHODCALLTYPE GetGPUVirtualAddress() override {
+        if (!accel_ && !va_ && console_placed_va_) {
+            static std::atomic<unsigned> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
+                std::fprintf(stderr,
+                             "[rt] d3d12: a title-placed texture answers GetGPUVirtualAddress with its console placement "
+                             "address 0x%llx; proxy vtable %p %ux%u format %d; the committed stand-in is not backed by "
+                             "the title's pages\n",
+                             static_cast<unsigned long long>(console_placed_va_),
+                             *reinterpret_cast<void* const*>(this), desc_.Width, desc_.Height, int(desc_.Format));
+            return console_placed_va_;
+        }
+        return accel_ ? gpu_va_ : va_;
+    }
 
     //
     // The node masks read back as the one node of a single adapter (0 becomes 1), and the heap flags as the runtime
@@ -4763,6 +4785,9 @@ private:
     // The title's pages of a title-placed texture (device slot 133, PALMETTO_TEXTURE_IMPORT): imported once into the
     // committed image before the first submission that can sample it (docs/texture_import.md).
     std::uint64_t placed_pages_ = 0;
+    // The console VA a title-placed texture answers from GetGPUVirtualAddress: the placement address the title asked
+    // for (docs/3d_textures.md). 0 for every other resource.
+    std::uint64_t console_placed_va_ = 0;
     unsigned placed_attempts_ = 0;  // bounded retries while the title's fill has not run yet
     bool placed_imported_ = false;
     bool placed_skipped_ = false;
@@ -10627,6 +10652,13 @@ public:
             if (SUCCEEDED(hr) && out && *out) {
                 if (Resource* stand_in = Resource::from<Resource>(static_cast<IUnknown*>(*out))) {
                     stand_in->set_placed_pages(reinterpret_cast<std::uintptr_t>(address));
+                    // The console's placed texture is the title's pages, and the title asks GetGPUVirtualAddress for
+                    // the address it placed the texture at and writes the texels through it (Xbox unified memory). The
+                    // PC committed stand-in above is not those pages, but the console's answer is the placement address;
+                    // the PC answer (none for a texture) made the lighting init's 256x256 clears memset a null pointer
+                    // (docs/3d_textures.md).
+                    stand_in->set_console_placed_va(
+                        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(address)));
                     {
                         // Diagnostic (docs/frame_capture.md): remember which resource lives at this title VA, so a T# the
                         // shader fetches itself can be bound from it.

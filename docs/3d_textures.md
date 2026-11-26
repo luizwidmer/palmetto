@@ -8,7 +8,9 @@ unordered access** - a pair the console allows and the host PC runtime refuses -
 the console's placed-creation path. With the fix the `0x146F23D` stop is gone and the boot reaches a new title-side
 null at `game+0x5EBEA38`. Section 2 corrects the previous page's reading of the two log lines: `dimension 3` in the
 slot-25 line is `D3D12_RESOURCE_DIMENSION_TEXTURE2D` (the enum is 0-based, so 3 is not "3D"), and `format 118` is a
-different, older refusal of an allocation query, not the format of the refused creations.
+different, older refusal of an allocation query, not the format of the refused creations. Section 10 takes the two
+walls after this one: the `0x5EBEA38` null is attributed and fixed, the boot requests and enters stage 3, and the new
+stop is the title's own hang watchdog at `game+0x2215C35`.
 
 All numbers are one machine (NVIDIA RTX 4090, Vulkan 1.3), one boot at a time under the repository's boot lock, harness
 `tooling/boot_report.py`. Logs and captures are outside the repository under the local work folder
@@ -239,3 +241,156 @@ This slice was implemented from this project's own measurements. The console-for
 reimplementation projects recorded in [cleanroom_peers.md](cleanroom_peers.md) as evidence only. No code from any of
 them was copied; the header, the translation, its tests and this page are this project's own. The upstream projects
 remain the copyright of their contributors and their licenses continue to apply to their own trees.
+
+## 10. The null shadow-buffer global, attributed and fixed; the boot reaches stage 3
+
+**Status: measured, attributed and fixed in our structure; the boot now requests and enters stage 3, and the next
+stop is the title's own hang watchdog.** Section 4 left the boot at the title-side null `game+0x5EBEA38`: the title's
+lighting/shadow init clears ten 256x256 host buffers through pointers it obtains from a console resource's virtual slot
+0x58, and every pointer was null. Slot 0x58 is `ID3D12Resource::GetGPUVirtualAddress` on our proxy resource, and the
+answer we gave was the PC texture answer (no GPU virtual address) for textures the title had placed through console
+device slot 133. The console's placed pages are CPU-addressable, so this slice answers the placement address on that
+console path only. With it the clears land, the machine word advances to 3/3 - the stage-3 request at `0x81B2EF` is
+written - and the boot stops about 29 s later in the title's own hang watchdog at `game+0x2215C35`, with no layer frame
+in the stack.
+
+### 10.1 The measured stop, its registers and its global
+
+The stop of section 4 is a write of 0 inside the CRT's memset. At the fault `rdi` is 0 (the intrinsic's destination),
+`rcx` is `0x40000` (the byte count), `rax` is 0 (the fill value), and the call is the one at `0x5EBEA33` inside
+`game+0x5EBEA10`, whose first statement is
+
+```text
+memset(_DAT_1476B4260, 0, _DAT_1476B41DC * _DAT_1476B41D8 * 4)
+```
+
+Both dimension dwords read 256 at that point (so `0x40000` bytes): the init stores one 64-bit value into both dwords at
+`0x1D957D1`, and the fault's byte count leaves only `256 x 256` for that value. `_DAT_1476B4260` is `image+0x76B4260`,
+the descriptor's `+0x10` slot of the first of ten descriptors. A scan of every RIP-relative reference to `image+0x76B4260`
+in `.text` finds exactly two: the load above (at `0x5EBEA22`) and a store of zero in the state-reset routine at
+`0x5EB6AEC`. The pointer is filled through the descriptor's base plus `0x10`, not by a direct store, which is why an
+exact-address write scan finds no allocator.
+
+The clear helper is ten memsets of the same 256x256x4 span, called at `0x5EBEA22`, `0x5EBEA46`, `0x5EBEA6A`,
+`0x5EBEA8E`, `0x5EBEAB2`, `0x5EBEAD6`, `0x5EBEAFA`, `0x5EBEB1E`, `0x5EBEB42` and `0x5EBEB66`; their destinations are
+the `+0x10` slot of each descriptor (image RVAs `0x76B4260`, `0x76B4300`, `0x76B4280`, `0x76B4320`, `0x76B42A0`,
+`0x76B4340`, `0x76B42C0`, `0x76B4360`, `0x76B42E0`, `0x76B4380`).
+
+### 10.2 The decompiled producer chain
+
+The job is the stage job of section 9's task-pool path: `0x5BC2E90` -> `0x1DC7650` -> `0x26205C0` -> `0x5B82DD0` ->
+`0x5B82EB0` -> `0x1D957B0` (RVAs). `game+0x1D957B0` is the lighting/shadow init: one 64-bit load from its config
+object (`+0x48`) writes both dimension dwords, then it calls `game+0x2913410` ten times with five descriptor pairs
+(first arguments `0x76B4250`/`0x42F0`, `0x4270`/`0x4310`, `0x4290`/`0x4330`, `0x42B0`/`0x4350`, `0x42D0`/`0x4370`; a
+second argument of `0x29` for the first of a pair and `0x10` for the second; the same 256x256 size words).
+
+`game+0x2913410` fills a descriptor. It first builds the engine record and the resource (`game+0x1429134E0`:
+`game+0x140CC24A0` then `game+0x141647200`, stored at descriptor `+0` and `+8`), then, while the descriptor's `+0x10`
+is still 0, calls `game+0x4FD2940` with the two fields of the resource at `+0x18`/`+0x20`. `game+0x4FD2980` in turn
+calls **virtual slot `0x58`** on the object in `+0x20` - the resource the title created through console device slot
+133 - and rebases the answer, and `game+0x2913410` stores that answer at descriptor `+0x10`. The job's trace tail shows
+ten slot-133 creations immediately before the clears, each followed by an SRV, an RTV and a UAV view call.
+
+Slot `0x58` is absolute vtable index 11, `ID3D12Resource::GetGPUVirtualAddress` (IUnknown 0-2, ID3D12Object 3-6,
+ID3D12DeviceChild 7, Map/Unmap/GetDesc 8-10). Our `Resource` proxy returns its console VA, and that field is set only
+on the buffer paths; for a texture it stays 0, the intended PC answer.
+
+### 10.3 The producer, measured in-process
+
+Two probe boots used `PALMETTO_POKE_LOG` at `0x291347B` (before `game+0x4FD2940`), `0x2913480` (after it),
+`0x4FD298F` (the slot-0x58 call) and `0x4FD2995` (its return), in the same deferred arm as the 300 s boot.
+
+| probe | before the fix | after the fix |
+|---|---|---|
+| slot-0x58 call at `0x4FD298F` | the called object's vtable is in the runtime's own module | the proxy's bounded line prints the same vtable pointer |
+| return at `0x4FD2995` | 0, all ten times | the title's placement address, ten different values |
+| descriptor slot after the call at `0x2913480` | 0 | non-zero |
+| next event | `memset` of `0x40000` bytes at 0 | the job continues and the boot requests stage 3 |
+
+The proxy line names the object (`a title-placed texture answers GetGPUVirtualAddress ... proxy vtable <pointer>`),
+and the pointer it prints is the same pointer the title's slot-0x58 call uses. The ten calls were on ten textures
+created through console slot 133 (256x256, the shapes this job creates); the answer our layer gave was the PC answer
+for a texture, not the console's.
+
+### 10.4 The fix
+
+- `port/shims/d3d12_vulkan_device.cpp`: `Resource` keeps a second address, `console_placed_va_`, set by
+  `set_console_placed_va`; `GetGPUVirtualAddress` returns it when the resource has neither an acceleration structure
+  nor an arena VA, and the console's placed-texture path (`create_at_host_address`, device slot 133) sets it to the
+  placement address it was given. Every PC path is unchanged: a committed texture still answers 0.
+- One bounded line (first eight answers) names the placement address, the resource's shape and the proxy's vtable
+  pointer, so a later boot can tie the answer to the call site again.
+- The committed image is still a stand-in: the title's CPU clears and writes go to its own pages, not into that image,
+  and the opt-in texture import ([texture_import.md](texture_import.md)) remains the only path that reads those pages
+  into it. That is the half this slice does not fix, and it is named again in section 10.7.
+
+### 10.5 The 300 s boot
+
+One boot under the boot lock, the standard environment of section 4 plus a capture and
+`PALMETTO_WAIT_SAMPLE=60,80,100,120,140,160,180,200,220,240,260,280`, binary SHA-256 `5E2C4622...2B939DE1` (built at
+21:09:23). It stops at 97.3 s wall (trace 95.3 s) on the new wall:
+
+| measurement | section 4's arm (`boot-final300`) | this arm (`boot-nullfinal300`) |
+|---|---:|---:|
+| verdict / exceptions | STOP `host:VCRUNTIME140.dll+0x1e579`, write `0x0`, trace 63.5 s (wall 82.7 s) | **STOP `game+0x2215C35`, write `0x0`**, trace 95.3 s (wall 97.3 s); the `0x5EBEA38` stop is **gone** |
+| init word | 2 at 22.0 s | **3 at 66.0 s** |
+| loading word / session word | loading 2 at 62.0 s, session 1 at 60.0 s | loading 2 at 64.0 s, **session 3 at 66.0 s** |
+| machine word (current / next) | 2 / 2; the stage-3 request at `0x81B2EF` is not written | **3 / 3 at 66.0 s; the stage-3 request is written and stage 3 is entered** |
+| stage-2 probe `wait` | +23.5 s: pending `0x7b`, 1 ready bit | +27.3 s: pending `0x7b`, ready 0/0, 1 ready bit (id 152) |
+| stage-2 probe `steady` | +29.6 s: pending `0x19`, 0 ready bits | +33.4 s: pending `0x19`, ready 0/0, 0 ready bits |
+| stage-2 probe `steady2` | not taken | +79.6 s: `b0 0xf9`, queue `0x0`, armed `0x0` - the poll returned |
+| D3D12 calls | 183,283 | 172,563 |
+| submissions / PresentX / captures | 4,096 at 27.3 s / 3,090 / 1 (2564x1421, mean rgb 0.00) | 4,096 at 28.9 s / 2,771 / 1 (2564x1421, mean rgb 0.00) |
+| deferred submitted / built / failed / fallback / submit waits | 2,742 / 316 / 0 / 0 / 0, pending 2,426 of 4,096 | 2,742 / 323 / 0 / 0 / 0, pending 2,419 of 4,096 |
+| deferred build time, max single | 4,526.8 ms, 142.0 ms | 63,362.6 ms, 58,938.3 ms (machine load, section 10.7) |
+| arena-full lines / refusals | 0 / 0 (default 1024 MiB) | 0 / 0 (default 1024 MiB, no refusal line) |
+
+### 10.6 The moved stop: the title's own hang watchdog
+
+The new stop is not a resource answer of ours. Its stack is `game+0x2215C35` <- `game+0x2215ECA` <-
+`host:KERNEL32.DLL+0x2dda7` (thread start), with no layer frame. The function containing the fault (`game+0x2215A60`)
+is the title's hang watchdog, run as a thread started through the generic thread wrapper `game+0x2215EA0`: it calls
+`QueryPerformanceCounter`, sleeps 1000 ms per pass, and when the heartbeat dword at `image+0x1471B6338` has not
+advanced for `0x1E` passes it calls the callback at `image+0x1471B6348` and then executes the deliberate null write
+(`_DAT_00000000 = 0`) followed by `int3` - the fault this boot records. The heartbeat is petted by the per-frame tick
+functions whose call sites are `0x120799` and `0xC9E368` (both call `game+0x22159F0`, which stores a
+`QueryPerformanceCounter` value in that dword), so the watchdog's abort dates the frame loop's stop.
+
+The state words date it to the stage transition: the machine word reads current 3 / next 3 from 66.0 s, the init word 3
+and the session word 3 also last change at 66.0 s, and nothing changes again before the abort at 95.3 s. The stage-3
+request at `0x81B2EF` was therefore written and the pump entered stage 3; the pump then stopped returning to the
+per-frame tick, the same class of block [stage2_blocker.md](stage2_blocker.md) recorded for stage 2 (the pump inside
+the entered handler). The wait samples put 96 threads (75 in a wait or busy title site) at 60 s and 100 threads (86) at
+80 s; they do not tie the pump's own stack to a wait in this arm, so the next falsifier is a thread-stack sample taken
+2-5 s after the machine word reads 3, or a probe at the stage-3 handler entry the pump runs.
+
+### 10.7 Limits
+
+- **One 300 s boot.** The deferred compile's single worst build is 58,938.3 ms here against 142.0 ms in section 4's
+  arm, and a 130 s diagnostic boot on the same tree reached stage 3 at 106.0 s instead of 66.0 s (its worst build
+  70,857.8 ms). The shared machine's load stretches every timing; the counters and the stop site did not move.
+- **The title's CPU clears do not reach the image.** The console answer lets the title's init proceed; the stand-in
+  texture is not backed by those pages, so rendering that depends on those bytes is not fixed (the capture is still
+  black, mean rgb 0.00).
+- **The watchdog stop is title-side and is not implemented.** This slice names it; the stage-3 handler's wait and its
+  producer are the next measurement named in section 10.6.
+- **The answer is on the console path only.** The PC methods keep the PC texture answer; only the slot-133 placed path
+  translates, as section 3's depth-stencil translation does.
+
+### 10.8 Tests and gates
+
+- `port/test/d3d12_existing_heap_test.cpp` (`check_title_placed`) gains two checks: a title-placed texture's
+  `GetGPUVirtualAddress` is the placement address it was given, and an ordinary committed texture still answers 0.
+  The target exits 0 and its slot-133 lines pass.
+- Gate subset: `frame_dump_test`, `unimplemented_policy_test` (98 checks), `graphics_record_test` (180),
+  `graphics_pso_test` (312), `xbox_present_test`, `buffer_va_index_test`, `dstorage_test` (224), `xapu_chad_test`
+  (87), `deferred_compile_test` (18), `xs_proxy_mock_test` and `arena_size_test` all exit 0; `d3d12_fence_timing_test`
+  remains the documented pre-existing crash.
+- Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, and the
+  `tests/test_docs_*.py` checks pass.
+
+### 10.9 Attribution
+
+This slice was implemented from this project's own measurements: the crash registers, the decompiled chain above, the
+in-process poke boots and the 300 s boot's counters. No peer code was used and no game data is added: RVAs, field
+offsets, counts, shapes and outcomes only.
