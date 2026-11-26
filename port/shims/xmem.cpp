@@ -257,6 +257,67 @@ void* __stdcall XMemAlloc(size_t size, uint64_t attributes) {
     return allocate_block(size, _ReturnAddress());
 }
 
+// ---- The allocation probe's range registry (docs/vertex_buffer_va.md section 15) ---------------------------------
+//
+// The title allocator's arena is MEM_PRIVATE committed memory, and VirtualQuery cannot say whether this shim or the
+// title's own host calls created it. When PALMETTO_ALLOC_WATCH is set, every XMemVirtualAlloc answer is recorded as a
+// real range with the title caller that asked for it, so the probe can answer "was this title page served by our XMem
+// hook, and from which title caller". The registry is append-only and bounded (1024 ranges, then recording stops): a
+// range freed later still answers yes, because the probe asks where the bytes came from, not whether they are live.
+// Off unless the probe switch is set, so the default path is unchanged (one cached switch read, no lock).
+struct ServedRange {
+    std::uintptr_t begin = 0, end = 0;
+    std::uint64_t caller = 0;
+    std::uint8_t kind = 0;
+};
+constexpr unsigned kServedRangeSlots = 1024;
+ServedRange g_served_ranges[kServedRangeSlots];
+unsigned g_served_count = 0;
+std::mutex g_served_mutex;
+
+bool served_registry_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("PALMETTO_ALLOC_WATCH");
+        return value && *value && *value != '0';
+    }();
+    return enabled;
+}
+
+void note_served_range(void* address, size_t bytes, const void* caller, std::uint8_t kind) {
+    if (!served_registry_enabled() || !address || !bytes) return;
+    const auto begin = reinterpret_cast<std::uintptr_t>(address);
+    if (begin > (std::numeric_limits<std::uintptr_t>::max)() - bytes) return;
+    const std::lock_guard lock(g_served_mutex);
+    if (g_served_count >= kServedRangeSlots) return;
+    ServedRange& range = g_served_ranges[g_served_count++];
+    range.begin = begin;
+    range.end = begin + bytes;
+    range.caller = reinterpret_cast<std::uint64_t>(caller);
+    range.kind = kind;
+}
+
+// The recorded range containing `address`, if any: locked linear search over at most 1024 entries.
+bool find_served_range(std::uintptr_t address, std::uint8_t* kind, std::uint64_t* caller) {
+    if (!served_registry_enabled()) return false;
+    const std::lock_guard lock(g_served_mutex);
+    for (unsigned i = 0; i < g_served_count; ++i) {
+        const ServedRange& range = g_served_ranges[i];
+        if (address >= range.begin && address < range.end) {
+            if (kind) *kind = range.kind;
+            if (caller) *caller = range.caller;
+            return true;
+        }
+    }
+    return false;
+}
+
+// The success answer XMemVirtualAlloc returns, recorded when it succeeded: one call site instead of one per return in
+// the function.
+void* served_virtual(void* address, size_t bytes, const void* caller) {
+    note_served_range(address, bytes, caller, 1);
+    return address;
+}
+
 void __stdcall XMemFree(void* p, uint64_t attributes) {
     note_attributes("XMemFree", attributes, kNoSize, _ReturnAddress());
     note_caller("XMemFree", _ReturnAddress());
@@ -535,7 +596,8 @@ PVOID reserve_placeholder(void* address, SIZE_T size, SIZE_T alignment) {
 // 4 KiB (host large pages need SeLockMemoryPrivilege). A 2 MiB region the host places is reserved 2 MiB-aligned through
 // VirtualAlloc2.
 void* WINAPI XMemVirtualAlloc(void* address, SIZE_T size, DWORD allocation_type, ULONGLONG attributes, DWORD protect) {
-    note_attributes("XMemVirtualAlloc", attributes, size, _ReturnAddress());
+    const void* const caller = _ReturnAddress();
+    note_attributes("XMemVirtualAlloc", attributes, size, caller);
     if (size == 0) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return nullptr;
@@ -626,10 +688,11 @@ void* WINAPI XMemVirtualAlloc(void* address, SIZE_T size, DWORD allocation_type,
         if (window) {
             // A reserve-only replacement stays a placeholder: the physical pages are mapped into it.
             record_window(address, size, host_prot);
-            return address;
+            return served_virtual(address, size, caller);
         }
-        return placeholder_api().virtual_alloc2(GetCurrentProcess(), address, size, host_type | MEM_RESERVE, host_prot,
-                                                nullptr, 0);
+        return served_virtual(placeholder_api().virtual_alloc2(GetCurrentProcess(), address, size,
+                                                               host_type | MEM_RESERVE, host_prot, nullptr, 0),
+                              size, caller);
     }
     if (new_placeholder || window) {
         void* const result = reserve_placeholder(address, size, base_granularity);
@@ -637,7 +700,7 @@ void* WINAPI XMemVirtualAlloc(void* address, SIZE_T size, DWORD allocation_type,
             const std::lock_guard lock(g_phys_mutex);
             record_window(result, size, host_prot);
         }
-        return result;
+        return served_virtual(result, size, caller);
     }
     if (page_mode == kXmemLargePages && address == nullptr) {
         MEM_ADDRESS_REQUIREMENTS requirements{};
@@ -645,10 +708,11 @@ void* WINAPI XMemVirtualAlloc(void* address, SIZE_T size, DWORD allocation_type,
         MEM_EXTENDED_PARAMETER parameter{};
         parameter.Type = MemExtendedParameterAddressRequirements;
         parameter.Pointer = &requirements;
-        return placeholder_api().virtual_alloc2(GetCurrentProcess(), nullptr, size, host_type | MEM_RESERVE, host_prot,
-                                                &parameter, 1);
+        return served_virtual(placeholder_api().virtual_alloc2(GetCurrentProcess(), nullptr, size,
+                                                               host_type | MEM_RESERVE, host_prot, &parameter, 1),
+                              size, caller);
     }
-    return VirtualAlloc(address, size, host_type, host_prot);
+    return served_virtual(VirtualAlloc(address, size, host_type, host_prot), size, caller);
 }
 
 // With g_phys_mutex held. Unmaps the page at `address` if one is mapped there; the address becomes a placeholder again.
@@ -1424,6 +1488,13 @@ void start_mem_trace() {
 }  // namespace
 
 namespace rt::xmem {
+
+// Which XMem entry point served `address`, and from which title caller (raw address; the caller resolves it to a
+// module+RVA). False when no recorded XMemVirtualAlloc answer contains it, or when the registry switch is off.
+bool served_range(const void* address, std::uint64_t* caller, std::uint8_t* kind) {
+    if (!address) return false;
+    return find_served_range(reinterpret_cast<std::uintptr_t>(address), kind, caller);
+}
 
 bool commit_physical_range(const void* address, size_t size) {
     if (size == 0) return true;

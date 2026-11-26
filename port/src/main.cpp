@@ -2763,6 +2763,472 @@ void start_writer_watch(std::uintptr_t image_base, std::size_t image_size) {
     std::fflush(stderr);
 }
 
+// ---- Title allocation trace (PALMETTO_ALLOC_WATCH) -----------------------------------------------------------------
+// docs/vertex_buffer_va.md section 15. Section 14 measured the stage-3 copy: the renderer executor's slot-0x40 table
+// builder copies a 0x1000-byte float4 table from the executor thread's stack into a block the title's own allocator
+// returns, and in every catch that block's range contains the live command object (the job) the same pass is running.
+// Two title-side mechanisms fit - a block allocated smaller than the copy, or an allocator range that still holds the
+// live object - and this probe decides between them at the allocation, before the copy runs:
+//
+//  * game+0x1335A20 (executor entry): reads machine stage 3 and records the job the executor runs (RCX). Its first
+//    stage-3 pass is when the two allocation points below are armed, so no loading-phase traffic is trapped.
+//  * game+0x184F0C (after the flush's 0x70-slot allocation of the 0xa0-byte job): RAX is the returned job, RDI the
+//    object it was created from, so the command object's allocation is named with its address and page.
+//  * game+0x455964C (after the constant helper's 0x50-slot allocation of the table block): RAX is the returned block,
+//    R12 the requested size, RBP/R13 the table's width/height and [RSP+0x28] the descriptor object being built. It
+//    reports the block, the request, the job the executor is running, and whether the two ranges overlap.
+//  * game+0x515ABB0 (the title's block free entry, RDX = pointer - the site PALMETTO_EXECUTOR_WATCH names), off unless
+//    PALMETTO_ALLOC_WATCH_FREE=1, armed at the stage-3 entry and printed only for a pointer within 4 KiB of the job or
+//    the block, so a free that could have put the live job on the free list is dated against the block.
+//
+// All four are int3 sites with the writer watch's own restore/trap/re-poke discipline: the original byte runs, the
+// single-step puts the int3 back. The executor site is skipped when PALMETTO_WRITER_WATCH is on (both would patch the
+// same byte), so an allocation arm runs PALMETTO_ALLOC_WATCH alone. Bounded: 24 lines per site class, then counters.
+// RVAs, sizes, register values, field offsets and module+offset labels only; no game data.
+constexpr std::uint32_t kAllocWatchExecutorRva = 0x1335A20;        // the per-command renderer executor entry
+constexpr std::uint32_t kAllocWatchJobAllocRva = 0x184F0C;         // after the flush's 0xa0-byte job allocation
+constexpr std::uint32_t kAllocWatchBlockAllocRva = 0x455964C;      // after the constant helper's block allocation
+constexpr std::uint32_t kAllocWatchFreeRva = 0x515ABB0;            // the title allocator's block free entry
+constexpr std::uint32_t kAllocWatchHelperEntryRva = 0x45594F0;     // the constant helper: class, plane count, dims
+constexpr std::uint32_t kAllocWatchEntryWrittenRva = 0x4559684;    // the 0x20-byte descriptor entry just written
+constexpr std::uint32_t kAllocWatchStateMachineRva = 0x71273C8;    // the state-machine object pointer, stage at +0x10
+constexpr std::uint32_t kAllocWatchAllocatorGlobalRva = 0xABCC310; // the title's default allocator object pointer
+constexpr unsigned kAllocWatchSites = 6;
+constexpr unsigned kAllocWatchLines = 24;
+
+enum AllocWatchSite : unsigned { alloc_watch_executor = 0, alloc_watch_job = 1, alloc_watch_block = 2,
+                                 alloc_watch_free = 3, alloc_watch_helper = 4, alloc_watch_entry = 5 };
+
+struct AllocWatch {
+    std::uintptr_t image_base = 0;
+    std::atomic<std::uintptr_t> site[kAllocWatchSites]{};
+    std::atomic<unsigned char> original[kAllocWatchSites]{};
+    std::atomic<unsigned> hits[kAllocWatchSites]{}, logged[kAllocWatchSites]{};
+    std::atomic<unsigned> stage{0xFFFF};
+    std::atomic<bool> stage3_entry{false}, identity_logged{false}, free_requested{false}, armed{false};
+    std::atomic<std::uintptr_t> executor_job{0}, executor_tid{0};
+    std::atomic<std::uintptr_t> last_job{0}, last_job_tid{0}, block{0}, block_size{0};
+    std::atomic<unsigned> executor_entries{0}, job_allocs{0}, job_matches{0}, overlaps{0}, free_matches{0};
+    std::mutex recent_mutex;
+    std::uintptr_t recent_jobs[8]{};
+    unsigned recent_count = 0;
+};
+
+AllocWatch& alloc_watch() {
+    static AllocWatch watch;
+    return watch;
+}
+
+// The site whose original byte is about to be re-poked after the trap flag single-step (slot + 1; 0 is "none").
+thread_local unsigned alloc_watch_repoke_slot = 0;
+
+// The state machine's current stage: the object at image+0x71273C8 holds it as a u16 at +0x10 (the word the state
+// trace prints as "machine current"). Same source the writer watch uses. 0xFFFF when the object is not there yet.
+unsigned alloc_watch_stage() {
+    const AllocWatch& watch = alloc_watch();
+    if (!watch.image_base) return 0xFFFF;
+    const std::uint64_t machine = executor_watch_read_u64(watch.image_base + kAllocWatchStateMachineRva);
+    if (!machine || (machine & 7) != 0) return 0xFFFF;
+    std::uint16_t current = 0;
+    if (!executor_watch_read_block(static_cast<std::uintptr_t>(machine) + 0x10, &current, sizeof current)) return 0xFFFF;
+    return current;
+}
+
+// The title's default allocator object, its vtable and the three slots this measurement uses, labelled by module.
+std::string alloc_watch_allocator_text() {
+    const AllocWatch& watch = alloc_watch();
+    const auto image_base = watch.image_base;
+    if (!image_base) return "allocator image base unknown";
+    const auto allocator = static_cast<std::uintptr_t>(executor_watch_read_u64(image_base + kAllocWatchAllocatorGlobalRva));
+    if (!allocator) return "allocator image+0xabcc310 -> 0";
+    const auto vtable = static_cast<std::uintptr_t>(executor_watch_read_u64(allocator));
+    std::string text = "allocator image+0xabcc310 -> " + executor_watch_hex(allocator) + " vtable " +
+                       executor_watch_hex(vtable) + " (" + rt::shims::module_offset(vtable) + ")";
+    struct Slot {
+        const char* name;
+        std::uint32_t offset;
+    };
+    const Slot slots[3] = {{"alloc", 0x50}, {"free", 0x60}, {"alloc-classed", 0x70}};
+    for (const Slot& slot : slots) {
+        const auto target = static_cast<std::uintptr_t>(executor_watch_read_u64(vtable + slot.offset));
+        text += "\n  vtable+0x";
+        char offset[8];
+        std::snprintf(offset, sizeof offset, "%x", slot.offset);
+        text += offset;
+        text += std::string(" ") + slot.name + " " + executor_watch_hex(target) + " (" +
+                rt::shims::module_offset(target) + ")";
+    }
+    return text;
+}
+
+// Replace first byte with int3; remember the original. The same order the writer watch uses: the page is made
+// writable first, then the byte is read and replaced, so a page the loader has not committed yet fails here by name.
+bool alloc_watch_install(AllocWatch& watch, unsigned slot, std::uintptr_t site) {
+    auto* const byte = reinterpret_cast<unsigned char*>(site);
+    DWORD old = 0;
+    if (!VirtualProtect(byte, 1, PAGE_EXECUTE_READWRITE, &old)) {
+        MEMORY_BASIC_INFORMATION info{};
+        const SIZE_T queried = VirtualQuery(byte, &info, sizeof info);
+        std::fprintf(stderr,
+                     "[rt] alloc watch: VirtualProtect failed at image+0x%llx (error %lu; query %llu state 0x%lx protect "
+                     "0x%lx type 0x%lx)\n",
+                     static_cast<unsigned long long>(site - watch.image_base), GetLastError(),
+                     static_cast<unsigned long long>(queried), queried == sizeof info ? info.State : 0,
+                     queried == sizeof info ? info.Protect : 0, queried == sizeof info ? info.Type : 0);
+        std::fflush(stderr);
+        return false;
+    }
+    watch.original[slot].store(*byte);
+    *byte = 0xCC;
+    VirtualProtect(byte, 1, old, &old);
+    watch.site[slot].store(site);
+    return true;
+}
+
+// The original byte back (so the trapped instruction can execute), or the int3 back (after its single step).
+void alloc_watch_write_byte(unsigned slot, unsigned char value) {
+    AllocWatch& watch = alloc_watch();
+    const auto site = static_cast<std::uintptr_t>(watch.site[slot].load());
+    if (!site) return;
+    DWORD old = 0;
+    auto* const byte = reinterpret_cast<unsigned char*>(site);
+    if (!VirtualProtect(byte, 1, PAGE_EXECUTE_READWRITE, &old)) return;
+    *byte = value;
+    VirtualProtect(byte, 1, old, &old);
+}
+
+// One traced allocation of the constant table's block, at the helper's own return site before the descriptor entry is
+// written: the block and its requested size are RAX/R12, and the executor's job is whatever the last stage-3 entry read.
+void alloc_watch_block_hit(CONTEXT& context) {
+    AllocWatch& watch = alloc_watch();
+    const unsigned hit = watch.hits[alloc_watch_block].fetch_add(1, std::memory_order_relaxed) + 1;
+    const auto block = static_cast<std::uintptr_t>(context.Rax);
+    const auto size = static_cast<std::uintptr_t>(context.R12);
+    const auto rsp = static_cast<std::uintptr_t>(context.Rsp);
+    const auto descriptor = static_cast<std::uintptr_t>(executor_watch_read_u64(rsp + 0x28));
+    const auto param3 = static_cast<std::uintptr_t>(executor_watch_read_u64(rsp + 0x40));
+    const auto caller = static_cast<std::uintptr_t>(executor_watch_read_u64(rsp + 0x88));  // 8 pushes + 0x48
+    const auto job = static_cast<std::uintptr_t>(watch.executor_job.load(std::memory_order_relaxed));
+    const auto job_tid = static_cast<unsigned long>(watch.executor_tid.load(std::memory_order_relaxed));
+    const auto width = static_cast<unsigned>(context.Rbp & 0xFFFFFFFFu);
+    const auto height = static_cast<unsigned>(context.R13 & 0xFFFFFFFFu);
+    if (block) {
+        watch.block.store(block);
+        watch.block_size.store(size);
+    }
+    const std::uintptr_t end = block + (size ? size : 0x1000);
+    const bool overlap = block && job && block <= job && job < end;
+    if (overlap) watch.overlaps.fetch_add(1, std::memory_order_relaxed);
+    if (watch.logged[alloc_watch_block].fetch_add(1, std::memory_order_relaxed) >= kAllocWatchLines) return;
+    char line[420];
+    std::snprintf(line, sizeof line,
+                  "[rt] alloc watch t=%.3f BLOCK ALLOC hit %u tid %lu block %s size %s width %u height %u caller %s "
+                  "job %s job-block 0x%llx overlap %s",
+                  executor_watch_seconds(), hit, static_cast<unsigned long>(GetCurrentThreadId()),
+                  executor_watch_hex(block).c_str(), executor_watch_hex(size).c_str(), width, height,
+                  rt::shims::module_offset(caller).c_str(), executor_watch_hex(job).c_str(),
+                  static_cast<unsigned long long>(job > block ? job - block : 0), overlap ? "YES" : "no");
+    std::string text = line;
+    text += "\n  " + alloc_watch_allocator_text();
+    text += "\n  block: " + writer_watch_region(block) + "\n    " + writer_watch_page_mapping(block);
+    if (job) text += "\n  job: " + writer_watch_page_mapping(job) + " (executor tid " + std::to_string(job_tid) + ")";
+    // Where the arena's bytes came from: an XMemVirtualAlloc answer this shim served, or memory the title's own host
+    // calls created. xmem.cpp fills the registry only while this probe switch is set (docs/vertex_buffer_va.md 15).
+    const auto served_text = [](const char* what, std::uintptr_t address) {
+        std::uint64_t served_caller = 0;
+        std::uint8_t served_kind = 0;
+        if (rt::xmem::served_range(reinterpret_cast<const void*>(address), &served_caller, &served_kind))
+            return std::string("\n  ") + what + " " + executor_watch_hex(address) +
+                   " served by XMemVirtualAlloc (kind " + std::to_string(served_kind) + "), title caller " +
+                   rt::shims::module_offset(served_caller);
+        return std::string("\n  ") + what + " " + executor_watch_hex(address) + " not in a recorded XMem answer";
+    };
+    text += served_text("block", block);
+    if (job) text += served_text("job", job);
+    text += served_text("allocator", static_cast<std::uintptr_t>(
+                                          executor_watch_read_u64(watch.image_base + kAllocWatchAllocatorGlobalRva)));
+    if (block >= 0x80) text += writer_watch_memory_lines("block-before", block - 0x80, 0x80);
+    if (block) text += writer_watch_memory_lines("block", block, 0x100);
+    if (job) text += writer_watch_memory_lines("job", job, 0x100);
+    // The descriptor is freshly allocated (0x68 bytes) and the helper has not written this entry yet, so its bytes are
+    // whatever the allocator handed back: recycled bytes here are the allocator-reuse cross-check section 14 lacked.
+    if (descriptor) {
+        text += writer_watch_memory_lines("descriptor", descriptor, 0x68);
+        const auto entries = static_cast<std::uintptr_t>(executor_watch_read_u64(descriptor + 0x38));
+        if (entries) text += writer_watch_memory_lines("entry0-before", entries, 0x40);
+    }
+    (void)param3;
+    executor_watch_print(text + "\n");
+}
+
+// One 0xa0-byte job allocation from the flush's 0x70-slot call: RAX the returned job, RDI the object it was created
+// from. Recorded in the recent-jobs ring so the executor entry can say whether the job it runs came from here.
+void alloc_watch_job_hit(CONTEXT& context) {
+    AllocWatch& watch = alloc_watch();
+    const auto job = static_cast<std::uintptr_t>(context.Rax);
+    const auto tag = static_cast<std::uintptr_t>(context.Rdi);
+    const auto caller = static_cast<std::uintptr_t>(executor_watch_read_u64(static_cast<std::uintptr_t>(context.Rsp) + 0x78));  // 7 pushes + 0x40
+    const unsigned stage = alloc_watch_stage();
+    if (job) {
+        watch.last_job.store(job);
+        watch.last_job_tid.store(GetCurrentThreadId());
+    }
+    {
+        std::lock_guard lock(watch.recent_mutex);
+        if (watch.recent_count < 8) {
+            watch.recent_jobs[watch.recent_count++] = job;
+        } else {
+            for (unsigned i = 1; i < 8; ++i) watch.recent_jobs[i - 1] = watch.recent_jobs[i];
+            watch.recent_jobs[7] = job;
+        }
+    }
+    const unsigned hit = watch.job_allocs.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (!job || stage != 3) return;
+    if (watch.logged[alloc_watch_job].fetch_add(1, std::memory_order_relaxed) >= kAllocWatchLines) return;
+    char line[320];
+    std::snprintf(line, sizeof line,
+                  "[rt] alloc watch t=%.3f JOB ALLOC hit %u tid %lu job %s size 0xa0 tag %s caller %s stage %u",
+                  executor_watch_seconds(), hit, static_cast<unsigned long>(GetCurrentThreadId()),
+                  executor_watch_hex(job).c_str(), executor_watch_hex(tag).c_str(),
+                  rt::shims::module_offset(caller).c_str(), stage);
+    std::string text = line;
+    text += "\n  " + alloc_watch_allocator_text();
+    text += "\n  job: " + writer_watch_region(job) + "\n    " + writer_watch_page_mapping(job);
+    text += writer_watch_memory_lines("job", job, 0x100);
+    executor_watch_print(text + "\n");
+}
+
+// One executor entry. Before stage 3 it is only a counter; at the first stage-3 pass it names the job and arms the
+// job and block points (and the free point when asked), then logs the job whenever it changes.
+void alloc_watch_executor_hit(CONTEXT& context) {
+    AllocWatch& watch = alloc_watch();
+    const unsigned hit = watch.executor_entries.fetch_add(1, std::memory_order_relaxed) + 1;
+    const auto job = static_cast<std::uintptr_t>(context.Rcx);
+    const auto caller = static_cast<std::uintptr_t>(executor_watch_read_u64(static_cast<std::uintptr_t>(context.Rsp)));
+    const unsigned stage = alloc_watch_stage();
+    watch.stage.store(stage);
+    if (stage != 3) {
+        if (hit <= 3)
+            executor_watch_print("[rt] alloc watch: executor entry hit " + std::to_string(hit) + " caller " +
+                                 rt::shims::module_offset(caller) + " job " + executor_watch_hex(job) + " stage " +
+                                 std::to_string(stage) + " (allocation points not armed)\n");
+        return;
+    }
+    const auto previous = static_cast<std::uintptr_t>(watch.executor_job.load(std::memory_order_relaxed));
+    watch.executor_job.store(job);
+    watch.executor_tid.store(GetCurrentThreadId());
+    const bool first = !watch.stage3_entry.exchange(true);
+    bool recent = false;
+    {
+        std::lock_guard lock(watch.recent_mutex);
+        for (unsigned i = 0; i < watch.recent_count; ++i)
+            if (watch.recent_jobs[i] == job) recent = true;
+    }
+    if (recent) watch.job_matches.fetch_add(1, std::memory_order_relaxed);
+    if (first) {
+        std::string text = "[rt] alloc watch t=" + std::to_string(executor_watch_seconds()) + " STAGE 3 ENTRY hit " +
+                           std::to_string(hit) + " tid " + std::to_string(GetCurrentThreadId()) + " job " +
+                           executor_watch_hex(job) + " from " + rt::shims::module_offset(caller) + " stage 3";
+        text += "\n  " + alloc_watch_allocator_text();
+        if (job) {
+            text += "\n  job: " + writer_watch_region(job) + "\n    " + writer_watch_page_mapping(job);
+            text += writer_watch_memory_lines("job", job, 0x100);
+        }
+        if (job && recent) text += "\n  this job is one of the recently allocated flush jobs";
+        const auto allocator = static_cast<std::uintptr_t>(
+            executor_watch_read_u64(watch.image_base + kAllocWatchAllocatorGlobalRva));
+        text += "\n  allocator page: " + writer_watch_page_mapping(allocator);
+        if (watch.free_requested.load(std::memory_order_relaxed)) {
+            const bool armed = alloc_watch_install(watch, alloc_watch_free, watch.image_base + kAllocWatchFreeRva);
+            text += std::string("\n  free point ") + (armed ? "armed at image+0x515abb0" : "could not be armed");
+        }
+        const bool job_armed = alloc_watch_install(watch, alloc_watch_job, watch.image_base + kAllocWatchJobAllocRva);
+        const bool block_armed = alloc_watch_install(watch, alloc_watch_block, watch.image_base + kAllocWatchBlockAllocRva);
+        const bool helper_armed = alloc_watch_install(watch, alloc_watch_helper, watch.image_base + kAllocWatchHelperEntryRva);
+        const bool entry_armed = alloc_watch_install(watch, alloc_watch_entry, watch.image_base + kAllocWatchEntryWrittenRva);
+        text += std::string("\n  job point ") + (job_armed ? "armed at image+0x184f0c" : "FAILED") + ", block point " +
+                (block_armed ? "armed at image+0x455964c" : "FAILED");
+        text += std::string("\n  helper entry point ") + (helper_armed ? "armed at image+0x45594f0" : "FAILED") +
+                ", entry-written point " + (entry_armed ? "armed at image+0x4559684" : "FAILED");
+        executor_watch_print(text + "\n");
+        return;
+    }
+    if (job == previous) return;
+    const auto allocator = static_cast<std::uintptr_t>(
+        executor_watch_read_u64(watch.image_base + kAllocWatchAllocatorGlobalRva));
+    if (watch.logged[alloc_watch_executor].fetch_add(1, std::memory_order_relaxed) >= kAllocWatchLines) return;
+    executor_watch_print("[rt] alloc watch t=" + std::to_string(executor_watch_seconds()) + " executor job changed was " +
+                         executor_watch_hex(previous) + " now " + executor_watch_hex(job) + " tid " +
+                         std::to_string(GetCurrentThreadId()) + " recent flush job " + (recent ? "yes" : "no") +
+                         " allocator " + executor_watch_hex(allocator) + " stage " + std::to_string(stage) + "\n");
+}
+
+// One free at the title allocator's free entry: only a pointer within 4 KiB of the job or the tracked block can be the
+// free that would explain an overlap, so every other call costs the trap and one comparison.
+void alloc_watch_free_hit(CONTEXT& context) {
+    AllocWatch& watch = alloc_watch();
+    const auto pointer = static_cast<std::uintptr_t>(context.Rdx);
+    const auto job = static_cast<std::uintptr_t>(watch.executor_job.load(std::memory_order_relaxed));
+    const auto block = static_cast<std::uintptr_t>(watch.block.load(std::memory_order_relaxed));
+    const bool near_job = job && pointer + 0x1000 >= job && pointer <= job + 0x1000;
+    const bool near_block = block && pointer + 0x1000 >= block && pointer <= block + 0x1000;
+    if (!near_job && !near_block) return;
+    watch.free_matches.fetch_add(1, std::memory_order_relaxed);
+    if (watch.logged[alloc_watch_free].fetch_add(1, std::memory_order_relaxed) >= kAllocWatchLines) return;
+    std::string text = "[rt] alloc watch t=" + std::to_string(executor_watch_seconds()) + " FREE near " +
+                       (near_job ? "job" : "") + (near_job && near_block ? "+" : "") + (near_block ? "block" : "") +
+                       ": pointer " + executor_watch_hex(pointer) + " job " + executor_watch_hex(job) + " block " +
+                       executor_watch_hex(block) + " tid " + std::to_string(GetCurrentThreadId());
+    text += "\n  " + alloc_watch_allocator_text();
+    text += "\n  " + writer_watch_page_mapping(pointer);
+    text += "\n  " + writer_watch_full_stack(context);
+    executor_watch_print(text + "\n");
+}
+
+// The constant helper's entry: the class (ECX, the value the job's slot-0x28 method returns), the plane count (EDX),
+// the dimensions pointer (R8) and the allocator argument (stack). This is the input side of the size computation whose
+// result the block point measures, so the zero size is attributed to either the plane count or the class stride.
+void alloc_watch_helper_hit(CONTEXT& context) {
+    AllocWatch& watch = alloc_watch();
+    const unsigned hit = watch.hits[alloc_watch_helper].fetch_add(1, std::memory_order_relaxed) + 1;
+    if (watch.logged[alloc_watch_helper].fetch_add(1, std::memory_order_relaxed) >= kAllocWatchLines) return;
+    const auto rsp = static_cast<std::uintptr_t>(context.Rsp);
+    const auto allocator_arg = static_cast<std::uintptr_t>(executor_watch_read_u64(rsp + 0x28));
+    const auto dims = static_cast<std::uintptr_t>(context.R8);
+    char line[400];
+    std::snprintf(line, sizeof line,
+                  "[rt] alloc watch t=%.3f HELPER ENTRY hit %u tid %lu class 0x%llx plane-count %llu dims-ptr %s "
+                  "allocator-arg %s",
+                  executor_watch_seconds(), hit, static_cast<unsigned long>(GetCurrentThreadId()),
+                  static_cast<unsigned long long>(context.Rcx & 0xFFFFFFFFu),
+                  static_cast<unsigned long long>(context.Rdx & 0xFFFFFFFFu), executor_watch_hex(dims).c_str(),
+                  executor_watch_hex(allocator_arg).c_str());
+    std::string text = line;
+    if (dims && dims < 0x7FFFFFFFFFFFull) {
+        text += "\n  dims at " + executor_watch_hex(dims) + ": width " + std::to_string(executor_watch_read_u32(dims)) +
+                " height " + std::to_string(executor_watch_read_u32(dims + 4));
+    }
+    executor_watch_print(text + "\n");
+}
+
+// The instruction after the helper stores its 0x20-byte descriptor entry. RCX is the entry array, RSI the entry offset,
+// RBP/R13D the width/height, RAX the row stride, R12 the declared size and RDI the block pointer, so the entry the copy
+// later follows is read as written: {width, height, stride, size, address}.
+void alloc_watch_entry_hit(CONTEXT& context) {
+    AllocWatch& watch = alloc_watch();
+    const unsigned hit = watch.hits[alloc_watch_entry].fetch_add(1, std::memory_order_relaxed) + 1;
+    const auto entries = static_cast<std::uintptr_t>(context.Rcx);
+    const auto offset = static_cast<std::uintptr_t>(context.Rsi);
+    const auto stride = static_cast<std::uintptr_t>(context.Rax);
+    const auto declared = static_cast<std::uintptr_t>(context.R12);
+    const auto block = static_cast<std::uintptr_t>(context.Rdi);
+    const auto width = static_cast<unsigned>(context.Rbp & 0xFFFFFFFFu);
+    const auto height = static_cast<unsigned>(context.R13 & 0xFFFFFFFFu);
+    if (watch.logged[alloc_watch_entry].fetch_add(1, std::memory_order_relaxed) >= kAllocWatchLines) return;
+    char line[400];
+    std::snprintf(line, sizeof line,
+                  "[rt] alloc watch t=%.3f ENTRY WRITTEN hit %u tid %lu entry %s width %u height %u stride %s size %s "
+                  "block %s",
+                  executor_watch_seconds(), hit, static_cast<unsigned long>(GetCurrentThreadId()),
+                  executor_watch_hex(entries + offset).c_str(), width, height, executor_watch_hex(stride).c_str(),
+                  executor_watch_hex(declared).c_str(), executor_watch_hex(block).c_str());
+    std::string text = line;
+    text += "\n  " + alloc_watch_allocator_text();
+    executor_watch_print(text + "\n");
+}
+
+LONG CALLBACK alloc_watch_exception(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT& context = *info->ContextRecord;
+    const DWORD code = info->ExceptionRecord->ExceptionCode;
+    AllocWatch& watch = alloc_watch();
+    if (code == EXCEPTION_BREAKPOINT) {
+        const auto at = reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress);
+        unsigned slot = kAllocWatchSites;
+        for (unsigned i = 0; i < kAllocWatchSites; ++i)
+            if (watch.site[i].load(std::memory_order_relaxed) == at) {
+                slot = i;
+                break;
+            }
+        if (slot == kAllocWatchSites) return EXCEPTION_CONTINUE_SEARCH;
+        if (slot == alloc_watch_executor) alloc_watch_executor_hit(context);
+        else if (slot == alloc_watch_job) alloc_watch_job_hit(context);
+        else if (slot == alloc_watch_block) alloc_watch_block_hit(context);
+        else if (slot == alloc_watch_free) alloc_watch_free_hit(context);
+        else if (slot == alloc_watch_helper) alloc_watch_helper_hit(context);
+        else alloc_watch_entry_hit(context);
+        // The original instruction runs, then the trap flag brings us back here to put the int3 back.
+        alloc_watch_write_byte(slot, watch.original[slot].load());
+        alloc_watch_repoke_slot = slot + 1;
+        context.EFlags |= 0x100;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (code == EXCEPTION_SINGLE_STEP) {
+        if (!alloc_watch_repoke_slot) return EXCEPTION_CONTINUE_SEARCH;
+        const unsigned slot = alloc_watch_repoke_slot - 1;
+        alloc_watch_repoke_slot = 0;
+        alloc_watch_write_byte(slot, 0xCC);
+        context.EFlags &= ~static_cast<DWORD>(0x100);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// Puts the int3 over the executor entry once the machine reads stage 3, then the two allocation points are armed by
+// that entry. The patch is deliberately late: the loading phase never traps, so the probe cannot move whether the boot
+// reaches stage 3 - the reach is the environmental race sections 10-14 record, and the arm's own reach is reported.
+void start_alloc_watch(std::uintptr_t image_base, std::size_t image_size) {
+    const char* spec = std::getenv("PALMETTO_ALLOC_WATCH");
+    if (!spec || !*spec || *spec == '0') return;
+    (void)image_size;
+    const char* writer = std::getenv("PALMETTO_WRITER_WATCH");
+    if (writer && *writer && *writer != '0') {
+        std::fprintf(stderr,
+                     "[rt] alloc watch: not armed - PALMETTO_WRITER_WATCH owns the executor entry this probe gates on; "
+                     "run the allocation arm with the writer watch off\n");
+        std::fflush(stderr);
+        return;
+    }
+    AllocWatch& watch = alloc_watch();
+    watch.image_base = image_base;
+    const char* free_switch = std::getenv("PALMETTO_ALLOC_WATCH_FREE");
+    watch.free_requested.store(free_switch && *free_switch && *free_switch != '0');
+    AddVectoredExceptionHandler(1, alloc_watch_exception);
+    // The stage-3 gate. A 20 ms poll is fine: stage 3 stays set until the stop, and the first executor entry after the
+    // patch arms the job and block points, so the stage-3 pass that crashes is still covered.
+    std::thread([] {
+        AllocWatch& watch = alloc_watch();
+        for (unsigned attempt = 0; attempt < 60000; ++attempt) {
+            if (alloc_watch_stage() == 3) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (alloc_watch_stage() != 3) {
+            std::fprintf(stderr, "[rt] alloc watch: stage 3 never read; the arm did not reach it, so no site was armed\n");
+            std::fflush(stderr);
+            return;
+        }
+        if (watch.armed.exchange(true)) return;
+        const bool armed = alloc_watch_install(watch, alloc_watch_executor, watch.image_base + kAllocWatchExecutorRva);
+        std::fprintf(stderr,
+                     "[rt] alloc watch t=%.3f stage 3 read: %s the executor entry image+0x%x; job point image+0x%x, "
+                     "block point image+0x%x, helper entry image+0x%x and entry-written image+0x%x arm at its first "
+                     "entry, free point image+0x%x %s\n",
+                     executor_watch_seconds(), armed ? "int3 over" : "FAILED to arm", kAllocWatchExecutorRva,
+                     kAllocWatchJobAllocRva, kAllocWatchBlockAllocRva, kAllocWatchHelperEntryRva,
+                     kAllocWatchEntryWrittenRva, kAllocWatchFreeRva,
+                     watch.free_requested.load() ? "requested" : "off (PALMETTO_ALLOC_WATCH_FREE unset)");
+        std::fflush(stderr);
+    }).detach();
+    std::fprintf(stderr,
+                 "[rt] alloc watch: waiting for machine stage 3 (no int3 before it; stage-gated executor point "
+                 "image+0x%x, then job image+0x%x, block image+0x%x, helper entry image+0x%x, entry-written "
+                 "image+0x%x, free image+0x%x %s)\n",
+                 kAllocWatchExecutorRva, kAllocWatchJobAllocRva, kAllocWatchBlockAllocRva, kAllocWatchHelperEntryRva,
+                 kAllocWatchEntryWrittenRva, kAllocWatchFreeRva,
+                 watch.free_requested.load() ? "requested" : "off (PALMETTO_ALLOC_WATCH_FREE unset)");
+    std::fflush(stderr);
+}
+
 // ---- RIP histogram (PALMETTO_RIP_HIST) ---------------------------------------------------------------------------------
 // Diagnostic, off unless the variable names sample windows ("5,20" or "5,20;60,90": start,end seconds). In each window the
 // sampler enumerates every other thread every 3 ms, suspends it, reads the instruction pointer and keeps the ones inside
@@ -5410,6 +5876,12 @@ int wmain(int argc, wchar_t** argv) {
         // that replaces its vtable is named in-process (diagnostic; see the writer watch above).
         if (const char* watch = std::getenv("PALMETTO_WRITER_WATCH"); watch && *watch && *watch != '0')
             start_writer_watch(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size);
+        // PALMETTO_ALLOC_WATCH=1: int3 sites on the renderer executor entry (the stage gate), the flush's job
+        // allocation and the constant helper's block allocation, so the 0x1000-byte table block's requested size and
+        // its range against the live command object are measured at the allocation (diagnostic; see the allocation
+        // trace above). Off by default; PALMETTO_ALLOC_WATCH_FREE=1 adds the allocator's free entry.
+        if (const char* watch = std::getenv("PALMETTO_ALLOC_WATCH"); watch && *watch && *watch != '0')
+            start_alloc_watch(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size);
         const int code = rt::process::run_entry(main_module.base + main_module.entry_rva);
         std::fflush(stdout);
         std::printf("game exited with code %d\n", code);

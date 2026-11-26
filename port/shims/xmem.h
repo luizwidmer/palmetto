@@ -8,6 +8,12 @@ namespace rt::xmem {
 bool commit_physical_range(const void* address, std::size_t size);
 bool commit_physical_pages(const std::uint64_t* page_array, std::size_t count);
 
+// The allocation probe (docs/vertex_buffer_va.md section 15): whether `address` lies in a range an XMemVirtualAlloc
+// answer recorded while PALMETTO_ALLOC_WATCH is set, with the raw title caller address and the entry point that served
+// it (1 = XMemVirtualAlloc). False when the switch is off or no recorded answer contains the address. The registry is
+// append-only and bounded, so a range freed later still answers yes: the probe asks where the bytes came from.
+bool served_range(const void* address, std::uint64_t* caller, std::uint8_t* kind);
+
 // Console queue slot 31 (CopyPageMappingsBatchX, port/shims/d3d12_xs_device.cpp): the command-object proxy is also
 // compiled into GPU-free test binaries that link no xmem, so the mapping primitive is a hook this file's
 // implementation fills in and a test can replace. Each call gives `pages` 64 KiB destination pages a second view of

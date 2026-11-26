@@ -1143,3 +1143,199 @@ copy arithmetic from the CRT's own disassembly, the decompiled chain at `game+0x
 The title functions were decompiled with this project's Ghidra tooling from the user's own image; the host CRT
 instruction pair was re-read from the system's own `vcruntime140.dll`. No peer code was used and no game data is
 added. RVAs, VAs, field offsets, register values, module names, counts and outcomes only.
+
+## 15. The table's block is allocated with zero declared bytes; the overlap is the copy's 0x1000-byte overrun, not an allocator reuse
+
+**Status: measured, and negative for a producer in this tree. The block's declared size is 0 because the title's own
+row-stride table has no entry for the table's format class (0xa); the copy writes 0x1000 bytes into it anyway, and the
+live command object is inside that overrun. The default path is unchanged: the probe is opt-in and every site is behind
+`PALMETTO_ALLOC_WATCH`.**
+
+Section 14 left two title-side mechanisms for the overlap: the block was allocated smaller than the copy, or the
+allocator returned a range that still held the live object. This section decides between them at the allocation itself,
+before the copy runs: it puts int3 sites on the executor entry (the stage-3 gate), on the flush's job allocation, on
+the constant helper's block allocation, on the helper's own entry and on the descriptor entry the helper writes, and it
+records the allocator's answer, the requested size, the format class, the row stride and the entry as written. In three
+caught allocations the block is requested with **0 bytes**; the allocator returns a real block for that request (its
+small-size class rounding is `(size + 0xf) & 0x7f0`, so a request of 0 stays 0), the entry declares `stride 0, size 0`,
+and the copy's 0x1000 bytes then land on whatever follows the block: on the live job in two catches (stop
+`game+0x13360A3`) and past the job on the allocator's own free-tree nodes in the third (stop `game+0x538D0E6`). The
+same producer therefore explains both stop families. No layer call is in the chain, and the overlap is the overrun of a
+zero-byte block, not the allocator reusing live memory.
+
+### 15.1 What this slice changes
+
+| file | change |
+|---|---|
+| `port/src/main.cpp` | `PALMETTO_ALLOC_WATCH`: a stage-gated int3 probe. A 20 ms poll of the state machine waits for machine stage 3 and then puts the int3 on the executor entry `game+0x1335A20`; its first entry arms `game+0x184F0C` (after the flush's `[allocator+0x70]` 0xa0-byte job allocation), `game+0x455964C` (after the constant helper's `[allocator+0x50]` block allocation), `game+0x45594F0` (the helper's entry: class, plane count, dims) and `game+0x4559684` (after the helper stores its 0x20-byte descriptor entry). Each payload logs the tick, thread, addresses, the requested size, the class, the width/height/stride, the job the executor is running, whether the copy's range contains it, the allocator object and its vtable slots by module+RVA, and the `VirtualQuery` mapping of both objects. `PALMETTO_ALLOC_WATCH_FREE=1` additionally arms the title allocator's free entry `game+0x515ABB0` at the stage-3 entry and prints a free only within 4 KiB of the job or the block |
+| `port/shims/xmem.cpp`, `port/shims/xmem.h` | the range registry behind the probe's attribution question: while `PALMETTO_ALLOC_WATCH` is set, every successful `XMemVirtualAlloc` answer is recorded as a bounded (1024-entry, append-only) range with the title caller that asked for it, and `rt::xmem::served_range()` answers which recorded range contains an address. Off by default: one cached switch read, no lock, in the default path |
+| `docs/vertex_buffer_va.md` | this section |
+
+The executor entry is deliberately patched late (at the stage-3 poll, not at startup) so the probe never traps during
+loading: the stage-3 reach is the environmental race sections 10-14 record, and the arm's own reach is reported rather
+than assumed. The four allocation sites are armed from the first stage-3 executor entry, which is the pass that crashes.
+All payloads are bounded (24 lines per site class, then counters) and the handler is the writer watch's own
+restore/trap/re-poke discipline. No layer call or answer changes; reverting the slice leaves the default path identical.
+
+### 15.2 The allocator and the two allocations
+
+The caught boot names the allocator from the title's own global and reads its vtable, so the whole chain is title code
+over title-private memory:
+
+| item | measured |
+|---|---|
+| allocator | `image+0xabcc310` -> a title-heap object; its vtable is `game+0x663BDE0` |
+| slot 0x50 (alloc) | `game+0x538D930`, which locks the allocator's own mutex and calls `game+0x538D220` |
+| slot 0x60 (free) | `game+0x515ABB0` (the site section 10 measured, and the one the executor watch arms) |
+| slot 0x70 (alloc-classed) | `game+0x538D040`, which searches the allocator's address tree for a class and calls `game+0x538D220` |
+| small-size classes | `game+0x538D220`: a request below 0x201 is rounded to `(size + 0xf) & 0x7f0`, i.e. 0x10-byte classes; a request of 0 rounds to 0 |
+| arena | one `MEM_PRIVATE`, `PAGE_READWRITE` committed region (this boot: allocation `0x192ffa00000` + `0x212c3000`); the block, the job and the allocator object all live in it |
+| arena provenance | the probe's XMem registry answers that the region's range is inside an `XMemVirtualAlloc` answer this shim returned to title caller `game+0x1e1d28d`; the shim is a host `VirtualAlloc` pass-through for that call type, and the range decision inside the arena is the title allocator's own |
+
+The two allocations the same pass makes, both through this allocator:
+
+| allocation | site | request | returned |
+|---|---|---|---|
+| the command object (job) | `game+0x184F0C`, after the flush's `[vtable+0x70]` call | `0xa0` bytes, class tag `0x48` | a title-heap block; the same thread (tid 55972 in the third catch) then enters the executor with it in `RCX` |
+| the constant table's block | `game+0x455964C`, after the helper's `[vtable+0x50]` call | **`0x0` bytes** | a title-heap block (the allocator's zero class), inside the same executor pass, 13 ms after the entry |
+
+Section 14 named the helper `game+0x1445594F0`; that is the same function written as a VA with the image's
+`0x140000000` preferred base, and its RVA is `game+0x45594F0` - the site this slice arms, and the function whose
+decompilation section 14.3 quotes. The allocator call sites the helper uses (its own `[vtable+0x50]` calls at
+`game+0x4559547` for the 0x68-byte descriptor and `game+0x4559649` for the block) are the two this slice watches.
+
+### 15.3 The trace table
+
+Three catches, three build groups, one shape: the request is 0, the copy is 0x1000, the job is the executor's own `RCX`
+in every catch. Addresses are per boot; the low bits repeat because the arena layout is deterministic.
+
+| boot | binary sha256 (first 16) | job | block | block relative to job | requested size | width x height | entry stride / size | copy range contains job | stop |
+|---|---|---|---:|---:|---:|---:|---|---|---|
+| `boot-s15-alloc5` | `BE2C0110CCA20F21` | `0x2a466b3e440` | `0x2a466b3d550` | job - 0xEF0 | `0x0` | 256 x 1 | - | yes (last 0x110 bytes) | `game+0x13360A3` |
+| `boot-s15-alloc23` | `851F27B6124DB1A6` | `0x19303b3e440` | `0x19303b3d550` | job - 0xEF0 | `0x0` | 256 x 1 | `0x0` / `0x0` | yes (last 0x110 bytes) | `game+0x13360A3` |
+| `boot-s15-alloc34` | `D0E84F4D2DD9C5F5` | `0x2250d9374e0` | `0x2250d937580` | job + 0xA0 | `0x0` | 256 x 1 | `0x0` / `0x0` | no: the copy runs `job+0xA0`..`job+0x10A0` | `game+0x538D0E6` |
+
+The pattern is the same in all three; what moves is which side of the job the zero-class block comes from (the
+allocator's zero-class free tree in the first two, the next arena chunk in the third), and therefore which live bytes
+the 0x1000-byte copy hits. In the third catch the job survives but the overrun reaches the allocator's own classed
+lookup: the stop at `game+0x538D0E6` is `game+0x538D040`'s tree walk reading a null node's `+0x18`, the same family
+section 10 recorded at `game+0x515ACF5` in the free path. One producer, two crash windows.
+
+### 15.4 The mechanism, named at both ends
+
+The helper's entry (site `game+0x45594F0`) and the descriptor entry it writes (site `game+0x4559684`) name the two ends
+of the mismatch:
+
+- the class is **0xa**: the job's `+0x58` object's slot 8 (reached from the job's own slot 0x28, `game+0x6FECC0`,
+  which tail-calls `*(*(job+0x58) + 8)`) returns 10; the helper stores it at `descriptor+0x28`;
+- the size computation is `game+0x455A610`: `sum over plane-count of game+0x1555B60(class, width, height)`, where
+  `game+0x1555B60` is `height * row_stride` and `game+0x1555C10` is the row-stride table. That table has bytes-per-row
+  answers for classes 1-4, 9, 0x15, 0x32-0x42 and the 100/101/200/201 families, and **returns 0 for class 0xa** (its
+  `default:` path). The helper passes plane count 1 and the job's own `+0x38` dims {0x100, 1}, so
+  `size = 1 * (0x100 * 0) = 0`;
+- the helper asks the allocator for 0 bytes and stores `{0x100, 1, 0, 0, block}` in the entry; the entry-written site
+  reads exactly that: `width 256, height 1, stride 0x0, size 0x0`;
+- the slot-0x40 builder (`game+0x550E2D0`) then copies `*(int*)(command-list + 0x38) << 4` bytes per iteration: the
+  measured `0x100 << 4 = 0x1000` (section 14's copy arithmetic: `RAX .. RAX+0x1000`), i.e. 16 bytes per element, not the
+  stride the size computation used.
+
+So the block is not "smaller than the copy" by a few bytes: it is allocated with a declared size of **zero** and the
+whole 0x1000 bytes are an overrun. The allocator did what it was asked (its zero-size class is a real allocation); the
+mismatch is the title's own class/stride computation against its own fixed 16-byte copy step. This is the "block
+undersized" mechanism of section 14.4, and it refutes the reuse mechanism: the allocator never returned a range that
+its own bookkeeping considered live.
+
+### 15.5 Verdict, the attribution, and the fix decision
+
+- **A title-side producer, measured.** The request is 0, the entry is `{256, 1, 0, 0, block}`, and the copy is 0x1000;
+  every input is title code or title data (the job's format object, the title's stride table, the title's allocator,
+  the command-list's own width). No layer call appears between the executor entry and the copy.
+- **No measured producer in this tree, so no default-path change.** The layer cannot resize a block the title allocates
+  from its own arena with its own allocator, and it cannot change the class value the title's format object returns.
+  Adding a guard, delay or fence would not change a 0-byte request into a 0x1000-byte one.
+- **What our runtime does participate in, measured and excluded.** The arena's address range was served by our
+  `XMemVirtualAlloc` hook (registry answer above), so the pages are ours to the extent that the shim's host
+  `VirtualAlloc` pass-through created them - but the *range decision inside the arena* (size class, block address,
+  free tree) is the title allocator's own code (`game+0x538D930`, `game+0x538D220`, `game+0x538D040`), and no answer of
+  ours changes the class or the copy length. The slot-9 allocator callback, placed-VA bookkeeping and the page-import
+  path are not in the chain; the block and the job are in a `MEM_PRIVATE` region, not an imported span or a placed
+  range.
+- **The next falsifier is on the title side, not the layer.** Decode the object at `job+0x58` and the job slot-0x28
+  answer (class 0xa) to name where the class comes from - a title format-table gap, a resource description the title
+  fills from asset data, or a field set from a D3D12 description the layer happens to translate. The first two need no
+  layer change; only the third would name a layer input worth modelling. Until that is measured, a layer fix would be a
+  guess.
+- **A console-behaviour question this raises is named, not answered.** The console allocator may treat a zero-byte
+  request differently (a minimum block, or a refusal). The measured title's own allocator treats it as a real
+  zero-size class; no console service we answer participates, so this is a title-side compatibility question, not a
+  shim answer to change blind.
+
+### 15.6 The boots and the A/B
+
+Thirteen full-length probe boots and three default-path boots under the boot lock, the section-12 content environment,
+300 s timeout; the probe is stage-gated so its pre-stage-3 cost is zero. Four probe boots read stage 3; three of those
+caught the allocation (the table above). One default-path boot reached stage 3. The A/B pair is the same binary with the
+switch off and on:
+
+| arm | binary sha256 (first 16) | wall | stage 3 | stop / trace t | `ExecuteCommandLists` ok / refused | content readback, first capture per target | write control | presents / readback windows | presenter captures | device lost |
+|---|---|---:|---:|---|---:|---|---:|---:|---:|---|
+| A: `boot-s15-off2`, probe off | `D0E84F4D2DD9C5F5` | 70.5 s | 56.0 s | `0x13360a3` read -1, 58.67 s | 3,557 / 0 | `0 0 0`, 0/16,384 | `51 102 204`, 16,384/16,384 | 1,778 / 6 | 9, all mean rgb 0.00 | no |
+| B: `boot-s15-alloc34`, probe on | `D0E84F4D2DD9C5F5` | 74.7 s | 64.0 s | `0x538d0e6` read `0x18`, 65.33 s | 4,703 / 0 | `0 0 0`, 0/16,384 | `51 102 204`, 16,384/16,384 | 2,351 / 6 | 12, all mean rgb 0.00 | no |
+
+Both arms stop in the same title-side family (A on the job's vtable, B on the allocator's classed tree, both after the
+same 0x1000-byte overrun), both import two title-page spans, both read the first capture of every content target as
+`0 0 0` while the layer's own write control on the same target reads `51 102 204`, every presenter capture in both arms
+reads mean rgb 0.00, and neither loses the device. The four readback PPM files per arm are the window captures; the
+presenter PPM files are 9 and 12. The probe arm's stop moved to the allocator window and its stage 3 arrived later; the
+int3 traps are a timing perturbation, the same cost sections 11-14 record for their arms, and the B arm's allocation
+records are the measurement, not the A arm's stop. No title pixel is measured in either arm.
+
+### 15.7 Limits
+
+- **The class is measured; where it comes from is not.** The class value 0xa is read at the helper's entry and in the
+  descriptor, but the object at `job+0x58` (whose slot 8 returns it) and the job slot-0x28 dispatch were not decoded past
+  the two `game+0x6FECC0` instructions. The row-stride table's "no entry for 0xa" is a static reading of
+  `game+0x1555C10`; the dynamic size 0 is measured.
+- **Three catches, three builds.** The first catch is on the binary before the helper-entry/entry-written sites were
+  added; its entry fields were inferred from section 14's read of the same descriptor, not re-read. The second catch has
+  the helper and entry points but not the XMem range registry; the third is the A/B pair's binary and has both. The
+  stage-3 reach is a race: of the probe boots, four reached stage 3 and nine stopped before it, and the off arm needed
+  two attempts.
+- **The probe perturbs the window.** The B arm stops on a different site than the A arm (both in the same family) and
+  its stage 3 is 8 s later; the allocation records are taken at the allocation, before the copy, so the stop site does
+  not decide them.
+- **The copy's length is section 14's measurement.** This slice measures the requested size (0) and the entry's stride
+  and size (0), not the copy again; the `0x1000` length and its exact range are section 14's CRT arithmetic, and the
+  entry's width 256 matches the copy's per-iteration `width << 4`.
+- **The arena provenance is a range answer, not a call log.** The registry records the `XMemVirtualAlloc` answer that
+  contains the arena's range and the title caller (`game+0x1e1d28d`), but it does not record that call's requested
+  size/type (the traced attribute events dedupe per attribute word), and it is append-only: a freed range still answers
+  yes. It is enough to attribute the *pages*, not the *range decision*, which is the point.
+- **The free point was built but not measured.** `PALMETTO_ALLOC_WATCH_FREE` is implemented and documented, but no arm
+  enabled it: the allocation trace already decides the mechanism (the allocator returned exactly what was requested),
+  so the free history is not needed for this verdict. It is the next arm if the allocation record is ever disputed.
+
+### 15.8 Tests and gates
+
+- **No test target changed.** The slice adds an opt-in diagnostic probe (`port/src/main.cpp`) and a range registry whose
+  only consumer is that probe (`port/shims/xmem.cpp`/`.h`); the default path is unchanged. The existing `xmem_test`
+  already exercises the shim's allocation paths and still exits 0 (286 checks), so the new registry code does not regress
+  it; adding a test for a diagnostic table that only matters while a probe switch is set would test the test, which is
+  the same call sections 11.7, 12.7, 13.9 and 14.8 made.
+- Gate subset on the changed tree, all exit 0: `xmem_test` (286 checks), `frame_dump_test`, `unimplemented_policy_test`
+  (98 checks), `graphics_record_test` (180 checks), `graphics_pso_test` (312 checks), `buffer_va_index_test`,
+  `dstorage_test` (224 checks), `xapu_chad_test` (87 checks), `deferred_compile_test` (18 checks), `arena_size_test`,
+  `xbox_present_test`, `xs_proxy_mock_test`; `d3d12_fence_timing_test` remains the documented pre-existing crash.
+- Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, and every
+  `tests/test_docs_*.py` check passes (the environment-variable check requires `PALMETTO_ALLOC_WATCH` and
+  `PALMETTO_ALLOC_WATCH_FREE` to be named in a page, which this section does).
+
+### 15.9 Attribution
+
+This section was implemented from this project's own measurements: the stage-gated int3 sites and their payloads, the
+XMem range registry, the three catches in 15.3, the allocator identity in 15.2, the decompiled size chain
+(`game+0x45594F0`, `game+0x455A530`, `game+0x455A5E0`, `game+0x455A610`, `game+0x1555B60`, `game+0x1555C10`,
+`game+0x538D220`, `game+0x538D930`, `game+0x538D040`, `game+0x515ABB0`, `game+0x6FECC0`, `game+0x663BDE0`,
+`game+0x658DA80`) and the two A/B boots. The title functions were decompiled with this project's Ghidra tooling from the
+user's own image; no peer code was used and no game data is added. RVAs, VAs, field offsets, register values, class
+numbers, sizes, module names, counts and outcomes only.
