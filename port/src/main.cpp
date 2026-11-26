@@ -7378,7 +7378,913 @@ void start_stream_reap_probe(std::uintptr_t image_base, std::size_t image_size, 
     }).detach();
 }
 
+// ---- Stream open-transition probe (PALMETTO_STREAMOPEN) ------------------------------------------------------------
+// docs/decomp_stage.md section 14 measured the session-3 stream request created, cached and attached once, stepped by the
+// loading update every frame, with its async command engine entered only for 0.7 s around the attach: the stream's own
+// open gate game+0x45e640 was true in that window and false for the rest of the boot, so the request stayed pending and
+// every completion entry point stayed at zero. Section 14.7 names this probe as the next falsifier: a hardware write
+// watch on the manager-table slot and on the entry's state block (the two fields the gate reads), execution probes on
+// the gate's two lookups and on the registration/open path, and a fine sampler so a sub-second open window is measured
+// instead of missed.
+//
+// The gate and the table, from the image's own bytes (RVAs and offsets only):
+//   0x45e640(id, table)  gate: true when 0x45e690(id, table) is non-null, or when 0x45e6d0(id, table) is non-null and
+//                        *(u32*)(entry+0xac) == 2; 0x45e690 reads *(u64*)(table + (id-1)*0xc0 + 0x10), 0x45e6d0 reads
+//                        *(u64*)(table + (id-1)*0xc0 + 0x18);
+//   0x402f120(stream)    command start: handler lookup 0x402f1c0, registration 0x402d010(queue = stream+0xe8), then the
+//                        gate again; only a true gate raises the start event on stream+0x128 and returns 1;
+//   0x402d010(queue)     registration/open: three registry setters, a record vector commit, two queue-object virtual
+//                        calls (vtable slot +0x18), a registry update 0x1c9b8e0, and a final gate check whose result is
+//                        discarded - the caller re-reads the gate itself;
+//   0x5aeac40/50/60      the registry setters: store to table + (id-1)*0xc0 + 0x8 / + 0x10 / + 0x18 (the gate reads
+//                        the last two); 0x5aeace0 stores +0xb8, 0x5aead00 stores the record vector at +0x20/+0x28/+0x30
+//                        and its count at +0xb0, 0x5aeabf0 clears +0x8/+0x10/+0x18 and the vector (the close path), and
+//                        0x1c9b8e0 is the registry update that can store the +0x10 engine pointer.
+// The write watch (PALMETTO_STREAMOPEN_WATCH=1, on by default when the probe is on) uses all four data breakpoints:
+//   DR0 table+(id-1)*0xc0+0x10  the registry engine pointer the gate's first lookup reads;
+//   DR1 table+(id-1)*0xc0+0x18  the entry pointer the gate's second lookup reads;
+//   DR2 stream+0x118             the stream state byte +0x118, the owner-busy bit +0x11a the request step tests,
+//                               and the pending request slot +0x120 (one aligned 8-byte window);
+//   DR3 game+0x78acb08          the session-3 poll's slot-4 tick: the same-boot title-store live control section 11.3
+//                               measured (writer game+0x41e8fd).
+// The points are installed on the loading task's own thread at the subscriber start and the command start (so the
+// registration's stores are caught), and a sweep arms every other thread for later writers. Everything is opt-in and
+// bounded: one cached getenv when unset, per-site caps, a 10 ms change log, a 2 s sampler, a 10 s counter reporter, and
+// with the switch unset no thread starts, no handler is installed and the default path is unchanged. RVAs only.
+constexpr std::uint32_t kSoLiveControlRva = 0x78ACB08;
+constexpr unsigned kSoSiteCount = 30;
+constexpr unsigned kSoTotalLines = 800;
+constexpr unsigned kSoSamplerLines = 130;
+constexpr unsigned kSoFineLines = 260;
+constexpr unsigned kSoWatchLines = 160;
+constexpr unsigned kSoMaxThreads = 4096;
+constexpr unsigned kSoPendingThreads = 512;
 
+enum SoSiteIndex : unsigned {
+    kSoSubscriberStart = 0,
+    kSoStreamSubmit,
+    kSoPendingRegister,
+    kSoCommandStart,
+    kSoHandlerLookup,
+    kSoRegisterOpen,
+    kSoRegisterCancel,
+    kSoOpenGate,
+    kSoRegistryEngineLookup,
+    kSoQueueVtableSite,
+    kSoEngineState,
+    kSoRecordKeyLookup,
+    kSoRegistryUpdate,
+    kSoRegistryClose,
+    kSoRegistrySetJob,
+    kSoRegistrySetEngine,
+    kSoRegistrySetEntry,
+    kSoRegistrySetTail,
+    kSoRegistrySetRecords,
+    kSoStreamPump,
+    kSoStreamStep,
+    kSoAsyncEngineStep,
+    kSoCompletionDispatch,
+    kSoCacheComplete,
+    kSoOwnerBusyCheck,
+    kSoRequestStep,
+    kSoRequestConsume,
+    kSoCompletionRun,
+    kSoQueueProcess,
+    kSoQueuePoll,
+};
+
+struct SoSite {
+    std::uint32_t rva;
+    const char* name;
+    unsigned cap;
+};
+
+constexpr SoSite kSoSites[kSoSiteCount] = {
+    {0x2355DD0, "subscriber-start", 3},
+    {0x1DBC0F0, "stream-submit", 3},
+    {0x402F0F0, "stream-pending-register", 3},
+    {0x402F120, "stream-command-start", 4},
+    {0x402F1C0, "handler-lookup", 3},
+    {0x402D010, "register-open", 6},
+    {0x402D320, "register-cancel", 6},
+    {0x45E640, "stream-open-gate", 8},
+    {0x45E690, "registry-engine-lookup", 12},
+    {0x402D15D, "queue-vtable-site", 4},
+    {0x402D430, "engine-state", 12},
+    {0x1C9B8D0, "record-key-lookup", 6},
+    {0x1C9B8E0, "registry-update", 10},
+    {0x5AEABF0, "registry-close", 10},
+    {0x5AEAC40, "registry-set-job", 8},
+    {0x5AEAC50, "registry-set-engine", 10},
+    {0x5AEAC60, "registry-set-entry", 10},
+    {0x5AEACE0, "registry-set-tail", 6},
+    {0x5AEAD00, "registry-set-records", 8},
+    {0x45E570, "stream-pump", 3},
+    {0x402E260, "stream-step", 3},
+    {0x402E340, "async-engine-step", 10},
+    {0x402E8A0, "completion-dispatch", 8},
+    {0x4043390, "cache-complete", 6},
+    {0x88B3F0, "owner-busy-check", 3},
+    {0x45E430, "request-step", 4},
+    {0x4043300, "request-consume", 6},
+    {0x402E050, "completion-run", 6},
+    {0x599B7B0, "queue-process", 6},
+    {0x599B790, "queue-poll", 6},
+};
+
+struct StreamOpen {
+    std::atomic<bool> ready{false};
+    std::atomic<std::uintptr_t> address[kSoSiteCount]{};
+    std::atomic<unsigned> original[kSoSiteCount]{};
+    std::atomic<unsigned> hits[kSoSiteCount]{};
+    std::atomic<unsigned> logged[kSoSiteCount]{};
+    std::atomic<unsigned> lines{0};
+    std::atomic<unsigned> sampler_lines{0};
+    std::atomic<unsigned> fine_lines{0};
+    std::atomic<std::uintptr_t> subscriber{0};
+    std::atomic<std::uintptr_t> stream{0};
+    std::atomic<std::uintptr_t> request{0};
+    std::atomic<std::uintptr_t> table{0};
+    std::atomic<std::uintptr_t> entry{0};
+    std::atomic<bool> watch_enabled{false};
+    std::atomic<unsigned> point_version{0};
+    std::atomic<std::uintptr_t> points[4]{};
+    std::atomic<std::uint64_t> point_last[3]{};
+    std::atomic<unsigned> watch_hits[4]{};
+    std::atomic<unsigned> watch_lines{0};
+    std::atomic<unsigned> watch_armed{0};
+};
+
+StreamOpen& stream_open() {
+    static StreamOpen probe;
+    return probe;
+}
+
+std::uintptr_t so_image_base = 0;
+std::mutex& so_print_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+void so_print(const std::string& text) {
+    std::lock_guard lock(so_print_mutex());
+    std::fwrite(text.data(), 1, text.size(), stderr);
+    std::fflush(stderr);
+}
+
+std::uintptr_t so_record_slot(std::uintptr_t table, std::uint32_t id, std::uintptr_t offset) {
+    if (!table || id == 0 || id > 0x100) return 0;
+    return table + offset + static_cast<std::uintptr_t>(id - 1) * 0xc0;
+}
+
+std::uintptr_t so_stream_table(std::uintptr_t stream, std::uint32_t* id_out) {
+    if (!stream) {
+        if (id_out) *id_out = 0;
+        return 0;
+    }
+    const std::uint32_t id = executor_watch_read_u32(stream + 0xfc);
+    if (id_out) *id_out = id;
+    return static_cast<std::uintptr_t>(executor_watch_read_u64(stream + 0x100));
+}
+
+std::uintptr_t so_table_engine(std::uintptr_t table, std::uint32_t id) {
+    return static_cast<std::uintptr_t>(executor_watch_read_u64(so_record_slot(table, id, 0x10)));
+}
+
+std::uintptr_t so_table_entry(std::uintptr_t table, std::uint32_t id) {
+    return static_cast<std::uintptr_t>(executor_watch_read_u64(so_record_slot(table, id, 0x18)));
+}
+
+bool so_gate_open(std::uintptr_t engine, std::uintptr_t entry) {
+    return engine != 0 || (entry != 0 && executor_watch_read_u32(entry + 0xac) == 2);
+}
+
+// The manager-table record for the stream's id, read the way the gate and the registry setters read it.
+std::string so_gate_text(std::uintptr_t stream) {
+    std::uint32_t id = 0;
+    const std::uintptr_t table = so_stream_table(stream, &id);
+    std::string text = " gate id " + std::to_string(id) + " table " + executor_watch_hex(table);
+    if (!table || id == 0 || id > 0x100) return text;
+    const std::uintptr_t record = so_record_slot(table, id, 0);
+    const std::uintptr_t engine = static_cast<std::uintptr_t>(executor_watch_read_u64(record + 0x10));
+    const std::uintptr_t entry = static_cast<std::uintptr_t>(executor_watch_read_u64(record + 0x18));
+    text += " rec " + executor_watch_hex(record) + " +0x8 " +
+            executor_watch_hex(executor_watch_read_u64(record + 0x8)) + " engine " + executor_watch_hex(engine) +
+            " entry " + executor_watch_hex(entry);
+    if (engine) {
+        text += " engine-vtable " + sr_label(executor_watch_read_u64(engine)) + " engine+0x58 " +
+                std::to_string(executor_watch_read_u32(engine + 0x58)) + " engine+0x40 " +
+                executor_watch_hex(executor_watch_read_u64(engine + 0x40));
+    }
+    if (entry) {
+        text += " entry-vtable " + sr_label(executor_watch_read_u64(entry)) + " entry+0x58 " +
+                std::to_string(executor_watch_read_u32(entry + 0x58)) + " state+0xac " +
+                std::to_string(executor_watch_read_u32(entry + 0xac));
+    }
+    text += " open " + std::string(so_gate_open(engine, entry) ? "yes" : "no");
+    return text;
+}
+
+std::string so_entry_text(std::uintptr_t entry) {
+    if (!entry) return " entry 0";
+    std::string text = " entry " + executor_watch_hex(entry) + " vtable " + sr_label(executor_watch_read_u64(entry));
+    text += sr_qwords(" +0x0", entry, 5);
+    text += " state+0x58 " + std::to_string(executor_watch_read_u32(entry + 0x58)) + " +0x5c " +
+            std::to_string(executor_watch_read_u32(entry + 0x5c)) + " state+0xa8 " +
+            executor_watch_hex(executor_watch_read_u64(entry + 0xa8)) + " +0xb0 " +
+            executor_watch_hex(executor_watch_read_u64(entry + 0xb0));
+    return text;
+}
+
+std::string so_engine_text(std::uintptr_t engine) {
+    if (!engine) return " engine 0";
+    std::string text = " engine " + executor_watch_hex(engine) + " vtable " + sr_label(executor_watch_read_u64(engine));
+    text += sr_qwords(" +0x0", engine, 5);
+    text += " +0x28 " + executor_watch_hex(executor_watch_read_u64(engine + 0x28)) + " +0x40 " +
+            executor_watch_hex(executor_watch_read_u64(engine + 0x40)) + " state+0x58 " +
+            std::to_string(executor_watch_read_u32(engine + 0x58)) + " +0x5c " +
+            std::to_string(executor_watch_read_u32(engine + 0x5c));
+    return text;
+}
+
+// The stream's embedded async queue (stream+0xe8): the fields 0x402d010 reads, and the virtual-call target the
+// registration invokes as (*(*(queue+0)) + 0x18).
+std::string so_queue_text(std::uintptr_t queue) {
+    if (!queue) return " queue 0";
+    const std::uintptr_t holder = static_cast<std::uintptr_t>(executor_watch_read_u64(queue));
+    const std::uintptr_t vtable =
+        holder ? static_cast<std::uintptr_t>(executor_watch_read_u64(holder)) : 0;
+    std::string text = " queue " + executor_watch_hex(queue) + " id " +
+                       std::to_string(executor_watch_read_u32(queue + 0x14)) + " table " +
+                       executor_watch_hex(executor_watch_read_u64(queue + 0x18)) + " holder " +
+                       executor_watch_hex(holder) + " vtable " + sr_label(vtable);
+    if (vtable) {
+        text += " slot+0x18 " + sr_label(executor_watch_read_u64(vtable + 0x18)) + " slot+0x20 " +
+                sr_label(executor_watch_read_u64(vtable + 0x20));
+    }
+    text += sr_qwords(" queue", queue, 4);
+    return text;
+}
+
+std::string so_hits_summary() {
+    StreamOpen& probe = stream_open();
+    std::string text = " hits";
+    for (unsigned i = 0; i < kSoSiteCount; ++i) {
+        const unsigned hits = probe.hits[i].load(std::memory_order_relaxed);
+        if (!hits) continue;
+        text += std::string(" ") + kSoSites[i].name + " " + std::to_string(hits);
+    }
+    text += " watch";
+    for (unsigned i = 0; i < 4; ++i)
+        text += " " + std::to_string(probe.watch_hits[i].load(std::memory_order_relaxed));
+    return text;
+}
+
+std::string so_state_text() { return sr_state_text(); }
+
+// The table and entry in full, for the first command-start hit and the 2 s sampler.
+void so_store_stream(std::uintptr_t stream) {
+    StreamOpen& probe = stream_open();
+    if (!stream) return;
+    probe.stream.store(stream, std::memory_order_relaxed);
+    std::uint32_t id = 0;
+    const std::uintptr_t table = so_stream_table(stream, &id);
+    if (table) {
+        probe.table.store(table, std::memory_order_relaxed);
+        const std::uintptr_t entry = so_table_entry(table, id);
+        if (entry) probe.entry.store(entry, std::memory_order_relaxed);
+    }
+}
+
+// One logged execution-probe hit. Everything printed is read from title memory at the hit.
+void so_log_site(unsigned slot, CONTEXT& context) {
+    StreamOpen& probe = stream_open();
+    if (probe.lines.fetch_add(1, std::memory_order_relaxed) >= kSoTotalLines) return;
+    const std::uint64_t rcx = context.Rcx;
+    const std::uint64_t rdx = context.Rdx;
+    const std::uint64_t r8 = context.R8;
+    const std::uint64_t r9 = context.R9;
+    const std::uintptr_t our_table = probe.table.load(std::memory_order_relaxed);
+    char head[256];
+    std::snprintf(head, sizeof head,
+                  "[rt] streamopen t=%.3f (%.1f s) site %s hit %u tid %lu rcx 0x%llx rdx 0x%llx r8 0x%llx r9 0x%llx",
+                  executor_watch_seconds(),
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - sampler_epoch()).count(),
+                  kSoSites[slot].name, probe.hits[slot].load(std::memory_order_relaxed),
+                  static_cast<unsigned long>(GetCurrentThreadId()), static_cast<unsigned long long>(rcx),
+                  static_cast<unsigned long long>(rdx), static_cast<unsigned long long>(r8),
+                  static_cast<unsigned long long>(r9));
+    std::string text = head;
+    switch (slot) {
+        case kSoSubscriberStart: {  // subscriber in rcx; its stream object at +0x50
+            probe.subscriber.store(static_cast<std::uintptr_t>(rcx), std::memory_order_relaxed);
+            const std::uintptr_t stream = rcx ? static_cast<std::uintptr_t>(executor_watch_read_u64(rcx + 0x50)) : 0;
+            if (stream) {
+                probe.stream.store(stream, std::memory_order_relaxed);
+                std::uint32_t id = 0;
+                const std::uintptr_t table = so_stream_table(stream, &id);
+                if (table) probe.table.store(table, std::memory_order_relaxed);
+            }
+            text += sr_subscriber_text(static_cast<std::uintptr_t>(rcx));
+            text += sr_stream_text(stream) + so_gate_text(stream) + so_state_text();
+            break;
+        }
+        case kSoStreamSubmit: {  // subscriber in rcx, command id in rdx, flag in r8b
+            const std::uintptr_t stream = rcx ? static_cast<std::uintptr_t>(executor_watch_read_u64(rcx + 0x50)) : 0;
+            text += " subscriber 0x" + executor_watch_hex(rcx).substr(2) + " command-id " +
+                    std::to_string(rdx & 0xFFFFFFFFu) + " flag " + std::to_string(r8 & 0xFF) + " stream " +
+                    executor_watch_hex(stream) + " request-before " +
+                    executor_watch_hex(rcx ? executor_watch_read_u64(rcx + 0x58) : 0);
+            break;
+        }
+        case kSoPendingRegister:  // stream in rcx, request in rdx, key in r8d
+            if (rcx) so_store_stream(static_cast<std::uintptr_t>(rcx));
+            if (rdx) probe.request.store(static_cast<std::uintptr_t>(rdx), std::memory_order_relaxed);
+            text += sr_stream_text(static_cast<std::uintptr_t>(rcx)) +
+                    sr_request_text(static_cast<std::uintptr_t>(rdx)) + so_gate_text(static_cast<std::uintptr_t>(rcx)) +
+                    " key 0x" + executor_watch_hex(r8 & 0xFFFFFFFFu).substr(2);
+            break;
+        case kSoCommandStart:  // stream in rcx, command id in rdx
+            so_store_stream(static_cast<std::uintptr_t>(rcx));
+            probe.point_version.fetch_add(1, std::memory_order_relaxed);
+            text += sr_stream_text(static_cast<std::uintptr_t>(rcx)) +
+                    so_gate_text(static_cast<std::uintptr_t>(rcx)) +
+                    " queue" + so_queue_text(static_cast<std::uintptr_t>(rcx) + 0xe8) + " command-id " +
+                    std::to_string(rdx & 0xFFFFFFFFu);
+            break;
+        case kSoHandlerLookup: {  // handler count in ecx, command array in rdx, command id in r8d
+            text += " count " + std::to_string(rcx & 0xFFFFFFFFu) + " array " + executor_watch_hex(rdx) +
+                    " command-id " + std::to_string(r8 & 0xFFFFFFFFu) + " array+0xb0-0xb8";
+            if (rdx) {
+                text += " " + executor_watch_hex(executor_watch_read_u64(rdx + 0xb0)) + " " +
+                        executor_watch_hex(executor_watch_read_u64(rdx + 0xb8));
+            }
+            break;
+        }
+        case kSoRegisterOpen: {  // queue in rcx, arg2 in rdx, arg3 in r8, handler in r9
+            const std::uintptr_t queue = static_cast<std::uintptr_t>(rcx);
+            text += so_queue_text(queue) + " arg2 " + executor_watch_hex(rdx) + " arg3 " + executor_watch_hex(r8) +
+                    " handler " + executor_watch_hex(r9);
+            const std::uint32_t id = executor_watch_read_u32(queue + 0x14);
+            const std::uintptr_t table = static_cast<std::uintptr_t>(executor_watch_read_u64(queue + 0x18));
+            text += " rec+0x8 " + executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0x8))) +
+                    " rec+0x10 " + executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0x10))) +
+                    " rec+0x18 " + executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0x18)));
+            break;
+        }
+        case kSoRegisterCancel:  // queue in rcx
+            text += so_queue_text(static_cast<std::uintptr_t>(rcx));
+            break;
+        case kSoOpenGate: {  // id in ecx, table in rdx
+            const std::uint32_t id = static_cast<std::uint32_t>(rcx);
+            const std::uintptr_t table = static_cast<std::uintptr_t>(rdx);
+            const std::uintptr_t engine = so_table_engine(table, id);
+            const std::uintptr_t entry = so_table_entry(table, id);
+            text += " gate id " + std::to_string(id) + " table " + executor_watch_hex(table) + " engine " +
+                    executor_watch_hex(engine) + " entry " + executor_watch_hex(entry) + " state+0xac " +
+                    std::to_string(entry ? executor_watch_read_u32(entry + 0xac) : 0) + " open " +
+                    std::string(so_gate_open(engine, entry) ? "yes" : "no");
+            if (table && table == our_table) text += " OUR-TABLE";
+            if (entry && entry == probe.entry.load(std::memory_order_relaxed)) text += " OUR-ENTRY";
+            break;
+        }
+        case kSoRegistryEngineLookup: {  // id in ecx, table in rdx
+            const std::uint32_t id = static_cast<std::uint32_t>(rcx);
+            const std::uintptr_t table = static_cast<std::uintptr_t>(rdx);
+            const std::uintptr_t engine = so_table_engine(table, id);
+            text += " lookup id " + std::to_string(id) + " table " + executor_watch_hex(table) + " engine " +
+                    executor_watch_hex(engine);
+            if (engine) text += so_engine_text(engine);
+            if (table && table == our_table) text += " OUR-TABLE";
+            break;
+        }
+        case kSoQueueVtableSite: {  // queue in rsi (the site is after the argument copy), just before the +0x18 call
+            const std::uintptr_t queue = static_cast<std::uintptr_t>(context.Rsi);
+            const std::uintptr_t holder = static_cast<std::uintptr_t>(executor_watch_read_u64(queue));
+            const std::uintptr_t owner = holder >= 0x10 ? holder - 0x10 : 0;
+            text += so_queue_text(queue);
+            if (owner) text += sr_stream_text(owner) + so_gate_text(owner);
+            text += so_state_text();
+            break;
+        }
+        case kSoEngineState: {  // engine object in rcx, second argument in rdx, flag in r8b
+            text += so_engine_text(static_cast<std::uintptr_t>(rcx)) + " arg2 " + executor_watch_hex(rdx) +
+                    " flag " + std::to_string(r8 & 0xFF) + " state " +
+                    std::to_string(rcx ? executor_watch_read_u32(rcx + 0x58) : 0);
+            break;
+        }
+        case kSoRecordKeyLookup: {  // id in ecx, table in rdx (reads +0x8+(id-1)*0xc0)
+            const std::uint32_t id = static_cast<std::uint32_t>(rcx);
+            const std::uintptr_t table = static_cast<std::uintptr_t>(rdx);
+            text += " id " + std::to_string(id) + " table " + executor_watch_hex(table) + " record+0x8 " +
+                    executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0x8)));
+            if (table && table == our_table) text += " OUR-TABLE";
+            break;
+        }
+        case kSoRegistryUpdate: {  // queue in rcx, parameters rdx/r8, flag r9
+            const std::uintptr_t queue = static_cast<std::uintptr_t>(rcx);
+            const std::uint32_t id = executor_watch_read_u32(queue + 0x14);
+            const std::uintptr_t table = static_cast<std::uintptr_t>(executor_watch_read_u64(queue + 0x18));
+            text += " id " + std::to_string(id) + " table " + executor_watch_hex(table) + " rec+0x8 " +
+                    executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0x8))) + " rec+0x10 " +
+                    executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0x10))) + " rec+0x18 " +
+                    executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0x18))) + " arg2 " +
+                    executor_watch_hex(rdx) + " arg3 " + executor_watch_hex(r8) + " flag " +
+                    std::to_string(r9 & 0xFF);
+            if (table && table == our_table) text += " OUR-TABLE";
+            break;
+        }
+        case kSoRegistryClose: {  // queue-like object in rcx
+            const std::uintptr_t queue = static_cast<std::uintptr_t>(rcx);
+            const std::uint32_t id = executor_watch_read_u32(queue + 0x14);
+            const std::uintptr_t table = static_cast<std::uintptr_t>(executor_watch_read_u64(queue + 0x18));
+            text += " id " + std::to_string(id) + " table " + executor_watch_hex(table) + " rec+0x8 " +
+                    executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0x8))) + " rec+0x10 " +
+                    executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0x10))) + " rec+0x18 " +
+                    executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0x18)));
+            if (table && table == our_table) text += " OUR-TABLE";
+            break;
+        }
+        case kSoRegistrySetJob:     // id in ecx, table in rdx, value in r8
+        case kSoRegistrySetEngine:
+        case kSoRegistrySetEntry:
+        case kSoRegistrySetTail: {
+            const std::uint32_t id = static_cast<std::uint32_t>(rcx);
+            const std::uintptr_t table = static_cast<std::uintptr_t>(rdx);
+            static constexpr std::uintptr_t kOffset[4] = {0x8, 0x10, 0x18, 0xb8};
+            const std::uintptr_t offset = kOffset[slot - kSoRegistrySetJob];
+            const std::uintptr_t address = so_record_slot(table, id, offset);
+            text += " id " + std::to_string(id) + " table " + executor_watch_hex(table) + " record+0x" +
+                    executor_watch_hex(offset).substr(2) + " <- " + executor_watch_hex(r8) + " (now " +
+                    executor_watch_hex(executor_watch_read_u64(address)) + ")";
+            if (table && table == our_table) text += " OUR-TABLE";
+            break;
+        }
+        case kSoRegistrySetRecords: {  // id in ecx, table in rdx, vector in r8
+            const std::uint32_t id = static_cast<std::uint32_t>(rcx);
+            const std::uintptr_t table = static_cast<std::uintptr_t>(rdx);
+            const std::uintptr_t vector = static_cast<std::uintptr_t>(r8);
+            text += " id " + std::to_string(id) + " table " + executor_watch_hex(table) + " vector " +
+                    executor_watch_hex(vector) + " vector-count " +
+                    std::to_string(vector ? executor_watch_read_u32(vector + 0x90) : 0) + " record+0xb0 " +
+                    executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0xb0)));
+            if (table && table == our_table) text += " OUR-TABLE";
+            break;
+        }
+        case kSoStreamPump:  // stream in rcx
+            text += sr_stream_text(static_cast<std::uintptr_t>(rcx)) + so_gate_text(static_cast<std::uintptr_t>(rcx));
+            break;
+        case kSoStreamStep:  // stream in rcx
+            text += sr_stream_text(static_cast<std::uintptr_t>(rcx)) + so_gate_text(static_cast<std::uintptr_t>(rcx)) +
+                    sr_request_text(static_cast<std::uintptr_t>(executor_watch_read_u64(
+                        static_cast<std::uintptr_t>(rcx) + 0x120)));
+            break;
+        case kSoAsyncEngineStep:  // queue (stream+0xe8) in rcx, out in r8, pending request in r9
+            text += so_queue_text(static_cast<std::uintptr_t>(rcx)) + " out " + executor_watch_hex(r8) +
+                    " request " + executor_watch_hex(r9) + " engine " +
+                    executor_watch_hex(so_table_engine(static_cast<std::uintptr_t>(executor_watch_read_u64(
+                                                            static_cast<std::uintptr_t>(rcx) + 0x18)),
+                                                        executor_watch_read_u32(static_cast<std::uintptr_t>(rcx) + 0x14)));
+            if (r9 && r9 == probe.request.load(std::memory_order_relaxed)) text += " OUR-REQUEST";
+            break;
+        case kSoCompletionDispatch: {  // stream in rcx, found entry in rdx, out record in r8
+            const std::uintptr_t out_record = static_cast<std::uintptr_t>(r8);
+            text += sr_stream_text(static_cast<std::uintptr_t>(rcx)) +
+                    so_gate_text(static_cast<std::uintptr_t>(rcx)) + " found " + executor_watch_hex(rdx) +
+                    " out-record " + executor_watch_hex(out_record) + " out-vtable " +
+                    sr_label(out_record ? executor_watch_read_u64(out_record) : 0) + " out-state+0xac " +
+                    std::to_string(out_record ? executor_watch_read_u32(out_record + 0xac) : 0) + " out+0x58 " +
+                    std::to_string(out_record ? executor_watch_read_u32(out_record + 0x58) : 0);
+            if (out_record) {
+                text += " out+0x40 " +
+                        executor_watch_hex(executor_watch_read_u64(out_record + 0x40)) +
+                        sr_qwords(" out", out_record, 6);
+            }
+            break;
+        }
+        case kSoCacheComplete:  // cache entry/request in rcx
+            text += sr_request_text(static_cast<std::uintptr_t>(rcx));
+            if (rcx && rcx == probe.request.load(std::memory_order_relaxed)) text += " OURS";
+            break;
+        case kSoOwnerBusyCheck:  // stream owner in rcx; returns *(u8*)(owner+0x11a) & 1
+            text += " owner " + executor_watch_hex(rcx) + " +0x11a 0x" +
+                    executor_watch_hex(rcx ? executor_watch_read_u32(static_cast<std::uintptr_t>(rcx) + 0x118) : 0).substr(2) +
+                    " busy " + std::to_string(rcx ? (executor_watch_read_u32(static_cast<std::uintptr_t>(rcx) + 0x118) >> 16) & 0xFF : 0);
+            break;
+        case kSoRequestStep: {  // request/queue entry in rcx, frame delta in xmm1
+            const std::uintptr_t queue = static_cast<std::uintptr_t>(rcx);
+            const std::uintptr_t owner = static_cast<std::uintptr_t>(executor_watch_read_u64(queue + 0x30));
+            text += so_queue_text(queue) + " owner " + executor_watch_hex(owner) + " owner+0x11a 0x" +
+                    executor_watch_hex(owner ? executor_watch_read_u32(owner + 0x118) : 0).substr(2) + " request " +
+                    executor_watch_hex(executor_watch_read_u64(queue + 0x120));
+            break;
+        }
+        case kSoRequestConsume: {  // the request consume: request in rcx, walked callbacks +0x20/+0x28
+            const std::uintptr_t request = static_cast<std::uintptr_t>(rcx);
+            text += sr_request_text(request);
+            if (request && request == probe.request.load(std::memory_order_relaxed)) text += " OURS";
+            break;
+        }
+        case kSoCompletionRun: {  // the state-2 completion dispatch: stream in rcx, engine in rdx, handler in r8
+            text += sr_stream_text(static_cast<std::uintptr_t>(rcx)) +
+                    so_gate_text(static_cast<std::uintptr_t>(rcx)) + " engine " + executor_watch_hex(rdx) + " handler " +
+                    executor_watch_hex(r8);
+            break;
+        }
+        case kSoQueueProcess:  // the queue holder's vtable +0x18: id in ecx, table in rdx (the value it returns)
+        case kSoQueuePoll: {   // the queue holder's vtable +0x20
+            const std::uint32_t id = static_cast<std::uint32_t>(rcx);
+            const std::uintptr_t table = static_cast<std::uintptr_t>(rdx);
+            text += " id " + std::to_string(id) + " table " + executor_watch_hex(table) + " record-key " +
+                    executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0x8))) + " record-engine " +
+                    executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0x10)));
+            if (table && table == our_table) text += " OUR-TABLE";
+            break;
+        }
+        default:
+            break;
+    }
+    text += "\n  chain:" + sr_chain(context) + "\n";
+    so_print(text);
+}
+
+void so_write_byte(unsigned slot, unsigned char value) {
+    StreamOpen& probe = stream_open();
+    const auto address = probe.address[slot].load(std::memory_order_relaxed);
+    if (!address) return;
+    DWORD old_protect = 0;
+    if (VirtualProtect(reinterpret_cast<void*>(address), 1, PAGE_EXECUTE_READWRITE, &old_protect)) {
+        *reinterpret_cast<unsigned char*>(address) = value;
+        VirtualProtect(reinterpret_cast<void*>(address), 1, old_protect, &old_protect);
+    }
+}
+
+thread_local unsigned so_repoke_slot = 0;
+
+// The four data watch points for the measured stream, or zero for a point that cannot be armed yet.
+void so_points(std::uintptr_t out[4]) {
+    StreamOpen& probe = stream_open();
+    out[0] = out[1] = out[2] = out[3] = 0;
+    const std::uintptr_t stream = probe.stream.load(std::memory_order_relaxed);
+    if (!stream) return;
+    std::uint32_t id = 0;
+    const std::uintptr_t table = so_stream_table(stream, &id);
+    if (!table || id == 0 || id > 0x100) return;
+    probe.table.store(table, std::memory_order_relaxed);
+    out[0] = so_record_slot(table, id, 0x10);
+    out[1] = so_record_slot(table, id, 0x18);
+    // The stream's +0x118..+0x120 block: the +0x118 state byte, the +0x11a owner-busy bit the request step tests, and
+    // the +0x120 pending request slot. The entry's +0xac state block was the section-14 candidate, but the measured
+    // registration never writes it, so the third breakpoint watches the busy/state block instead.
+    out[2] = stream + 0x118;
+    probe.entry.store(so_table_entry(table, id), std::memory_order_relaxed);
+    out[3] = so_image_base + kSoLiveControlRva;
+}
+
+void so_publish_points(const std::uintptr_t points[4]) {
+    StreamOpen& probe = stream_open();
+    for (unsigned i = 0; i < 4; ++i) probe.points[i].store(points[i], std::memory_order_relaxed);
+    for (unsigned i = 0; i < 3; ++i) probe.point_last[i].store(executor_watch_read_u64(points[i]));
+}
+
+// Install the points on the calling thread inside the int3 handler, so the registration's own stores are watched
+// without waiting for the sweep.
+void so_arm_this_thread(CONTEXT& context) {
+    StreamOpen& probe = stream_open();
+    if (!probe.watch_enabled.load(std::memory_order_relaxed)) return;
+    std::uintptr_t points[4] = {};
+    so_points(points);
+    if (!points[0] || !points[1]) return;
+    so_publish_points(points);
+    probe.point_version.fetch_add(1, std::memory_order_relaxed);
+    context.Dr0 = points[0];
+    context.Dr1 = points[1];
+    context.Dr2 = points[2];
+    context.Dr3 = points[3];
+    context.Dr6 = 0;
+    context.Dr7 = sr_watch_dr7(points);
+}
+
+// One hardware write-watch hit: writer RIP and the bytes before it (the trap fires after the store), the value now and
+// before, the table/entry/engine state at that instant, and the unwound writer chain.
+void so_watch_hit(unsigned index, CONTEXT& context) {
+    StreamOpen& probe = stream_open();
+    const unsigned hit = probe.watch_hits[index].fetch_add(1, std::memory_order_relaxed) + 1;
+    static constexpr unsigned kCap[4] = {24, 16, 16, 3};
+    const bool log = hit <= kCap[index] || (hit % 4096 == 0);
+    if (index == 1) {
+        probe.entry.store(static_cast<std::uintptr_t>(
+                              executor_watch_read_u64(probe.points[1].load(std::memory_order_relaxed))),
+                          std::memory_order_relaxed);
+    }
+    if (!log) return;
+    if (probe.watch_lines.fetch_add(1, std::memory_order_relaxed) >= kSoWatchLines) return;
+    const std::uintptr_t address = probe.points[index].load(std::memory_order_relaxed);
+    std::uint64_t now = 0;
+    const bool read_ok = executor_watch_read_block(address, &now, 8);
+    std::uint64_t previous = 0;
+    if (index < 3) previous = probe.point_last[index].exchange(now, std::memory_order_relaxed);
+    const std::uint64_t rip = context.Rip;
+    unsigned char bytes[16] = {};
+    char store_bytes[96] = " (unreadable)";
+    if (rip >= 16 && executor_watch_read_block(static_cast<std::uintptr_t>(rip) - 16, bytes, 16)) {
+        int at = 0;
+        for (unsigned i = 0; i < 16 && at + 4 < static_cast<int>(sizeof store_bytes); ++i)
+            at += std::snprintf(store_bytes + at, sizeof store_bytes - static_cast<std::size_t>(at), " %02x", bytes[i]);
+    }
+    static const char* const kNames[4] = {"TABLE +0x10 ENGINE", "TABLE +0x18 ENTRY", "STREAM +0x118 STATE",
+                                          "LIVE-CONTROL"};
+    char head[320];
+    std::snprintf(head, sizeof head,
+                  "[rt] streamopen watch t=%.3f (%.1f s) %s hit %u tid %lu writer %s value %s0x%llx (was 0x%llx)",
+                  executor_watch_seconds(),
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - sampler_epoch()).count(),
+                  kNames[index], hit, static_cast<unsigned long>(GetCurrentThreadId()), sr_label(rip).c_str(),
+                  read_ok ? "" : "UNREADABLE ", static_cast<unsigned long long>(now),
+                  static_cast<unsigned long long>(previous));
+    std::string text = head;
+    const std::uintptr_t stream = probe.stream.load(std::memory_order_relaxed);
+    text += so_gate_text(stream) + sr_stream_text(stream);
+    const std::uintptr_t entry = probe.entry.load(std::memory_order_relaxed);
+    if (entry) text += so_entry_text(entry);
+    const std::uintptr_t engine = static_cast<std::uintptr_t>(
+        executor_watch_read_u64(so_record_slot(probe.table.load(std::memory_order_relaxed),
+                                               executor_watch_read_u32(stream + 0xfc), 0x10)));
+    if (engine) text += so_engine_text(engine);
+    text += so_state_text();
+    text += "\n  bytes before writer rip:" + std::string(store_bytes) +
+            "\n  rax " + executor_watch_hex(context.Rax) + " rbx " + executor_watch_hex(context.Rbx) + " rcx " +
+            executor_watch_hex(context.Rcx) + " rdx " + executor_watch_hex(context.Rdx) + " rsi " +
+            executor_watch_hex(context.Rsi) + " rdi " + executor_watch_hex(context.Rdi) +
+            "\n  chain:" + sr_chain(context) + "\n";
+    so_print(text);
+}
+
+LONG CALLBACK so_exception(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT& context = *info->ContextRecord;
+    StreamOpen& probe = stream_open();
+    if (!probe.ready.load(std::memory_order_relaxed)) return EXCEPTION_CONTINUE_SEARCH;
+    if (info->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT) {
+        const auto at = reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress);
+        unsigned slot = kSoSiteCount;
+        for (unsigned i = 0; i < kSoSiteCount; ++i)
+            if (probe.address[i].load(std::memory_order_relaxed) == at) {
+                slot = i;
+                break;
+            }
+        if (slot == kSoSiteCount) return EXCEPTION_CONTINUE_SEARCH;
+        const unsigned hit = probe.hits[slot].fetch_add(1, std::memory_order_relaxed) + 1;
+        const bool wanted = hit <= kSoSites[slot].cap || (hit % 4096 == 0) ||
+                            ((slot == kSoOpenGate || slot == kSoRegistryEngineLookup) &&
+                             probe.table.load(std::memory_order_relaxed) ==
+                                 static_cast<std::uintptr_t>(context.Rdx));
+        if (wanted && probe.logged[slot].fetch_add(1, std::memory_order_relaxed) < 256) so_log_site(slot, context);
+        if (slot == kSoSubscriberStart || slot == kSoCommandStart || slot == kSoRegisterOpen) so_arm_this_thread(context);
+        so_write_byte(slot, static_cast<unsigned char>(probe.original[slot].load(std::memory_order_relaxed)));
+        so_repoke_slot = slot + 1;
+        context.EFlags |= 0x100;  // trap after the original instruction, then put the int3 back
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (info->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP) {
+        if (so_repoke_slot) {
+            const unsigned slot = so_repoke_slot - 1;
+            so_repoke_slot = 0;
+            so_write_byte(slot, 0xCC);
+            context.EFlags &= ~static_cast<DWORD>(0x100);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        const DWORD dr6 = context.Dr6;
+        if ((dr6 & 0xFu) == 0) return EXCEPTION_CONTINUE_SEARCH;
+        context.Dr6 = 0;
+        for (unsigned index = 0; index < 4; ++index)
+            if ((dr6 & (1u << index)) != 0) so_watch_hit(index, context);
+        return EXCEPTION_CONTINUE_EXECUTION;  // a data breakpoint does not consume the instruction
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// The arming sweep: waits for the command start to name the stream, configures every thread that has been alive across
+// two scans, and keeps picking up threads created later.
+void so_start_watch_sweep() {
+    std::thread([] {
+        StreamOpen& probe = stream_open();
+        for (unsigned tick = 0; tick < 12000; ++tick) {
+            if (probe.table.load(std::memory_order_relaxed)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (!probe.table.load(std::memory_order_relaxed)) return;
+        static DWORD configured[kSoMaxThreads];
+        static DWORD seen_tid[kSoMaxThreads];
+        static ULONGLONG seen_at[kSoMaxThreads];
+        unsigned configured_count = 0, seen_count = 0;
+        unsigned last_version = 0;
+        const auto find = [](const DWORD* table, unsigned count, DWORD tid) -> int {
+            for (unsigned i = 0; i < count; ++i)
+                if (table[i] == tid) return static_cast<int>(i);
+            return -1;
+        };
+        std::uintptr_t points[4] = {};
+        DWORD dr7 = 0;
+        for (;;) {
+            const unsigned version = probe.point_version.load(std::memory_order_relaxed);
+            const std::uintptr_t table = probe.table.load(std::memory_order_relaxed);
+            if (table && (version != last_version || configured_count == 0)) {
+                so_points(points);
+                if (points[0] && points[1]) {
+                    so_publish_points(points);
+                    dr7 = sr_watch_dr7(points);
+                    configured_count = 0;
+                    last_version = version;
+                    char log[512];
+                    std::snprintf(log, sizeof log,
+                                  "[rt] streamopen watch: table 0x%llx DR0 game+0x%x DR1 game+0x%x DR2 game+0x%x "
+                                  "DR3 game+0x%x (live control); dr7 0x%lx; arming every thread\n",
+                                  static_cast<unsigned long long>(table),
+                                  static_cast<unsigned>(points[0] - so_image_base),
+                                  static_cast<unsigned>(points[1] - so_image_base),
+                                  static_cast<unsigned>(points[2] ? points[2] - so_image_base : 0),
+                                  static_cast<unsigned>(points[3] - so_image_base), static_cast<unsigned long>(dr7));
+                    so_print(log);
+                }
+            }
+            const ULONGLONG now = GetTickCount64();
+            DWORD pending[kSoPendingThreads];
+            unsigned pending_count = 0;
+            const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if (snapshot != INVALID_HANDLE_VALUE) {
+                THREADENTRY32 entry{};
+                entry.dwSize = sizeof entry;
+                const DWORD pid = GetCurrentProcessId();
+                const DWORD self = GetCurrentThreadId();
+                if (Thread32First(snapshot, &entry))
+                    do {
+                        if (entry.th32OwnerProcessID != pid || entry.th32ThreadID == self) continue;
+                        if (find(configured, configured_count, entry.th32ThreadID) >= 0) continue;
+                        const int seat = find(seen_tid, seen_count, entry.th32ThreadID);
+                        if (seat < 0) {
+                            if (seen_count < kSoMaxThreads) {
+                                seen_tid[seen_count] = entry.th32ThreadID;
+                                seen_at[seen_count] = now;
+                                ++seen_count;
+                            }
+                            continue;  // first sight: wait one scan before suspending it
+                        }
+                        if (now - seen_at[seat] < 1000) continue;
+                        if (pending_count < kSoPendingThreads) pending[pending_count++] = entry.th32ThreadID;
+                    } while (Thread32Next(snapshot, &entry));
+                CloseHandle(snapshot);
+            }
+            for (unsigned i = 0; i < pending_count; ++i)
+                if (dr7 && sr_watch_configure_thread(pending[i], points, dr7)) {
+                    if (configured_count < kSoMaxThreads) configured[configured_count++] = pending[i];
+                }
+            probe.watch_armed.store(configured_count, std::memory_order_relaxed);
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        }
+    }).detach();
+}
+
+void start_stream_open_probe(std::uintptr_t image_base, std::size_t image_size, bool watch_enabled) {
+    (void)image_size;
+    StreamOpen& probe = stream_open();
+    so_image_base = image_base;
+    sr_image_base = image_base;  // the shared read helpers (sr_state_text and friends) are image-relative readers
+    probe.watch_enabled.store(watch_enabled, std::memory_order_relaxed);
+    unsigned armed = 0;
+    std::string list;
+    for (unsigned i = 0; i < kSoSiteCount; ++i) {
+        auto* const at = reinterpret_cast<unsigned char*>(image_base + kSoSites[i].rva);
+        DWORD old_protect = 0;
+        if (!VirtualProtect(at, 1, PAGE_EXECUTE_READWRITE, &old_protect)) {
+            list += std::string(" ") + kSoSites[i].name + "=FAILED";
+            continue;
+        }
+        probe.original[i].store(*at, std::memory_order_relaxed);
+        probe.address[i].store(reinterpret_cast<std::uintptr_t>(at), std::memory_order_relaxed);
+        *at = 0xCC;
+        VirtualProtect(at, 1, old_protect, &old_protect);
+        ++armed;
+        char item[64];
+        std::snprintf(item, sizeof item, " %s=game+0x%x", kSoSites[i].name,
+                      static_cast<unsigned>(kSoSites[i].rva));
+        list += item;
+    }
+    AddVectoredExceptionHandler(1, so_exception);
+    probe.ready.store(true, std::memory_order_relaxed);
+    std::fprintf(stderr, "[rt] streamopen: %u/%u int3 site(s) armed:%s; watch %s\n", armed, kSoSiteCount,
+                 list.c_str(), watch_enabled ? "on" : "off");
+    std::fflush(stderr);
+    if (watch_enabled) so_start_watch_sweep();
+    // The 10 ms fine sampler: the gate's two inputs, the entry state block, the engine state, the request's first eight
+    // qwords and the site counters; one line per change, so the short open window is dated.
+    std::thread([] {
+        StreamOpen& probe = stream_open();
+        std::uint64_t last[20] = {};
+        bool have = false;
+        for (unsigned tick = 0; tick < 30000; ++tick) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            const std::uintptr_t stream = probe.stream.load(std::memory_order_relaxed);
+            if (!stream) continue;
+            std::uint32_t id = 0;
+            const std::uintptr_t table = so_stream_table(stream, &id);
+            if (!table || id == 0 || id > 0x100) continue;
+            const std::uintptr_t record = so_record_slot(table, id, 0);
+            const std::uintptr_t engine = static_cast<std::uintptr_t>(executor_watch_read_u64(record + 0x10));
+            const std::uintptr_t entry = static_cast<std::uintptr_t>(executor_watch_read_u64(record + 0x18));
+            std::uint64_t now[20] = {};
+            now[0] = engine;
+            now[1] = entry;
+            now[2] = executor_watch_read_u64(stream + 0x118);  // +0x118 state byte, +0x11a owner-busy bit
+            now[3] = entry ? executor_watch_read_u32(entry + 0xb0) : 0;
+            now[4] = engine ? executor_watch_read_u64(engine + 0x40) : 0;
+            now[5] = engine ? (executor_watch_read_u32(engine + 0x58) | (std::uint64_t{executor_watch_read_u32(engine + 0x5c)} << 32)) : 0;
+            now[6] = static_cast<std::uint64_t>(so_gate_open(engine, entry));
+            now[7] = probe.hits[kSoAsyncEngineStep].load(std::memory_order_relaxed);
+            now[8] = probe.hits[kSoOpenGate].load(std::memory_order_relaxed);
+            now[9] = probe.hits[kSoStreamPump].load(std::memory_order_relaxed);
+            const std::uintptr_t request = probe.request.load(std::memory_order_relaxed);
+            now[10] = request ? executor_watch_read_u64(request + 0x18) : 0;
+            now[11] = request ? executor_watch_read_u64(request + 0x20) : 0;
+            now[12] = request ? executor_watch_read_u64(request + 0x28) : 0;
+            now[13] = request ? executor_watch_read_u64(request + 0x30) : 0;
+            now[14] = request ? executor_watch_read_u64(request + 0x38) : 0;
+            now[15] = static_cast<std::uint64_t>(table);
+            now[16] = probe.hits[kSoRequestStep].load(std::memory_order_relaxed);
+            now[17] = probe.hits[kSoRequestConsume].load(std::memory_order_relaxed);
+            now[18] = probe.hits[kSoCompletionRun].load(std::memory_order_relaxed);
+            now[19] = executor_watch_read_u64(record + 0x8);
+            bool changed = !have;
+            for (unsigned i = 0; i < 20; ++i)
+                if (now[i] != last[i]) changed = true;
+            if (!changed) continue;
+            char line[640];
+            std::snprintf(line, sizeof line,
+                          "[rt] streamopen t=%.3f fine id %u table 0x%llx engine 0x%llx entry 0x%llx stream118 0x%llx "
+                          "entryb0 0x%llx engine40 0x%llx engine58 0x%llx open %llu engine-steps %llu gate %llu "
+                          "pump %llu req18 0x%llx req20 0x%llx req28 0x%llx req30 0x%llx req38 0x%llx "
+                          "steps %llu consume %llu compl-run %llu job 0x%llx",
+                          executor_watch_seconds(), id, static_cast<unsigned long long>(table),
+                          static_cast<unsigned long long>(engine), static_cast<unsigned long long>(entry),
+                          static_cast<unsigned long long>(now[2]), static_cast<unsigned long long>(now[3]),
+                          static_cast<unsigned long long>(now[4]), static_cast<unsigned long long>(now[5]),
+                          static_cast<unsigned long long>(now[6]), static_cast<unsigned long long>(now[7]),
+                          static_cast<unsigned long long>(now[8]), static_cast<unsigned long long>(now[9]),
+                          static_cast<unsigned long long>(now[10]), static_cast<unsigned long long>(now[11]),
+                          static_cast<unsigned long long>(now[12]), static_cast<unsigned long long>(now[13]),
+                          static_cast<unsigned long long>(now[14]), static_cast<unsigned long long>(now[16]),
+                          static_cast<unsigned long long>(now[17]), static_cast<unsigned long long>(now[18]),
+                          static_cast<unsigned long long>(now[19]));
+            if (probe.fine_lines.fetch_add(1, std::memory_order_relaxed) >= kSoFineLines) return;
+            so_print(std::string(line) + "\n");
+            for (unsigned i = 0; i < 20; ++i) last[i] = now[i];
+            have = true;
+        }
+    }).detach();
+    // The 2 s sampler: the three state words, the movie player, the loading record's slot-4 completion dword, and the
+    // full table/entry/engine record plus the site counters.
+    std::thread([] {
+        for (unsigned tick = 1; tick <= 320; ++tick) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (tick % 2 != 0) continue;
+            StreamOpen& probe = stream_open();
+            const std::uintptr_t stream = probe.stream.load(std::memory_order_relaxed);
+            if (!stream) continue;
+            if (probe.sampler_lines.fetch_add(1, std::memory_order_relaxed) >= kSoSamplerLines) return;
+            std::uint32_t id = 0;
+            const std::uintptr_t table = so_stream_table(stream, &id);
+            char head[96];
+            std::snprintf(head, sizeof head, "[rt] streamopen at %u s:", tick);
+            std::string text = head;
+            text += so_state_text();
+            text += so_gate_text(stream);
+            text += sr_stream_text(stream);
+            text += sr_request_text(probe.request.load(std::memory_order_relaxed));
+            text += so_queue_text(stream + 0xe8);
+            if (table) {
+                text += " rec+0x8 " + executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0x8)));
+                text += " rec+0xb0 " + executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0xb0)));
+                text += " rec+0xb8 " + executor_watch_hex(executor_watch_read_u64(so_record_slot(table, id, 0xb8)));
+                const std::uintptr_t engine = so_table_engine(table, id);
+                if (engine) text += so_engine_text(engine);
+                const std::uintptr_t entry = so_table_entry(table, id);
+                if (entry) text += so_entry_text(entry);
+            }
+            text += so_hits_summary();
+            text += " armed " + std::to_string(probe.watch_armed.load(std::memory_order_relaxed));
+            text += "\n";
+            so_print(text);
+        }
+    }).detach();
+    // The 10 s counter reporter: a boot without a writer hit still shows what the probe saw.
+    std::thread([] {
+        for (unsigned sample = 1; sample <= 30; ++sample) {
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+            std::fprintf(stderr, "[rt] streamopen counters at %u s:%s\n", sample * 10, so_hits_summary().c_str());
+            std::fflush(stderr);
+        }
+    }).detach();
+}
 
 }  // namespace
 
@@ -7920,6 +8826,17 @@ int wmain(int argc, wchar_t** argv) {
             const char* watch = std::getenv("PALMETTO_STREAMREAP_WATCH");
             start_stream_reap_probe(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size,
                                     watch && *watch && *watch != '0');
+        }
+        // PALMETTO_STREAMOPEN=1: the stream open-transition probe - int3 sites on the manager-table gate
+        // (game+0x45e640), its registry lookup, the command start and its registration/open path (0x402f1c0,
+        // 0x402d010), the async registry setters the registration calls, the engine's state/step/completion sites and
+        // the request step/consume/owner-busy checks, plus a 10 ms sampler; PALMETTO_STREAMOPEN_WATCH=1 (default when
+        // the probe is on) adds the hardware write watch on the gate's two table qwords and the stream's +0x118 state
+        // block, with the session-3 poll's slot-4 tick as the same-boot live control. Diagnostics only; off by default.
+        if (const char* spec = std::getenv("PALMETTO_STREAMOPEN"); spec && *spec && *spec != '0') {
+            const char* watch = std::getenv("PALMETTO_STREAMOPEN_WATCH");
+            const bool watch_on = !watch || (*watch && *watch != '0');
+            start_stream_open_probe(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, watch_on);
         }
         // PALMETTO_LOADER_WATCH=1: hardware data watchpoints on the loader object's armed flag (+0x78) and in-flight
         // count (+0x64), so the storing title code and its stack are captured at each transition (diagnostic; see the

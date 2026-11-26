@@ -1285,3 +1285,223 @@ and request-cache walk. The static check reused the read-only Ghidra project cop
 `D:\leonida-work\streamreap\decomp-sr1` through `decomp-sr9`; no peer code was used and no game data is added: RVAs,
 field offsets, instruction bytes, values, counts and outcomes only.
 
+
+## 15. Measured: the stream's open gate opens through the registry engine pointer, and the completion dispatch re-registers the engine's out record because its state reads 0, not 2
+
+**Status: measured, diagnostic only, negative for a runtime producer; the "ready state 2" the section-14 gate tests is a
+state word this build never writes, and the wall one level deeper is named.** Section 14 left one falsifier: a hardware
+write watch on the manager-table slot and the entry's state block, execution probes on the registry lookup
+`0x45E690`, the command-start handler lookup `0x402F1C0`/registration `0x402D010`, plus a fine sampler, with a same-boot
+live control. This section adds one opt-in probe, `PALMETTO_STREAMOPEN`, with 30 int3 sites, four hardware write
+watchpoints and a 10 ms change sampler, and reports three arms with the class-0xa mitigation on. In both arms that
+reached the session-3 window the subscriber start, the command start, the registration and the attach ran once each; the
+open gate's first condition then passed because the registry engine pointer at `table + (id-1)*0xc0 + 0x10` was written
+by the title setter `0x5AEAC50` (writer `game+0x5AEAC5F`) on the registration, and the gate's second condition (entry
+pointer non-null and `entry + 0xac == 2`) was never the one that opened: **no title store ever wrote the entry's `+0xac`
+state block in the measured windows** (zero data-breakpoint hits on it while the gate was evaluated 55 times). The
+completion never ran for a second reason, also measured: when the engine's step produced an out record, the dispatch
+`0x402E8A0` read that record's `+0xac`, found 0, and took its re-registration branch (four `0x402D010` calls, four
+`0x5AEABF0` closes) instead of the state-2 completion branch `0x402E050` (zero hits); the cache completion `0x4043390`,
+the request consume `0x4043300` and the record-completion writer stayed at zero. No shim write, storage answer, GPU
+event or runtime-visible call is on the path, so no shim behaviour changes and the default path is unchanged. Session
+stayed 3, the movie player held state `0x9` with `buffers 0`, and every capture and readback stayed black. The next
+falsifier is the decisive diagnostic named in 15.6.
+
+### 15.1 The probe
+
+`port/src/main.cpp` gains the section `PALMETTO_STREAMOPEN`. It is opt-in (unset or `0`: one cached `getenv`, no
+handler, no thread and no patch) and uses the section 13/14 trap discipline: one-byte `int3`, restore, single-step,
+re-arm. `PALMETTO_STREAMOPEN_WATCH` (on by default when the probe is on; `=0` turns it off) arms the hardware write
+watch. Thirty sites are armed once, after the image is mapped and before the entry point:
+
+| site | RVA | what it measures | `open2` | `open3` |
+|---|---|---|---:|---:|
+| `subscriber-start` | `0x2355DD0` | the loading subscriber's start; its stream object at subscriber `+0x50` | 1 | 1 |
+| `stream-submit` | `0x1DBC0F0` | the stream submit (command id, flag) | 1 | 1 |
+| `stream-pending-register` | `0x402F0F0` | the attach that stores the request at stream `+0x120` | 1 | 1 |
+| `stream-command-start` | `0x402F120` | the command start: handler lookup, registration, the gate re-check and the start event | 1 | 1 |
+| `handler-lookup` | `0x402F1C0` | the stream's command-handler array lookup (`count` at stream `+0x3c`, array at `+0x40`, stride `0xb8`) | 1 | 1 |
+| `register-open` | `0x402D010` | the registration/open of the stream's async queue (`stream+0xe8`) | 4 | 4 |
+| `register-cancel` | `0x402D320` | the cancel/teardown the engine step runs on an out record | 1 | 1 |
+| `stream-open-gate` | `0x45E640` | the gate: `0x45E690` engine pointer or `0x45E6D0` entry with `+0xac == 2` | 55 | 55 |
+| `registry-engine-lookup` | `0x45E690` | `*(u64*)(table + (id-1)*0xc0 + 0x10)` | 175 | 175 |
+| `queue-vtable-site` | `0x402D15D` | just before the registration's queue-object virtual call at vtable `+0x18` | 4 | 4 |
+| `engine-state` | `0x402D430` | the engine object's state machine (`+0x58` 1/2/3, `+0x40` job) | 2 | 2 |
+| `record-key-lookup` | `0x1C9B8D0` | `*(u64*)(table + (id-1)*0xc0 + 0x8)`, the record's job key | 95 | 95 |
+| `registry-update` | `0x1C9B8E0` | the registration's registry update that can store the `+0x10` engine pointer | 11 | 11 |
+| `registry-close` | `0x5AEABF0` | the close path that clears the record's `+0x8`/`+0x10`/`+0x18` | 4 | 4 |
+| `registry-set-job` | `0x5AEAC40` | stores `+0x8 + (id-1)*0xc0` | 16 | 16 |
+| `registry-set-engine` | `0x5AEAC50` | stores `+0x10 + (id-1)*0xc0` (the gate's first condition) | 16 | 16 |
+| `registry-set-entry` | `0x5AEAC60` | stores `+0x18 + (id-1)*0xc0` (the gate's second condition) | 8 | 8 |
+| `registry-set-tail` | `0x5AEACE0` | stores `+0xb8 + (id-1)*0xc0` | 14 | 14 |
+| `registry-set-records` | `0x5AEAD00` | commits the record's out-record vector (`+0x20`/`+0x28`/`+0x30`, count `+0xb0`) | 8 | 8 |
+| `stream-pump` | `0x45E570` | the per-frame stream pump inside the request step | 5 | 5 |
+| `stream-step` | `0x402E260` | the stream step the pump runs with the pending request | 8 | 8 |
+| `async-engine-step` | `0x402E340` | the async engine step (always with the session-3 request) | 12 | 12 |
+| `completion-dispatch` | `0x402E8A0` | the engine step's dispatch of a produced out record | 3 | 3 |
+| `cache-complete` | `0x4043390` | the async cache completion (the only request-completion path) | **0** | **0** |
+| `owner-busy-check` | `0x88B3F0` | `*(u8*)(owner+0x11a) & 1`, the request step's owner check | 5 | 5 |
+| `request-step` | `0x45E430` | the loading update's request-cache step | 5 | 5 |
+| `request-consume` | `0x4043300` | the request consume (callbacks, sub-ops, owner, flag) | **0** | **0** |
+| `completion-run` | `0x402E050` | the state-2 completion branch of the dispatch | **0** | **0** |
+| `queue-process` | `0x599B7B0` | the queue holder's vtable `+0x18` method the registration calls | 21 | 21 |
+| `queue-poll` | `0x599B790` | the queue holder's vtable `+0x20` method | 7 | 7 |
+
+The data watch arms when the subscriber start names the stream, installs on the loading task's own thread first (so
+the registration's stores are caught), and a sweep arms every other thread for later writers:
+
+| breakpoint | address | role |
+|---|---|---|
+| DR0 | `table + (id-1)*0xc0 + 0x10` | the registry engine pointer the gate's first lookup reads |
+| DR1 | `table + (id-1)*0xc0 + 0x18` | the entry pointer the gate's second lookup reads |
+| DR2 | `stream + 0x118` | the stream state byte, the `+0x11a` owner-busy bit and the pending request pointer at `+0x120` |
+| DR3 | `game+0x78acb08` | the session-3 poll's slot-4 tick: the same-boot title-store live control section 11.3 measured |
+
+The 10 ms thread prints one change line for the gate's two inputs, the entry's state/handler fields, the engine's state
+and job, the stream's `+0x118` block, the request's first five qwords and the site counters; a 2 s sampler prints the
+state words, the movie player, the record and the manager-table record, and a 10 s reporter prints the counters. The log
+is bounded: per-site caps, 800 hit lines, 260 fine lines, 130 sampler lines and 160 watch lines.
+
+### 15.2 The arms and the environment
+
+Three arms, one at a time under `_setup/boot_lock.ps1` (`-Who streamreg`), `-Light`, through `tooling/boot_report.py`,
+300 s timeout, logs outside the repository. The environment is section 17.1's content environment (deferred compile,
+2 s state trace, stage-3 pump, alloc watch, console graphics root, slot-70 publication, content probe, full-target
+readback, captures every 100 frames) with the mitigation `PALMETTO_TITLE_CLASS0A_SIZE=1`, `PALMETTO_STREAMOPEN=1` and
+the template's write watch; the two session-3 arms also ran `PALMETTO_USER_TRACE=1` and `PALMETTO_INPUT_TRACE=1`.
+
+| arm | build | wall | session 3 | stop | device loss | captures / readbacks |
+|---|---|---|---:|---|---|---:|
+| `open1` | 24 sites, `9BFB7B0C...` | 62.4 s | not reached (stage 2 candidate only) | STOP `game+0x4064926` read `0x1c` | 0 | none assembled |
+| `open2` | 24 sites, `9BFB7B0C...` | 103.1 s | reached 54.5 s | STOP `game+0x43AE303` read `0x10000007e` | 1 | 15 captures, all mean 0; 4 readbacks, mean 0 |
+| `open3` | 30 sites, `2A553C49...` | 97.8 s | reached 51.3 s | STOP `Bink2Scarlett.dll+0x5de9` read `0x1660000005c` | 1 | 13 captures, all mean 0; 4 readbacks, mean 0 |
+
+No arm is a clean 300 s arm: one stopped before stage 3 and the two that reached session 3 stopped about 45 s later,
+each after one `present failed (VkResult -4)` device loss. The programme's rule is to stop after two device losses, so
+the measurement ends with these three. The two session-3 arms agree wherever both armed a site, and each stop is in a
+family this programme already records: `open1` in the pre-stage read family ([3d_textures.md](3d_textures.md) section
+11.1), `open2` at `game+0x43AE303` after the device loss, and `open3` inside the movie middleware after the device
+loss.
+
+`open2`'s `meta.txt` was rewritten by a refused rerun after the probe rebuild (the runtime refuses to overwrite an
+existing `boot.jsonl`); the arm itself was not re-run, and its own arming line records the 24-site build it ran. The
+exe hash in `open1`'s `meta.txt` (`9BFB7B0CEB8AE10D...`) is the value recorded when `open2` started too.
+
+### 15.3 The registration and the open transition, measured
+
+Times below are `open3`'s trace clock; `open2` measured the same order with its own times (+3.2 s on the start).
+Every value is from the same boot as its control.
+
+| t (s) | measurement |
+|---:|---|
+| 51.27 | `subscriber-start`: subscriber `0x1667e248450`, stream `0x1667e248520` (vtable `game+0x658de48`), id 1, table `0x1667e248890` |
+| 51.28 | `stream-submit`: command id 0 on the same task; `stream-command-start`: the stream's handler array count is 2 and its first entry is at table `+0xD0` (`vtable game+0x658de38`) |
+| 51.29 | `register-open`: queue `stream+0xe8`, id 1, table `0x1667e248890`, queue holder at `stream+0x10` with vtable `game+0x658de60`; its virtual methods are `game+0x599b7b0` (`+0x18`) and `game+0x599b790` (`+0x20`) |
+| 51.29 | first gate hit: engine 0, entry 0, `open no`; the registration's initial gate call reads the same |
+| 51.31 | `registry-set-engine`: `record+0x10 <- 0`; `registry-set-entry`: `record+0x18 <- table+0xD0`; `registry-set-job`: `record+0x8 <- 0` |
+| 51.33 | second gate hit: engine `stream+0x58`, entry `table+0xD0`, entry state `+0xac` 0, **`open yes`** (the first condition) |
+| 51.35 | `stream-pending-register`: the request is attached at stream `+0x120` (vtable `game+0x658de18`, key `0x9837FB2E`, owner = stream, flag `0x45003c00`) |
+| 51.4-52.0 | `async-engine-step` 5 times, each with the session-3 request in `r9`; the engine object moves from `stream+0x58` to a heap object `0x1667e32c280` with vtable `game+0x658de90`, its `+0x58` state walking 0 -> 1 -> 2 |
+| 52.0-74.9 | the request step stops being run: the pump and request-step counters stay at 4 and no engine step arrives; the loading word's tick does not advance (22678982 since 48.0 s) |
+| 74.9-76.7 | three `completion-dispatch` hits: out records `0x1667e24a498`, `0x16690448028`, `0x1667e426dc8`, vtable `game+0x658df20`, **`+0xac` 0** in all three; each is re-registered (`register-open` 2-4) and closed (`registry-close`) |
+| 78-94 | the counters move once more (pump and request-step 5, engine step 12 by 80 s); the record's slot-4 completion dword stays 0 and the session word stays 3 |
+
+The hardware watch names the writers of the two gate inputs and measures the state block:
+
+| watch | hits | writer | values |
+|---|---:|---|---|
+| `TABLE +0x10 ENGINE` | 16 | `game+0x5AEAC5F` (inside the setter `0x5AEAC50`) | 0 and engine object pointers (`stream+0x58`, then heap objects with vtable `game+0x658de90`) |
+| `TABLE +0x18 ENTRY` | 8 | `game+0x5AEAC6F` (inside the setter `0x5AEAC60`) | 0 and the command-handler/out-record pointers (`table+0xD0`, `game+0x658df20` records) |
+| entry `+0xac` state block | **0** | - | never written in `open2`'s 24-site watch (the section-14 candidate) |
+| `STREAM +0x118 STATE` | 2 | `game+0x58D6913` / `game+0x58D691A` | qword `0x1667e000100` -> `0x1667e000101`: the stream `+0x118` byte 0 -> 1; the `+0x11a` owner-busy byte stays 0 |
+
+Three static facts complete the attribution, all from the image's own bytes:
+
+- **The gate's two conditions** are `0x45E690(id, table)` = `*(u64*)(table + (id-1)*0xc0 + 0x10)` non-null and
+  `0x45E6D0(id, table)` = `*(u64*)(table + (id-1)*0xc0 + 0x18)` non-null with `*(u32*)(entry + 0xac) == 2`
+  [M, disassembly and decompile]. The registry setters are one-store helpers: `0x5AEAC40` stores `+0x8`, `0x5AEAC50`
+  stores `+0x10`, `0x5AEAC60` stores `+0x18`, `0x5AEACE0` stores `+0xb8`, `0x5AEAD00` builds the record's out-record
+  vector, and `0x5AEABF0` clears `+0x8`/`+0x10`/`+0x18` and the vector (the close) [M, decompiled C].
+- **The registration** `0x402D010` sets the three record fields, commits a record vector, calls the queue object's
+  virtual `+0x18` twice, runs the registry update `0x1C9B8E0` (which stores the `+0x10` engine pointer), and finally
+  clears the registration when the record's `+0x8` equals its `+0x10` [M, decompiled C]. The command start
+  `0x402F120` calls it, re-reads the gate itself, and raises the start event only when the gate is true [M].
+- **The completion dispatch** `0x402E8A0` checks its out record's `+0xac`: state 2 runs `0x402E050` (the completion),
+  any other state runs `0x402D010` again with the out record as the handler [M, decompiled C]. Its caller is the
+  stream step `0x402E260`, which runs it only when the engine step produced an out record [M, decompiled C].
+
+### 15.4 Verdict: the state-2 path is not the open path, and the completion path needs a state the engine never sets
+
+- **The "ready state 2" is not what opens this stream.** The gate's second condition reads the command-handler/out
+  record's `+0xac`, and no measured title code writes that word at all: the write watch on the state block caught zero
+  stores in a boot where the gate was evaluated 55 times and the registration ran four times. The open transition is
+  the gate's first condition, the registry engine pointer at `table + 0x10`, written by `game+0x5AEAC5F` (the
+  `0x5AEAC50` setter) on the registration and cleared by the same setter when the engine step's out record is handled.
+  Section 14's "manager-table entry never reaches ready state 2" is therefore true but is not the wall: that word is
+  not part of this build's open path.
+- **The deeper wall is the out record's state.** The engine step does produce out records (three of them, between
+  `open3`'s 74.9 s and 76.7 s), and the dispatch reads their `+0xac`: all three read 0, so the state-2 completion
+  branch `0x402E050` never runs, the framework re-registers each record through `0x402D010` (four registrations, four
+  closes), and the cache completion `0x4043390`, the request consume `0x4043300` and the record-completion writer
+  never see the session-3 request. The record class vtable `game+0x658df20` and its `+0x28`/`+0x40` job fields are the
+  title's own async command objects; whatever should store 2 into `+0xac` is title-side and did not run.
+- **No runtime answer of ours is on the path.** Every writer the watch named is a title function (`game+0x5AEAC5F`,
+  `game+0x5AEAC6F`, `game+0x58D6913`); the gate and the dispatch read title bookkeeping only; the file, DirectStorage
+  and GPU reach switches from sections 13.5 and 14.6 measured nothing at or after the start; and the section-13.5
+  finding (no IO after the start) still holds. No shim is changed and the default path stays byte-identical.
+- **The picture is unchanged.** Session stayed 3 with the machine at 3/3 in both session-3 arms, the movie player held
+  state `0x9` with `buffers 0`, the record's slot-4 completion dword stayed 0, and every presented capture is mean
+  rgb `0.00 0.00 0.00` (`open3`: 13 captures and four 3840x2160 readbacks; `open2`: 15 captures and four readbacks). No session 4 and no movie draw.
+
+### 15.5 Limits, and the movie-middleware stop
+
+- **No clean 300 s arm.** Three arms, one pre-stage stop and two session-3 stops at 103.1 s and 97.8 s, each after one
+  device loss; the programme's two-device-loss rule ended the boots. The session-3 window is about 45 s per arm, and
+  the two arms agree on every site both measured.
+- **The 22 s loading pause is not attributed.** Between the first registration and the out records the loading task
+  runs no request step (the pump and request-step counters stay at 4) and no engine step arrives; its stack was not
+  sampled in these arms (no `PALMETTO_THREAD_STACKS`/`PALMETTO_WAIT_TRACE` line), so whether the pause is title work
+  or a wait is open. The owner check is not the cause: `0x88B3F0` returned "not busy" on all five calls and the
+  `+0x11a` byte was never set.
+- **The state-block watch arms at the entry's publication.** In the 24-site arm the third breakpoint is armed when
+  `0x5AEAC60` first stores the entry pointer, so a store into `+0xac` before that store would not be caught; its
+  measured effect would be the state 0 the gate read, and the same boot's DR0/DR1 hits and live control prove the
+  debug registers were honoured.
+- **The probes shift timing** by their trap cost (about 150 k traps per session-3 arm across 30 sites), and no
+  probe-off A/B was run in this environment; the stops are in families the programme records without the probe.
+- **`open3`'s stop is in the movie middleware**, not on the stream path: `Bink2Scarlett.dll+0x5de9` read
+  `0x1660000005c` after the device loss, inside a Bink decode attempt on a pointer derived from the console address
+  range. That is the movie/Bink path section 12 named, and it is the next slice's subject; this section does not
+  attribute it.
+
+### 15.6 The next falsifier
+
+The decisive diagnostic is one opt-in title-side patch and it needs the lead's routing before implementation: at
+`0x402E8A0`, make the state test treat the engine's out record as state 2 when it reads 0 (a one-byte conditional
+redirect over the compare, installed after the image is mapped and before the entry point, off by default). If the
+session-3 request then completes - `0x402E050`, then `0x4043390`, then the record-completion writer, then session 3 ->
+4 and the movie player leaving state `0x9` - the missing producer is the out-record state store and the next slice
+chases that store. If it still does not complete, the wall is upstream of the dispatch and the next probe should
+re-target the state watch on the out record `+0xa8`/`+0xac` and arm `0x402E050` and `0x599B7B0` as the completion and queue-process controls, with the 22 s loading pause sampled by
+`PALMETTO_THREAD_STACKS` at 60/70 s to name the blocked site.
+
+### 15.7 Tests and gates
+
+- No test target is added: the slice is an opt-in diagnostic path in `port/src/main.cpp` with no pure helper to
+  exercise, and every switch is off in a default run.
+- Gates on the changed tree: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints
+  `TESTS_BUILT`, the GPU-free gate targets exit 0, and every `tests/test_docs_*.py` check passes.
+- Evidence outside the repository: `D:\leonida-work\fsrstable\boot-open1`, `boot-open2`, `boot-open3` with
+  `stderr.log`/`stdout.log`/`summary.txt`/`meta.txt`/`boot.jsonl`, the matching `capture-open*` and `readback-open*`
+  directories, and `D:\leonida-work\streamopen` (`run_arm.ps1`, `analyze.py`, the two analysis transcripts). The
+  static work reused the read-only Ghidra project copy section 1 describes, with decompiled ranges under
+  `D:\leonida-work\streamreap\decomp-sr10` through `decomp-sr17`. No game data: RVAs, offsets, register/pointer
+  values, counts, times and image means only.
+
+### 15.8 Attribution
+
+This section was implemented from this project's own measurement: the three arms, the 30 execution probes and their
+register reads, the four hardware write watchpoints and their live control, the 10 ms fine-change log and the 2 s
+sampler, the capture means, and the disassembled/decompiled gate, registry setters, registration/open, command start,
+engine step, completion dispatch and stream-step functions. No peer code was used and no game data is added: RVAs,
+field offsets, instruction bytes, values, counts and outcomes only.
