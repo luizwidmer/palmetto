@@ -1031,3 +1031,257 @@ functions. The static check reused the read-only Ghidra project copy section 1 d
 `decomp-q16` and `D:\leonida-work\s3record`); no peer code was used and no game data is added: RVAs, field offsets,
 instruction bytes, values, counts and outcomes only.
 
+## 14. Measured: the session-3 stream request is stepped by the loading update every frame but its command engine stops after the attach, and every completion entry point stays at zero
+
+**Status: measured, diagnostic only, negative for a runtime producer; the case split is "the request is attached,
+cached and stepped by the loading update, but the stream's command engine is entered only in the attach window and
+never again".** Section 13 left one falsifier: probe the request-class and stream-class vtable slots, the streaming
+manager's reaping family, the manager global `_DAT_147455F40` and a write watch on the request completion fields with a
+same-boot control. This section adds one opt-in probe, `PALMETTO_STREAMREAP`, with execution probes on the request,
+the request cache, the manager's job reap and the async command engine, a hardware write watch on the measured request
+and stream objects, and two samplers that read the request, the stream, the request cache and the manager's per-stream
+table. Three arms are reported: one clean 300 s build with sixteen sites (`stream1`), one pre-stage loss with the
+twenty-site build (`stream2`), and the clean 300 s arm of that build (`stream3`). In both clean arms the session-3
+request is created and attached once (subscriber start, submit, command start and pending registration exactly one hit
+each), stays in the request cache for the whole window, and is stepped by the loading update 9,588 times in
+`stream3`; but the async engine step the stream pump calls it with runs 16 times, all inside the 0.7 s attach window,
+and zero times afterwards. The manager-table slot the engine's entry gate reads holds an entry with state 0 (not the
+"open" state 2) during those sixteen steps and reads null in all 118 two-second samples from 62 s to 296 s. The request
+consume `0x4043300`, the subscriber completion `0x2355D40`, the cache completion `0x4043390`, the manager job reap
+`0x234A870`, the other two cache-completion handlers and the completion-event raise all stay at zero hits in both
+clean arms, and the request's completion fields (+0x18, +0x20/+0x28, +0x30, +0x38, +0x3c) and the stream's pending slot
++0x120 never change except for the loading update's own `+0x20 = 0` cleanup every frame. No runtime answer of ours and
+no D3D12 fence, copy or queue submission is on this path, so no shim changes and the default path is unchanged. The
+session word stays 3, the movie player holds state `0x9`, and every capture and readback is unchanged: black title
+pixels, no session 4, no movie draw.
+
+### 14.1 The probe
+
+`port/src/main.cpp` gains the section `PALMETTO_STREAMREAP`. It is opt-in (unset or `0`: one cached `getenv`, no
+handler, no thread and no patch) and it uses the section 13 trap discipline: each site is a one-byte `int3` that is
+restored, single-stepped and re-armed, so the title executes the code it would have executed. The write watch is
+`PALMETTO_STREAMREAP_WATCH=1` and arms when the attach registers the request, with the slot-watch arming discipline
+(three scans, one suspend per thread, threads created later re-armed).
+
+The first build armed sixteen sites; the refined build adds four inside the pipeline the first build's write watch
+found. Two of the first build's cache sites were transcribed with the wrong image offset and failed to arm
+(`cache-lookup` and `cache-key`); the refined build fixes their RVAs, so its table is the reference.
+
+| site | RVA | what it measures | stream1 hits | stream3 hits |
+|---|---|---|---:|---:|
+| `subscriber-start` | `0x2355DD0` | the loading subscriber's start (vtable `+0x68`): resets the record, runs the command, registers the bus entry | 1 | 1 |
+| `stream-submit` | `0x1DBC0F0` | the command dispatch: stream ready check, command start, cache key and request store | 1 | 1 |
+| `stream-pending-register` | `0x402F0F0` | the attach onto the stream: stream `+0x1c`, `+0x30`, `+0x120` | 1 | 1 |
+| `stream-command-start` | `0x402F120` | the stream command start: handler lookup, `stream+0xe8`, the open check, the start event | 1 | 1 |
+| `cache-complete` | `0x4043390` | the async cache-entry completion (the only path that can complete a request) | 0 | 0 |
+| `cache-lookup` | `0x402D580` | the request cache's hash lookup by key | not armed | 1 |
+| `cache-key` | `0x402D560` | the cache key builder from a handle | not armed | 0 |
+| `job-reap` | `0x234A870` | the streaming manager's job reap (class vtable `game+0x61B4170` slot `+0x40`) | 0 | 0 |
+| `async-cmd-handler` | `0x131C480` | the async command handler that completes a job's handle from a command | 27 | 27 |
+| `async-complete-handler` | `0x2329110` | one async completion handler (event flag 8) | 0 | 0 |
+| `manager-complete` | `0x230BB90` | the streaming manager's completion entry (event flags `0x48`) | 0 | 0 |
+| `stream-event-raise` | `0x3065AF0` | the completion raise `0x4043390` uses on the stream queue `+0x128` | 0 | 0 |
+| `stream-start-event` | `0x864100` | the shared event-queue raise the command start and the engine use | 36 | 35 |
+| `request-consume` | `0x4043300` | the request consume (callbacks `+0x20`/`+0x28`, sub-ops `+0x18`, owner `+0x30`, flag `+0x3c`) | 0 | 0 |
+| `subscriber-completion` | `0x2355D40` | the subscriber completion that writes the loading record's completion dword | 0 | 0 |
+| `streaming-stop` | `0x2306070` | the streaming subsystem stop | 0 | 0 |
+| `stream-pump` | `0x45E570` | the per-frame stream pump inside the request step | not armed | 9,588 |
+| `stream-step` | `0x402E260` | the async step the pump calls with the pending request `stream+0x120` | not armed | 9,592 |
+| `async-engine-step` | `0x402E340` | the async engine step, entered only when the stream's open check passes | not armed | 16 |
+| `stream-open-check` | `0x45E630` | the manager-table open check `state(+0xAC) == 2` that gates the engine step | not armed | 38,357 |
+
+The write watch uses all four data breakpoints, each an 8-byte write watch, armed after the attach names the
+request and the stream:
+
+| breakpoint | address | role |
+|---|---|---|
+| DR0 | request+0x18 | the sub-operation count dword |
+| DR1 | request+0x20 | the callback array pointer |
+| DR2 | stream+0x120 | the stream's pending request slot |
+| DR3 | `game+0x78ACB08` | the same-boot live control: the session-3 poll's slot-4 tick write (section 11.3 measured its writer) |
+
+The two-second sampler prints the three state words, the machine pair, the loading tick, the record's slot-4 tick and
+completion dword, the manager object, the request cache (bucket count, entry count and whether the measured request
+is still in it), the request's full `0x40` bytes, the stream's `+0xd8..+0x128` block, the manager-table gate fields
+(id, table, entry pointer, entry state `+0xAC`) and the site counters. A second thread polls the request, the stream
+block, the cache entry count and the record's completion dword every 100 ms and prints one line per change; a third
+reports the counters every 10 s. The log is bounded: per-site caps, 900 hit lines, 150 sampler lines, 140 fine-change
+lines and 120 watch lines.
+
+### 14.2 The arms
+
+Two clean arms and one pre-stage loss, one at a time under `_setup/boot_lock.ps1` (`-Who streamreap`), `-Light`, 300 s
+via `tooling/boot_report.py`, logs outside the repository. The environment is section 17.1's content environment
+(deferred compile, state trace, stage-3 pump, alloc watch, console graphics root, slot-70 publication, content probe,
+full-target readback, captures every 100 frames to 12) with the mitigation `PALMETTO_TITLE_CLASS0A_SIZE=1`,
+`PALMETTO_STREAMREAP=1`, `PALMETTO_STREAMREAP_WATCH=1` and `PALMETTO_THREAD_STACKS=100,160,220,280` (`stream1`) or
+`130,190,250` (`stream2`/`stream3`).
+
+| arm | binary SHA-256 (first 16) | wall | stage 3 (pump read) | session word | stop | device loss | captures / readbacks |
+|---|---|---|---|---:|---|---|---:|---|
+| `stream1` | `835D37600A030E76` | 300.3 s (timeout) | 62.1 s | 3 from 64.0 s to 298.0 s | ALIVE, 0 exceptions | 0 | 12, all mean rgb `0.00 0.00 0.00`; 6 readbacks, 3 mean 0 and 3 the layer's `51 102 204` control |
+| `stream2` | `208D769914F17D50` | 62.1 s | not reached (last state sample: loading 2, session 1) | not reached | STOP `game+0x28CF870` read `0x5c` | 1 | 12, all mean rgb `0.00 0.00 0.00`; 0 readbacks |
+| `stream3` | `208D769914F17D50` | 300.2 s (timeout) | 58.8 s | 3 from 60.0 s to 298.0 s | ALIVE, 0 exceptions | 0 | 12, all mean rgb `0.00 0.00 0.00`; 6 readbacks, 3 mean 0 and 3 the layer's `51 102 204` control |
+
+`stream2` is the host's pre-stage crash family sections 10.2 and 12.1 record (`game+0x28CF870` reading `0x5c`): its
+`stderr.log` carries one `replay: the Vulkan device was lost` line, it stopped before stage 3, and it is a loss, not a
+measurement. One device loss is a retry, so `stream3` ran; a second loss would have ended the arms. Both clean arms
+kept submitting to the timeout: 24,483 `exec entry` timeline lines in `stream1` and 24,504 in `stream3`, the last
+entries about 0.1 s before the kill, and D3D12 recorded 1,009,867 and 1,018,685 calls.
+
+### 14.3 What the sites measured
+
+Every value below is from the same boot as its control. The two clean arms agree wherever both armed the same site.
+
+| measurement | `stream1` | `stream3` |
+|---|---|---|
+| subscriber start / submit / command start / pending registration | 1 / 1 / 1 / 1 hit | 1 / 1 / 1 / 1 hit |
+| command id at the start and submit | 0 | 0 |
+| request object / vtable | measured by the attach hit | measured by the attach hit |
+| request key | `0x9837FB2E` | `0x9837FB2E` |
+| request cache | 11 buckets, 1 entry, request in cache at every sample | 11 buckets, 1 entry, request in cache at every sample |
+| cache lookup | site not armed | 1 hit at the attach: key `0x9837FB2E`, 0 buckets (the cache is allocated on this insert) |
+| per-frame stream pump `0x45E570` | site not armed | 9,588 hits by 290 s (about 41 per second) |
+| per-frame stream step `0x402E260` | site not armed | 9,592 hits by 290 s |
+| async engine step `0x402E340` | site not armed | **16 hits by 70 s, 0 after**: all eight logged hits fall between 60.5 s and 60.7 s |
+| stream open check `0x45E630` | site not armed | 38,357 hits by 290 s |
+| cache completion `0x4043390` | 0 hits | 0 hits |
+| manager job reap `0x234A870` | 0 hits | 0 hits |
+| manager completion `0x230BB90` | 0 hits | 0 hits |
+| async completion handler `0x2329110` | 0 hits | 0 hits |
+| completion raise `0x3065AF0` | 0 hits | 0 hits |
+| request consume `0x4043300` | 0 hits | 0 hits |
+| subscriber completion `0x2355D40` | 0 hits | 0 hits |
+| async command handler `0x131C480` | 27 hits by the 60 s sample (the six logged hits at 59.5 s), before the attach | 27 hits by the 60 s sample (the six logged hits at 56.0 s), before the attach |
+| shared event raise `0x864100` | 36 hits; all raises before the 70 s sample | 35 hits; all raises before the 70 s sample; six logged, all between 60.4 s and 60.6 s |
+| hardware watch DR0 request+0x18 | 0 hits | 0 hits |
+| hardware watch DR1 request+0x20 | 9,348 hits by 290 s | 9,557 hits by 290 s |
+| hardware watch DR2 stream+0x120 | 0 hits | 0 hits |
+| hardware watch DR3 live control | 6,662 hits by 290 s, writer `game+0x41E8FD` | 6,769 hits by 290 s, writer `game+0x41E8FD` |
+| threads armed | 107 | 107 |
+| state words at the last sample | init 3, loading 2, session 3, machine 3/3 | init 3, loading 2, session 3, machine 3/3 |
+| record slot-4 completion dword | 0 at every sample | 0 at every sample |
+| movie player state | `0x9` in all 115 samples | `0x9` in all 118 samples |
+| captures / readback means | 12, all mean rgb `0.00 0.00 0.00`; 6 readbacks, 3 mean 0 and 3 the layer's `51 102 204` write control | same |
+
+The start and attach hits read the same shape in both clean arms. The start is called once on the loading task
+(`rcx` = subscriber, vtable `game+0x61B2790`; `rdx` = the event payload whose qwords are `0,0,0,0x100000000`;
+`r8` = `0xFFFFFFFF00000001`). The submit is called on the same thread with command id 0 and flag 1, and reads the
+stream object out of subscriber `+0x50` before its `+0x58` request is stored. The command start reads the stream
+object (vtable `game+0x658DE48`), its command id 0, its identity pair `+0xFC`/`+0x100` (the pair the open check
+reads) and raises the start event on the stream's event queue at `+0x128`. The attach then reads the request with
+vtable `game+0x658DE18`, owner `+0x30` = the stream object, key `+0x38` = `0x9837FB2E`, flag `+0x3C` = 0, and writes
+the stream's `+0x120` = request.
+
+The only completion-field write in either clean arm is the loading update's own cleanup: `mov qword [rsi+0x20], 0`
+at `game+0x45E488`, whose unwound chain is `game+0x45E488 <- game+0x528CD72 <- game+0x14EAC80 <- game+0x2257807 <-
+game+0x11F749 <- game+0x4FD1AE0 <- game+0x23CF247 <- game+0x23CF104`, i.e. the loading task's loading poll
+`0x11F740` -> loading update `0x2257700` -> streaming manager update `0x14EABB0` -> request-cache walk `0x528CD20` ->
+request step `0x45E430` -> loading task. It writes the value the field already holds (0), so no request field changes;
+the fine-change poller printed exactly one line in each clean arm (the post-attach snapshot) and no change after it.
+
+### 14.4 The pipeline the write watch found
+
+The write's chain names the per-frame pipeline, and three decompiled functions close it (all read from the image's
+own bytes; RVAs and offsets only):
+
+| RVA | what it does |
+|---|---|
+| `0x14EABB0` | the streaming manager's per-loading-update tick: calls the manager's vtable slots with the frame delta; the manager object is at `game+0x7455F40` |
+| `0x528CD20` | walks the request cache's bucket table (`cache+0x348`, bucket count `cache+0x350`): for each node the request is `node+0x8`, and when `0x299090(request+0x30)` says the owner slot is non-null it calls the request step |
+| `0x45E430` | the request step: if the owner check `0x88B3F0(owner)` reads `owner+0x11A` bit 0 clear, it steps the owner (`0x45E570`), walks the callback array `+0x20`/`+0x28`, then frees and clears that array and the count (the measured `+0x20 = 0`) |
+| `0x45E570` | the stream pump: checks the stream's `+0x118` state byte, `0x45E5D0`, then loops `0x45E630` -> `0x402E260` while the open check and the step return work, and finally stores the manager-table lookup in `stream+0x138` |
+| `0x402E260` | the stream step: if `0x45E630(stream+0xFC, stream+0x100)` is true it loops the async engine step `0x402E340(stream+0xE8, ..., &out, *(u64*)(stream+0x120))` and, when an out record appears, calls the completion dispatch `0x402E8A0` and releases through the handler at `+0x40`; if the check is false it returns 0 without calling the engine |
+| `0x402E340` | the async engine step: resolves the queue's key pair `queue+0x14`/`queue+0x18` through the async registry, drives the queue entry's state `+0x58`, its result `+0x40` and its event records, and writes the produced out record |
+| `0x45E630` | the open check: true when the async registry lookup `0x45E690(id, table)` is non-null, or when the manager-table entry `*(qword*)(table + 0x18 + (id-1)*0xC0)` is non-null and its state dword `+0xAC` is 2; `0x45E5D0` uses the same check to decide whether the pump's loop is entered |
+
+So the request is not parked on a thread that never runs: the loading task's loading update walks the request cache
+and steps the request's owner every frame, and the stream pump and the stream step are entered every frame (9,588 and
+9,592 hits by 290 s). The only frame-level gate is `0x45E630`.
+
+### 14.5 The open gate: the engine step stops after the attach
+
+The refined arm's sampler reads the gate's inputs every two seconds: the stream's id at `+0xFC` is 1 and its table
+pointer at `+0x100` is a stream-owned address in every sample; the manager-table entry slot
+`table + 0x18 + (id-1)*0xC0` reads null in **all 118 samples from 62 s to 296 s**. The attach-window checks catch
+the slot before it is emptied: the two logged gate hits at 60.4 s and 60.5 s read the entry slot as `table + 0xD0`
+with state dword `+0xAC` = **0**, and the probe's own print labels it `open no` (the state the gate accepts is 2).
+
+The counters agree with the gate: the stream step `0x402E260` was entered 9,592 times, but the engine step
+`0x402E340` only 16 times, and the counter readings show those 16 were complete by the 70 s sample: the per-frame
+loading update continues for the remaining 230 s, the pump keeps running, and the engine step never runs again. The
+35 shared event raises and the 27 async command handler hits are also complete by then. In other words, the async
+command engine is entered for 0.7 s around the attach, then the gate closes and the request is left pending.
+
+What the request waits on is therefore measured one level past section 13: the request is not missing a dispatch and
+not waiting on a storage, GPU or thread event; the per-frame update reaches it, but the stream's manager-table
+registration is missing (or its state never reaches 2) after the attach, so the command engine is not stepped. The
+gate reads title bookkeeping (`table+0x18` and the entry's `+0xAC` state word); no shim of this tree writes either
+field, and no runtime answer of ours is on the path.
+
+### 14.6 The D3D12 timeline and the storage reach
+
+The timeline (`PALMETTO_TIMELINE`) is the same in both clean arms: `stream1` origin `t=20422.670`, start at
+`t=20486.641`; `stream3` origin `t=21032.321`, start at `t=21092.705`. The event kinds are only `exec entry`,
+`exec return`, `queue signal` and `compile wait` (107,898 and 108,104 lines); there is no fence, copy or queue event
+that corresponds to the request. The first ten seconds after the start carry 647 (`stream1`) and 701 (`stream3`)
+`exec entry` events, i.e. the renderer keeps its normal submission cadence through the request's whole life; the
+request itself emits nothing on the timeline. So the awaited job is not behind a D3D12 fence or copy of ours.
+
+The storage/file reach was not re-run with its trace switches in these arms; section 13.5 measured the same start in
+an arm that ran `PALMETTO_FILE_TRACE`, `PALMETTO_DSTORAGE_TRACE` and `PALMETTO_DS_LOAD_TRACE` in the same boot and
+found no open, read, enqueue or repair after the start (the last file event 3.3 s and the last storage repair 3.6 s
+before it). The request is not waiting on a storage answer.
+
+### 14.7 Verdict, limits and the next falsifier
+
+- **Verdict: negative for a runtime producer, with the wait attributed one level deeper.** The session-3 request is
+  created, cached and attached once; the loading update walks the request cache and steps it every frame; the stream
+  pump and stream step run every frame; but the stream's open gate closes after the attach (manager-table slot null,
+  entry state 0 not 2), so the async command engine is entered only in the attach window. Every completion entry point
+  stays at zero, the request stays in the cache with its fields unchanged, and the session word stays 3.
+- **No runtime answer is on the path.** The gate reads title bookkeeping (a manager-table pointer and a state dword);
+  the request cache, the request, the stream and the manager are all title-side objects. The D3D12 timeline has no
+  event tied to the request and the storage reach was measured empty in section 13.5's same-boot arm. No shim change
+  is implied and the default path is byte-identical; with the switches unset the probe installs nothing.
+- **The picture is unchanged.** No session advance means no movie draw: the player holds state `0x9`, all 12
+  presenter captures are mean rgb `0.00 0.00 0.00` in both clean arms, and of the six 128x128 readbacks three are
+  mean 0 and three are the replay layer's own `51 102 204` write control (16,384/16,384 non-black), not title
+  content.
+- **Limits.** Two clean arms, one stage-3 window each (58.8 s and 62.1 s pump reads), plus one pre-stage loss; the
+  write watch samples four 8-byte fields only (the owner `+0x30`, key `+0x38` and flag `+0x3C` are covered by the
+  100 ms poller, not by a breakpoint); the gate sampler reads one table slot and one state word, and the 16 engine
+  steps' out record and queue operations are not identified; `stream1`'s two cache sites failed to arm because their
+  RVAs were transcribed with the wrong image offset, so only `stream3` measures the cache lookup; and the probes'
+  traps shift timings by their cost, so the stage-3 arrival spread is not compared between arms.
+- **Next falsifier.** Name the writer of the manager-table slot and the state transition: a hardware write watch on
+  `table + 0x18 + (id-1)*0xC0` and on the entry's `+0xAC` state dword (replacing the two request watches that measured
+  zero), with the request consume `0x4043300` and the subscriber completion `0x2355D40` as zero-hit controls, plus
+  execution probes on the registry lookup `0x45E690` and the command-start handler lookup `0x402F1C0` / queue
+  registration `0x402D010`. If the slot writer runs before the attach and the state word never reaches 2, the wall is
+  the open transition itself; if the slot is never written again after it is emptied, the wall is whatever code is
+  supposed to open the stream in this build's loading sequence.
+
+### 14.8 Tests and gates
+
+- No test target is added: the slice is an opt-in diagnostic path in `port/src/main.cpp` with no pure helper to
+  exercise, and every switch is off in a default run.
+- Gates on the changed tree: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints
+  `TESTS_BUILT`, the GPU-free gate targets exit 0, and every `tests/test_docs_*.py` check passes.
+- Evidence outside the repository: `D:\leonida-work\fsrstable\boot-stream1`, `boot-stream2`, `boot-stream3` with
+  `stderr.log`/`stdout.log`/`summary.txt`/`meta.txt`/`boot.jsonl`, `capture-stream1`/`capture-stream3` and
+  `readback-stream1`/`readback-stream3`; and `D:\leonida-work\streamreap` with the arm log, the analysis script, the
+  cross-reference and vcall scanners and the decompiled ranges (`decomp-sr1` through `decomp-sr9`). No game data:
+  RVAs, offsets, register/pointer values, counts, times and image means only.
+
+### 14.9 Attribution
+
+This section was implemented from this project's own measurement: the two clean 300 s arms and the pre-stage loss,
+the twenty execution probes and their register reads and unwound chains, the hardware write watch and its live
+control, the two samplers and the fine-change log, the three state-word timelines, the capture and readback means,
+and the disassembled/decompiled request step, stream pump, stream step, async engine step, open check, manager update
+and request-cache walk. The static check reused the read-only Ghidra project copy section 1 describes
+(`D:\leonida-work\decomp-stage\ghidra-proj`), with the new decompiled ranges under
+`D:\leonida-work\streamreap\decomp-sr1` through `decomp-sr9`; no peer code was used and no game data is added: RVAs,
+field offsets, instruction bytes, values, counts and outcomes only.
+

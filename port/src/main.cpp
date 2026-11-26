@@ -6575,6 +6575,811 @@ void start_s3_dispatch_probe(std::uintptr_t image_base, std::size_t image_size) 
     }).detach();
 }
 
+// ---- Streaming request completion-producer probe (PALMETTO_STREAMREAP) ----------------------------------------------
+// docs/decomp_stage.md section 13 measured the session-3 wall down to the request: the loading subscriber's start
+// submits the streaming subsystem's async request (class vtable game+0x658DE18, key 0x9837FB2E), attaches it to the
+// subscriber's stream object (vtable game+0x658DE48) whose pending slot +0x120 holds it, and from then on the request's
+// completion fields and the stream's +0x100..+0x120 block never move; the consumer 0x4043300, the subscriber completion
+// 0x2355D40, the task callback and the event bus all stay at zero hits. Section 13's next falsifier is exactly this
+// probe: the request-class and stream-class vtable slots, the streaming manager's reaping family, the manager global
+// game+0x7455F40, and a write watch on the completion fields, with a same-boot control.
+//
+// The static shape this probe measures, all named from the image's own bytes (RVAs, offsets and values only):
+//   0x2355DD0  loading subscriber's start (its vtable +0x68): resets the loading record, runs the event's command
+//              (0x5BB4DE0) and registers its id-0xe bus entry; subscriber+0x50 is its stream object, +0x58 its request;
+//   0x1DBC0F0  the dispatch inside that start: requires the stream "ready", starts the stream command (0x402F120),
+//              asks the subscriber's vtable +0xF0 for the command key, inserts/looks the key up in the global request
+//              cache (0x4043570, cache object *game+0x999ABE0) and stores the attached request at subscriber+0x58;
+//   0x402F0F0  the attach's pending registration on the stream: stream+0x1c = command id, stream+0x30 = request key,
+//              stream+0x120 = request (the measured pending slot);
+//   0x402F120  the stream command start: resolves the command handler into stream+0xe8, requires the stream's
+//              +0xfc/+0x100 state to be open, then raises the command-start event on the stream queue at +0x128;
+//   0x4043390  the async cache-entry completion: checks the entry's owner (+0x30), resolves it, requires the stream
+//              state open, builds the completion record and raises the completion event on the stream queue +0x128.
+//              Its four callers below are the only paths that can complete a cache entry, so the request finishes iff
+//              one of them reaches this function for it;
+//   0x4042D560/0x4042D580  the cache key builder and the hash lookup (buckets at cache+0x348, count +0x350, entries
+//              +0x358); the node layout is {key +0x0, request +0x8, next +0x10};
+//   0x234A870  the streaming manager's job reap (class vtable game+0x61B4170 slot +0x40): looks the job's async handle
+//              (+0x40) up in the request cache and completes the entry with the job's +0x48 status;
+//   0x131C480, 0x2329110, 0x230BB90  the other three cache-entry completion callers (command, queue and manager event
+//              paths of the same async framework);
+//   0x143065AF0/0x140864100  the stream event-queue raises used by the completion and by the command start;
+//   0x4043300  the request consume (walks callbacks +0x20/+0x28, decrements the +0x18 sub-op count, clears the owner
+//              +0x30 and the +0x3c flag): the measured-zero consumer of section 13;
+//   0x2355D40  the subscriber completion that would write the loading record's completion dword;
+//   0x2306070  the streaming stop, which would explain a request being released instead of completed.
+// The write watch (PALMETTO_STREAMREAP_WATCH=1) arms when the attach registers the request: DR0 request+0x18, DR1
+// request+0x20, DR2 stream+0x120, and DR3 the loading record's slot-4 tick game+0x78ACB08, which the session-3 poll
+// 0x41E8C0 writes every 33 ms - the same-boot live control that proves the debug registers catch title stores here.
+// Everything is opt-in and bounded (per-site caps, a total line cap, a 100 ms fine-change log and 10 s counters), and
+// with the switch unset there is one cached getenv, no handler, no thread and no patch. RVAs, offsets, values only.
+constexpr std::uint32_t kSrManagerGlobalRva = 0x7455F40;       // streaming manager object base (vtable pointer at +0)
+constexpr std::uint32_t kSrRequestCacheGlobalRva = 0x999ABE0;  // qword: the async request-cache object
+constexpr std::uint32_t kSrRecordSlot4TickRva = 0x78ACB08;     // live control: the session-3 poll's own tick store
+constexpr unsigned kSrSiteCount = 20;
+constexpr unsigned kSrTotalLines = 900;
+constexpr unsigned kSrSamplerLines = 150;
+constexpr unsigned kSrFineLines = 140;
+constexpr unsigned kSrWatchLines = 120;
+
+struct SrSite {
+    std::uint32_t rva;
+    const char* name;
+    unsigned cap;
+};
+
+constexpr SrSite kSrSites[kSrSiteCount] = {
+    {0x2355DD0, "subscriber-start", 4},
+    {0x1DBC0F0, "stream-submit", 4},
+    {0x402F0F0, "stream-pending-register", 4},
+    {0x402F120, "stream-command-start", 6},
+    {0x4043390, "cache-complete", 10},
+    {0x402D580, "cache-lookup", 10},
+    {0x402D560, "cache-key", 6},
+    {0x234A870, "job-reap", 10},
+    {0x131C480, "async-cmd-handler", 6},
+    {0x2329110, "async-complete-handler", 6},
+    {0x230BB90, "manager-complete", 6},
+    {0x3065AF0, "stream-event-raise", 10},
+    {0x864100, "stream-start-event", 6},
+    {0x4043300, "request-consume", 8},
+    {0x2355D40, "subscriber-completion", 8},
+    {0x2306070, "streaming-stop", 6},
+    {0x45E570, "stream-pump", 6},
+    {0x402E260, "stream-step", 6},
+    {0x402E340, "async-engine-step", 8},
+    {0x45E630, "stream-open-check", 8},
+};
+
+struct StreamReap {
+    std::atomic<bool> ready{false};
+    std::atomic<std::uintptr_t> address[kSrSiteCount]{};
+    std::atomic<unsigned> original[kSrSiteCount]{};
+    std::atomic<unsigned> hits[kSrSiteCount]{};
+    std::atomic<unsigned> logged[kSrSiteCount]{};
+    std::atomic<unsigned> lines{0};
+    std::atomic<std::uintptr_t> subscriber{0};
+    std::atomic<std::uintptr_t> request{0};
+    std::atomic<std::uintptr_t> stream{0};
+    std::atomic<std::uint32_t> request_key{0};
+    std::atomic<unsigned> sampler_lines{0};
+    std::atomic<unsigned> fine_lines{0};
+    // The hardware write watch on the measured request/stream, armed by the attach registration.
+    std::atomic<bool> watch_enabled{false};
+    std::atomic<bool> watch_ready{false};
+    std::atomic<std::uintptr_t> points[4]{};
+    std::atomic<std::uint64_t> point_last[3]{};
+    std::atomic<unsigned> watch_hits[4]{};
+    std::atomic<unsigned> watch_lines{0};
+    std::atomic<unsigned> watch_armed{0};
+};
+
+StreamReap& stream_reap() {
+    static StreamReap watch;
+    return watch;
+}
+
+std::uintptr_t sr_image_base = 0;
+std::mutex& sr_print_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+void sr_print(const std::string& text) {
+    std::lock_guard lock(sr_print_mutex());
+    std::fwrite(text.data(), 1, text.size(), stderr);
+    std::fflush(stderr);
+}
+
+// A label for a value: image RVAs as game+RVA, other modules by name, anything else in hex.
+std::string sr_label(std::uint64_t value) {
+    if (value >= sr_image_base && value < sr_image_base + 0x18000000ull) {
+        char buffer[32];
+        std::snprintf(buffer, sizeof buffer, "game+0x%x", static_cast<unsigned>(value - sr_image_base));
+        return buffer;
+    }
+    return value ? rt::shims::module_offset(static_cast<std::uintptr_t>(value)) : std::string("0x0");
+}
+
+std::string sr_qwords(const char* what, std::uintptr_t address, unsigned count) {
+    std::string text = std::string(" ") + what + ":";
+    for (unsigned i = 0; i < count; ++i) text += " " + executor_watch_hex(executor_watch_read_u64(address + i * 8));
+    return text;
+}
+
+// The measured request layout (section 13.4): vtable, refcount at +8, sub-op count +0x18, callback array +0x20 with
+// count +0x28, owner +0x30, key +0x38, flag +0x3c.
+std::string sr_request_text(std::uintptr_t request) {
+    if (!request) return " request 0";
+    std::string text = " request " + executor_watch_hex(request) + " vtable " +
+                       sr_label(executor_watch_read_u64(request));
+    text += " subops " + std::to_string(executor_watch_read_u32(request + 0x18)) + " callbacks " +
+            executor_watch_hex(executor_watch_read_u64(request + 0x20)) + "/" +
+            std::to_string(executor_watch_read_u32(request + 0x28)) + " owner " +
+            executor_watch_hex(executor_watch_read_u64(request + 0x30)) + " key 0x" +
+            executor_watch_hex(executor_watch_read_u32(request + 0x38)).substr(2) + " flag 0x" +
+            executor_watch_hex(executor_watch_read_u32(request + 0x3c)).substr(2) + " qwords" +
+            sr_qwords("", request, 8);
+    return text;
+}
+
+// The stream object the request is attached to (vtable game+0x658DE48): command id +0x1c, request key +0x30, the
+// +0xd8..+0xe8 command state, the +0xfc/+0x100 identity pair, the pending slot +0x120 and the event queue +0x128.
+std::string sr_stream_text(std::uintptr_t stream) {
+    if (!stream) return " stream 0";
+    std::string text = " stream " + executor_watch_hex(stream) + " vtable " +
+                       sr_label(executor_watch_read_u64(stream)) + " cmd-id 0x" +
+                       executor_watch_hex(executor_watch_read_u32(stream + 0x1c)).substr(2) + " key 0x" +
+                       executor_watch_hex(executor_watch_read_u32(stream + 0x30)).substr(2);
+    text += sr_qwords(" +0x18", stream + 0x18, 5);
+    text += sr_qwords(" +0xd8", stream + 0xd8, 3);
+    text += " +0xfc 0x" + executor_watch_hex(executor_watch_read_u32(stream + 0xfc)).substr(2) + " +0x100 " +
+            executor_watch_hex(executor_watch_read_u64(stream + 0x100));
+    text += sr_qwords(" +0x108", stream + 0x108, 5);
+    return text;
+}
+
+
+// The stream's manager-table gate, read the way 0x45e630 reads it: the id at stream+0xfc, the table at stream+0x100,
+// the entry qword at table+0x18+(id-1)*0xc0 and the entry's state dword at +0xac (2 = the state the pump requires).
+// Printing it every sample says whether the per-frame stream pump is skipping its command loop because the stream is
+// not "open" in the manager's own table.
+std::string sr_gate_text(std::uintptr_t stream) {
+    if (!stream) return " gate node";
+    const std::uint32_t id = executor_watch_read_u32(stream + 0xfc);
+    const std::uintptr_t table = static_cast<std::uintptr_t>(executor_watch_read_u64(stream + 0x100));
+    std::string text = " gate id " + std::to_string(id) + " table " + executor_watch_hex(table);
+    if (!table || id == 0 || id > 0x100) return text;
+    const std::uintptr_t entry = static_cast<std::uintptr_t>(
+        executor_watch_read_u64(table + 0x18 + static_cast<std::uintptr_t>(id - 1) * 0xc0));
+    text += " entry " + executor_watch_hex(entry);
+    if (entry) {
+        text += " state " + std::to_string(executor_watch_read_u32(entry + 0xac));
+        text += " +0x58 " + std::to_string(executor_watch_read_u32(entry + 0x58));
+    }
+    return text;
+}
+
+std::string sr_subscriber_text(std::uintptr_t subscriber) {
+    if (!subscriber) return " subscriber 0";
+    std::string text = " subscriber " + executor_watch_hex(subscriber) + " vtable " +
+                       sr_label(executor_watch_read_u64(subscriber));
+    text += " stream " + executor_watch_hex(executor_watch_read_u64(subscriber + 0x50)) + " request " +
+            executor_watch_hex(executor_watch_read_u64(subscriber + 0x58));
+    text += sr_qwords(" +0x80", subscriber + 0x80, 2);
+    text += " +0xa8 " + executor_watch_hex(executor_watch_read_u64(subscriber + 0xa8)) + " +0xac 0x" +
+            executor_watch_hex(executor_watch_read_u32(subscriber + 0xac)).substr(2) + " +0xb4 0x" +
+            executor_watch_hex(executor_watch_read_u32(subscriber + 0xb4)).substr(2);
+    return text;
+}
+
+// The global request cache at *game+0x999ABE0: buckets +0x348, bucket count +0x350, entry count +0x358, and the node
+// layout {key +0x0, request +0x8, next +0x10}. Bounded walk: at most 4096 buckets, 64 nodes per chain and 20000 nodes
+// per sample; it reports whether the measured request and its key are still in the cache, which is the cache's own
+// statement about whether the request was completed, reaped or never left.
+std::string sr_cache_text(std::uintptr_t ours, std::uint32_t our_key) {
+    const std::uintptr_t cache = static_cast<std::uintptr_t>(
+        executor_watch_read_u64(sr_image_base + kSrRequestCacheGlobalRva));
+    if (!cache) return " cache 0";
+    const std::uintptr_t buckets = static_cast<std::uintptr_t>(executor_watch_read_u64(cache + 0x348));
+    const std::uint32_t bucket_count = executor_watch_read_u32(cache + 0x350);
+    const std::uint32_t entries = executor_watch_read_u32(cache + 0x358);
+    const std::uint32_t init_word = executor_watch_read_u32(cache + 0x35c);
+    std::string text = " cache " + executor_watch_hex(cache) + " buckets " + std::to_string(bucket_count) +
+                       " entries " + std::to_string(entries) + " init-word 0x" +
+                       executor_watch_hex(init_word).substr(2);
+    if (!buckets || bucket_count == 0) return text;
+    unsigned nodes = 0, scanned = 0, our_key_nodes = 0;
+    bool found_ours = false;
+    unsigned buckets_scanned = bucket_count < 4096 ? bucket_count : 4096;
+    for (unsigned b = 0; b < buckets_scanned && nodes < 20000; ++b) {
+        std::uintptr_t node = static_cast<std::uintptr_t>(executor_watch_read_u64(buckets + b * 8ull));
+        unsigned depth = 0;
+        ++scanned;
+        while (node && depth < 64) {
+            const std::uint32_t key = executor_watch_read_u32(node);
+            if (key == our_key) ++our_key_nodes;
+            if (executor_watch_read_u64(node + 8) == ours && ours) found_ours = true;
+            node = static_cast<std::uintptr_t>(executor_watch_read_u64(node + 0x10));
+            ++nodes;
+            ++depth;
+        }
+    }
+    text += " scanned " + std::to_string(scanned) + " buckets " + std::to_string(nodes) + " node(s); request-in-cache " +
+            (found_ours ? "yes" : "no") + " key-nodes " + std::to_string(our_key_nodes);
+    return text;
+}
+
+std::string sr_manager_text() {
+    const std::uintptr_t manager = sr_image_base + kSrManagerGlobalRva;
+    std::string text = " manager " + executor_watch_hex(manager) + " vtable " +
+                       sr_label(executor_watch_read_u64(manager));
+    text += sr_qwords(" +0x8", manager + 0x8, 8);
+    text += sr_qwords(" +0x48", manager + 0x48, 4);
+    return text;
+}
+
+std::string sr_state_text() {
+    bool ok = false;
+    const std::uint64_t machine = title_read_u64(sr_image_base, kTitleStateMachineRva, ok);
+    std::uint16_t current = 0, next = 0;
+    if (machine && (machine & 7) == 0) {
+        current = title_read_u16_at(static_cast<std::uintptr_t>(machine) + 0x10, ok);
+        next = title_read_u16_at(static_cast<std::uintptr_t>(machine) + 0x12, ok);
+    }
+    std::string text = " init " + std::to_string(title_read_u32(sr_image_base, kTitleInitStateRva, ok)) +
+                       " loading " + std::to_string(title_read_u32(sr_image_base, kTitleLoadingStateRva, ok)) +
+                       " session " + std::to_string(title_read_u32(sr_image_base, kTitleSessionStateRva, ok)) +
+                       " machine " + std::to_string(current) + "/" + std::to_string(next) +
+                       " loading-tick " + std::to_string(title_read_u32(sr_image_base, kTitleLoadingTickRva, ok)) +
+                       " record-slot4-tick " + std::to_string(title_read_u32(sr_image_base, kSrRecordSlot4TickRva, ok)) +
+                       " record-slot4-comp " + std::to_string(title_read_u32(sr_image_base, kTitleLoadingRecordRva + 4 * 0x50 + 0x18, ok));
+    const std::uintptr_t entity = static_cast<std::uintptr_t>(
+        title_read_u64(sr_image_base, kTitleMovieSlot0EntityRva, ok));
+    if (entity) {
+        unsigned char state = 0, open = 0;
+        executor_watch_read_block(entity + 0x1c4, &state, 1);
+        executor_watch_read_block(entity + 0x23e, &open, 1);
+        text += " movie state 0x" + executor_watch_hex(state).substr(2) + " buffers " +
+                std::to_string(executor_watch_read_u32(entity + 0x1b8)) + " open 0x" +
+                executor_watch_hex(open).substr(2);
+    } else {
+        text += " movie entity 0";
+    }
+    return text;
+}
+
+std::string sr_chain(const CONTEXT& context) {
+    std::uint64_t frames[40] = {};
+    const unsigned found = unwind_call_chain(context, frames, 40);
+    std::string text;
+    text.reserve(768);
+    unsigned shown = 0;
+    for (unsigned i = 0; i < found && shown < 20; ++i) {
+        text += ' ';
+        text += sr_label(frames[i]);
+        ++shown;
+    }
+    return text.empty() ? std::string(" (none)") : text;
+}
+
+std::string sr_hits_summary() {
+    StreamReap& watch = stream_reap();
+    std::string text = " hits";
+    for (unsigned i = 0; i < kSrSiteCount; ++i)
+        text += std::string(" ") + kSrSites[i].name + " " + std::to_string(watch.hits[i].load(std::memory_order_relaxed));
+    text += " watch";
+    for (unsigned i = 0; i < 4; ++i)
+        text += " " + std::to_string(watch.watch_hits[i].load(std::memory_order_relaxed));
+    return text;
+}
+
+// One logged execution-probe hit. The per-site body reads the argument registers the measured call shape passes.
+void sr_log_site(unsigned slot, CONTEXT& context) {
+    StreamReap& watch = stream_reap();
+    if (watch.lines.fetch_add(1, std::memory_order_relaxed) >= kSrTotalLines) return;
+    const std::uintptr_t rcx = static_cast<std::uintptr_t>(context.Rcx);
+    const std::uintptr_t rdx = static_cast<std::uintptr_t>(context.Rdx);
+    const std::uintptr_t r8 = static_cast<std::uintptr_t>(context.R8);
+    const std::uintptr_t r9 = static_cast<std::uintptr_t>(context.R9);
+    char head[224];
+    std::snprintf(head, sizeof head,
+                  "[rt] streamreap t=%.3f (%.1f s) site %s hit %u tid %lu rcx 0x%llx rdx 0x%llx r8 0x%llx r9 0x%llx",
+                  executor_watch_seconds(),
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - sampler_epoch()).count(),
+                  kSrSites[slot].name, watch.hits[slot].load(std::memory_order_relaxed),
+                  static_cast<unsigned long>(GetCurrentThreadId()), static_cast<unsigned long long>(rcx),
+                  static_cast<unsigned long long>(rdx), static_cast<unsigned long long>(r8),
+                  static_cast<unsigned long long>(r9));
+    std::string text = head;
+    const std::uintptr_t ours = watch.request.load(std::memory_order_relaxed);
+    switch (slot) {
+        case 0:  // subscriber start: the measured subscriber object and the event payload it consumed
+            if (rcx) watch.subscriber.store(rcx, std::memory_order_relaxed);
+            text += sr_subscriber_text(rcx);
+            if (rdx) text += sr_qwords(" payload", rdx, 4);
+            break;
+        case 1: {  // the command dispatch: subscriber, command id and the stream/handle it is about to submit
+            const std::uintptr_t stream = rcx ? static_cast<std::uintptr_t>(executor_watch_read_u64(rcx + 0x50)) : 0;
+            const std::uintptr_t request = rcx ? static_cast<std::uintptr_t>(executor_watch_read_u64(rcx + 0x58)) : 0;
+            text += " subscriber 0x" + executor_watch_hex(rcx).substr(2) + " command-id 0x" +
+                    executor_watch_hex(rdx & 0xFFFFFFFFu).substr(2) + " flag " + std::to_string(context.R8 & 0xFF) +
+                    " stream " + executor_watch_hex(stream) + " request-before " + executor_watch_hex(request);
+            break;
+        }
+        case 2:  // the attach's pending registration: stream in rcx, request in rdx, command id in r8d
+            if (rcx) watch.stream.store(rcx, std::memory_order_relaxed);
+            if (rdx) {
+                watch.request.store(rdx, std::memory_order_relaxed);
+                watch.request_key.store(executor_watch_read_u32(rdx + 0x38), std::memory_order_relaxed);
+                watch.watch_ready.store(true, std::memory_order_relaxed);
+            }
+            text += sr_stream_text(rcx) + sr_request_text(rdx) + " command-id 0x" +
+                    executor_watch_hex(context.R8 & 0xFFFFFFFFu).substr(2);
+            break;
+        case 3:  // the stream command start: stream and command id
+            text += sr_stream_text(rcx) + " command-id 0x" +
+                    executor_watch_hex(rdx & 0xFFFFFFFFu).substr(2);
+            break;
+        case 4: {  // the async cache-entry completion: entry in rcx, status in rdx; the producer's last step
+            text += " entry 0x" + executor_watch_hex(rcx).substr(2);
+            const std::uintptr_t owner = rcx ? static_cast<std::uintptr_t>(executor_watch_read_u64(rcx + 0x30)) : 0;
+            text += sr_request_text(rcx) + " status 0x" + executor_watch_hex(rdx & 0xFFFFFFFFu).substr(2);
+            text += " owner " + sr_label(owner);
+            if (ours && rcx == ours) text += " OURS";
+            if (owner && owner == watch.stream.load(std::memory_order_relaxed)) text += " OWNER-IS-STREAM";
+            if (owner) text += sr_stream_text(owner);
+            break;
+        }
+        case 5:  // the cache hash lookup: table rcx, count rdx, out r8, key r9d
+            text += " lookup key 0x" + executor_watch_hex(context.R9 & 0xFFFFFFFFu).substr(2) + " buckets " +
+                    executor_watch_hex(rcx) + " count " + std::to_string(rdx & 0xFFFFFFFFu) + " out " +
+                    executor_watch_hex(r8);
+            if (ours && (context.R9 & 0xFFFFFFFFu) == executor_watch_read_u32(ours + 0x38)) text += " OURS-KEY";
+            break;
+        case 6:  // the cache key builder: out rcx, handle rdx, flag r8d
+            text += " handle " + executor_watch_hex(rdx) + " out " + executor_watch_hex(rcx) + " flag " +
+                    std::to_string(context.R8 & 0xFF);
+            break;
+        case 7:  // the streaming manager's job reap: the job object rcx (handle +0x40, status +0x48), context rdx
+            text += " job 0x" + executor_watch_hex(rcx).substr(2) + " vtable " +
+                    sr_label(rcx ? executor_watch_read_u64(rcx) : 0) + " handle " +
+                    executor_watch_hex(rcx ? executor_watch_read_u64(rcx + 0x40) : 0) + " status 0x" +
+                    executor_watch_hex(rcx ? executor_watch_read_u32(rcx + 0x48) : 0).substr(2) + " context " +
+                    executor_watch_hex(rdx) + " context-vtable " + sr_label(rdx ? executor_watch_read_u64(rdx) : 0);
+            break;
+        case 8:  // the async command handler: object rcx (its +0x58 async request), payload rdx
+            text += " object 0x" + executor_watch_hex(rcx).substr(2);
+            if (ours && rcx) {
+                const std::uintptr_t handle = static_cast<std::uintptr_t>(executor_watch_read_u64(rcx + 0x58));
+                text += " object+0x58 " + executor_watch_hex(handle);
+                if (handle == ours) text += " OURS";
+            }
+            text += sr_qwords(" object", rcx, 8) + sr_qwords(" payload", rdx, 4);
+            break;
+        case 9:  // the async completion handler: object rcx, handle/payload rdx, flags r8
+            text += sr_qwords(" object", rcx, 8) + sr_qwords(" payload", rdx, 4) + " flags 0x" +
+                    executor_watch_hex(context.R8).substr(2);
+            break;
+        case 10:  // the streaming manager's completion entry: status rcx, payload rdx, flags r8
+            text += sr_qwords(" status", rcx, 4) + sr_qwords(" payload", rdx, 4) + " flags 0x" +
+                    executor_watch_hex(context.R8).substr(2);
+            break;
+        case 11:  // the stream event-queue raise: queue rcx (stream+0x128), value rdx
+            text += " queue " + executor_watch_hex(rcx) + " value " + executor_watch_hex(rdx) + " queue-vtable " +
+                    sr_label(rcx ? executor_watch_read_u64(rcx) : 0);
+            if (ours) text += " stream-queue " +
+                              sr_label(executor_watch_read_u64(ours + 0x30) + 0x128);
+            break;
+        case 12:  // the stream command-start event raise: queue rcx, command id rdx
+            text += " queue " + executor_watch_hex(rcx) + " command-id 0x" +
+                    executor_watch_hex(rdx & 0xFFFFFFFFu).substr(2) + " queue-vtable " +
+                    sr_label(rcx ? executor_watch_read_u64(rcx) : 0);
+            break;
+        case 13:  // the request consume: request rcx; the measured-zero consumer of section 13
+            text += sr_request_text(rcx);
+            if (ours && rcx == ours) text += " OURS";
+            break;
+        case 14:  // the subscriber completion: subscriber rcx
+            text += sr_subscriber_text(rcx);
+            break;
+        case 15:  // the streaming stop: its argument and the manager
+            text += " arg " + std::to_string(context.Rcx & 0xFFFFFFFFu) + sr_manager_text();
+            break;
+        case 16:  // the per-frame stream pump: stream in rcx, frame delta in rdx (float bits)
+            text += sr_stream_text(rcx) + sr_gate_text(rcx);
+            break;
+        case 17:  // the async command step the pump runs with the pending request: stream in rcx
+            text += sr_stream_text(rcx) + sr_gate_text(rcx);
+            break;
+        case 18:  // the async engine step: queue stream+0xe8 in rcx, delta rdx, out r8, pending request r9
+            text += " queue 0x" + executor_watch_hex(rcx).substr(2) + " out " + executor_watch_hex(r8) +
+                    " request " + executor_watch_hex(r9);
+            if (rcx) text += sr_qwords(" queue", rcx, 6);
+            if (ours && r9 == ours) text += " OURS";
+            break;
+        case 19: {  // the manager-table open check: id in rcx, table in rdx; print the entry and state it tests
+            const std::uint32_t id = static_cast<std::uint32_t>(rcx);
+            const std::uintptr_t table = rdx;
+            text += " check id " + std::to_string(id) + " table " + executor_watch_hex(table);
+            if (table && id && id <= 0x100) {
+                const std::uintptr_t entry = static_cast<std::uintptr_t>(
+                    executor_watch_read_u64(table + 0x18 + static_cast<std::uintptr_t>(id - 1) * 0xc0));
+                text += " entry " + executor_watch_hex(entry);
+                if (entry) {
+                    const std::uint32_t state = executor_watch_read_u32(entry + 0xac);
+                    text += " state " + std::to_string(state) + " open " + (state == 2 ? "yes" : "no");
+                }
+            }
+            break;
+        }
+        default:
+            break;
+    }
+    text += "\n  chain:" + sr_chain(context) + "\n";
+    sr_print(text);
+}
+
+void sr_write_byte(unsigned slot, unsigned char value) {
+    StreamReap& watch = stream_reap();
+    const auto address = watch.address[slot].load(std::memory_order_relaxed);
+    if (!address) return;
+    DWORD old_protect = 0;
+    if (VirtualProtect(reinterpret_cast<void*>(address), 1, PAGE_EXECUTE_READWRITE, &old_protect)) {
+        *reinterpret_cast<unsigned char*>(address) = value;
+        VirtualProtect(reinterpret_cast<void*>(address), 1, old_protect, &old_protect);
+    }
+}
+
+thread_local unsigned sr_repoke_slot = 0;
+
+// The four hardware write breakpoints: DR0 request+0x18 (sub-op count), DR1 request+0x20 (callback array), DR2 the
+// stream's pending slot +0x120, DR3 the loading record's slot-4 tick as the same-boot title-store live control.
+DWORD sr_watch_dr7(const std::uintptr_t points[4]) {
+    DWORD dr7 = 0;
+    for (unsigned index = 0; index < 4; ++index) {
+        if (!points[index] || (points[index] & 7u) != 0) continue;
+        dr7 |= 0x1u << (2 * index);           // L_i
+        dr7 |= 0x1u << (16 + 4 * index);      // RW_i = 01, write
+        dr7 |= 0x3u << (18 + 4 * index);      // LEN_i = 11, 8 bytes
+    }
+    return dr7;
+}
+
+bool sr_watch_configure_thread(DWORD tid, const std::uintptr_t points[4], DWORD dr7) {
+    const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, tid);
+    if (!thread) return false;
+    bool configured = false;
+    if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
+        CONTEXT context{};
+        context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        if (GetThreadContext(thread, &context)) {
+            context.Dr0 = points[0];
+            context.Dr1 = points[1];
+            context.Dr2 = points[2];
+            context.Dr3 = points[3];
+            context.Dr6 = 0;
+            context.Dr7 = dr7;
+            configured = SetThreadContext(thread, &context) != FALSE;
+        }
+        ResumeThread(thread);
+    }
+    CloseHandle(thread);
+    return configured;
+}
+
+// One hardware write-watch hit: writer RIP and the bytes before it (the trap fires after the store), the value now and
+// before, the request/stream state at that instant and the unwound writer chain.
+void sr_watch_hit(unsigned index, CONTEXT& context) {
+    StreamReap& watch = stream_reap();
+    std::atomic<unsigned>& hits = watch.watch_hits[index];
+    const unsigned hit = hits.fetch_add(1, std::memory_order_relaxed) + 1;
+    static constexpr unsigned kCap[4] = {24, 12, 12, 3};
+    const bool log = hit <= kCap[index] || (hit % 4096 == 0);
+    if (!log) return;
+    if (watch.watch_lines.fetch_add(1, std::memory_order_relaxed) >= kSrWatchLines) return;
+    const std::uintptr_t address = watch.points[index].load(std::memory_order_relaxed);
+    std::uint64_t now = 0;
+    const bool read_ok = executor_watch_read_block(address, &now, 8);
+    std::uint64_t previous = 0;
+    if (index < 3) previous = watch.point_last[index].exchange(now, std::memory_order_relaxed);
+    char writer[96];
+    const std::uint64_t rip = context.Rip;
+    snprintf(writer, sizeof writer, "%s", sr_label(rip).c_str());
+    unsigned char bytes[16] = {};
+    char store_bytes[96] = " (unreadable)";
+    if (rip >= 16 && executor_watch_read_block(static_cast<std::uintptr_t>(rip) - 16, bytes, 16)) {
+        int at = 0;
+        for (unsigned i = 0; i < 16 && at + 4 < static_cast<int>(sizeof store_bytes); ++i)
+            at += std::snprintf(store_bytes + at, sizeof store_bytes - static_cast<std::size_t>(at), " %02x", bytes[i]);
+    }
+    static const char* const kNames[4] = {"REQUEST +0x18", "REQUEST +0x20", "STREAM +0x120", "LIVE-CONTROL"};
+    char head[320];
+    std::snprintf(head, sizeof head,
+                  "[rt] streamreap watch t=%.3f (%.1f s) %s hit %u tid %lu writer %s value %s0x%llx (was 0x%llx)",
+                  executor_watch_seconds(),
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - sampler_epoch()).count(),
+                  kNames[index], hit, static_cast<unsigned long>(GetCurrentThreadId()), writer,
+                  read_ok ? "" : "UNREADABLE ", static_cast<unsigned long long>(now),
+                  static_cast<unsigned long long>(previous));
+    std::string text = head;
+    if (index != 3) {
+        text += sr_request_text(watch.request.load(std::memory_order_relaxed));
+        const std::uintptr_t watched_stream = watch.stream.load(std::memory_order_relaxed);
+        text += sr_stream_text(watched_stream);
+        text += sr_gate_text(watched_stream);
+        text += sr_state_text();
+        text += sr_cache_text(watch.request.load(std::memory_order_relaxed),
+                              watch.request_key.load(std::memory_order_relaxed));
+    }
+    text += "\n  bytes before writer rip:" + std::string(store_bytes) +
+            "\n  rax " + executor_watch_hex(context.Rax) + " rbx " + executor_watch_hex(context.Rbx) + " rcx " +
+            executor_watch_hex(context.Rcx) + " rdx " + executor_watch_hex(context.Rdx) + " rsi " +
+            executor_watch_hex(context.Rsi) + " rdi " + executor_watch_hex(context.Rdi) +
+            "\n  chain:" + sr_chain(context) + "\n";
+    sr_print(text);
+}
+
+LONG CALLBACK sr_exception(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT& context = *info->ContextRecord;
+    StreamReap& watch = stream_reap();
+    if (!watch.ready.load(std::memory_order_relaxed)) return EXCEPTION_CONTINUE_SEARCH;
+    if (info->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT) {
+        const auto at = reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress);
+        unsigned slot = kSrSiteCount;
+        for (unsigned i = 0; i < kSrSiteCount; ++i)
+            if (watch.address[i].load(std::memory_order_relaxed) == at) {
+                slot = i;
+                break;
+            }
+        if (slot == kSrSiteCount) return EXCEPTION_CONTINUE_SEARCH;
+        const unsigned hit = watch.hits[slot].fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((hit <= kSrSites[slot].cap || hit % 4096 == 0) &&
+            watch.logged[slot].fetch_add(1, std::memory_order_relaxed) < 256)
+            sr_log_site(slot, context);
+        sr_write_byte(slot, static_cast<unsigned char>(watch.original[slot].load(std::memory_order_relaxed)));
+        sr_repoke_slot = slot + 1;
+        context.EFlags |= 0x100;  // trap after the original instruction, then put the int3 back
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (info->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP) {
+        // The int3 restore-and-single-step first: its pending slot is thread-local. A debug-register trap has no TF.
+        if (sr_repoke_slot) {
+            const unsigned slot = sr_repoke_slot - 1;
+            sr_repoke_slot = 0;
+            sr_write_byte(slot, 0xCC);
+            context.EFlags &= ~static_cast<DWORD>(0x100);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        const DWORD dr6 = context.Dr6;
+        if ((dr6 & 0xFu) == 0) return EXCEPTION_CONTINUE_SEARCH;
+        context.Dr6 = 0;
+        for (unsigned index = 0; index < 4; ++index)
+            if ((dr6 & (1u << index)) != 0) sr_watch_hit(index, context);
+        return EXCEPTION_CONTINUE_EXECUTION;  // a data breakpoint does not consume the instruction
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// The arming sweep for the request/stream watch: starts when the attach has registered the request, configures every
+// thread that has been alive across two scans, and keeps picking up threads created later.
+void sr_start_watch_sweep() {
+    std::thread([] {
+        StreamReap& watch = stream_reap();
+        for (unsigned tick = 0; tick < 12000; ++tick) {
+            if (watch.request.load(std::memory_order_relaxed) && watch.stream.load(std::memory_order_relaxed)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (!watch.request.load(std::memory_order_relaxed) || !watch.stream.load(std::memory_order_relaxed)) return;
+        static constexpr unsigned kMaxThreads = 4096, kPending = 512;
+        static DWORD configured[kMaxThreads];
+        static DWORD seen_tid[kMaxThreads];
+        static ULONGLONG seen_at[kMaxThreads];
+        unsigned configured_count = 0, seen_count = 0;
+        std::uintptr_t last_request = 0, last_stream = 0;
+        const auto find = [](const DWORD* table, unsigned count, DWORD tid) -> int {
+            for (unsigned i = 0; i < count; ++i)
+                if (table[i] == tid) return static_cast<int>(i);
+            return -1;
+        };
+        std::uintptr_t points[4] = {};
+        DWORD dr7 = 0;
+        for (;;) {
+            // The attach names the request and the stream; re-arm every thread when the measured pair changes (a later
+            // loading channel's attach would otherwise leave the watch on a stale object).
+            const std::uintptr_t request = watch.request.load(std::memory_order_relaxed);
+            const std::uintptr_t stream = watch.stream.load(std::memory_order_relaxed);
+            if (request && stream && (request != last_request || stream != last_stream)) {
+                points[0] = request + 0x18;
+                points[1] = request + 0x20;
+                points[2] = stream + 0x120;
+                points[3] = sr_image_base + kSrRecordSlot4TickRva;
+                for (unsigned i = 0; i < 4; ++i) watch.points[i].store(points[i], std::memory_order_relaxed);
+                for (unsigned i = 0; i < 3; ++i) watch.point_last[i].store(executor_watch_read_u64(points[i]));
+                dr7 = sr_watch_dr7(points);
+                configured_count = 0;
+                last_request = request;
+                last_stream = stream;
+                char log[480];
+                std::snprintf(log, sizeof log,
+                              "[rt] streamreap watch: request 0x%llx stream 0x%llx; DR0 game+0x%x DR1 game+0x%x "
+                              "DR2 game+0x%x DR3 game+0x%x (live control); dr7 0x%lx; arming every thread\n",
+                              static_cast<unsigned long long>(request), static_cast<unsigned long long>(stream),
+                              static_cast<unsigned>(points[0] - sr_image_base),
+                              static_cast<unsigned>(points[1] - sr_image_base),
+                              static_cast<unsigned>(points[2] - sr_image_base),
+                              static_cast<unsigned>(points[3] - sr_image_base), static_cast<unsigned long>(dr7));
+                std::lock_guard lock(sr_print_mutex());
+                std::fwrite(log, 1, std::strlen(log), stderr);
+                std::fflush(stderr);
+            }
+            const ULONGLONG now = GetTickCount64();
+            DWORD pending[kPending];
+            unsigned pending_count = 0, refused = 0;
+            const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if (snapshot != INVALID_HANDLE_VALUE) {
+                THREADENTRY32 entry{};
+                entry.dwSize = sizeof entry;
+                const DWORD pid = GetCurrentProcessId();
+                const DWORD self = GetCurrentThreadId();
+                if (Thread32First(snapshot, &entry))
+                    do {
+                        if (entry.th32OwnerProcessID != pid || entry.th32ThreadID == self) continue;
+                        if (find(configured, configured_count, entry.th32ThreadID) >= 0) continue;
+                        const int seat = find(seen_tid, seen_count, entry.th32ThreadID);
+                        if (seat < 0) {
+                            if (seen_count < kMaxThreads) {
+                                seen_tid[seen_count] = entry.th32ThreadID;
+                                seen_at[seen_count] = now;
+                                ++seen_count;
+                            }
+                            continue;  // first sight: wait one scan before suspending it
+                        }
+                        if (now - seen_at[seat] < 1000) continue;
+                        if (pending_count < kPending) pending[pending_count++] = entry.th32ThreadID;
+                    } while (Thread32Next(snapshot, &entry));
+                CloseHandle(snapshot);
+            }
+            for (unsigned i = 0; i < pending_count; ++i)
+                if (dr7 && sr_watch_configure_thread(pending[i], points, dr7)) {
+                    if (configured_count < kMaxThreads) configured[configured_count++] = pending[i];
+                } else {
+                    ++refused;
+                }
+            watch.watch_armed.store(configured_count, std::memory_order_relaxed);
+            (void)refused;
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        }
+    }).detach();
+}
+
+void start_stream_reap_probe(std::uintptr_t image_base, std::size_t image_size, bool watch_enabled) {
+    (void)image_size;
+    StreamReap& watch = stream_reap();
+    sr_image_base = image_base;
+    watch.watch_enabled.store(watch_enabled, std::memory_order_relaxed);
+    unsigned armed = 0;
+    std::string list;
+    for (unsigned i = 0; i < kSrSiteCount; ++i) {
+        auto* const at = reinterpret_cast<unsigned char*>(image_base + kSrSites[i].rva);
+        DWORD old_protect = 0;
+        if (!VirtualProtect(at, 1, PAGE_EXECUTE_READWRITE, &old_protect)) {
+            list += std::string(" ") + kSrSites[i].name + "=FAILED";
+            continue;
+        }
+        watch.original[i].store(*at, std::memory_order_relaxed);
+        watch.address[i].store(reinterpret_cast<std::uintptr_t>(at), std::memory_order_relaxed);
+        *at = 0xCC;
+        VirtualProtect(at, 1, old_protect, &old_protect);
+        ++armed;
+        char item[64];
+        std::snprintf(item, sizeof item, " %s=game+0x%x", kSrSites[i].name,
+                      static_cast<unsigned>(kSrSites[i].rva));
+        list += item;
+    }
+    AddVectoredExceptionHandler(1, sr_exception);
+    watch.ready.store(true, std::memory_order_relaxed);
+    std::fprintf(stderr,
+                 "[rt] streamreap: %u/%u int3 site(s) armed:%s; manager game+0x%x, request cache *game+0x%x, watch %s\n",
+                 armed, kSrSiteCount, list.c_str(), static_cast<unsigned>(kSrManagerGlobalRva),
+                 static_cast<unsigned>(kSrRequestCacheGlobalRva), watch_enabled ? "on" : "off");
+    std::fflush(stderr);
+    if (watch_enabled) sr_start_watch_sweep();
+    // The 2 s sampler: state words, manager, request cache, the measured request and stream, and the hit counters.
+    std::thread([] {
+        for (unsigned tick = 1; tick <= 320; ++tick) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (tick % 2 != 0) continue;
+            StreamReap& watch = stream_reap();
+            const std::uintptr_t request = watch.request.load(std::memory_order_relaxed);
+            if (!request && !watch.subscriber.load(std::memory_order_relaxed)) continue;
+            if (watch.sampler_lines.fetch_add(1, std::memory_order_relaxed) >= kSrSamplerLines) return;
+            char head[96];
+            std::snprintf(head, sizeof head, "[rt] streamreap at %u s:", tick);
+            std::string text = head;
+            text += sr_state_text();
+            text += sr_manager_text();
+            text += sr_cache_text(request, watch.request_key.load(std::memory_order_relaxed));
+            if (request) text += sr_request_text(request);
+            const std::uintptr_t sampled_stream = watch.stream.load(std::memory_order_relaxed);
+            text += sr_stream_text(sampled_stream);
+            text += sr_gate_text(sampled_stream);
+            text += sr_hits_summary();
+            text += "\n";
+            sr_print(text);
+        }
+    }).detach();
+    // The 10 s counter reporter: a boot without a hit still shows what the probe saw.
+    std::thread([] {
+        for (unsigned sample = 1; sample <= 30; ++sample) {
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+            StreamReap& watch = stream_reap();
+            std::fprintf(stderr, "[rt] streamreap counters at %u s:%s watch-armed %u\n", sample * 10,
+                         sr_hits_summary().c_str(), watch.watch_armed.load(std::memory_order_relaxed));
+            std::fflush(stderr);
+        }
+    }).detach();
+    // The 100 ms fine change log: the request's first 0x40 bytes, the stream's +0xfc..+0x128 block, the cache entry
+    // count and the record's slot-4 completion dword; one line per change after the request is known.
+    std::thread([] {
+        StreamReap& watch = stream_reap();
+        std::uint64_t last_request[8] = {};
+        std::uint64_t last_stream[7] = {};
+        std::uint32_t last_cache_entries = 0, last_record = 0;
+        std::uintptr_t last_request_ptr = 0;
+        bool have = false;
+        for (unsigned tick = 0; tick < 3100; ++tick) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            const std::uintptr_t request = watch.request.load(std::memory_order_relaxed);
+            const std::uintptr_t stream = watch.stream.load(std::memory_order_relaxed);
+            if (!request) continue;
+            std::uint64_t now_request[8] = {};
+            std::uint64_t now_stream[7] = {};
+            for (unsigned i = 0; i < 8; ++i) now_request[i] = executor_watch_read_u64(request + i * 8);
+            if (stream)
+                for (unsigned i = 0; i < 7; ++i) now_stream[i] = executor_watch_read_u64(stream + 0xfc + i * 8);
+            std::uint32_t now_cache_entries = 0, now_record = 0;
+            {
+                const std::uintptr_t cache = static_cast<std::uintptr_t>(
+                    executor_watch_read_u64(sr_image_base + kSrRequestCacheGlobalRva));
+                if (cache) now_cache_entries = executor_watch_read_u32(cache + 0x358);
+            }
+            bool ok_record = false;
+            now_record = title_read_u32(sr_image_base, kTitleLoadingRecordRva + 4 * 0x50 + 0x18, ok_record);
+            bool changed = !have || request != last_request_ptr || now_cache_entries != last_cache_entries ||
+                           now_record != last_record;
+            for (unsigned i = 0; i < 8; ++i)
+                if (now_request[i] != last_request[i]) changed = true;
+            for (unsigned i = 0; i < 7; ++i)
+                if (now_stream[i] != last_stream[i]) changed = true;
+            if (!changed) continue;
+            if (watch.fine_lines.fetch_add(1, std::memory_order_relaxed) >= kSrFineLines) return;
+            char head[128];
+            std::snprintf(head, sizeof head, "[rt] streamreap t=%.3f fine request 0x%llx stream 0x%llx",
+                          executor_watch_seconds(), static_cast<unsigned long long>(request),
+                          static_cast<unsigned long long>(stream));
+            std::string text = head;
+            text += " request" + sr_qwords("", request, 8);
+            if (stream) text += sr_qwords(" stream +0xfc", stream + 0xfc, 7);
+            text += " cache-entries " + std::to_string(now_cache_entries) + " record-slot4-comp " +
+                    std::to_string(now_record);
+            text += sr_hits_summary();
+            text += "\n";
+            sr_print(text);
+            for (unsigned i = 0; i < 8; ++i) last_request[i] = now_request[i];
+            for (unsigned i = 0; i < 7; ++i) last_stream[i] = now_stream[i];
+            last_request_ptr = request;
+            last_cache_entries = now_cache_entries;
+            last_record = now_record;
+            have = true;
+        }
+    }).detach();
+}
+
+
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -7106,6 +7911,16 @@ int wmain(int argc, wchar_t** argv) {
         // session-3 completion dispatch probe above). Off by default.
         if (const char* dispatch = std::getenv("PALMETTO_S3DISPATCH"); dispatch && *dispatch && *dispatch != '0')
             start_s3_dispatch_probe(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size);
+        // PALMETTO_STREAMREAP=1: int3 probes and samplers on the session-3 stream request's completion producer - the
+        // request/stream class vtable slots, the request cache's key/lookup/completion family, the streaming manager's
+        // job reap and the manager global game+0x7455F40 - so one boot names whether a producer runs for this request;
+        // PALMETTO_STREAMREAP_WATCH=1 adds the hardware write watch on request +0x18/+0x20 and the stream pending slot
+        // +0x120, with the loading record's slot-4 poll tick as the same-boot title-store live control. Off by default.
+        if (const char* spec = std::getenv("PALMETTO_STREAMREAP"); spec && *spec && *spec != '0') {
+            const char* watch = std::getenv("PALMETTO_STREAMREAP_WATCH");
+            start_stream_reap_probe(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size,
+                                    watch && *watch && *watch != '0');
+        }
         // PALMETTO_LOADER_WATCH=1: hardware data watchpoints on the loader object's armed flag (+0x78) and in-flight
         // count (+0x64), so the storing title code and its stack are captured at each transition (diagnostic; see the
         // loader write watch above). Off by default.
