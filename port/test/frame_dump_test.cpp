@@ -438,6 +438,16 @@ int main() {
                "the scan appends nothing past its own collection (the budget is the caller's)");
     }
 
+    {
+        // docs/vertex_buffer_va.md section 10: the content-frame readback arming rule. The draw PALMETTO_READBACK_AT_DRAW
+        // lists arms; so does every draw of a submission whose lists imported title pages at first use (the stage-3
+        // content submits, which no present follows); neither stays off.
+        expect(frame_dump::draw_readback_arms(true, false), "a listed draw arms its target readback");
+        expect(frame_dump::draw_readback_arms(false, true), "a title-import submission arms every draw it holds");
+        expect(frame_dump::draw_readback_arms(true, true), "both triggers together arm the readback");
+        expect(!frame_dump::draw_readback_arms(false, false), "an unlisted draw of an ordinary submission stays unread");
+    }
+
     if (failures) return 1;
     std::printf("frame_dump_test: command kinds, ordered writers and table windows exact\n");
     return 0;

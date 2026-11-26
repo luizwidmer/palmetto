@@ -1240,6 +1240,13 @@ struct ReplayFunctions {
     // mirror, and a readback of the first sampled image. Both optional; consumed only by the frame dump's sample mode.
     std::function<bool(std::uint64_t table_va, std::uint32_t max_descriptors, SampledTable& out)> sampled_table;
     std::function<void(VkImage image, VkFormat format, VkExtent2D extent, ResourceId resource)> capture_sample;
+    // Diagnostic (docs/vertex_buffer_va.md section 10): the content frame. True while a submission is one whose lists
+    // named title memory at first use (register_title_command_buffers imported it), i.e. the stage-3 content submits
+    // this slice's picture comes from. The draw readback arms on this so the content pixels are copied after the
+    // submission, not only the title page's: the presenter capture's fixed schedule misses the presents that follow the
+    // content submits, so this readback is how the content frame is read. Optional; false when the device registered no
+    // hook.
+    std::function<bool()> title_import_capture;
     // Diagnostic (docs/frame_capture.md): read up to `bytes` of the title's own memory at `va` (the constants a draw's
     // V# names), in place. False when the range is not committed/readable; `read` returns the bytes actually copied.
     std::function<bool(std::uint64_t va, std::uint32_t bytes, std::uint8_t* out, std::uint32_t& read)> read_title_memory;
@@ -1421,6 +1428,14 @@ inline bool readback_armed_at(std::uint64_t draw) {
     return false;
 }
 inline unsigned long long readback_primary() { return readback_draws().empty() ? 0 : readback_draws().front(); }
+
+// When a draw's colour target is copied back after its submission (docs/frame_capture.md, docs/vertex_buffer_va.md
+// section 10). Two triggers: the draw PALMETTO_READBACK_AT_DRAW lists, and any draw of a submission whose lists named
+// title memory at first use - the stage-3 content submits, whose presents the presenter capture's fixed schedule
+// misses, so the draw readback is the only way to read the content pixels. Pure; frame_dump_test pins it.
+inline bool draw_readback_arms(bool listed_draw, bool title_import_submission) {
+    return listed_draw || title_import_submission;
+}
 
 // The descriptor-table V#s a draw's s8 table holds at the slot the module reads as matrix A (s8+0) and at the next one
 // (s8+0x40), decoded from the arena. Used by the readback arming line so both draws of the frame can be compared; reads
@@ -3212,9 +3227,13 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
         }
         // Once (or at every draw PALMETTO_READBACK_AT_DRAW names - a comma-separated list arms the frame's even and odd
         // draws together): this draw's colour target is read back after its submission (docs/page_content.md), so the
-        // frame's own bytes can be compared with what the present blits.
-        if (frame_dump::readback_armed_at(seen) && vk.capture_attachment && !p.colors.empty() && p.colors[0].id &&
-            p.colors[0].binding.image) {
+        // frame's own bytes can be compared with what the present blits. A submission whose lists named title memory at
+        // first use (the stage-3 content submits, docs/vertex_buffer_va.md section 10) arms every draw it holds, because
+        // the presenter captures miss the presents that follow it.
+        const bool title_import_armed = vk.title_import_capture && vk.title_import_capture();
+        if (frame_dump::draw_readback_arms(frame_dump::readback_armed_at(seen), title_import_armed) &&
+            vk.capture_attachment && !p.colors.empty() &&
+            p.colors[0].id && p.colors[0].binding.image) {
             const VkFormat captured = pipeline->color_formats[0] != VK_FORMAT_UNDEFINED
                                           ? pipeline->color_formats[0]
                                           : p.colors[0].binding.format;

@@ -1276,6 +1276,11 @@ public:
                                             palmetto::ResourceId resource, std::uint64_t draw) {
             arm_attachment_capture(image, format, extent, resource, draw);
         };
+        // Diagnostic (docs/vertex_buffer_va.md section 10): the content frame's readback trigger. True while the
+        // submission being prepared is one whose lists named title memory at first use.
+        replay_.title_import_capture = [this] {
+            return title_import_capture_active_.load(std::memory_order_relaxed);
+        };
         // Diagnostic (docs/frame_capture.md): the sampled-texture readback's copy. Off unless the frame dump's sample
         // mode arms it, and it only ever copies.
         replay_.capture_sample = [this](VkImage image, VkFormat format, VkExtent2D extent,
@@ -1945,6 +1950,17 @@ public:
                              static_cast<unsigned long long>(va), static_cast<unsigned long long>(bytes));
         }
         return imported;
+    }
+    // Called by a queue once per submission, right after register_title_command_buffers (docs/vertex_buffer_va.md
+    // section 10): when that call imported title pages at first use, this submission holds the stage-3 content draws,
+    // and the next two submissions are armed with it (the content is submitted over several frames). While armed, the
+    // replay arms a colour-target readback on every draw the submission holds; the presenter capture's fixed schedule
+    // misses the presents that follow the content submits, so this readback is how the content frame is read.
+    void title_import_capture_tick(std::size_t imported) {
+        if (imported) title_import_capture_pending_.store(3, std::memory_order_relaxed);
+        const unsigned pending = title_import_capture_pending_.load(std::memory_order_relaxed);
+        title_import_capture_active_.store(pending != 0, std::memory_order_relaxed);
+        if (pending) title_import_capture_pending_.fetch_sub(1, std::memory_order_relaxed);
     }
     // The byte range of an imported title buffer that holds `va`, cut to the range's end.
     bool imported_title_range(std::uint64_t va, std::uint64_t& size, VkBuffer& buffer, VkDeviceSize& offset) const {
@@ -3009,6 +3025,10 @@ private:
     std::atomic<std::uint64_t> imported_title_hits_{0};
     std::atomic<unsigned> title_import_refusals_{0};
     std::atomic<bool> import_conflict_{false};  // a title descriptor named an imported range: draws stay refused
+    // The content-frame readback trigger (docs/vertex_buffer_va.md section 10): set for the submission whose lists
+    // imported title pages at first use and the two after it, so the replay's draw readback arms on the content draws.
+    std::atomic<unsigned> title_import_capture_pending_{0};
+    std::atomic<bool> title_import_capture_active_{false};
     // The one-shot colour-target readbacks of docs/page_content.md (up to four per submission, docs/frame_capture.md):
     // armed by the draws PALMETTO_READBACK_AT_DRAW lists and taken after that submission completes.
     AttachmentCapture attachment_captures_[4];
@@ -3641,7 +3661,11 @@ private:
         // prepared, so prepare_draw finds a VkBuffer for it. The measured stage-3 range is the title's committed memory
         // and the arena is full, so the import is the one answer that needs no arena room; a span the device cannot
         // import stays unresolved and keeps the replay's named refusal.
-        context_.register_title_command_buffers(lists);
+        const std::size_t imported_title_spans = context_.register_title_command_buffers(lists);
+        // Diagnostic (docs/vertex_buffer_va.md section 10): arm the draw readback on the content submissions, whose
+        // presents the presenter capture misses. A no-op unless that registration imported something or an armed
+        // submission is pending.
+        context_.title_import_capture_tick(imported_title_spans);
         // Diagnostic (docs/frame_capture.md): which control drew after the frame's commands. The one-shot readback below
         // copies the target after them, so its line is labelled as the control's readback; that axis measures coverage
         // independently of the title pixel shader.
@@ -4890,6 +4914,56 @@ private:
                                          "image is an armed sampled input\n",
                                          static_cast<unsigned long long>(capture.draw),
                                          static_cast<unsigned long long>(capture.resource));
+                        }
+                        // Diagnostic (docs/vertex_buffer_va.md section 10): write the copied window out as a binary PPM,
+                        // so the content frame the title draws can be inspected as pixels rather than averages. Off
+                        // unless PALMETTO_READBACK_PPM names an existing directory; bounded by
+                        // PALMETTO_READBACK_PPM_LIMIT (default 4). 4-byte texels are written as their R,G,B bytes (the
+                        // display targets are VK_FORMAT_R8G8B8A8_*); other texel sizes are skipped and named.
+                        if (const char* ppm_dir = std::getenv("PALMETTO_READBACK_PPM"); ppm_dir && *ppm_dir) {
+                            static std::atomic<unsigned> ppm_written{0};
+                            unsigned ppm_limit = 4;
+                            if (const char* limit_text = std::getenv("PALMETTO_READBACK_PPM_LIMIT"))
+                                ppm_limit = static_cast<unsigned>(std::max(0, std::atoi(limit_text)));
+                            if (ppm_written.load(std::memory_order_relaxed) < ppm_limit) {
+                                if (capture_texel != 4) {
+                                    std::fprintf(stderr,
+                                                 "[rt] replay: readback ppm [draw %llu]: skipped, a %u-byte texel is "
+                                                 "not written\n",
+                                                 static_cast<unsigned long long>(capture.draw), capture_texel);
+                                } else {
+                                    char path[1024];
+                                    std::snprintf(path, sizeof path,
+                                                  "%s\\readback_draw%llu_res%llx_%ux%u.ppm", ppm_dir,
+                                                  static_cast<unsigned long long>(capture.draw),
+                                                  static_cast<unsigned long long>(capture.resource),
+                                                  attachment_regions[k].width, attachment_regions[k].height);
+                                    if (FILE* file = std::fopen(path, "wb")) {
+                                        std::fprintf(file, "P6\n%u %u\n255\n", attachment_regions[k].width,
+                                                     attachment_regions[k].height);
+                                        std::vector<std::uint8_t> row(std::size_t(attachment_regions[k].width) * 3);
+                                        for (unsigned y = 0; y < attachment_regions[k].height; ++y) {
+                                            const std::uint8_t* texel =
+                                                bytes + std::size_t(y) * attachment_regions[k].width * capture_texel;
+                                            for (unsigned x = 0; x < attachment_regions[k].width; ++x) {
+                                                row[std::size_t(x) * 3 + 0] = texel[0];
+                                                row[std::size_t(x) * 3 + 1] = texel[1];
+                                                row[std::size_t(x) * 3 + 2] = texel[2];
+                                                texel += capture_texel;
+                                            }
+                                            std::fwrite(row.data(), 1, row.size(), file);
+                                        }
+                                        std::fclose(file);
+                                        ppm_written.fetch_add(1, std::memory_order_relaxed);
+                                        std::fprintf(stderr,
+                                                     "[rt] replay: readback ppm [draw %llu target resource 0x%llx]: "
+                                                     "%ux%u written to %s\n",
+                                                     static_cast<unsigned long long>(capture.draw),
+                                                     static_cast<unsigned long long>(capture.resource),
+                                                     attachment_regions[k].width, attachment_regions[k].height, path);
+                                    }
+                                }
+                            }
                         }
                         base += (full_target ? 1 : 2) * attachment_windows[k];
                     }

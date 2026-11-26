@@ -251,3 +251,177 @@ placement trace and the A/B boots above. The behaviour was cross-checked against
 (title-memory windows) and `runtime/src/title_window_plan.h`, commit `ed94fbef9888` (PR #1723, Moriz82). No code from
 that project was copied; the upstream project remains the copyright of its contributors and its license continues to
 apply to its own tree. No game data is added: RVAs, VAs, counts, shapes and outcomes only.
+
+## 10. The content frame is black on the presented resource, and the stop is a title renderer object reused
+
+**Status: measured; the picture question is answered and the renderer stop is attributed as title-side.** Section 6
+left the content pixels unmeasured: the twelve presenter captures were black because no captured present lands after
+the content submits. This section arms the existing draw readback on the submissions that imported title pages at first
+use (the content submits), copies the draw targets and writes them out as pixels, and also measures the stop with the
+in-process registers the trace already records. The answer is plain: the title's first content frames are black on the
+compose targets, and those targets are the resources the presenter then presents; the stop is a title renderer/command
+object whose memory is overwritten or released while the renderer still uses it, with no layer frame in the chain. The
+arena default stays 1024 MiB: raising it to 2047 removes the buffer-placement refusals but does not advance the boot or
+change the picture. Counts, RVAs, VAs and outcomes only; no package bytes, paths or extracted tables.
+
+### 10.1 The capture schedule this slice adds
+
+| file | change |
+|---|---|
+| `port/src/vulkan_replay.h` | `ReplayFunctions::title_import_capture`: true while the submission being prepared is one whose lists named title memory at first use; the pure `frame_dump::draw_readback_arms(listed, title_import)` rule that makes that submission's every draw arm the colour-target readback |
+| `port/src/vulkan_backend.h` | `VulkanContext::title_import_capture_tick(imported)`: the submission whose registration imported title pages plus the next two are armed; the PPM writer that dumps each copied window (`PALMETTO_READBACK_PPM=<dir>`, at most `PALMETTO_READBACK_PPM_LIMIT` files, default 4) |
+| `port/test/frame_dump_test.cpp` | four checks pinning the arming truth table: a listed draw arms, a title-import submission arms every draw it holds, both together arm, neither stays off |
+
+The trigger is a measurement, not a guess: the first import happens in the content submission itself, and the
+`title pages imported at first use` lines are the same ones section 5 measures. The arm is bounded to three
+submissions because the content came in two in every boot measured here. `PALMETTO_READBACK_FULL=1` copies the whole
+target; without it the existing 128x128-window readback runs with its write control (the same target cleared by the
+layer to `51 102 204` and copied into a second window), which is how the copy path is proven. The new dump only writes
+the bytes the existing readback has already copied; no recorded command changes.
+
+### 10.2 The captured content pixels
+
+Every content draw the trigger armed is a 3-draw submission: two draws into a 4K intermediate and one compose draw
+into a 4K display buffer, all `format 37`, viewport `3840x2160`. The compose draw's target resource id is the id the
+present trace prints for the presented plane, which is the identity that matters for the picture:
+
+| arm | presented plane ids (present calls 1, 2, 1000) | content compose-draw target | content pixels |
+|---|---|---|---|
+| `contentr1`, full target, 1024 MiB | `0x1BC9958C550`, `0x1BD28020490`, `0x1BD28020490` | draw 3676 -> `0x1BD28020490`; draw 3679 -> `0x1BC9958C550` | all-zero: 8,294,400/8,294,400 texels of the full 3840x2160 target |
+| `contentv1`, window, 1024 MiB | `0x1A9033599C0`, `0x1A903359C30`, `0x1A903359C30` | draw 4547 -> `0x1A9033599C0`; draw 4550 -> `0x1A903359C30` | 0 0 0 at the centre window (1856,1016, 128x128), non-black 0/16,384 |
+| `contentb1`, window, 2047 MiB | `0x21033B98CB0`, `0x2103391D230`, `0x2103391D230` | draw 3644 -> `0x2103391D230`; draw 3647 -> `0x21033B98CB0` | 0 0 0 at the centre window, non-black 0/16,384 |
+
+The full-target arm writes the copied 4K targets out as PPM files: four files of 24,883,217 bytes each, every one
+all-zero (mean 0 0 0, maximum 0, non-zero byte 0). The two 3-draw submissions hold six draws in both arms; the
+intermediate-target draws read back zero as well, so the frame's own passes leave the intermediate black too.
+
+The copy path is proven on the same 4K `format 37` targets in the window arms: every capture's write control reads
+`mean 51 102 204, non-black 16,384/16,384, peak 204`, so an all-zero content window is the target's content and not a
+failed copy, mapping or format. One diagnostic artefact is named so a later reader reads the numbers in order: within
+one submission, a second capture of the same target copies after the first capture's write-control clear, so its
+"content" window is `51 102 204`; the first capture of a target after the title's last write is the measurement. The
+`contentv1` first captures are draws 4545, 4547 and 4550 (intermediate and both display buffers), all zero. A
+known-good raster control was also drawn in that boot (`vs_tri` + `fs_solid`); armed by draw index it landed on a
+repeating title-page frame, so it proves the replay's raster/readback path for a 4K format-37 target but not inside the
+content submission; the falsifier for a same-frame control is in section 10.6.
+
+Plain answer: the title's first content frames draw black. The display resources the presenter names read 0 over the
+whole 3840x2160 target immediately before the presents that follow them, so the black is not a capture-scheduling
+artefact and not a readback artefact. The presenter's own 12 captures stay black because they stop before the
+post-content presents; the draw readback covers exactly those frames.
+
+### 10.3 The stop, with registers and the decompiled chain
+
+`contentv1` (measured binary `80D9EEB7`) stops at `game+0x13360A3`, `read` of `0xFFFFFFFFFFFFFFFF`, t 60.27 s, 2.3 s
+after the machine word first reads 3 (58.0 s); `contentr1` stops at the same site (t 92.08 s after a 54.7 s single
+deferred build); `contentb1` (2047 MiB) stops at `game+0x515B22D` reading `0x3F800000`, t 53.41 s, 1.4 s after stage 3.
+
+The fault instruction at `0x13360A3` is `CALL qword ptr [RAX+0xB0]` with `RAX = 0x3F8000003F800000`. That operand
+address is non-canonical, and Windows reports a non-canonical access with address `0xFFFFFFFFFFFFFFFF`; the stop is
+therefore not a read at -1. `RAX` is the object's first qword, so the object's vtable pointer holds two `1.0f` floats.
+The object is `RSI = RCX = 0x1B60C1394E0` in `contentv1`, and the trace's 0x80-byte fault dump at it is
+`float4(1,1,1,0)` repeated eight times - a constant/matrix block, not a renderer object. `RBX = 0x1B60B47F0A8` was
+computed earlier in the same call as `[object+0x28]+0x18` (at `0x1335B1F`), so that field was a valid pointer when
+read and was replaced before the call; the object's memory is reused while its executor runs.
+
+The 2047 MiB arm is the same family at another point: `0x515B22D` reads at address `0x3F800000` - again a `1.0f`
+constant used as a pointer - and its stack is `0x515B22D <- 0x538D651 <- 0x538D36C <- 0x538D96C <- 0x183CEA <-
+0x1837F3 <- 0x182EB4`, i.e. the same outer renderer graph. The earlier 2047 arm's `0x515ACF5` stop (section 5) is the
+same shape in the title's own allocator: the decompiled free path at `0x515ABB0` reaches `LAB_14515acf5`
+(`plVar10 = *(uVar4+0x18) & ~3`) with a null tree node, so the block being released is not in the allocator's tree.
+
+Decompiled with this project's Ghidra tooling, the chain is the title's render-command/job path. `game+0x1335A20` is
+the per-command executor: it makes virtual calls on one object at vtable slots `0x28`, `0xA8`, `0x30`, `0x98`, `0xB0`,
+`0xB8` and `0xC8`, and releases a second object (slot `0x10`) on its way out. `game+0x186170` is the job executor
+around it: it checks a state dword at `job+0x40` (the code compares it with 3), runs the per-command executor, and
+stores 2 in that dword when it returns. Its caller `game+0x1856D0` is the submit/wait: it waits while `job+0x40` is 0,
+and when the dword reads 1 it clears `job+0x30` and releases the job (`func_0x14503e5c0`). Above that, `0x184EB0`
+flushes, `0x184770` creates or finds a job, `0x1836D0` dispatches on a command opcode (1..6), `0x182D90`, `0x182B60`
+and `0x1829C0` build the command, and `0x183A20`/`0x184250` walk the command graph's repeated list at `+0x90`. The
+repeating `0x183AAF`/`0x18435F` frames in the stop stack are that walk.
+
+Verdict: this is a title-side lifetime race in the renderer's job/command graph across the stage-3 transition, not a
+runtime answer. No frame of the 12-16 frame chain is in the layer; the layer's submissions in the window were all
+accepted (0 `ExecuteCommandLists` refusals, 0 unknown-resource refusals); the draws whose targets are read back were
+resolved, executed and copied. The object that faults is title heap memory filled by the title's own constant data. The
+honest statement of the remaining gap: the writer (the thread and the store that frees/reuses the object) is not named
+yet, and the two stop sites are two windows on one race rather than a proven single store.
+
+The scope question "is it ours" is answered by the isolation the slice already has: with the three refusals present
+(section 5's before arm) the same site stopped; with the imports and zero refusals it stops at the same site
+(`contentv1`, `contentr1`); and the arena arm moves it. Nothing this layer answers appears in the fault path.
+
+### 10.4 The arena A/B
+
+Both arms are the same binary, SHA-256 `80D9EEB7...5A237F3A`, the same environment and capture schedule, one boot
+under the boot lock, `PALMETTO_ARENA_MB` unset (1024 MiB) against 2047 MiB (the device cap). The full-target arm of
+section 10.2 is the pre-refactor build `1446B707...5733764C`; the only difference between the three is the pure
+`draw_readback_arms` helper and its test (which record no command) and, after the measurements, comment text. The
+tree's gate build is `E6131819...08213B17`; its PE timestamp differs from the measured arms and its code is the same:
+
+| measurement | 1024 MiB, `contentv1` | 2047 MiB, `contentb1` |
+|---|---:|---:|
+| stage 3 (machine word current 3) | 58.0 s | 52.0 s |
+| verdict | STOP `game+0x13360A3` read `0xFFFFFFFFFFFFFFFF`, t 60.27 s | STOP `game+0x515B22D` read `0x3F800000`, t 53.41 s |
+| `ExecuteCommandLists` ok / refused | 4,555 / 0 | 3,653 / 0 |
+| slot-133 creations ok / failed | 4,517 / 84 | 4,598 / 3 |
+| buffer placements refused `E_OUTOFMEMORY` | 81 | **0** |
+| placed-texture refusals `E_INVALIDARG` | 3 | 3 |
+| title spans imported / draws armed | 2 / 6 | 2 / 6 |
+| content-frame readback | black (window) | black (window) |
+| presents / captures | 2,277 / 12 black | 1,826 / 10 black |
+| wall | 84.7 s | 74.8 s |
+
+So raising the arena removes 81 buffer-placement refusals and changes the stop site and its timing, but it brings no
+content pixel and no frame the 1024 MiB arm does not reach: both arms capture the content frame, both are black, and
+both stop in the same title-side family. The refusals are placements the renderer never needs for the frame that
+reaches the screen, while the arena at 1024 MiB is measured exactly full in the same window (section 2.3). The
+decision is to keep `kArenaDefaultMiB = 1024`: a larger default doubles the address space, moves the stop, and the A/B
+shows no measured benefit. `arena_size_test` is unchanged.
+
+### 10.5 The other stop family measured while reaching for the picture
+
+Three of the first four content-capture boots stopped before stage 3, and they are a different family, recorded here so
+the numbers are not confused with the renderer stop: `content1` stopped at `game+0x28CD3CC` (read `0xD60800F680`,
+t 52.36 s, four cascading exceptions on title task threads), `content1b` at `game+0x86F981` (read `0x9B25`, t 58.81 s,
+three exceptions) and `contentr3` at `0x0` (execute, four exceptions); the first two show `loading 2`, `session 1` and
+machine word 2/2. All three had a `[rt] replay: the Vulkan device was lost` line followed by `ExecuteCommandLists`
+refusals as `unsupported`; the device-lost line also appears in earlier arms (`boot-vfix2`, `boot-vmeas3`,
+`boot-vmeas5`). That is a separate, pre-existing runtime-answer candidate (a GPU command that faults the device) and
+is not this slice's stop.
+
+### 10.6 Limits and the next falsifier
+
+- **One boot per configuration.** Stage 3 ranged 52.0-58.0 s and the stop moved between `game+0x13360A3`,
+  `game+0x515B22D` and the section-5 sites; the content draw indices also vary (`3674`-`3679`, `4545`-`4550`,
+  `3642`-`3647`), which is why a control armed by a fixed draw index did not land in a content submission.
+- **The writer is unnamed.** The next falsifier is a hardware write watchpoint on the faulting object's first qword,
+  armed from the object address a `PALMETTO_POKE_LOG` line at `game+0x1335A20` entry prints, plus a poke line on the
+  `job+0x40` state stores in `0x1856D0`/`0x186170`; that would name the thread and the store that reuses the object.
+- **Same-frame raster control.** Arming the known-good control triangle (or the PS-only control) on the same
+  title-import trigger used for the readback would put the control's 32 160 240 output into a content submission's own
+  target, closing the last gap between "the copy path works" and "the content submission's raster path works".
+- **The full-target dump is one boot's pixels.** It is the frame's bytes, not a movie of frames; the title presents
+  after the content frames, but the presenter capture's fixed 200-present schedule still misses those presents.
+- **The content is the loading-era frame.** The measured frame is the first stage-3 content the renderer submits; a
+  later stage of the boot (stage 4) is not reached, so nothing here says the title's picture stays black later.
+
+### 10.7 Tests and gates
+
+- `port/test/frame_dump_test.cpp` gains four checks for `frame_dump::draw_readback_arms`: a listed draw arms, a
+  title-import submission arms every draw it holds, both together arm, and an unlisted draw of an ordinary submission
+  stays unread. The target exits 0.
+- Gate subset run on the changed tree: `frame_dump_test`, `unimplemented_policy_test` (98 checks),
+  `graphics_record_test`, `graphics_pso_test`, `buffer_va_index_test`, `dstorage_test`, `xapu_chad_test`,
+  `deferred_compile_test` (18 checks), `arena_size_test`, `xbox_present_test` and `xs_proxy_mock_test` all exit 0;
+  `d3d12_fence_timing_test` remains the documented pre-existing crash.
+- Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, and every
+  `tests/test_docs_*.py` check passes (the environment-variable check is the one that requires `PALMETTO_READBACK_PPM`
+  and `PALMETTO_READBACK_PPM_LIMIT` to be named in a page, which this section does).
+
+### 10.8 Attribution
+
+This section was implemented from this project's own measurements: the capture trigger's imports, the readback
+windows, the presenter plane ids, the in-process fault registers and memory, the 300 s arms and the arena A/B. The
+stop sites and the job/command chain were decompiled with the project's Ghidra tooling from the user's own image; no
+peer code was used and no game data is added. RVAs, VAs, field offsets, counts, shapes and outcomes only.
