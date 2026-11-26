@@ -1,7 +1,7 @@
 # The first-run, UI and movie path: the boot-media gate, the frame handshake and the calls behind the first visible frame
 
-**Status: static decompilation, no boot.** This page maps the title's own first-run/UI/movie path from the image
-alone: the boot-media gate the stage-2 boot sequence waits on, the frame loop that gate releases, the first-run,
+**Status: sections 1-10 are static decompilation, no boot; section 11 is measured.** This page maps the title's
+own first-run/UI/movie path from the image alone: the boot-media gate the stage-2 boot sequence waits on, the frame loop that gate releases, the first-run,
 accessibility, text-entry, profile, settings/save and launcher code with the runtime calls each one makes, and the
 separate movie/Bink module that produces the launch-video frames. Every entry is an image RVA (image base
 `0x140000000`) and a call site, a call graph edge, a structure offset or a count; no strings, asset contents or hashes
@@ -284,3 +284,145 @@ exact functions and gates to probe next, not a new measurement of them.
 - **Index**: this page needs one row in `docs/README.md` next to the picture-frontier pages; that file is outside
   this slice's write scope, so the lead adds it.
 - **Uncommitted files**: `docs/decomp_first_ui.md` (new, this slice). No other repository change.
+
+## 11. Measured: the AC chain in a boot (bounded probes, negative)
+
+**Status: measured, diagnostic only, negative.** Sections 1-10 are the static slice. This section reports what two
+130 s probe boots and one clean 300 s boot showed about the chain in section 2. The media module is armed - its kernel
+objects and both present semaphores exist early, the event handler is registered once, the per-frame media tick runs
+and the frame body is ticked 4556 times in 130 s - but the handler `0x247B500`, the AC opener `0x2484A90` and the AC
+setter `0x2218910` never execute, and both present-pass keys (`0x71B90AD`, `0x71B90AC`) read 0 in every sample of all
+three boots. The only in-image producer of the type-`0x24` set event, `0x2218180`, has no reference in the image and
+never executes (11.2). So **no shim answer is the missing side**: the AC handshake cannot be opened by title code in
+this build, and this slice changes no shim behaviour beyond the two diagnostic fields in 11.1.
+
+### 11.1 The probe and the two 130 s boots
+
+The probe is the tree's existing `PALMETTO_POKE_LOG` (up to four int3 entry probes; a hit logs the registers and the
+title stack words and then re-arms) plus two fields added to the existing `PALMETTO_STATE_TRACE` sampler in
+`port/src/main.cpp`: the two media/UI present semaphores `0x71B9078`/`0x71B9088`, which section 3 names as the body's
+release sites. Both switches are opt-in; the added fields are diagnostic-only and the default path is unchanged. The
+boots ran one at a time under `_setup/boot_lock.ps1` with `tooling/boot_report.py`, the standard Vulkan environment
+(`PALMETTO_D3D12=vulkan`, `PALMETTO_SHADERS`, `PALMETTO_SKIP_INT3=1`), logs outside the repository under
+`D:\leonida-work\boot-mediaac-probe`, `-producer` and `-300`. `PALMETTO_STATE_TRACE` reads the byte flags as a dword
+at the byte address, so the sample prints a key of 0 as `0xff000000` when the neighbouring byte is 0xff; the byte is
+the low one.
+
+| probe site | role (section 2/3) | hits in 130 s boot A |
+|---|---|---|
+| `0x247B500` | event handler that sets `0x75DF0D8` on event type `0x24` and clears it on `0x25` | **0** |
+| `0x2484A90` | AC opener: tail jump to `0x2218900` -> `0x2218910` | **0** |
+| `0x2218910` | the only instruction that sets `0x71B90AC = 1` | **0** |
+| `0x22185A0` | the boot-media/UI present body | **4556** |
+
+The 4556 body entries name the pumps that drive the tick, and the body exits at its first two compares every time:
+
+| body caller (return address after the tick call) | hits | what it is |
+|---|---|---|
+| `0x63AD7D` (tick call at `0x63AD78`) | 4529 | the title's task-queue pump, which drains two GDK task queues afterwards; supports H1 in section 7 |
+| `0x1E40BF3` | 6 | the async pump around an async wait |
+| `0x21B8A43` (tick call at `0x21B8A3E`) | 1 | the stage-2 boot-wait loop; it exits on its first iteration because the gate `0x71B9048` is already 2 |
+
+Boot A's chain words: `0x71B9048` 0 -> **2 at 10 s**; `0x71B90AD` 0 and `0x71B90AC` 0 in every sample; the semaphores
+`0x71B9078`/`0x71B9088` were **0x714/0x71c** from the 10 s sample; the state machine stayed current 2, next 2 (reached
+at 25 s); session 0; loading 1.
+
+Boot B re-armed the probe on the producer side: `PALMETTO_POKE_LOG=24846D0,2478440,2218180,2217C70`. It shows the media
+module is open and ticking while the one producer of the set event does not run:
+
+| probe site | role | hits in 130 s boot B |
+|---|---|---|
+| `0x24846D0` | the title's media/frame tick; it calls `0x2484A90` when bit 0 of `0x75DF0D8` is set | **5214** (caller return `0xC9E603`, the per-frame entry `0xC9E5E0`) |
+| `0x2478440` | media module open: creates the device-side objects and calls the registration thunk `0x5CABBB0` at `0x2479675` | **1** (caller return `0x19F4F54`) |
+| `0x2218180` | the only in-image producer of the type-`0x24` set event (11.2) | **0** |
+| `0x2217C70` | the selector thunk that tail-jumps to `0x2218180` | **0** |
+
+Boot B's chain words are the same negative (gate 2 at 20 s, the two keys 0, semaphores 0x714/0x71c, machine 2/2,
+session 0), with 0 exceptions and 249,337 D3D12 calls recorded.
+
+### 11.2 The static cross-check that names the missing side
+
+The probe is the measurement; the image's own reference graph explains why it reads 0, and it corrects one claim in
+sections 2-3:
+
+- **The flag has one writer and one reader.** `0x75DF0D8` is stored only at `0x247B527` (inside `0x247B500`) and
+  loaded only at `0x2484823` (inside the media tick `0x24846D0`). A RIP-relative scan of the whole image finds no
+  reference to it in `0x2490080`, so the earlier "cleared by `0x2490080`" is not what this image shows; the clear is
+  the frame body's own end-of-frame dispatch of the type-`0x25` item at `0x2218673` (section 3, step 15).
+- **The handler is an intrusive-list node.** The registration thunk `0x5CABBB0` stores the handler address in the
+  node at `0x75DF0B0` (`node+8 = 0x247B500`, `node+0 = 0`) and tail-jumps to the generic insert `0x1B0BC20`, which
+  links the node into the subscriber list rooted at `image+0x9AEA338` (the same list section 2 calls the subscriber
+  list). The module open `0x2478440` is the only caller of that thunk, and boot B measured it running once.
+- **That list has two dispatchers only:** the request poll `0x2218410` and the item dispatch `0x2217B80`. Both call
+  each subscriber with a 16-byte item whose type is the high dword of the item's `+8` qword. The queued items the
+  poll sees carry types 2-5/8/9/0x20; the directly dispatched items carry `0x24` (only from `0x2218180`, which also
+  queues the state-2 item `0x200000000` the poll turns into `0x71B90AD = 1`), `0x25` (only from the body at
+  `0x2218673`), `0x26` (`0x2217CC0`), `0x27` (`0x2217D50`) and `0x10` (`0x59DCBD0`). So the two present-pass keys have
+  exactly one common producer, `0x2218180`.
+- **That producer is unreferenced code in this image.** `0x2218180` has no reference anywhere in the image except
+  its own selector thunk `0x2217C70`; the two selector thunks `0x2217C70`/`0x2217C90` themselves have no call, jump,
+  conditional jump or address-taken pointer (8-byte VA or 32-bit RVA) anywhere, and `0x2217CC0`/`0x2217D50` are each
+  referenced only by their selector thunk. The constant `0x2400000000` that builds the type-`0x24` item appears twice
+  in `.text`: at `0x22181C3` inside `0x2218180`, and at `0x526D3EA` in the GDK task-queue port-message builder
+  `0x526D3E0`, which posts into its own queue (`0x5220050`) and never dispatches into the boot-media list. A linear
+  scan also finds one other `[reg+0xC] = 0x24` builder at `0x3C2DC60`; it builds a different 16-byte event object for
+  its own consumer (`0x3C0C970`) and never reaches either dispatcher of the boot-media list.
+
+### 11.3 The clean 300 s boot
+
+One boot with no int3 probe: standard environment, `PALMETTO_STATE_TRACE=10`, presenter captures armed
+(`PALMETTO_CAPTURE`, every 600 presented frames, at most 16), 300 s timeout. Logs, trace and captures are under
+`D:\leonida-work\boot-mediaac-300` and `D:\leonida-work\capture-mediaac-300`.
+
+| measure | value |
+|---|---|
+| verdict | ALIVE 300.3 s, killed by the harness timeout; stopped nowhere, no crash, 0 exceptions |
+| D3D12 calls / trace events | 435,282 calls recorded; 52,124 trace events |
+| presenter captures | 16, each 2564x1421, mean rgb **0.00 0.00 0.00** (black); at least 9,001 frames presented by the kill (~30/s) |
+| device-lost | no device-lost line anywhere in the capture |
+| other device answers | 113 slot-67 calls failed with `0x80070057` (a pre-existing stand-in answer in this tree, none fatal) |
+| stage/session words | init 2 (last change 20 s), loading 1 (last change 20 s), session 0 in every sample; machine current 2, next 2 |
+| boot-media gate | `0x71B9048` 0 -> 2 at 20 s, 2 to the kill |
+| present-pass keys | `0x71B90AD = 0`, `0x71B90AC = 0` in every sample (0 s and 20-290 s every 10 s) |
+| media semaphores | `0x71B9078`/`0x71B9088` = 0x714/0x71c from 20 s to the kill |
+| platform / loading-active | platform gate `0xA210D81` 0x1000001 at 20 s then 0x101; loading-active 0x7453EE0 = 1 from 30 s |
+
+Before/after in one sentence: at 0 s every chain word is zero; from 20 s to the kill the gate, the state machine and
+the semaphores are set exactly as in section 2's static model, and the two keys that would let the body run stay 0,
+which is why the 16 captures are black.
+
+### 11.4 Verdict, limits and the next falsifier
+
+The verdict is a negative, and it is not a shim gap. The media module is fully armed in the measured boots - the
+kernel objects and both semaphores exist by 10-20 s, the event handler is registered once, the per-frame media tick
+runs 5214 times in 130 s and the frame body is ticked 4556 times - but the request/set side of the handshake never
+executes, and the image's own reference graph shows why: the only producer of the type-`0x24` event (and of the state-2
+item that sets the other key) is unreferenced code in this build. A runtime that synthesized that event or those ring
+items would be inventing title state, not answering a runtime call, so this slice implements no producer fix. The
+picture-roadmap consequence is that the boot-media/UI present pass is not the missing first visible producer on this
+build; the stage-2 -> 3 gate (roadmap row 1) and the first-run/UI and movie producers (rows 4/5) remain the candidates.
+
+- **Next falsifier:** one boot in which `0x247B500` is entered, `0x71B90AD` reads 1, or `0x2218180`/`0x2217C70`
+  executes. Any of them means the producer is reachable after all (through a pointer form these scans do not see) and
+  the chain trace restarts from that site with the same four probes.
+- **Static limit.** The "unreferenced" result comes from RIP-relative, direct `E8`/`E9`/`jcc` and 8-byte-VA/32-bit-RVA
+  data scans of the image as it sits in the package. A pointer computed at run time from a table outside those forms
+  would not be seen; the probe boot is what makes the negative a measurement (the function did not execute).
+- **Probe limit.** Function entries only. `0x2218180` is a `.pdata` function start and the selector thunks tail-jump to
+  it, so the entry is the site a caller would hit; an interior entry is not plausible for the measured call shapes.
+- **Host-side noise.** Boot A recorded 8 exceptions, all host-side C++ exceptions (`0xe06d7363`) raised and caught
+  inside the host's UI Automation DLL during the boot; they are host-only and did not stop the boot. Boot B and the
+  300 s boot recorded none.
+
+### 11.5 Files and gates
+
+- **Source change**: `port/src/main.cpp` only - the `PALMETTO_STATE_TRACE` boot-media line now also prints the two
+  present semaphores `0x71B9078`/`0x71B9088` (`kTitleBootMediaSemaphoreARva`/`B`). Diagnostic only, off unless the
+  sampler switch is set; no shim, no default path and no test target changed.
+- **This page**: the measured section above and the status line in the header.
+- **Evidence (outside the repository)**: `D:\leonida-work\boot-mediaac-probe`, `boot-mediaac-producer`,
+  `boot-mediaac-300` (stderr, trace, summary) and `D:\leonida-work\capture-mediaac-300` (captures + `index.txt`);
+  driver scripts `D:\leonida-work\boot_mediaac_probe.ps1`, `boot_mediaac_producer.ps1`, `boot_mediaac_final.ps1`;
+  static scan helpers under `D:\leonida-work\mediaac`.
+- **No game data**: RVAs, counts, handles and outcomes only; no string, asset, package path or hash is quoted here.
+- **No git write**: the lead commits the two uncommitted files (`port/src/main.cpp`, `docs/decomp_first_ui.md`).

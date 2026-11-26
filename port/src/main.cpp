@@ -3918,6 +3918,12 @@ constexpr std::uint32_t kTitleSessionCompanionRva = 0x98F8290;
 constexpr std::uint32_t kTitleBootMediaGateRva = 0x71B9048;   // byte: 2 = the boot-media stage the wait loop wants
 constexpr std::uint32_t kTitleBootMediaActiveRva = 0x71B90AD;  // bytes the boot-media tick tests at 0x313560
 constexpr std::uint32_t kTitleBootMediaFlagRva = 0x71B90AC;
+// The media/UI present body 0x22185A0 signals semaphore A (0x71B9078) at step 5 and semaphore B (0x71B9088) at
+// step 10 of the measured sequence; both handles are created by the kernel-object helper 0x5A91C40. Sampling them
+// beside the gate/active/flag words says whether the handles exist and whether the body has ever run
+// (docs/decomp_first_ui.md section 3 and section 11).
+constexpr std::uint32_t kTitleBootMediaSemaphoreARva = 0x71B9078;
+constexpr std::uint32_t kTitleBootMediaSemaphoreBRva = 0x71B9088;
 constexpr std::uint32_t kTitleStateMachineRva = 0x71273C8;     // state machine object pointer (set at stage-2 entry)
 constexpr std::uint32_t kTitlePlatformGateRva = 0xA210D81;     // byte; 1 makes FUN_1421B8960 take its 4 gated waits
 constexpr std::uint32_t kTitleLoadingActiveRva = 0x7453EE0;    // byte set by the loading subsystem init
@@ -5418,10 +5424,15 @@ void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_siz
             const std::uint64_t loading_since = title_read_u64(image_base, kTitleLoadingSinceRva, ok_since);
             const std::uint32_t loading_flags = title_read_u32(image_base, kTitleLoadingFlagsRva, ok_flags);
             bool ok_gate = false, ok_media = false, ok_media_flag = false, ok_platform = false, ok_active = false,
-                 ok_companion = false, ok_machine = false, ok_current = false, ok_next = false;
+                 ok_companion = false, ok_machine = false, ok_current = false, ok_next = false, ok_sem_a = false,
+                 ok_sem_b = false;
             const std::uint32_t boot_media_gate = title_read_u32(image_base, kTitleBootMediaGateRva, ok_gate);
             const std::uint32_t boot_media_active = title_read_u32(image_base, kTitleBootMediaActiveRva, ok_media);
             const std::uint32_t boot_media_flag = title_read_u32(image_base, kTitleBootMediaFlagRva, ok_media_flag);
+            const std::uint64_t boot_media_sem_a =
+                title_read_u64(image_base, kTitleBootMediaSemaphoreARva, ok_sem_a);
+            const std::uint64_t boot_media_sem_b =
+                title_read_u64(image_base, kTitleBootMediaSemaphoreBRva, ok_sem_b);
             const std::uint32_t platform_gate = title_read_u32(image_base, kTitlePlatformGateRva, ok_platform);
             const std::uint32_t loading_active = title_read_u32(image_base, kTitleLoadingActiveRva, ok_active);
             const std::uint32_t session_companion = title_read_u32(image_base, kTitleSessionCompanionRva, ok_companion);
@@ -5474,12 +5485,14 @@ void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_siz
             std::fprintf(stderr,
                          "[rt] state trace at %.1f s: boot-media gate %s0x%x (active %s0x%x flag %s0x%x), platform gate"
                          " %s0x%x, loading-active %s0x%x, session companion %s0x%x, machine 0x%llx current %s%u next"
-                         " %s%u\n",
+                         " %s%u, media semaphores %s0x%llx/%s0x%llx\n",
                          at, ok_gate ? "" : "?", boot_media_gate, ok_media ? "" : "?", boot_media_active,
                          ok_media_flag ? "" : "?", boot_media_flag, ok_platform ? "" : "?", platform_gate,
                          ok_active ? "" : "?", loading_active, ok_companion ? "" : "?", session_companion,
                          static_cast<unsigned long long>(state_machine), ok_current ? "" : "?", machine_current,
-                         ok_next ? "" : "?", machine_next);
+                         ok_next ? "" : "?", machine_next, ok_sem_a ? "" : "?",
+                         static_cast<unsigned long long>(boot_media_sem_a), ok_sem_b ? "" : "?",
+                         static_cast<unsigned long long>(boot_media_sem_b));
             ++sample;
             const bool census_now = censuses < 12 || (sample % 10 == 0 && censuses < 24);
             if (census_now) {
