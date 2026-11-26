@@ -935,3 +935,211 @@ prewarm arm, the widened content window, the content-boundary drain and the boot
 layout, the graph lock helper and the stop sites were decompiled with the project's Ghidra tooling from the user's own
 image; the host CRT instruction pair was re-read from the system's own `vcruntime140.dll`. No peer code was used and no
 game data is added. RVAs, VAs, field offsets, register values, module names, counts and outcomes only.
+
+## 14. The copy is the renderer's own 256-entry table write, made while the executor runs the command it belongs to; no layer frame is in the chain
+
+**Status: measured. The caller and the copy are named; the runtime answer this slice looked for is not measured, and
+the default path is unchanged.** Section 13 named the writer - a host-CRT `memcpy` executed by the renderer executor
+thread, copying a stack block over the live command object - and left one falsifier: the same arm with the writer
+thread's stack resolved by `RtlVirtualUnwind`, every frame labelled by module. This section adds that payload, catches
+the store in three boots, and reports the chain: the executor's own virtual call enters `game+0x550E2D0`, a
+command-list method that selects a descriptor entry with `game+0x13367A0`, builds a 256-entry `float4` table with
+`game+0x13368F0` in its stack frame and copies it with the host CRT `memcpy` to the pointer that entry carries. The
+copy is measured exactly: **0x1000 bytes from the executor thread's stack** (`RAX .. RAX+0x1000`, the CRT's unrolled
+loop and its tail), and the live command object sits 0xE30-0xEF0 bytes after the destination: the object's header is intact
+when the copy starts, and the last 0x110-0x1D0 bytes of the copy land on it while the executor is running it. No frame of the chain is in the layer: the store is title code, the
+source is the executor thread's stack, the destination is title heap, and the table's size is title data. Counts,
+RVAs, VAs, module names and register values only; no game data and no package paths.
+
+### 14.1 What this slice changes
+
+| file | change |
+|---|---|
+| `port/src/main.cpp` | the `PALMETTO_WRITER_WATCH` payload: the writer hit and a title-code control hit print the full call chain through `RtlVirtualUnwind` (`writer_watch_full_stack`, the walker the stage-3 pump probe already uses), each frame labelled by `rt::shims::module_offset` (a title module+RVA, `host:<dll>+offset`, or the raw address), all sixteen general-purpose registers, the copy's arithmetic from `RAX` (the CRT's saved destination) and the trapped pass base/left, the destination window before and after the block, the caller frame at `[rsp+8+0x40]` (the out struct `game+0x13367A0` returns), the job's 0x180-byte layout and the vtable identities at `job+0x30`/`job+0x58`; `PALMETTO_WRITER_STACK_LOG=<file>` writes the same payload to a file as well as to stderr |
+| `port/src/main.cpp` | at machine stage 3, the second same-pass point (`graph+0x20`, a duplicate word of the `graph+0x18` control's store) becomes a provenance point on `job+0x50` (kind 4), the field the executor reads before its slot-0x40 call; the `graph+0x18` control stays armed in DR1 and is still the same-boot proof (it fired in all three hit boots) |
+
+The default path is unchanged: all of the payload is inside the `PALMETTO_WRITER_WATCH` probe, every switch is off by
+default, and no layer call or answer changes. The copy's arithmetic is the CRT's own: `vcruntime140.dll+0x1cb40`
+opens with `mov rax,rcx` (the destination), rounds it up to a 32-byte boundary, copies 0x100 bytes per unrolled pass
+and finishes with the tail from `rcx+r8`; at the trapped store `RCX` is the pass base, `RDX` its source and `R8` the
+bytes from `RCX` to the end, so `RAX .. RAX+0x1000` is a measured range, not an inferred one. The one deviation from
+the committed arm is the kind-4 point above; it replaced a word that no measured store wrote separately, and the
+same-pass control is unchanged.
+
+### 14.2 The caller stack
+
+Both hit boots resolve the same chain, 24 frames, with the CRT at frame 0 and the title image at frames 1-23; no
+frame of the chain is in a mapped title DLL, so every title frame is `game_scarlett_master.exe+<RVA>` (the module
+table printed at the stage-3 entry lists the main image and host modules only, and a mapped title DLL would be named
+by the loader's own registry the same way the main image is). RVAs are the function entries from the image's `.pdata`,
+and the offsets are the return addresses the unwind data reports:
+
+| # | frame | function | in the chain it is |
+|---:|---|---|---|
+| 0 | `host:VCRUNTIME140.dll+0x1cd56` | the CRT `memcpy` unrolled loop | the storing instruction (one of its 32-byte stores; `+0x1cd0c`, `+0x1cd4e` and `+0x1cd56` were caught in the three boots) |
+| 1 | `game+0x550E613` | `game+0x550E2D0` | the table builder's `memcpy` call (`CALL qword ptr [rsp+0x38]` at `game+0x550E60F`) |
+| 2 | `game+0x1335BEA` | `game+0x1335A20` | the per-command executor's virtual call `CALL qword ptr [r10+0x40]` at `game+0x1335BE6`, slot 0x40 of `*(job+0x30)` |
+| 3 | `game+0x186424` | `game+0x186170` | the job executor |
+| 4 | `game+0x18573B` | `game+0x1856D0` | the submit/wait |
+| 5 | `game+0x184F42` | `game+0x184EB0` | the flush |
+| 6 | `game+0x1847D8` | `game+0x184770` | create/find job |
+| 7 | `game+0x1837A2` | `game+0x1836D0` | the command opcode dispatch |
+| 8 | `game+0x182EB4` | `game+0x182D90` | command build |
+| 9 | `game+0x182BBA` | `game+0x182B60` | command build |
+| 10 | `game+0x182AB2` | `game+0x1829C0` | command build |
+| 11,13,15,17 | `game+0x183AAF` | `game+0x183A20` | the command graph's repeated-list walk |
+| 12,14,16,18 | `game+0x18435F` | `game+0x184250` | the same walk |
+| 19 | `game+0x1826CB` | `game+0x182600` | command graph |
+| 20 | `game+0x503D5F5` | `game+0x503D4C0` | renderer frame path |
+| 21 | `game+0x180F2D` | `game+0x180F00` | renderer frame path |
+| 22 | `game+0x503CE73` | `game+0x503CDE0` | renderer frame path |
+| 23 | `game+0x41F3F8` | `game+0x41F380` | the outer frame entry |
+
+The copy is therefore made **inside the executor's own pass**: the frame chain that builds the command (walk, build,
+dispatch, create/find job, flush, submit/wait) is the same chain that runs the executor, so the job is executed
+synchronously by its builder, not handed to another thread.
+
+### 14.3 What the copy is
+
+The decompiled chain (this project's Ghidra tooling, the user's own image) reads:
+
+- `game+0x1335BE6` calls slot 0x40 of the object at `job+0x30` with `RDX` = the descriptor and `R8` = a copy
+  function pointer the object at `job+0x58` returns from its slot 0x10 (the executor also passes the value `0x18` in
+  `R9`). The measured `RAX`/`RBX` at the trap show that call is what reaches the CRT `memcpy`.
+- `game+0x550E2D0` (the slot-0x40 method) resolves the descriptor's entry with `game+0x13367A0(descriptor, 0, &out)`
+  and, in this branch, runs `for (i = 0; i < this->+0x3c; ++i) copy(out.+0x18, stack_table, this->+0x38 << 4)`.
+  Measured: `[this+0x38] = 0x100` and the call's size is `0x100 << 4 = 0x1000`.
+- `game+0x13368F0` fills that stack table: a **256-entry `float4` table** (0x1000 bytes) that starts as one
+  `float4(1,1,1,0)` value repeated and then gets a computed prefix for the mip levels it covers; the measured source
+  block is exactly that shape - its first 0x868 bytes are the computed prefix and the rest is the `float4(1,1,1,0)`
+  default, which is why the copied bytes are `0x3f8000003f800000, 0x000000003f800000` alternating (section 13 called
+  the block "all-1.0f"; the dump shows the 0.0 lane).
+- `game+0x13367A0` returns the descriptor entry: at the hit the out struct in `game+0x550E2D0`'s frame at
+  `[rsp+0x80]` holds `{0x00000100, 0x00000001, 0, 0, destination}` - a 256-wide, one-high element and the destination
+  pointer, i.e. 256 16-byte elements = 0x1000 bytes, the copy's length.
+- The destination pointer itself is written by the **allocation `game+0x1445594F0` makes**: that helper allocates a
+  0x68-byte descriptor object, then for each of its entries allocates a block with the title's allocator
+  (`CALL qword ptr [allocator+0x50]`), records its size and address in the 0x20-byte entry, and the copy follows
+  `entry[0].+0x18`. That is the "constant upload" path on this title: a CPU-built table into a title-heap block, with
+  no D3D12 call for the transfer.
+
+### 14.4 The destination, its provenance, and our answers
+
+Three catches, three different blocks, one layout:
+
+| boot | job | destination (`RAX` at the trap) | job - destination | copy end | job header before the copy |
+|---|---|---:|---:|---:|---|
+| `boot-s14-stack6` | `0x1e7433394e0` | `0x1e7433386b0` | 0xE30 | job + 0x1D0 | vtable `game+0x658DA80`, graph at `job+0x28` |
+| `boot-s14-stack7` | `0x19f17141440` | `0x19f17140560` | 0xEE0 | job + 0x120 | the same vtable and graph fields |
+| `boot-s14-stack11` | `0x1ea4133e440` | `0x1ea4133d550` | 0xEF0 | job + 0x110 | the same vtable and graph fields |
+
+So in every catch the copy starts 0xE30-0xEF0 bytes before the live command object and its 0x1000 bytes run past the
+object's first bytes: the job's vtable, its state dword and the fields the executor calls through are overwritten by
+the table's `float4(1,1,1,0)` default. The command object's own `job+0x100` field already held the destination
+address before the copy (it is outside the copied range at the trap), i.e. the object and the table's block are
+related by construction, and the object's header was intact until the copy wrote over it.
+
+The destination is title-private memory: `VirtualQuery` at the block reports `MEM_COMMIT`, `MEM_PRIVATE`,
+`PAGE_READWRITE`, file-backed no, inside the title's reserved region (the same region the job page is in). It is not
+a range the layer registered: in the same boot the layer imported two title-page spans for the content draws (for
+example `0x1e94bc00300 + 0x120000` and `0x1e94bd20380 + 0x60000` in `boot-s14-stack11`) and the destination is in
+neither, it is not in the 32-bit arena window the replay places buffers in, and the console placed-resource ranges the
+layer recorded at slot 133 are in the `0x1F3...` range. The copy also has no layer frame between the executor entry
+and the store: the `[d3d12-trace]` stream shows `ID3D12CommandQueue::ExecuteCommandLists ok` before the entry and
+`Xbox CreatePlacedResourceX`/`CreateShaderResourceView` about 10 ms before it, and nothing between the entry and the
+store is a layer call.
+
+What our answers show, and what they do not: the copy's length, source, destination and the allocator that produced
+it are title-computed values (`this->+0x38`, the executor stack, the descriptor entry, the title allocator), and no
+layer call participates in computing them, so **this slice measures no runtime answer as the producer of the
+collision**. Two title-side mechanisms fit the measured layout and are not separated yet:
+
+- the table's block may be allocated with a size below the 0x1000 bytes the copy writes, so the copy runs past its
+  own block into the next live object in the same heap page (the entry's `+0x10` size field read 0 at the hit, so this
+  is not yet measured);
+- or the allocator may return a range that overlaps the still-live command object (the object's header survived
+  because the allocator's bookkeeping is at the block's start, not at the object's offset).
+
+The next falsifier distinguishes them and is named in section 14.5.
+
+### 14.5 Verdict, the fix decision, and the next falsifier
+
+- **The caller and the copy are named; the runtime answer is not.** The full cross-module chain is section 14.2, the
+  copy's extent is section 14.3 and the destination's layout is section 14.4. No layer frame, no layer range, no layer
+  size is in the chain, so there is no measured producer in this tree to fix. The honest statement is the one section
+  13 made and this section sharpens: the title writes a 0x1000-byte table into a block that abuts (and is overwritten
+  onto) the command object the same pass is executing.
+- **No default-path change, no new emulation.** A layer change cannot resize a block the title allocates from its own
+  heap with its own allocator, and adding a fence or a delay would not move two live blocks apart. The default path is
+  untouched, the two candidate mechanisms are named, and the next falsifier is a probe, not a fix.
+- **Next falsifier (one boot).** Read the allocator call's size argument at the hit: the out struct's `+0x10` is this
+  entry's size field (`0` for the selected entry here, so the size must be read from the executor's own descriptor
+  locals, the two 0x20-byte structs the executor builds), and log `(allocator+0x50)(size, 0)`'s `size` from
+  `game+0x1445594F0`. A size below 0x1000 makes the mechanism an overrun of the block; a 0x1000 size whose range
+  contains the live job makes it a title allocator reuse, and only then is a lifetime/ordering emulation the next
+  question.
+- **A same-frame control for the write itself is still missing.** The same-pass control proves the data watch is
+  live in the pass, but no control store *inside the copied block* has been armed; the payload's pattern scan and the
+  copy arithmetic are the cross-check instead.
+
+### 14.6 The boots and the A/B
+
+One boot per arm, under the boot lock, the section-12 content environment, 300 s timeout; the three probe boots are
+the same binary per build group and the A/B arm is the probe off. All stop with 0xC0000005 and none loses the device.
+
+| arm | binary sha256 (first 16) | wall | stage 3 | stop / trace t | `ExecuteCommandLists` ok / refused | content readback, first capture per target | write control | presents / captures |
+|---|---|---:|---:|---|---:|---|---:|---:|
+| `boot-s14-stack6` writer payload, hit | `AF0185F50AB23DF8` | 77.2 s | 58.3 s | `0x13360a3` read -1, 62.05 s | 4,037 / 0 | `0 0 0`, 0/16,384 (draws 4026, 4028, 4031) | `51 102 204`, 16,384/16,384 | 2,018 / 12 black |
+| `boot-s14-stack7` writer payload, hit | `E62582CBD4B2CF72` | 127.7 s | 111.2 s | `0x13360a3` read -1, 114.78 s | 5,375 / 0 | `0 0 0`, 0/16,384 (draws 5362, 5364, 5367) | `51 102 204`, 16,384/16,384 | 2,687 / 13 black |
+| `boot-s14-stack11` writer payload, hit | `7035DE1267CCA7E2` | 85.7 s | 68.3 s | `0x13360a3` read -1, 71.63 s | 4,633 / 0 | `0 0 0`, 0/16,384 (draws 4620, 4622, 4625) | `51 102 204`, 16,384/16,384 | 2,316 / 13 black |
+| `boot-s14-ab300` default path, A/B | `7035DE1267CCA7E2` | 105.1 s | 84.0 s | `0x13360a3` read -1, 88.14 s | 6,127 / 0 | `0 0 0`, 0/16,384 (draws 6116, 6118, 6121) | `51 102 204`, 16,384/16,384 | 3,063 / 13 black |
+
+The A/B arm is the same binary as `boot-s14-stack11` with the probe off: it reaches the same stage-3 second family
+(84.0 s), stops at the same site with the same operand, imports the same two title-page spans and captures the same
+black content frame, so the probe payload does not move the default path. The picture is section 13's: the first
+capture of every content target is all-zero, the layer's own write control on the same target reads `51 102 204`, and
+every presenter capture reads mean rgb 0.00. `PALMETTO_READBACK_PPM` wrote 4 PPM files in every arm; no arm records a
+`Vulkan device was lost` line. The content-frame draws are 6116/6118/6121 in the A/B arm; the draw indices differ per
+boot as section 10.2 recorded.
+
+The tree's gate build after the measurement is 4CE24B84341FA718...; it differs from the measured arms only in
+PE timestamp and comments (the probe payload is the same), the way section 13 recorded its gate build.
+
+### 14.7 Limits
+
+- **The hit is a race.** Eight writer-arm attempts in this slice produced three catches; two more reached the stage-3
+  entry without the store and three stopped before it (`0x4D9F636`, `0xF229C`, `0x0`). The three catches are three
+  different boots and heap layouts, which is what makes the 0xE30-0xEF0 layout statement credible, not one boot's
+  coincidence.
+- **The allocation's declared size is not read yet.** The selected descriptor entry's size field is 0, so the two
+  mechanisms of section 14.4 are still open; the next falsifier above is the decisive measurement.
+- **The one-boot A/B and the compile stall.** This environment's compute-pipeline driver build measured 63 s in the
+  A/B boot (`max single compute 63031.7 ms`), which is what moves stage 3 to 84 s; it is the same pre-existing stall
+  family section 13.5 measured at 0.5 s in an earlier arm, not a property of this probe.
+- **No reference cross-check.** No page of the reference project describes this table or its allocation, so the
+  console meaning of the block could not be cross-checked from the reference; the attribution below is this project's
+  measurements only.
+- **The table's builder is title code.** The 0x13368F0 fill was read with the project's decompiler; its mip-level
+  inputs were not decoded further because the deciding measurement is the allocation size, not the table's values.
+
+### 14.8 Tests and gates
+
+- The slice changes no layer call and adds no pure helper, so no test target changed: the writer payload is a
+  diagnostic behind `PALMETTO_WRITER_WATCH` and the default path is unchanged (section 11.7 and 12.7 did the same for
+  their probe-only slices). The gate subset stays green on the changed tree: `frame_dump_test`,
+  `unimplemented_policy_test`, `graphics_record_test`, `graphics_pso_test`, `buffer_va_index_test`, `dstorage_test`,
+  `xapu_chad_test`, `deferred_compile_test`, `arena_size_test`, `xbox_present_test` and `xs_proxy_mock_test` exit 0;
+  `d3d12_fence_timing_test` remains the documented pre-existing crash.
+- Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, and every
+  `tests/test_docs_*.py` check passes (the environment-variable check requires `PALMETTO_WRITER_STACK_LOG` to be
+  named in a page, which this section does).
+
+### 14.9 Attribution
+
+This section was implemented from this project's own measurements: the module-aware unwind payload, the provenance
+point and its negative, the three writer catches with their registers, memory windows and destination layout, the
+copy arithmetic from the CRT's own disassembly, the decompiled chain at `game+0x1335A20`, `game+0x550E2D0`,
+`game+0x13367A0`, `game+0x13368F0`, `game+0x1445594F0`, `game+0x186170` and `game+0x1856D0`, and the four boots above.
+The title functions were decompiled with this project's Ghidra tooling from the user's own image; the host CRT
+instruction pair was re-read from the system's own `vcruntime140.dll`. No peer code was used and no game data is
+added. RVAs, VAs, field offsets, register values, module names, counts and outcomes only.

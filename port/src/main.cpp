@@ -1912,11 +1912,12 @@ struct WriterWatch {
     std::atomic<std::uint64_t> job_first{0};     // the job's first qword as last seen at an entry
     std::atomic<std::uintptr_t> graph{0};        // *(job+0x28) at the stage-3 entry, the same-pass control's base
     // The four points as armed: the address (0 = slot unused) and what it means (kind: 0 object first qword,
-    // 1/2 graph same-pass control, 3 job state control).
+    // 3 job state control, 4 the job+0x50 descriptor field the pass fills (section 14), 5 graph same-pass control).
     std::atomic<std::uintptr_t> point[4]{};
     std::atomic<unsigned> point_kind[4]{};
     std::atomic<unsigned> entries{0}, logged{0}, job_changes{0}, data_points_armed{0};
     std::atomic<unsigned> writes{0}, vtable_writes{0}, state_writes{0}, graph_control_writes{0}, other_writes{0};
+    std::atomic<unsigned> descriptor_writes{0};  // kind 4: the job+0x50 descriptor field's writers (section 14)
     std::atomic<unsigned> same_pass_control_hits{0};
     std::atomic<unsigned> sweep_seen{0}, sweep_armed{0}, sweep_skipped{0}, sweep_failed{0};
     std::atomic<unsigned> poller_changes{0};
@@ -2015,6 +2016,115 @@ std::string writer_watch_page_mapping(std::uintptr_t address) {
     return text;
 }
 
+// ---- The writer hit's payload: module-aware stack, destination and source (docs/vertex_buffer_va.md section 14) ------
+// Section 13.8 left the copy's caller unnamed because the writer line used executor_watch_title_stack(): a raw stack
+// scan that keeps only title-image frames, and at the store the storing frame is the host CRT, so it printed
+// "(none)". This payload asks the OS for the unwind data instead (RtlLookupFunctionEntry/RtlVirtualUnwind, the walk
+// the stage-3 pump probe already uses): the mapped title modules register their .pdata as dynamic function tables and
+// host modules are in the loader's own table, so one walk crosses the host CRT, the title image, its mapped DLLs and
+// the host; every frame is labelled with rt::shims::module_offset (a module+RVA, host:<dll>+offset, or the raw
+// address). It also measures the copy itself: at the trap RCX is the trapped iteration's destination base, RDX its
+// source and R8 the bytes still to copy, so the copy's real start and length fall out of the default-block pattern
+// the earlier bytes hold. The default block is float4(1,1,1,0) repeated (section 13 called it "all-1.0f"; the dump
+// at the store shows the 1.0f/0.0 lanes), so the pattern check is the exact alternating pair of qwords the copy
+// writes. All reads are page checked; nothing is written into title memory. RVAs, module names and register values
+// only; no game data. Off unless PALMETTO_WRITER_WATCH is set; PALMETTO_WRITER_STACK_LOG=<file> adds a file copy.
+unsigned unwind_call_chain(CONTEXT context, std::uint64_t* frames, unsigned cap);  // the walker below
+
+constexpr std::uint64_t kWriterDefaultBlockA = 0x3f8000003f800000ull;  // float4(1,1,1,0): lanes 1.0, 1.0
+constexpr std::uint64_t kWriterDefaultBlockB = 0x000000003f800000ull;  // float4(1,1,1,0): lanes 0.0, 1.0
+
+// The other qword of the two-qword float4(1,1,1,0) pattern, or 0 when the value is not one of them.
+std::uint64_t writer_watch_default_other(std::uint64_t qword) {
+    if (qword == kWriterDefaultBlockA) return kWriterDefaultBlockB;
+    if (qword == kWriterDefaultBlockB) return kWriterDefaultBlockA;
+    return 0;
+}
+
+// How many qwords of the alternating float4(1,1,1,0) block run from `address` in `step` direction (bounded). The copy
+// writes front to back, so a backwards run from the trapped iteration's base measures how far the table's pattern runs;
+// section 14's measurement shows it is the table's own extent (the builder fills only a prefix and leaves the default
+// float4 in the rest), not the copy's start, which is why the payload derives the start from RAX instead.
+unsigned writer_watch_default_run(std::uintptr_t address, int step, unsigned max_qwords) {
+    std::uint64_t value = 0;
+    if (!executor_watch_read_block(address, &value, sizeof value)) return 0;
+    if (!writer_watch_default_other(value)) return 0;
+    unsigned count = 0;
+    while (count < max_qwords) {
+        const std::uintptr_t next = step > 0 ? address + (count + 1) * 8 : address - (count + 1) * 8;
+        std::uint64_t other = 0;
+        if (!executor_watch_read_block(next, &other, sizeof other)) break;
+        if (other != writer_watch_default_other(value)) break;
+        value = other;
+        ++count;
+    }
+    return count;
+}
+
+// A qword window with its address on each line, so the memory around a pointer is readable without a debugger.
+std::string writer_watch_memory_lines(const char* name, std::uintptr_t address, unsigned bytes) {
+    std::string text;
+    for (unsigned offset = 0; offset < bytes; offset += 0x40) {
+        char line[96];
+        std::snprintf(line, sizeof line, "\n  %s+0x%x %s", name, offset, executor_watch_hex(address + offset).c_str());
+        text += line;
+        for (unsigned inner = 0; inner < 0x40; inner += 8) {
+            char word[24];
+            std::snprintf(word, sizeof word, " %016llx",
+                          static_cast<unsigned long long>(executor_watch_read_u64(address + offset + inner)));
+            text += word;
+        }
+    }
+    return text;
+}
+
+// Every general-purpose register of the trap: the copy keeps its destination in RCX, its source in RDX and what is
+// left in R8, and the title caller's frame pointer/callee-saved registers name its stack block.
+std::string writer_watch_all_registers(const CONTEXT& context) {
+    char buffer[560];
+    std::snprintf(buffer, sizeof buffer,
+                  "\n  rax %llx rbx %llx rcx %llx rdx %llx rsi %llx rdi %llx rbp %llx rsp %llx"
+                  "\n  r8 %llx r9 %llx r10 %llx r11 %llx r12 %llx r13 %llx r14 %llx r15 %llx",
+                  static_cast<unsigned long long>(context.Rax), static_cast<unsigned long long>(context.Rbx),
+                  static_cast<unsigned long long>(context.Rcx), static_cast<unsigned long long>(context.Rdx),
+                  static_cast<unsigned long long>(context.Rsi), static_cast<unsigned long long>(context.Rdi),
+                  static_cast<unsigned long long>(context.Rbp), static_cast<unsigned long long>(context.Rsp),
+                  static_cast<unsigned long long>(context.R8), static_cast<unsigned long long>(context.R9),
+                  static_cast<unsigned long long>(context.R10), static_cast<unsigned long long>(context.R11),
+                  static_cast<unsigned long long>(context.R12), static_cast<unsigned long long>(context.R13),
+                  static_cast<unsigned long long>(context.R14), static_cast<unsigned long long>(context.R15));
+    return buffer;
+}
+
+// The full call chain of the trapping thread, nearest frame first, each one labelled with its module (the host CRT's
+// memcpy is frame 0, its caller is frame 1). Bounded and fault tolerant; the walker never modifies the CONTEXT.
+std::string writer_watch_full_stack(const CONTEXT& context, unsigned max_frames = 24) {
+    std::uint64_t frames[24] = {};
+    const unsigned count = unwind_call_chain(context, frames, max_frames < 24 ? max_frames : 24);
+    if (!count) return " (none)";
+    std::string text;
+    for (unsigned i = 0; i < count; ++i) {
+        char line[48];
+        std::snprintf(line, sizeof line, "\n  frame %u: ", i);
+        text += line;
+        text += rt::shims::module_offset(static_cast<std::uintptr_t>(frames[i]));
+    }
+    return text;
+}
+
+// The hit payload to stderr (the boot capture) and, when PALMETTO_WRITER_STACK_LOG names a file, to that file too:
+// the boot's other threads interleave [rt] lines, so a copy the analysis can read on its own is worth one opt-in
+// switch. The file gets the same text as the capture and nothing else.
+void writer_watch_print(const std::string& text) {
+    executor_watch_print(text);
+    const char* path = std::getenv("PALMETTO_WRITER_STACK_LOG");
+    if (!path || !*path) return;
+    if (FILE* file = std::fopen(path, "ab")) {
+        std::fwrite(text.data(), 1, text.size(), file);
+        std::fclose(file);
+    }
+}
+
 // The DR7 value for up to four 8-byte write-only points (RWn = 01, LENn = 11, Ln = 1). A null or misaligned point
 // leaves its slot off; the caller's point array is aligned down before it gets here.
 std::uint32_t writer_watch_dr7(const std::uintptr_t points[4]) {
@@ -2062,17 +2172,17 @@ void writer_watch_data(CONTEXT& context) {
     if (kind == 0) watch.vtable_writes.fetch_add(1, std::memory_order_relaxed);
     else if (kind == 3) watch.state_writes.fetch_add(1, std::memory_order_relaxed);
     else if (kind == 5) watch.same_pass_control_hits.fetch_add(1, std::memory_order_relaxed);
+    else if (kind == 4) watch.descriptor_writes.fetch_add(1, std::memory_order_relaxed);
     else watch.graph_control_writes.fetch_add(1, std::memory_order_relaxed);
     const unsigned hits = watch.writes.fetch_add(1, std::memory_order_relaxed) + 1;
     if (kind == 5) {
         // The same-pass control has to be cheap: the graph lock it watches is a hot word, so a trapped store there must
         // cost one terse line and then be disarmed, or the control itself perturbs the pass it is measuring. Two hits
-        // are logged; after the second the two control points are cleared in this context, so the hot word traps no more.
+        // are logged; after the second the control point is cleared in this context, so the hot word traps no more.
         const std::uint64_t control = watch.same_pass_control_hits.load(std::memory_order_relaxed);
         if (control > 1) {
             context.Dr1 = 0;
-            context.Dr2 = 0;
-            context.Dr7 &= ~((1u << 2) | (1u << 4) | (0xFu << 20) | (0xFu << 24));
+            context.Dr7 &= ~((1u << 2) | (0xFu << 20));
             return;
         }
         std::uint64_t control_value = 0;
@@ -2088,9 +2198,35 @@ void writer_watch_data(CONTEXT& context) {
                      writer_watch_stage());
         std::fflush(stderr);
         // One hit is the proof; the control is disarmed at once so the hot lock word cannot become the measurement.
+        // Only DR1 (the graph+0x18 word) is the control; DR2 is the provenance point on job+0x50 and stays armed.
         context.Dr1 = 0;
-        context.Dr2 = 0;
-        context.Dr7 &= ~((1u << 2) | (1u << 4) | (0xFu << 20) | (0xFu << 24));
+        context.Dr7 &= ~((1u << 2) | (0xFu << 20));
+        return;
+    }
+    if (kind == 4) {
+        // The provenance point. The executor reads job+0x50 before it calls the command-list object's slot 0x40, so who
+        // writes that field would name the path that hands the command its descriptor. Measured (section 14): it stays
+        // 0 for the whole stage-3 pass and the only hit here is the constant copy itself writing over the job, so the
+        // pass took the other branch and built the descriptor on its stack from the resource object 0x1445594f0
+        // returns. The point is kept as the arm's live control for that negative.
+        const auto job = static_cast<std::uintptr_t>(watch.job.load(std::memory_order_relaxed));
+        std::uint64_t value = 0;
+        executor_watch_read_block(address, &value, sizeof value);
+        std::string text = writer_watch_prefix("DESCRIPTOR FIELD WRITER (job+0x50)") + " tid " +
+                           std::to_string(GetCurrentThreadId()) + " writer " +
+                           rt::shims::module_offset(static_cast<std::uint64_t>(context.Rip)) + " value after " +
+                           executor_watch_label(value, executor_watch_image_base, executor_watch_image_size) + " job " +
+                           executor_watch_hex(job);
+        text += writer_watch_all_registers(context);
+        text += "\n  " + writer_watch_prefix("writer stack (module-aware)") + writer_watch_full_stack(context);
+        if (value >= 0x10000) {
+            const auto descriptor = static_cast<std::uintptr_t>(value);
+            text += writer_watch_memory_lines("descriptor", descriptor, 0x60);
+            const std::uint64_t entries = executor_watch_read_u64(descriptor + 0x18 + 0x10);
+            if (entries >= 0x10000)
+                text += writer_watch_memory_lines("entry0", static_cast<std::uintptr_t>(entries), 0x40);
+        }
+        writer_watch_print(text + "\n");
         return;
     }
     if (kind == 0) {
@@ -2124,19 +2260,103 @@ void writer_watch_data(CONTEXT& context) {
             text += byte;
         }
     }
-    char registers[320];
-    std::snprintf(registers, sizeof registers,
-                  "\n  rax %llx rbx %llx rcx %llx rdx %llx rsi %llx rdi %llx r8 %llx r9 %llx r14 %llx r15 %llx",
-                  static_cast<unsigned long long>(context.Rax), static_cast<unsigned long long>(context.Rbx),
-                  static_cast<unsigned long long>(context.Rcx), static_cast<unsigned long long>(context.Rdx),
-                  static_cast<unsigned long long>(context.Rsi), static_cast<unsigned long long>(context.Rdi),
-                  static_cast<unsigned long long>(context.R8), static_cast<unsigned long long>(context.R9),
-                  static_cast<unsigned long long>(context.R14), static_cast<unsigned long long>(context.R15));
-    text += registers;
-    text += "\n  " + writer_watch_prefix("writer stack") + executor_watch_title_stack(context.Rsp);
     const auto job = static_cast<std::uintptr_t>(watch.job.load(std::memory_order_relaxed));
-    if (job) text += executor_watch_memory_dump("job", job, 0x80);
-    executor_watch_print(text + "\n");
+    std::string body;
+    // The heavy payload is for the measured constant copy only: its storing frame is a host module (the CRT), while the
+    // job-state control's store is title code. A title-code writer still gets the module-aware stack and the registers,
+    // which is cheap; the copy's memory windows are skipped so a loading-phase control hit costs one line.
+    const bool copy_hit = writer.rfind("host:", 0) == 0;
+    if (copy_hit) {
+        // The copy this hit is one store of. The CRT's memcpy keeps its original destination in RAX (the function opens
+        // with `mov rax,rcx` and stores the first/last 32 bytes through it), and rounds the destination up to a 32-byte
+        // boundary before its unrolled loop; RCX is the trapped iteration's chunk base, RDX its source and R8 the bytes
+        // from RCX to the end. So the copy is RAX .. RCX+R8, and the number of completed 0x100 passes falls out of the
+        // alignment offset. The default-block pattern around both pointers is the independent cross-check (section 13
+        // called the block "all-1.0f"; it is float4(1,1,1,0) repeated, and only the block's tail is that pattern because
+        // the rest was filled by the title's table builder).
+        const auto dest = static_cast<std::uintptr_t>(context.Rcx);
+        const auto source = static_cast<std::uintptr_t>(context.Rdx);
+        const std::uint64_t left = static_cast<std::uint64_t>(context.R8);
+        const auto saved_dst = static_cast<std::uintptr_t>(context.Rax);
+        const unsigned before = dest > 8 ? writer_watch_default_run(dest - 8, -1, 8192) : 0;
+        const unsigned source_before = source > 8 ? writer_watch_default_run(source - 8, -1, 8192) : 0;
+        const unsigned source_after = writer_watch_default_run(source, 1, 8192);
+        char copy[400];
+        std::snprintf(copy, sizeof copy,
+                      "\n  copy: memcpy dst (RAX) %s trapped chunk dest %s source %s left %s; default-block qwords"
+                      " before the chunk dest %u (0x%llx bytes), before the source %u, from the source forward %u",
+                      executor_watch_hex(saved_dst).c_str(), executor_watch_hex(dest).c_str(),
+                      executor_watch_hex(source).c_str(), executor_watch_hex(left).c_str(), before,
+                      static_cast<unsigned long long>(before) * 8, source_before, source_after);
+        body += copy;
+        if (saved_dst && dest > saved_dst) {
+            // The unrolled loop starts at round_up(dst, 0x20) and each pass copies 0x100, so the pass count is exact.
+            const std::uintptr_t aligned = saved_dst + (0x20 - (saved_dst & 0x1F));
+            const std::uintptr_t offset = dest >= aligned ? dest - aligned : 0;
+            char measured[256];
+            std::snprintf(measured, sizeof measured,
+                          "\n  copy size: dst %s first pass base %s completed pass(es) %llu size %s (end %s);"
+                          " source end %s",
+                          executor_watch_hex(saved_dst).c_str(), executor_watch_hex(aligned).c_str(),
+                          static_cast<unsigned long long>(offset / 0x100),
+                          executor_watch_hex(left + (offset / 0x100) * 0x100 +
+                                             (static_cast<std::uint64_t>(aligned) - saved_dst)).c_str(),
+                          executor_watch_hex(saved_dst + left + (offset / 0x100) * 0x100 +
+                                             (static_cast<std::uint64_t>(aligned) - saved_dst)).c_str(),
+                          executor_watch_hex(source + left).c_str());
+            body += measured;
+        }
+        body += writer_watch_all_registers(context);
+        body += "\n  " + writer_watch_prefix("writer stack (module-aware)") + writer_watch_full_stack(context);
+        // The title function that calls the copy (0x550e2d0) selects the descriptor entry with 0x13367a0(index 0) into
+        // its own frame at [rsp+0x80]; memcpy pushes nothing, so the caller's frame is the trap RSP + 8. The struct's
+        // +0x10 is the entry's declared size (the allocation's size field, set by the allocator call in 0x1445594f0)
+        // and +0x18 is the destination pointer 0x13367a0 returns: the copy length against that size is the mismatch
+        // this measurement decides.
+        const std::uintptr_t caller_frame = static_cast<std::uintptr_t>(context.Rsp) + 8;
+        if (caller_frame > 0x1000)
+            body += writer_watch_memory_lines("caller-frame", caller_frame + 0x40, 0x140);
+        if (saved_dst > 0x100) body += writer_watch_memory_lines("copy-dst-before", saved_dst - 0x100, 0x100);
+        if (saved_dst) body += writer_watch_memory_lines("copy-dst", saved_dst, 0x200);
+        if (dest > 0x100) body += writer_watch_memory_lines("dest-before", dest - 0x100, 0x100);
+        body += writer_watch_memory_lines("dest", dest, 0x300);
+        if (source > 0x100) body += writer_watch_memory_lines("source-before", source - 0x100, 0x100);
+        body += writer_watch_memory_lines("source", source, 0x300);
+        if (saved_dst)
+            body += "\n  " + writer_watch_region(saved_dst) + "\n  " + writer_watch_page_mapping(saved_dst);
+    } else {
+        body += writer_watch_all_registers(context);
+        body += "\n  " + writer_watch_prefix("writer stack (module-aware)") + writer_watch_full_stack(context);
+    }
+    if (job) {
+        // The job's own fields and sub-object identities. job+0x50 stays 0 through the pass (the kind-4 point's
+        // negative), so the descriptor the copy's destination comes from is the stack-local one the pass builds from
+        // the resource object 0x1445594f0 returns; the fields are printed anyway so the job's layout is in the record.
+        body += executor_watch_memory_dump("job", job, 0x180);
+        const std::uint64_t object30 = executor_watch_read_u64(job + 0x30);
+        const std::uint64_t object50 = executor_watch_read_u64(job + 0x50);
+        const std::uint64_t object58 = executor_watch_read_u64(job + 0x58);
+        char classes[400];
+        std::snprintf(classes, sizeof classes,
+                      "\n  job+0x30 object %s vtable %s; job+0x50 descriptor %s vtbl %s; job+0x58 object %s vtable %s",
+                      executor_watch_hex(object30).c_str(),
+                      executor_watch_label(executor_watch_read_u64(static_cast<std::uintptr_t>(object30)),
+                                           executor_watch_image_base, executor_watch_image_size).c_str(),
+                      executor_watch_hex(object50).c_str(),
+                      executor_watch_label(executor_watch_read_u64(static_cast<std::uintptr_t>(object50)),
+                                           executor_watch_image_base, executor_watch_image_size).c_str(),
+                      executor_watch_hex(object58).c_str(),
+                      executor_watch_label(executor_watch_read_u64(static_cast<std::uintptr_t>(object58)),
+                                           executor_watch_image_base, executor_watch_image_size).c_str());
+        body += classes;
+        if (object50 >= 0x10000) {
+            const auto descriptor = static_cast<std::uintptr_t>(object50);
+            body += writer_watch_memory_lines("descriptor", descriptor, 0x60);
+            const std::uint64_t entries = executor_watch_read_u64(descriptor + 0x18 + 0x10);
+            if (entries >= 0x10000) body += writer_watch_memory_lines("entry0", static_cast<std::uintptr_t>(entries), 0x40);
+        }
+    }
+    writer_watch_print(text + body + "\n");
 }
 
 // One executor entry: RCX is the job/command object the executor calls through. Log a new job class with its chain
@@ -2217,22 +2437,27 @@ void writer_watch_entry(CONTEXT& context) {
         // The same-pass control: the executor's first job after the entry's virtual calls is the graph lock helper on
         // graph+0x18 (FUN_14515adb0, called from game+0x1335AE6). A write there is made by this thread in this pass.
         points[1] = (static_cast<std::uintptr_t>(graph) + 0x18) & ~static_cast<std::uintptr_t>(7);
-        points[2] = (static_cast<std::uintptr_t>(graph) + 0x20) & ~static_cast<std::uintptr_t>(7);
+        // Provenance point (section 14): the executor reads job+0x50 before it calls the command-list object's slot
+        // 0x40, so a writer of this field would name the descriptor's path. The measurement shows it stays 0 and the
+        // call is made with a stack-local descriptor instead; graph+0x20 was a duplicate of the graph+0x18 control
+        // (one store word), so the control itself stays armed in DR1 and this point costs nothing.
+        points[2] = (job + 0x50) & ~static_cast<std::uintptr_t>(7);
         points[3] = (job + 0x40) & ~static_cast<std::uintptr_t>(7);
         kinds[1] = 5;
-        kinds[2] = 5;
+        kinds[2] = 4;
         kinds[3] = 3;
         if (!watch.stage3_entry.exchange(true)) {            watch.graph.store(static_cast<std::uintptr_t>(graph));
             watch.executor_tid.store(GetCurrentThreadId());
             std::uint64_t lock_word = 0;
             executor_watch_read_block(points[1], &lock_word, sizeof lock_word);
-            std::uint64_t lock_word2 = 0;
-            executor_watch_read_block(points[2], &lock_word2, sizeof lock_word2);
+            std::uint64_t descriptor_field = 0;
+            executor_watch_read_block(points[2], &descriptor_field, sizeof descriptor_field);
             std::string text = writer_watch_prefix("STAGE 3 ENTRY") + " job " + executor_watch_hex(job) +
                                " tid " + std::to_string(GetCurrentThreadId()) + " graph " +
                                executor_watch_hex(graph) + " same-pass control at graph+0x18 " +
-                               executor_watch_hex(points[1]) + " (now " + executor_watch_hex(lock_word) + ") and graph+0x20 " +
-                               executor_watch_hex(points[2]) + " (now " + executor_watch_hex(lock_word2) + ")" +
+                               executor_watch_hex(points[1]) + " (now " + executor_watch_hex(lock_word) +
+                               "), provenance point at job+0x50 " + executor_watch_hex(points[2]) + " (now " +
+                               executor_watch_hex(descriptor_field) + ")" +
                                "\n  " + writer_watch_region(job) + "\n  " + writer_watch_page_mapping(job) +
                                "\n  " + writer_watch_page_mapping(points[1]) +
                                executor_watch_memory_dump("job", job, 0x80) +
@@ -2506,7 +2731,8 @@ void start_writer_watch(std::uintptr_t image_base, std::size_t image_size) {
             WriterWatch& watch = writer_watch();
             std::fprintf(stderr,
                          "[rt] writer watch at %d s: executor entries %u (job logs %u), job changes %u (data arm(s) "
-                         "%u), data hits %u (vtable %u, same-pass control %u, state %u, graph control %u), same-pass "
+                         "%u), data hits %u (vtable %u, same-pass control %u, state %u, descriptor field %u, graph "
+                         "control %u), same-pass "
                          "control hits %u, sweep seen %u armed %u failed %u, poller changes %u, machine stage %u, "
                          "site byte %02x\n",
                          sample * 10, watch.entries.load(std::memory_order_relaxed),
@@ -2517,6 +2743,7 @@ void start_writer_watch(std::uintptr_t image_base, std::size_t image_size) {
                          watch.vtable_writes.load(std::memory_order_relaxed),
                          watch.same_pass_control_hits.load(std::memory_order_relaxed),
                          watch.state_writes.load(std::memory_order_relaxed),
+                         watch.descriptor_writes.load(std::memory_order_relaxed),
                          watch.graph_control_writes.load(std::memory_order_relaxed),
                          watch.same_pass_control_hits.load(std::memory_order_relaxed),
                          watch.sweep_seen.load(std::memory_order_relaxed),
