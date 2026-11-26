@@ -2,6 +2,7 @@
 // files: the archetype lookup they stand in for takes its model hash in ecx (docs/modding.md).
 #include "../src/code_hooks.h"
 #include "../src/mods.h"
+#include "../src/title_class0a.h"
 
 #include <cstdio>
 #include <cstring>
@@ -367,6 +368,147 @@ int main() {
         free_thunk(unwind_remap);
     }
     free_thunk(nullptr);
+
+    // ---- title_class0a.h: the class-0xa row-stride mitigation (docs/decomp_first_ui.md section 16) -------------------
+    // The switch's value parser and the class decision are pure; the trampoline and the call-site redirection are
+    // exercised on synthetic functions written into memory (the measured title switch's ABI, not its bytes).
+    {
+        using namespace palmetto::title_class0a;
+        check(!switch_enabled(nullptr), "the class-0xa switch is off when unset");
+        check(!switch_enabled(""), "the class-0xa switch is off when empty");
+        check(!switch_enabled("0"), "the class-0xa switch is off for 0");
+        check(!switch_enabled(" off "), "the class-0xa switch is off for off");
+        check(!switch_enabled("FALSE"), "the class-0xa switch is off for FALSE");
+        check(!switch_enabled("no"), "the class-0xa switch is off for no");
+        check(switch_enabled("1"), "the class-0xa switch is on for 1");
+        check(switch_enabled(" 1 "), "the class-0xa switch ignores surrounding blanks");
+        check(switch_enabled("yes"), "the class-0xa switch is on for any other spelling");
+        check(class_of(0xau) == 0xau, "class 0xa is read from the low 12 bits");
+        check(class_of(0x1000u | 0xau) == 0xau, "flag bits above the low 12 are masked off");
+        check(overrides(0xau) && overrides(0x1000u | 0xau), "0xa is the overridden class");
+        check(!overrides(0x9u) && !overrides(0xbu) && !overrides(0u) && !overrides(0x1u),
+              "every other class keeps the original answer");
+        check(row_stride(0x100u) == 0x1000u, "the class-0xa row stride is width*16 (0x1000 at width 0x100)");
+        check(row_stride(1u) == 0x10u, "the class-0xa row stride is 16 bytes per element");
+
+        // The trampoline alone: class 0xa is answered without entering the original; other classes reach it.
+        uint8_t* mem2 = alloc_near(reinterpret_cast<const void*>(&remap_lucia), 0x4000);
+        check(mem2 != nullptr, "executable memory for the class-0xa trampoline");
+        if (mem2) {
+            std::memset(mem2, 0xCC, 0x4000);
+            uint8_t* const original = mem2;  // the measured switch's shape: class 1 -> width*4, everything else -> 0
+            put(original, {0x89, 0xC8});                                // mov eax, ecx
+            put(original + 2, {0x25, 0xFF, 0x0F, 0x00, 0x00});          // and eax, 0xfff
+            put(original + 7, {0x83, 0xF8, 0x01});                      // cmp eax, 1
+            put(original + 10, {0x75, 0x06});                           // jne +6 (the zero path)
+            put(original + 12, {0x89, 0xD0});                           // mov eax, edx
+            put(original + 14, {0xC1, 0xE0, 0x02});                     // shl eax, 2
+            put(original + 17, {0xC3});                                 // ret
+            put(original + 18, {0x31, 0xC0, 0xC3});                     // xor eax, eax ; ret
+            check(original[10] == 0x75 && original[11] == 0x06, "the synthetic original branches over the class-1 path");
+            uint8_t* const thunk = make_row_stride_thunk(original);
+            check(thunk != nullptr, "a class-0xa trampoline is allocated near the original");
+            if (thunk) {
+                using StrideFn = uint32_t (*)(uint32_t, uint32_t);
+                const auto stride = reinterpret_cast<StrideFn>(thunk);
+                check(stride(0xau, 0x100u) == 0x1000u, "the trampoline answers 0x1000 for class 0xa at width 0x100");
+                check(stride(0xau, 0x40u) == 0x400u, "the trampoline scales the class-0xa stride with the width");
+                check(stride(0x1000u | 0xau, 0x100u) == 0x1000u, "the trampoline masks the class like the original");
+                check(stride(0x1u, 0x100u) == 0x400u, "class 1 reaches the original unchanged");
+                check(stride(0x9u, 0x100u) == 0u, "a class the original answers 0 for still reaches the original");
+                check(make_row_stride_thunk(nullptr) == nullptr, "a null original is refused");
+                free_row_stride_thunk(thunk);
+            }
+            VirtualFree(mem2, 0, MEM_RELEASE);
+        }
+
+        // Install, call through, uninstall on a synthetic mapped image: the two direct branches are redirected and
+        // restored byte for byte, the decoy branch is untouched, and class 0xa only changes while installed.
+        uint8_t* const img = static_cast<uint8_t*>(
+            VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+        check(img != nullptr, "synthetic image for the class-0xa patch");
+        if (img) {
+            std::memset(img, 0xCC, 0x4000);
+            constexpr std::uint32_t kStrideRva = 0x1000;
+            uint8_t* const original = img + kStrideRva;
+            put(original, {0x89, 0xC8});                                // mov eax, ecx
+            put(original + 2, {0x25, 0xFF, 0x0F, 0x00, 0x00});          // and eax, 0xfff
+            put(original + 7, {0x83, 0xF8, 0x01});                      // cmp eax, 1
+            put(original + 10, {0x75, 0x06});                           // jne +6 (the zero path)
+            put(original + 12, {0x89, 0xD0});                           // mov eax, edx
+            put(original + 14, {0xC1, 0xE0, 0x02});                     // shl eax, 2
+            put(original + 17, {0xC3});                                 // ret
+            put(original + 18, {0x31, 0xC0, 0xC3});                     // xor eax, eax ; ret
+            uint8_t* const caller_site = img + 0x1100;
+            caller(caller_site, original);                              // call
+            uint8_t* const tail_site = img + 0x1120;
+            branch(tail_site, 0xE9, original);                          // tail jump
+            uint8_t* const decoy_site = img + 0x1140;
+            caller(decoy_site, original + 1);                           // a branch to another address
+            uint8_t caller_before[16], tail_before[8], decoy_before[16], original_before[21];
+            std::memcpy(caller_before, caller_site, sizeof(caller_before));
+            std::memcpy(tail_before, tail_site, sizeof(tail_before));
+            std::memcpy(decoy_before, decoy_site, sizeof(decoy_before));
+            std::memcpy(original_before, original, sizeof(original_before));
+            DWORD old_img = 0;
+            check(VirtualProtect(img, 0x4000, PAGE_EXECUTE_READ, &old_img) != FALSE,
+                  "the synthetic image is executable before install (the install scans executable regions)");
+            FlushInstructionCache(GetCurrentProcess(), img, 0x4000);
+            using StrideFn = uint32_t (*)(uint32_t, uint32_t);
+
+            Patch patch = install_row_stride_patch(img, 0x4000, kStrideRva);
+            check(patch.ok && patch.site_count == 2, "install redirects the call and the tail jump, not the decoy");
+            if (patch.ok) {
+                check(std::memcmp(decoy_site, decoy_before, sizeof(decoy_before)) == 0,
+                      "the decoy branch to another address is left byte for byte");
+                check(std::memcmp(original, original_before, sizeof(original_before)) == 0,
+                      "the original switch's own bytes are not rewritten");
+                check(reinterpret_cast<StrideFn>(caller_site)(0xau, 0x100u) == 0x1000u,
+                      "through the redirected call, class 0xa answers 0x1000");
+                check(reinterpret_cast<StrideFn>(tail_site)(0xau, 0x40u) == 0x400u,
+                      "through the redirected tail jump, class 0xa answers width*16");
+                check(reinterpret_cast<StrideFn>(caller_site)(0x1u, 0x100u) == 0x400u,
+                      "class 1 still runs the original and answers width*4");
+                check(reinterpret_cast<StrideFn>(caller_site)(0x9u, 0x100u) == 0u,
+                      "a class the original answers 0 for still runs the original");
+                check(reinterpret_cast<StrideFn>(caller_site)(0x1000u | 0xau, 0x20u) == 0x200u,
+                      "the redirected call masks the class and scales the width");
+                const bool removed = uninstall_row_stride_patch(patch);
+                check(removed, "uninstall restores every site");
+                check(std::memcmp(caller_site, caller_before, sizeof(caller_before)) == 0,
+                      "the redirected call is restored byte for byte");
+                check(std::memcmp(tail_site, tail_before, sizeof(tail_before)) == 0,
+                      "the redirected tail jump is restored byte for byte");
+                check(patch.site_count == 0 && !patch.ok, "an uninstalled patch is empty");
+                check(reinterpret_cast<StrideFn>(caller_site)(0xau, 0x100u) == 0u,
+                      "after uninstall class 0xa runs the original again (the default path)");
+                check(uninstall_row_stride_patch(patch), "uninstalling an empty patch is a no-op");
+
+                // Install a second time (proves the restored bytes are patchable again) and release the page once no
+                // call site points at it.
+                Patch again = install_row_stride_patch(img, 0x4000, kStrideRva);
+                check(again.ok && again.site_count == 2, "the restored image can be patched again");
+                if (again.ok) {
+                    check(reinterpret_cast<StrideFn>(caller_site)(0xau, 0x10u) == 0x100u,
+                          "the re-installed patch answers again");
+                    check(uninstall_row_stride_patch(again, true), "the second uninstall restores and frees");
+                }
+            }
+
+            // Refusals: no image, the RVA outside the image, and an image that is not executable (install must not
+            // rewrite data pages).
+            check(!install_row_stride_patch(nullptr, 0x4000, kStrideRva).ok, "a null image is refused");
+            check(!install_row_stride_patch(img, 0x1000, kStrideRva).ok, "an RVA outside the image is refused");
+            DWORD ignored = 0;
+            VirtualProtect(img, 0x4000, PAGE_READWRITE, &ignored);
+            const Patch read_only = install_row_stride_patch(img, 0x4000, kStrideRva);
+            check(!read_only.ok && read_only.site_count == 0,
+                  "a non-executable image is refused and nothing stays patched");
+            check(std::memcmp(caller_site, caller_before, sizeof(caller_before)) == 0,
+                  "a refused install leaves the callers byte for byte");
+            VirtualFree(img, 0, MEM_RELEASE);
+        }
+    }
 
     std::printf("code_hooks_test: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

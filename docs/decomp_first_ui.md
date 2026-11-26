@@ -984,3 +984,161 @@ thread's stack; this arm reproduces its allocation geometry in the movie display
   VAs, runtime pointers, register values, counts, times and image means only.
 - **No git write**: the lead commits this slice's two uncommitted files (`port/src/main.cpp`,
   `docs/decomp_first_ui.md`). The tree otherwise has no uncommitted files from this slice.
+
+## 16. Measured: a title-side row-stride patch makes the class-0xa upload allocate its 0x1000 bytes, the executor pass survives the window, and the movie decode is still not reached
+
+**Status: measured with the user-approved opt-in title-side mitigation. The zero-byte request sections 14-15 named is
+replaced by the 0x1000 the copy writes: an in-memory trampoline answers the title's row-stride switch `width * 0x10`
+for class 0xa only, so the constant-upload helper asks its allocator for 0x1000 and writes
+`{256, 1, 0x1000, 0x1000, block}`. With the switch on the block no longer touches the live command object and the
+executor pass runs on for the rest of the window - two boots, 90.6 s and 175.0 s past the entry, killed by the harness
+timeout, zero device losses - where the same binary with the switch off faults about a second after the same entry. The
+movie decode is still not reached: frame-buffer registration `0x442F760` and per-frame decode `0x2EF0E0` have 0 hits in
+both arms, every presenter capture is mean rgb 0.00, and the first visible frame is not reached. The mitigation is off
+by default (`PALMETTO_TITLE_CLASS0A_SIZE`), installed after the image is mapped, and its scope and risks are
+section 16.5.**
+
+### 16.1 The ABI and the patch point: image+0x1555C10
+
+The zero-size request's producer was already named statically and in a boot ([vertex_buffer_va.md](vertex_buffer_va.md)
+sections 14-16, [decomp_memory.md](decomp_memory.md) section 9); this slice decodes the switch's exact ABI from the
+image and patches its callers, not the title's data. The function is a leaf with no `.pdata` entry:
+
+| item | measured |
+|---|---|
+| function | image+0x1555C10, `uint32_t row_stride(uint32_t class_and_flags /*ecx*/, uint32_t width /*edx*/)` |
+| class | `class = ecx & 0xfff` (the first three instructions are `mov eax, ecx` / `and eax, 0xfff` / the compare ladder) |
+| answer | bytes per row, by class: 1,2 -> `width * 4`; 3,4 -> `width * 3` rounded up to 4; 9 -> `width`; 0x15 -> `width * 2`; the 0x32-0x42 and 100/101/200/201 families -> their untiled/tiled answers; every other class, 0xa included -> 0 |
+| shape | reads only ecx and edx, writes eax, touches no stack, branches only within its own body |
+| references | three direct branches in the image: `call` at image+0x1555B85 inside the per-plane size helper image+0x1555B60, `call` at image+0x455965C (the per-plane stride write of the constant helper image+0x45594F0) and `call` at image+0x455AD4B inside a second per-plane helper image+0x455ACE0 that stores the row stride at `+8` of a descriptor; no rip-relative `lea`/`mov` of its address and no relocation entry pointing at it |
+| class-0xa inputs | the class is the image's format-table record 8 (`0xa`), the row width is 0x100, and the copy writes `width << 4` = 0x1000 bytes |
+
+The size the helper requests is `image+0x455A610`'s per-plane sum of `height * row_stride`; at class 0xa,
+`height * row_stride(0xa, 0x100) = 1 * 0 = 0`, which is the measured `size 0x0` request. What the mitigation changes
+is that one answer, `width * 0x10` for class 0xa: the class's format record says R32G32B32A32_FLOAT (16 bytes per
+element) and the copy's own step is 16 bytes per element, so `height * width * 0x10 = 0x1000` at the measured width.
+At any other width the same rule keeps the size and the copy's per-element step consistent; a fixed 0x1000 would only
+fit the measured table. Every other class returns through the original bytes, so the other 15 format-table classes and
+every other caller keep byte-identical answers.
+
+### 16.2 The implementation and the switch
+
+| change | what it is |
+|---|---|
+| new include-only header under port/src (`title_class0a.h`) | the measured constants (RVA, class mask, class, element size), the pure switch parser and class decision, the executable trampoline emitter, and install/uninstall with a scope guard |
+| `port/src/main.cpp` | the opt-in install after `loader.load()` (image mapped, before any image code), the log line naming the RVA and the redirected call-site count, and a `ScopedPatch` that restores the call sites when the run's C++ scope exits |
+| `port/test/code_hooks_test.cpp` | the pure switch/class checks, the trampoline on a synthetic original, and install/call-through/uninstall on a synthetic mapped image |
+
+The trampoline is 30 bytes of x64: read `class = ecx & 0xfff`; for class 0xa return `edx << 4` in eax; for every other
+class load the original function's address and `jmp` to it with ecx, edx and the stack untouched. It has no prolog, so
+the Windows unwinder treats it as a leaf, which is correct on both paths. It uses no int3, no VEH and no debug register,
+so it cannot collide with the `PALMETTO_SKIP_INT3` handler, the movie probes or any other switch hook; it is not on the
+per-frame path.
+
+The install walks the mapped image's committed executable regions (the same effective span rule the loader uses) and
+rewrites only `E8`/`E9` rel32 sites whose target is exactly image+0x1555C10, recording each site's original displacement.
+Uninstall writes those displacements back and flushes the instruction cache, so the image returns byte for byte; the
+trampoline's page is left mapped by default because a thread could be inside its few instructions when a shutdown-time
+uninstall runs (the test frees it explicitly once no site points at it). A title-initiated exit ends the process with the
+patch in place, which is process-local: the mapped image is this process's private copy and nothing on disk changes. The
+switch is off unless `PALMETTO_TITLE_CLASS0A_SIZE` is set to a value other than `0`/`off`/`false`/`no`, so every default
+arm runs the title's original bytes. This is a title-side workaround for the experiment, not a console-faithful
+emulation, and section 16.5 is part of the change.
+
+### 16.3 The A/B
+
+One boot per arm under the shared boot lock, the section-12 content environment from the arm script, `-Light`,
+`PALMETTO_MOVIE_PROBE=player`, `PALMETTO_ALLOC_WATCH=1`, 120-240 s. A and B are one binary: sha256 first 16
+`F7AC0564C163D5A7`. B3 repeated the on arm on the tree's gate build after the measurement (sha256 first 16
+`2120E306743D2DBD`), which differs from the measured arms only in the install-failure cleanup: the measured path and
+the switch are identical. The A baseline from the previous commit (`4238F141ED2FBD52`) is the section-15.4 boot,
+quoted for the class-0xa record.
+
+| arm | binary sha256 (first 16) | wall | stage 3 (run time) | BLOCK ALLOC request | descriptor entry | executor pass | play-step probes | stop / trace t | device lost | presenter captures |
+|---|---|---:|---:|---|---|---|---|---:|---:|---|
+| A: `boot-mitig-off4`, switch off | `F7AC0564C163D5A7` | 66.7 s | 64.2 s | **0x0** | stride 0, size 0 | faults about 1 s after the entry | - | `0x538D68E` read -1, t 65.14 | 0 | 12, all mean rgb 0.00 |
+| A: `boot-mitig-off1..3`, switch off | `F7AC0564C163D5A7` | 63.7 / 63.2 / 54.2 s | none | - | - | - | - | `0x28CD3CC`, `VCRUNTIME140.dll+0x1CCAB`, `0x4D9E79C` | 1 each | - |
+| B: `boot-mitig-on1`, switch on | `F7AC0564C163D5A7` | 150.2 s (timeout) | 58.6 s | **0x1000** | stride 0x1000, size 0x1000 | survives to the 150 s kill: 90.6 s past the entry, no fault | open 3 / playback 1 / decode 0 / registration 0 | none (killed) | 0 | 12, all mean rgb 0.00 |
+| B: `boot-mitig-on2`, switch on | `F7AC0564C163D5A7` | 240.2 s (timeout) | 64.3 s | **0x1000** | stride 0x1000, size 0x1000 | survives to the 240 s kill: 175.0 s past the entry, no fault | open 3 / playback 1 / decode 0 / registration 0 | none (killed) | 0 | 12, all mean rgb 0.00 |
+| B: `boot-mitig-on3`, gate build, switch on | `2120E306743D2DBD` | 120.3 s (timeout) | 54.6 s | **0x1000** | stride 0x1000, size 0x1000 | survives to the 120 s kill: 64.6 s past the entry, no fault | open 3 / playback 1 / decode 0 / registration 0 | none (killed) | 0 | 12, all mean rgb 0.00 |
+
+The A baseline of the previous commit, same environment: `BLOCK ALLOC` request `0x0`, job-block `0xef0` (the block
+held the live job), `ENTRY WRITTEN` stride 0 size 0, stop `0x13360A3` 0.1 s after the pass (section 15.4). So the
+measured step is the request itself: 0x0 on the off path, 0x1000 on the on path, and the job no longer sits in the
+copy's range. In `boot-mitig-off4` the same binary even produced the other placement (`job-block 0x0`, the zero-size
+block 0xA0 after the job) and still faulted, at `0x538D68E` in the allocator's classed tree - the overrun of a 0x1000
+copy into allocator metadata, the section-15 third stop family. The on arms' block sits after the job's 0xA0 bytes in
+both boots (0xC0 and 0x120 bytes after its base), so the copy lands entirely inside the 0x1000-size chunk the helper
+allocated and the executor's next call through the job header sees an intact object.
+
+The on arms keep submitting: 13,437 `ExecuteCommandLists` in B1's window and 23,480 in B2's, i.e. the renderer loop
+runs for the whole window after the pass that used to kill it; the probes' per-frame decode still sees nothing. The
+three failed off attempts are the stage-3 race sections 10-15 record (and each lost the Vulkan device once); the clean
+off arm for comparison is `boot-mitig-off4`.
+
+### 16.4 The state and the pixels
+
+The on arms' last state sample (B2, 238 s; B1 reads the same at 148 s): init 3 (last change 64/58 s), loading 2,
+session 3, machine current 3 next 3; the movie slot is armed (entity non-null, active 1, armed 1, media id 0x540714f3)
+and the player state byte is **0x9** with a non-null Bink handle and `open 1` - the playing state section 15 measured -
+but `buffers 0`. The middleware play steps that do fire are the same two section 15 measured: metadata/probe open
+`0x442EA70` 3 times and playback open `0x199EF20` once. Per-frame decode `0x2EF0E0` and frame-buffer registration
+`0x442F760` (called only from inside the decode wrapper) have 0 hits, so the draw that would decode a movie frame is
+never issued in the window; the executor pass that used to die completes, and the boot then keeps rendering the
+loading frames.
+
+Pixels: no title pixel is measured. The 12 presenter captures per on arm are 2564x1421 and every one has mean rgb
+`0.00 0.00 0.00` (black) - the visible frame is a black target, unchanged from section 15. The 128x128 centre readback
+on the content target reads the layer's own write-control colour (`51 102 204`, 16,384/16,384 non-black) on the
+write-control draws and `0 0 0` on the others; that colour is the replay's control, not title content. So the first
+visible frame milestone is not reached: the overrun is no longer what stops the boot, but the decode that would put a
+frame on screen is still not called.
+
+### 16.5 Risks and limits
+
+- **Title-side, narrow, and named.** The patch changes one answer of one title function for one class. It is not a
+  console-faithful emulation: no console evidence says the console's switch answers width*16 for 0xa; the inference is
+  the image's own format record (16 bytes per element), this title's own 16-byte copy step, and every other case of the
+  function being `width * bytes-per-element`. If the console's answer is different, the overrun would be the console's
+  own bug and the mitigation is only a way to keep this experiment moving.
+- **Image-specific RVA and shape.** The install trusts image+0x1555C10 to be the measured leaf and only redirects direct
+  branches to that address. A different image build needs the function and its callers re-measured; with the switch off
+  nothing changes. The third reference (image+0x455AD4B, inside the second per-plane helper image+0x455ACE0) is
+  redirected too; whether that helper ever sees class 0xa is not measured, and no other consumer was measured.
+- **The clean A arm is one boot.** Three further off attempts did not reach stage 3 (the section 10-15 race; each lost
+  the device once), and the clean off arm did. The on arms reached stage 3 on both attempts and neither lost the device;
+  that correlation with the device loss is measured but not claimed as causal (n=5, and the device loss is the host-GPU
+  family the FSR pages record). A falsifier: an off boot that reaches stage 3 without a device loss, or a count of
+  class-0xa stride queries before stage 3 (the third call site is the named candidate for a pre-stage-3 consumer).
+- **The executor pass survives; the next wall is the decode gating, not this overrun.** The player stays at state 0x9
+  with `buffers 0` and the draw that calls `0x2EF0E0` is never issued; whether that is the movie middleware's own
+  gating or the loading state (loading is still 2 in this window) is not answered here.
+- **The switch does not synthesise anything.** It changes no shim answer, allocates nothing itself and writes no title
+  data; it only changes what the title's own switch returns for one class, in memory, for this process.
+
+### 16.6 Tests and gates
+
+- The extended `port/test/code_hooks_test.cpp` covers the switch parser, the class mask/decision and the stride
+  (`105 checks, 0 failures`, run as the `code_hooks` ctest target), the trampoline on a synthetic original function (class
+  0xa answered, every other class reaching the original unchanged, class bits masked, scaling with width), and
+  install/call-through/uninstall on a synthetic executable image: both an E8 call and an E9 tail jump redirected, a
+  decoy branch to another address left byte for byte, the original function's bytes untouched, byte-for-byte restore on
+  uninstall, the default answer coming back after uninstall, re-install, a refusing install on a null image / an
+  out-of-image RVA / a non-executable image, and the explicit free of the trampoline page.
+- Gates on the changed tree: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints
+  `TESTS_BUILT`, the GPU-free gate subset exits 0 (`code_hooks`, `frame_dump`, `unimplemented_policy`,
+  `graphics_record`, `graphics_pso`, `buffer_va_index`, `dstorage`, `xapu_chad`, `deferred_compile`, `arena_size`,
+  `xbox_present`, `xs_proxy_mock`, `xmem` - 13 of 13), and the docs checks pass (this tracked section names
+  `PALMETTO_TITLE_CLASS0A_SIZE` for the environment-variable check).
+
+### 16.7 Evidence, uncommitted files, attribution
+
+- **Evidence (outside the repository)**: `D:\leonida-work\fsrstable\boot-mitig-off1`, `boot-mitig-off2`,
+  `boot-mitig-off3`, `boot-mitig-off4`, `boot-mitig-on1`, `boot-mitig-on2` and `boot-mitig-on3` with
+  `stderr.log`/`stdout.log`/`summary.txt`/`boot.jsonl`, and `capture-mitig-*`/`readback-mitig-*` for the arms that
+  reached a capture. No game data: RVAs, sizes, register/pointer values, counts, times and image means only.
+- **Uncommitted files**: the new include-only header under port/src (`title_class0a.h`), `port/src/main.cpp`,
+  `port/test/code_hooks_test.cpp` and this section of `docs/decomp_first_ui.md`. No git write: the lead commits them.
+- **Attribution.** The ABI decode, the trampoline, the install/uninstall, the tests and the six boots are this project's
+  own work on the user's image and the measured chain of [vertex_buffer_va.md](vertex_buffer_va.md) sections 14-16 and
+  [decomp_memory.md](decomp_memory.md) section 9. No peer code was used and no game data is added.

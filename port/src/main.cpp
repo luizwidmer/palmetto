@@ -40,6 +40,7 @@
 #include "host_cpu.h"
 #include "mods.h"
 #include "pe_loader.h"
+#include "title_class0a.h"
 #include "wait_trace.h"
 #include "../shims/d3d12_trace.h"
 #include "../shims/d3d12_xs_device.h"
@@ -6203,6 +6204,29 @@ int wmain(int argc, wchar_t** argv) {
                              r.error);
         }
         if (run) rt::process::set_command_line(image.filename().wstring(), game_args);
+        // PALMETTO_TITLE_CLASS0A_SIZE=1: title-side mitigation for the class-0xa zero-byte constant-table upload
+        // (user-approved; docs/decomp_first_ui.md section 16). The title's own row-stride switch image+0x1555C10 has no
+        // case for the class its format table gives the 256x1 float4 table, so the upload asks its allocator for 0
+        // bytes and then copies 0x1000 bytes over the live command object (docs/vertex_buffer_va.md sections 14-16).
+        // This redirects the stride switch's direct callers to a trampoline that answers width*16 for class 0xa only
+        // and jumps to the original bytes for every other class; installed after the image is mapped and before any
+        // image code runs, uninstalled when the run returns. Off by default.
+        palmetto::title_class0a::ScopedPatch class0a_size;
+        if (palmetto::title_class0a::switch_enabled(std::getenv("PALMETTO_TITLE_CLASS0A_SIZE"))) {
+            class0a_size.patch =
+                palmetto::title_class0a::install_row_stride_patch(main_module.base, main_module.size);
+            if (class0a_size.patch.ok)
+                std::fprintf(stderr,
+                             "[rt] class-0xa size mitigation: image+0x%x redirected at %u direct call site(s); class 0xa "
+                             "row stride = width*0x10, every other class runs the original bytes\n",
+                             palmetto::title_class0a::kRowStrideRva, class0a_size.patch.site_count);
+            else
+                std::fprintf(stderr,
+                             "[rt] class-0xa size mitigation: NOT installed (no executable direct caller of "
+                             "image+0x%x could be redirected); the default path runs\n",
+                             palmetto::title_class0a::kRowStrideRva);
+            std::fflush(stderr);
+        }
         std::exception_ptr init_failure;
         if (init || run) {
             try {
