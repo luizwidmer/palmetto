@@ -95,6 +95,70 @@ int main() {
         EXPECT(unlimited.touch(1) == 0 && unlimited.live() == 0);
     }
 
+    // The title-page pull coalescer (docs/title_memory_model.md): the include-only policy and the VulkanContext decision
+    // path the replay's pull lambda takes. GPU-free: no device, no title memory, no game data. A pull is skipped only
+    // when the same submission already copied every byte of it; the trace arm counts the repeat and never skips.
+    {
+        palmetto::TitlePullWindows windows;
+        EXPECT(!windows.covers(0x1000, 0x1000));
+        EXPECT(windows.add(0x1000, 0x2000));
+        EXPECT(windows.covers(0x1000, 0x2000));
+        EXPECT(windows.covers(0x1800, 0x100));
+        EXPECT(!windows.covers(0x1800, 0x2000));  // runs past the window: those bytes were not all copied
+        EXPECT(!windows.covers(0xff0, 0x20));     // starts before it
+        EXPECT(windows.add(0x1800, 0x4000));      // an overlap merges
+        EXPECT(windows.size() == 1 && windows.covers(0x1000, 0x4800));
+        EXPECT(windows.add(0x5000, 0x1000));      // adjacency merges into one window
+        EXPECT(windows.size() == 1 && windows.covers(0x1000, 0x5000));
+        EXPECT(!windows.add(0, 0) && !windows.add(~std::uint64_t{0}, 2));
+        windows.reset();
+        EXPECT(windows.size() == 0);
+        // The bound: past kMaxWindows the lowest window is dropped, which only means its bytes are copied again.
+        for (std::uint64_t i = 0; i < palmetto::TitlePullWindows::kMaxWindows + 8; ++i)
+            EXPECT(windows.add(0x10000 * (i + 1), 0x1000));
+        EXPECT(windows.size() == palmetto::TitlePullWindows::kMaxWindows);
+        EXPECT(windows.covers(0x10000 * (palmetto::TitlePullWindows::kMaxWindows + 8), 0x1000));
+        EXPECT(!windows.covers(0x10000, 0x1000));
+    }
+    {
+        struct Stub {
+            static PFN_vkVoidFunction VKAPI_CALL proc(VkDevice, const char* name) {
+                (void)name;
+                return nullptr;
+            }
+        };
+        _putenv_s("PALMETTO_TITLE_PULL_TRACE", "1");
+        _putenv_s("PALMETTO_TITLE_PULL_COALESCE", "");
+        {
+            palmetto::VulkanContext trace(Stub::proc,
+                                          reinterpret_cast<VkDevice>(static_cast<std::uintptr_t>(1)), false);
+            EXPECT(trace.title_pull_trace() && !trace.title_pull_coalesce());
+            trace.title_pull_begin_submission();
+            EXPECT(!trace.title_pull_decide(0x9000, 0x80));
+            trace.title_pull_copied(3);
+            EXPECT(!trace.title_pull_decide(0x9000, 0x80));  // TRACE counts the repeat, it does not skip
+            EXPECT(trace.title_pull_report().find("repeated in submission 1") != std::string::npos);
+            trace.title_pull_begin_submission();
+            EXPECT(!trace.title_pull_decide(0x9000, 0x80));  // a repeat of the previous submission is counted only
+        }
+        _putenv_s("PALMETTO_TITLE_PULL_COALESCE", "1");
+        {
+            palmetto::VulkanContext coalesce(Stub::proc,
+                                             reinterpret_cast<VkDevice>(static_cast<std::uintptr_t>(1)), false);
+            EXPECT(coalesce.title_pull_coalesce());
+            coalesce.title_pull_begin_submission();
+            EXPECT(!coalesce.title_pull_decide(0x9000, 0x80));
+            EXPECT(coalesce.title_pull_decide(0x9000, 0x80));
+            EXPECT(coalesce.title_pull_decide(0x9000, 0x40));
+            EXPECT(!coalesce.title_pull_decide(0x9080, 0x80));  // not fully covered: copied
+            coalesce.title_pull_begin_submission();
+            EXPECT(!coalesce.title_pull_decide(0x9000, 0x80));  // a new submission starts with an empty window
+            std::printf("title pull coalescer: ok (policy and VulkanContext decision)\n");
+        }
+        _putenv_s("PALMETTO_TITLE_PULL_TRACE", "");
+        _putenv_s("PALMETTO_TITLE_PULL_COALESCE", "");
+    }
+
     // The replay accessor lock order (docs/memory_growth.md): execute() holds VulkanContext's resource lock shared for
     // the whole replay, and the device callbacks the replay calls read heap_base() from inside it (the device-memory
     // reader/writer). Windows SRW locks are writer-preferring, so a nested shared acquire in heap_base() blocks behind an

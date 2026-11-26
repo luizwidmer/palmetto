@@ -1,0 +1,374 @@
+# The title-memory model: our copies against the peers' page heaps and write watch
+
+**Status: measured model, one reversible step landed behind a switch (off by default), and one boot A/B - the step is
+measured inert at today's frontier and the measurement says why.** This is the rank-3 slice of
+[cleanroom_peers.md](cleanroom_peers.md): the peers' title memory is aliased into GPU-visible memory and kept current
+by a write signal, while our tree copies the title's bytes into an arena and has no enabled change signal. This page
+measures the whole model as it stands (every consumer, its bytes and CPU cost, from our own counters), states for each
+peer mechanism what our Windows/Vulkan backend would need - measured in our tree wherever a measurement exists, and
+marked unmeasured where it does not - and lands the safest step the measurement supports: a per-submission **pull
+coalescer** that reuses a copy this same submission already made
+([port/src/title_pull_windows.h](../port/src/title_pull_windows.h), [port/src/vulkan_backend.h](../port/src/vulkan_backend.h),
+`PALMETTO_TITLE_PULL_TRACE` / `PALMETTO_TITLE_PULL_COALESCE`). The A/B then measured that the title's draws name a
+**different byte range almost every time** (0 repeated ranges in 8,186 pulls), so the step has no population here: it
+is recorded as a negative with no regression, and the model's measured conclusion is that the only title-memory copy
+with reusable bytes at this frontier is the descriptor mirror, whose skip rule is already landed
+([card_copies.md](card_copies.md)). No peer code and no game data are in it; section 6 gives the A/B and section 7 the
+next falsifier.
+
+Counts, sizes, RVAs and status codes only; no package path, shader byte, extracted table or peer code.
+
+## 1. Why this slice, and what the peers claim
+
+The peer evidence is feature-level and was read from their public documentation and repositories (reference only; the
+programme's no-copy rule is [upstream_port.md](upstream_port.md)). All claims are from the clones named in
+[cleanroom_peers.md](cleanroom_peers.md) section "Reference material consulted", re-read at those commits:
+
+| peer | public claim (summarised) | the mechanism class it names |
+|---|---|---|
+| XCL (`6d12f58`, GPL-2.0-only) | README: "title graphics memory shared by CPU and GPU without copies, up to 16 GB (4 GiB windows)"; its handoff notes describe 4 GiB reserved windows whose 64 KiB tiles are mapped onto heaps, the CPU view staying the title's memory and a per-submit write-watch scan uploading only changed 64-byte chunks (measured there: ~0.8 ms a submit over ~2 GB of mapped tiles, then ~0.3 ms of uploads). | real GPU aliasing of title pages through a window address space plus a write watch |
+| victory-fork (`9c184b3`, GPL-3.0-or-later) | README: small title buffers get a copy in card memory with shader writes found by hashing on the card (its title lists 68.0 -> 49.8 ms of card time a frame); "Title memory can be opened as a graphics heap so that buffers are used in place instead of copied"; a write through one view of a physical page is seen by copies taken through its other views; guarded memory is left out of a submission's write-watch; storage writes into physical pages are counted. | in-place card heaps, a guard-based write watch, and alias reporting |
+| five-star (`0bfa755`, GPL-3.0-or-later) | "a page mapped at two addresses is one page and a remapped page keeps its contents"; GPU visibility by opening the page sections as heaps, 1 GiB windows. | pagefile-section page heaps with 64 KiB remappable pages |
+| VIctory (`13f91ca`, GPL-3.0-or-later) | title memory at raw GPU addresses through a per-page host-copy raw-view table; writes found by read-only guards, alias reports from the runtime. | read-only-guard write detection |
+
+Ours is the other end of the class: a **copy and mirror** model. [page_address_space.md](page_address_space.md) rebases
+the title VAs into one arena and mirrors the console descriptor heap; [page_content.md](page_content.md) copies the
+pages a draw names into the arena before the draw; [card_copies.md](card_copies.md) measured that mirror's refresh cost
+and readied, but did not enable, a guard-page change signal. This page measures what the whole model costs and what
+each peer mechanism would actually require here.
+
+## 2. Our measured model
+
+### 2.1 Every title-memory consumer, with its measured volume and cost
+
+| consumer | code | when | measured volume | measured CPU cost |
+|---|---|---|---|---|
+| console descriptor-heap mirror | `sync_console_heaps` / `DescriptorHeap::sync_console_descriptors` (`port/shims/d3d12_vulkan_device.cpp`), switched measure in `port/src/vulkan_backend.h` | once per submission, before the lists | one range, **38.0 MiB** (39,845,888 B) of title bytes compared against a CPU-side mirror (76 MB read); only changed 32-byte slots copied | **3.4-4.4 ms** per refresh on its first boot ([page_address_space.md](page_address_space.md) section 4), **8.4-9.5 ms** in the later A/B ([card_copies.md](card_copies.md) section 6); 52.9% of that boot's wall clock before the skip rule, **27.3%** after it |
+| per-draw page pull (vertex/index/root descriptor) | `console_pull_pages` (`d3d12_vulkan_device.cpp`), replay hook `pull_title_pages` (`port/src/vulkan_backend.h`, `port/src/vulkan_replay.h`) | while a draw is prepared, per title VA the draw names | **131,072 pulls / 273.0 MiB over a 300 s boot** on the tree that measured it ([page_content.md](page_content.md) section 8); **8,186 pulls / 31.9 MiB over the 130.4 s A/B boot** on this tree - about one pull a submission, ~4 KiB each (a vertex view of 0xFF0 and a root window of 0x60), every one a different VA | the hook's own copy is **7 us a pull, 54.4 ms over 130.4 s** in the A/B (measured with `PALMETTO_TITLE_PULL_TRACE`, section 6). The earlier pull-on vs pull-off boots attribute **~440 us a submission** (submission 8,192 at 38.6 s vs 35.0 s) to the *whole* pull path, so most of that is in the table pull and the mirror reads, not in this hook (section 7) |
+| per-draw table pull (a descriptor table's V# data) | `console_pull_table` (`d3d12_vulkan_device.cpp`), replay hook `pull_title_table` | same, per descriptor table the draw names | each draw's table has one V# and it is title-named and pulled ([page_content.md](page_content.md) section 2); its copies run inside the device file and are **not** wrapped by this slice's trace | not timed by this slice; the measured whole-path figure above is the bound (section 7 names the counter as the next instrument) |
+| copy-source pull | `console_pull_arena`, replay hook `pull_title_arena` | before a copy command reads a title range | **0 requests** in the measured window (no copy command at all) | 0 |
+| page-mapping batch (queue slot 31) | `rt::xmem::copy_page_mappings_fn` (`port/shims/xmem.cpp`) | when the title calls `CopyPageMappingsBatchX` | implemented, **0 calls** at the frontier | 0 ([cpu_view_mapping.md](cpu_view_mapping.md)) |
+| DirectStorage page-list resolver | `rt::xmem::resolve_physical_page_fn` (`port/shims/xmem.cpp`) | when a dstorage request names destination physical pages | implemented, **0 page-list requests**, `dest-pages=0` ([page_resolver.md](page_resolver.md)) | 0 |
+| title-placed buffer import (slot 133) | `create_buffer_at_host_address` (`d3d12_vulkan_device.cpp`, `VK_EXT_external_memory_host`) | when the title places a resource on its own pages | the measured 182,452,224-byte placed range is **not importable** (`E_NOTIMPL`; xmem commits pages lazily) | 0 - the stand-in copy path is used instead |
+| placed-texture import | `PALMETTO_TEXTURE_IMPORT` (`d3d12_vulkan_device.cpp`) | one bounded import per placed texture | opt-in; measured, the title's source addresses are not any device resource's address in the observed window | off by default ([texture_import.md](texture_import.md)) |
+
+The backing stores the model copies *from* are the xmem physical pages: `XMemAllocatePhysicalPages` is measured at
+3 calls / 114,096 pages (7,131 MB requested), **638 MB committed** at 110-140 s, one 64 KiB pagefile-section view per
+page ([memory_growth.md](memory_growth.md) section 1, [xmem.cpp](../port/shims/xmem.cpp)). A kernel `ReadFile` of
+**271,044,608 bytes** into those pages is repaired at boot by first-touching every destination page
+([readfile_first_touch.md](readfile_first_touch.md)); section 3.4 shows why that measured fact decides the guard-page
+option.
+
+### 2.2 What this adds up to
+
+At the measured frontier the title's CPU memory reaches the GPU through **two copies**, and only one of them has
+reusable bytes:
+
+- The **descriptor mirror** is a 38.0 MiB compare pass every submission, the largest single CPU block on the recording
+  thread. Its bytes *are* reused: the title rewrites a few of 1,245,184 descriptors a frame, so a skip rule pays, and
+  the landed one skips 50% of the refreshes ([card_copies.md](card_copies.md) section 6).
+- The **per-draw pull** carries different bytes almost every time. This slice's A/B measured 8,186 pull requests in
+  8,957 submissions, with **0 requests covered by an earlier pull in the same submission and 0 covered by the previous
+  submission's pulls** (section 6). The title's vertex, index and constant views are per-frame rings and streamed
+  ranges, so a copy of them is a fresh copy: the peers' "only changed pages are copied" win applies when pages *are*
+  re-read, and at this frontier they are not.
+
+Everything else the model carries (copy sources, page batches, resolver requests, the placed-buffer import) is measured
+at **zero population** in the observed window. That is the honest shape of the gap: the peers' aliasing would remove a
+38 MB compare and a per-draw copy; on this tree only the first has a reusable population today, and its skip rule is
+already measured and landed. The per-draw copy's measured cost (54.4 ms over 130.4 s in the wrapped hook) is far
+smaller than the mirror refresh, which is the other measured result this slice contributes to the ranking.
+
+## 3. What each peer mechanism would need on our Windows/Vulkan backend
+
+The instruction for this slice was to measure the feasible mechanisms before choosing. Each option below states what
+it would change, what our backend already has, and the exact measured constraint - a measurement, a line of our code,
+or an explicit "not measured".
+
+### 3.1 External host memory import (`VK_EXT_external_memory_host`)
+
+**Would do:** make a title range a Vulkan buffer over the title's own committed pages, so a GPU read is the CPU's
+bytes with no copy.
+
+**What our backend has:** the extension is enabled when the driver reports `minImportedHostPointerAlignment`
+(`d3d12_vulkan_device.cpp`, the device-extension list) and is already exercised: `OpenExistingHeapFromAddress` imports
+a caller's committed allocation, and slot 133 (`create_buffer_at_host_address`) imports the title pages behind a placed
+buffer. So the mechanism itself is not speculative here.
+
+**Measured constraints, all from our tree:**
+
+- **The measured placed range cannot be imported.** `create_buffer_at_host_address` refuses when any page of the range
+  is not committed, write-combined or non-cached, and when the address/size are not aligned to the driver's
+  `minImportedHostPointerAlignment`. The 182,452,224-byte placement is reserved and committed page by page, so the
+  import answers `E_NOTIMPL` and the stand-in copy path is what runs ([page_address_space.md](page_address_space.md)
+  section 1, [replay_resolution.md](replay_resolution.md)).
+- **An imported buffer's address does not satisfy the shader's address equation.** The translated shaders compute
+  `host_address = heap_base + console_va` ([d3d12_vulkan.md](d3d12_vulkan.md) section 3.3); an imported buffer has a
+  driver-chosen device address, and the only console VA that reaches it is `device_address - heap_base`. That bias is
+  **measured to work for 64-bit root arguments but to fail for a V#**: the V# base field is 48 bits and the measured
+  bias is negative (`0xffffffffffce0000` on one GPU, `0xffffffffffedc000` on another), so it truncates
+  ([d3d12_vulkan.md](d3d12_vulkan.md) D3D-53, [remaining_mechanisms.md](remaining_mechanisms.md) section 3.3).
+- **The peers measured the pinning cost of the in-place forms.** victory-fork reports that both ways of opening title
+  memory to the card pin it, on a PC with 1-5 GB free, and that the buffer carrying the most traffic cannot be opened
+  at all; XCL reports that tiles mapped onto heaps opened from file mappings removed its device (both README/handoff
+  pages at the clones above, cited in [cleanroom_peers.md](cleanroom_peers.md)).
+
+**Verdict:** real for a *defined* range used as a command argument (already used by slot 133), not a substitute for
+the mirror or the pull. The address-equation blocker is the measured reason: the mirror's descriptor bytes are read by
+shaders as an arena VA.
+
+### 3.2 Host-visible aliasing (the page heap: the title's page is the GPU's page)
+
+**Would do:** what the peers do - one memory, mapped at the title's console VA and visible to the GPU, so the title's
+CPU write *is* the shader's read (the "page heap" of five-star/VIctory, the 4 GiB window of XCL).
+
+**What it needs that we do not have:** a Vulkan memory object whose physical pages are the same pages xmem maps at the
+title's VAs. In our backend the arena is one host-visible `VkBuffer` with a driver-chosen device address
+([d3d12_vulkan.md](d3d12_vulkan.md) section 3.3), while the title's pages are pagefile-section views xmem maps into
+reserved placeholder windows. Windows has no API to map arbitrary committed host memory at a second address, so the
+aliasing would have to come from the other direction: a section-backed `VkDeviceMemory` imported by NT handle
+(`VK_KHR_external_memory_win32`). Our device does not enable or probe that extension; whether a driver accepts a
+pagefile-backed section, and whether it pins the whole section at import (xmem commits lazily), is **not measured in
+this tree** - it is exactly the kind of prerequisite this programme's policy says not to assume.
+
+**What blocks it even if the import worked:** the same measured V# 48-bit bias as 3.1. The shader's equation holds
+only for arena ranges, so a title page visible at a non-arena device address still needs a different address-space
+design (the peers' model: the console VA *is* the GPU address, which is a rewiring of the arena, not a slice beside
+it). Two peer measurements stay as warnings: XCL's pagefile-mapping heaps removed the device; victory-fork found some
+title buffers cannot be pinned at all.
+
+**Verdict:** the only mechanism that removes the copies outright, and the largest and least measured step. Not this
+slice's first step.
+
+### 3.3 Sparse/placed emulation
+
+**Would do:** page-granular demand copies into GPU memory: a sparse buffer/image whose tiles are bound as the title's
+pages become live.
+
+**What our backend has:** sparse and aliased buffers are already created for D3D12 reserved resources
+(`sparse_buffer_info`: `SPARSE_BINDING | SPARSE_RESIDENCY | SPARSE_ALIASED`), and sparse-image tiles and reserved
+buffer tile mappings have their own tests ([d3d12_vulkan.md](d3d12_vulkan.md) section 4.2). The mechanism exists; what
+it does not do is remove a copy: XCL's measured sparse-window path still scans for CPU writes and uploads changed
+64-byte chunks each submission (~0.8 ms scan + ~0.3 ms uploads over ~2 GB of mapped tiles at its content population),
+and its GPU writes are not copied back. Its device address is again outside our arena, so a V# would hit the same
+48-bit bias.
+
+**Verdict:** a page-granular *copy* model - a natural companion to the streamed page path
+([page_resolver.md](page_resolver.md)), not a win for the measured 2 KiB-per-draw pull population.
+
+### 3.4 Copy-on-change with dirty tracking (the write watch)
+
+**Would do:** copy only the pages that changed since the last copy. [card_copies.md](card_copies.md) measured and
+landed the *signal half* (a guard-page write tracker in `port/shims/xmem.cpp`) and left it readied, not enabled. This
+slice measured the next question - what the full mechanism would need on this tree - and found four measured
+constraints that are not on the peers' structures:
+
+1. **The OS write watch cannot see this memory.** `GetWriteWatch` answers `ERROR_INVALID_PARAMETER` for pagefile-section
+   views (measured, [card_copies.md](card_copies.md) section 2.2). Guards are the only measured signal here.
+2. **Our own pull path is incompatible with armed guards.** `console_pull_pages` skips a page whose protection carries
+   `PAGE_GUARD` (it treats guard/no-access/write-combine/non-cached pages as "not the layer's to copy",
+   `d3d12_vulkan_device.cpp`), so a guard armed on a title page silently refuses that page's copy. A guard-based cache
+   therefore has to arm and disarm around every copy, or the device's changed-page loop has to learn to take a changed
+   page directly - the same device-side hook [card_copies.md](card_copies.md) section 5 names for the mirror scan. The
+   wrapper this slice landed covers only the replay's `pull_title_pages` hook; the table pull (`console_pull_table`)
+   copies in the device file, which is outside this slice's scope.
+3. **Read-only guards would break the loader's kernel writes.** The peers' alternative (VIctory: read-only pages +
+   write faults) cannot be used here: the loader writes **271,044,608 bytes** into first-touch title pages with a
+   kernel `ReadFile` ([readfile_first_touch.md](readfile_first_touch.md)), and a kernel write to a guarded or read-only
+   page fails instead of faulting. XCL recorded the identical trade-off on its own tree: read-only protection of cold
+   tiles would make the scan follow written pages, "but the kernel's own writes (ReadFile into title memory) then fail
+   instead of faulting".
+4. **Aliased views defeat a per-VA guard.** One physical page can be mapped at several title addresses (xmem_test
+   checks that both mappings see one memory; five-star documents the same invariant). A write through another view does
+   not trip a guard armed on ours: victory-fork measured 0.8-1.0 million such writes in a five-minute run and added a
+   per-page alias report for them. Our tracker publishes per-VA ranges, so it would need the alias-view list and the
+   mapping-change report that [cleanroom_peers.md](cleanroom_peers.md) slice 3 names; xmem does not carry it.
+   The layer's own dstorage writes go through the page's backing view too (`resolve_physical_page` in
+   [xmem.cpp](../port/shims/xmem.cpp)), which no title-VA guard sees.
+
+**Verdict:** the change signal is measured feasible and the narrowed copy is where the peers' win lives, but enabling
+it needs (a) a device-side changed-page hook, (b) the alias-view list and mapping reports, and (c) a census of kernel
+writes into title pages. None is a small reversible step; the safest first step this measurement supports is the one
+below.
+
+## 4. What this slice implemented: a per-submission title-pull coalescer
+
+**The hypothesis it was built on:** the frame records **two draws in one submission**
+([page_address_space.md](page_address_space.md) section 4), both draws are full-screen triangles into
+same-size targets, and every draw's vertex/index/root-descriptor pull goes through the replay's
+`pull_title_pages` hook; if the two draws name the same vertex/index pages, the second draw's pull repeats the first's,
+and reusing the first copy is safe without any claim about *what changed*, because the second copy would put exactly the
+same bytes in the same arena range. **Section 6 measures the hypothesis false on this tree**: in 8,186 pulls over 8,957
+submissions, no pull repeated an earlier range in its own submission and no pull repeated the previous submission's
+ranges - the title gives each draw different per-frame ring bytes. The step is therefore landed as the safest measured
+form of the peer mechanism, switched off, with its own trace; the measurement is the negative, and it is the reason
+this page can say the cross-submission cache has no population at this frontier.
+
+**The implementation, in our structure:**
+
+- `port/src/title_pull_windows.h` - the pure policy: a bounded (64) interval set of 4 KiB-granular title ranges copied
+  so far in a submission. `covers(va, bytes)` is true only when *every* byte is inside one window; `add` merges
+  overlapping and adjacent ranges; past the bound the lowest window is dropped, which can only cause a copy that would
+  have been skipped. No Windows, no Vulkan, no allocation (a fixed array), so it is tested without a GPU.
+- `port/src/vulkan_backend.h` - the switches and the two hooks: `title_pull_begin_submission()` (called by
+  `sync_console_heaps_measured`, once per submission, before the lists are recorded) resets the window and keeps the
+  previous submission's windows for the trace; `title_pull_decide(va, bytes)` answers copy/skip and counts requests,
+  bytes, copies, skipped bytes, the same-submission repeats and the previous-submission repeats. The replay's
+  `pull_title_pages` lambda asks it first and, only when the answer is "copy", calls the device's pull and times it.
+- Every switch is read once per process and **off by default**, so the default path is exactly the tree before this
+  slice: one branch in a lambda, no clock read, no state change.
+
+| switch | effect |
+|---|---|
+| `PALMETTO_TITLE_PULL_TRACE=1` | The measurement arm. Counts every request/byte/copy/skip/repeat and prints a line every 2,048 submissions into stderr (`[rt] replay: title pulls: ...`). The copy path is unchanged: TRACE counts what COALESCE would have saved. |
+| `PALMETTO_TITLE_PULL_COALESCE=1` | The implemented step. A pull whose every byte this submission already copied is skipped; a later draw then reads the arena bytes the earlier draw's copy put there. Measured at this frontier: it skips nothing (section 6), so enabling it changes no submitted command. |
+
+The coalescer deliberately does **not** cover the table pull (its copies are inside `console_pull_table` in the device
+file, outside this slice's scope) and does **not** claim anything across submissions; the trace's
+"previous-submission repeat" figure is the measurement that sizes a future guard-based cache, and it measured 0 here.
+
+**Why this was the safe first step, and what the measurement now says:** it makes no decision about a page's contents,
+so it cannot go stale in the way a write-watch gate can; the one assumption - that a second pull of a range would copy
+the same bytes - is the existing pull's own assumption between preparation and execution. The A/B's job was to test the
+population, and it measured none: the pulls are distinct per-frame ranges. Two conclusions follow, and the page keeps
+both: (1) the coalescer is inert here and stays off, so the default path is unchanged; (2) a cross-submission
+guard-based cache would also remove nothing at this frontier, which saves the device-side hook
+[card_copies.md](card_copies.md) section 5 names from being written for a zero population.
+
+## 5. Cross-check against the references
+
+Reference-only, no code, comment text, identifier or table copied. The peer numbers and files are in section 1 and
+[cleanroom_peers.md](cleanroom_peers.md).
+
+- **Agreement on the mechanism class.** XCL's no-copy windows, victory-fork's in-place heaps and guard-based write
+  watch, five-star's 64 KiB page heaps and VIctory's read-only guards all name the same two halves: *a memory visible
+  to the CPU and the GPU without a copy*, and *a signal for what changed*. Our measurement agrees that the copy is the
+  cost, and locates it: the mirror compare is the largest CPU block on the recording thread, while the per-draw pull's
+  own copy measured only 54.4 ms over 130.4 s (0.04% of the boot) and its ranges do not repeat.
+- **Measured disagreement on feasibility here.** Victory-fork can open some title memory as a card heap; our measured
+  182 MB placed range cannot be imported at all (lazy commit), and an imported range cannot carry a V# base because of
+  the measured 48-bit bias. XCL's window model gets its GPU address to equal the console VA by rebuilding the address
+  space; our arena is one buffer with a driver-chosen base, so the same mechanism is a re-architecture here, not a
+  switch.
+- **Measured disagreement on the change signal.** The peers' write watch is the OS watch or read-only guards; our
+  measured memory refuses `GetWriteWatch`, and the read-only form would break the loader's 271 MB kernel `ReadFile`
+  (XCL independently recorded the same kernel-write trade-off). Our own pull path also skips guarded pages, which the
+  peers' structures do not have to care about because their copies are device-side.
+- **Where the numbers are not comparable.** The peers' 68.0 -> 49.8 ms of card time, 22,900 read-backs in six minutes
+  and ~0.8 ms write-watch scans are their measurements on their structures and content population; this page's numbers
+  are ours. A copy-side win here is bounded by our two consumers' measured costs, not by theirs.
+
+## 6. A/B measurement
+
+One 130 s A/B pair, same machine, same title, same binary (`port/build/palmetto.exe`, SHA-256 in the boot directory's
+`meta.txt`), boot lock held, one boot at a time, harness `tooling/boot_report.py`. Standard environment
+(`PALMETTO_SHADERS`, `PALMETTO_D3D12=vulkan`, `PALMETTO_SKIP_INT3=1`, `PALMETTO_SEED_GLOBAL`, presenter capture on:
+`PALMETTO_CAPTURE`, one every 2,000 presented, up to 6), external private-bytes sample every 5 s. Both arms set
+`PALMETTO_TITLE_PULL_TRACE=1`; arm B adds `PALMETTO_TITLE_PULL_COALESCE=1`. Outputs are outside the repository
+(`D:\leonida-work\memmodel\boot-a`, `boot-b`).
+
+| measure | A: `PALMETTO_TITLE_PULL_TRACE=1` | B: + `PALMETTO_TITLE_PULL_COALESCE=1` |
+|---|---|---|
+| run | ALIVE 130.4 s, killed by the timeout as usual, **0 exceptions**, 0 `device was lost`, 0 validation errors | ALIVE 130.3 s, killed by the timeout as usual, **0 exceptions**, 0 `device was lost`, 0 validation errors |
+| d3d12 calls recorded (max #) | 220,495 (#223,619) | 220,668 (#223,573) |
+| `ExecuteCommandLists` ok / failed | **8,957 / 0** | **8,955 / 0** |
+| `PresentX` ok / failed | **4,478 / 0** | **4,477 / 0** |
+| `DrawInstanced` | 8,954 | 8,952 |
+| `Close` ok / failed | 9,582 / 0 | 9,579 / 0 |
+| submission 8,192 reached at | **90.1 s** | **89.3 s** |
+| title pull requests / requested bytes | **8,186 / 31.9 MiB** | **8,186 / 31.9 MiB** |
+| pulls copied / skipped | 8,186 / **0** | 8,186 / **0** |
+| repeated in submission (the coalescer's population) | **0 / 0.0 MiB** | **0 / 0.0 MiB** |
+| previous-submission repeat (a cross-submission cache's population) | **0 / 0.0 MiB** | **0 / 0.0 MiB** |
+| pull copy time / per copy / max | 54.4 ms / 7 us / 4,248 us | 57.2 ms / 7 us / 6,643 us |
+| captures | 3 frames (1, 2,001, 4,001) at 2564x1421, mean rgb **0 0 0** each | same 3 frames, same mean; all 6 PPMs **byte-identical** (SHA-256 `1B8380D477F7D161CCBC67BB25413CABCE3C6391C7E40AAA16BFA750F8F64207` in both arms) |
+| host private bytes, average from 30 s (external sample) | 28.35 GiB (max 35.99) | 29.76 GiB (max 36.12) |
+| host working set, average from 30 s | 21.67 GiB | 22.73 GiB |
+| verdict | **no win, no regression**: the coalescer has **zero population** on this title - every one of the 8,186 pulls is a different byte range, so COALESCE changed nothing (0 skips). The two arms submit, present and draw the same work (within 0.02%), have the same 0 exceptions/device-lost/validation errors, and their captures are byte-identical. The 54.4 vs 57.2 ms pull time and the memory difference are boot-to-boot noise between two arms that executed identical copies; no effect is claimed for either. | |
+
+The history this pair writes into the page: the pre-slice estimate of the pull population (two full-screen draws in one
+submission, "about 2 KiB a draw") predicted a same-submission repeat; the counters say the title's draws name
+*different* vertex, index and constant ranges (arm A's first pull lines: one draw's vertex VA `...bef30 + 0xFF0` and
+root window `...ff20 + 0x60`, the next draw's `...df10 + 0xFF0`), and the same holds across submissions
+(`previous-submission repeat 0` in all 4 milestone lines, at submissions 2,048/4,096/6,144/8,192). That is the measured
+reason the peer copy-avoidance models have nothing to reuse here yet: streamed content, which creates repeated reads
+of the same pages, is the missing population.
+
+Reproduction: `boot-a` and `boot-b` under `D:\leonida-work\memmodel` (outside the repository), each with `boot.out`
+(the harness summary above), `stderr.log` with the four `[rt] replay: title pulls:` milestone lines, `boot.jsonl`,
+`series.csv`, `capture/index.txt` and the three PPMs, and `meta.txt` naming the binary (SHA-256
+`198D69DF...72FD8`) and the exact environment. Harness `tooling/boot_report.py`; boot lock held through
+`_setup\boot_lock.ps1 -Acquire -Who memmodel` and released after both arms.
+
+## 7. Limits and the next falsifier
+
+- **The step has no population at this frontier - measured, not assumed.** 8,186 pulls, 0 same-submission repeats and
+  0 previous-submission repeats (section 6). The A/B's job was to test the population and it failed to find one; the
+  step stays off. It becomes useful only when the same title range is pulled twice without a change between the pulls,
+  which is what streamed content is expected to do.
+- **The wrapped hook measured 54.4 ms over 130.4 s, but the older pull A/B attributes ~440 us a submission to the
+  whole pull path.** The difference has to be in the parts this slice does not wrap: `console_pull_table` (64 slots
+  scanned and the V# bytes copied, inside the device file) and the post-slice mirror reads. That counter is the next
+  instrument, and it is a small device-file addition - the same follow-up that would make the table copy coalescable.
+- **Table pulls are not coalesced.** `console_pull_table` makes its own copies inside the device file; the wrapper
+  covers only the replay's `pull_title_pages` hook.
+- **The trace counts requested bytes, not copied bytes.** The device caps a pull at the alias range and at the arena
+  boundary, and leaves uncommitted pages alone; the counters report what was asked for, so arms compare like with like,
+  not against the device's own byte counter.
+- **The picture check is the capture, and at this frontier every capture is black.** The two arms' captures are
+  byte-identical, which proves no drawn content changed - not that a black frame stayed black for the same reason.
+- **No write watch, no aliasing and no import were enabled.** The guard tracker stays readied (`PALMETTO_CARD_COPY_WATCH`,
+  off), the external-memory import is unchanged, and nothing about title memory is pinned.
+- **The cross-submission cache is measured to be worthless *here*, so the device-side hook is not worth writing for it
+  at this frontier.** The `previous-submission repeat 0` figure is the population and it is zero; section 3.4's
+  prerequisites (device changed-page hook, alias-view list and mapping reports, kernel-write census) stay the price of
+  enabling it wherever repeated reads do appear.
+- **The next falsifier:** the content path. The first streamed block or texture fill that makes a draw re-read the same
+  title pages (or the title's page-mapping batches reaching the boot, [cpu_view_mapping.md](cpu_view_mapping.md)) is
+  where this step gets a population and where the guard-based cache's prerequisites become worth their cost. A negative
+  at that point would say the peers' copy model does not transfer to this title's access pattern.
+
+## 8. Tests
+
+- `port/test/pipeline_recipe_cache_test.cpp` - the existing GPU-free section, extended with **24 EXPECT assertions**
+  (the test binary passes; its line `title pull coalescer: ok (policy and VulkanContext decision)`): the pure policy's
+  coverage, partial-range refusal, merge of overlap and adjacency, the empty/overflowing range, the 64-window bound
+  (the lowest window is dropped and its range is copied again), and the real `VulkanContext` decision path with fake
+  Vulkan procedures - TRACE counts a repeat and never skips, COALESCE skips a covered pull and copies a range that is
+  not fully covered, and a new submission starts with an empty window. No device, no title memory, no game data.
+- `port/test/buffer_va_index_test.cpp` and `port/test/xmem_test.cpp` are unchanged; the runtime's default path is
+  proved by their existing checks plus the A/B's measurement arm (TRACE only changes counters).
+- Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`; `_setup\build_tests.cmd` prints `TESTS_BUILT`; the gate
+  binaries pass (`xs_proxy_mock_test` PASS, `unimplemented_policy_test` 98 checks/0 failed, `graphics_record_test`
+  180/0, `graphics_pso_test` 312/0, `xbox_present_test` all cases, `buffer_va_index_test` pass, `dstorage_test` 224/0,
+  `xapu_chad_test` 87/0, `deferred_compile_test` 18/0, `frame_dump_test` pass). `d3d12_fence_timing_test` crashes in
+  `Fence::from` on queue console slot 17, the **documented pre-existing crash** that predates this slice and is
+  unchanged by it ([issue1_baseline.md](issue1_baseline.md) section "gates" records the same binary built against HEAD's
+  `d3d12_xs_device.cpp` crashing identically). The documentation checks (`tests/test_docs_*.py`) pass 42 tests; the
+  environment-variable check is the one exception and only because it enumerates `git ls-files` and this page is
+  untracked at slice end - with `docs/title_memory_model.md` added to that list the check passes (verified), so it goes
+  green with the lead's commit. No git write was made by this slice.
+
+## 9. Attribution
+
+This slice was implemented from this project's own measurements: the consumer table, the A/B boots, the counter trace,
+the coalescer policy and its tests are ours. The behaviour was cross-checked against these public GPL projects, which
+are evidence sources here and not code sources - no code, comment text, identifier or table was copied from them:
+
+- **XCL** (<https://github.com/xcl-dev/xcl>, GPL-2.0-only), clone `6d12f58` (ivall): README's "title graphics memory
+  shared by CPU and GPU without copies, up to 16 GB (4 GiB windows)", and its `HANDOFF.md` write-watch/sparse-window
+  notes and their measured costs and kernel-`ReadFile` trade-off.
+- **victory-fork** (<https://github.com/fxceless/victory-fork>, GPL-3.0-or-later), clone `9c184b3` (fxceless):
+  README's card-memory copies, guard-based write watch, alias-view report, in-place heap status and its measured pinning
+  limit.
+- **five-star** (<https://github.com/ThatRecompDev/five-star-recomp>, GPL-3.0-or-later), clone `0bfa755`
+  (ThatRecompDev): the documented "a page mapped at two addresses is one page" / pagefile-section heap model.
+- **VIctory** (<https://github.com/Marvisak/VIctory>, GPL-3.0-or-later), clone `13f91ca` (Marvis): the read-only-guard
+  write-detection and per-page raw-view model.
+- **ubiquitarianism/leonida** (<https://github.com/ubiquitarianism/leonida>, GPL-3.0): the reference the programme's
+  [upstream_port.md](upstream_port.md) policy names, clone `ed94fbef9`; its page/title-memory pages are the prior art
+  [cleanroom_peers.md](cleanroom_peers.md) ranks, and this page's measurement is our own.
+
+The upstream projects remain the copyright of their contributors under their own licenses. `NOTICE.md`'s attribution
+entry for this slice is owed by the lead if the mechanism (rather than only its measurement) is adopted; this page
+carries the credit now.

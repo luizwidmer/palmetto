@@ -24,6 +24,7 @@
 #include "upscale_standin_spv.h"
 #include "queue_families.h"
 #include "resource_tiling.h"
+#include "title_pull_windows.h"  // docs/title_memory_model.md: the same-submission title-page pull coalescer
 #include "xdxr_build.h"
 #include "../shims/xmem.h"  // docs/card_copies.md: the guard-page write tracker the mirror gate polls
 
@@ -981,6 +982,14 @@ public:
         card_copy_gate_ = card_copy_watch_ && switch_on("PALMETTO_CARD_COPY_GATE");
         if (const char* refresh = std::getenv("PALMETTO_CARD_COPY_GATE_REFRESH"))
             card_copy_gate_refresh_ = static_cast<unsigned>(std::strtoul(refresh, nullptr, 10));
+        // docs/title_memory_model.md: the same-submission title-page pull coalescer. TRACE is the measurement arm (the
+        // counters only, the copy path unchanged); COALESCE makes the decision the same counters describe.
+        title_pull_trace_ = switch_on("PALMETTO_TITLE_PULL_TRACE");
+        title_pull_coalesce_ = switch_on("PALMETTO_TITLE_PULL_COALESCE");
+        if (title_pull_trace_ || title_pull_coalesce_)
+            std::fprintf(stderr,
+                         "[rt] replay: title pulls: trace %d, coalesce repeated same-submission ranges %d\n",
+                         int(title_pull_trace_), int(title_pull_coalesce_));
         if (card_copy_trace_ || card_copy_watch_)
             std::fprintf(stderr,
                          "[rt] replay: card copies: trace %d, skip no-shader submission %d, write tracker %d, gate %d "
@@ -1130,8 +1139,21 @@ public:
         };
         // The title's page content (docs/page_content.md): the device copies the bytes behind a title VA into its arena
         // stand-in, and the data a descriptor table's V#s name, before the submission reads them.
+        // docs/title_memory_model.md: a draw's vertex/index/root-descriptor pull first asks this submission's
+        // coalescing window; a range this submission already copied is not copied again (COALESCE), and the counters
+        // report how often that decision is available (TRACE).
         replay_.pull_title_pages = [this](std::uint64_t va, std::uint64_t bytes) {
-            if (console_page_pull_) console_page_pull_(va, bytes);
+            if (title_pull_decide(va, bytes)) return;
+            std::uint64_t microseconds = 0;
+            if (title_pull_trace_ || title_pull_coalesce_) {
+                const auto started = std::chrono::steady_clock::now();
+                if (console_page_pull_) console_page_pull_(va, bytes);
+                microseconds = static_cast<std::uint64_t>(std::chrono::duration<double, std::micro>(
+                    std::chrono::steady_clock::now() - started).count());
+            } else if (console_page_pull_) {
+                console_page_pull_(va, bytes);
+            }
+            title_pull_copied(microseconds);
         };
         replay_.pull_title_table = [this](std::uint64_t table_va, std::uint32_t max_descriptors) {
             if (console_table_pull_) console_table_pull_(table_va, max_descriptors);
@@ -1555,6 +1577,7 @@ public:
     // switch off this is exactly sync_console_heaps(), with no clock read and no tracker call. Returns the measured
     // microseconds the refresh took, 0 when it was skipped.
     std::uint64_t sync_console_heaps_measured(bool shader_submission) {
+        title_pull_begin_submission();  // docs/title_memory_model.md: a new submission's coalescing window
         const bool watch = card_copy_watch_ && console_watch_available() && console_watch_ranges() > 0;
         bool refresh = true;
         bool unchanged = false;
@@ -1613,6 +1636,98 @@ public:
                       calls ? double(us) / double(calls) : 0.0, double(us) / 1000.0,
                       double(heap_refresh_max_us_.load(std::memory_order_relaxed)),
                       static_cast<unsigned long long>(page_write_hits()), static_cast<unsigned long long>(page_read_hits()));
+        return text;
+    }
+
+    // ---- docs/title_memory_model.md: the same-submission title-page pull coalescer ---------------------------------
+    // The draw's page pull (docs/page_content.md) copies the title's placed-buffer bytes into the arena stand-in before
+    // the submission reads them: measured 131,072 pulls / 273.0 MiB over a 300 s boot, about 2 KiB per draw at the
+    // frontier this slice measured. The frame records its two draws in one submission and both name the same full-screen
+    // geometry, so the second draw's pull can repeat ranges the first already copied. Skipping that repeat is the
+    // measured first step of the peers' copy model (docs/title_memory_model.md section 3). The safe rule is deliberately
+    // narrow: a pull is skipped only when *this same submission* already copied every byte of it (TitlePullWindows, the
+    // include-only policy above), so nothing here has to know whether a page changed - no write watch, no guard pages,
+    // no cross-submission state, and every switch is off by default.
+    //   PALMETTO_TITLE_PULL_TRACE=1     the measurement arm: counts requests, copied bytes, copies, the ranges COALESCE
+    //                                   would skip, and the ranges the previous submission also asked for (the
+    //                                   cross-submission locality the guard-page cache would need). Copy path unchanged.
+    //   PALMETTO_TITLE_PULL_COALESCE=1  the implemented step: skip a pull this submission already copied. Values change
+    //                                   only when the frame's draws really name the same bytes.
+    bool title_pull_trace() const { return title_pull_trace_; }
+    bool title_pull_coalesce() const { return title_pull_coalesce_; }
+    // Starts a submission's coalescing window: the previous submission's windows are kept for the TRACE line, the rest
+    // restarts empty. Called once per submission before the lists are recorded; with both switches off it is one
+    // branch and no state change.
+    void title_pull_begin_submission() {
+        if (!title_pull_trace_ && !title_pull_coalesce_) return;
+        {
+            std::lock_guard lock(title_pull_mutex_);
+            title_pull_previous_ = title_pull_windows_;
+            title_pull_windows_.reset();
+        }
+        const std::uint64_t submission = title_pull_submissions_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (submission % 2048 == 0) std::fprintf(stderr, "[rt] replay: %s\n", title_pull_report().c_str());
+    }
+    // The decision for one pull. False: copy it (and the range joins this submission's window). True: every byte is
+    // already copied in this submission and COALESCE is on, so the copy is skipped. With only TRACE on it never answers
+    // true; the counters say what COALESCE would have saved.
+    bool title_pull_decide(std::uint64_t va, std::uint64_t bytes) {
+        if (!title_pull_trace_ && !title_pull_coalesce_) return false;
+        title_pull_requests_.fetch_add(1, std::memory_order_relaxed);
+        title_pull_requested_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+        std::lock_guard lock(title_pull_mutex_);
+        if (title_pull_previous_.covers(va, bytes)) {
+            title_pull_repeat_previous_.fetch_add(1, std::memory_order_relaxed);
+            title_pull_repeat_previous_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+        }
+        if (title_pull_windows_.covers(va, bytes)) {
+            // The measurement arm counts the repeat; the coalescing arm takes it.
+            title_pull_repeats_.fetch_add(1, std::memory_order_relaxed);
+            title_pull_repeat_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+            if (title_pull_coalesce_) {
+                title_pull_skips_.fetch_add(1, std::memory_order_relaxed);
+                title_pull_skipped_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+                return true;
+            }
+            return false;
+        }
+        title_pull_windows_.add(va, bytes);
+        return false;
+    }
+    // The copy path's cost, so the A/B can report microseconds per copied pull next to the counts.
+    void title_pull_copied(std::uint64_t microseconds) {
+        if (!title_pull_trace_ && !title_pull_coalesce_) return;
+        title_pull_copies_.fetch_add(1, std::memory_order_relaxed);
+        title_pull_us_.fetch_add(microseconds, std::memory_order_relaxed);
+        std::uint64_t max = title_pull_max_us_.load(std::memory_order_relaxed);
+        while (microseconds > max && !title_pull_max_us_.compare_exchange_weak(max, microseconds)) {
+        }
+    }
+    // The milestone report of the pull path (docs/title_memory_model.md section 4), empty with both switches off.
+    std::string title_pull_report() const {
+        if (!title_pull_trace_ && !title_pull_coalesce_) return {};
+        const std::uint64_t requests = title_pull_requests_.load(std::memory_order_relaxed);
+        const std::uint64_t requested = title_pull_requested_bytes_.load(std::memory_order_relaxed);
+        const std::uint64_t copies = title_pull_copies_.load(std::memory_order_relaxed);
+        const std::uint64_t skips = title_pull_skips_.load(std::memory_order_relaxed);
+        const std::uint64_t skipped = title_pull_skipped_bytes_.load(std::memory_order_relaxed);
+        const std::uint64_t repeats = title_pull_repeats_.load(std::memory_order_relaxed);
+        const std::uint64_t repeat_bytes = title_pull_repeat_bytes_.load(std::memory_order_relaxed);
+        const std::uint64_t previous = title_pull_repeat_previous_.load(std::memory_order_relaxed);
+        const std::uint64_t previous_bytes = title_pull_repeat_previous_bytes_.load(std::memory_order_relaxed);
+        const std::uint64_t us = title_pull_us_.load(std::memory_order_relaxed);
+        char text[512];
+        std::snprintf(text, sizeof text,
+                      "title pulls: %llu request(s)/%.1f MiB, copied %llu, skipped %llu/%.1f MiB, repeated in "
+                      "submission %llu/%.1f MiB, previous-submission repeat %llu/%.1f MiB | %.0f us/copy, %.1f ms "
+                      "total, max %.0f us | coalesce %d",
+                      static_cast<unsigned long long>(requests), double(requested) / (1 << 20),
+                      static_cast<unsigned long long>(copies), static_cast<unsigned long long>(skips),
+                      double(skipped) / (1 << 20), static_cast<unsigned long long>(repeats),
+                      double(repeat_bytes) / (1 << 20), static_cast<unsigned long long>(previous),
+                      double(previous_bytes) / (1 << 20), copies ? double(us) / double(copies) : 0.0,
+                      double(us) / 1000.0, double(title_pull_max_us_.load(std::memory_order_relaxed)),
+                      int(title_pull_coalesce_));
         return text;
     }
 
@@ -2618,6 +2733,17 @@ private:
     std::atomic<std::uint64_t> gate_submissions_since_refresh_{0};
     std::atomic<std::uint64_t> heap_refresh_calls_{0}, heap_refresh_skipped_{0}, heap_refresh_skipped_unchanged_{0},
         heap_refresh_skipped_no_shader_{0}, heap_refresh_us_{0}, heap_refresh_max_us_{0};
+    // docs/title_memory_model.md: the same-submission title-page pull coalescer. The switches are read once per process;
+    // the windows are per submission and written from the replay (under a leaf mutex: two queues may prepare at once).
+    std::mutex title_pull_mutex_;
+    TitlePullWindows title_pull_windows_;   // ranges this submission has copied
+    TitlePullWindows title_pull_previous_;  // the previous submission's, for the TRACE line only
+    bool title_pull_trace_ = false;         // PALMETTO_TITLE_PULL_TRACE: count the pulls (copy path unchanged)
+    bool title_pull_coalesce_ = false;      // PALMETTO_TITLE_PULL_COALESCE: skip a range this submission already copied
+    std::atomic<std::uint64_t> title_pull_submissions_{0}, title_pull_requests_{0}, title_pull_requested_bytes_{0},
+        title_pull_copies_{0}, title_pull_skips_{0}, title_pull_skipped_bytes_{0}, title_pull_repeats_{0},
+        title_pull_repeat_bytes_{0}, title_pull_repeat_previous_{0}, title_pull_repeat_previous_bytes_{0},
+        title_pull_us_{0}, title_pull_max_us_{0};
     std::function<void(std::uint64_t, std::uint64_t)> console_page_pull_;   // title pages -> arena stand-in
     std::function<void(std::uint64_t, std::uint32_t)> console_table_pull_;  // a table's V# data -> arena stand-in
     std::function<void()> placed_texture_import_;                           // title-placed texture pages -> image
