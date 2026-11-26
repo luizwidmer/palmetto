@@ -6497,6 +6497,20 @@ HRESULT proxy_create_graphics_pipeline_probe(DeviceProxy* self, const void* desc
     return converted;
 }
 
+// PALMETTO_SLOT67_PROGRAM_LOG=1 (measurement aid, docs/decomp_renderer.md section 12): one bounded line per slot-67
+// call with the kind-6 program's size and SHA-256 (and the kind-0 state's when it is readable) and the call's result.
+// The FSR upscale answer is a request count: the 29 translated FidelityFX programs carry their fspx_code_sha256 in the
+// shader corpus index, so the boot's lines are matched against those to measure 0 of 29 before this support and n of
+// 29 after it. Off by default; nothing about the call changes.
+bool slot67_program_probe() {
+    static const bool enabled = [] {
+        char value[8] = {};
+        const DWORD length = GetEnvironmentVariableA("PALMETTO_SLOT67_PROGRAM_LOG", value, sizeof(value));
+        return length > 0 && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
 // The Xbox slot 67 creates a compute pipeline from native GPU code: (desc, riid, out), named
 // DeserializeComputePipelineStateX in amd_fidelityfx_upscaler_xbox.dll's messages (call at RVA 0x56d9). The desc
 // passes the root signature at +0x00, followed by pointer/size pairs for the shader's FSPX entries (docs/fspx.md):
@@ -6567,6 +6581,26 @@ HRESULT proxy_create_compute_pipeline_from_native_code(DeviceProxy* self, const 
     static std::atomic<std::uint64_t> calls{0};
     const std::uint64_t call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
     const HRESULT hr = self->real->CreateComputePipelineState(&pc_desc, *riid, out);
+    if (slot67_program_probe()) {
+        static std::atomic<unsigned> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 4096) {
+            const auto program_sha = [](const void* code, std::uint64_t size) {
+                if (!code || !size || size > (16u << 20) || !readable_range(code, static_cast<std::size_t>(size)))
+                    return std::string("unreadable");
+                return palmetto::sha256_hex({static_cast<const std::uint8_t*>(code),
+                                             static_cast<std::size_t>(size)});
+            };
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: slot 67 program #%llu kind6 %llu B sha256 %s kind0 %llu B sha256 %s -> "
+                         "0x%08lx\n",
+                         static_cast<unsigned long long>(call),
+                         static_cast<unsigned long long>(xbox_desc->kind6_size),
+                         program_sha(xbox_desc->kind6, xbox_desc->kind6_size).c_str(),
+                         static_cast<unsigned long long>(xbox_desc->kind0_size),
+                         program_sha(xbox_desc->kind0, xbox_desc->kind0_size).c_str(),
+                         static_cast<unsigned long>(hr));
+        }
+    }
     if (FAILED(hr))
         std::fprintf(stderr,
                      "[rt] d3d12_xs: slot 67 call %llu failed with 0x%08lx (kind 0 %llu B, kind 1 %llu B, kind 6 %llu B, "

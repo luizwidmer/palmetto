@@ -3156,9 +3156,70 @@ int check_console_texture_translation() {
     EXPECT(palmetto::format_family(DXGI_FORMAT_R8G8B8A8_UNORM) == DXGI_FORMAT_R8G8B8A8_TYPELESS);
     EXPECT(palmetto::depth_stencil_family(DXGI_FORMAT_R16_TYPELESS));
     EXPECT(!palmetto::depth_stencil_family(DXGI_FORMAT_R8G8B8A8_UNORM));
+    // The console Series-S upscale output shape (docs/decomp_renderer.md section 12): the measured 1920x1080
+    // R9G9B9E5_SHAREDEXP render target with unordered access, and the console-type spelling the translation is gated on.
+    const auto upscale_output = [] {
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = 1920;
+        desc.Height = 1080;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_R9G9B9E5_SHAREDEXP;
+        desc.SampleDesc.Count = 1;
+        desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                                                       D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        return desc;
+    };
+    EXPECT(palmetto::console_r9g9b9e5_render_target(upscale_output()));
+    {
+        D3D12_RESOURCE_DESC desc = upscale_output();
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;  // a render target without unordered access
+        EXPECT(!palmetto::console_r9g9b9e5_render_target(desc));
+    }
+    {
+        D3D12_RESOURCE_DESC desc = upscale_output();
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;  // unordered access alone is the existing UAV emulation
+        EXPECT(!palmetto::console_r9g9b9e5_render_target(desc));
+    }
+    {
+        D3D12_RESOURCE_DESC desc = upscale_output();
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;  // the same flags on another format are not this shape
+        EXPECT(!palmetto::console_r9g9b9e5_render_target(desc));
+    }
+    {
+        D3D12_RESOURCE_DESC desc = upscale_output();
+        desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(UINT(desc.Flags) | UINT(D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL));
+        EXPECT(!palmetto::console_r9g9b9e5_render_target(desc));  // depth-stencil stays refused by the format rules
+    }
+    {
+        D3D12_RESOURCE_DESC desc = upscale_output();
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;  // a volume has no attachment of this shape
+        EXPECT(!palmetto::console_r9g9b9e5_render_target(desc));
+    }
+    {
+        D3D12_RESOURCE_DESC desc = upscale_output();
+        desc.SampleDesc.Count = 2;  // measured single-sample; multisampled stays unmeasured
+        EXPECT(!palmetto::console_r9g9b9e5_render_target(desc));
+    }
+    {
+        D3D12_RESOURCE_DESC desc = upscale_output();
+        desc.MipLevels = 2;
+        EXPECT(!palmetto::console_r9g9b9e5_render_target(desc));
+    }
+    // The console-type gate: only the Series-S spellings the loader accepts match; the Series X/devkit values, the
+    // default-path spellings and anything malformed leave the translation off.
+    for (const char* series_s : {"6", "seriess", "series-s", "series s", " 6 ", "SeriesS", "SERIES-S"})
+        EXPECT(palmetto::console_type_is_series_s(series_s));
+    for (const char* not_series_s :
+         {static_cast<const char*>(nullptr), "", "0", "off", "1", "pc", "7", "seriesx", "series-x", "8", "devkit",
+          "06", "6x", "series"})
+        EXPECT(!palmetto::console_type_is_series_s(not_series_s));
     std::printf("%s: the console's depth-stencil + unordered-access pair is translated to the depth-stencil resource "
                 "for the measured R16_TYPELESS 6/1/3-layer shapes and the other depth families, while a colour "
-                "texture, a buffer and either flag alone stay unchanged\n",
+                "texture, a buffer and either flag alone stay unchanged; the measured Series-S R9G9B9E5 upscale "
+                "output is the only shape the console render-target rule accepts, behind the Series-S console-type "
+                "spellings\n",
                 g_label);
     return 0;
 }

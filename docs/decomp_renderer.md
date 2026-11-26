@@ -573,3 +573,204 @@ projects' published observations of the Series-S path are cross-checked where se
 git writes were made; the uncommitted files at the end of the slice are `port/src/pe_loader.h`,
 `port/src/pe_loader.cpp`, `port/test/pe_loader_test.cpp` and this page.
 
+
+## 12. The Series-S upscale shape survives its creation and the FSR path still stops before the stage-3 executor pass
+
+**Status: measured, implemented behind the console-type switch, with a negative on the class-0xa question.** Section 11
+left the console FSR path refused before its first FidelityFX program: the kind-7 branch creates its 1920x1080
+`R9G9B9E5_SHAREDEXP` render target through the console placed path, the layer's allocation query refuses the format's
+render-target flag pair, and the creation answers `0x80070057` (`E_INVALIDARG`). This section decodes that description
+and the exact refusal, implements the measured support for it on the Series-S arm, and re-measures the three questions
+of the picture goal: whether the FSR path survives the creation, whether the class-0xa command appears, and whether
+stage 3 continues. It survives the creation; the boot then stops before stage 3 in both measured arms, so the executor
+pass and its class-0xa command are still not reached and **0 of 29** FidelityFX programs are requested. The default
+path is unchanged: with `PALMETTO_CONSOLE_TYPE` unset the same description keeps its previous named refusal.
+
+### 12.1 The measured shape and the exact refusal
+
+With `PALMETTO_CONSOLE_TYPE=6` the kind-7 branch creates its upscale output on the title's own worker thread, at a
+title VA it has mapped, through console device slot 133 (`CreatePlacedResourceX`). One boot's log for that sequence
+(`fsr1`; the shape lines are the same in the committed Series-S arms of section 11, before this section's change):
+
+```text
+[rt] d3d12: GetResourceAllocationInfo format not supported yet: 67
+[rt] d3d12_xs: slot 25 refused description 0/1: dimension 3 format 67 flags 0x300005 layout 0x0 1920x1080x1 mips 1 samples 1
+[rt] d3d12_xs: slot 108 could not size the description, reporting 64 KiB / 64 KiB alignment
+[rt] d3d12: placed texture: address <title VA> 1920x1080x1 format 67 dimension 3 mips 1 layers 1 flags 0x5 samples 1 layout 0x0
+[rt] d3d12: CreateCommittedResource refused (texture size, mips, samples or alignment), dimension 3
+[rt] d3d12: placed texture refused: 1920x1080x1 format 67 ... hresult 0x80070057
+```
+
+| item | measured value | reading |
+|---|---|---|
+| dimension | 3 | `D3D12_RESOURCE_DIMENSION_TEXTURE2D` (not a 3D texture) |
+| extent / mips / array | 1920x1080, 1 mip, 1 layer, 1 sample | the console's Series-S upscale output size (1080p) |
+| `desc.Format` | 67 | the PC DXGI numbering: `DXGI_FORMAT_R9G9B9E5_SHAREDEXP`, 4 bytes per texel. The title's resource descriptions use the PC enum; the console-only values sit in the PC gap 116..120 ([3d_textures.md](3d_textures.md) section 2.2), so 67 is not a console-only number |
+| console flags | `0x300005`, masked to `0x5` | `ALLOW_RENDER_TARGET \| ALLOW_UNORDERED_ACCESS`; the `0x300000` bits are Xbox-only and the proxy's `0x5ff` mask drops them (device slot 133's handler) |
+| layer table entry | `R9G9B9E5_SHAREDEXP` -> `VK_FORMAT_E5B9G9R9_UFLOAT_PACK32` | the format is mapped; the refusal is not a missing format |
+| refusal site | allocation query -> placed creation | the query answers the invalid allocation (`UINT64_MAX`), the console slot-108 size query falls back to 64 KiB, and the created description is then refused with `0x80070057` |
+
+The refusal reason is the flag pair, not the format: this host GPU (RTX 4090) has no `COLOR_ATTACHMENT` and no
+`STORAGE_IMAGE` support for `VK_FORMAT_E5B9G9R9_UFLOAT_PACK32` (the same boot logs the UAV-only committed
+`R9G9B9E5` textures taking the mutable `R32_UINT` emulation: `R9G9B9E5_SHAREDEXP UAV unavailable natively, using
+mutable R32_UINT; format 67`). The layer's existing emulation refuses `ALLOW_RENDER_TARGET` by design
+([d3d12_vulkan.md](d3d12_vulkan.md) section 3.7), so the allocation query has no format for the RT+UAV pair and returns
+the invalid answer. The title's console branch asks for that pair (the same format's UAV creation is measured in the
+FidelityFX route test, [d3d12_vulkan.md](d3d12_vulkan.md) Appendix A and [fsr_route.md](fsr_route.md) section 4.2); this section measures the host's refusal, not
+the console's answer to the render-target half. The layer is the side that cannot attach the format.
+
+### 12.2 What we implemented
+
+| file | change |
+|---|---|
+| `port/src/console_texture.h` | `console_r9g9b9e5_render_target(desc)`: the measured shape (2D, `R9G9B9E5_SHAREDEXP`, 1 mip / 1 layer / 1 sample, `ALLOW_RENDER_TARGET \| ALLOW_UNORDERED_ACCESS`). `console_type_is_series_s(text)`: the Series-S spellings of `PALMETTO_CONSOLE_TYPE` the loader accepts (`6`, `seriess`, `series-s`, `series s`, any case, surrounding spaces). Both pure, so the GPU-free test covers them |
+| `port/shims/d3d12_vulkan_device.cpp` | `texture_format`'s `R9G9B9E5_SHAREDEXP` block: when the host has no native attachment/storage for the format and the description is the measured console shape, and `PALMETTO_CONSOLE_TYPE` answers Series S, and the existing mutable `R32_UINT` UAV backing is available, the resource is created as that backing (the RT flag's `COLOR_ATTACHMENT` usage included). `CreateRenderTargetView` refuses the attachment view of a `uint_backed` `R9G9B9E5` resource by name: the host cannot attach `E5B9G9R9`, and an `R32_UINT` attachment would not be the format the title's pipeline names. Off the console arm the description keeps the previous refusal, and a console shape without the backing keeps a named refusal too |
+| `port/shims/d3d12_xs_device.cpp` | `PALMETTO_SLOT67_PROGRAM_LOG=1`: one bounded line per slot-67 call with the kind-6 program's size and SHA-256 (and the kind-0 state's), so the FidelityFX program request count is measured rather than inferred. Off by default; the call's answer is unchanged |
+| `port/test/xs_proxy_mock_test.cpp` | the shape predicate and the console-type spelling checks (see 12.6) |
+| `docs/decomp_renderer.md` | this section |
+
+The measured support is deliberately narrow: the resource is served as the UAV-only emulation the title already uses
+for the same format, and the render-target half is named as not hostable. Whether the FSR path needs the attachment
+(the console shape allows one) is not measured here; a draw into it would be dropped by the replay and is the next
+falsifier if the path ever names it.
+
+### 12.3 The boots and the A/B
+
+The A/B is the same console answer with the support in place against the section-11 Series-S evidence (the previous
+binary, which refused the creation), plus default-path control arms. Every arm is the section-12 content environment of
+section 11.3 (the class-0xa probe set with `PALMETTO_ALLOC_WATCH`), one boot under the boot lock, presenter captures and
+centre-window readbacks; the slot-67 program probe is on in every arm of this section (it reads only). Two binaries
+carry the arms: `fsr1`/`fsr2`/`ctl1` ran the first build, SHA-256
+`56C937CFFAF183BE353AFB75999B0DDBBC2D8CEDC40AD083A1E05622E92ECF6E`, and `fsr7`/`ctl4` ran the final build of this
+section, SHA-256 `83CEC1BE2DA41ECD3EDE61D5D05D0302879A73A9452092B36EA72DA8CA86B8E6`. The two builds differ only in the
+narrowing of the render-target-view refusal (a log and a zeroed view for a UAV-only resource; no creation answer) and
+in comments, so the Series-S rows are the same measurement twice. One boot per arm, no retries; the first two Series-S
+arms ran 180 s windows and the continuation ran a lighter 90 s window without the heavy crash dumps (see 12.5).
+
+| arm | console type | binary SHA-256 (first 16) | wall | stage 3 | stop | device lost | shape creation | FSR programs | class-0xa | captures |
+|---|---|---:|---:|---|---|---|---|---:|---|---|
+| `s61` (section 11) | 6 | `D7B4D8975D449BA5` | 61.8 s | yes, 51.8 s | `game+0x4EEE4EC` read `0x100000028` | no | refused `0x80070057` | 0 of 29 | none | 10, black |
+| `s62` (section 11) | 6 | `D7B4D8975D449BA5` | 61.3 s | yes, 51.6 s | `0x0` execute | no | refused `0x80070057` | 0 of 29 | none | 10, black |
+| `fsr1` | 6 | `56C937CFFAF183BE` | 72.3 s | **no** (machine 2 at 68.0 s) | `game+0x55AA29B` read `0x6B9B1EB48` | **yes** | **created** | 0 of 29 | none | 12, black |
+| `fsr2` | 6 | `56C937CFFAF183BE` | 65.2 s | **no** (machine 2 at 62.0 s) | `game+0xF229C` read `0x537B384DFA` | **yes** | **created** | 0 of 29 | none | 11, black |
+| `ctl1` | unset | `56C937CFFAF183BE` | 82.6 s | yes, 76.7 s | `game+0x13360A3` read `-1` | no | none (title's own upscaler) | 0 of 29 | FORMAT KEY key 0xa / BLOCK ALLOC 0 bytes 256x1 / ENTRY WRITTEN stride 0 | 12, black |
+| `ctl4` | unset | `83CEC1BE2DA41ECD` | 62.4 s | **no** (pre-stage-3) | `0x0` execute | **yes** | none (title's own upscaler) | 0 of 29 | none | 11, black |
+| `fsr7` | 6 | `83CEC1BE2DA41ECD` | 57.1 s | **no** (machine 2 at 54.0 s) | `0x401F06648` execute | **yes** | **created** | 0 of 29 | none | 10, black |
+
+- **The creation is survived.** All three measured Series-S arms log the shape's `placed texture` line for the 1920x1080 format-67
+  description, the backing line, and one named refusal of the render-target view. The
+  `CreateCommittedResource refused ... 0x80070057` line is gone. This is the first of the two failures section 11 named;
+  the layer now answers the creation with a resource.
+- **The second failure is not reached the same way.** The section-11 stop `game+0x4EEE4EC` (the `0x100000000` read) does
+  not occur in any of the three Series-S arms. The boot instead stops earlier, in title-side garbage-pointer uses of its
+  own (`fsr1` `game+0x55AA29B` reading `0x6B9B1EB48`, `fsr2` `game+0xF229C` reading `0x537B384DFA`, `fsr7` executing
+  `0x401F06648`), and every one of them loses the Vulkan device in a long `ExecuteCommandLists` (200-207 ms) just
+  before the stop.
+- **Stage 3 does not arrive.** All three boots are still at machine stage 2 when they stop (`fsr1` init 2 at 20.0 s,
+  loading 2 and session 1 at 64.0 s; `fsr2` init 2 at 24.0 s, loading 2 and session 1 at 60.0 s; `fsr7` init 2 at 16.0 s,
+  loading 2 and session 1 at 48.0 s, machine 2 at 54.0 s). The stage-3 window is what section 11 reached 2 of 2 times on
+  the previous binary; with the shape now created the boot spends its remaining time in the loading window and stops
+  there.
+- **The class-0xa command is still absent, for the measured reason.** The `PALMETTO_ALLOC_WATCH` sites saw no stage-3
+  executor entry in any of the three Series-S arms, so no FORMAT KEY, BLOCK ALLOC or ENTRY WRITTEN was recorded: the
+  executor pass itself is not reached. This is the same honest limitation as section 11: absence is not proof that the
+  kind-7 branch skips the command.
+- **The default path is unchanged, measured on two binaries.** The first build's control arm `ctl1` (no
+  `PALMETTO_CONSOLE_TYPE`) reaches stage 3 at 76.7 s, records the whole class-0xa sequence (FORMAT KEY key 0xa at t=36194.118 with command vtable
+  `game+0x66314B0` and creator vtable `game+0x658DB60`, STAGE 3 ENTRY, HELPER ENTRY class 0xa, BLOCK ALLOC of 0 bytes for
+  the 256x1 entry with overlap YES, ENTRY WRITTEN with stride 0 and size 0), and stops at `game+0x13360A3` reading `-1`
+  0.9 s later, with 12 black captures and no device loss. No Series-S shape line and no FidelityFX DLL mapping appears
+  in it. So the translation is off unless the console arm is on, and the class-0xa reference is this binary's own.
+- **The FSR programs are still 0 of 29.** The slot-67 program probe records 2,689 slot-67 calls (2,680 distinct
+  kind-6 program hashes) in both `fsr1` and `fsr7` - the title's own compute pipeline-library programs - and none of
+  them is one of the
+  29 translated `amd_fidelityfx_upscaler_xbox` programs (the corpus index's `fspx_code_sha256`/`fspx_state_sha256`
+  values). The FidelityFX DLL is mapped, so the kind-7 path still stops before its first upscaler dispatch, which is
+  where those programs are created.
+- **No pixels changed.** Every presenter capture in every arm of this section reads mean RGB 0.00 (10-12 per boot);
+  the FSR output shape is created but nothing presents through it.
+- **The continuation series is bounded, and part of it is lost to the host.** After an unrelated host crash and a
+  period of GPU instability, the continuation arms dropped the heavy crash dumps (`PALMETTO_DUMP_REGS`,
+  `PALMETTO_FAULT_MEM`): `fsr7` is the light 90 s Series-S arm of the final build and `ctl4` its light 120 s control
+  (`ctl4` stops before stage 3 at `0x0` execute with a device loss, like `fsr7`, so that pre-stage-3 loss is not
+  specific to the console arm; the class-0xa reference stays `ctl1`'s stage-3 boot). Two further arms are not counted:
+  `ctl3`/`fsr6` produced no logs before the host crashed, and `fsr6`'s runtime was later found spinning in its crash
+  handler for minutes and was killed. A validation-layer arm (`fsr3v`, 180 s, `PALMETTO_VK_VALIDATION=1`) stayed in
+  the loading window for its whole window (76,128 D3D12 calls, no exception, no FSR shape) and printed no validation
+  message, so it neither names the device loss nor reaches the window.
+
+### 12.4 The stop chain, decompiled
+
+The section-11 stop was decompiled from the image to name what the `0x100000000` read is:
+
+- The record processor is the function at `game+0x4EEE490`, called from the recorder's iterator at `game+0x43A6B40`
+  (itself called from the frame update at `game+0x6D8DA0`). Its entry switches on `(*(u32 *)record) >> 3`: a
+  ten-way dispatch over the title's recorded command types.
+- Case 4 (the measured record type; the record's handler index is the byte at record+0xC) reads the per-type object at
+  `context+0x508 + index*8`, takes the object's first qword as a pointer, reads slot `+0x28` of it, and compares that
+  value against the two functions `game+0x4EEEE90` and `game+0x4EEECF0` to pick the handler variant.
+- In `s61` the object's first qword is `0x100000000`, so slot `+0x28` faults at `0x100000028`. A neighbouring title
+  function's disassembly shows the same constant used as the **console GPU-address base**: `MOV R10,0x100000000` and
+  `MOV R9,-0x100000000`, with the low 32 bits of a GPU address split off to index a static table. The value is therefore
+  the title's own GPU-address-space base in a slot that the record processor treats as a pointer, not a value this
+  layer handed out for the refused creation (that creation answered `E_INVALIDARG` and no resource, and the shape's
+  placement VA was a title VA, not `0x100000000`). This is the same unified-memory family [boot_frontier.md](boot_frontier.md)
+  measures: the title dereferences a console GPU address as CPU memory.
+
+The new stops are not on that chain: `fsr1`'s `game+0x55AA29B` is a table lookup indexed by the low 32 bits of a
+title global that reads `0x171360A23D` (an out-of-range index into a static table), `fsr2`'s `game+0xF229C` reads
+through `0x537B384D86`, and `fsr7` executes `0x401F06648` (a call through a bad function pointer). Every one of those
+boots lost the Vulkan device in the submission just before the stop, so whether the stops are the device loss's
+downstream effect or the FSR path's own state is not separated by this slice.
+
+### 12.5 The next wall and its falsifier
+
+The FSR path now survives its shape creation and proceeds through the DLL load and its context's texture creations,
+then stops in the loading window before the frame loop's stage-3 upscale dispatch. The next falsifier is in that
+window, in this order:
+
+1. **Name the device loss.** A validation-layer Series-S arm (`PALMETTO_VK_VALIDATION=1` with the host layer's
+   standard suppression variables, [testing.md](testing.md)) catches an invalid usage at the submit that loses the
+   device; a clean run moves the question to the title-side garbage stops. `fsr1`/`fsr2` are the control pair for
+   that arm. The one attempt made (`fsr3v`, 180 s) stayed in loading and printed no validation message, so it does
+   not decide this: the next arm needs the FSR window reached with the layer actually enabled.
+2. **Name what the title does with the served shape.** The render-target view of the shape is refused by name; whether
+   the FSR path draws into it (and the replay then drops the draw) is not measured. A per-resource record of the
+   R9G9B9E5 views the title creates (the descriptor probes already exist for T#s) is the smallest measurement that
+   decides whether the attachment half must be emulated.
+3. **Re-watch the class-0xa sites.** Once an arm reaches stage 3 with `PALMETTO_CONSOLE_TYPE=6` and the shape served,
+   the `PALMETTO_ALLOC_WATCH` sites answer the picture question directly. No arm of this slice reaches them.
+
+### 12.6 Tests and gates
+
+- `port/test/xs_proxy_mock_test.cpp` (`check_console_texture_translation`) gains the shape predicate's cases: the
+  measured 1920x1080 RT+UAV description is the one shape accepted; render-target without unordered access, unordered
+  access alone, a colour format with the same flags, the depth-stencil flag, a 3D dimension, 2 samples and 2 mips are
+  refused. The console-type spelling checks accept `6`, `seriess`, `series-s`, `series s` in mixed case and with
+  spaces, and refuse unset/empty, `0`, `off`, `1`, `pc`, `7`, `seriesx`, `series-x`, `8`, `devkit`, `06`, `6x` and
+  `series`.
+- Gates on the changed tree: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK` and `_setup\build_tests.cmd` prints
+  `TESTS_BUILT`; the `xs_proxy_mock` target and the other gate targets of section 11.7 pass, and every
+  `tests/test_docs_*.py` check passes (the new `PALMETTO_SLOT67_PROGRAM_LOG` and the reused
+  `PALMETTO_CONSOLE_TYPE` are named here).
+- The binaries of the arms: `fsr1`/`fsr2`/`ctl1` ran
+  `56C937CFFAF183BE353AFB75999B0DDBBC2D8CEDC40AD083A1E05622E92ECF6E` and `fsr7`/`ctl4` ran the final tree's
+  `83CEC1BE2DA41ECD3EDE61D5D05D0302879A73A9452092B36EA72DA8CA86B8E6`; the arm reports, captures and traces stay
+  outside the repository (D:\leonida-work\fsrsurvive). The two builds differ only in the render-target-view refusal's
+  narrowing and in comments (12.3).
+- The uncommitted files at the end of the slice are the five of this section (`port/src/console_texture.h`,
+  `port/shims/d3d12_vulkan_device.cpp`, `port/shims/d3d12_xs_device.cpp`, `port/test/xs_proxy_mock_test.cpp` and this
+  page); the loader files and the parallel console-type slice's own new page in the same tree are that slice's, not
+  this one's.
+
+### 12.7 Attribution
+
+This section was implemented from this project's own measurements: the boot log's shape/refusal lines and the
+FidelityFX program probe of the arms above; the decompiled record dispatcher (`game+0x4EEE490`, `game+0x43A6B40`,
+`game+0x6D8DA0`) and the GPU-address-base constant of `game+0x55AA250`; the host GPU's format-property answers the
+runtime itself prints; and the existing emulation the device documents in [d3d12_vulkan.md](d3d12_vulkan.md) section
+3.7. The console-type switch and its Series-S evidence are section 11's. No peer code was used and no game data is
+added: RVAs, VAs, format numbers, flag words, dimensions, counts, program hashes and outcomes only.
+
+
+

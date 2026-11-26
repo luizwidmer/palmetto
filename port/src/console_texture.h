@@ -19,6 +19,8 @@
 
 #include <d3d12.h>
 
+#include <string>
+
 namespace palmetto {
 
 // The typeless format a DXGI format can be cast within, or the format itself when it has no such family.
@@ -73,6 +75,52 @@ inline bool console_depth_uav_translated(D3D12_RESOURCE_DESC& desc) {
     desc.Flags = static_cast<D3D12_RESOURCE_FLAGS>(
         UINT(desc.Flags) & ~UINT(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS));
     return true;
+}
+
+// ---- The console Series-S upscale output shape (docs/decomp_renderer.md section 12) --------------------------------
+//
+// Measured: with the console type answered as Series S (PALMETTO_CONSOLE_TYPE=6) the title's kind-7 FidelityFX branch
+// creates its upscale output through the console placed-creation path (device slot 133): a 1920x1080 TEXTURE2D in
+// DXGI_FORMAT_R9G9B9E5_SHAREDEXP with ALLOW_RENDER_TARGET | ALLOW_UNORDERED_ACCESS, at a console VA the title placed
+// it at. The console title asks for that pair (the same format's UAV creation is measured in the FidelityFX route
+// test, docs/d3d12_vulkan.md Appendix A and docs/fsr_route.md section 4.2); this slice measures the host's
+// refusal, not the console's answer to the render-target half. The host devices this layer runs on do not take the
+// format: on the measured RTX 4090 VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 has neither COLOR_ATTACHMENT nor STORAGE_IMAGE
+// support, so the same description fails the allocation query and the placed creation answers 0x80070057, before any
+// FidelityFX program is requested.
+//
+// `console_r9g9b9e5_render_target` names that one measured console shape. The device backs it with the same mutable
+// R32_UINT image its UAV-only R9G9B9E5 textures already use (the E5B9G9R9 sampled view and the R32_UINT storage view
+// are unchanged), and refuses the render-target view by name: the host cannot attach E5B9G9R9, and an R32_UINT
+// attachment would not be the format the title's pipeline names. The rule is the format/flag pair the console's format
+// and view support allows; the measured instance is the 1920x1080, 1-mip, 1-layer, single-sample description.
+inline bool console_r9g9b9e5_render_target(const D3D12_RESOURCE_DESC& desc) {
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) return false;
+    if (desc.Format != DXGI_FORMAT_R9G9B9E5_SHAREDEXP) return false;
+    if (desc.SampleDesc.Count != 1 || desc.MipLevels != 1 || desc.DepthOrArraySize != 1) return false;
+    constexpr UINT both =
+        UINT(D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) | UINT(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    const UINT flags = UINT(desc.Flags);
+    if ((flags & both) != both) return false;
+    if (flags & (UINT(D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) | UINT(D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)))
+        return false;
+    return true;
+}
+
+// The console-type switch (`PALMETTO_CONSOLE_TYPE`) as the one value this translation is gated on. The loader owns the
+// switch and its answers (port/src/pe_loader.cpp, `parse_console_type_switch`): it accepts `6`, `seriess`, `series-s`
+// and `series s` for Series S, in any case and with surrounding spaces, and every other spelling leaves the default
+// path. The device needs the same gate but is also built into GPU-free test binaries that do not link the loader, so
+// it parses the Series-S spellings here; the two must stay in step. Pure, so the gate is tested without a GPU.
+inline bool console_type_is_series_s(const char* text) {
+    if (!text) return false;
+    std::string value(text);
+    const auto first = value.find_first_not_of(" \t");
+    const auto last = value.find_last_not_of(" \t");
+    value = first == std::string::npos ? std::string() : value.substr(first, last - first + 1);
+    for (char& c : value)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return value == "6" || value == "seriess" || value == "series-s" || value == "series s";
 }
 
 }  // namespace palmetto

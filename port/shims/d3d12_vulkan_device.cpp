@@ -1259,6 +1259,20 @@ inline bool deferred_image_backing_enabled() {
     return enabled;
 }
 
+// The console-type switch the Series-S upscale-target translation is gated on (docs/decomp_renderer.md section 12).
+// Read once, and only the Series-S answer arms it: the kind-7 FidelityFX branch and the upscale shape it creates are
+// what the switch makes the title take. The loader owns the switch (port/src/pe_loader.cpp); this device reads the same
+// variable so the translation can be off unless the console arm is on. Every other spelling, and an unset switch,
+// leaves the default path and the R9G9B9E5 render target keeps its existing named refusal.
+inline bool console_series_s_upscale_targets() {
+    static const bool enabled = [] {
+        char text[32] = {};
+        (void)GetEnvironmentVariableA("PALMETTO_CONSOLE_TYPE", text, sizeof(text));
+        return palmetto::console_type_is_series_s(text);
+    }();
+    return enabled;
+}
+
 // What a device's children need from it, kept apart from the COM class so children can hold a plain pointer.
 class PipelineState;  // defined below: the live-pipeline budget evicts through it
 class DescriptorHeap;  // defined below; DeviceState keeps the console-addressed shader-visible ones to refresh
@@ -2157,12 +2171,39 @@ inline double pipeline_call_stats_interval_s() {
                                                (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))) ||
                 (desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)))
                 return {};
-            if ((desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) &&
-                (!color_attachment_usable(VK_FORMAT_E5B9G9R9_UFLOAT_PACK32) ||
-                 ((desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) &&
-                  !storage_usable(VK_FORMAT_E5B9G9R9_UFLOAT_PACK32))))
-                return {};
-            if ((desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) && r9g9b9e5_uav_emulated) {
+            const bool render_target = (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0;
+            const bool unordered_access = (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
+            const bool native_attachments =
+                color_attachment_usable(VK_FORMAT_E5B9G9R9_UFLOAT_PACK32) &&
+                (!unordered_access || storage_usable(VK_FORMAT_E5B9G9R9_UFLOAT_PACK32));
+            if (render_target && !native_attachments) {
+                // The console's Series-S upscale output (docs/decomp_renderer.md section 12): R9G9B9E5 with both a
+                // render-target and an unordered-access flag. The console creates it; this host cannot attach or store
+                // E5B9G9R9. Off the console arm it stays refused exactly as before; on the console arm the measured
+                // support is the UAV-only emulation's mutable R32_UINT image plus a refusal of the attachment view.
+                if (!palmetto::console_r9g9b9e5_render_target(desc)) {
+                    log_once("R9G9B9E5_SHAREDEXP render targets need colour-attachment and storage support for the "
+                             "format; flags",
+                             int(desc.Flags));
+                    return {};
+                }
+                if (!console_series_s_upscale_targets()) {
+                    log_once("an R9G9B9E5_SHAREDEXP render target is only served on the Series-S console arm "
+                             "(PALMETTO_CONSOLE_TYPE=6); flags",
+                             int(desc.Flags));
+                    return {};
+                }
+                if (!r9g9b9e5_uav_emulated) {
+                    log_once("Series-S R9G9B9E5_SHAREDEXP render target: the host has neither an E5B9G9R9 attachment "
+                             "nor a mutable R32_UINT backing; flags",
+                             int(desc.Flags));
+                    return {};
+                }
+                log_once("Series-S R9G9B9E5_SHAREDEXP render target: backed by a mutable R32_UINT image, its "
+                         "render-target view is refused by name; flags",
+                         int(desc.Flags));
+            }
+            if (unordered_access && r9g9b9e5_uav_emulated) {
                 log_once("R9G9B9E5_SHAREDEXP UAV unavailable natively, using mutable R32_UINT; format", desc.Format);
                 Format backed{VK_FORMAT_R32_UINT, VK_IMAGE_ASPECT_COLOR_BIT};
                 backed.uint_backed = VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;
@@ -10000,9 +10041,21 @@ public:
                     view.format = static_cast<palmetto::ColorViewFormat>(r->uint_backed());
             } else if (rd.Format == DXGI_FORMAT_R9G9B9E5_SHAREDEXP ||
                        (desc && desc->Format == DXGI_FORMAT_R9G9B9E5_SHAREDEXP)) {
-                if (rd.Format != DXGI_FORMAT_R9G9B9E5_SHAREDEXP || !(rd.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) ||
-                    (desc && desc->Format != DXGI_FORMAT_UNKNOWN && desc->Format != rd.Format))
+                if (r && r->uint_backed() == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 &&
+                    (rd.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
+                    // The Series-S upscale output (docs/decomp_renderer.md section 12): the console's R9G9B9E5 render
+                    // target is hosted as a mutable R32_UINT image because this GPU has no E5B9G9R9 attachment or
+                    // storage, so there is no attachment view of the format the title's pipeline names. Refused by
+                    // name; the resource's SRV and UAV views are served by the UAV-only emulation.
+                    log_once("R9G9B9E5_SHAREDEXP render-target view refused: the console's render target is hosted as a "
+                             "mutable R32_UINT image on this GPU; format",
+                             int(asked));
                     view = {};
+                } else if (rd.Format != DXGI_FORMAT_R9G9B9E5_SHAREDEXP ||
+                           !(rd.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) ||
+                           (desc && desc->Format != DXGI_FORMAT_UNKNOWN && desc->Format != rd.Format)) {
+                    view = {};
+                }
             } else if (typeless_color || typed_rgba8 || cast_listed || typed_bgra8_listed) {
                 const DXGI_FORMAT requested = asked;
                 // A typed UNORM RGBA8 resource with a castable list may be viewed in a listed family format
