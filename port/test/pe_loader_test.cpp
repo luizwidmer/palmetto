@@ -681,6 +681,66 @@ void test_inherited_reservation() {
     if (saved_length && saved_length < 64) SetEnvironmentVariableW(br::kVariable, saved);
 }
 
+// The opt-in console-type override (docs/decomp_renderer.md section 11): the switch's spelling, the exact registry-name
+// match, and the answers the hooks would serve, including the switch-off shape. No title string is used: the synthetic
+// key/value below are the test's own, and the real match runs against the strings the title image's read passes.
+void test_console_type_override() {
+    bool valid = false;
+    check(rt::parse_console_type_switch(nullptr, &valid) == 0 && valid, "console type: unset is off");
+    check(rt::parse_console_type_switch("", &valid) == 0 && valid, "console type: empty is off");
+    check(rt::parse_console_type_switch("0", &valid) == 0 && valid, "console type: 0 is off");
+    check(rt::parse_console_type_switch("6", &valid) == rt::kSeriesSConsoleType && valid,
+          "console type: 6 is Series S");
+    check(rt::parse_console_type_switch("SeriesS", &valid) == rt::kSeriesSConsoleType && valid,
+          "console type: SeriesS is Series S");
+    check(rt::parse_console_type_switch("series-s", &valid) == rt::kSeriesSConsoleType && valid,
+          "console type: series-s is Series S");
+    check(rt::parse_console_type_switch(" 6 ", &valid) == rt::kSeriesSConsoleType && valid,
+          "console type: surrounding spaces are tolerated");
+    check(rt::parse_console_type_switch("7", &valid) == 0 && !valid, "console type: 7 is refused");
+    check(rt::parse_console_type_switch("pc", &valid) == 0 && !valid, "console type: a word that is not Series S is refused");
+    check(rt::kSeriesSConsoleType == 6 && rt::kSeriesSRegistryValue == 0x60,
+          "console type: Series S is console type 6, registry value 0x60");
+
+    // The environment read: unset (the default path), the accepted spelling, and a refused one restored afterwards.
+    SetEnvironmentVariableA("PALMETTO_CONSOLE_TYPE", nullptr);
+    check(rt::console_type_switch() == 0, "console type: no PALMETTO_CONSOLE_TYPE is off");
+    SetEnvironmentVariableA("PALMETTO_CONSOLE_TYPE", "6");
+    check(rt::console_type_switch() == rt::kSeriesSConsoleType, "console type: PALMETTO_CONSOLE_TYPE=6 arms it");
+    SetEnvironmentVariableA("PALMETTO_CONSOLE_TYPE", "not-a-console");
+    check(rt::console_type_switch() == 0, "console type: an unknown PALMETTO_CONSOLE_TYPE stays off");
+    SetEnvironmentVariableA("PALMETTO_CONSOLE_TYPE", nullptr);
+    check(rt::console_type_switch() == 0, "console type: clearing PALMETTO_CONSOLE_TYPE is off again");
+
+    // The exact name match; the strings are the test's own shape, not the title's.
+    const wchar_t key[] = L"Software\\Synthetic\\OEM";
+    const wchar_t value[] = L"SyntheticValue";
+    const std::wstring key_copy = key;
+    check(rt::registry_name_matches(key, key), "console type: a name matches itself by pointer");
+    check(rt::registry_name_matches(key_copy.c_str(), key), "console type: a copy of the name matches by content");
+    check(!rt::registry_name_matches(L"Software\\Synthetic", key), "console type: a prefix does not match");
+    check(!rt::registry_name_matches(L"software\\synthetic\\oem", key), "console type: a case difference does not match");
+    check(!rt::registry_name_matches(nullptr, key), "console type: a null name matches nothing");
+    check(!rt::registry_name_matches(key, nullptr), "console type: a null expectation matches nothing");
+
+    // The answers an armed override serves, and the unarmed (switch-off) shape: nothing matches.
+    int token = 0;
+    rt::ConsoleTypeAnswers answers;
+    answers.key = key;
+    answers.value = value;
+    answers.opener = &token;
+    check(answers.armed(), "console type: the answers are armed with both names and a handle");
+    check(answers.is_console_key(key) && answers.is_console_key(key_copy.c_str()),
+          "console type: the answered open matches the key");
+    check(answers.is_console_value(value), "console type: the answered query matches the value name");
+    check(!answers.is_console_value(L"OtherValue"), "console type: a different value name is not the read");
+    check(answers.is_answered_open(&token), "console type: the answered handle is recognised");
+    check(!answers.is_answered_open(&valid), "console type: another handle is not the answered open");
+    rt::ConsoleTypeAnswers off;
+    check(!off.armed() && !off.is_console_key(key) && !off.is_console_value(value) && !off.is_answered_open(&token),
+          "console type: an unarmed override answers nothing (the switch-off fallback)");
+}
+
 void print_result() {
     if (g_failures == 0)
         std::printf("\npe_loader_test: OK (%d checks)\n", g_checks);
@@ -715,6 +775,7 @@ int main(int argc, char** argv) {
         test_rejections(dll, temp.path);
         test_unwind(dll);
         test_inherited_reservation();
+        test_console_type_override();
         test_optional_package();
         test_optional_package_unwind();
     } catch (const std::exception& e) {

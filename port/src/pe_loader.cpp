@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <fstream>
 #include <mutex>
 #include <stdexcept>
@@ -1783,8 +1784,217 @@ void* Loader::resolve(Module& m, const std::string& dll, const std::string& name
     return shims::make_unimplemented_thunk(dll, sym);
 }
 
+// ---- Opt-in console-type override (PALMETTO_CONSOLE_TYPE; docs/decomp_renderer.md section 11) ------------------
+// The title's console-profile read is a host registry call pair - RegOpenKeyW on HKLM with the image's own key string,
+// then RegQueryValueExW of the image's own value name - whose single result is cached once per boot. On a PC the key is
+// absent, the read answers 1 and the upscaler selector (`game+0x7E93F0`) returns kind 6. The switch answers the read
+// as Series S (registry dword 0x60 -> console type 6) so the selector can take kind 7, and leaves every other registry
+// call alone. The two wide strings are read from the mapped image at the RVAs the decompilation gives, so no title
+// string is carried in this repository; a build whose strings are elsewhere fails the plausibility check and the
+// override stays off. Off by default: when PALMETTO_CONSOLE_TYPE is unset the IAT is never touched.
+namespace {
+
+// The console-type read's two strings in the title image's .rdata (image-relative, as docs/decomp_renderer.md names
+// them); the read passes these addresses to ADVAPI32.
+constexpr uint32_t kConsoleKeyRva = 0x678F340;    // the HKLM subkey
+constexpr uint32_t kConsoleValueRva = 0x678EB18;  // the value name it queries
+
+char g_console_type_token;  // the answered key handle: an address no real HKEY can be
+
+ConsoleTypeAnswers& console_type_answers() {
+    static ConsoleTypeAnswers answers;
+    return answers;
+}
+
+// The host entry points every non-console registry call is forwarded to, resolved once when the override is armed.
+struct HostRegistryCalls {
+    LSTATUS(WINAPI* open)(HKEY, LPCWSTR, PHKEY) = nullptr;
+    LSTATUS(WINAPI* query_value)(HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD) = nullptr;
+    LSTATUS(WINAPI* close_key)(HKEY) = nullptr;
+    bool resolved = false;
+};
+
+HostRegistryCalls& host_registry_calls() {
+    static HostRegistryCalls calls;
+    return calls;
+}
+
+bool resolve_host_registry_calls() {
+    HostRegistryCalls& calls = host_registry_calls();
+    if (calls.resolved) return calls.open && calls.query_value && calls.close_key;
+    calls.resolved = true;
+    const HMODULE advapi = LoadLibraryExW(L"advapi32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!advapi) return false;
+    calls.open = reinterpret_cast<LSTATUS(WINAPI*)(HKEY, LPCWSTR, PHKEY)>(GetProcAddress(advapi, "RegOpenKeyW"));
+    calls.query_value = reinterpret_cast<LSTATUS(WINAPI*)(HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD)>(
+        GetProcAddress(advapi, "RegQueryValueExW"));
+    calls.close_key = reinterpret_cast<LSTATUS(WINAPI*)(HKEY)>(GetProcAddress(advapi, "RegCloseKey"));
+    return calls.open && calls.query_value && calls.close_key;
+}
+
+// One stderr line and one trace event per answered read, bounded so a title that re-reads cannot flood a boot log.
+constexpr uint32_t kConsoleOverrideReportLimit = 16;
+
+void report_console_override(const char* api, void* caller, uint32_t registry_value) {
+    const std::string where = shims::module_offset(reinterpret_cast<uint64_t>(caller));
+    std::fprintf(stderr, "[rt] console-type override: %s at %s answered 0x%x (console type %u, Series S)\n", api,
+                 where.c_str(), registry_value, kSeriesSConsoleType);
+    if (startup_trace::enabled())
+        startup_trace::event("console_type_override",
+                             "\"api\":" + startup_trace::quote(api) + ",\"caller\":" + startup_trace::quote(where) +
+                                 ",\"registry_value\":" + std::to_string(registry_value) + ",\"console_type\":" +
+                                 std::to_string(kSeriesSConsoleType));
+}
+
+// The IAT hooks. Each matches only the console read and forwards everything else to the host entry point it replaced.
+LSTATUS WINAPI console_type_open_hook(HKEY root, LPCWSTR subkey, PHKEY out) {
+    ConsoleTypeAnswers& answers = console_type_answers();
+    if (root == HKEY_LOCAL_MACHINE && answers.is_console_key(subkey)) {
+        if (!out) return ERROR_INVALID_PARAMETER;
+        *out = static_cast<HKEY>(answers.opener);
+        const uint32_t hit = answers.opens.fetch_add(1, std::memory_order_relaxed);
+        if (hit < kConsoleOverrideReportLimit)
+            report_console_override("RegOpenKeyW", _ReturnAddress(), kSeriesSRegistryValue);
+        return ERROR_SUCCESS;
+    }
+    const HostRegistryCalls& calls = host_registry_calls();
+    return calls.open ? calls.open(root, subkey, out) : ERROR_PROC_NOT_FOUND;
+}
+
+LSTATUS WINAPI console_type_query_hook(HKEY key, LPCWSTR value, LPDWORD reserved, LPDWORD type, LPBYTE data,
+                                       LPDWORD cbdata) {
+    ConsoleTypeAnswers& answers = console_type_answers();
+    if (answers.is_answered_open(key)) {
+        if (!answers.is_console_value(value)) return ERROR_FILE_NOT_FOUND;
+        if (type) *type = REG_DWORD;
+        const DWORD capacity = cbdata ? *cbdata : 0;
+        if (data && capacity) {
+            const uint32_t answer = kSeriesSRegistryValue;
+            std::memcpy(data, &answer, std::min<DWORD>(capacity, static_cast<DWORD>(sizeof answer)));
+        }
+        if (cbdata) *cbdata = static_cast<DWORD>(sizeof(uint32_t));
+        answers.served.fetch_add(1, std::memory_order_relaxed);
+        const uint32_t hit = answers.queries.fetch_add(1, std::memory_order_relaxed);
+        if (hit < kConsoleOverrideReportLimit)
+            report_console_override("RegQueryValueExW", _ReturnAddress(), kSeriesSRegistryValue);
+        return ERROR_SUCCESS;
+    }
+    const HostRegistryCalls& calls = host_registry_calls();
+    return calls.query_value ? calls.query_value(key, value, reserved, type, data, cbdata) : ERROR_PROC_NOT_FOUND;
+}
+
+LSTATUS WINAPI console_type_close_hook(HKEY key) {
+    const ConsoleTypeAnswers& answers = console_type_answers();
+    if (answers.is_answered_open(key)) return ERROR_SUCCESS;
+    const HostRegistryCalls& calls = host_registry_calls();
+    return calls.close_key ? calls.close_key(key) : ERROR_INVALID_HANDLE;
+}
+
+// A printable, terminated wide string inside the image, read as a generic sanity check (no title string is named
+// here). The key must also look like a registry path, one backslash at least.
+bool plausible_wide_string(const uint8_t* base, uint32_t image_size, uint32_t rva, bool require_backslash) {
+    if (rva >= image_size) return false;
+    const auto* text = reinterpret_cast<const wchar_t*>(base + rva);
+    const uint32_t available = (image_size - rva) / static_cast<uint32_t>(sizeof(wchar_t));
+    const uint32_t limit = std::min<uint32_t>(available, 256);
+    bool backslash = false;
+    for (uint32_t i = 0; i < limit; ++i) {
+        const wchar_t c = text[i];
+        if (c == 0) return i > 0 && (!require_backslash || backslash);
+        if (c < 0x20 || c > 0x7e) return false;
+        if (c == L'\\') backslash = true;
+    }
+    return false;
+}
+
+// Arms the override against the module that holds the image's two key strings. Idempotent; every module that imports
+// the registry calls afterwards is patched with the same hooks (only the title image is large enough and shaped right).
+bool arm_console_type_override(const Module& m) {
+    ConsoleTypeAnswers& answers = console_type_answers();
+    if (answers.armed()) return true;
+    if (!plausible_wide_string(m.base, m.size, kConsoleKeyRva, true)) return false;
+    if (!plausible_wide_string(m.base, m.size, kConsoleValueRva, false)) return false;
+    if (!resolve_host_registry_calls()) {
+        std::fprintf(stderr, "[rt] console-type override: PALMETTO_CONSOLE_TYPE is set but advapi32's registry entry "
+                             "points could not be resolved; the title's read keeps its default answer\n");
+        return false;
+    }
+    answers.key = reinterpret_cast<const wchar_t*>(m.base + kConsoleKeyRva);
+    answers.value = reinterpret_cast<const wchar_t*>(m.base + kConsoleValueRva);
+    answers.opener = &g_console_type_token;
+    std::fprintf(stderr,
+                 "[rt] console-type override: PALMETTO_CONSOLE_TYPE=%u (Series S) armed on %s: its console-profile "
+                 "registry read is answered 0x%x; every other registry call is forwarded to the host\n",
+                 kSeriesSConsoleType, m.name.c_str(), kSeriesSRegistryValue);
+    return true;
+}
+
+// Which of the three ADVAPI32 imports a binding is, while bind_imports walks the import tables.
+enum class RegistryImport { None, Open, QueryValue, Close };
+
+RegistryImport registry_import_kind(const std::string& dll, const std::string& name) {
+    if (lower(dll) != "advapi32.dll") return RegistryImport::None;
+    if (name == "RegOpenKeyW") return RegistryImport::Open;
+    if (name == "RegQueryValueExW") return RegistryImport::QueryValue;
+    if (name == "RegCloseKey") return RegistryImport::Close;
+    return RegistryImport::None;
+}
+
+}  // namespace
+
+uint32_t parse_console_type_switch(const char* text, bool* valid) {
+    if (valid) *valid = true;
+    if (!text || !*text) return 0;
+    std::string value(text);
+    const auto first = value.find_first_not_of(" \t");
+    const auto last = value.find_last_not_of(" \t");
+    value = first == std::string::npos ? std::string() : value.substr(first, last - first + 1);
+    value = lower(value);
+    if (value.empty() || value == "0") return 0;
+    if (value == "6" || value == "seriess" || value == "series-s" || value == "series s") return kSeriesSConsoleType;
+    // Only Series S selects the kind-7 branch; the parser refuses every other console type rather than guessing one
+    // (the title's map takes 0x40/0x50/0x58/0x60/0x64/0x68 for the others, and none of them reaches kind 7).
+    if (valid) *valid = false;
+    return 0;
+}
+
+uint32_t console_type_switch() {
+    char text[32] = {};
+    const DWORD n = GetEnvironmentVariableA("PALMETTO_CONSOLE_TYPE", text, sizeof text);
+    if (n == 0) return 0;  // unset or empty: the default path
+    // A refused spelling is reported once: bind_imports reads the switch once per mapped module.
+    static std::atomic<bool> reported{false};
+    const auto report_once = [](const char* format, const char* value) {
+        if (!reported.exchange(true)) std::fprintf(stderr, format, value);
+    };
+    if (n >= sizeof text) {
+        report_once("[rt] console-type override: PALMETTO_CONSOLE_TYPE=%s is too long; off\n", "?");
+        return 0;
+    }
+    bool valid = true;
+    const uint32_t type = parse_console_type_switch(text, &valid);
+    if (!valid)
+        report_once("[rt] console-type override: PALMETTO_CONSOLE_TYPE=%s is not Series S (6); off\n", text);
+    return type;
+}
+
+bool registry_name_matches(const wchar_t* asked, const wchar_t* expected) {
+    if (!asked || !expected) return false;
+    if (asked == expected) return true;
+    return std::wcscmp(asked, expected) == 0;
+}
+
 void Loader::bind_imports(Module& m) {
     auto* nt = at<IMAGE_NT_HEADERS64>(m.base, reinterpret_cast<IMAGE_DOS_HEADER*>(m.base)->e_lfanew);
+
+    // The opt-in console-type override patches this image's IAT slots for the three ADVAPI32 registry imports after the
+    // normal binding below. The switch is read once here; unset means the IAT is never touched (the default path).
+    const bool console_type_override = console_type_switch() != 0;
+    struct RegistrySlot {
+        RegistryImport kind;
+        uint64_t iat_rva;
+    };
+    std::vector<RegistrySlot> registry_slots;
 
     // Thunk tables have no length field: they end at a zero entry, so each step is checked against the image.
     auto bind_thunks = [&](const std::string& dll, uint64_t lookup_rva, uint64_t iat_rva) {
@@ -1800,6 +2010,10 @@ void Loader::bind_imports(Module& m) {
                 require_range(m.name, lookup->u1.AddressOfData, sizeof(uint16_t), m.size, "an import name");
                 uint32_t hint = static_cast<uint32_t>(lookup->u1.AddressOfData);
                 name = read_string(m.name, m.base, m.size, hint + sizeof(uint16_t), "an import name");
+            }
+            if (console_type_override) {
+                const RegistryImport kind = registry_import_kind(dll, name);
+                if (kind != RegistryImport::None) registry_slots.push_back({kind, iat_rva});
             }
             at<IMAGE_THUNK_DATA64>(m.base, static_cast<uint32_t>(iat_rva))->u1.Function =
                 reinterpret_cast<uint64_t>(resolve(m, dll, name, ord, by_ord));
@@ -1839,6 +2053,33 @@ void Loader::bind_imports(Module& m) {
             if (!d->ImportNameTableRVA)
                 throw std::runtime_error(m.name + ": a delay-import descriptor has no name table");
             bind_thunks(dll, d->ImportNameTableRVA, d->ImportAddressTableRVA);
+        }
+    }
+
+    // Opt-in console-type override: replace the bound host entry points of the registry imports with the hooks that
+    // answer the console-profile read as Series S. This runs before protect_sections(), so the .rdata IAT is still
+    // writable; nothing else about the binding changes.
+    if (!registry_slots.empty()) {
+        if (arm_console_type_override(m)) {
+            for (const RegistrySlot& slot : registry_slots) {
+                uint64_t hook = 0;
+                if (slot.kind == RegistryImport::Open)
+                    hook = reinterpret_cast<uint64_t>(&console_type_open_hook);
+                else if (slot.kind == RegistryImport::QueryValue)
+                    hook = reinterpret_cast<uint64_t>(&console_type_query_hook);
+                else
+                    hook = reinterpret_cast<uint64_t>(&console_type_close_hook);
+                at<IMAGE_THUNK_DATA64>(m.base, static_cast<uint32_t>(slot.iat_rva))->u1.Function = hook;
+            }
+            std::fprintf(stderr, "[rt] console-type override: patched %zu ADVAPI32 IAT slot(s) of %s\n",
+                         registry_slots.size(), m.name.c_str());
+        } else if (m.size > kConsoleValueRva) {
+            // Only an image large enough to hold the two strings could be the one the decompilation describes, so only
+            // that image reports a failed arm; a smaller DLL that imports the calls is simply not a candidate.
+            std::fprintf(stderr,
+                         "[rt] console-type override: PALMETTO_CONSOLE_TYPE is set but %s does not hold the image's "
+                         "console-profile key strings at image+0x%x/image+0x%x; the IAT is not patched\n",
+                         m.name.c_str(), kConsoleKeyRva, kConsoleValueRva);
         }
     }
 }

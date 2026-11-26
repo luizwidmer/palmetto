@@ -386,12 +386,13 @@ frame. Rank is by measured support, not by expected severity.
 | 3 | **formats/stride**: the type-5 class 0xa table's block is sized by a stride switch with no 0xa case, so the block is 0 bytes and the copy overruns | this page section 4.5 and the prior slice's measured zero-byte request and 0x1000 copy ([vertex_buffer_va.md](vertex_buffer_va.md) sections 15-16) | the executor's block request is 0 and the copy writes 0x1000; the stop moves if the stride switch treats 0xa as a known format | yes: `PALMETTO_EXECUTOR_WATCH`, `PALMETTO_POKE_LOG` at `0x45629A0`/`0x550E2D0`, `PALMETTO_XS_ALLOCATOR_CALLBACK_TRACE` |
 | 4 | **colour-space**: the colour data is zero or the SDR/HDR choice hides the frame | [colour_path.md](colour_path.md): the constant pass's four colour dwords are zero and the module reads nothing else; this page section 7: plane colour space 0 vs 0xC | the four colour dwords become non-zero in a content frame, or a captured presented frame is non-black with HDR off | yes: `PALMETTO_COLOUR_PATH`, `PALMETTO_READBACK_AT_DRAW`, `PALMETTO_READBACK_FULL`, `PALMETTO_CAPTURE`, `PALMETTO_HDR`, `PALMETTO_SDR_EOTF` |
 | 5 | **present/plane resource**: the present plane's resource word is null, so PresentX refuses the plane | [display_path.md](display_path.md): the `0x75E0DE0` cell was written 23,819 times, all 0, by `0xCD74DB`; [surface_population.md](surface_population.md) | the plane cell holds a non-null placed resource and PresentX succeeds on it | yes: `PALMETTO_WATCH_RVA_WRITE=75E0DE0`, `PALMETTO_PRESENT_STUB`, `PALMETTO_XS_CALLERS`, presenter captures |
-| 6 | **upscaler kind**: the console FSR branch (kind 7) is not taken on PC | this page section 5: selector returns 6 unless console type 6 and caps bit 0x40; [upscale_standin.md](upscale_standin.md) section 2.2: 0 of 29 FidelityFX programs requested | make the title's console-type read answer 6 and see kind 7, FSR programs requested and this table-set draw change | no: the registry read is the title's own; no existing probe writes it (a new console-type probe or registry arm would be needed) |
+| 6 | **upscaler kind**: the console FSR branch (kind 7) is not taken on PC | this page section 5: selector returns 6 unless console type 6 and caps bit 0x40; [upscale_standin.md](upscale_standin.md) section 2.2: 0 of 29 FidelityFX programs requested | make the title's console-type read answer 6 and see kind 7, FSR programs requested and this table-set draw change | yes, measured: `PALMETTO_CONSOLE_TYPE` (section 11) answers the read as Series S; the selector returns 7 and the console FSR path runs, but the stop moves earlier and the class-0xa command is not created in the measured window |
 | 7 | **type-5 table consumer**: the 256-entry table is a compose-pass filter kernel (own-upscaler kernel) rather than a colour curve | this page section 4.4: four channels, key interpolation, radial variants; the boot ordering put the upload before the compose draw | the element's record kind and the compose draw's table set read back together; a kind-7 arm that still records the draw's table set removes the indirect selection | no existing single probe; `PALMETTO_RAMP_PROBE` would be a new bounded arm (not implemented) |
 
-Hypotheses 1-5 can be exercised with switches the tree already has. Hypothesis 6 needs a probe that changes what the
-title's own registry read returns, which is not an existing switch. Hypothesis 7 needs either a new bounded emitter
-probe or a kind-7 arm; neither exists.
+Hypotheses 1-5 can be exercised with switches the tree already has. Hypothesis 6 was taken up after this page: the
+console-type arm exists as `PALMETTO_CONSOLE_TYPE` and is measured in section 11 (the answer is consumed and the
+kind-7 FSR path runs, but it does not remove the class-0xa command - it stops the boot earlier). Hypothesis 7 needs
+either a new bounded emitter probe or a kind-7 arm that survives to the table-set draw; neither exists.
 
 ## 9. Limits
 
@@ -417,3 +418,158 @@ probe or a kind-7 arm; neither exists.
 One file for this slice, new and untracked: `docs/decomp_renderer.md`. The work notes, decompiled function dumps and
 Ghidra logs are outside the repository (`D:\leonida-work\decomp\...`). No other page, no `port/` file, no test and no
 build file was edited, and no git writes were made.
+
+## 11. The console-type experiment: answering the read as Series S, measured
+
+**Status: measured, with a negative verdict on the picture question.** One opt-in switch, two boot sets and the static
+cross-check below. The switch is off by default and the default path is unchanged (no environment variable means no
+IAT patch at all); no game string, asset byte or hash is carried in the tree or in any log. The answer is consumed and
+the selector takes the console FSR branch - but the console FSR path stops the boot earlier than the class-0xa window,
+so it does not avoid the crash that matters.
+
+### 11.1 The override
+
+The switch is `PALMETTO_CONSOLE_TYPE`. The only accepted value is `6` (Series S; `seriess`, `series-s` and `series s`
+are also accepted); any other value prints one line and leaves the default path. With it set, `port/src/pe_loader.cpp`:
+
+- arms on the mapped image that holds the console-type read's two wide strings at the RVAs section 5 names: the
+  HKLM subkey at `image+0x678F340` and the value name at `image+0x678EB18`. The strings are read from the title's own
+  `.rdata`; a plausibility check (printable, terminated, the key containing a backslash) keeps a different build from
+  arming. No title string is written into this repository;
+- replaces the image's three `ADVAPI32.dll` IAT slots (`RegOpenKeyW`, `RegQueryValueExW`, `RegCloseKey`) with hooks that
+  answer exactly that read: an open of HKLM with the key string gets a token handle, a query of the value name on that
+  token gets `REG_DWORD 0x60` (the value section 5 maps to console type 6), and a close of the token succeeds. Every
+  other registry call - and every other key or value name on the same imports - is forwarded to the host advapi32 entry
+  point the loader had bound;
+- reports each answered read with its caller (`RegOpenKeyW at game+0x55DEBB2`, `RegQueryValueExW at game+0x55DEBF2`, in
+  the measured binary) and emits a `console_type_override` trace event, so a boot says both that the title asked and
+  that the answer was served. The host registry is never written.
+
+The default path is untouched: the loader only reads the switch inside `bind_imports`, and when it is unset the IAT is
+not patched (a `--dry-run` of the same image with the switch unset prints no override line and binds every import as
+before). The switch is refused safely: `7` prints one line and stays off.
+
+### 11.2 The presence bit is not a second condition
+
+Section 5's selector tests the console type and capability bit `0x40`. The static reading already answers the second
+half: the capability word is built by the function that walks the upscaler factory for kinds 0..7 (`0x56DCF00` ->
+`0x876110`); the factory constructs both the kind-6 object (`0x7E9490`, `0x7B99040`) and the kind-7 object (`0x56D9BC0`,
+`0x7B98E08`) on that walk, and each object's vtable slot +8 ORs its presence bit (`0x20` / `0x40`) into the word. The
+`0x40` bit is therefore set by the build itself on every boot, independent of the console type, and answering 6 is
+sufficient: no additional write to the word is needed. The measured selector return in section 11.4 confirms it.
+
+### 11.3 The two boot sets
+
+Both sets are the section-12 content environment with the class-0xa slice's probe set (`PALMETTO_ALLOC_WATCH` plus the
+`PALMETTO_DUMP_REGS`/`PALMETTO_FAULT_MEM` diagnostics, presenter captures and readbacks), one boot under the boot lock,
+180 s timeout, the same binary (`palmetto.exe` SHA-256 `D7B4D8975D449BA5...` for every row). The control set is the
+current default answers; the Series-S set adds `PALMETTO_CONSOLE_TYPE=6`. The extra fast-path probes that section 11.6
+names are not in these rows.
+
+| set | boot | stage 3 | first stop | stop t | device lost | class-0xa signals | FSR path | captures |
+|---|---|---|---:|---:|---|---|---|---|
+| control | `def1` | no | `game+0x86F981` read `0x954F` | 63.1 s | yes | none | none | 4, black |
+| control | `def2` | yes | `host:VCRUNTIME140.dll+0x1CCAB` read `0xC837E003E8` | 67.3 s | yes | none | none | 10, black |
+| control | `def3` | yes | `game+0x13360A3` read -1 | 72.8 s | no | FORMAT KEY key 0xa / BLOCK ALLOC 0 bytes 256x1 / ENTRY WRITTEN stride 0 size 0 | none | 10, black |
+| Series S | `s61` | yes | `game+0x4EEE4EC` read `0x100000028` | 53.2 s | no | none | DLL mapped, 1920x1080 format 67 refused, 1280x720 formats 57/62 placed | 10, black |
+| Series S | `s62` | yes | `0x0` execute | 52.7 s | no | none | DLL mapped | 10, black |
+
+Stage-3 times in the probe's own clock: control `def3` 68.5 s, `def2` 61.0 s; Series S `s61` 51.8 s, `s62` 51.6 s. The
+class-0xa sequence in the control boot is the one sections 4.5 and 7 describe: the emitter's FORMAT KEY at 71.80 s
+(key 0xa, command vtable `game+0x66314B0`, creator vtable `game+0x658DB60`, caller `game+0x1837A2`), the executor's
+BLOCK ALLOC of `0x0` bytes for a 256x1 entry at 71.84 s with `overlap YES`, the ENTRY WRITTEN with stride 0 and size 0
+at 71.87 s, then the stop at `game+0x13360A3` 0.89 s later.
+
+### 11.4 What the answer changed
+
+- **It was consumed.** Every Series-S boot logs the title's own two calls answered at t = 0.888 s after the run's start:
+  `RegOpenKeyW at game+0x55DEBB2` and `RegQueryValueExW at game+0x55DEBF2`, each answered `0x60`, twice per boot (four
+  trace events). The read is the static initialiser's, so the whole boot runs on console type 6.
+- **The selector takes kind 7.** A one-shot `PALMETTO_POKE_LOG` at the selector's return (`image+0x7E9429`) prints RAX
+  at the exit of `0x7E93F0`. Control (60 s poke boot): 20 hits, **RAX=6 on all 20**. Series S: 17 hits, **RAX=7 on all
+  17**. This is the direct measurement of the branch, and it agrees with section 11.2's reading of the capability bit.
+- **The console FSR path runs.** The selector result commits the upscale dispatch to the kind-7 object. In both Series-S
+  boots the title then creates the Series-S upscale shape - a 1920x1080 target in format 67 (the layer's
+  `GetResourceAllocationInfo`/slot-25 path refuses the format, so `CreateCommittedResource` returns `0x80070057`), and
+  1280x720 color/depth targets in formats 57 and 62 (placed, accepted) - and maps
+  `amd_fidelityfx_upscaler_xbox.dll` from the game directory (a run-time load). The control boots do neither: no
+  FidelityFX module is mapped anywhere in their measured window. Of the 29 FidelityFX `FSPX` programs, 0 are requested
+  in either set at the measure time, so the failure is before their pipeline creation, not a translation refusal.
+- **The class-0xa command is not created in the Series-S window - and the honest reason is where the boot stops.**
+  In both Series-S boots the alloc-watch probe (armed at stage 3) never sees a FORMAT KEY, BLOCK ALLOC, ENTRY WRITTEN or
+  an executor-entry hit before the stop, which arrives 1.1-1.4 s after the probe reads stage 3. In the control's
+  stage-3 boot those events are 3.3 s after the probe's own stage-3 read, so a control boot that stops before that
+  point (as `def2` did) also shows no class-0xa event. The measured conclusion is therefore not "the branch skips the
+  command": it is that the console FSR dispatch fails first, in a different family, before the content submission that
+  would create the command.
+- **The stop family moved.** The two Series-S stops are `game+0x4EEE4EC`, a table lookup that loads `[rax+0x28]` with
+  `rax = 0x100000000` - a read through the fabricated console GPU address range, the mechanism
+  [boot_frontier.md](boot_frontier.md) measures - and `0x0` execute, a call through a null function pointer. Neither
+  occurs in any control boot; both are new for this arm.
+- **No pixels changed.** Every presenter capture in both sets is mean RGB 0.0, black; the Series-S set has 10 captures
+  (12 with the poke boot) and none is non-black. The trade the peers' pages describe is confirmed: the console FSR path
+  cannot run on this layer, and taking it leaves the picture where it was.
+
+### 11.5 The precondition: stage-3 reach with the current defaults
+
+The experiment needs machine stage 3. After the platform slice changed the first-run service defaults
+([decomp_first_ui.md](decomp_first_ui.md) section 12), a first probe attempt produced 0/6 stage-3 boots with the
+experiment's own fast-path probes on. The matched comparison below separates the tree from the probes: same binary,
+section-12 content environment, seed and probe set (`PALMETTO_ALLOC_WATCH` plus the diagnostics; no selector poke, no
+watch thread), 180 s arms, retried until two stage-3 boots.
+
+| arm | boots | stage 3 | first-stop families |
+|---|---:|---:|---|
+| current defaults | 3 | 2 | `0x86F981` (no stage 3), `host:VCRUNTIME140.dll+0x1CCAB` (after stage 3), `0x13360A3` (class-0xa family) |
+| `PALMETTO_SILENT_SPEECH=0`, `PALMETTO_USER_CHANGE_EVENT=0`, `PALMETTO_PAD_PRESENT=0` | 5 | 1 | `0x4D9F636`, `0x86F97E`, `0x559468F`, `0x86F981` (all no stage 3) |
+| earlier arm, only `PALMETTO_SILENT_SPEECH=0` reached the process | 5 | 0 | `0x86F97E` x3, `0x86F981`, `0x4D4CA97659` |
+
+Read together: the current defaults do not reduce stage-3 reach; this sample reaches it more often than the pre-default
+answers (2/3 against 1/5 and 0/5). The 0/6 that started this measurement came from the experiment's own hot-path probes
+(the selector poke and the 2 ms watch thread), not from the platform defaults; the Series-S boots themselves reach
+stage 3 in 2 of 2 attempts. No change to the platform defaults is implied by this measurement; they are the better
+trajectory of the two measured here.
+
+### 11.6 Limits
+
+- **The image version.** The two RVAs are image-relative and move with a different build. The arming plausibility check
+  fails closed (no patch, one line), but the strings themselves are not verified against the decompilation beyond that
+  check.
+- **The two-read shape is measured, not explained.** The title calls the answered read pair twice per boot. The
+  decompilation shows one caller in the static runtime block; the second call is not attributed here. Both reads are
+  answered identically.
+- **The class-0xa skip is not proven.** Section 11.4 gives the measured reason: the Series-S boot stops before the
+  content submission whose executor pass creates the command. Whether the kind-7 upscale dispatch would still record the
+  compose draw's table set - and therefore the class-0xa command - if the console FSR path survived is not measured.
+  That is the next falsifier: make the FSR create/dispatch succeed far enough to reach the same executor pass (for
+  example by backing the console address range, `PALMETTO_BACK_IMAGES`, or by standing in the FSR dispatch's resource
+  creations) and watch the alloc-watch sites with `PALMETTO_CONSOLE_TYPE=6`.
+- **The FSR path's own failure is named, not fixed.** The two stop sites are new occurrences of existing families
+  (section 11.4); neither was decoded past the fault. The FSR program request count (0 of 29) is taken from the shader
+  translation log, so it does not rule out a request path that the boot never reaches.
+- **The A/B is one machine and one tree state.** Both sets share one binary and one boot slot; the boot slot serialises
+  boots but not CPU load from builds, and stage-3 reach is a race.
+- **No game data.** RVAs, registry value mappings, the console type, module names, formats, dimensions, counts and
+  outcomes only; the two registry strings are read from the user's own image at run time and never written to the tree.
+
+### 11.7 Tests and gates
+
+- `port/test/pe_loader_test.cpp` gains 27 checks (106 total): the switch's spelling (`nullptr`, empty, `0`, `6`,
+  `SeriesS`, `series-s`, surrounding spaces, a refused `7`, a refused word), the environment read and its unset/refused
+  fallback, the exact registry-name match (pointer, content, prefix, case, null on either side) and the answers' armed
+  and unarmed shapes. They run in the existing `pe_loader` CTest target, no new target or source file.
+- The default path is covered by the switch-off checks and by the `--dry-run` comparison above.
+- Gates on the changed tree: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints
+  `TESTS_BUILT`, the `pe_loader` and the other `pe_loader.cpp`-linking tests pass, and the twelve `tests/test_docs_*.py`
+  checks pass. No test or build file other than the two named source/test files was edited.
+
+### 11.8 Attribution
+
+This section was implemented from this project's own measurements: the two boot sets above (under
+`tooling/boot_report.py`, boot lock held), the static reading of the selector/factory/capability functions already
+recorded in sections 5-6 and in the classwhy work notes, and the layer behaviour the runtime itself prints. The peer
+projects' published observations of the Series-S path are cross-checked where section 5 cites them and stay credited in
+[NOTICE.md](../NOTICE.md); no code or data was copied from any of them and no NOTICE row changes for this section. No
+git writes were made; the uncommitted files at the end of the slice are `port/src/pe_loader.h`,
+`port/src/pe_loader.cpp`, `port/test/pe_loader_test.cpp` and this page.
+

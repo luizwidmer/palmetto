@@ -5,6 +5,7 @@
 // ~Loader() delivers process detach before unmapping initialised modules. The TLS slot and template are set up by load().
 // palmetto_tls_host.dll must sit next to the executable; the loader reuses the module TLS index the OS assigns it.
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -183,5 +184,44 @@ private:
 void cleanup_tls_clones();
 
 std::string lower(std::string s);
+
+// ---- Opt-in console-type override (PALMETTO_CONSOLE_TYPE; docs/decomp_renderer.md section 11) -------------------
+// The title's upscaler selector (`game+0x7E93F0`) takes the console FidelityFX branch (kind 7) only when its
+// console-profile registry read answers 6 (Series S). That read is the title's own ADVAPI32 RegOpenKeyW /
+// RegQueryValueExW call pair, cached once per boot; on a PC the key is absent, the read answers 1 and the selector
+// returns 6 (the title's own upscaler). PALMETTO_CONSOLE_TYPE=6 answers that one read as Series S: the loader replaces
+// the title image's IAT slots for the three ADVAPI32 registry imports with hooks that match only the exact key and
+// value name the read uses (the image's own .rdata strings at the two RVAs the decompilation gives) and forward every
+// other registry call to the host. Off by default; an unknown value leaves the default path untouched.
+inline constexpr uint32_t kSeriesSConsoleType = 6;       // the console type the kind-7 branch requires
+inline constexpr uint32_t kSeriesSRegistryValue = 0x60;  // the registry dword that maps to console type 6
+
+// The switch's value: 0 = off, else the console type. Only 6 (Series S) is accepted; *valid = false for any other
+// spelling, and the result is then 0.
+uint32_t parse_console_type_switch(const char* text, bool* valid = nullptr);
+
+// The switch as the environment spells it; 0 when unset, empty or invalid (the default path).
+uint32_t console_type_switch();
+
+// The registry-name match the hooks use, exact. The title passes its own .rdata pointers, so a pointer compare is the
+// common case; a copy with the same content also matches. Null matches nothing.
+bool registry_name_matches(const wchar_t* asked, const wchar_t* expected);
+
+// The answers served for the console-profile read, separated from the host registry calls so the test can cover the
+// Series-S value and the unarmed (switch-off) shape without the title's strings. `opener` is what RegOpenKeyW answers
+// as the handle and what RegCloseKey then recognises.
+struct ConsoleTypeAnswers {
+    const wchar_t* key = nullptr;    // the image's own key string; null = not armed
+    const wchar_t* value = nullptr;  // the image's own value-name string
+    void* opener = nullptr;          // the token that names the answered open
+    std::atomic<uint32_t> opens{0};
+    std::atomic<uint32_t> queries{0};
+    std::atomic<uint32_t> served{0};
+
+    bool armed() const { return key && value && opener; }
+    bool is_console_key(const wchar_t* asked) const { return armed() && registry_name_matches(asked, key); }
+    bool is_console_value(const wchar_t* asked) const { return armed() && registry_name_matches(asked, value); }
+    bool is_answered_open(const void* handle) const { return armed() && handle == opener; }
+};
 
 }  // namespace rt
