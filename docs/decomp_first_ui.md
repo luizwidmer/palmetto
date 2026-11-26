@@ -1142,3 +1142,240 @@ frame on screen is still not called.
 - **Attribution.** The ABI decode, the trampoline, the install/uninstall, the tests and the six boots are this project's
   own work on the user's image and the measured chain of [vertex_buffer_va.md](vertex_buffer_va.md) sections 14-16 and
   [decomp_memory.md](decomp_memory.md) section 9. No peer code was used and no game data is added.
+
+## 17. Measured: with the class-0xa mitigation the boot lives 300 s past stage 3, the session-3 loading record still never completes, and the presented frame stays black
+
+**Status: measured with the approved opt-in mitigation, negative on the picture, with the new wall named.** Section 16
+left the mitigation at two points: the executor pass survives and the picture is still a black target. This section
+runs the long window the mitigation makes reachable: one clean 300.2 s light arm held stage 3 for 185 s with zero
+exceptions and zero device losses, seven thousand command lists after the stage-3 entry, six full-4K content-target
+readbacks, and thirty presenter captures. The state words never move past `init 3 / loading 2 / session 3`; the session-3
+loading record's completion dword is still never observed; the movie player reaches state `0x9` with a non-null Bink
+handle and `buffers 0`, while per-frame decode `0x2EF0E0` and frame-buffer registration `0x442F760` still have **0 hits**;
+every capture and every full-target readback is mean `0 0 0`. The new wall is title-side and named: the frame thread
+parks in the session-3 poll and the loading task blocks on a title semaphore, so the frame pump that would issue the
+movie draw stops, while the loader keeps updating. Two later arms lost the host GPU device before stage 3
+(`nvlddmkm` event 153), so boots stopped after the second loss per the task rule and the input A/B has no post-stage-3
+arm; that is the honest state of the input question.
+
+### 17.1 The arms and the environment
+
+One binary for all three arms: SHA-256 `2120E306743D2DBD...`, the section-16 gate build. Each boot is one at a time under
+`_setup/boot_lock.ps1` (`-Who aftermitig`), `-Light`, via `tooling/boot_report.py`; logs, captures and readbacks are
+outside the repository. `long1` is the task's required movie arm; `long2` and `input1` add the session-record and
+screen-owner diagnostics (and `input1` the scripted pad); `long2` also carries the hardware completion watch.
+
+| arm | binary SHA-256 (first 16) | wall | stage 3 (state clock) | verdict / stop | device lost | presenter captures |
+|---|---|---|---|---|---|---|
+| `long1` | `2120E306743D2DBD` | 300.2 s (harness timeout) | 114.4 s (alloc watch read; state words 116.0 s) | ALIVE, 0 exceptions | 0 | 30 (frames 1-2901), every one mean rgb `0.00 0.00 0.00` |
+| `long2` | `2120E306743D2DBD` | 81.6 s | not reached (last sample: init 2, loading 2, session 1 at 78 s) | STOP `0x0` execute (0xC0000005) | 1 | 21, every one mean rgb `0.00 0.00 0.00` |
+| `input1` | `2120E306743D2DBD` | 58.1 s | not reached (last sample: init 2, loading 2 at 54 s) | STOP `game+0x86f981` read `0x962a` (0xC0000005) | 1 | 16, every one mean rgb `0.00 0.00 0.00` |
+
+The environment is the section-12/20 content environment from the boot template (deferred compile, stage-3 pump, 2 s
+state trace, alloc watch, console graphics root feed `PALMETTO_GRAPHICS_CONSOLE_ROOT=1`, slot-70 publication
+`PALMETTO_SLOT70_PUBLISH=1`, content probe `PALMETTO_CONTENT_PROBE=1`, full-target readback `PALMETTO_READBACK_FULL=1`)
+with these additions: the mitigation `PALMETTO_TITLE_CLASS0A_SIZE=1` in every arm; `PALMETTO_MOVIE_PROBE=player` in
+`long1`; `PALMETTO_SLOT_WATCH=1`, `PALMETTO_DS_RECORD=500,300` and
+`PALMETTO_POKE_LOG=5A75F80,5BB5390,2234A40,3DAF310` in `long2`; the same poke log and record sampler plus
+`PALMETTO_FAKE_INPUT=70` in `input1`; captures every 100 presented frames to a limit of 30 (the template's 200 and 12
+are overridden by the later value); stage-3 pump offsets overridden to `5,20,60,120,180,240` in `long2`/`input1`;
+`PALMETTO_WAIT_TRACE=120,200,280` in `long2`/`input1`. The template carries the content environment's
+`PALMETTO_SILENT_SPEECH=0`, `PALMETTO_USER_CHANGE_EVENT=0` and `PALMETTO_PAD_PRESENT=0`, so this page's speech create
+answers `E_FAIL` and the neutral pad is absent; the scripted pad is `input1`'s only pad.
+
+The host's GPU dropped the device in the two later arms: the System log records `nvlddmkm` event 153 errors at the two
+boots' windows, and each `stderr.log` carries one `replay: the Vulkan device was lost` line before its stop. The
+`long1` window (16:07-16:12 host time) has no such record. Two device losses in a row ended the boots per the task's
+rule, so `long3` (the input A/B baseline) and a movie-draw arm were not run.
+
+### 17.2 The long-run state table
+
+`long1`'s state words, selected samples of the 149 the 2 s trace took (the state trace and the layer timeline clocks
+agree to 0.4 s or better; the table's `t` is the state trace's process clock). `tick` is the loading worker's own
+progress dword.
+
+| t (s) | init | loading | session | machine current/next | boot-media gate | loading tick | movie player state / buffers |
+|---:|---:|---:|---:|---:|---:|---:|---|---|
+| 0.0 | 0 | 0 | 0 | 0/0 | 0x0 | 0 | 0x0 / 0 |
+| 4.0 | 1 | 0 | 0 | 0/0 | 0x2 | 0 | 0x0 / 0 |
+| 22.0 | 2 | 1 | 0 | 2/2 | 0x2 | 14404147 | 0x0 / 0 |
+| 60.0 | 2 | 1 | 0 | 2/2 | 0x2 | 14441877 | 0x0 / 0 |
+| 100.0 | 2 | 1 | 0 | 2/2 | 0x2 | 14482443 | 0x0 / 0 |
+| 112.0 | 2 | 2 | 1 | 2/2 | 0x2 | 14494463 | 0x3 / 0 |
+| 116.0 | 3 | 2 | 3 | 3/3 | 0x2 | 14497733 | 0x5 / 0 |
+| 118.0 | 3 | 2 | 3 | 3/3 | 0x2 | 14499919 | 0x9 / 0 |
+| 140.0 | 3 | 2 | 3 | 3/3 | 0x2 | 14520158 | 0x9 / 0 |
+| 200.0 | 3 | 2 | 3 | 3/3 | 0x2 | 14582434 | 0x9 / 0 |
+| 260.0 | 3 | 2 | 3 | 3/3 | 0x2 | 14642433 | 0x9 / 0 |
+| 298.0 | 3 | 2 | 3 | 3/3 | 0x2 | 14680460 | 0x9 / 0 |
+
+The measured changes are exactly four: `init 0 -> 1` and `boot-media gate 0x0 -> 0x2` at 4.0 s, `init 1 -> 2` and
+`loading 0 -> 1` at 22.0 s, `loading 1 -> 2` and `session 0 -> 1` at 112.0 s, and `init 2 -> 3`, `session 1 -> 3` and the
+machine's pending stage `2 -> 3` at 116.0 s (the alloc watch reads the machine's stage 3 at 114.4 s). Nothing moves in
+the 180 s after that. The loading tick advances about 1,000 counts a second for the whole window, so the loading update
+keeps being driven; the loader is running, not hung. The front-end manager the movie/UI request path uses is non-null,
+ready and running from the 26.0 s sample with its seven service pointers and vtables unchanged to 298.0 s.
+
+The stage-3 pump samples the other threads after the stage-3 read. At every offset (`+2`, `+5`, `+10`, `+20`, `+40` s)
+the frame thread is in the session-3 poll chain `[session3-poll session-dispatch stage3-post transition pump-loop
+machine-wrapper tick-dispatch frame-pump frame-update]` waiting on `NtDelayExecution` with a 33 ms timeout - the measured
+`Sleep(33)` of the poll at `game+0x21B7070`. The loading task is in
+`[frame-tick load-monitor-tick loading-update loading-task task-executor loading-worker]`, and from `+5` s it waits with
+`NtWaitForSingleObject`, infinite timeout, on a title semaphore (handle `0x950`). The pump's heartbeat advance count is
+16 at `+5` s and 17 by `+40` s (its last change 16.8 s before that sample), i.e. the per-frame tick that pets the
+heartbeat stops advancing while the renderer queue keeps being submitted: the layer's timeline records 12,913
+`ExecuteCommandLists` entries, 7,309 of them after the stage-3 read, the last at 299.2 s. So the title keeps rendering
+while the frame thread that drives the loading/movie path sits in the poll. The loading task's wait chain is title
+frames only (`loading-update` -> `loading-task` -> `task-executor` -> `loading-worker`); no layer call is between the
+task and the wait.
+
+### 17.3 The session-3 loading record: the completion never arrives
+
+The session-3 poll `0x21B7070` reads the loading record's slot-4 completion dword `image+0x78ACB20` and, when the
+predicate `0x41E8C0` is true, consumes it in one pass and stores session 4 (section 10.4). In `long1` the session word
+reads 3 from 116.0 s to the last sample at 298.0 s, so the title never observed the predicate true in that window. The
+two shorter arms add direct dword samples before their stops:
+
+| witness | arm | window | measurement |
+|---|---|---|---|
+| session word (the predicate's consumer) | `long1` | 116.0-298.0 s | 3 at every sample; a true predicate would be consumed in one 33 ms pass and store 4, so no true read |
+| `PALMETTO_DS_RECORD` slot 0..4 tick/completion/state | `long2` | +0.0 to +73.3 s, 146 samples | every completion dword 0; no `SLOT n COMPLETION` line; slot 0 tick 14,766,572 at the last sample |
+| the same sampler | `input1` | +0.0 to +51.0 s, 102 samples | every completion dword 0; slot 0 tick 14,858,270 at the last sample |
+| hardware completion watch (DR0 on slot 4 `+0x18`) | `long2` | 1.1-81.6 s, 104 threads armed | completion hits 0 at every 10 s counter; method control 3 hits at 1.1 s; live control 4 hits at 75.9-78.4 s (`game+0x41E8FD`, the loading pass's slot-0 tick writes) |
+
+The watch's live control firing is the method proof: the debug registers are honoured and the watch catches title stores
+into this record, yet no store into the completion field arrives in its window. `long2` stopped before stage 3, so the
+post-stage-3 window's direct dword watch is not measured; the session word is its witness, and the poll's own store is
+what a true predicate would consume. This reproduces and extends sections 10-11: no shim answer or shim-held completion
+is in this path, and the same semaphore wait the loading task is parked on is the next object to name.
+
+### 17.4 The movie chain after the mitigation
+
+The movie module is ready from 26.0 s (`movie ready 1`, its player-count word reads 58), and the game-side request binds
+slot 0 at the stage-3 transition: at 112.0 s the slot shows entity non-null, `active 1`, `armed 1`, media id
+`0x540714f3`. The player state then advances and holds:
+
+| probe / field | measured in `long1` |
+|---|---|
+| player state `entity+0x1c4` | 0x3 at 112.0 s (metadata-probe result 1, playback open 1), 0x5 at 116.0 s, **0x9 from 118.0 s to 298.0 s** |
+| Bink handle `entity+0x50` | non-null from 118.0 s, unchanged |
+| decode gate `+0x1b8` (`buffers`), probe/open/error bytes | `buffers 0`, `probe 0`, `open 1`, `error 0` at every sample from 120.0 s to 298.0 s |
+| play-step probe `0x442EA70` (metadata/probe open) | 3 hits (before the final open) |
+| play-step probe `0x199EF20` (playback open) | 1 hit |
+| play-step probe `0x2EF0E0` (per-frame decode) | **0 hits** |
+| play-step probe `0x442F760` (frame-buffer registration) | **0 hits** (its only caller is inside the decode wrapper) |
+| class-0xa constant upload (alloc watch) | entry `{width 256, height 1, stride 0x1000, size 0x1000}`, block size 0x1000, `overlap no`, executor entry at 155.5 s (timeline clock) and no fault after it; mitigation reports 3 redirected call sites |
+
+So the mitigation does what section 16 measured - the executor pass that used to die completes and the boot keeps
+submitting - and the movie open completes even though it happens after stage 3 (the player reached 0x9 at 118 s, around
+the stage-3 read at 114.4 s). The decode is still not reached: the movie's own draw path, which is what calls the decode
+wrapper, is not issued while the frame thread is in the session-3 poll. The decode gate is consistent with that: number
+of frame buffers 0, and the player is at the playing state waiting for the first draw.
+
+### 17.5 The content window and the pixels
+
+After stage 3 `long1` records two content windows of three draws each (draws 5630-5632 at about 116 s and 5633-5635 at
+about 136 s, state clock). The content probe prints each window draw's pipeline, its PS presence (`0 image(s)` against
+77/157/213 loads for the first window), its 3840x2160 area and its viewport. The full-target readback (armed at those six
+draws) reads each target completely:
+
+| readback | draws | measurement |
+|---|---|---|
+| render-target (full 4K, 4-byte texel) | 5630, 5631 | mean `0 0 0`, non-black `0/8294400`, peak 0, alpha mean 0 |
+| render-target (full 4K, 4-byte texel) | 5632 | mean `0 0 0`, non-black `0/8294400`, peak 0, alpha mean 0 |
+| render-target (full 4K, 4-byte texel) | 5633, 5634, 5635 | mean `0 0 0`, non-black `0/8294400`, peak 0, alpha mean 0 |
+| 8x8 tile map | all six | all-zero |
+| presenter captures | 30, frames 1-2901 | every one 2564x1421, mean rgb `0.00 0.00 0.00` (black) |
+
+The readback wrote 4 PPM files (the template's PPM limit) under the arm's readback directory. The layer's write-control
+draw was skipped in this arm ("the image is an armed sampled input"), so no control colour is quoted here; section 16's
+on arms measured the `51 102 204` write control on the same content targets. The matrix-block readbacks the same arm
+prints are descriptor-table contents, not pixels: 96 and 64 entries read all-zero, and one 5,768-entry block reads mean
+4 with 214 non-black entries and peak 255 - a table, not a target. So no title pixel is measured and the first visible
+frame is not reached: the visible target is black, as it was in section 16.
+
+### 17.6 The UI path and the screen owners
+
+The four screen-owner entry probes (accessibility `0x5A75F80`, sign-in `0x5BB5390`, profile-name text entry `0x2234A40`,
+profile card `0x3DAF310`) run in `long2` and `input1`; the title-side user trace runs in all three arms.
+
+| screen / step | `long2` (hit, state clock) | `input1` (hit, state clock) | the runtime call it makes |
+|---|---|---|---|
+| accessibility boot step `0x5A75F80` | 1 hit at about 20.0 s | 1 hit at about 16.0 s | `XSpeechSynthesizerCreate` answers `E_FAIL` under this environment (`PALMETTO_SILENT_SPEECH=0`) |
+| user sign-in request `0x5BB5390` | 1 hit at about 22.0 s | 1 hit at about 18.0 s | `XUserAddAsync`/`XUserAddResult` once: +24.57 s / +20.24 s (user-trace clock) |
+| profile-name text entry `0x2234A40` | 0 hits | 0 hits | `XGameUiShowTextEntryAsync` never called |
+| profile card `0x3DAF310` | 0 hits | 0 hits | `XGameUiShowPlayerProfileCardAsync` never called |
+
+The long arm's user trace (no poke log in that arm) repeats the same shape: `XUserAddAsync`/`XUserAddResult` at
++27.00 s and the 9x user-ready refresh, plus one persistent-storage path and the one speech create. The front-end
+manager is non-null, ready and running from 26.0 s with its seven services. So a UI service path executes and the
+sign-in screen owner runs, but neither changes a stage word nor a pixel: the presented frames before and after it are
+black. That is the same negative section 12 measured, now with the sign-in owner observed in a boot that reaches stage 3
+rather than one that stays at stage 2.
+
+### 17.7 The scripted-input arm
+
+`input1` is the always-built input backend's scripted arm: `PALMETTO_FAKE_INPUT=70` attaches one scripted pad (30
+presses, 1 s apart, 150 ms each, first at +70.000 s; confirm on even presses, start on odd ones) and the boot log shows
+the pad connected on slot 5, the device callback enumerating it, and two first-run reads (`IGameInput::GetCurrentReading`
+and `IGameInputReading::GetGamepadState`). The arm then stopped at 58.1 s, before the first press: the host device loss
+happened first and the stop is `game+0x86f981` reading `0x962a`. So no confirm/start press reached the title, no
+post-stage-3 input effect is measured, and no A/B input result is claimed. The stream to compare is named for the next
+arm: the same environment with the presses at +20 s (the first-run window) and at +70 s (the post-stage-3 window), and
+the state words, screen-owner hits, movie player state and presenter captures compared with `long2` and `long1`.
+
+### 17.8 Verdict, the new wall, and the next falsifier
+
+- **The mitigation's long-run verdict is measured.** The class-0xa overrun no longer stops the boot: `long1` held stage
+  3 for 185 s, the layer received 7,309 command lists after the entry, and 0 exceptions and 0 device losses were
+  recorded. The step over section 16 is time and state: 300 s of boot, 149 state samples and thirty captures instead of
+  the 90-175 s windows that stopped at the harness kill.
+- **The wall is now the session-3 loading record's completion, and it is title-side.** The frame thread is in the
+  session-3 poll at every stage-3 pump sample, the loading task is parked on a title semaphore, the loading tick keeps
+  advancing, and the completion dword is never observed non-zero. No layer answer is in the chain (the storage path was
+  measured complete in section 10.5 and the executor allocation is intact in section 16), so no shim producer is
+  measured to fix and the default path is unchanged.
+- **The picture is still not reached.** The movie open completes to state `0x9`, but its draw path never issues the
+  decode (`0x2EF0E0` and `0x442F760` 0 hits, `buffers 0`), the content window's six full-4K targets read black, and all
+  30 presenter captures are black. The first visible frame remains the milestone.
+- **Next falsifiers, in the order they would decide the wall.** (a) The hardware completion watch (DR0 on
+  `image+0x78ACB20`) through a post-stage-3 long window on a stable host - the arm that would have carried it (`long2`)
+  lost the device before stage 3, so raise the survival odds by running it as the only heavy probe in that boot. (b) An
+  execution probe on the streaming subscriber start `0x2355DD0` and the record reset `0x22310D0`, printing the event
+  payload the reset consumed (section 11.6's named falsifier), to date the job whose completion the poll is waiting for.
+  (c) A probe of the movie's own draw path - layer entry `0x23495A0`, player draw `0x2349D80`, second per-frame advance
+  `0x51B45B0` - which separates "draw never issued" from "draw issued and skipped by the frame-ready flag". (d) A wait
+  trace of the loading task's semaphore `0x950` to name its signaller.
+- **Limits.** One clean long arm; stage 3 arrived at 114.4 s in it (the stage-3 reach is the environmental race sections
+  10-16 record), and the two other arms are losses, not measurements of their switch. The completion-dword witness after
+  stage 3 is the session word, not a direct dword sample; the direct sample is the named next arm. The boot template's
+  content environment disables the section-12 speech and pad defaults, so the UI sequence measured here is that
+  environment's, not the clean-default one. The host GPU's event 153 losses are the FSR pages' host condition, not a
+  property of this tree.
+
+### 17.9 Tests and gates
+
+- **No code changed.** This slice is measurement plus this page: no shim, no probe, no build file and no test target was
+  edited, so the default path and every switch's default are byte-identical. The binary measured is the section-16 gate
+  build `2120E306743D2DBD...`, the same one the clean-tree gate builds after the measurement.
+- **Gates on this tree**: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK` (`ninja: no work to do`, so the binary is the
+  tree's); `_setup\build_tests.cmd` prints `TESTS_BUILT`; the GPU-free gate subset exits 0 - `code_hooks`, `frame_dump`,
+  `unimplemented_policy`, `graphics_record`, `graphics_pso`, `buffer_va_index`, `dstorage`, `xapu_chad`,
+  `deferred_compile`, `arena_size`, `xbox_present`, `xs_proxy_mock`, `xmem` (13 of 13) - and the docs checks
+  (`tests/test_docs_*.py`, run with the session's broken `GIT_CONFIG_*` variables cleared) pass (12 of 12 files). The
+  pre-existing quarantined `d3d12_fence_timing_test` is not part of the gate subset ([testing.md](testing.md) line 95).
+
+### 17.10 Evidence, uncommitted files, attribution
+
+- **Evidence (outside the repository)**: `D:\leonida-work\fsrstable\boot-long1` (stderr 45 MB, stdout, summary, boot
+  trace, meta with the exact environment), `capture-long1` (30 presenter PPMs + `index.txt`),
+  `readback-long1` (4 full-target PPMs), `boot-long2`, `capture-long2`, `boot-input1`, `capture-input1`, and the
+  analysis scripts under `D:\leonida-work\aftermitig` (`run_arm.ps1`, `analyze.py`, `details*.py`). The host's
+  `nvlddmkm` event 153 records are quoted by time only. No game data: RVAs, sizes, pointer/register values, counts,
+  times and image means only.
+- **Uncommitted files**: this section of `docs/decomp_first_ui.md` only. `docs/README.md` needs one index row for the
+  page's new section; that file is outside this slice's write scope, so the lead adds it. No git write.
+- **Attribution.** The arms, the state tables, the record samples, the completion watch, the screen-owner probes and the
+  captures are this project's own measurements on the user's own image and the chain of
+  [decomp_stage.md](decomp_stage.md) sections 10-11 and [vertex_buffer_va.md](vertex_buffer_va.md) sections 14-16. No
+  peer code was used and no game data is added.
