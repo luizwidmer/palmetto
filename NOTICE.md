@@ -89,3 +89,14 @@ ports as evidence for mechanisms this repository does not yet implement: five-st
 (GPL-3.0-or-later, `52ac4ec`) and XCL (GPL-2.0-only, `8b957be`). Their code and documentation are read to understand
 behaviour; no source, comment, identifier or data table is copied into this repository, and the mechanisms described
 are reimplemented here in our own structure with attribution when a port lands.
+
+### Implemented peer ports (reference only)
+
+The present-driven frame clock ([docs/peer_port_first_ui.md](docs/peer_port_first_ui.md), section 12) was informed by the
+peers' present handshakes: VIctory (GPL-3.0-or-later, `63bcca4`) frame/queue code, Five Star Recomp (GPL-3.0-or-later,
+`45071d52`) D3D12.X shim notes, XCL (GPL-2.0-only, `8b957be`) present code and PercyScarlett (GPL-2.0-only, `e44c465`)
+runtime pacing. The non-blocking pipeline hold ([docs/peer_port_streaming.md](docs/peer_port_streaming.md), section 10)
+was informed by Five Star Recomp's D3D12.X shim and debugging notes and by XCL's asynchronously built pipelines. Those
+projects are read as evidence of behaviour only; the implementations in this repository are our own, no source, comment,
+identifier or data table is copied, and the upstream projects remain the copyright of their contributors under their own
+licences.
