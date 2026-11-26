@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
+#include <mutex>
+#include <set>
 #include <utility>
 
 namespace rt::graphics_pso {
@@ -194,6 +196,337 @@ bool apply_measured_cull_axis(FixedFunctionState* state, bool enabled) {
     if (!state || !enabled) return false;
     state->rasterizer.CullMode = D3D12_CULL_MODE_NONE;
     state->rasterizer.FrontCounterClockwise = FALSE;
+    return true;
+}
+
+// ---- The per-record measured rasterizer state (docs/vertex_buffer_va.md section 21) -------------------------------
+
+namespace {
+
+// One parsed size field of a selector shape. The measured ranges are the record's own interface ranges (the state
+// container and the input layout) and the program byte range; a value outside them is a refusal, not a clamp.
+bool parse_shape_size(std::string_view text, std::uint32_t minimum, std::uint32_t maximum, std::uint32_t* out) {
+    if (!out || text.empty()) return false;
+    std::uint64_t value = 0;
+    for (const char c : text) {
+        if (c < '0' || c > '9') return false;
+        value = value * 10 + static_cast<unsigned>(c - '0');
+        if (value > 0xFFFFFFFFull) return false;
+    }
+    if (value < minimum || value > maximum) return false;
+    *out = static_cast<std::uint32_t>(value);
+    return true;
+}
+
+std::string_view trimmed(std::string_view text) {
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.remove_prefix(1);
+    while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) text.remove_suffix(1);
+    return text;
+}
+
+bool same_shape(const MeasuredRecordShape& a, const MeasuredRecordShape& b) {
+    if (a.state_bytes != b.state_bytes || a.layout_bytes != b.layout_bytes) return false;
+    for (int slot = 0; slot < 3; ++slot)
+        if (a.stage_bytes[slot] != b.stage_bytes[slot]) return false;
+    return true;
+}
+
+// The one refusal text of a malformed selector: the offending shape, the refused key and why.
+bool shape_refusal(std::string* why, std::size_t index, std::string_view what) {
+    if (why)
+        *why = "state.record_rasterizer.selector[" + std::to_string(index) + "]: " + std::string(what) +
+               "; the per-record measured cull rule stays off and every record keeps the documented stand-in";
+    return false;
+}
+
+// Logs the measured rule's application/fallback once per distinct event. build() runs on many threads, so the
+// bookkeeping is under a mutex; the log lines are the boot's measurement of what the rule reached.
+void log_measured_record_event(const MeasuredRecordShape* shape, bool matched, const std::string& why) {
+    static std::mutex mutex;
+    static std::set<std::uint64_t> logged_shapes;
+    static bool logged_fallback = false;
+    static bool logged_off = false;
+    const std::lock_guard lock(mutex);
+    if (!matched) {
+        if (why.rfind("state.record_rasterizer.off", 0) == 0) {
+            if (!logged_off) {
+                logged_off = true;
+                std::fprintf(stderr, "[rt] graphics_pso: per-record rasterizer state: %s\n", why.c_str());
+            }
+            return;
+        }
+        if (!logged_fallback) {
+            logged_fallback = true;
+            std::fprintf(stderr, "[rt] graphics_pso: per-record rasterizer state: fallback to the documented stand-in: %s\n",
+                         why.c_str());
+        }
+        return;
+    }
+    if (!shape) return;
+    std::uint64_t key = static_cast<std::uint64_t>(shape->state_bytes) << 32 | shape->layout_bytes;
+    key = key * 0x100000001b3ull ^ shape->stage_bytes[0];
+    key = key * 0x100000001b3ull ^ shape->stage_bytes[1];
+    key = key * 0x100000001b3ull ^ shape->stage_bytes[2];
+    if (!logged_shapes.insert(key).second) return;
+    std::fprintf(stderr,
+                 "[rt] graphics_pso: per-record rasterizer state: measured record shape state %u, layout %u, "
+                 "ps/vs/ms %u/%u/%u: the measured cull pair (NONE, clockwise front) replaces only the caller's cull "
+                 "fields; every other fixed-function field and every other record keeps the documented stand-in "
+                 "(docs/vertex_buffer_va.md section 21)\n",
+                 shape->state_bytes, shape->layout_bytes, shape->stage_bytes[0], shape->stage_bytes[1],
+                 shape->stage_bytes[2]);
+}
+
+}  // namespace
+
+bool parse_measured_record_selection(std::string_view text, MeasuredRecordSelection* out, std::string* why) {
+    if (why) why->clear();
+    if (!out) return false;
+    MeasuredRecordSelection selection;
+    const bool was_empty = trimmed(text).empty();
+    if (was_empty) {
+        selection.enabled = false;
+        selection.ok = true;
+        *out = std::move(selection);
+        return true;
+    }
+    selection.enabled = true;
+    // The selector is a ';' list of five-key shapes. Exactly the five measured keys, once each; at most eight records
+    // (a measurement covers a handful of draws, not a corpus).
+    std::size_t index = 0;
+    std::size_t at = 0;
+    while (at <= text.size()) {
+        const std::size_t end = text.find(';', at);
+        const std::string_view shape_text = trimmed(text.substr(at, end == std::string_view::npos ? std::string_view::npos : end - at));
+        if (shape_text.empty()) {
+            selection.ok = false;
+            if (why)
+                *why = "state.record_rasterizer.selector[" + std::to_string(index) +
+                       "]: an empty record shape; the per-record measured cull rule stays off and every record keeps "
+                       "the documented stand-in";
+            *out = std::move(selection);
+            return false;
+        }
+        if (index >= 8) {
+            selection.ok = false;
+            if (why)
+                *why = "state.record_rasterizer.selector: more than eight measured record shapes; the per-record "
+                       "measured cull rule stays off and every record keeps the documented stand-in";
+            *out = std::move(selection);
+            return false;
+        }
+        MeasuredRecordShape shape;
+        bool seen[5] = {};  // state, layout, ps, vs, ms
+        std::size_t key_at = 0;
+        while (key_at <= shape_text.size()) {
+            const std::size_t key_end = shape_text.find(',', key_at);
+            const std::string_view pair =
+                trimmed(shape_text.substr(key_at, key_end == std::string_view::npos ? std::string_view::npos
+                                                                                    : key_end - key_at));
+            const std::size_t colon = pair.find(':');
+            if (colon == std::string_view::npos) {
+                selection.ok = false;
+                *out = std::move(selection);
+                return shape_refusal(why, index, std::string("expected <key>:<size>, read \"") + std::string(pair) + "\"");
+            }
+            const std::string_view key = trimmed(pair.substr(0, colon));
+            const std::string_view value = trimmed(pair.substr(colon + 1));
+            int slot = -1;
+            if (key == "state") slot = 0;
+            else if (key == "layout") slot = 1;
+            else if (key == "ps") slot = 2;
+            else if (key == "vs") slot = 3;
+            else if (key == "ms") slot = 4;
+            if (slot < 0) {
+                selection.ok = false;
+                *out = std::move(selection);
+                return shape_refusal(why, index, std::string("unknown key \"") + std::string(key) +
+                                                          "\" (the measured keys are state, layout, ps, vs, ms)");
+            }
+            if (seen[slot]) {
+                selection.ok = false;
+                *out = std::move(selection);
+                return shape_refusal(why, index, std::string("duplicate key \"") + std::string(key) + "\"");
+            }
+            seen[slot] = true;
+            std::uint32_t parsed = 0;
+            const bool ok = slot == 0
+                                ? parse_shape_size(value, 380, 520, &parsed)
+                                : slot == 1
+                                      ? parse_shape_size(value, 80, 340, &parsed)
+                                      : parse_shape_size(value, 0, 239464, &parsed);
+            if (!ok) {
+                selection.ok = false;
+                *out = std::move(selection);
+                return shape_refusal(why, index, std::string("refused ") + std::string(key) + " value \"" +
+                                                          std::string(value) + "\" (decimal, measured range)");
+            }
+            if (slot == 0) shape.state_bytes = parsed;
+            else if (slot == 1) shape.layout_bytes = parsed;
+            else shape.stage_bytes[slot - 2] = parsed;
+            if (key_end == std::string_view::npos) break;
+            key_at = key_end + 1;
+        }
+        for (int slot = 0; slot < 5; ++slot)
+            if (!seen[slot]) {
+                selection.ok = false;
+                *out = std::move(selection);
+                return shape_refusal(why, index, "a size key is missing (all five of state, layout, ps, vs, ms must "
+                                                 "be present)");
+            }
+        // A shape must name a programmable stage set a record can have: one of PS/VS/PS+MS, and never VS and MS
+        // together (D3D12 refuses that pair, and the record decoder refuses it too). Program sizes are 0 or above the
+        // measured program minimum; a smaller non-zero value cannot be a program.
+        if (shape.stage_bytes[0] != 0 && shape.stage_bytes[0] < 52) {
+            selection.ok = false;
+            *out = std::move(selection);
+            return shape_refusal(why, index, "ps is a non-zero size below the measured 52-byte program minimum");
+        }
+        if (shape.stage_bytes[1] != 0 && shape.stage_bytes[1] < 52) {
+            selection.ok = false;
+            *out = std::move(selection);
+            return shape_refusal(why, index, "vs is a non-zero size below the measured 52-byte program minimum");
+        }
+        if (shape.stage_bytes[2] != 0 && shape.stage_bytes[2] < 52) {
+            selection.ok = false;
+            *out = std::move(selection);
+            return shape_refusal(why, index, "ms is a non-zero size below the measured 52-byte program minimum");
+        }
+        if (shape.stage_bytes[1] != 0 && shape.stage_bytes[2] != 0) {
+            selection.ok = false;
+            *out = std::move(selection);
+            return shape_refusal(why, index, "both vs and ms are named; a record has one programmable vertex stage");
+        }
+        if (shape.stage_bytes[0] == 0) {
+            selection.ok = false;
+            *out = std::move(selection);
+            return shape_refusal(why, index, "ps is 0; the measured records carry a pixel stage");
+        }
+        if (shape.stage_bytes[1] == 0 && shape.stage_bytes[2] == 0) {
+            selection.ok = false;
+            *out = std::move(selection);
+            return shape_refusal(why, index, "no vertex and no mesh stage; a record's geometry stage is missing");
+        }
+        for (const MeasuredRecordShape& earlier : selection.shapes)
+            if (same_shape(earlier, shape)) {
+                selection.ok = false;
+                *out = std::move(selection);
+                return shape_refusal(why, index, "the same record shape appears twice");
+            }
+        selection.shapes.push_back(shape);
+        ++index;
+        if (end == std::string_view::npos) break;
+        at = end + 1;
+    }
+    *out = std::move(selection);
+    return true;
+}
+
+const MeasuredRecordSelection& measured_record_selection() {
+    static const MeasuredRecordSelection selection = [] {
+        const char* value = std::getenv("PALMETTO_RASTER_RECORD_MEASURED");
+        MeasuredRecordSelection parsed;
+        if (value) {
+            std::string why;
+            if (!parse_measured_record_selection(value, &parsed, &why)) {
+                if (!why.empty()) std::fprintf(stderr, "[rt] graphics_pso: measured record selection refused: %s\n",
+                                               why.c_str());
+                parsed.enabled = true;
+                parsed.ok = false;
+                parsed.error = why;
+            }
+        }
+        return parsed;
+    }();
+    return selection;
+}
+
+MeasuredRecordShape measured_record_shape(const rt::graphics_record::Record& record) {
+    MeasuredRecordShape shape;
+    shape.state_bytes = static_cast<std::uint32_t>(record.state.size);
+    shape.layout_bytes = static_cast<std::uint32_t>(record.input_layout.size);
+    for (std::size_t i = 0; i < record.stage_count; ++i) {
+        const int slot = record.stages[i].slot;
+        if (slot >= 0 && slot < static_cast<int>(rt::graphics_record::kStageSlotCount))
+            shape.stage_bytes[slot] = static_cast<std::uint32_t>(record.stages[i].program.size);
+    }
+    return shape;
+}
+
+bool decode_record_rasterizer_state(const rt::graphics_record::State& state,
+                                    const rt::graphics_record::Record& record,
+                                    const MeasuredRecordSelection& selection, RecordRasterState* out,
+                                    FixedFunctionFieldStatus* fields, std::string* why) {
+    if (fields) *fields = FixedFunctionFieldStatus{};
+    if (!out) {
+        if (why) *why = "state.record_rasterizer: the output is null";
+        return false;
+    }
+    const char* const kPlace =
+        "rasterizer.cull_mode.place: the state record's own words pin no rasterizer field (the only cull-enum word is "
+        "the +0x2C stage-set word, docs/vertex_buffer_va.md section 21), so the measured cull value is applied by the "
+        "measured record selection, not read from a word";
+    if (!selection.enabled) {
+        if (why) *why = std::string("state.record_rasterizer.off: PALMETTO_RASTER_RECORD_MEASURED is unset, so no "
+                                    "record's cull is measured and the documented stand-in stays; refused: ") + kPlace;
+        return false;
+    }
+    if (!selection.ok) {
+        if (why) *why = "state.record_rasterizer.selector: " + selection.error;
+        return false;
+    }
+    if (state.size == 0) {
+        if (why) *why = "state.record_rasterizer.state: the state container did not decode, so the record cannot be "
+                        "measured; the documented stand-in stays";
+        return false;
+    }
+    // The measured records are vertex-family graphics pipelines. A mesh pipeline has no measured draw, and a record
+    // whose state family disagrees with its stage slots is not the shape the record decoder accepts.
+    bool mesh = false;
+    for (std::size_t i = 0; i < record.stage_count; ++i)
+        if (record.stages[i].slot == rt::graphics_record::kStageSlotMs) mesh = true;
+    if (mesh) {
+        if (why) *why = "state.record_rasterizer.record: the record names a mesh stage, and no mesh draw was measured "
+                        "for the cull axis (docs/vertex_buffer_va.md section 21); the documented stand-in stays";
+        return false;
+    }
+    if (state.family != rt::graphics_record::StateFamily::kVertex) {
+        if (why) *why = "state.record_rasterizer.state: the state record is the mesh family, which is not the family "
+                        "the measured records carry; the documented stand-in stays";
+        return false;
+    }
+    const MeasuredRecordShape shape = measured_record_shape(record);
+    for (const MeasuredRecordShape& measured : selection.shapes) {
+        if (!same_shape(measured, shape)) continue;
+        RecordRasterState result;
+        result.cull_mode = D3D12_CULL_MODE_NONE;
+        result.front_counter_clockwise = FALSE;
+        *out = result;
+        if (fields) fields->rasterizer = true;
+        if (why) why->clear();
+        return true;
+    }
+    if (why)
+        *why = "state.record_rasterizer.record: the record's measured shape (state " +
+               std::to_string(shape.state_bytes) + ", layout " + std::to_string(shape.layout_bytes) + ", ps/vs/ms " +
+               std::to_string(shape.stage_bytes[0]) + "/" + std::to_string(shape.stage_bytes[1]) + "/" +
+               std::to_string(shape.stage_bytes[2]) +
+               ") is not one the measurement covers, so the documented stand-in stays; refused: " + kPlace;
+    return false;
+}
+
+bool apply_measured_record_rasterizer_state(const rt::graphics_record::State& state,
+                                            const rt::graphics_record::Record& record,
+                                            const MeasuredRecordSelection& selection, FixedFunctionState* state_inout,
+                                            FixedFunctionFieldStatus* fields, std::string* why) {
+    if (!state_inout) {
+        if (why) *why = "state.record_rasterizer: the state output is null";
+        return false;
+    }
+    RecordRasterState raster;
+    if (!decode_record_rasterizer_state(state, record, selection, &raster, fields, why)) return false;
+    state_inout->rasterizer.CullMode = raster.cull_mode;
+    state_inout->rasterizer.FrontCounterClockwise = raster.front_counter_clockwise;
     return true;
 }
 
@@ -494,7 +827,25 @@ bool build(const rt::graphics_record::Record& record, const GraphicsPsoInputs& i
                                     "DXGI_FORMAT_UNKNOWN");
         }
     }
-    const FixedFunctionState& ff = inputs.defaults;
+    // The per-record measured rasterizer state (docs/vertex_buffer_va.md section 21): the measured record selection
+    // replaces only the cull pair of a record the measurement covers; every other record and every other field keeps
+    // the caller's state. Off by default, so the default path is byte-identical to the caller's description.
+    FixedFunctionState measured_defaults = inputs.defaults;
+    {
+        const MeasuredRecordSelection& selection = measured_record_selection();
+        if (selection.enabled) {
+            FixedFunctionFieldStatus record_fields;
+            std::string record_why;
+            if (apply_measured_record_rasterizer_state(state, record, selection, &measured_defaults, &record_fields,
+                                                       &record_why)) {
+                const MeasuredRecordShape shape = measured_record_shape(record);
+                log_measured_record_event(&shape, true, record_why);
+            } else {
+                log_measured_record_event(nullptr, false, record_why);
+            }
+        }
+    }
+    const FixedFunctionState& ff = measured_defaults;
     switch (ff.topology_type) {
         case D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT:
         case D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE:

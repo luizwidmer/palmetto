@@ -39,6 +39,7 @@
 #include <functional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "graphics_record.h"
@@ -148,6 +149,106 @@ bool measured_cull_axis_enabled();
 bool apply_measured_cull_axis(FixedFunctionState* state, bool enabled);
 inline bool apply_measured_cull_axis(FixedFunctionState* state) {
     return apply_measured_cull_axis(state, measured_cull_axis_enabled());
+}
+
+// ---- The per-record measured rasterizer state: a measured record selection --------------------------------------
+//
+struct FixedFunctionFieldStatus;  // defined below with the fixed-function decode (this section only points at it)
+
+// The cull axis above is a *pass-level* observation: it was decided on draws of the title's own constant and compose
+// passes, and the picture slice measured that applying it to every pipeline changes measured title behaviour before
+// stage 3 - the global arm's boots stay in stage 2 where the default path reaches stage 3 (docs/vertex_buffer_va.md
+// section 21, docs/raster_state.md section 5). The per-record decode is measured here, and its result is a negative
+// on the record side plus a measured rule on the observation side:
+//
+//   * The state record's rasterizer field is still not readable. Over the library's 5,680 distinct state records the
+//     only aligned word whose value stays inside the D3D12 cull enum is the record's stage-set word at +0x2C, and
+//     that word is 2 on every PS+VS record - all three content draws included - so it names the stage family, not a
+//     per-pipeline cull. A word/byte/nibble extraction over the smallest container yields no second place: the record
+//     stores the console driver's state, not the D3D12 enum (docs/state_blob.md section 9, docs/raster_state.md
+//     section 3).
+//   * The cull *value* is pinned per measured record by the behavioural observation the probe contract requires
+//     (docs/state_blob.md section 9): under the documented stand-in's back-face cull the constant pass and the compose
+//     pass cover 0 of 8,294,400 pixels, and with the cull pair replaced they cover 4,147,200 - the winding-pair probe
+//     tells the two states apart (`run_probe`, ProbeScene::kWindingPair). The observation cannot tell cull NONE from
+//     (BACK, counter-clockwise front) or (FRONT, clockwise front), so NONE stays the minimal value (docs/
+//     raster_state.md section 4).
+//
+// The rule this enables is a **measured record selection**, explicit and off by default: the caller names the records
+// the measurement covered by their measured *shape* - the state bytes, the input-layout bytes and the program bytes of
+// each stage, i.e. the interface sizes a slot-57 build carries (the boot log prints them as the record's `pairs`) -
+// and only a record of one of those shapes gets the measured cull pair. Every other record keeps the caller's state
+// (the documented stand-in is the fallback) byte for byte, and an unparsable selector, an unmeasured shape, a mesh
+// pipeline, a record whose state container did not decode and a refused stage placement are refusals by name. The
+// *place* of the field stays refused: the selection says which measured records the observed value belongs to, not
+// which word of the record encoded it.
+//
+//   PALMETTO_RASTER_RECORD_MEASURED=state:388,layout:188,ps:384,vs:320,ms:0;state:396,layout:188,ps:384,vs:512,ms:0
+//
+// A shape is five sizes: the state blob's bytes, the input layout's bytes and the PS/VS/MS program bytes (0 for a
+// stage the record does not use). The measured shapes are the content window's three draws (docs/vertex_buffer_va.md
+// section 21); nothing here is game data - a shape is a set of sizes and the selector is a run-time measurement input.
+struct MeasuredRecordShape {
+    std::uint32_t state_bytes = 0;   // the decoded state container's size (380..520)
+    std::uint32_t layout_bytes = 0;  // the input-layout blob's size (80..340)
+    std::uint32_t stage_bytes[3] = {};  // by record slot: PS(0), VS(1), MS(2); 0 for a slot the record does not use
+};
+
+// Parses the selector text (the environment's value). An empty text is the switch off (`enabled` false, `ok` true).
+// A non-empty text must name one to eight shapes, each exactly `state:<n>,layout:<n>,ps:<n>,vs:<n>,ms:<n>` with `;`
+// between shapes; a missing/unknown/duplicate key, a non-decimal value, a size outside the measured ranges, a shape
+// with no programmable stage or with both VS and MS, and a duplicate shape are refused by name. `out` is untouched on
+// a refusal and `why` names the refused field with the offending text in it.
+struct MeasuredRecordSelection {
+    bool enabled = false;  // the switch is set (text non-empty)
+    bool ok = true;        // the text parsed; false names the refusal in `error`
+    std::string error;
+    std::vector<MeasuredRecordShape> shapes;
+};
+bool parse_measured_record_selection(std::string_view text, MeasuredRecordSelection* out, std::string* why);
+
+// The environment decision, read once from PALMETTO_RASTER_RECORD_MEASURED (the explicit overload of the parse above
+// is the testable one). Off by default: every record keeps the documented stand-in and nothing is logged.
+const MeasuredRecordSelection& measured_record_selection();
+
+// The measured shape of one record: the decoded state container's size, the input layout's size and each stage's
+// program bytes by record slot. The record must have decoded; a slot the record does not use is 0.
+MeasuredRecordShape measured_record_shape(const rt::graphics_record::Record& record);
+
+// The per-record decode of the rasterizer state. Returns true only when the record's measured shape is one the
+// selection names: `cull_mode`/`front_counter_clockwise` are then the measured pair (NONE, clockwise front), and
+// `fields` (when given) reports only `rasterizer` true - the other seven fixed-function fields stay refused. Returns
+// false with a named refusal in `why` for: the switch off (the documented stand-in stays), a malformed selector, an
+// unmeasured record shape, a record whose state container did not decode, a mesh pipeline (the measurement covered no
+// mesh draw), and a record whose stage program sizes disagree with the state family. The refusal prefix is
+// `state.record_rasterizer`; the place of the cull field is refused by name (`rasterizer.cull_mode.place`).
+struct RecordRasterState {
+    D3D12_CULL_MODE cull_mode = D3D12_CULL_MODE_NONE;
+    BOOL front_counter_clockwise = FALSE;
+};
+bool decode_record_rasterizer_state(const rt::graphics_record::State& state,
+                                    const rt::graphics_record::Record& record,
+                                    const MeasuredRecordSelection& selection, RecordRasterState* out,
+                                    FixedFunctionFieldStatus* fields, std::string* why);
+inline bool decode_record_rasterizer_state(const rt::graphics_record::State& state,
+                                           const rt::graphics_record::Record& record, RecordRasterState* out,
+                                           FixedFunctionFieldStatus* fields, std::string* why) {
+    return decode_record_rasterizer_state(state, record, measured_record_selection(), out, fields, why);
+}
+
+// Applies the per-record decode to `state`: on a matched record exactly the caller's rasterizer cull pair is replaced
+// with the measured one and every other field is left byte-identical; on a refusal `state` is untouched (the documented
+// stand-in stays) and `why` names the refusal. The environment overload is what build() calls; the explicit overload is
+// the testable decision.
+bool apply_measured_record_rasterizer_state(const rt::graphics_record::State& state,
+                                            const rt::graphics_record::Record& record,
+                                            const MeasuredRecordSelection& selection, FixedFunctionState* state_inout,
+                                            FixedFunctionFieldStatus* fields, std::string* why);
+inline bool apply_measured_record_rasterizer_state(const rt::graphics_record::State& state,
+                                                   const rt::graphics_record::Record& record,
+                                                   FixedFunctionState* state_inout,
+                                                   FixedFunctionFieldStatus* fields, std::string* why) {
+    return apply_measured_record_rasterizer_state(state, record, measured_record_selection(), state_inout, fields, why);
 }
 
 // ---- Where the graphics bind point's root arguments actually go: the console user-SGPR layout ---------------------

@@ -618,6 +618,162 @@ void test_measured_cull_axis() {
     check(!(culled == drawn), "cull axis: the two states are told apart by the winding-pair probe");
 }
 
+// The per-record measured rasterizer state (docs/vertex_buffer_va.md section 21): the measurement pins no word of the
+// state record for the cull field, so the per-record rule is a measured record selection - the records the measurement
+// covered are named by their measured shape (state bytes, layout bytes, each stage's program bytes) and only those get
+// the measured cull pair. The parse is strict: a mistyped selector must not silently widen the rule, so every malformed
+// form refuses by name and the switch-off form is not a refusal. No game data: the shapes are sizes.
+void test_measured_record_selection() {
+    pso::MeasuredRecordSelection selection;
+    std::string why;
+    check(pso::parse_measured_record_selection("", &selection, &why) && !selection.enabled && selection.ok &&
+              selection.shapes.empty(),
+          "record selection: an empty selector is the switch off, not a refusal");
+    check(pso::parse_measured_record_selection(" \t ", &selection, &why) && !selection.enabled && selection.ok,
+          "record selection: a whitespace selector is the switch off");
+    const std::string measured =
+        "state:388,layout:188,ps:384,vs:320,ms:0;"
+        " state:388, layout:188, ps:448, vs:512, ms:0 ;"
+        "state:396,layout:188,ps:384,vs:512,ms:0";
+    check(pso::parse_measured_record_selection(measured, &selection, &why) && selection.enabled && selection.ok &&
+              selection.shapes.size() == 3,
+          "record selection: the measured selector parses into three shapes");
+    check(selection.shapes[0].state_bytes == 388 && selection.shapes[0].layout_bytes == 188 &&
+              selection.shapes[0].stage_bytes[0] == 384 && selection.shapes[0].stage_bytes[1] == 320 &&
+              selection.shapes[0].stage_bytes[2] == 0,
+          "record selection: the first shape carries the state, layout and PS/VS program sizes");
+    check(selection.shapes[1].stage_bytes[0] == 448 && selection.shapes[1].stage_bytes[1] == 512 &&
+              selection.shapes[2].state_bytes == 396,
+          "record selection: whitespace around keys and between shapes is accepted");
+
+    const auto refuses = [&](const char* text, const char* field) {
+        pso::MeasuredRecordSelection refused;
+        std::string refusal;
+        const bool parsed = pso::parse_measured_record_selection(text, &refused, &refusal);
+        return !parsed && !refused.ok && refusal.find(field) != std::string::npos;
+    };
+    check(refuses("state:388,layout:188,ps:384,vs:320,ms:0,foo:1", "state.record_rasterizer.selector"),
+          "record selection: an unknown key refuses");
+    check(refuses("state:388,layout:188,ps:384,vs:320", "state.record_rasterizer.selector"),
+          "record selection: a missing key refuses");
+    check(refuses("state:388,state:388,layout:188,ps:384,vs:320,ms:0", "state.record_rasterizer.selector"),
+          "record selection: a duplicate key refuses");
+    check(refuses("state:38x,layout:188,ps:384,vs:320,ms:0", "state.record_rasterizer.selector"),
+          "record selection: a non-decimal size refuses");
+    check(refuses("state:379,layout:188,ps:384,vs:320,ms:0", "state.record_rasterizer.selector"),
+          "record selection: a state size below the measured container refuses");
+    check(refuses("state:388,layout:188,ps:51,vs:320,ms:0", "state.record_rasterizer.selector"),
+          "record selection: a non-zero program size below the measured program minimum refuses");
+    check(refuses("state:388,layout:188,ps:0,vs:320,ms:0", "state.record_rasterizer.selector"),
+          "record selection: a shape with no pixel stage refuses");
+    check(refuses("state:388,layout:188,ps:384,vs:0,ms:0", "state.record_rasterizer.selector"),
+          "record selection: a shape with no geometry stage refuses");
+    check(refuses("state:388,layout:188,ps:384,vs:320,ms:320", "state.record_rasterizer.selector"),
+          "record selection: a shape naming both a vertex and a mesh stage refuses");
+    check(refuses("state:388,layout:188,ps:384,vs:320,ms:0;state:388,layout:188,ps:384,vs:320,ms:0",
+                  "state.record_rasterizer.selector"),
+          "record selection: a duplicate shape refuses");
+    check(refuses("state:388,layout:188,ps:384,vs:320,ms:0;", "state.record_rasterizer.selector"),
+          "record selection: an empty shape refuses");
+    check(refuses("state:388,layout:188,ps:384,vs:320,ms:0;state:388,layout:188,ps:384,vs:320,ms:0;"
+                  "state:388,layout:188,ps:384,vs:320,ms:0;state:388,layout:188,ps:384,vs:320,ms:0;"
+                  "state:388,layout:188,ps:384,vs:320,ms:0;state:388,layout:188,ps:384,vs:320,ms:0;"
+                  "state:388,layout:188,ps:384,vs:320,ms:0;state:388,layout:188,ps:384,vs:320,ms:0;"
+                  "state:388,layout:188,ps:384,vs:320,ms:0",
+                  "state.record_rasterizer.selector"),
+          "record selection: more than eight shapes refuses");
+}
+
+// The per-record decode and its application: a record of a measured shape yields only the rasterizer field (cull NONE,
+// clockwise front) and the apply replaces only the caller's cull pair; an unmeasured record, a mesh pipeline and the
+// switch off all refuse by name and leave the caller's state byte-identical (the documented stand-in is the fallback).
+void test_measured_record_rasterizer_state() {
+    RecordFixture fixture = make_record({kStageSlotPs, kStageSlotVs}, make_layout_188());
+    check(fixture.record.stage_count == 2, "record rasterizer: the fixture decodes as PS+VS");
+    rt::graphics_record::State state;
+    check(rt::graphics_record::decode_state(fixture.record.state, &state),
+          "record rasterizer: the fixture's state container decodes");
+    const pso::MeasuredRecordShape shape = pso::measured_record_shape(fixture.record);
+    check(shape.state_bytes == 388 && shape.layout_bytes == 188 && shape.stage_bytes[kStageSlotPs] == 52 &&
+              shape.stage_bytes[kStageSlotVs] == 52 && shape.stage_bytes[kStageSlotMs] == 0,
+          "record rasterizer: the record's shape is its measured sizes");
+
+    pso::RecordRasterState raster;
+    pso::FixedFunctionFieldStatus fields;
+    fields.rasterizer = true;  // a sentinel: a refusal resets every field status
+    std::string why;
+    pso::MeasuredRecordSelection off;
+    check(!pso::decode_record_rasterizer_state(state, fixture.record, off, &raster, &fields, &why),
+          "record rasterizer: with the selection off no record decodes");
+    check(why.find("state.record_rasterizer.off") != std::string::npos &&
+              why.find("rasterizer.cull_mode.place") != std::string::npos,
+          "record rasterizer: the refusal names the switch and the refused cull place");
+    check(!fields.rasterizer, "record rasterizer: every field status is false on a refusal");
+
+    pso::MeasuredRecordSelection measured;
+    check(pso::parse_measured_record_selection("state:388,layout:188,ps:52,vs:52,ms:0;"
+                                               "state:380,layout:80,ps:52,vs:52,ms:0",
+                                               &measured, &why),
+          "record rasterizer: the fixture's own shape parses as a measured selector");
+    check(pso::decode_record_rasterizer_state(state, fixture.record, measured, &raster, &fields, &why),
+          "record rasterizer: a record of a measured shape decodes");
+    check(raster.cull_mode == D3D12_CULL_MODE_NONE && raster.front_counter_clockwise == FALSE,
+          "record rasterizer: the measured pair is cull NONE with clockwise front");
+    check(fields.rasterizer && !fields.blend && !fields.depth_stencil && !fields.topology_type && !fields.strip_cut &&
+              !fields.sample_count && !fields.sample_quality && !fields.sample_mask,
+          "record rasterizer: only the rasterizer field group is yielded");
+
+    const pso::FixedFunctionState documented = pso::documented_default_state();
+    pso::FixedFunctionState applied = documented;
+    check(pso::apply_measured_record_rasterizer_state(state, fixture.record, measured, &applied, &fields, &why),
+          "record rasterizer: the measured pair applies to the caller's state");
+    check(applied.rasterizer.CullMode == D3D12_CULL_MODE_NONE &&
+              applied.rasterizer.FrontCounterClockwise == FALSE,
+          "record rasterizer: the applied decision changes the cull pair");
+    check(applied.rasterizer.FillMode == documented.rasterizer.FillMode &&
+              applied.rasterizer.DepthBias == documented.rasterizer.DepthBias &&
+              applied.rasterizer.DepthBiasClamp == documented.rasterizer.DepthBiasClamp &&
+              applied.rasterizer.SlopeScaledDepthBias == documented.rasterizer.SlopeScaledDepthBias &&
+              applied.rasterizer.DepthClipEnable == documented.rasterizer.DepthClipEnable &&
+              applied.rasterizer.MultisampleEnable == documented.rasterizer.MultisampleEnable &&
+              applied.rasterizer.AntialiasedLineEnable == documented.rasterizer.AntialiasedLineEnable &&
+              applied.rasterizer.ForcedSampleCount == documented.rasterizer.ForcedSampleCount &&
+              applied.rasterizer.ConservativeRaster == documented.rasterizer.ConservativeRaster &&
+              std::memcmp(&applied.blend, &documented.blend, sizeof(D3D12_BLEND_DESC)) == 0 &&
+              std::memcmp(&applied.depth_stencil, &documented.depth_stencil, sizeof(D3D12_DEPTH_STENCIL_DESC)) == 0 &&
+              applied.topology_type == documented.topology_type && applied.strip_cut == documented.strip_cut &&
+              applied.sample_count == documented.sample_count && applied.sample_quality == documented.sample_quality &&
+              applied.sample_mask == documented.sample_mask,
+          "record rasterizer: every other field stays the caller's documented stand-in");
+
+    // An unmeasured record (same programs, a different layout) keeps the stand-in byte for byte and names its shape.
+    RecordFixture other = make_record({kStageSlotPs, kStageSlotVs}, make_layout_152());
+    rt::graphics_record::State other_state;
+    check(rt::graphics_record::decode_state(other.record.state, &other_state),
+          "record rasterizer: the unmeasured fixture's state decodes");
+    pso::FixedFunctionState untouched = documented;
+    check(!pso::apply_measured_record_rasterizer_state(other_state, other.record, measured, &untouched, &fields, &why),
+          "record rasterizer: an unmeasured record refuses");
+    check(std::memcmp(&untouched.rasterizer, &documented.rasterizer, sizeof(D3D12_RASTERIZER_DESC)) == 0 &&
+              std::memcmp(&untouched.blend, &documented.blend, sizeof(D3D12_BLEND_DESC)) == 0,
+          "record rasterizer: a refused record leaves the caller's state byte-identical");
+    check(why.find("state.record_rasterizer.record") != std::string::npos &&
+              why.find("not one the measurement covers") != std::string::npos,
+          "record rasterizer: the unmeasured refusal names the record's shape");
+
+    // A mesh record is refused by name even when a selector names its shape: no mesh draw was measured for the axis.
+    RecordFixture mesh = make_record({kStageSlotPs, kStageSlotMs});
+    rt::graphics_record::State mesh_state;
+    check(rt::graphics_record::decode_state(mesh.record.state, &mesh_state),
+          "record rasterizer: the mesh fixture's state decodes");
+    pso::MeasuredRecordSelection mesh_selected;
+    check(pso::parse_measured_record_selection("state:464,layout:80,ps:52,vs:0,ms:52", &mesh_selected, &why),
+          "record rasterizer: a mesh-shaped selector parses");
+    check(!pso::decode_record_rasterizer_state(mesh_state, mesh.record, mesh_selected, &raster, &fields, &why),
+          "record rasterizer: a mesh record refuses even when its shape is selected");
+    check(why.find("mesh") != std::string::npos, "record rasterizer: the mesh refusal names the mesh stage");
+}
+
 // The state record's container decodes but its fixed-function fields do not: decode_fixed_function_state() must
 // refuse all eight by name, key the refusal state.fixed_function, report every field false, and leave the output
 // untouched; an undecoded container is refused as `state`. This is the measurement behind the documented stand-in
@@ -1967,6 +2123,8 @@ int main() {
     test_pick_entry();
     test_documented_default_state();
     test_measured_cull_axis();
+    test_measured_record_selection();
+    test_measured_record_rasterizer_state();
     test_console_graphics_user_data();
     test_console_feed_plan();
     test_fixed_function_state_decode();

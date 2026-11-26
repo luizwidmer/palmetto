@@ -2372,3 +2372,238 @@ This section was implemented from this project's own measurements: the committed
 committed measurement and switch; the compose/constant pass structure is [frame_first_light.md](frame_first_light.md)'s and
 [colour_path.md](colour_path.md)'s. No peer code was used and no game data is added: pipeline ids, VAs, descriptor words, counts,
 statistics and outcomes only.
+
+
+## 21. The per-record rasterizer state: the record's cull field is a measured negative, and the scoped rule keeps its fallback
+
+**Status: measured, implemented behind a switch, with the A/B's control side measured and its record side not reached.**
+The picture slice asked for the per-record rasterizer decode so the content draws rasterise with the console's measured
+state instead of the slot-57 stand-in. Two measurements are negative and one is positive. First, the state record's cull
+field is **not readable per record**: re-censused on the title's whole library (5,680 distinct state records), exactly
+one aligned word stays inside the D3D12 cull enum - the record's `+0x2C` stage word, which is 2 on every PS+VS and
+every mesh-family record and 1 on the two distinct records carrying the unidentified slot-6 program - and no place at
+all stays inside the D3D12 fill enum; all three content-window records read `+0x2C = 2` like every other PS+VS record.
+The renderer's own class/descriptor tables ([decomp_renderer.md](decomp_renderer.md) sections 2 and 4.3) index a
+*renderer-side* pipeline-state record (its class nibble at `+0xF` selects a 0x20-byte descriptor through the 5-byte
+table at `0x6631D34`), which the layer never receives: the slot-57 record carries no such index. Second, the *global*
+application of the measured cull axis changes measured title behaviour in stage 2 (section 20's `cg` arms stop with the
+machine still at `current 2 / next 2` where the same environment without the axis reaches stage 3), so the axis cannot
+be applied to records it was never measured on. Third - the positive - the cull *value* is pinned per measured record by
+the behavioural observation the probe contract requires: the constant and compose passes cover `0/8,294,400` pixels
+under the stand-in's back-face cull and `4,147,200/8,294,400` with the cull pair replaced, and the winding-pair probe
+tells the two states apart. This slice implements that as a **measured record selection**: the records the measurement
+covered are named by their measured *shape* (the state bytes, the input-layout bytes and each stage's program bytes, the
+interface sizes a slot-57 build carries), only those records get the measured cull pair, every other record and every
+other field keeps the documented stand-in, and the place of the field stays a named refusal. The A/B's control arm
+measures the baseline; the record arm did not reach the content window in six attempts, so the content-window pixels are
+**not** claimed (21.5). The default path is byte-identical.
+
+### 21.1 What this slice changes
+
+| file | change |
+|---|---|
+| `port/src/graphics_pso.h` | `MeasuredRecordShape` / `MeasuredRecordSelection` and `parse_measured_record_selection` (the strict selector parse), `measured_record_selection()` (`PALMETTO_RASTER_RECORD_MEASURED`, read once, off by default), `measured_record_shape`, `RecordRasterState` and `decode_record_rasterizer_state` (the per-record decode and its named refusals), `apply_measured_record_rasterizer_state` (replaces only the caller's cull pair) |
+| `port/src/graphics_pso.cpp` | the parse, the decode and its refusals; `build()` applies the environment decision only while the switch is set - a matched record replaces only the two cull fields of `inputs.defaults`, every other record and field is byte-identical - and logs the first application per matched shape and the first fallback once |
+| `port/test/graphics_pso_test.cpp` | 38 checks: the selector parse (switch off, three measured shapes, whitespace, and twelve malformed forms that refuse by name), the record shape, the decode's measured pair and field status, the apply's byte-identical non-cull fields, the unmeasured record's byte-identical fallback and the mesh refusal |
+| `docs/vertex_buffer_va.md` | this section |
+
+`port/src/vulkan_replay.h` and `port/src/vulkan_backend.h` are not edited: the A/B uses the content probe, the PS-only
+control and the full-target readback the earlier sections built, and the per-record decision is made where the record
+exists - the slot-57 conversion that feeds `graphics_pso::build()`.
+
+All switches are off by default. With `PALMETTO_RASTER_RECORD_MEASURED` unset `build()` never touches the caller's
+state (the existing byte-identity check on `desc.RasterizerState` stays in `test_build_success`), nothing is logged and
+the measured global axis (`PALMETTO_RASTER_CULL_MEASURED`) is unchanged and still off.
+
+### 21.2 The per-draw state table
+
+The three content-window draws are identified in the title's own pipeline library by their measured program pair
+(section 17.2's table) and their records' measured state containers are dumped. The library holds one record for the
+constant pass and one for the compose pass; the content pass's program pair appears 18 times across the library's
+containers with 14 distinct state records, and the boot's own measured `pairs` line is what the per-record rule selects,
+not one of the 18 copies.
+
+| draw | program pair (translated corpus) | measured record shape (state / layout / ps / vs bytes) | state container | layout |
+|---|---|---|---|---|
+| A constant pass | `lib_ps_00820` + `lib_vs_00821` | 388 / 188 / 384 / 320 | vertex family, k = 1, `+0x2C = 2` | 188 B, 3 elements (POSITION, COLOR, TEXCOORD), stride 24 |
+| B content pass | `lib_ps_00106` + `lib_vs_00107` | 396 / 188 / 384 / 512 | vertex family, k = 2, `+0x2C = 2` | 188 B, 3 elements (COLOR, COLOR, POSITION), stride 16 |
+| C compose pass | `lib_ps_00822` + `lib_vs_00823` | 388 / 188 / 448 / 512 | vertex family, k = 1, `+0x2C = 2` | 188 B, 3 elements (POSITION, COLOR, TEXCOORD), stride 24 |
+
+The layout and vertex-stride columns agree with section 17.2's measured per-draw table (A and C: vb stride 24, three
+vertices; B: vb stride 16, indexed strip). The three shapes differ in the program sizes, which is what lets the
+selection tell them apart.
+
+### 21.3 The measured decode: no field place, and why a class index does not exist here
+
+The field census is re-derived on this slice's own script over all 5,680 distinct state records the library's 25,471
+graphics records reference:
+
+| question | measured answer |
+|---|---|
+| aligned words whose value stays in the D3D12 cull enum (1..3) and varies | **one**: `+0x2C`, values 1..2 |
+| ...on which records is `+0x2C` not 2 | the two distinct records that carry the unidentified slot-6 program (`+0x2C = 1`); it is 2 on all 2,525 other vertex-family records and all 3,153 mesh-family records, i.e. it tracks the record's stage set |
+| aligned words whose value stays in the D3D12 fill enum (2..3) | **none** |
+| byte/nibble places in the cull enum (1..3) that vary | only the byte and low nibble at `+0x2C` |
+| the content records' `+0x2C` | 2 / 2 / 2, identical to every other PS+VS record |
+
+So the record does not store the cull as a D3D12 enum anywhere. The class/table-index route is measured out too: the
+decompiled renderer reads its own pipeline-state record's class nibble at `+0xF` and selects a 0x20-byte descriptor
+through the 5-byte table at `0x6631D34` ([decomp_renderer.md](decomp_renderer.md) section 4.3), but that object is the
+renderer's record, not a field of the slot-57 record the layer receives; the slot-57 record's only class-shaped byte is
+the `+0x0C` word's flag byte (measured values 0x00, 0x02 and 0x04, vertex family only), and all three content records
+share 0x02 with 1,779 other distinct vertex-family records - it is not a per-record rasterizer index.
+
+What the record *does* differ in between the measured draws is shaped like per-target register state, which is the
+register hypothesis [state_blob.md](state_blob.md) section 3 names (it is not adopted as a decode): the constant and
+compose records differ in **21 of their 97 words** - two eight-word runs (`+0xD0..+0xEC` and `+0x100..+0x11C`, each run
+one repeated 4-byte word, shaped like the eight per-target `CB_BLENDi_CONTROL` registers) and five single words
+(`+0x38`, `+0x4C`, `+0x5C`, `+0x84`, `+0x174`, each differing in its low byte only) - and none of those places is a
+cull-domain place (the census above has exactly one, and the two records read 2 there). A decode that picked one of them
+would be a guess about the driver's state order, which the project's policy refuses.
+
+**The decode this slice implements is therefore the observation, per measured record.** The probe contract
+([state_blob.md](state_blob.md) section 9) says a field is pinned when the probe tells the candidate values apart and the
+title's own draw supplies the observation; both hold here (the stand-in culls the measured draws' triangles, the
+replaced pair draws them, and `run_probe(ProbeScene::kWindingPair)` reports 1 culled/4 fragments vs 0 culled/8
+fragments). The observation still cannot tell cull NONE from (BACK, counter-clockwise front) or (FRONT, clockwise
+front), so the applied value is NONE, the minimal one - the same choice [raster_state.md](raster_state.md) section 4
+records.
+
+### 21.4 Why the global axis cannot carry it, and the scoped rule
+
+Section 20 ran the measured axis on every pipeline (`PALMETTO_RASTER_CULL_MEASURED=1`, arms `cg1`-`cg3`) and none of the
+three boots reached stage 3. This slice reads those boots' state traces against the same environment without the axis:
+
+| arm | axis applied to | wall | last state trace | stop |
+|---|---|---:|---|---|
+| `cf2` | nothing (console feed + publication) | 104.9 s | init 3 at 70 s, loading 2 at 66 s, session 3 at 70 s, machine `current 3 next 3` | host `KERNELBASE.dll+0xc569a` |
+| `ch1` | the substituted control only | 94.4 s | init 3 at 60 s, loading 2 at 56 s, session 3 at 60 s, machine `current 3 next 3` | host `KERNELBASE.dll+0xc569a` |
+| `cg1` | every pipeline | 80.8 s | init 2 (last change 18 s), loading 2 (76 s), session 1 (76 s), machine `current 2 next 2` | host `KERNELBASE.dll+0xc569a` |
+| `cg2` | every pipeline | 65.2 s | init 2 (16 s), loading 2 (60.1 s), session 1 (60.1 s), machine `current 2 next 2` | title read `game+0x41ebcc7` |
+| `cg3` | every pipeline | 69.3 s | init 2 (20 s), loading 2 (64 s), session 1 (64 s), machine `current 2 next 2` | host `KERNELBASE.dll+0xc569a` |
+
+The read: the global axis does not move the stop family (four of the five boots stop at the same raised host exception)
+and its walls are **shorter** than the default arms', so it is not a slowdown pushing the boot past a window. What moves
+is the title's own stage-2 result: the machine never leaves `current 2 / next 2`, while the same environment without the
+axis reaches `init 3`/`session 3` within those walls. Culling every pipeline draws geometry the title's own GPU work was
+discarding, and the title reads a result of that work during stage 2 (the loading record's candidate counts in the same
+boots are the title's own GPU-fed state), so its transition does not complete. The honest statement is **value, not
+timing**: the axis is wrong for the records it was never measured on, and no single global cull value is the console's
+state. The exact title consumer of the changed result is not named here (a limit, 21.6).
+
+The implementation is therefore a measured record selection, explicit and off by default:
+
+* `PALMETTO_RASTER_RECORD_MEASURED` is a `;`-separated list of measured record shapes, each
+  `state:<bytes>,layout:<bytes>,ps:<bytes>,vs:<bytes>,ms:<bytes>`. The three content draws' shapes are the measurement;
+  a shape is interface sizes, not game data.
+* `graphics_pso::build()` decodes the record's shape from the record and its decoded state container. Only when the
+  switch is set and the shape is one the selection names does `apply_measured_record_rasterizer_state()` replace
+  **exactly** `CullMode = NONE` and `FrontCounterClockwise = FALSE` in a copy of the caller's `inputs.defaults`; every
+  other field is byte-identical, and a record that does not match keeps the caller's state byte-identically (the
+  documented stand-in is the fallback).
+* Refusals are named per build: the switch off (`state.record_rasterizer.off`), a malformed selector
+  (`state.record_rasterizer.selector`, with the offending shape/key and the refused size), a state container that did
+  not decode (`state.record_rasterizer.state`), a mesh pipeline (`state.record_rasterizer.record`: no mesh draw was
+  measured), and any other record shape (`state.record_rasterizer.record`, with the record's own five sizes). Every
+  refusal also names `rasterizer.cull_mode.place`, the field the record's words never yielded.
+* The boot logs the first application per matched shape ("measured record shape state ..., layout ..., ps/vs/ms ...:
+  the measured cull pair replaces only the caller's cull fields") and the first fallback once, so a boot's log shows
+  what the rule reached.
+
+### 21.5 The boots and the A/B
+
+One binary for every arm, SHA-256 `D7B4D8975D449BA511D8FE23D4AFCB53B0ACA22AFD76F34C560577EF9B605C9A`; one boot per
+attempt under the boot lock, the section-20 content environment (stage-3 pump, deferred compile, presenter captures
+every 200 frames, full-target readback, console graphics root feed, slot-70 publication), 300 s timeout. The A/B: arm
+`C` is the environment without the switch (the control, also the section-20 default arm's shape); arm `A` adds the
+measured record selection with the three content-draw shapes. The PS-only control is armed at the compose draw's
+ordinal (2) **without** `PALMETTO_FRAME_DUMP_PS_CONTROL_CULL_NONE`, so the substituted control inherits the recipe's own
+cull state: 0 under the documented stand-in and 4,147,200 under the per-record measured pair - the signature section
+20's `ch1` measured through the explicit control-only override.
+
+| arm | boots (valid) | wall | stage 3 | content window | stop | PS-control readbacks (display 4K) | captures |
+|---|---|---:|---:|---|---|---|---|
+| `A01` control | 1 | 125.2 s | 64 s | **2 submissions**, draws 4512-4517 | `game+0x13360a3` read -1 | **all 0/8,294,400** (draws 4513-4516, all 64 tiles 0) | 12/12 mean rgb 0.00 |
+| `A11`-`A13`, `B11`-`B13` record | 6 | 70.4-170.9 s | 1 of 6 (`A11`, 62.7 s) | 0 of 6 | `game+0x54828fe` read 0x16 (`A11`, 91.9 s); `game+0xbe717`; `game+0x28cd3cc`; `game+0x43adfb0`; `game+0x28cf870` | not reached | - |
+
+Read as a statement:
+
+* **The baseline is measured.** Under the documented stand-in cull the content window's own draws cover 0 of 8,294,400
+  pixels in two submissions and four readbacks, and all 12 presenter captures are black - the "before" the picture
+  slice needs.
+* **The record side of the A/B was not measured.** Six record-arm attempts produced no content submission. One of them
+  (`A11`) reached stage 3 at 62.7 s and stopped 29 s later at `game+0x54828fe` (a read of 0x16) before the window's
+  first content draw; the other five never reached stage 3. The A/B therefore measures the control baseline only, and
+  the per-record rule's content-window coverage is **not claimed**.
+* **The rule itself is verified in every record-arm boot.** The three measured shapes are built and logged
+  (`measured record shape state 388, layout 188, ps/vs/ms 384/320/0`, `... 448/512/0`, `... 396/188/384/512/0`), the only
+  replaced fields are the cull pair, and the control arm logs no application (the default path is unchanged).
+* **An early-draw arm does not extend the acceptance.** A 150 s lean arm with the raster slice's decisive environment
+  (both feeds, the PS-only control at draws 100/101, full-target readback, no control-only cull override) applied the
+  three measured shapes and still read `0/8,294,400` for the draw-100 and draw-101 controls. So the loading frame's
+  constant-pass pipeline is not demonstrated to carry the applied state (its recipe is not one the selection reached at
+  that point), and the arm cannot stand in for the content-window acceptance. The cull axis's own "after" remains
+  [raster_state.md](raster_state.md) section 2's decisive boot, not this one.
+* **Stage-3 reach in this tree, with counts.** Of the seven valid content-environment boots this slice ran after the
+  tree's platform-defaults commit, **two reached stage 3** (`A01` at 64 s, `A11` at 62.7 s) and the five others stopped
+  before it (70.4-170.9 s). The lead's reduced-reach note is consistent with this count; it is not conclusive on its
+  own.
+* No boot logged `Vulkan device was lost`; every presenter capture is black.
+
+### 21.6 Limits and the next wall
+
+- **The cull place stays refused.** The rule says which measured records the observed value belongs to, not which word
+  encoded it. What would lift the refusal is the serialized driver state layout (the same wall [state_blob.md](state_blob.md)
+  section 8 names) or a per-record table index the layer actually receives; neither exists yet.
+- **The selection is a measured class, not a proven identity.** It is keyed on interface sizes; records with the same
+  sizes are selected too. The boot's log names the shapes that matched; a narrower measured interface field is the next
+  narrowing, not a guess.
+- **The content-window acceptance is open.** The record arm reached no content submission in six attempts. The next
+  application is *per draw*, not per pipeline: the layer already knows when the content window is active (the same
+  `title_import_capture` gate section 18's console feed uses) and the replay emits each draw, so a cull-only pipeline
+  variant chosen for a window draw would change exactly the measured draws and leave every pre-content frame's
+  pipelines standing. That needs one small shim addition: the existing substituted-pipeline variant
+  (`GraphicsPipeline::with_ps`) caches by cull mode **only** (`variant_with_ps`, keyed `cull_none ? 1 : 0`), so it cannot
+  produce a real-pipeline cull variant without colliding with the control's substituted module; a separate cull-only
+  variant function with its own cache is the smallest honest step. It is not edited here because the shim file is outside
+  this slice's scope and is being edited by another slice.
+- **The record side shares its shapes with pre-content pipelines.** The content window's pipelines are created during
+  the loading frame (the boot's slot-57 calls happen long before the window), so a creation-time rule cannot be scoped
+  by the window; the A/B's stage-3 reach (1 of 6 record-arm boots vs 1 of 1 control boot) is not enough to attribute a
+  cause, only to record the count.
+- **The measured pair is the minimal observation-consistent value.** NONE, (BACK, counter-clockwise front) and (FRONT,
+  clockwise front) all keep the measured triangles; the record cannot tell them apart. A serialized layout that pins
+  the winding would replace the choice.
+- **One of the content pass's 18 library records is not identified.** The content pass's program pair appears in 18
+  library records across the library's containers with 14 distinct state records; the measured shape selects all of
+  them, and which copy the boot's draw was built from is not measured (the slot-57 record's boot identity is a digest
+  over pointers and is not stable across boots).
+- **The default path is unchanged.** The switch is off, `build()` is byte-identical without it, and what would make it
+  default is a per-record place (the layout) or a window-scoped per-draw application whose A/B covers the content
+  window.
+
+### 21.7 Tests and gates
+
+- `port/test/graphics_pso_test.cpp` gains 38 checks (the selector parse's 4 positive and 12 refusal cases, the recorded
+  shape, the measured pair and field status, the byte-identical non-cull fields, the fallback and the mesh refusal);
+  the target passes **350 checks**.
+- `graphics_record_test`, `frame_dump_test`, `unimplemented_policy_test`, `xs_proxy_mock_test`, `xbox_present_test`,
+  `buffer_va_index_test`, `dstorage_test`, `xapu_chad_test`, `deferred_compile_test` pass unchanged;
+  `d3d12_fence_timing_test` remains the documented pre-existing crash.
+- Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, and eleven of
+  the twelve `tests/test_docs_*.py` checks pass on this tree. The one failure is another slice's work, not this page:
+  `test_docs_env_vars.py` reports `PALMETTO_CONSOLE_TYPE` read by the console-type slice's uncommitted
+  `port/src/pe_loader.cpp` and not yet named in a page (its `docs/decomp_renderer.md` section is in progress). This
+  page's own new switch `PALMETTO_RASTER_RECORD_MEASURED` is named here, and the reused
+  `PALMETTO_RASTER_CULL_MEASURED`, `PALMETTO_FRAME_DUMP_PS_CONTROL_CULL_NONE`, `PALMETTO_CONTENT_PROBE_ARM`,
+  `PALMETTO_GRAPHICS_CONSOLE_ROOT` and `PALMETTO_SLOT70_PUBLISH` are named in their own pages.
+
+### 21.8 Attribution
+
+This section was implemented from this project's own measurements: the library state-record census (this slice's script
+over the 5,680 distinct records the 25,471 graphics records reference), the per-draw record shapes and state containers,
+section 20's four boots' state traces and readbacks, and this slice's A/B boots. The probe contract and the candidate
+place census are [state_blob.md](state_blob.md) section 9's and [raster_state.md](raster_state.md) section 3's; the
+renderer class/descriptor tables are [decomp_renderer.md](decomp_renderer.md) sections 2 and 4.3's; the content window's
+draw table is section 17's. No peer code was used and no game data is added: record shapes, offsets, counts, formats,
+statistics and outcomes only; the state containers' varying words are reported as regions and counts, never as values.
