@@ -1527,6 +1527,42 @@ inline bool content_probe_arms(bool enabled, bool content_window, unsigned long 
     return enabled && content_window && ordinal < limit;
 }
 
+// Diagnostic (docs/vertex_buffer_va.md section 20): PALMETTO_CONTENT_PROBE_ARM=<n> pins the ordinal of the window draw
+// the PS-only control and the one-shot readback arm, instead of the section-17 rule that gives the window's first three
+// submissions ordinals 0, 1 and 2 in turn. The measured window holds two submissions before the stop, so the cycling
+// rule controls draws 0 and 1 only and the compose draw (ordinal 2) is never measured; a fixed ordinal arms the window's
+// FIRST submission at that ordinal and leaves the later submissions uncontrolled, so their target readbacks are the
+// frame's own content. Unset keeps the section-17 cycling. Pure; frame_dump_test pins the truth table.
+inline int content_probe_arm_from(const char* value) {
+    if (!value || !*value) return -1;
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 0);
+    if (end == value || parsed < 0 || parsed > 11) return -1;
+    return static_cast<int>(parsed);
+}
+
+inline int content_probe_arm() {
+    static const int arm = content_probe_arm_from(std::getenv("PALMETTO_CONTENT_PROBE_ARM"));
+    return arm;
+}
+
+// Which draw ordinal of a content-window submission the control arms. The fixed form clamps to the submission's draws;
+// the cycling form takes the window-submission counter. Pure; frame_dump_test pins it.
+inline unsigned long long content_probe_arm_ordinal(unsigned long long window_submission, int fixed,
+                                                    unsigned long long draws) {
+    if (!draws) return 0;
+    const unsigned long long wanted =
+        fixed >= 0 ? static_cast<unsigned long long>(fixed) : window_submission;
+    return std::min(wanted, draws - 1);
+}
+
+// Whether a content-window submission arms the control draw: the cycling rule arms the window's first three
+// submissions (section 17); a fixed ordinal arms only the first, so later submissions stay uncontrolled.
+inline bool content_probe_window_arm(bool enabled, bool content_window, unsigned long long window_submission, int fixed) {
+    if (!enabled || !content_window) return false;
+    return fixed >= 0 ? window_submission == 0 : window_submission < 3;
+}
+
 // The descriptor-table V#s a draw's s8 table holds at the slot the module reads as matrix A (s8+0) and at the next one
 // (s8+0x40), decoded from the arena. Used by the readback arming line so both draws of the frame can be compared; reads
 // only.
@@ -4220,6 +4256,14 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
     } else {
         draw_va_pulls(vk, draw, *pipeline);
     }
+    // Diagnostic (docs/vertex_buffer_va.md section 20): the matrix slot's content once THIS draw's own page pulls have
+    // run. The arming-time read prints the stand-in before prepare's pulls, so it can show an arena range whose first
+    // copy has not happened yet; this read is the data the shader's matrix fetch names. Readback-armed draws only, and
+    // only with the vertex path diagnostic on, so the default path reads nothing extra.
+    if (p.armed_readback && frame_dump::vertex_path_enabled()) {
+        const std::uint64_t s8 = p.console_user_data_ok ? p.console_user_data[8] : draw.user_data[8];
+        if (s8) frame_dump::print_matrix_slot(vk, vk.heap_base, s8, "readback target (after pull)");
+    }
     return ReplayResult::success;
 }
 
@@ -5410,9 +5454,12 @@ inline Armed armed_submission(std::span<const PreparedList> lists, bool content_
         // The window's first three submissions arm one draw each, at succeeding ordinals (0, 1, 2), so the control
         // measures a different one of the frame's three content draws in each submission - the three distinct pipelines -
         // instead of only the first. Bounded to three submissions so a widened PALMETTO_READBACK_AFTER cannot turn the
-        // control into a per-frame draw.
-        out.armed = draws != 0 && content_armed < 3;
-        out.at = out.first + std::min<unsigned long long>(content_armed, draws - 1);
+        // control into a per-frame draw. PALMETTO_CONTENT_PROBE_ARM=<n> pins the ordinal instead (section 20) and arms
+        // only the first submission, so the later submissions' readbacks stay the frame's own content.
+        const int fixed = content_probe_arm();
+        out.armed = draws != 0 &&
+                    content_probe_window_arm(content_probe_enabled(), content_window, content_armed, fixed);
+        if (draws != 0) out.at = out.first + content_probe_arm_ordinal(content_armed, fixed, draws);
         if (out.armed) ++content_armed;
         return out;
     }

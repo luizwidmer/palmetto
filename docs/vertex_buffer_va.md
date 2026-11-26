@@ -2200,3 +2200,175 @@ the class-0xa producer and the copy are sections 15-16's measurements (`game+0x5
 title functions were decompiled earlier with this project's Ghidra tooling from the user's own image. No peer code was
 used and no game data is added: RVAs, VAs, sizes, alignments, offsets, counts, formats and readback statistics only.
 
+
+## 20. The compose draw's matrix slot is fed by the slot-70 publication; its vertices were discarded by the stand-in's cull mode, and the presented frame's source image is zero
+
+**Status: measured, and the record corrected. Section 18.6 left "matrix A of the compose pass is still not produced" open and
+named the slot-70 probe as the next falsifier. This slice runs that falsifier and finds the slot is filled at this tree: with
+`PALMETTO_SLOT70_PUBLISH=1` the compose draw's console table slot `s8+0` carries the handler's matrix V#, and after the draw's
+own page pull the block reads the identity 4x4. It also finds the compose draw had never been the armed control draw: the
+section-17 cycling arm only reaches the window's first two submissions, so the 0/8,294,400 readbacks earlier sections quoted
+for "draw C" are the frame's own display content, not a control. A fixed-ordinal arm measures the compose draw for the first
+time: under the documented stand-in's back-face culling its control paints **0/8,294,400**; with the cull axis off on the
+substituted control only it paints **4,147,200/8,294,400** (mean `16 80 120`, peak 240) into the presented 4K target. So the
+console block, the matrix table and the driver block are fed, and the pass rasterises; the cull mode is what discards it. The
+presented frame stays black and no compose feed can change that: in the same submission the intermediate the compose samples
+reads **0/8,294,400** under the title's own pixel shaders (the pre-content loop's colour input is zero by design,
+[colour_path.md](colour_path.md)), and the global cull lever does not reach stage 3 in this environment. The default path is
+unchanged: the new arm ordinal is unset in it and the new matrix read is read-only.**
+
+### 20.1 What this slice changes
+
+| file | change |
+|---|---|
+| `port/src/vulkan_replay.h` | `content_probe_arm_from` / `content_probe_arm` (`PALMETTO_CONTENT_PROBE_ARM`), the pure `content_probe_arm_ordinal` and `content_probe_window_arm` rules, and `armed_submission` using them: a fixed ordinal arms the window's first submission at that ordinal and leaves the later submissions uncontrolled, so their readbacks are the frame's own content. A second matrix-slot read at the end of `prepare_draw` (after the draw's page pulls) prints the data the shader's matrix fetch actually names, next to the arming-time read that runs before the pulls |
+| `port/test/frame_dump_test.cpp` | 20 checks: the arm-ordinal parse (unset/empty/zero/valid/cap/negative/non-numeric), the ordinal clamp (fixed, cycling, past the draws, no draws) and the window rule (fixed first submission, later submissions uncontrolled, cycling three submissions, probe off, outside the window) |
+| `docs/vertex_buffer_va.md` | this section |
+
+All switches are off by default. With `PALMETTO_CONTENT_PROBE_ARM` unset the section-17 cycling rule is exactly as before,
+and the new matrix read runs only for a readback-armed draw with `PALMETTO_VERTEX_PATH` set; it reads and changes no command.
+
+### 20.2 The recorded matrix slot, re-measured
+
+The slot-70 handler's publication is the committed one ([device_slot70.md](device_slot70.md) section 5,
+[slot70_publication.md](slot70_publication.md) section 3): it writes a MATRIX V# over the record's CPU block into the title's
+destination slot, and the layer's console-heap mirror rebases the 48-bit base to the block's arena stand-in and pulls the
+block's pages before the draw is recorded. This boot's fixed arm (`ch1`) prints the publication sites and the compose draw's
+feed in one log:
+
+```text
+slot 70 publish #1: block <title VA in the 0xae00000 placed range, offset 0x3de20>, declared 0x1688, format 0x16
+                    -> dest page=<title descriptor heap page> off=0xa660 V# 1d13de20 0000017f 00001688 30000fac
+content probe: draw 3310 pipeline 0x2 ps present 6 image(s) vs 213 load(s) ...   (the compose draw's control)
+vertex stream descriptor: pipeline <compose pipeline> driver block 0x1309e700 (emitted at s0/s1):
+                    wrote V# address 0x120d1b0 stride 24 records 3 format 22
+graphics console root: pipeline <compose pipeline> console block placed (1 parameter(s), 0 refused), s8=0x0cb0d140
+fetch slot table(s8)+0x00: 0120d0c0 00000000 00001688 30000fac -> V# buffer address 0x120d0c0 stride 0 records 5768
+fetch slot table(s8)+0x20: 0100042e c3800000 021bc3bf 90000fac -> T# image address 0x100042e00 format 56 3840x2160
+fetch slot table(s8)+0x40: 0120cee0 00000000 000001e0 30014fac -> V# buffer address 0x120cee0 stride 0 records 480
+readback target (after pull): matrix A content: read 5768 of 5768 B: mean 6, non-black 311/5768, peak 255;
+                    dwords 3f800000 00000000 00000000 00000000 00000000 3f800000 ...
+```
+
+Read as a statement: the table slot the compose module reads as matrix A (`s8+0`) is the handler's V# (a 0x1688-byte block,
+`30000fac`), its next sampled-image slot is the 4K intermediate T#, and its `+0x40` slot is the title's own 480-byte constants
+V# (matrix B). After the draw's page pull the matrix block's first 64 bytes are the identity 4x4, so the vertex stage's matrix
+fetch reads a real transform. The arming-time read of the same slot, printed by the section-17 diagnostic, is taken before
+`prepare_draw` runs the block's pull and shows the stand-in's zeros; that is a read-order artefact, not the shader's data, and
+the after-pull line is the one this section accepts.
+
+The publication is not the earlier "refused or missing" shape: in arm `cf2` the same boot's summary is 2,524 matrix V# written,
+0 refused (empty block pages), 6 refused (block outside a slot-133 range), 0 refused (unreadable) and 451 refused
+(texture-shaped description, no pinned T# encoding). So section 18.6's "the slot-70 arm did not fill matrix A" read the
+publication-off table of `d2`: `be1`'s arm-C log already carried the published V# in the compose table
+(`00b0d0c0 00000000 00001688 30000fac`), and the 0/8,294,400 line section 18.5 quoted for "draw C" was the display target's
+own frame content, not the draw's substituted control.
+
+### 20.3 The arming gap: the compose draw was never the controlled draw
+
+The section-17 content-probe rule arms one draw of each content-window submission, at ordinals 0, 1, 2 in turn. The measured
+window holds one to two submissions before the stop (section 18.5, and this slice's `cf2`/`ch1` each hold one), so the control
+landed on the constant pass (ordinal 0) and, when a second submission arrived, on the content pass (ordinal 1): the compose
+draw (ordinal 2) was never armed. Every earlier readback labelled with the compose draw inside a PS-control arm is therefore a
+frame-content copy, not a coverage measurement. This slice's own line for that artefact is exactly the earlier page's number:
+the frame's display target in `cf2` reads 0/8,294,400 with no control on it.
+
+`PALMETTO_CONTENT_PROBE_ARM=2` pins the ordinal: the window's first submission arms the compose draw, and the later submissions
+stay uncontrolled, so their readbacks are the frame's own content. Both measured arms show the armed control on the compose
+pipeline (`pipeline 0x2 ps present 6 image(s) vs 213 load(s)`, the six-image `fspx/lib_vs_00823`/`lib_ps_00822` pair) drawn into
+the presented target after the frame's commands.
+
+### 20.4 The compose draw's coverage: measured under the cull axis, and the picture
+
+Two boots of one binary separate the two variables. `cf2` is the console feed + publication with the documented default
+fixed-function stand-in; `ch1` is the same plus `PALMETTO_FRAME_DUMP_PS_CONTROL_CULL_NONE=1`, which rebuilds only the
+substituted control's pipeline with culling off and changes no title draw.
+
+| arm | compose control readback (presented 4K target) | intermediate, title pixel shaders | presenter captures |
+|---|---|---|---|
+| `cf2`, default stand-in cull | `mean 0 0 0, non-black 0/8,294,400`, all 64 tiles 0 | `0/8,294,400` (draws 5148 and 5149) | 8 files, all `mean 0` |
+| `ch1`, control cull none | **`mean 16 80 120, non-black 4,147,200/8,294,400, peak 240, alpha non-black 4,147,200`** | `0/8,294,400` (draws 3307 and 3308) | 9 files, all `mean 0` |
+
+The cull-none control's colour is the substituted `fs_solid` `32 160 240` halved by the uncovered half of the image, the same
+half-screen-triangle signature the constant pass's control had in section 18.5: the compose draw's own three vertices, through
+the title's pipeline and with the title's table, driver block and root arguments, produce fragments. So the console feed is
+complete and the no-coverage in `cf2` is the fixed-function stand-in's back-face culling of this draw - the class
+[raster_state.md](raster_state.md) measured (the record's rasterizer state is not the stand-in's `CULL_BACK`/clockwise-front;
+its decisive test was a PS-only control with cull none for the same reason). It also reconciles the earlier publication page:
+its compose-control arm ran with `PALMETTO_FRAME_DUMP_PS_CONTROL_CULL_NONE=1` and `PALMETTO_RASTER_CULL_MEASURED=1` set
+([slot70_publication.md](slot70_publication.md) section 2), which is why its control painted; its own real-compose arm, with
+the same cull axis on, still read 0/8,294,400 on both targets - the black intermediate, not a lost feed.
+
+The picture does not follow from either arm. The intermediate the compose pass samples reads 0 of 8,294,400 in the same
+submission under the title's own pixel shaders, so a correctly rasterising compose writes black over the title's black clear,
+and all 8-9 presenter captures are black. The pre-content loop's colour input is zero by design
+([colour_path.md](colour_path.md), [frame_first_light.md](frame_first_light.md) section 4); this slice adds that even the
+compose's own geometry is culled under the default stand-in, so a non-black presented frame would need both a per-record
+rasterizer decode and a frame that has content. The global cull lever (`PALMETTO_RASTER_CULL_MEASURED=1`, applying the
+measured axis to every pipeline) was run as the third arm and never reached stage 3 in three attempts (65.2-80.8 s walls), so
+it is not a picture arm in this environment either; the per-record cull decode stays the raster slice's next step.
+
+### 20.5 The boots
+
+One binary for the four measured arms, SHA-256 `7B9AD6D0792540D97CCB3F92C710C91BFE35D21E293EA5F8F83DF4E4D0C79A0A`; one boot per
+attempt under the boot lock, the section-12 content environment (stage-3 pump, deferred compile, presenter captures every 200
+frames, full-target readback), 300 s timeout. The arm tag's second character is the arm: `cf` = console feed + publication +
+fixed ordinal, default stand-in cull; `cg` = `cf` + the measured global cull axis; `ch` = `cf` + control-only cull none.
+
+| boot | switch set | wall | stage 3 | content window | stop | what it measured |
+|---|---|---:|---:|---|---|---|
+| `cf1` | `cf` | 84.7 s | no | not reached | execute fault `0x3b7ee4152f` | no content draw before the stop |
+| `cf2` | `cf` | 104.9 s | 70 s | 1 submission, draws 5147-5149 | `0xe06d7363` at host `KERNELBASE.dll+0xc569a` | the compose draw's control under the default cull: 0/8,294,400; intermediate 0/8,294,400; 2,524 publications |
+| `cg1`-`cg3` | `cf` + measured global cull axis | 80.8 / 65.2 / 69.3 s | no (all three) | not reached | `0xe06d7363`; `game+0x41ebcc7` read `0xed` | the global cull axis does not reach stage 3 in this environment |
+| `ch1` | `cf` + control-only cull none | 94.4 s | 60 s | 1 submission, draws 3306-3308 | `0xe06d7363` at host `KERNELBASE.dll+0xc569a` | the compose draw's control: 4,147,200/8,294,400; intermediate 0/8,294,400; 9/9 black captures |
+
+State words are this tree's shape (init 1 at 4 s, init 2/loading 1 at 18 s, loading 2 and session 1 at 56 s, stage 3 at 60 s in
+`ch1` and 70 s in `cf2`; the earlier sections' 56.9-134 s spread is the environmental race). No boot logs
+`Vulkan device was lost`; `cf2` records 171,215 D3D12 calls and `ch1` 136,501. The stop is a raised C++ exception at
+`KERNELBASE.dll+0xc569a` (`0xe06d7363`) in four of this slice's boots (`cf2`, `ch1`, `cg1`, `cg3`), not the section 17-19
+access-violation family; the measured content of the window is not affected by which stop ends it.
+
+### 20.6 Limits
+
+- **One content submission per measured window.** `cf2` and `ch1` each hold one window submission before the stop, so the
+  compose control's acceptance is one submission. The fixed-ordinal rule's "later submissions stay uncontrolled" was designed
+  for the two-submission window section 18 measured, and this slice's boots did not produce a third: the frame's own display
+  target is not read independently here (the readback copy follows the appended control, so its line is the control's output),
+  while the intermediate's real content, which is what the compose samples, is measured 0/8,294,400 in both arms.
+- **The passed control is the substituted PS, not the title's.** The 4,147,200 pixels are `fs_solid`'s colour over the compose
+  draw's geometry; the title pixel shader's own output is the black intermediate's compose, and it was never read with a
+  rasterising compose because the artefact is the same one the PS-only control exists to isolate.
+- **The cull axis is changed only on the substituted control in `ch1`.** The title's own compose pipeline keeps the
+  documented stand-in cull and stays discarded; the global axis arm (`cg`) did not reach stage 3 in three attempts, so a
+  picture A/B of the global axis is not measured here.
+- **The real display target is the control's output in `ch1`.** The readback copies the target after the appended control, so
+  `ch1`'s display readback is the control's colour; the frame's own display content is `cf2`'s 0/8,294,400 and the intermediate
+  is 0/8,294,400 in both.
+- **The matrix content is the block's first 64 bytes after one pull.** The pull copies the title's pages at prepare; the boot's
+  arming-time read is before it. The declared range is 0x1688 bytes and the shader's matrix fetch is the first 64; the rest of
+  the block is not content this section accepts.
+- **No default change and no fix to the feed.** The feed is measured complete (no publication ordering issue: the block is
+  non-zero at publication and identity after the pull; no conversion miss: the console block places the table at `s8` and the
+  driver block at `s0/s1`; no missing title content: the block carries both matrices and the sampled T#). The measured
+  blockers of the picture are the default stand-in's undecoded cull state and the zero content of this loop, both named above;
+  the default path is unchanged.
+
+### 20.7 Tests and gates
+
+- `port/test/frame_dump_test.cpp` gains 20 checks for the free arm-ordinal and window rules; the target exits 0 with its
+  existing command-table/writers checks.
+- Gate subset on the changed tree, all exit 0: `frame_dump_test`; `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`,
+  `_setup\build_tests.cmd` prints `TESTS_BUILT`.
+- Every `tests/test_docs_*.py` check passes; the new switch `PALMETTO_CONTENT_PROBE_ARM` is named here, and the reused
+  `PALMETTO_SLOT70_PUBLISH`, `PALMETTO_SLOT70_PROBE`, `PALMETTO_FRAME_DUMP_PS_CONTROL_CULL_NONE` and
+  `PALMETTO_RASTER_CULL_MEASURED` are named in their own pages ([device_slot70.md](device_slot70.md),
+  [raster_state.md](raster_state.md)).
+
+### 20.8 Attribution
+
+This section was implemented from this project's own measurements: the committed slot-70 publication handler and heap mirror
+([device_slot70.md](device_slot70.md)), the section-18 arms' logs (`be1`), and this slice's four boots (`cf1`, `cf2`, `cg1`-`cg3`,
+`ch1`) with their full-target readbacks, matrix-slot reads and presenter captures. The cull axis is [raster_state.md](raster_state.md)'s
+committed measurement and switch; the compose/constant pass structure is [frame_first_light.md](frame_first_light.md)'s and
+[colour_path.md](colour_path.md)'s. No peer code was used and no game data is added: pipeline ids, VAs, descriptor words, counts,
+statistics and outcomes only.

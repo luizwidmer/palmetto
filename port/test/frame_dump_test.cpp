@@ -534,6 +534,34 @@ int main() {
     }
 
     {
+        // docs/vertex_buffer_va.md section 20: the fixed control-arm ordinal. The measured two-submission window never
+        // reaches the compose draw under the section-17 cycling rule (submission 1 arms draw 0, submission 2 draw 1), so
+        // the ordinal is settable; a fixed ordinal arms only the first window submission - the later ones stay
+        // uncontrolled, so their readbacks are the frame's own content. Unset keeps the cycling rule.
+        expect(frame_dump::content_probe_arm_from(nullptr) == -1, "an unset arm ordinal keeps the cycling control");
+        expect(frame_dump::content_probe_arm_from("") == -1, "an empty arm ordinal keeps the cycling control");
+        expect(frame_dump::content_probe_arm_from("0") == 0, "the constant draw's ordinal is settable");
+        expect(frame_dump::content_probe_arm_from("2") == 2, "the compose draw's ordinal is settable");
+        expect(frame_dump::content_probe_arm_from("11") == 11, "the last promised ordinal is settable");
+        expect(frame_dump::content_probe_arm_from("12") == -1, "an ordinal past the window bound is refused");
+        expect(frame_dump::content_probe_arm_from("-1") == -1, "a negative ordinal is refused");
+        expect(frame_dump::content_probe_arm_from("x") == -1, "a non-numeric ordinal is refused");
+        expect(frame_dump::content_probe_arm_ordinal(0, 2, 3) == 2, "the fixed ordinal names the third draw");
+        expect(frame_dump::content_probe_arm_ordinal(9, 2, 3) == 2, "the fixed ordinal ignores the window counter");
+        expect(frame_dump::content_probe_arm_ordinal(0, 7, 3) == 2, "a fixed ordinal past the draws clamps to the last");
+        expect(frame_dump::content_probe_arm_ordinal(2, -1, 3) == 2, "the cycling rule takes the window counter");
+        expect(frame_dump::content_probe_arm_ordinal(9, -1, 3) == 2, "the cycling ordinal clamps to the last draw");
+        expect(frame_dump::content_probe_arm_ordinal(0, 2, 0) == 0, "a submission with no draw has no ordinal");
+        expect(frame_dump::content_probe_window_arm(true, true, 0, 2), "the fixed ordinal arms the first submission");
+        expect(!frame_dump::content_probe_window_arm(true, true, 1, 2),
+               "the fixed ordinal leaves later window submissions uncontrolled");
+        expect(frame_dump::content_probe_window_arm(true, true, 2, -1), "the cycling rule arms the third submission");
+        expect(!frame_dump::content_probe_window_arm(true, true, 3, -1), "the cycling rule stops after three");
+        expect(!frame_dump::content_probe_window_arm(false, true, 0, 2), "an off probe arms nothing");
+        expect(!frame_dump::content_probe_window_arm(true, false, 0, 2), "a draw outside the window stays unarmed");
+    }
+
+    {
         // docs/vertex_buffer_va.md section 12: the two opt-in submission pacing knobs' truth table. Both are off by
         // default, "0" is off, and the delay is decimal microseconds; the queue reads them once at startup.
         const palmetto::SubmissionPace none = palmetto::submission_pace_from(nullptr, nullptr);
