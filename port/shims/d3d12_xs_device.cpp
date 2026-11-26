@@ -4099,41 +4099,134 @@ HRESULT proxy_create_command_queue(DeviceProxy* self, const D3D12_COMMAND_QUEUE_
     return wrap_child<ChildKind::queue>(static_cast<IUnknown*>(created), self, riid, out);
 }
 
+// PALMETTO_PRESENT_PACING: the frame-wait side of the pacing measurement aid (docs/peer_port_first_ui.md, the
+// implemented port): the first eight waits and every sixtieth log their time, event, timeout, flags and token, and
+// whether the wait was answered by the pacer. Off by default; it changes no answer.
+bool frame_wait_trace() {
+    static const bool on = [] {
+        char* value = nullptr;
+        std::size_t length = 0;
+        bool enabled = false;
+        if (_dupenv_s(&value, &length, "PALMETTO_PRESENT_PACING") == 0 && value) {
+            enabled = value[0] != '\0' && std::strcmp(value, "0") != 0;
+            std::free(value);
+        }
+        return enabled;
+    }();
+    return on;
+}
+
+void trace_frame_wait(std::uint64_t event, std::uint64_t timeout_ms, std::uint64_t flags, std::uint64_t token,
+                      bool pacer) {
+    if (!frame_wait_trace()) return;
+    static const auto epoch = std::chrono::steady_clock::now();
+    static std::atomic<std::uint64_t> waits{0};
+    const std::uint64_t n = waits.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n > 8 && n % 60 != 0) return;
+    const double at = std::chrono::duration<double>(std::chrono::steady_clock::now() - epoch).count();
+    std::fprintf(stderr,
+                 "[rt] frame wait: wait %llu at %.3f s event 0x%llx timeout 0x%llx flags 0x%llx token 0x%llx %s\n",
+                 static_cast<unsigned long long>(n), at, static_cast<unsigned long long>(event),
+                 static_cast<unsigned long long>(timeout_ms), static_cast<unsigned long long>(flags),
+                 static_cast<unsigned long long>(token), pacer ? "pacer" : "device-proxy");
+}
+
 // Xbox device slot 78 (public HLE): SetFrameIntervalX(output, interval_us, latency, flags). The output and flags are
 // not used before a presenter exists. The period is a vblank period in microseconds in the public samples (16667 for
 // 60 Hz), and latency is the allowed frames in flight. S_OK even for 0: a boot must not abort here, and nothing paces.
+// With the present-driven clock on (docs/peer_port_first_ui.md: PALMETTO_PRESENT_DRIVEN=1) the interval registers in
+// that clock's pacer instead, which is the token source the waits use. A refusal falls back to the proxy's own record,
+// so a frame call the pacer cannot take can never abort a boot.
 HRESULT proxy_set_frame_interval_x(DeviceProxy* self, std::uint64_t output, std::uint64_t interval_us,
                                    std::uint64_t latency, std::uint64_t flags) {
     (void)output;
-    (void)flags;
+    if (rt::d3d12::xbox_frame_events_enabled()) {
+        const HRESULT pacer_hr = rt::d3d12::xbox_frame_event_set_interval(
+            static_cast<std::uint32_t>(interval_us), static_cast<std::uint32_t>(latency),
+            static_cast<std::uint32_t>(flags));
+        if (SUCCEEDED(pacer_hr)) return S_OK;
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed))
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: the present-driven frame pacer refused SetFrameIntervalX (0x%08lx); the device "
+                         "proxy's own record is kept\n",
+                         static_cast<unsigned long>(pacer_hr));
+    }
     self->frame_interval_us.store(static_cast<std::uint32_t>(interval_us), std::memory_order_relaxed);
     self->frame_latency.store(static_cast<std::uint32_t>(latency ? latency : 1), std::memory_order_relaxed);
     return S_OK;
 }
 
 // Xbox device slot 79 (public HLE): ScheduleFrameEventX(event, offset_us, pEvent, flags); our pacer has only the origin.
+// With the present-driven clock on, the origin event arms that clock. The measured title schedules event 2 as well
+// (game+0x2478DEA, before the origin at game+0x247AC02); a later frame point has nothing to arm, so that call keeps
+// the proxy's record and S_OK.
 HRESULT proxy_schedule_frame_event_x(DeviceProxy* self, std::uint64_t event, std::uint64_t offset_us,
                                      std::uint64_t flags) {
-    (void)event;
+    if (rt::d3d12::xbox_frame_events_enabled() && static_cast<std::uint32_t>(event) == rt::d3d12::xbox_frame_event_origin) {
+        const HRESULT pacer_hr = rt::d3d12::xbox_frame_event_schedule(
+            static_cast<std::uint32_t>(event), static_cast<std::uint32_t>(offset_us), static_cast<std::uint32_t>(flags));
+        if (SUCCEEDED(pacer_hr)) return S_OK;
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed))
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: the present-driven frame pacer refused ScheduleFrameEventX (0x%08lx); the "
+                         "device proxy's own record is kept\n",
+                         static_cast<unsigned long>(pacer_hr));
+    }
     (void)offset_us;
-    (void)flags;
     self->frame_event_scheduled.store(true, std::memory_order_relaxed);
     return S_OK;
 }
 
-// Xbox device slot 80 (public HLE): WaitFrameEventX(event, timeout_ms, pEvent, flags, &token). It returns at once with
-// a fresh non-zero token (the first-frame choice): there is no vblank source behind the device before a presenter, and
-// a zero wait cannot stall the title. A null token pointer is E_POINTER, as a _Out_ parameter.
+// Xbox device slot 80 (public HLE): WaitFrameEventX(event, timeout_ms, pEvent, flags, &token). Without the switch the
+// answer is today's: a fresh non-zero token at once (there is no vblank source behind the device before a presenter,
+// and a zero wait cannot stall the title), with a null token pointer E_POINTER as a _Out_ parameter.
+//
+// With the present-driven clock on, the measured title's two calls (docs/display_path.md section 4) have their console
+// meanings:
+//   * event 0, timeout 0, flag 2 (game+0x248244E): the origin poll. A new token when the pacer's origin is due; when it
+//     is not, flag 2 writes the last token the caller holds (XCL's public rule) and the poll returns S_FALSE.
+//   * event 2, INFINITE (game+0x248240B): the blocking flip wait before the frame's work. It issues no token and is
+//     released by the present that flips an in-flight frame.
+// Any hard state failure (suspended, not registered) falls back to the proxy's own answer: a frame call must not stall
+// or abort a boot.
 HRESULT proxy_wait_frame_event_x(DeviceProxy* self, std::uint64_t event, std::uint64_t timeout_ms,
                                  std::uint64_t flags, std::uint64_t token_word) {
-    (void)event;
     (void)timeout_ms;
-    (void)flags;
     auto* token = reinterpret_cast<std::uint64_t*>(token_word);
     if (!token) return E_POINTER;
+    if (rt::d3d12::xbox_frame_events_enabled()) {
+        if (static_cast<std::uint32_t>(event) == rt::d3d12::xbox_frame_event_origin) {
+            std::uint64_t issued = 0;
+            const HRESULT pacer_hr = rt::d3d12::xbox_frame_event_wait(
+                static_cast<std::uint32_t>(event), static_cast<std::uint32_t>(timeout_ms),
+                static_cast<std::uint32_t>(flags), &issued);
+            if (pacer_hr == S_OK) {
+                *token = issued;
+                trace_frame_wait(event, timeout_ms, flags, issued, true);
+                return S_OK;
+            }
+            if ((static_cast<std::uint32_t>(flags) & 2u) != 0) {
+                const std::uint64_t last = rt::d3d12::xbox_frame_event_last_token();
+                if (last) {  // no new origin is due: the caller keeps presenting the frame it already holds
+                    *token = last;
+                    trace_frame_wait(event, timeout_ms, flags, last, true);
+                    return S_FALSE;
+                }
+            }
+        } else {
+            const HRESULT pacer_hr = rt::d3d12::xbox_frame_event_wait_flip(static_cast<std::uint32_t>(timeout_ms));
+            if (SUCCEEDED(pacer_hr)) {
+                trace_frame_wait(event, timeout_ms, flags, 0, true);
+                return S_OK;
+            }
+        }
+    }
     std::uint64_t value = self->frame_next_token.fetch_add(1, std::memory_order_relaxed);
     if (value == 0) value = self->frame_next_token.fetch_add(1, std::memory_order_relaxed);  // skip the null token
     *token = value;
+    trace_frame_wait(event, timeout_ms, flags, value, false);
     // docs/present_wiring.md: the frame-token bridge's report side. The presentation's pacer has not issued this token,
     // so it would refuse it as "never handed out"; reporting it before the title can present it makes it presentable.
     // A no-op until a presentation is registered.

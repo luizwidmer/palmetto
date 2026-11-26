@@ -36,6 +36,10 @@ std::future<Result> wait_async(FramePacer& pacer, std::uint32_t timeout_ms) {
 bool blocked(std::future<Result>& f) {
     return f.wait_for(std::chrono::milliseconds(40)) == std::future_status::timeout;
 }
+// The same for the flip wait, which returns an HRESULT and no token.
+bool blocked_flip(std::future<std::int32_t>& f) {
+    return f.wait_for(std::chrono::milliseconds(40)) == std::future_status::timeout;
+}
 
 bool setup(FramePacer& pacer, std::uint32_t latency, std::uint32_t offset = 0) {
     return pacer.set_frame_interval(period, latency, 0) == pacer_hr::ok &&
@@ -566,6 +570,168 @@ int main() {
         EXPECT(blocked(wait));
         clock.advance_us(period);
         EXPECT(wait.get().token == 6);
+    }
+
+    // ---- Present-driven clock (PALMETTO_PRESENT_DRIVEN; frame_pacer.h "Present-driven") ---------------------------
+    // The present is the clock: a wait hands out token 1 at once (there is no displayed frame to follow before the
+    // first present), the present that carries a token marks it flipped and frees an in-flight slot, the blocking flip
+    // wait is released exactly at that present, and the next origin is one observed display interval after the last
+    // flip. A repeated or stale token is presented again but carries no new frame, so the clock does not move.
+    {
+        ManualFrameClock clock;
+        FramePacer pacer(clock);
+        EXPECT(!pacer.present_driven());
+        pacer.set_present_driven(true);
+        EXPECT(pacer.present_driven());
+        EXPECT(setup(pacer, 1));
+        std::uint64_t token = 0;
+        // Before the first present there is no displayed frame to follow: token 1 at once, no clock advance.
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::ok && token == 1);
+        EXPECT(pacer.present_clock_fallbacks() == 0 && pacer.flipped_token() == 0);
+        // Before any present the flip wait has nothing to hold: it returns at once.
+        EXPECT(pacer.wait_flip(infinite_timeout_ms) == pacer_hr::ok);
+        // The first present anchors the phase: the next origin is one declared period after it (the seed cadence).
+        clock.advance_us(1000);
+        pacer.commit_present_token(1, 1);
+        EXPECT(pacer.flipped_token() == 1 && pacer.frames_in_flight() == 0);
+        EXPECT(pacer.display_cadence_us() == period);
+        // The frame's flip is its display time: present and display are both the present's time.
+        std::uint32_t count = 2;
+        FrameStatistic stats[2];
+        EXPECT(pacer.get_frame_statistics(1, stat_present | stat_display, &count, stats) == pacer_hr::ok &&
+               count == 2 && stats[0].time_us == 1000 && stats[1].time_us == 1000);
+        // The next origin is the present's time plus the cadence, exactly.
+        auto held = wait_async(pacer, infinite_timeout_ms);
+        EXPECT(blocked(held));
+        clock.advance_us(period - 1);
+        EXPECT(blocked(held));
+        clock.advance_us(1);
+        Result r = held.get();
+        EXPECT(r.hr == pacer_hr::ok && r.token == 2);
+        // One present consumes one token: presenting token 2 flips it at this present's time (17000 us).
+        clock.advance_us(0);  // (the wait returned at the origin; token 2 is presented now)
+        pacer.commit_present_token(2, 1);
+        EXPECT(pacer.flipped_token() == 2 && pacer.display_cadence_us() == period);
+        count = 2;
+        EXPECT(pacer.get_frame_statistics(2, stat_present | stat_display, &count, stats) == pacer_hr::ok &&
+               count == 2 && stats[0].time_us == period + 1000 && stats[1].time_us == stats[0].time_us);
+        // A zero-timeout poll before the next origin times out and leaves the token alone; a poll after it returns a
+        // token on the acquire. That is the title's measured event-0 poll (timeout 0, flag 2).
+        token = 999;
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::timeout && token == 999);
+        EXPECT(pacer.last_issued_token() == 2);
+        clock.advance_us(period);
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::ok && token == 3);
+        pacer.commit_present_token(3, 1);
+        EXPECT(pacer.flipped_token() == 3 && pacer.frames_in_flight() == 0);
+        // A stale and the null token are presented again (a title does that between origins) but carry no new frame.
+        const std::uint64_t cadence_before = pacer.display_cadence_us();
+        clock.advance_us(10);
+        pacer.commit_present_token(1, 1);
+        pacer.commit_present_token(0, 1);
+        EXPECT(pacer.flipped_token() == 3 && pacer.display_cadence_us() == cadence_before);
+    }
+
+    // The blocking flip wait (the title's event 2) is released exactly at the present that flips an in-flight frame,
+    // and a timeout is honoured while nothing presents.
+    {
+        ManualFrameClock clock;
+        FramePacer pacer(clock);
+        pacer.set_present_driven(true);
+        EXPECT(setup(pacer, 1));
+        std::uint64_t token = 0;
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::ok && token == 1);
+        clock.advance_us(period);
+        pacer.commit_present_token(1, 1);  // the first present anchors the phase at 2 * period
+        clock.advance_us(period);
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::ok && token == 2);
+        EXPECT(pacer.frames_in_flight() == 1);  // token 2 is issued but not presented: the latency slot is used
+        auto flip = std::async(std::launch::async, [&pacer] { return pacer.wait_flip(infinite_timeout_ms); });
+        EXPECT(blocked_flip(flip));
+        clock.advance_us(1);                    // time passing does not release the flip wait; only the present does
+        EXPECT(blocked_flip(flip));
+        pacer.commit_present_token(2, 1);       // the present: the held flip wait is released exactly here
+        EXPECT(flip.get() == pacer_hr::ok);
+        EXPECT(pacer.frames_in_flight() == 0);
+        // A flip wait with a timeout times out when nothing presents and the latency is used up.
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::timeout);  // not due yet (0 timeout)
+        clock.advance_us(period);
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::ok && token == 3);
+        auto timed = std::async(std::launch::async, [&pacer] { return pacer.wait_flip(1); });
+        EXPECT(blocked_flip(timed));
+        clock.advance_us(1000);                 // the only 1 ms of the timeout passing
+        EXPECT(timed.get() == pacer_hr::timeout);
+        pacer.commit_present_token(3, 1);
+    }
+
+    // The held token wait released by the cadence dead-man when no present ever comes (a title that waits without
+    // presenting), so a boot cannot hang on the handshake; the fallback is counted.
+    {
+        ManualFrameClock clock;
+        FramePacer pacer(clock);
+        pacer.set_present_driven(true);
+        EXPECT(setup(pacer, 1));
+        std::uint64_t token = 0;
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::ok && token == 1);
+        clock.advance_us(1);
+        pacer.commit_present_token(1, 1);  // the clock starts
+        clock.advance_us(period);
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::ok && token == 2);
+        EXPECT(pacer.frames_in_flight() == 1);
+        auto choked = wait_async(pacer, infinite_timeout_ms);  // the latency slot is used and nothing presents
+        EXPECT(blocked(choked));
+        clock.advance_us(4 * period);  // the dead-man: four observed intervals
+        Result r = choked.get();
+        EXPECT(r.hr == pacer_hr::ok && r.token == 3);
+        EXPECT(pacer.present_clock_fallbacks() == 1);
+    }
+
+    // The observed display cadence replaces the declared one: a present that comes late widens it, and the next origin
+    // follows the widened cadence (the title is paced by the display it actually has).
+    {
+        ManualFrameClock clock;
+        FramePacer pacer(clock);
+        pacer.set_present_driven(true);
+        EXPECT(setup(pacer, 2));
+        std::uint64_t token = 0;
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::ok && token == 1);
+        pacer.commit_present_token(1, 1);  // present at 0: the phase anchors at period
+        clock.advance_us(period);
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::ok && token == 2);
+        clock.advance_us(14000);  // the next present comes 30 ms after the first instead of 16 ms
+        pacer.commit_present_token(2, 1);
+        // (period = 16000: observed 30000, smoothed (7 * 16000 + 30000) / 8 = 17750.)
+        EXPECT(pacer.display_cadence_us() == 17750);
+        // The origin token 3 was already due at the pre-adaptation phase (32000); the one after it is a widened
+        // cadence (17750 us) after token 3's origin, so the display's own rate is what the title is paced by.
+        clock.advance_us(32000 - 30000);
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::ok && token == 3);
+        auto next = wait_async(pacer, infinite_timeout_ms);
+        EXPECT(blocked(next));
+        clock.advance_us(17749);
+        EXPECT(blocked(next));
+        clock.advance_us(1);
+        EXPECT(next.get().token == 4);
+    }
+
+    // Suspension: a held present-driven wait fails, and the flag survives (as the cap flag does).
+    {
+        ManualFrameClock clock;
+        FramePacer pacer(clock);
+        pacer.set_present_driven(true);
+        EXPECT(setup(pacer, 1));
+        std::uint64_t token = 0;
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token) == pacer_hr::ok && token == 1);
+        pacer.commit_present_token(1, 1);
+        auto waiter = wait_async(pacer, infinite_timeout_ms);  // waits for the next origin
+        EXPECT(blocked(waiter));
+        pacer.suspend();
+        EXPECT(waiter.get().hr == pacer_hr::invalid_state);
+        EXPECT(pacer.suspended());
+        pacer.resume();
+        EXPECT(pacer.present_driven() && !pacer.registered());
+        EXPECT(setup(pacer, 1));
+        EXPECT(pacer.wait_frame_event(frame_event_origin, infinite_timeout_ms, 0, &token) == pacer_hr::ok && token == 2);
     }
 
     // Real clock: five 10 ms vblanks take about 50 ms.

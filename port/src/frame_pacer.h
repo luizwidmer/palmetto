@@ -28,6 +28,29 @@
 // handing out one token each, but a wait never blocks — no vblank grid, no latency throttle — and a presented
 // frame counts as shown at once. The frame rate is then the title's own; the error surface (nothing registered,
 // suspended) is unchanged.
+//
+// Present-driven (set_present_driven; PALMETTO_PRESENT_DRIVEN in the shim): the clock has no independent vblank grid;
+// the present is the clock. The peer evidence (docs/peer_port_first_ui.md sections 2-4 and 6: a token per origin and a
+// blocking flip wait before a present, a plane's token used up by a present with held waits released at a present, a
+// present marking the frame token flipped, a vsync present pacing the title) describes the console handshake this mode
+// models, in our own terms:
+//   * A wait hands out token 1, 2, 3, ... (one per successful wait, never reused). Before the first present there is
+//     no displayed frame to follow, so waits return at once: the layer cannot wait for a clock that does not exist yet.
+//   * The present that carries a token is its flip: commit_present_token marks the record presented and displayed at
+//     the present's time, and frees one of the `latency` in-flight slots. A wait that was held because `latency`
+//     frames were in flight is released exactly at that present (the notification carries no time of its own), and a
+//     wait that arrives after the flip finds the slot free and returns on that acquire.
+//   * The cadence is the one measured from the presents, not the declared interval alone: the next frame's origin is
+//     one observed display interval after the last present. The observed interval is the time between successive
+//     tokened presents, smoothed (1/8 weight) and clamped to the declared period's range; the declared interval seeds
+//     it, so a display that keeps up gives the title's own rate and a display that falls behind drags the title with
+//     it (the "vsync present paces the title" behaviour). A blank present (a frame with no token) shows on the same
+//     clock and sets the phase but does not contribute a cadence sample.
+//   * A wait held for an in-flight slot that no present releases is let go by a cadence dead-man after four observed
+//     intervals (counted in present_clock_fallbacks()), so a title that waits without presenting cannot hang the boot.
+//     The wait's own timeout is honoured first; the error surface is unchanged.
+//   * A frame's lateness (present_timing) is measured against the origin it was due at: the wait's time plus the
+//     observed cadence at the moment it was issued.
 
 #include <algorithm>
 #include <atomic>
@@ -179,6 +202,7 @@ public:
         interval_set_ = true;
         offset_us_ = std::min(offset_us_, period_us - 1);
         last_origin_ = 0;  // origin 0 is the epoch itself, which has passed
+        if (present_driven_) cadence_us_ = period_us_;  // seed only: the observed presents replace it
         cv_.notify_all();
         return pacer_hr::ok;
     }
@@ -209,6 +233,24 @@ public:
         std::unique_lock lock(mutex_);
         ++waiters_;
         const std::int32_t result = wait_locked(lock, timeout_ms, token);
+        if (--waiters_ == 0) cv_.notify_all();
+        return result;
+    }
+
+    // The last token wait_frame_event handed out (0: none). With the origin event's flag 2 the caller may present the
+    // frame it already holds while no new origin is due (the title's measured poll shape: event 0, timeout 0, flag 2).
+    std::uint64_t last_issued_token() const { std::lock_guard guard(mutex_); return issued_; }
+
+    // A pure flip wait (the title's measured event 2, INFINITE: the blocking flip wait before a frame's work): no token
+    // is issued or consumed. The wait returns when an in-flight frame has been flipped by a present, so a caller that
+    // keeps `latency` frames queued is released exactly at the present that flips one; on the vblank grid it returns
+    // when the oldest queued frame's vblank has come. Never blocks before the first presented frame. A dead-man
+    // (four observed cadences) releases a present-driven wait whose flip never comes, so a title cannot hang here;
+    // `timeout_ms` is otherwise honoured. invalid_state while unregistered or suspended.
+    std::int32_t wait_flip(std::uint32_t timeout_ms) {
+        std::unique_lock lock(mutex_);
+        ++waiters_;
+        const std::int32_t result = wait_flip_locked(lock, timeout_ms);
         if (--waiters_ == 0) cv_.notify_all();
         return result;
     }
@@ -307,6 +349,16 @@ public:
                 if (r.token == token) { r.presented = r.displayed = true; r.present_us = r.display_us = now; }
             return;
         }
+        if (present_driven_) {
+            // The present is this frame's flip: it is marked displayed at the present's own time. Only a present that
+            // consumes a token nobody has flipped yet advances the clock (a repeated or stale token is presented again,
+            // which a title does between origins, and carries no new frame); a blank frame carries no token at all.
+            for (Record& r : records_)
+                if (r.token == token && token) { r.presented = true; r.present_us = now; }
+            if (token && token > flipped_) advance_present_clock_locked(now, token);
+            cv_.notify_all();
+            return;
+        }
         // The vblank after now, and not before the one after the previous queued frame.
         const std::uint64_t since = now > epoch_us_ ? now - epoch_us_ : 0;
         std::uint64_t flip = epoch_us_ + (since / period_us_ + 1) * period_us_;
@@ -333,6 +385,9 @@ public:
         if (!interval_set_ || !armed_ || uncapped_) return;
         const std::uint64_t now = clock_.now_us();
         retire_locked(now);
+        if (present_driven_) {  // a blank frame carries no token: it is not a flip of a tokened frame
+            return;
+        }
         const std::uint64_t since = now > epoch_us_ ? now - epoch_us_ : 0;
         std::uint64_t flip = epoch_us_ + (since / period_us_ + 1) * period_us_;
         if (!pending_.empty()) flip = std::max(flip, pending_.back().flip_us + period_us_);
@@ -346,6 +401,8 @@ public:
         suspended_ = true;
         interval_set_ = armed_ = false;
         pending_.clear();
+        present_count_ = 0;  // the clock's phase goes with the registration, which suspend drops
+        request_due_us_ = 0;
         cv_.notify_all();
     }
     // ResumeX: presents work again, but the interval and the origin event must be set up again.
@@ -353,6 +410,8 @@ public:
         std::lock_guard guard(mutex_);
         suspended_ = false;
         interval_set_ = armed_ = false;
+        present_count_ = 0;
+        request_due_us_ = 0;
         cv_.notify_all();
     }
 
@@ -360,6 +419,7 @@ public:
     std::uint64_t tokens_issued() const { std::lock_guard guard(mutex_); return issued_; }
     std::uint32_t frames_in_flight() {
         std::lock_guard guard(mutex_);
+        if (present_driven_) return std::uint32_t(issued_ >= flipped_ ? issued_ - flipped_ : 0);
         retire_locked(clock_.now_us());
         return std::uint32_t(pending_.size());
     }
@@ -373,6 +433,31 @@ public:
     void set_uncapped(bool on) { std::lock_guard guard(mutex_); uncapped_ = on; }
     bool uncapped() const { std::lock_guard guard(mutex_); return uncapped_; }
 
+    // The present-driven clock (PALMETTO_PRESENT_DRIVEN in the shim; see the top comment): the present is the clock.
+    // The flag is set once, before registration, by the environment; turning it off restores the vblank grid, which
+    // the next SetFrameIntervalX re-bases. It survives suspend/resume like the cap flag.
+    void set_present_driven(bool on) {
+        std::lock_guard guard(mutex_);
+        if (present_driven_ == on) return;
+        present_driven_ = on;
+        pending_.clear();      // nothing was shown on the grid this mode is leaving
+        present_count_ = 0;
+        request_due_us_ = 0;
+        if (on && period_us_) cadence_us_ = period_us_;
+        cv_.notify_all();
+    }
+    bool present_driven() const { std::lock_guard guard(mutex_); return present_driven_; }
+    // The observed display cadence the clock is following, in microseconds (0 before an interval is set). Seeded by
+    // SetFrameIntervalX's period and replaced by the presents' own intervals as they are measured.
+    std::uint32_t display_cadence_us() const { std::lock_guard guard(mutex_); return cadence_us_; }
+    // The highest token whose consuming present has happened (the flip watermark).
+    std::uint64_t flipped_token() const { std::lock_guard guard(mutex_); return flipped_; }
+    // Waits let go by the cadence dead-man because no present came to release an in-flight slot.
+    std::uint64_t present_clock_fallbacks() const {
+        std::lock_guard guard(mutex_);
+        return present_clock_fallbacks_;
+    }
+
 private:
     struct Pending {
         std::uint64_t token;
@@ -381,7 +466,7 @@ private:
     };
     struct Record {
         std::uint64_t token = 0, origin_us = 0, present_us = 0, display_us = 0;
-        std::uint64_t due_us = 0;  // vblank after this token's origin, fixed when issued
+        std::uint64_t due_us = 0;  // the frame's deadline: the origin's own vblank (grid), or origin + cadence (present-driven)
         float percent_scanned = 0.0f;
         bool presented = false, displayed = false;
     };
@@ -399,6 +484,112 @@ private:
         }
     }
 
+    // A token's record, in the shared shape: the mode-specific fields are the origin and the deadline.
+    std::int32_t record_token_locked(std::uint64_t token, std::uint64_t origin_us, std::uint64_t due_us) {
+        Record record;
+        record.token = token;
+        record.origin_us = origin_us;
+        record.due_us = due_us;
+        records_.push_back(record);
+        if (records_.size() > 64) records_.pop_front();
+        return pacer_hr::ok;
+    }
+
+    // The present is the clock. A frame's flip (the present that consumes its token) marks it displayed at the
+    // present's time and frees one of the `latency` slots; the frame's own cadence sample is the interval between two
+    // successive flips of new tokens, smoothed and clamped to the declared period's range.
+    void advance_present_clock_locked(std::uint64_t now, std::uint64_t token) {
+        if (present_count_ > 0 && cadence_us_) {
+            const std::uint64_t observed = now > last_present_us_ ? now - last_present_us_ : 0;
+            const std::uint64_t low = std::max<std::uint64_t>(period_us_ / 8, 1000u);
+            const std::uint64_t high = 4ull * period_us_;
+            if (observed >= low && observed <= high) {
+                const std::uint64_t smoothed = (std::uint64_t(cadence_us_) * 7 + observed) / 8;
+                cadence_us_ = std::uint32_t(std::min(smoothed, high));
+            }
+        }
+        if (present_count_ == 0) request_due_us_ = now + cadence_us_;  // the first present anchors the phase
+        last_present_us_ = now;
+        ++present_count_;
+        if (token > flipped_) {
+            flipped_ = token;
+            for (Record& r : records_)
+                if (r.token == token) { r.displayed = true; r.display_us = now; }
+        }
+        cv_.notify_all();
+    }
+
+    // Hand a present-driven token out at the newest origin that has passed (the missed ones are skipped, as on the
+    // grid), and record the deadline as one observed interval later.
+    std::int32_t issue_present_token_locked(std::uint64_t now, std::uint64_t* token) {
+        if (!cadence_us_) cadence_us_ = period_us_ ? period_us_ : 1000;
+        if (request_due_us_ == 0) request_due_us_ = now + cadence_us_;
+        std::uint64_t origin = request_due_us_;
+        if (now >= origin) origin += ((now - origin) / cadence_us_) * cadence_us_;
+        request_due_us_ = origin + cadence_us_;
+        *token = ++issued_;
+        return record_token_locked(*token, origin, origin + cadence_us_);
+    }
+
+    std::int32_t wait_present_driven_locked(std::unique_lock<std::mutex>& lock, std::uint64_t start,
+                                            std::uint64_t give_up, std::uint64_t* token) {
+        for (;;) {
+            if (shutdown_ || suspended_ || !interval_set_ || !armed_) return pacer_hr::invalid_state;
+            const std::uint64_t now = clock_.now_us();
+            // Before the first present there is no displayed frame to follow: the layer cannot wait for a clock that
+            // does not exist yet, and a wait must not stall the title before its first frame.
+            if (present_count_ == 0) return issue_present_token_locked(now, token);
+            const std::uint64_t budget = std::max<std::uint64_t>(latency_, 1u);
+            const bool free_slot = issued_ >= flipped_ && issued_ - flipped_ < budget;
+            if (!free_slot) {
+                // A held wait: the present that flips a frame releases it (the notification), and the dead-man lets it
+                // go if no present ever comes so a title that waits without presenting cannot hang.
+                const std::uint64_t dead_man = start + 4ull * std::max<std::uint64_t>(cadence_us_, 1000u);
+                if (now >= dead_man) {
+                    ++present_clock_fallbacks_;
+                    return issue_present_token_locked(now, token);
+                }
+                if (give_up != no_deadline && now >= give_up) return pacer_hr::timeout;
+                clock_.wait(lock, cv_, give_up == no_deadline ? dead_man : std::min(dead_man, give_up));
+                continue;
+            }
+            // The cadence gate: the next frame event is one observed display interval after the previous origin.
+            const std::uint64_t due = request_due_us_ ? request_due_us_ : now;
+            if (now >= due) return issue_present_token_locked(now, token);
+            if (give_up != no_deadline && now >= give_up) return pacer_hr::timeout;
+            clock_.wait(lock, cv_, give_up == no_deadline ? due : std::min(due, give_up));
+        }
+    }
+
+    std::int32_t wait_flip_locked(std::unique_lock<std::mutex>& lock, std::uint32_t timeout_ms) {
+        const std::uint64_t start = clock_.now_us();
+        const std::uint64_t give_up = timeout_ms == infinite_timeout_ms ? no_deadline
+                                                                         : start + std::uint64_t(timeout_ms) * 1000;
+        const std::uint64_t budget = std::max<std::uint64_t>(latency_, 1u);
+        for (;;) {
+            if (shutdown_ || suspended_ || !interval_set_ || !armed_) return pacer_hr::invalid_state;
+            const std::uint64_t now = clock_.now_us();
+            if (present_driven_) {
+                // No displayed frame yet, or an in-flight slot is free: nothing to wait for. A present that flips a
+                // frame notifies the wait (`commit_present_token`), which then finds its slot and returns.
+                if (present_count_ == 0 || (issued_ >= flipped_ && issued_ - flipped_ < budget)) return pacer_hr::ok;
+                const std::uint64_t dead_man = start + 4ull * std::max<std::uint64_t>(cadence_us_, 1000u);
+                if (now >= dead_man) {
+                    ++present_clock_fallbacks_;
+                    return pacer_hr::ok;
+                }
+                if (give_up != no_deadline && now >= give_up) return pacer_hr::timeout;
+                clock_.wait(lock, cv_, give_up == no_deadline ? dead_man : std::min(dead_man, give_up));
+                continue;
+            }
+            retire_locked(now);
+            if (pending_.size() < budget) return pacer_hr::ok;
+            const std::uint64_t wake = pending_.front().flip_us;  // the oldest frame's vblank
+            if (give_up != no_deadline && now >= give_up) return pacer_hr::timeout;
+            clock_.wait(lock, cv_, give_up == no_deadline ? wake : std::min(wake, give_up));
+        }
+    }
+
     std::int32_t wait_locked(std::unique_lock<std::mutex>& lock, std::uint32_t timeout_ms, std::uint64_t* token) {
         const std::uint64_t start = clock_.now_us();
         const std::uint64_t give_up = timeout_ms == infinite_timeout_ms ? no_deadline
@@ -409,14 +600,9 @@ private:
             retire_locked(now);
             if (uncapped_) {  // no vblank grid and no latency throttle: a token at once, due now
                 *token = ++issued_;
-                Record record;
-                record.token = *token;
-                record.origin_us = now;
-                record.due_us = now;
-                records_.push_back(record);
-                if (records_.size() > 64) records_.pop_front();
-                return pacer_hr::ok;
+                return record_token_locked(*token, now, now);
             }
+            if (present_driven_) return wait_present_driven_locked(lock, start, give_up, token);
             const std::uint64_t first = epoch_us_ + offset_us_;  // origin 0
             const std::int64_t next = last_origin_ + 1;
             const std::uint64_t next_us = first + std::uint64_t(next) * period_us_;
@@ -452,11 +638,19 @@ private:
     bool interval_set_ = false;
     bool armed_ = false;
     bool uncapped_ = false;
+    bool present_driven_ = false;
     std::uint32_t period_us_ = 0;
     std::uint32_t latency_ = 1;
     std::uint32_t offset_us_ = 0;
     std::uint64_t epoch_us_ = 0;
     std::int64_t last_origin_ = 0;  // origin 0 is the epoch itself, which has passed
+    // Present-driven clock state (see the top comment). Only the wireframe above is shared with the grid.
+    std::uint32_t cadence_us_ = 0;        // observed display cadence; seeded by the period
+    std::uint64_t request_due_us_ = 0;    // the next origin a wait may hand a token out at
+    std::uint64_t last_present_us_ = 0;   // the last present that advanced the clock
+    std::uint64_t present_count_ = 0;     // presents that advanced the clock (0: no displayed frame yet)
+    std::uint64_t flipped_ = 0;           // the highest token whose consuming present has happened
+    std::uint64_t present_clock_fallbacks_ = 0;
     std::uint64_t issued_ = 0;
     std::uint64_t last_presented_ = 0;
     std::uint64_t immediate_presents_ = 0;

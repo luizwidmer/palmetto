@@ -13,6 +13,13 @@
 // Every device, queue, fence and resource here is a mock that records the calls it gets. No game data, no Xbox DLLs.
 #include "../shims/d3d12_xs_device.h"
 
+// The frame-event handshake (device slots 78/79/80) that the proxy forwards when the present-driven clock is on
+// (docs/peer_port_first_ui.md, the implemented port). Hook-only, so this GPU-free executable stays free of the Vulkan
+// layer and d3d12_com.h, exactly as the proxy's translation unit does.
+#define PALMETTO_XBOX_PRESENT_HOOK_ONLY
+#include "../shims/xbox_present.h"
+#undef PALMETTO_XBOX_PRESENT_HOOK_ONLY
+
 // Queue slot 31's measured batch layout and the page-mapping hook the proxy calls (docs/cpu_view_mapping.md). This
 // GPU-free executable links no xmem, so the hook is null here unless a check installs its own recorder.
 #include "../shims/xmem.h"
@@ -1328,6 +1335,111 @@ int check_allocators() {
                 "recorded and answered S_OK, tail refused, residency unwrapped, references balanced); others come back "
                 "unwrapped; failures leave no reference\n", g_label);
     return 0;
+}
+
+// ---- 7a. The present-driven frame events: what the proxy forwards (docs/peer_port_first_ui.md, the implemented port) ----
+//
+// With the switch on, the registered frame-event backend answers slots 78/79/80: SetFrameIntervalX and the origin
+// ScheduleFrameEventX are forwarded, the origin poll (event 0, flag 2) hands back the pacer's last token with S_FALSE
+// when no new origin is due, and the event-2 wait is the pacer's blocking flip wait. With the switch off (no backend
+// registered) every answer is the proxy's own, unchanged. The backend is a fake: this executable links no runtime.
+namespace {
+struct FakeFrameEvents {
+    unsigned set_interval = 0, schedule = 0, waits = 0, flips = 0;
+    std::uint32_t interval_us = 0, latency = 0, flags = 0, event = 0, offset_us = 0;
+    bool wait_succeeds = false;
+    std::uint64_t wait_token = 0;
+};
+FakeFrameEvents* g_fake_frame_events = nullptr;
+
+BOOL WINAPI fake_frame_events_enabled() { return g_fake_frame_events ? TRUE : FALSE; }
+HRESULT WINAPI fake_set_frame_interval(std::uint32_t interval_us, std::uint32_t latency, std::uint32_t flags) {
+    if (!g_fake_frame_events) return E_UNEXPECTED;
+    g_fake_frame_events->set_interval += 1;
+    g_fake_frame_events->interval_us = interval_us;
+    g_fake_frame_events->latency = latency;
+    g_fake_frame_events->flags = flags;
+    return S_OK;
+}
+HRESULT WINAPI fake_schedule_frame_event(std::uint32_t event, std::uint32_t offset_us, std::uint32_t flags) {
+    if (!g_fake_frame_events) return E_UNEXPECTED;
+    g_fake_frame_events->schedule += 1;
+    g_fake_frame_events->event = event;
+    g_fake_frame_events->offset_us = offset_us;
+    g_fake_frame_events->flags = flags;
+    return S_OK;
+}
+HRESULT WINAPI fake_wait_frame_event(std::uint32_t, std::uint32_t, std::uint32_t, std::uint64_t* token) {
+    if (!g_fake_frame_events) return E_UNEXPECTED;
+    g_fake_frame_events->waits += 1;
+    if (!g_fake_frame_events->wait_succeeds) return S_FALSE;  // no new origin due
+    *token = g_fake_frame_events->wait_token;
+    return S_OK;
+}
+HRESULT WINAPI fake_wait_flip(std::uint32_t) {
+    if (!g_fake_frame_events) return E_UNEXPECTED;
+    g_fake_frame_events->flips += 1;
+    return S_OK;
+}
+std::uint64_t WINAPI fake_last_token() { return 42; }
+}  // namespace
+
+int check_frame_event_forwarding() {
+#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+    Mock* mock = nullptr;
+    void* device = make_device(mock, 11, true);
+    EXPECT(device != nullptr);
+    FakeFrameEvents fake;
+    const rt::d3d12::XboxFrameEventBackend events{&fake_frame_events_enabled,     &fake_set_frame_interval,
+                                                  &fake_schedule_frame_event,     &fake_wait_frame_event,
+                                                  &fake_wait_flip,                &fake_last_token};
+    rt::d3d12::XboxPresentBackend record{};
+    record.size = sizeof(record);
+    record.version = rt::d3d12::xbox_present_backend_version;
+    record.frame_events = &events;
+    g_fake_frame_events = &fake;
+    rt::d3d12::xbox_present_hook::registered = &record;
+    EXPECT(rt::d3d12::xbox_frame_events_enabled());
+
+    // 78: forwarded to the pacer with the title's measured arguments (period 33333 us, latency 3), not to PC slot 78.
+    EXPECT(hr_of(raw(device, 78, 0, 33333, 3, 0)) == S_OK);
+    EXPECT(fake.set_interval == 1 && fake.interval_us == 33333 && fake.latency == 3 && mock->calls[78] == 0);
+    // 79: the origin event is forwarded; the later frame point (event 2) is kept by the proxy with S_OK.
+    EXPECT(hr_of(raw(device, 79, 0, 0, 0, 0)) == S_OK);
+    EXPECT(fake.schedule == 1 && fake.event == 0 && mock->calls[79] == 0);
+    EXPECT(hr_of(raw(device, 79, 2, 0, 0, 0)) == S_OK);
+    EXPECT(fake.schedule == 1);
+    // 80 event 0, flag 2: no new origin is due, so the poll returns S_FALSE with the pacer's last token (42) written.
+    std::uint64_t token = 0;
+    EXPECT(hr_of(raw(device, 80, 0, 0, 0, 2, word(&token))) == S_FALSE && token == 42 && fake.waits == 1);
+    // 80 event 0, no flag: a new origin is due, the pacer's token and S_OK are passed through.
+    fake.wait_succeeds = true;
+    fake.wait_token = 7;
+    token = 0;
+    EXPECT(hr_of(raw(device, 80, 0, 0xffffffffu, 0, 0, word(&token))) == S_OK && token == 7 && fake.waits == 2);
+    // 80 event 2 (INFINITE): the blocking flip wait, no token written.
+    token = 9;
+    EXPECT(hr_of(raw(device, 80, 2, 0xffffffffu, 0, 0, word(&token))) == S_OK && fake.flips == 1 && token == 9);
+    EXPECT(mock->calls[80] == 0);
+
+    // Switch off (nothing registered): the proxy's own counter answers again, exactly as before.
+    rt::d3d12::xbox_present_hook::registered = nullptr;
+    EXPECT(!rt::d3d12::xbox_frame_events_enabled());
+    token = 0;
+    EXPECT(hr_of(raw(device, 80, 0, 0, 0, 0, word(&token))) == S_OK && token != 0);
+    EXPECT(hr_of(raw(device, 78, 0, 16667, 1, 0)) == S_OK);
+    EXPECT(hr_of(raw(device, 79, 0, 0, 0x1234, 0)) == S_OK);
+    EXPECT(mock->calls[78] == 0 && mock->calls[79] == 0 && mock->calls[80] == 0);
+    EXPECT(release(device) == 0 && mock->refs == 0);
+    std::printf("%s: with the present-driven clock on the proxy forwards slots 78/79/80 to the pacer (interval, origin "
+                "event, the flag-2 origin poll with the last token, the event-2 flip wait) and never reaches the PC "
+                "slots; with it off the old token counter answers, unchanged\n",
+                g_label);
+    return 0;
+#else
+    std::printf("%s: ID3D12Device11 is not in this SDK; the frame-event forwarding case is not built\n", g_label);
+    return 0;
+#endif
 }
 
 // ---- 7. Xbox device slots from the public HLE (48, 73, 78, 79, 80) ----
@@ -3246,7 +3358,8 @@ int main(int argc, char** argv) {
     EXPECT(::SetEnvironmentVariableA("PALMETTO_SLOT70_PAIR", "1") != FALSE);
     if (check_tail(true) || check_queue_console_slots() || check_queue_copy_page_mappings() || check_levels() ||
         check_fence1() || check_create_failures() || check_open_shared() || check_alloc_failures() ||
-        check_allocators() || check_xbox_slots() || check_slot74_and_slot25_standin() ||
+        check_allocators() || check_xbox_slots() || check_frame_event_forwarding() ||
+        check_slot74_and_slot25_standin() ||
         check_console_command_list() || check_allocator_callback_invocation() || check_slot57_graphics_record() ||
         check_slot55_derived_pipeline_state() || check_console_command_signature() ||
         check_console_texture_translation() || check_slot70_console_view())

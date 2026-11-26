@@ -28,12 +28,109 @@ void log_once(bool& done, const char* text) {
     std::fprintf(stderr, "[rt] present: %s\n", text);
 }
 
+// PALMETTO_PRESENT_PACING: the pacing measurement aid (docs/peer_port_first_ui.md, the implemented port's A/B). Off by
+// default; on, the present path prints its token and cadence series and the device proxy prints its frame waits. A
+// measurement switch only: the answers never read it.
+bool pacing_trace() {
+    static const bool on = [] {
+        char* value = nullptr;
+        std::size_t length = 0;
+        bool enabled = false;
+        if (_dupenv_s(&value, &length, "PALMETTO_PRESENT_PACING") == 0 && value) {
+            enabled = value[0] != '\0' && std::strcmp(value, "0") != 0;
+            std::free(value);
+        }
+        return enabled;
+    }();
+    return on;
+}
+
+// The present side of PALMETTO_PRESENT_PACING: the token series and the cadence the pacer is following. The first eight
+// presents and then every thirtieth keep a boot's log small; the number is the present count, not the token.
+void trace_present_pacing(palmetto::FramePacer& pacer, std::uint64_t token) {
+    if (!pacing_trace()) return;
+    static const auto epoch = std::chrono::steady_clock::now();
+    static std::atomic<std::uint64_t> presents{0};
+    const std::uint64_t n = presents.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n > 8 && n % 30 != 0) return;
+    const double at = std::chrono::duration<double>(std::chrono::steady_clock::now() - epoch).count();
+    std::fprintf(stderr,
+                 "[rt] present pacing: present %llu at %.3f s token 0x%llx mode %s cadence %u us flipped 0x%llx "
+                 "fallbacks %llu\n",
+                 static_cast<unsigned long long>(n), at, static_cast<unsigned long long>(token),
+                 pacer.present_driven() ? "present-driven" : "grid", pacer.display_cadence_us(),
+                 static_cast<unsigned long long>(pacer.flipped_token()),
+                 static_cast<unsigned long long>(pacer.present_clock_fallbacks()));
+}
+
+}  // namespace
+
+// ---- The device frame clock: the present-driven token source for device slots 78-80 (PALMETTO_PRESENT_DRIVEN) -----
+// docs/peer_port_first_ui.md, the implemented port. The device proxy's frame events used to be its own atomics: an
+// interval stored and never used, a wait answered at once from a private counter (docs/present_wiring.md section 3).
+// With PALMETTO_PRESENT_DRIVEN on, the same frame handshake is answered here by one process-lifetime FramePacer, and
+// the presenting XboxPresentation commits its presents into it, so the present marks its token flipped and a held wait
+// is released at that present (frame_pacer.h, "Present-driven"). With the switch off the pacer is still the one the
+// runtime presentation uses (byte-identical pacing and token checks), and the device proxy keeps its own answer.
+namespace {
+
+struct DeviceFrameClock {
+    DeviceFrameClock()
+        : clock(std::make_unique<palmetto::SteadyFrameClock>()),
+          pacer(std::make_unique<palmetto::FramePacer>(*clock)) {
+        char* value = nullptr;
+        std::size_t length = 0;
+        bool on = false;
+        if (_dupenv_s(&value, &length, "PALMETTO_PRESENT_DRIVEN") == 0 && value) {
+            on = value[0] != '\0' && std::strcmp(value, "0") != 0;
+            std::free(value);
+        }
+        if (on) {
+            pacer->set_present_driven(true);
+            std::fprintf(stderr,
+                         "[rt] present: PALMETTO_PRESENT_DRIVEN is set: device slots 78/79/80 are answered by the frame "
+                         "pacer, a present marks its token flipped, and a wait held for an in-flight frame is released "
+                         "at that present\n");
+        }
+    }
+    std::unique_ptr<palmetto::SteadyFrameClock> clock;
+    std::unique_ptr<palmetto::FramePacer> pacer;
+    bool enabled() const { return pacer->present_driven(); }
+};
+
+// Leaked on purpose, like the presentation service: the window and swapchain outlive the CRT's static teardown, and a
+// pacer destructor waiting on a condition variable after that would race it.
+DeviceFrameClock& device_frame_clock() {
+    static DeviceFrameClock* const service = new DeviceFrameClock;
+    return *service;
+}
+palmetto::FramePacer& device_frame_clock_pacer() { return *device_frame_clock().pacer; }
+
+BOOL WINAPI frame_events_enabled() { return device_frame_clock().enabled() ? TRUE : FALSE; }
+HRESULT WINAPI frame_events_set_interval(std::uint32_t interval_us, std::uint32_t latency, std::uint32_t flags) {
+    return from_pacer(device_frame_clock_pacer().set_frame_interval(interval_us, latency, flags));
+}
+HRESULT WINAPI frame_events_schedule(std::uint32_t event, std::uint32_t offset_us, std::uint32_t flags) {
+    return from_pacer(device_frame_clock_pacer().schedule_frame_event(event, offset_us, flags));
+}
+HRESULT WINAPI frame_events_wait(std::uint32_t event, std::uint32_t timeout_ms, std::uint32_t flags,
+                                 std::uint64_t* token) {
+    return from_pacer(device_frame_clock_pacer().wait_frame_event(event, timeout_ms, flags, token));
+}
+HRESULT WINAPI frame_events_wait_flip(std::uint32_t timeout_ms) {
+    return from_pacer(device_frame_clock_pacer().wait_flip(timeout_ms));
+}
+std::uint64_t WINAPI frame_events_last_token() { return device_frame_clock_pacer().last_issued_token(); }
+const XboxFrameEventBackend g_frame_event_backend{&frame_events_enabled, &frame_events_set_interval,
+                                                  &frame_events_schedule,  &frame_events_wait,
+                                                  &frame_events_wait_flip, &frame_events_last_token};
+
 }  // namespace
 
 XboxPresentation::XboxPresentation(std::unique_ptr<WindowPresenter> presenter, palmetto::FrameClock* clock)
     : presenter_(std::move(presenter)),
-      own_clock_(clock ? nullptr : std::make_unique<palmetto::SteadyFrameClock>()),
-      pacer_(clock ? *clock : *own_clock_) {
+      own_pacer_(clock ? std::make_unique<palmetto::FramePacer>(*clock) : nullptr),
+      pacer_(clock ? *own_pacer_ : device_frame_clock_pacer()) {
     // A present waiting for a swapchain image gives up once SuspendX has been called.
     presenter_->set_abort([this] { return pacer_.suspended(); });
     // PALMETTO_SDR_EOTF=gamma22 (or 2.2, any case) decodes SDR with a pure power of 2.2 instead of piecewise sRGB; "srgb" or
@@ -113,7 +210,15 @@ HRESULT XboxPresentation::ScheduleFrameEventX(UINT event, UINT offset_us, UINT f
 }
 
 HRESULT XboxPresentation::WaitFrameEventX(UINT event, DWORD timeout_ms, UINT flags, std::uint64_t* token) {
-    return from_pacer(pacer_.wait_frame_event(event, timeout_ms, flags, token));
+    // The title's measured frame handshake has two calls: event 0 (origin) is the token handshake, and event 2, waited
+    // on with an INFINITE timeout before the frame's work, is the blocking flip wait (decompiled call sites
+    // game+0x248244E and game+0x248240B; docs/display_path.md section 4). The origin wait issues tokens; the flip wait
+    // carries none and is released by the present that flips an in-flight frame. Any other event is a later frame
+    // point, which this layer treats as a flip wait as well.
+    if (event == xbox_frame_event_origin) return from_pacer(pacer_.wait_frame_event(event, timeout_ms, flags, token));
+    (void)token;  // event 2 and the later frame points: the flip wait carries no token
+    if (event >= 1 && event <= 2) return from_pacer(pacer_.wait_flip(timeout_ms));
+    return E_INVALIDARG;  // an event value the public frame points do not cover
 }
 
 HRESULT XboxPresentation::GetFrameStatisticsX(std::uint64_t token, UINT type_mask, UINT* count,
@@ -162,6 +267,7 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
         if (SUCCEEDED(result)) {
             pacer_.note_untokened_present();
             ++presents_;
+            trace_present_pacing(pacer_, 0);
         }
         return result;
     }
@@ -303,6 +409,7 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
                                     tear && presenter_->last_present_tore() ? palmetto::PresentSync::immediate
                                                                             : palmetto::PresentSync::vblank);
         ++presents_;
+        trace_present_pacing(pacer_, token);
         return S_OK;
     }
 
@@ -334,6 +441,7 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
                                 tear && presenter_->last_present_tore() ? palmetto::PresentSync::immediate
                                                                         : palmetto::PresentSync::vblank);
     ++presents_;
+    trace_present_pacing(pacer_, token);
     return S_OK;
 }
 
@@ -697,6 +805,7 @@ const XboxPresentBackend* create_xbox_present_backend(ID3D12Device* device) {
     g_backend_record.create_window_presenter = &create_window_presenter_pointer;
     g_backend_record.present = &present_to_queue;
     g_backend_record.note_issued_token = &note_issued_token;
+    g_backend_record.frame_events = &g_frame_event_backend;  // the present-driven frame events (PALMETTO_PRESENT_DRIVEN)
     return &g_backend_record;
 }
 

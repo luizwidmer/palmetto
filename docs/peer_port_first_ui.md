@@ -227,6 +227,10 @@ programme, and its P1/P2 are the present-side measurements those audits can arm 
   `tests/test_docs_table_rows.py` and the rest of `tests/test_docs_*.py`); it names no build or test result, so no
   `PALMETTO_OK`/`TESTS_BUILT` pair is claimed for this slice.
 
+Section 10 above is the record of the audit slice that wrote this page only. Section 12 is the later, separately gated
+implementation of the page's P1 port: it does change runtime and test files, it did run boots, and its own files and
+gates are listed there.
+
 ## 11. No-copy and attribution statement
 
 This page and the plan it carries were written from this project's own measurements of the user's own image and boots,
@@ -245,3 +249,175 @@ continue to apply to their own trees:
 
 No game data, package path, shader byte, extracted table, save file or account value appears in this page; RVAs, counts,
 HRESULTs, API names, times and image means only.
+
+## 12. The implemented port: a present-driven frame clock and flip token (P1)
+
+This section is the record of the P1 slice in section 7. It was built from this tree's own measurements, with the peers'
+mechanisms read as evidence only, as [upstream_port.md](upstream_port.md) requires; section 12.7 repeats the credit.
+
+### 12.1 What was measured before the port
+
+The device frame handshake and the present path were measured on the current tree with a light boot of the section-12
+content environment, the class-0xa mitigation on, `PALMETTO_XS_CALLERS=1` with the caller profile and
+`PALMETTO_PRESENT_PACING=1` (the measurement switch this slice adds; it changes no answer). The call sites and argument
+words are the title's own, at the image RVAs below.
+
+| measurement | value and where |
+|---|---|
+| interval call | `game+0x247ABDE` calls device slot 78 `SetFrameIntervalX` with (output null, period `0x8235` = 33,333 us, latency 3, flags `0x100000000`); the device proxy stored both numbers in its own atomics and no clock read them |
+| schedule calls | `game+0x247AC02` schedules event 0; `game+0x2478DEA` schedules event 2; both were answered `S_OK` by the device proxy, which keeps one "scheduled" flag |
+| origin poll | `game+0x248244E` calls device slot 80 `WaitFrameEventX(event 0, timeout 0, flags 2, &[image+0x75E0E88])`; the submit at `game+0x2482660` reads that word back as the frame token, so this poll is the token handshake |
+| flip wait | `game+0x248240B` calls device slot 80 `WaitFrameEventX(event 2, timeout INFINITE, flags 0, ...)` in the same frame function, before the origin poll: the blocking flip wait of the peers' handshake |
+| token source and series | the device proxy's own counter issued every token, both call sites included, so a frame presented tokens 1, 3, 5, 7, 9, 11, 13 ... after the first; the pacer never issued one, never flipped one, and `PALMETTO_PRESENT_PACING` printed `mode grid cadence 0 us flipped 0x0` at every present |
+| present path | `PresentX` (queue slot 32) once per frame through the registered window presenter; because no interval reached the pacer, `sync_interval` was 0 (unpaced: not FIFO) and the frame-token bridge accepted the reported tokens |
+| frame-pacing effect at boot | the 50 s control arm traced 1,338 `PresentX ok`; 1,320 presents at 27.898 s, about 47 presents per second at that sample; captures every 200 frames, seven of them, all mean rgb `0.00 0.00 0.00` |
+
+### 12.2 What was implemented
+
+**The pacer is the clock** (`port/src/frame_pacer.h`, `set_present_driven`; on with `PALMETTO_PRESENT_DRIVEN=1` in the
+presentation core). In this mode:
+
+* **A wait hands out the token.** Token 1 is issued at once, before any present: the layer has no displayed frame to
+  follow yet and must not stall the title before its first frame. After that one token is issued per origin, never
+  reused.
+* **The present marks its token flipped.** `commit_present_token` is the frame's flip: it marks the record presented and
+  displayed at the present's own time, frees one of the `latency` in-flight slots, and notifies the waiters. This is the
+  "present marks the frame token flipped" of XCL and the "held waits released at a present" of Five Star Recomp, in our
+  state machine.
+* **The blocking flip wait is a separate call.** `wait_flip` issues no token; it returns when a present has flipped an
+  in-flight frame, so a caller that keeps `latency` frames queued is released exactly at that present. The measured
+  event-2 INFINITE call is that wait.
+* **The pacing follows the observed display cadence.** The first present anchors the phase; the period seed is
+  `SetFrameIntervalX`'s 33,333 us and every tokened present replaces it with a smoothed (1/8 weight) interval between
+  presents, clamped to a quarter-to-four-times the declared period. A repeated or stale token, and a blank present,
+  carry no new frame and never move the clock. The measured ON arm's cadence settled at 29,167 us at the last sample.
+* **A dead-man keeps the boot alive.** A flip wait whose present never comes is released after four observed cadences
+  (counted in `present_clock_fallbacks()`); a title that waits without presenting cannot hang on the handshake.
+
+The pacer stays the existing grid implementation when the switch is off, byte for byte: the early return of the old
+branches, the same tokens, the same statistics. The existing tests are unchanged and pass, which is the off-state proof.
+
+**One clock for the device and the presentation** (`port/shims/xbox_present.cpp`). A process-lifetime `FramePacer`
+(real steady clock) answers device slots 78/79/80 and is the pacer the runtime's `XboxPresentation` commits its presents
+into; a presentation constructed with a test clock still owns its own pacer. `port/shims/xbox_present.h` adds the
+hook-only `XboxFrameEventBackend` (backend record version 2) with the interval, schedule, origin-wait, flip-wait and
+last-token calls.
+
+**The two measured frame waits** (`port/shims/d3d12_xs_device.cpp`, slots 78-80). With the switch on, the device proxy
+forwards the handshake to that pacer instead of its atomics: `SetFrameIntervalX` registers the interval, the event-0
+schedule arms the origin, the event-0 poll hands back a new origin token or, when no origin is due, the last token with
+`S_FALSE` (the public flag-2 rule: the token is written on the timeout); the event-2 wait is the pacer's flip wait. Any
+hard refusal (not registered, suspended) falls back to the proxy's old fresh-token answer, so a foreground frame call
+can never wedge a boot. The interval now reaches the pacer, so registered presents also go through the FIFO present mode
+(sync interval 1) instead of the unpaced path: the "vsync present paces the title" of PercyScarlett's layer.
+
+`PALMETTO_PRESENT_PACING=1` is the measurement aid for the A/B: the present path prints the first eight presents and
+every thirtieth (time, token, mode, cadence, flipped watermark, dead-man count), and the device proxy prints the same
+series for the frame waits with the answering side (`pacer` or `device-proxy`). It is off by default and changes no
+answer.
+
+### 12.3 Tests
+
+* `port/test/frame_pacer_test.cpp`: new pure state-machine cases for present-driven mode - the first token before any
+  present and the flip wait before a present both return at once; the first present anchors the phase and the next
+  origin is exactly one declared period later; the present and display statistics both carry the present's time; a
+  zero-timeout origin poll times out and leaves the token alone while `last_issued_token()` still names the held one; a
+  repeated and the null token do not move the flipped watermark or the cadence; one present consumes one token; the
+  blocking flip wait is released exactly at the present that flips the frame and not by time passing; a 1 ms timeout
+  still times out; the cadence dead-man releases a held token wait with the fallback counted; a late present widens the
+  cadence (observed 30,000 us, smoothed 17,750 us) and the next origin follows it; suspend fails a held wait and
+  resume keeps the mode. The existing grid cases are unchanged and still pass.
+* `port/test/xbox_present_test.cpp`: a present-driven case on its own window, Vulkan presenter and `ManualFrameClock` -
+  `WaitFrameEventX(event 0, 0)` returns token 1 with no present, `WaitFrameEventX(event 2)` returns at once, the
+  `PresentX` of token 1 marks it flipped and fills its display statistic at fake time 0, the zero-timeout poll then
+  returns `HRESULT_FROM_WIN32(WAIT_TIMEOUT)` with the token untouched, the next origin arrives one cadence later, and
+  the event-2 flip wait is held while token 2 is unpresented and released by token 2's present.
+* `port/test/xs_proxy_mock_test.cpp`: a GPU-free forwarding case with a fake registered `XboxFrameEventBackend` - slots
+  78 and the event-0 schedule are forwarded (the PC slots never reached), the event-2 schedule keeps the proxy's record,
+  the event-0 flag-2 poll returns `S_FALSE` with the pacer's last token, an event-0 success passes the pacer's token
+  through, event 2 reaches the flip wait with the token untouched, and with nothing registered the old counter answers
+  exactly as before.
+
+Results: `frame_pacer_test: all cases pass`, `xbox_present_test: all cases pass`, `xs_proxy_mock_test: PASS`; the gates
+printed `PALMETTO_OK` and `TESTS_BUILT`.
+
+### 12.4 A/B measurement
+
+One light pair, one boot at a time under `_setup/boot_lock.ps1`, the section-12 content environment from the boot
+template, the class-0xa mitigation (`PALMETTO_TITLE_CLASS0A_SIZE=1`), `PALMETTO_PRESENT_PACING=1` in both arms and
+`PALMETTO_PRESENT_DRIVEN=1` in the ON arm only; 50 s limit per arm, stopped at the harness timeout in both (no device
+lost inside the window; the first two attempts at the full 130 s both hit the host device-loss race the page records,
+`[rt] replay: the Vulkan device was lost`, at 57.7 s and 58.2 s, so the pair was shortened before that point, per the
+stop-after-two-losses rule).
+
+| measurement (same 50 s window) | OFF arm (control) | ON arm (present-driven) |
+|---|---|---|
+| `PresentX ok` at the kill | 1,338 | 1,177 |
+| presents at the last pacing sample (27.9 s) | 1,320 | 1,170 (about 12% fewer) |
+| present cadence the pacer used | 0 us: grid mode, the pacer was not the clock | 33,333 us seed, then 32,769 -> 31,523 -> 29,167 us; it followed the presents |
+| presented token series | 1, 2, 3, 5, 7, 9, 11, 13 ... (a fresh device-proxy token per wait call, then +2 per frame) | 1, 2, 3, 4, 4, 5, 5, 6 ... (one pacer origin token per frame; the flag-2 poll holds the last token, so a repeated token is presented again) |
+| event-0 origin polls | answered by the device-proxy counter (`device-proxy`), token per call | answered by the pacer: a new token when the origin is due, the held last token with `S_FALSE` otherwise |
+| event-2 INFINITE waits | answered by the device-proxy counter (`device-proxy`), fresh token, never blocks | the pacer's flip wait (`pacer`), token 0x0, released at the present that flips an in-flight frame |
+| frame waits at 28.7-29.0 s | 2,640 | 2,340 (fewer because fewer frames) |
+| state words in the window (last sample 44 s) | init 2 (change at 22.0 s), loading 1 (22.0 s), session 0, machine current/next 2/2, boot-media gate 0x2 active 0xff000000 flag 0x0, movie slot 0 entity 0, front-end ready 1 running 1 | identical to the control at the same sample: init 2 (22.0 s), loading 1 (22.0 s), session 0, machine 2/2, gate 0x2 active 0xff000000 flag 0x0, movie entity 0, front-end ready 1 running 1 |
+| captures and pixels | 7 of the every-200-frame captures, all mean rgb `0.00 0.00 0.00` | 6 captures, all mean rgb `0.00 0.00 0.00` |
+| stop site / device lost | ALIVE at the 50 s timeout, 0 exceptions, no device-lost line | ALIVE at the 50 s timeout, 1 trace exception `0x406d1388` (a thread-name exception from the display driver, not a stop), no device-lost line |
+
+**Verdict: the present handshake moved, the title's state did not.** The pacer owned the tokens, the two measured waits
+went through the flip-token state machine, and the present cadence became the observed one (about 12% fewer presents in
+the same window); the loading/session/stage words, the boot-media keys, the movie slot and the capture means are the
+control's exactly. The frame heartbeat is not in this table: the stage-3 pump never armed in a 50 s window, so no
+heartbeat advance count exists for either arm. This is the P1 falsifier's shape read the other way round from a
+null result: the handshake is measurably different and the first-run/UI producer is still behind its state step, which
+keeps the producer ranking of section 6.
+
+### 12.5 Limits and the next falsifier
+
+* **The beat is one 50 s window per arm, and it is shorter than the state step.** The loading 1 -> 2 and session 0 -> 1
+  transitions in this content arrive at about 54 s; the pair ended before them. A slower or faster arm would move the
+  state words without the port being the cause.
+* **The heartbeat count is unmeasured.** The stage-3 pump is the only probe that counts it and stage 3 was not reached;
+  the next run should carry the pair to the first stage-3 sample and compare "advances since stage 3" between ON and
+  OFF.
+* **The event-2 wait's exact console condition is a model.** The measured call site gives the event, the INFINITE
+  timeout and the position in the frame function; that it is a latency/flip wait and not a wait on a later point of the
+  same frame is our reading, tested as a state machine but not against the console.
+* **The forwarding can fall back silently by design.** A refusal of the pacer (suspended, not registered) leaves the old
+  device-proxy answer, so an ON arm that never reaches the pacer would look like the control; the ON arm's wait trace
+  shows `pacer` on both call sites, so that fallback did not run here.
+* **`GetFrameStatisticsX` (device slot 81) still answers the beyond-vtable stub**, so the title's statistics calls
+  cannot observe the new flip times yet. That is the next small slice after the heartbeat measurement.
+* **The pacer's own presentation is unpaced when the switch is off on purpose**, and the off arm is the proof that the
+  default path is unchanged.
+
+### 12.6 Files, gates and the index row
+
+The slice changes `port/src/frame_pacer.h`, `port/shims/xbox_present.h`, `port/shims/xbox_present.cpp`,
+`port/shims/d3d12_xs_device.cpp` (slots 78-80 and the measurement probe only), `port/test/frame_pacer_test.cpp`,
+`port/test/xbox_present_test.cpp`, `port/test/xs_proxy_mock_test.cpp` and this page. It does not edit the files another
+slice owns (`port/src/deferred_compile.h`, `port/src/vulkan_backend.h`, `port/shims/d3d12_vulkan_device.cpp`), the
+README or NOTICE. Gates: `PALMETTO_OK` for the runtime with these sources, `TESTS_BUILT`, the three tests above pass,
+and of the docs checks the ones this page can affect pass (`test_docs_links.py`, `test_docs_list_items.py`,
+`test_docs_repo_paths.py`, `test_docs_encoding.py`, `test_docs_repeated_lines.py`, `test_docs_table_rows.py`,
+`test_docs_table_ids.py`, `test_docs_design_rows.py`, `test_docs_pr_template.py`, `test_docs_python_deps.py`); the two
+failures the suite still reports are other slices' (`_setup/xcl/HANDOFF.md` CLI flags and the `PALMETTO_PIPELINE_HOLD*`
+variables a concurrent slice introduced), not this page's. No git write was made; the lead commits the uncommitted list
+from the slice report.
+
+The index row for [docs/README.md](README.md) is the lead's: one line next to the other peer-port pages pointing at
+this page. The [NOTICE.md](../NOTICE.md) row for this slice is the attribution in 12.7, adding the peer files and
+commits to the existing peer-port first-visible-frame section.
+
+### 12.7 Attribution
+
+This slice was implemented from this project's own measurements. The behaviour was cross-checked against the public
+GPL-3.0 projects named in section 11, files and commits as follows: VIctory's `crates/victory-gpu/src/frame.rs` and
+`queue.rs` at `63bcca4` (a token per origin and a blocking flip wait before a present), Five Star Recomp's
+[d3d12x-shim.md](https://github.com/ThatRecompDev/five-star-recomp/blob/45071d52/docs/d3d12x-shim.md) at `45071d52`
+(a token used up by a present, held waits released at a present), XCL's
+`crates/xcl/src/hle/d3d12x/present.rs` at `8b957be` (a present marks the frame token flipped, and the flag-2 token on
+timeout), and PercyScarlett's `runtime/victory/apps/victory/src/run.rs` at `e44c465` (a vsync present pacing the title).
+No code, comment text, identifier or table from those projects was copied into this tree: the state machine, the
+callbacks and the tests are ours, derived from the call sites and boots above. The peers remain the copyright of their
+contributors and their licences continue to apply to their own trees.
+

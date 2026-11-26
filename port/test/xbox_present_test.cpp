@@ -27,6 +27,7 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <io.h>
 #include <iterator>
 #include <string>
@@ -744,7 +745,88 @@ int main() {
             DestroyWindow(bridge_window);
         }
 
-        // ---- The registered PresentX path (docs/present_wiring.md): what the queue proxy will call ----
+        // ---- The present-driven clock (docs/peer_port_first_ui.md, the implemented port; frame_pacer.h "Present-driven")
+        // The switch on its own presentation with the fake clock: the present is the clock. Token 1 comes at once before
+        // any present, the present marks its token flipped (the display statistic is the present's time), the next
+        // origin is one observed cadence after it, the event-2 flip wait is released exactly at the present that frees
+        // an in-flight slot, and a zero-timeout origin poll times out without moving the token.
+        {
+            WNDCLASSW frame_class{};
+            frame_class.lpfnWndProc = window_proc;
+            frame_class.hInstance = GetModuleHandleW(nullptr);
+            frame_class.lpszClassName = L"PalmettoXboxPresentFrameTest";
+            frame_class.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
+            if (!RegisterClassW(&frame_class)) EXPECT(GetLastError() == ERROR_CLASS_ALREADY_EXISTS);
+            RECT frame_rect{0, 0, LONG(width), LONG(height)};
+            AdjustWindowRect(&frame_rect, WS_OVERLAPPEDWINDOW, FALSE);
+            HWND frame_window = CreateWindowExW(0, frame_class.lpszClassName, L"Palmetto: PresentX present-driven clock",
+                                                WS_OVERLAPPEDWINDOW, 100, 100, frame_rect.right - frame_rect.left,
+                                                frame_rect.bottom - frame_rect.top, nullptr, nullptr,
+                                                frame_class.hInstance, nullptr);
+            EXPECT(frame_window != nullptr);
+            ShowWindow(frame_window, SW_SHOWNOACTIVATE);
+            UpdateWindow(frame_window);
+            pump();
+            auto frame_presenter = rt::d3d12::create_window_presenter(inner, frame_window);
+            EXPECT(frame_presenter && frame_presenter->enable_capture());
+            palmetto::ManualFrameClock frame_clock;
+            rt::d3d12::XboxPresentation driven(std::move(frame_presenter), &frame_clock);
+            palmetto::FramePacer& pacer = driven.pacer();
+            pacer.set_present_driven(true);
+            EXPECT(pacer.present_driven());
+            EXPECT(SUCCEEDED(driven.SetFrameIntervalX(nullptr, period, 1, 0)));
+            EXPECT(SUCCEEDED(driven.ScheduleFrameEventX(rt::d3d12::xbox_frame_event_origin, 0, 0)));
+            Source driven_source;
+            EXPECT(make_source(DXGI_FORMAT_R8G8B8A8_UNORM, driven_source));
+            const auto driven_plane = [&](std::uint64_t t) {
+                return rt::d3d12::XboxPresentPlaneParameters{t, 1, &driven_source.resource.p, nullptr, 0};
+            };
+            // Before the first present there is no displayed frame: the origin hands out the first token at once, the
+            // flip wait has nothing to hold, and no clock has been anchored yet.
+            std::uint64_t driven_token = 0;
+            EXPECT(driven.WaitFrameEventX(rt::d3d12::xbox_frame_event_origin, 0, 0, &driven_token) == S_OK &&
+                   driven_token == 1);
+            EXPECT(driven.WaitFrameEventX(2, 0, 0, nullptr) == S_OK);
+            EXPECT(pacer.frames_in_flight() == 1);  // token 1 is issued but no present has flipped it yet
+            EXPECT(pacer.flipped_token() == 0);
+            auto driven_p = driven_plane(driven_token);
+            EXPECT(driven.PresentX(1, &driven_p, nullptr) == S_OK);
+            EXPECT(pacer.flipped_token() == 1);  // the consuming present marks the token flipped
+            EXPECT(pacer.display_cadence_us() == period);
+            UINT driven_count = 2;
+            palmetto::FrameStatistic driven_stats[2];
+            EXPECT(driven.GetFrameStatisticsX(1, palmetto::stat_present | palmetto::stat_display, &driven_count,
+                                              driven_stats) == S_OK && driven_count == 2 &&
+                   driven_stats[1].time_us == 0);  // the present happened at fake time 0
+            // The next origin is one cadence after the present: a zero-timeout poll times out and leaves the token.
+            driven_token = 77;
+            EXPECT(driven.WaitFrameEventX(rt::d3d12::xbox_frame_event_origin, 0, 0, &driven_token) ==
+                       HRESULT_FROM_WIN32(WAIT_TIMEOUT) && driven_token == 77);
+            EXPECT(driven.WaitFrameEventX(2, 0, 0, nullptr) == S_OK);  // one slot free: the flip wait does not hold
+            std::future<HRESULT> driven_wait = std::async(std::launch::async, [&driven, &driven_token] {
+                return driven.WaitFrameEventX(rt::d3d12::xbox_frame_event_origin, 0xFFFFFFFFu, 0, &driven_token);
+            });
+            EXPECT(driven_wait.wait_for(std::chrono::milliseconds(40)) == std::future_status::timeout);
+            frame_clock.advance_us(period);
+            EXPECT(driven_wait.get() == S_OK && driven_token == 2);
+            // Token 2 is issued but not presented: the latency slot is used, so the event-2 flip wait is held and is
+            // released by exactly the present that flips the frame.
+            std::future<HRESULT> driven_flip = std::async(std::launch::async, [&driven] {
+                return driven.WaitFrameEventX(2, 0xFFFFFFFFu, 0, nullptr);
+            });
+            EXPECT(driven_flip.wait_for(std::chrono::milliseconds(40)) == std::future_status::timeout);
+            frame_clock.advance_us(period / 2);  // time alone does not release it
+            EXPECT(driven_flip.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+            driven_p = driven_plane(2);
+            EXPECT(driven.PresentX(1, &driven_p, nullptr) == S_OK);
+            EXPECT(driven_flip.get() == S_OK);  // released exactly at that present
+            EXPECT(pacer.flipped_token() == 2);
+            std::printf("present-driven clock: token 1 at once before any present, the present flips its token, the "
+                        "zero-timeout origin poll times out, the event-2 flip wait is released at the present: ok\n");
+            DestroyWindow(frame_window);
+        }
+
+
         // A real backend record over the test's Vulkan device, registered through the palmetto_register_* hook, and a
         // frame presented the way the queue proxy's console PresentX will present it: a token the device proxy issued
         // and reported, a plane array of the console layout. The presentation service makes its own window and

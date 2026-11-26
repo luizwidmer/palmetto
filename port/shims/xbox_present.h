@@ -120,8 +120,9 @@ struct XboxPresentParameters {
 // presenter. Not part of the hook-only layer, see the include guard at the top.
 class XboxPresentation {
 public:
-    // `clock` null: real time (a steady high-resolution timer). Tests pass a palmetto::ManualFrameClock, which must
-    // outlive this object. `presenter` is what create_window_presenter returned.
+    // `clock` null: the process's shared device frame clock (the present-driven clock the device frame-event slots use,
+    // see XboxPresentBackend::frame_events; real time). Tests pass a palmetto::ManualFrameClock, which must outlive this
+    // object, and then this presentation owns its pacer as before. `presenter` is what create_window_presenter returned.
     explicit XboxPresentation(std::unique_ptr<WindowPresenter> presenter, palmetto::FrameClock* clock = nullptr);
     ~XboxPresentation();
     XboxPresentation(const XboxPresentation&) = delete;
@@ -144,15 +145,17 @@ public:
     // See FramePacer::get_frame_statistics: S_FALSE and count 0 when nothing is available.
     HRESULT GetFrameStatisticsX(std::uint64_t token, UINT type_mask, UINT* count, palmetto::FrameStatistic* out);
 
-    // The frame-token bridge (docs/present_wiring.md, "the token rule"): the runtime's device proxy answers
-    // WaitFrameEventX from its own counter (device slots 78/79/80 belong to it today), so the frame tokens the title
-    // presents were never issued by this object's FramePacer, which refuses them. The device proxy reports every token
-    // it hands out here before returning it to the title; a present carrying a reported token is then accepted. The
-    // pacer's own checks are untouched: a token the pacer issued is checked exactly as before, and a token past both
-    // counters (handed out by nobody) is still E_INVALIDARG. An externally issued token has no pacer record, so it
-    // gets no GetFrameStatisticsX entry and cannot be shown mid-scan by ImmediateThresholdPercent; it shows at the next
-    // vblank. Failure mode: a missed report leaves exactly the old refusal (E_INVALIDARG), so the report has to happen
-    // before the token reaches the title's PresentX.
+    // The frame-token bridge (docs/present_wiring.md, "the token rule"): with the present-driven clock off, the
+    // runtime's device proxy answers WaitFrameEventX from its own counter (device slots 78/79/80 belong to it), so the
+    // frame tokens the title presents were never issued by this object's FramePacer, which refuses them. The device
+    // proxy reports every token it hands out here before returning it to the title; a present carrying a reported token
+    // is then accepted. The pacer's own checks are untouched: a token the pacer issued is checked exactly as before,
+    // and a token past both counters (handed out by nobody) is still E_INVALIDARG. With the present-driven clock on
+    // (PALMETTO_PRESENT_DRIVEN=1), the proxy issues no token itself: it forwards slots 78-80 to the shared pacer and
+    // this bridge is not used. An externally issued token has no pacer record, so it gets no GetFrameStatisticsX entry
+    // and cannot be shown mid-scan by ImmediateThresholdPercent; it shows at the next vblank. Failure mode: a missed
+    // report leaves exactly the old refusal (E_INVALIDARG), so the report has to happen before the token reaches the
+    // title's PresentX.
     void note_externally_issued_frame_token(std::uint64_t token);
     // Highest token the bridge has heard of (0: none). For tests and the once-only log line.
     std::uint64_t externally_issued_frame_token() const {
@@ -217,8 +220,10 @@ private:
     float effective_sdr_white_nits();  // override, else the cached Windows setting while HDR10, else 203
     void display_white_worker();       // refreshes display_white_ off the present path
     std::unique_ptr<WindowPresenter> presenter_;
-    std::unique_ptr<palmetto::FrameClock> own_clock_;
-    palmetto::FramePacer pacer_;
+    // Only when the caller supplied a clock (tests): the pacer is this object's and uses that clock. In the runtime the
+    // pacer is the process's shared device frame clock, so the device frame-event slots and the present commit share one.
+    std::unique_ptr<palmetto::FramePacer> own_pacer_;
+    palmetto::FramePacer& pacer_;
     std::mutex present_mutex_;  // PresentX, SuspendX and ResumeX one at a time
     std::atomic<std::uint64_t> presents_{0};
     std::atomic<std::uint64_t> externally_issued_token_{0};  // frame-token bridge watermark (highest reported token)
@@ -330,8 +335,38 @@ using XboxPresentToQueueCall = HRESULT(WINAPI*)(void* queue, std::uint32_t plane
                                                 const XboxPresentPlaneParameters* planes,
                                                 const XboxPresentParameters* params);
 // Device slot 80 (WaitFrameEventX) handed out `token`: the device proxy reports it here before the title can present it.
-// This is the other half of the frame-token bridge (XboxPresentation::note_externally_issued_frame_token).
+// This is the other half of the frame-token bridge (XboxPresentation::note_externally_issued_frame_token). With the
+// present-driven clock on the device proxy issues no token and reports nothing: the frame events are the pacer's.
 using XboxPresentTokenIssuedCall = void(WINAPI*)(std::uint64_t token);
+
+// ---- The device frame events, owned by the pacer (the present-driven clock) --------------------------------------
+// Device slots 78 (SetFrameIntervalX), 79 (ScheduleFrameEventX) and 80 (WaitFrameEventX) are the frame handshake. With
+// PALMETTO_PRESENT_DRIVEN on, xbox_present.cpp answers them from one process-lifetime FramePacer (the same pacer the
+// presenting XboxPresentation commits its presents into), so the pacer is the token source and a present marks its
+// frame token flipped (frame_pacer.h, "Present-driven"). The device proxy calls these through the registered record;
+// `enabled` false means the proxy keeps its own immediate-token answer, byte for byte the behaviour without the
+// switch. The wait may block (that is the point: a held wait is released at the present that flips a frame); the
+// proxy falls back to its own token on any failure, so a failure here cannot wedge a boot.
+using XboxFrameEventEnabledCall = BOOL(WINAPI*)();
+using XboxFrameEventSetIntervalCall = HRESULT(WINAPI*)(std::uint32_t interval_us, std::uint32_t latency,
+                                                      std::uint32_t flags);
+using XboxFrameEventScheduleCall = HRESULT(WINAPI*)(std::uint32_t event, std::uint32_t offset_us, std::uint32_t flags);
+using XboxFrameEventWaitCall = HRESULT(WINAPI*)(std::uint32_t event, std::uint32_t timeout_ms, std::uint32_t flags,
+                                                std::uint64_t* token);
+// Event 2 and the later frame points: the blocking flip wait (the title's measured event-2 wait, INFINITE). No token
+// is issued; the wait is released by the present that flips an in-flight frame.
+using XboxFrameEventWaitFlipCall = HRESULT(WINAPI*)(std::uint32_t timeout_ms);
+// The last token the origin wait handed out (0: none). The origin poll's flag 2 writes it when no new origin is due.
+using XboxFrameEventLastTokenCall = std::uint64_t(WINAPI*)();
+
+struct XboxFrameEventBackend {
+    XboxFrameEventEnabledCall enabled = nullptr;  // non-zero: the calls below answer the frame events
+    XboxFrameEventSetIntervalCall set_frame_interval = nullptr;
+    XboxFrameEventScheduleCall schedule_frame_event = nullptr;
+    XboxFrameEventWaitCall wait_frame_event = nullptr;
+    XboxFrameEventWaitFlipCall wait_flip = nullptr;
+    XboxFrameEventLastTokenCall last_token = nullptr;
+};
 
 // What the Vulkan backend registers: its window presenter factory over the PC device, plus the presentation core's
 // callbacks, which create_xbox_present_backend fills in (a backend does not set them by hand).
@@ -345,11 +380,13 @@ struct XboxPresentBackend {
     // presenter over `device` and `window`, or null when that device cannot present. Ownership of the result goes to
     // the presentation service. This is the "window presenter factory" of the registration.
     WindowPresenter* (*create_window_presenter)(ID3D12Device* device, HWND window) = nullptr;
-    // Filled in by create_xbox_present_backend: the present-to-queue-call and the token bridge's report.
+    // Filled in by create_xbox_present_backend: the present-to-queue-call, the token bridge's report, and the
+    // present-driven frame events.
     XboxPresentToQueueCall present = nullptr;
     XboxPresentTokenIssuedCall note_issued_token = nullptr;
+    const XboxFrameEventBackend* frame_events = nullptr;
 };
-inline constexpr std::uint32_t xbox_present_backend_version = 1;
+inline constexpr std::uint32_t xbox_present_backend_version = 2;
 
 // Builds the registration record for `device` (the PC Vulkan device created by create_vulkan_device*), with the
 // presentation core's callbacks filled in; null for a null device. The record is this module's process-lifetime
@@ -380,6 +417,44 @@ inline HRESULT xbox_present_queue_present(void* queue, std::uint32_t plane_count
 inline void xbox_present_note_issued_token(std::uint64_t token) {
     const XboxPresentBackend* backend = xbox_present_hook::registered;
     if (backend && backend->note_issued_token) backend->note_issued_token(token);
+}
+// The present-driven frame events (device slots 78-80; see XboxFrameEventBackend). `enabled` is false with nothing
+// registered, with a record that has no frame events, or with PALMETTO_PRESENT_DRIVEN off: the proxy then answers the
+// slots itself exactly as before.
+inline bool xbox_frame_events_enabled() {
+    const XboxPresentBackend* backend = xbox_present_hook::registered;
+    return backend && backend->frame_events && backend->frame_events->enabled &&
+           backend->frame_events->enabled() != FALSE;
+}
+inline HRESULT xbox_frame_event_set_interval(std::uint32_t interval_us, std::uint32_t latency, std::uint32_t flags) {
+    const XboxPresentBackend* backend = xbox_present_hook::registered;
+    const XboxFrameEventBackend* events = backend ? backend->frame_events : nullptr;
+    if (!events || !events->set_frame_interval) return HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
+    return events->set_frame_interval(interval_us, latency, flags);
+}
+inline HRESULT xbox_frame_event_schedule(std::uint32_t event, std::uint32_t offset_us, std::uint32_t flags) {
+    const XboxPresentBackend* backend = xbox_present_hook::registered;
+    const XboxFrameEventBackend* events = backend ? backend->frame_events : nullptr;
+    if (!events || !events->schedule_frame_event) return HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
+    return events->schedule_frame_event(event, offset_us, flags);
+}
+inline HRESULT xbox_frame_event_wait(std::uint32_t event, std::uint32_t timeout_ms, std::uint32_t flags,
+                                     std::uint64_t* token) {
+    const XboxPresentBackend* backend = xbox_present_hook::registered;
+    const XboxFrameEventBackend* events = backend ? backend->frame_events : nullptr;
+    if (!events || !events->wait_frame_event) return HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
+    return events->wait_frame_event(event, timeout_ms, flags, token);
+}
+inline HRESULT xbox_frame_event_wait_flip(std::uint32_t timeout_ms) {
+    const XboxPresentBackend* backend = xbox_present_hook::registered;
+    const XboxFrameEventBackend* events = backend ? backend->frame_events : nullptr;
+    if (!events || !events->wait_flip) return HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
+    return events->wait_flip(timeout_ms);
+}
+inline std::uint64_t xbox_frame_event_last_token() {
+    const XboxPresentBackend* backend = xbox_present_hook::registered;
+    const XboxFrameEventBackend* events = backend ? backend->frame_events : nullptr;
+    return events && events->last_token ? events->last_token() : 0;
 }
 
 }  // namespace rt::d3d12
