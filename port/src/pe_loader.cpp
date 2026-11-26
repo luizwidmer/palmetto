@@ -1784,13 +1784,14 @@ void* Loader::resolve(Module& m, const std::string& dll, const std::string& name
     return shims::make_unimplemented_thunk(dll, sym);
 }
 
-// ---- Opt-in console-type override (PALMETTO_CONSOLE_TYPE; docs/decomp_renderer.md section 11) ------------------
+// ---- Opt-in console-type override (PALMETTO_CONSOLE_TYPE; docs/console_type_branches.md) ------------------------
 // The title's console-profile read is a host registry call pair - RegOpenKeyW on HKLM with the image's own key string,
-// then RegQueryValueExW of the image's own value name - whose single result is cached once per boot. On a PC the key is
-// absent, the read answers 1 and the upscaler selector (`game+0x7E93F0`) returns kind 6. The switch answers the read
-// as Series S (registry dword 0x60 -> console type 6) so the selector can take kind 7, and leaves every other registry
-// call alone. The two wide strings are read from the mapped image at the RVAs the decompilation gives, so no title
-// string is carried in this repository; a build whose strings are elsewhere fails the plausibility check and the
+// then RegQueryValueExW of the image's own value name - whose single result is mapped to a console type and cached
+// once per boot. On a PC the key is absent, the read answers 1 and the upscaler selector (`game+0x7E93F0`) returns
+// kind 6. The switch answers the read with the ConsoleMode dword that the title's own map turns into a chosen console
+// type (6 Series S -> 0x60, 7 Series X -> 0x64, 8 devkit -> 0x68, 2..5 -> 0x10/0x40/0x50/0x58), and leaves every other
+// registry call alone. The two wide strings are read from the mapped image at the RVAs the decompilation gives, so no
+// title string is carried in this repository; a build whose strings are elsewhere fails the plausibility check and the
 // override stays off. Off by default: when PALMETTO_CONSOLE_TYPE is unset the IAT is never touched.
 namespace {
 
@@ -1835,15 +1836,15 @@ bool resolve_host_registry_calls() {
 // One stderr line and one trace event per answered read, bounded so a title that re-reads cannot flood a boot log.
 constexpr uint32_t kConsoleOverrideReportLimit = 16;
 
-void report_console_override(const char* api, void* caller, uint32_t registry_value) {
+void report_console_override(const char* api, void* caller, const ConsoleTypeAnswers& answers) {
     const std::string where = shims::module_offset(reinterpret_cast<uint64_t>(caller));
-    std::fprintf(stderr, "[rt] console-type override: %s at %s answered 0x%x (console type %u, Series S)\n", api,
-                 where.c_str(), registry_value, kSeriesSConsoleType);
+    std::fprintf(stderr, "[rt] console-type override: %s at %s answered 0x%x (the title's map reads console type %u)\n",
+                 api, where.c_str(), answers.registry_value, answers.console_type);
     if (startup_trace::enabled())
         startup_trace::event("console_type_override",
                              "\"api\":" + startup_trace::quote(api) + ",\"caller\":" + startup_trace::quote(where) +
-                                 ",\"registry_value\":" + std::to_string(registry_value) + ",\"console_type\":" +
-                                 std::to_string(kSeriesSConsoleType));
+                                 ",\"registry_value\":" + std::to_string(answers.registry_value) +
+                                 ",\"console_type\":" + std::to_string(answers.console_type));
 }
 
 // The IAT hooks. Each matches only the console read and forwards everything else to the host entry point it replaced.
@@ -1853,8 +1854,7 @@ LSTATUS WINAPI console_type_open_hook(HKEY root, LPCWSTR subkey, PHKEY out) {
         if (!out) return ERROR_INVALID_PARAMETER;
         *out = static_cast<HKEY>(answers.opener);
         const uint32_t hit = answers.opens.fetch_add(1, std::memory_order_relaxed);
-        if (hit < kConsoleOverrideReportLimit)
-            report_console_override("RegOpenKeyW", _ReturnAddress(), kSeriesSRegistryValue);
+        if (hit < kConsoleOverrideReportLimit) report_console_override("RegOpenKeyW", _ReturnAddress(), answers);
         return ERROR_SUCCESS;
     }
     const HostRegistryCalls& calls = host_registry_calls();
@@ -1869,14 +1869,13 @@ LSTATUS WINAPI console_type_query_hook(HKEY key, LPCWSTR value, LPDWORD reserved
         if (type) *type = REG_DWORD;
         const DWORD capacity = cbdata ? *cbdata : 0;
         if (data && capacity) {
-            const uint32_t answer = kSeriesSRegistryValue;
+            const uint32_t answer = answers.registry_value;
             std::memcpy(data, &answer, std::min<DWORD>(capacity, static_cast<DWORD>(sizeof answer)));
         }
         if (cbdata) *cbdata = static_cast<DWORD>(sizeof(uint32_t));
         answers.served.fetch_add(1, std::memory_order_relaxed);
         const uint32_t hit = answers.queries.fetch_add(1, std::memory_order_relaxed);
-        if (hit < kConsoleOverrideReportLimit)
-            report_console_override("RegQueryValueExW", _ReturnAddress(), kSeriesSRegistryValue);
+        if (hit < kConsoleOverrideReportLimit) report_console_override("RegQueryValueExW", _ReturnAddress(), answers);
         return ERROR_SUCCESS;
     }
     const HostRegistryCalls& calls = host_registry_calls();
@@ -1909,7 +1908,7 @@ bool plausible_wide_string(const uint8_t* base, uint32_t image_size, uint32_t rv
 
 // Arms the override against the module that holds the image's two key strings. Idempotent; every module that imports
 // the registry calls afterwards is patched with the same hooks (only the title image is large enough and shaped right).
-bool arm_console_type_override(const Module& m) {
+bool arm_console_type_override(const Module& m, uint32_t console_type, uint32_t registry_value) {
     ConsoleTypeAnswers& answers = console_type_answers();
     if (answers.armed()) return true;
     if (!plausible_wide_string(m.base, m.size, kConsoleKeyRva, true)) return false;
@@ -1922,10 +1921,12 @@ bool arm_console_type_override(const Module& m) {
     answers.key = reinterpret_cast<const wchar_t*>(m.base + kConsoleKeyRva);
     answers.value = reinterpret_cast<const wchar_t*>(m.base + kConsoleValueRva);
     answers.opener = &g_console_type_token;
+    answers.console_type = console_type;
+    answers.registry_value = registry_value;
     std::fprintf(stderr,
-                 "[rt] console-type override: PALMETTO_CONSOLE_TYPE=%u (Series S) armed on %s: its console-profile "
-                 "registry read is answered 0x%x; every other registry call is forwarded to the host\n",
-                 kSeriesSConsoleType, m.name.c_str(), kSeriesSRegistryValue);
+                 "[rt] console-type override: PALMETTO_CONSOLE_TYPE=%u armed on %s: its console-profile registry "
+                 "read is answered 0x%x (console type %u); every other registry call is forwarded to the host\n",
+                 console_type, m.name.c_str(), registry_value, console_type);
     return true;
 }
 
@@ -1942,6 +1943,36 @@ RegistryImport registry_import_kind(const std::string& dll, const std::string& n
 
 }  // namespace
 
+uint32_t console_type_registry_value(uint32_t console_type) {
+    switch (console_type) {
+        case 2: return 0x10;  // the Xbox One family's base mode; 0x20/0x21/0x30/0x31 map to the same type
+        case 3: return 0x40;
+        case 4: return 0x50;
+        case 5: return 0x58;
+        case kSeriesSConsoleType: return kSeriesSRegistryValue;
+        case 7: return 0x64;  // XboxScarlettAnaconda, Series X
+        case 8: return 0x68;  // XboxScarlettDevkit
+        default: return 0;    // the read cannot carry types 0 (present-but-unknown) and 1 (absent key)
+    }
+}
+
+uint32_t console_type_from_registry_value(uint32_t registry_value) {
+    switch (registry_value) {
+        case 0x10:
+        case 0x20:
+        case 0x21:
+        case 0x30:
+        case 0x31: return 2;
+        case 0x40: return 3;
+        case 0x50: return 4;
+        case 0x58: return 5;
+        case 0x60: return kSeriesSConsoleType;
+        case 0x64: return 7;
+        case 0x68: return 8;
+        default: return 0;  // the title's "present but unknown" answer; a failed open is its type 1
+    }
+}
+
 uint32_t parse_console_type_switch(const char* text, bool* valid) {
     if (valid) *valid = true;
     if (!text || !*text) return 0;
@@ -1950,10 +1981,17 @@ uint32_t parse_console_type_switch(const char* text, bool* valid) {
     const auto last = value.find_last_not_of(" \t");
     value = first == std::string::npos ? std::string() : value.substr(first, last - first + 1);
     value = lower(value);
-    if (value.empty() || value == "0") return 0;
-    if (value == "6" || value == "seriess" || value == "series-s" || value == "series s") return kSeriesSConsoleType;
-    // Only Series S selects the kind-7 branch; the parser refuses every other console type rather than guessing one
-    // (the title's map takes 0x40/0x50/0x58/0x60/0x64/0x68 for the others, and none of them reaches kind 7).
+    if (value.empty() || value == "0" || value == "off") return 0;
+    // Type 1 is the answer for a failed open (the absent key), so it is the default path rather than an answer this
+    // read can be given. Accepting it as "off" keeps an arm's "PC" spelling meaningful.
+    if (value == "1" || value == "pc") return 0;
+    if (value == "seriess" || value == "series-s" || value == "series s") return kSeriesSConsoleType;
+    if (value == "seriesx" || value == "series-x" || value == "series x") return 7;
+    if (value == "devkit" || value == "scarlett-devkit") return 8;
+    // The measured numeric values are the console types the title's map can produce: 2..8. A one-digit strict parse
+    // keeps "07" or "+7" out, so the spelling has to name exactly one value.
+    if (value.size() == 1 && value[0] >= '2' && value[0] <= '8') return static_cast<uint32_t>(value[0] - '0');
+    // The remaining measured values (2-5, 7, 8) are named by number; everything else is refused rather than guessed.
     if (valid) *valid = false;
     return 0;
 }
@@ -1974,7 +2012,8 @@ uint32_t console_type_switch() {
     bool valid = true;
     const uint32_t type = parse_console_type_switch(text, &valid);
     if (!valid)
-        report_once("[rt] console-type override: PALMETTO_CONSOLE_TYPE=%s is not Series S (6); off\n", text);
+        report_once("[rt] console-type override: PALMETTO_CONSOLE_TYPE=%s names no measured console type (2..8); off\n",
+                    text);
     return type;
 }
 
@@ -1989,7 +2028,9 @@ void Loader::bind_imports(Module& m) {
 
     // The opt-in console-type override patches this image's IAT slots for the three ADVAPI32 registry imports after the
     // normal binding below. The switch is read once here; unset means the IAT is never touched (the default path).
-    const bool console_type_override = console_type_switch() != 0;
+    const uint32_t console_type = console_type_switch();
+    const uint32_t console_type_answer = console_type_registry_value(console_type);
+    const bool console_type_override = console_type != 0 && console_type_answer != 0;
     struct RegistrySlot {
         RegistryImport kind;
         uint64_t iat_rva;
@@ -2057,10 +2098,10 @@ void Loader::bind_imports(Module& m) {
     }
 
     // Opt-in console-type override: replace the bound host entry points of the registry imports with the hooks that
-    // answer the console-profile read as Series S. This runs before protect_sections(), so the .rdata IAT is still
-    // writable; nothing else about the binding changes.
+    // answer the console-profile read as the chosen console type. This runs before protect_sections(), so the .rdata
+    // IAT is still writable; nothing else about the binding changes.
     if (!registry_slots.empty()) {
-        if (arm_console_type_override(m)) {
+        if (arm_console_type_override(m, console_type, console_type_answer)) {
             for (const RegistrySlot& slot : registry_slots) {
                 uint64_t hook = 0;
                 if (slot.kind == RegistryImport::Open)

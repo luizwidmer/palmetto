@@ -185,22 +185,35 @@ void cleanup_tls_clones();
 
 std::string lower(std::string s);
 
-// ---- Opt-in console-type override (PALMETTO_CONSOLE_TYPE; docs/decomp_renderer.md section 11) -------------------
-// The title's upscaler selector (`game+0x7E93F0`) takes the console FidelityFX branch (kind 7) only when its
-// console-profile registry read answers 6 (Series S). That read is the title's own ADVAPI32 RegOpenKeyW /
-// RegQueryValueExW call pair, cached once per boot; on a PC the key is absent, the read answers 1 and the selector
-// returns 6 (the title's own upscaler). PALMETTO_CONSOLE_TYPE=6 answers that one read as Series S: the loader replaces
+// ---- Opt-in console-type override (PALMETTO_CONSOLE_TYPE; docs/console_type_branches.md) ------------------------
+// The title's console-profile read (`game+0x55DEB88`, called from the getter `game+0x75140` and from the XMem
+// initialiser) is its own ADVAPI32 RegOpenKeyW / RegQueryValueExW call pair on a fixed HKLM OEM key; the getter caches
+// one boolean ("console type == 6") for the boot. On a PC the key is absent, the read answers console type 1 and the
+// upscaler selector (`game+0x7E93F0`) returns kind 6. PALMETTO_CONSOLE_TYPE answers that one read with the ConsoleMode
+// dword the title's own map turns into a console type, so one arm can run the whole boot as that console: 2..5 are the
+// Xbox One family, 6 is Series S, 7 is Series X and 8 is the Scarlett devkit (docs/console_type_branches.md). Type 1
+// is the absent-key answer and is therefore the default path, not an answer this read can carry. The loader replaces
 // the title image's IAT slots for the three ADVAPI32 registry imports with hooks that match only the exact key and
 // value name the read uses (the image's own .rdata strings at the two RVAs the decompilation gives) and forward every
 // other registry call to the host. Off by default; an unknown value leaves the default path untouched.
-inline constexpr uint32_t kSeriesSConsoleType = 6;       // the console type the kind-7 branch requires
-inline constexpr uint32_t kSeriesSRegistryValue = 0x60;  // the registry dword that maps to console type 6
+inline constexpr uint32_t kSeriesSConsoleType = 6;       // the console type the kind-7 upscaler branch requires
+inline constexpr uint32_t kSeriesSRegistryValue = 0x60;  // the ConsoleMode dword that maps to console type 6
 
-// The switch's value: 0 = off, else the console type. Only 6 (Series S) is accepted; *valid = false for any other
-// spelling, and the result is then 0.
+// Console type -> the ConsoleMode dword the title's map (`game+0x55DEB88`) turns into that type: 2 -> 0x10, 3 -> 0x40,
+// 4 -> 0x50, 5 -> 0x58, 6 -> 0x60, 7 -> 0x64, 8 -> 0x68. Returns 0 for a type the read cannot carry (0, 1, > 8).
+uint32_t console_type_registry_value(uint32_t console_type);
+
+// The title's own map in the other direction (0x10/0x20/0x21/0x30/0x31 -> 2, 0x40 -> 3, 0x50 -> 4, 0x58 -> 5,
+// 0x60 -> 6, 0x64 -> 7, 0x68 -> 8, any other value -> 0); used for reporting and tests. A failed open (no value at
+// all) is the title's type 1 and is not represented here.
+uint32_t console_type_from_registry_value(uint32_t registry_value);
+
+// The switch: 0 = off (the default path), else the console type 2..8 whose ConsoleMode dword the read is answered
+// with. Unset, empty, "0", "1"/"pc" (the absent-key answer) and "off" are off; *valid = false for any other spelling,
+// and the result is then 0.
 uint32_t parse_console_type_switch(const char* text, bool* valid = nullptr);
 
-// The switch as the environment spells it; 0 when unset, empty or invalid (the default path).
+// The switch as the environment spells it; 0 when unset, empty, PC (the default path) or invalid.
 uint32_t console_type_switch();
 
 // The registry-name match the hooks use, exact. The title passes its own .rdata pointers, so a pointer compare is the
@@ -208,12 +221,15 @@ uint32_t console_type_switch();
 bool registry_name_matches(const wchar_t* asked, const wchar_t* expected);
 
 // The answers served for the console-profile read, separated from the host registry calls so the test can cover the
-// Series-S value and the unarmed (switch-off) shape without the title's strings. `opener` is what RegOpenKeyW answers
-// as the handle and what RegCloseKey then recognises.
+// answered value and the unarmed (switch-off) shape without the title's strings. `opener` is what RegOpenKeyW answers
+// as the handle and what RegCloseKey then recognises; `registry_value` is the ConsoleMode dword the query returns and
+// `console_type` is the type the title's own map turns it into (kept next to it so a log cannot drift from the answer).
 struct ConsoleTypeAnswers {
     const wchar_t* key = nullptr;    // the image's own key string; null = not armed
     const wchar_t* value = nullptr;  // the image's own value-name string
     void* opener = nullptr;          // the token that names the answered open
+    uint32_t console_type = 0;       // the console type the answered dword maps to (2..8)
+    uint32_t registry_value = 0;     // the REG_DWORD the query answers (0x10..0x68)
     std::atomic<uint32_t> opens{0};
     std::atomic<uint32_t> queries{0};
     std::atomic<uint32_t> served{0};

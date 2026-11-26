@@ -681,32 +681,76 @@ void test_inherited_reservation() {
     if (saved_length && saved_length < 64) SetEnvironmentVariableW(br::kVariable, saved);
 }
 
-// The opt-in console-type override (docs/decomp_renderer.md section 11): the switch's spelling, the exact registry-name
-// match, and the answers the hooks would serve, including the switch-off shape. No title string is used: the synthetic
-// key/value below are the test's own, and the real match runs against the strings the title image's read passes.
+// The opt-in console-type override (docs/console_type_branches.md): the switch's spelling, the measured ConsoleMode
+// mapping in both directions, the exact registry-name match, and the answers the hooks would serve, including the
+// switch-off shape. No title string is used: the synthetic key/value below are the test's own, and the real match runs
+// against the strings the title image's read passes.
 void test_console_type_override() {
     bool valid = false;
     check(rt::parse_console_type_switch(nullptr, &valid) == 0 && valid, "console type: unset is off");
     check(rt::parse_console_type_switch("", &valid) == 0 && valid, "console type: empty is off");
     check(rt::parse_console_type_switch("0", &valid) == 0 && valid, "console type: 0 is off");
+    check(rt::parse_console_type_switch("off", &valid) == 0 && valid, "console type: off is off");
+    check(rt::parse_console_type_switch("1", &valid) == 0 && valid,
+          "console type: 1 is the absent-key PC answer, the default path");
+    check(rt::parse_console_type_switch("pc", &valid) == 0 && valid, "console type: pc is the default path");
     check(rt::parse_console_type_switch("6", &valid) == rt::kSeriesSConsoleType && valid,
           "console type: 6 is Series S");
     check(rt::parse_console_type_switch("SeriesS", &valid) == rt::kSeriesSConsoleType && valid,
           "console type: SeriesS is Series S");
     check(rt::parse_console_type_switch("series-s", &valid) == rt::kSeriesSConsoleType && valid,
           "console type: series-s is Series S");
-    check(rt::parse_console_type_switch(" 6 ", &valid) == rt::kSeriesSConsoleType && valid,
+    check(rt::parse_console_type_switch("7", &valid) == 7 && valid, "console type: 7 is Series X");
+    check(rt::parse_console_type_switch("SeriesX", &valid) == 7 && valid, "console type: SeriesX is Series X");
+    check(rt::parse_console_type_switch("series-x", &valid) == 7 && valid, "console type: series-x is Series X");
+    check(rt::parse_console_type_switch("8", &valid) == 8 && valid, "console type: 8 is the Scarlett devkit");
+    check(rt::parse_console_type_switch("devkit", &valid) == 8 && valid, "console type: devkit is the devkit");
+    check(rt::parse_console_type_switch("5", &valid) == 5 && valid, "console type: 5 is an Xbox One devkit mode");
+    check(rt::parse_console_type_switch("2", &valid) == 2 && valid, "console type: 2 is the Xbox One family");
+    check(rt::parse_console_type_switch(" 7 ", &valid) == 7 && valid,
           "console type: surrounding spaces are tolerated");
-    check(rt::parse_console_type_switch("7", &valid) == 0 && !valid, "console type: 7 is refused");
-    check(rt::parse_console_type_switch("pc", &valid) == 0 && !valid, "console type: a word that is not Series S is refused");
+    check(rt::parse_console_type_switch("9", &valid) == 0 && !valid, "console type: 9 is refused");
+    check(rt::parse_console_type_switch("07", &valid) == 0 && !valid, "console type: a two-digit spelling is refused");
+    check(rt::parse_console_type_switch("not-a-console", &valid) == 0 && !valid,
+          "console type: a word that names no console type is refused");
     check(rt::kSeriesSConsoleType == 6 && rt::kSeriesSRegistryValue == 0x60,
           "console type: Series S is console type 6, registry value 0x60");
 
-    // The environment read: unset (the default path), the accepted spelling, and a refused one restored afterwards.
+    // The measured ConsoleMode dword in both directions (docs/console_type_branches.md section 2): 6 -> 0x60,
+    // 7 -> 0x64, 8 -> 0x68, 3/4/5 -> 0x40/0x50/0x58, 2 -> 0x10 (0x20/0x21/0x30/0x31 are the same type).
+    check(rt::console_type_registry_value(6) == 0x60 && rt::console_type_registry_value(7) == 0x64 &&
+              rt::console_type_registry_value(8) == 0x68,
+          "console type: 6/7/8 answer ConsoleMode 0x60/0x64/0x68");
+    check(rt::console_type_registry_value(2) == 0x10 && rt::console_type_registry_value(3) == 0x40 &&
+              rt::console_type_registry_value(4) == 0x50 && rt::console_type_registry_value(5) == 0x58,
+          "console type: 2..5 answer ConsoleMode 0x10/0x40/0x50/0x58");
+    check(rt::console_type_registry_value(0) == 0 && rt::console_type_registry_value(1) == 0 &&
+              rt::console_type_registry_value(9) == 0,
+          "console type: 0, 1 and 9 have no ConsoleMode answer");
+    check(rt::console_type_from_registry_value(0x60) == 6 && rt::console_type_from_registry_value(0x64) == 7 &&
+              rt::console_type_from_registry_value(0x68) == 8,
+          "console type: the title's map reads 0x60/0x64/0x68 as 6/7/8");
+    check(rt::console_type_from_registry_value(0x10) == 2 && rt::console_type_from_registry_value(0x20) == 2 &&
+              rt::console_type_from_registry_value(0x21) == 2 && rt::console_type_from_registry_value(0x30) == 2 &&
+              rt::console_type_from_registry_value(0x31) == 2,
+          "console type: the title's map reads 0x10/0x20/0x21/0x30/0x31 as 2");
+    check(rt::console_type_from_registry_value(0x40) == 3 && rt::console_type_from_registry_value(0x50) == 4 &&
+              rt::console_type_from_registry_value(0x58) == 5,
+          "console type: the title's map reads 0x40/0x50/0x58 as 3/4/5");
+    check(rt::console_type_from_registry_value(0) == 0 && rt::console_type_from_registry_value(0x7f) == 0,
+          "console type: a present but unknown ConsoleMode reads as console type 0");
+
+    // The environment read: unset (the default path), the accepted spellings, and a refused one restored afterwards.
     SetEnvironmentVariableA("PALMETTO_CONSOLE_TYPE", nullptr);
     check(rt::console_type_switch() == 0, "console type: no PALMETTO_CONSOLE_TYPE is off");
     SetEnvironmentVariableA("PALMETTO_CONSOLE_TYPE", "6");
     check(rt::console_type_switch() == rt::kSeriesSConsoleType, "console type: PALMETTO_CONSOLE_TYPE=6 arms it");
+    SetEnvironmentVariableA("PALMETTO_CONSOLE_TYPE", "7");
+    check(rt::console_type_switch() == 7, "console type: PALMETTO_CONSOLE_TYPE=7 arms Series X");
+    SetEnvironmentVariableA("PALMETTO_CONSOLE_TYPE", "8");
+    check(rt::console_type_switch() == 8, "console type: PALMETTO_CONSOLE_TYPE=8 arms the devkit");
+    SetEnvironmentVariableA("PALMETTO_CONSOLE_TYPE", "pc");
+    check(rt::console_type_switch() == 0, "console type: PALMETTO_CONSOLE_TYPE=pc is the default path");
     SetEnvironmentVariableA("PALMETTO_CONSOLE_TYPE", "not-a-console");
     check(rt::console_type_switch() == 0, "console type: an unknown PALMETTO_CONSOLE_TYPE stays off");
     SetEnvironmentVariableA("PALMETTO_CONSOLE_TYPE", nullptr);
@@ -729,7 +773,12 @@ void test_console_type_override() {
     answers.key = key;
     answers.value = value;
     answers.opener = &token;
+    answers.console_type = 6;
+    answers.registry_value = rt::console_type_registry_value(answers.console_type);
     check(answers.armed(), "console type: the answers are armed with both names and a handle");
+    check(answers.registry_value == rt::console_type_registry_value(answers.console_type) &&
+              rt::console_type_from_registry_value(answers.registry_value) == answers.console_type,
+          "console type: an armed answer's dword and type agree both ways");
     check(answers.is_console_key(key) && answers.is_console_key(key_copy.c_str()),
           "console type: the answered open matches the key");
     check(answers.is_console_value(value), "console type: the answered query matches the value name");

@@ -203,6 +203,7 @@ roadmap; each row below is one slice.
 | [decomp_stage.md](decomp_stage.md) | Stage and session state machine: writers, transition conditions, phase protocol, stage-3 job graph and the runtime answers those paths read. |
 | [decomp_first_ui.md](decomp_first_ui.md) | The first-run/UI/movie producer: boot-media gate, screen-owner paths, Bink entries, UI classes and the runtime services each screen asks for. |
 | [decomp_renderer.md](decomp_renderer.md) | Renderer command graph: decoder forms, the shared node, the type-5 LUT family and its three producers, the upscaler kind branch, compose and present. |
+| [console_type_branches.md](console_type_branches.md) | The console-type branch measured end to end: the ConsoleMode read and value map, the one cached Series-S flag and all its consumers, the extended override, and the Series-X arms that retire the "class-0xa is a PC fallback" hypothesis. |
 | [decomp_jobs.md](decomp_jobs.md) | Job/threading contract: creator/executor/flush/submit-wait, pools, frame tick, heartbeat and watchdog, and the ordering the title assumes. |
 | [decomp_memory.md](decomp_memory.md) | Title heap and XMem arena contract: inner allocator, zero-size degeneration, graphics VA/page model and where our answers are consumed. |
 | [decomp_imports.md](decomp_imports.md) | Complete import map: 587 imports by subsystem and phase, our shim status, the stage-3/first-run gate list and a ranked implementation list. |
