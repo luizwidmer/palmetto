@@ -2764,6 +2764,30 @@ control built from the same cull override (a shim addition this slice does not m
 under either arm: the compose pass samples a zero intermediate in the same submission (20.4), so a non-black presented
 frame needs the feed change, which is a different slice.
 
+### 22.8 The A/B, run on a stable host
+
+The host GPU was stable for this measurement window (no driver event-153 fault in the arms below; the earlier instability
+is recorded in the FSR section). Two environment mistakes are recorded because they cost arms: the first control/variant
+triples passed the extra switches through a nested PowerShell invocation that bound only the first array element, so
+`PALMETTO_CONTENT_CULL_VARIANT` was never set (the arms reached the content window but applied no variant and logged no
+line). The corrected arms bind the array in-process; their recorded environment is in the boot metadata.
+
+| arm | environment | content window | variant lines | content-target readbacks (full 4K) | stop |
+|---|---|---|---|---|---|
+| `cullctl2` control | full content env, switch unset | yes, two submissions (draws 4026-4028, 4029-4031) | none | four targets `0/24,883,200`, mean 0, peak 0 | `game+0x1335dcb` read -1 |
+| `cullvar4` variant | full content env + `PALMETTO_CONTENT_CULL_VARIANT=1` | no (stage 3 reached at 61.2 s, stop before the window) | none | none | `game+0x502b2f1` read `0x100037b05` (fabricated console VA) |
+| `cullvar5` variant | full content env + `PALMETTO_CONTENT_CULL_VARIANT=1` | yes, two submissions (draws 3512-3514, 3515-3517) | one application line per window draw, six in total, each naming the pipeline and the measured pair | four targets `0/24,883,200`, mean 0, peak 0 - identical to the control | `game+0x1335dcb` read -1 |
+
+The acceptance wanted three things: the application lines (present, six), a readback statistic differing from the control
+(absent - the pixels are identical at full 4K), and the same stop family (present). This is exactly the falsifier 22.6 named:
+the real window draws rasterise under the measured cull pair, but their colour targets stay zero, so the pre-content loop's
+colour input is zero and a colour-target readback cannot observe the change. The honest negative stands; the next
+measurement is a depth or alpha readback of the real window draw, or a PS control built from the same cull override - both
+need a new probe rather than another boot of this switch.
+
+The host stayed stable through the five arms that actually ran (no device-lost line, no new driver fault), so the
+instability recorded in the FSR sections is not a per-boot property of this tree.
+
 ### 22.7 Attribution
 
 This section was implemented from this project's own measurements: sections 17-21's content-window draw table, the
