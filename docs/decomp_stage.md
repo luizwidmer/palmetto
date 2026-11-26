@@ -819,3 +819,215 @@ reused the read-only Ghidra project copy section 1 describes (`D:\leonida-work\d
 decompiled C under `D:\leonida-work\s3record\decomp-b6` through `decomp-b10`; no peer code was used and no game data
 is added: RVAs, field offsets, instruction bytes, values, counts and outcomes only.
 
+## 13. Measured: the session-3 stream job is dispatched and stays pending; the completion dispatch and the event bus never run in two clean 300 s arms
+
+**Status: measured, diagnostic only, negative for the producer; the case split is "the job never finished".** Section
+12 named the record-completion writer `0x5862370`, its two callers that pass the session-3 loading record (the streaming
+subscriber's completion method `0x2355D40` at vtable `+0x60` and the task callback `0x27ED3A0`), and left one falsifier:
+an execution probe on the `+0x60` dispatch, on the loading event queue `0x147F00518` and on the job block the start
+builds through `0x5BB4DE0`. This section adds one opt-in probe, `PALMETTO_S3DISPATCH`, with twelve int3 sites, a 2 s
+state sampler and a 100 ms fine change log, and reports two clean 300 s light arms with the class-0xa mitigation on. In
+both arms the subscriber start ran once (reset, command id 0, third argument 1), the streaming subsystem's async request
+(vtable `game+0x658DE18`, key `0x9837FB2E`) was created and attached to the subscriber's stream object (vtable
+`game+0x658DE48`), whose pending slot `+0x120` then held it; the request's owner slot `+0x30`, sub-operation count
+`+0x18`, callback array/count `+0x20`/`+0x28`, key `+0x38` and flag `+0x3c` did not change again for the rest of the
+boot. The consumer that the completion method runs first (`0x4043300`), the completion method, the task callback, the
+event-bus raise `0x224CD60` (zero events of any id in the whole boot) and the subscriber's registered id-`0xe` handler
+`0x2355EF0` all stayed at zero hits, and the completion writer fired only for the two other loading records section 12
+measured. Session and stage stayed 3, the movie player stayed at state `0x9` with `buffers 0`, every capture and every
+full-target readback is black. No runtime answer of ours is on the path, so no shim changes and the default path is
+unchanged.
+
+### 13.1 The probe
+
+`port/src/main.cpp` gains the section `PALMETTO_S3DISPATCH`. It is opt-in (unset or `0`: one cached `getenv`, no
+handler, no thread, no patch), and it uses the allocation watch's trap discipline: each site gets one `int3` over the
+function's first byte, a hit restores the original byte, single-steps it and re-arms, so the title executes exactly the
+code it would have executed. Twelve sites are armed once, after the image is mapped and before the entry point:
+
+| site | RVA | what it measures |
+|---|---|---|
+| `subscriber-start` | `0x2355DD0` | the subscriber's start method (vtable `+0x68`): the object, the event payload, the record reset |
+| `job-exec` | `0x5BB4DE0` | the start's command execution: the subscriber object and the command block's dwords |
+| `async-submit` | `0x1DBC0F0` | the command dispatch that submits the stream job: command id, flag, handle before/after |
+| `subscriber-completion` | `0x2355D40` | the completion method (vtable `+0x60`) that would write the record completion |
+| `task-callback` | `0x27ED3A0` | the other caller that would write this record's completion |
+| `event-bus-raise` | `0x224CD60` | the global event bus raise/dispatch entry; the event id is `*(u32*)(event+8)` |
+| `subscriber-bus-handler` | `0x2355EF0` | the handler the start registers on that bus for id `0xe` |
+| `completion-writer` | `0x5862370` | the writer itself, logged with the record and the poll index it is called for (control) |
+| `async-request-consume` | `0x4043300` | the SDK routine the completion method runs first; it reads the request's completion fields |
+| `owner-attach-request` | `0x402F0F0` | the attach that registers the request into the stream object's pending slot |
+| `owner-attach-notify` | `0x402F110` | the attach's notification step (skipped when the attach pre-check says so) |
+| `async-attach` | `0x1D1B8D0` | the attach check itself: request, owner, owner slot |
+
+The two samplers read title memory only: every 2 s the subscriber object, its async handle and the request's fields,
+the record's index, header gate fields `+0x198`/`+0x1A0`, callback lists `+0x1A8`/`+0x1C0` and the five slots' tick and
+completion dwords, the global event bus (`*image+0x7F00518`, its owner token and its bucket count), the three state
+words with the machine's current/next pair, and the movie player's state, handle and buffer count. A second thread polls
+the request's first 0x40 bytes and the stream object's `+0x100..+0x120` block every 100 ms and prints only a change, so a
+job that never moves is visible as a single line. The log is bounded: per-site caps, three logged raises per event id, a
+600-line total cap, 170 state lines and 150 fine-change lines.
+
+### 13.2 The arms
+
+Two clean arms are the measurement; the first measured attempt and a 60 s smoke arm are quoted for completeness. All
+boots are one at a time under `_setup/boot_lock.ps1` (`-Who s3dispatch`), `-Light`, 300 s (60 s for the smoke arm) via
+`tooling/boot_report.py`, logs outside the repository. The environment is section 17.1's content environment (deferred
+compile, 2 s state trace, stage-3 pump, alloc watch, console graphics root, slot-70 publication, content probe,
+full-target readback, user and input traces, captures every 100 frames to 30) with the mitigation
+`PALMETTO_TITLE_CLASS0A_SIZE=1`, `PALMETTO_S3DISPATCH=1` and the DirectStorage record sampler in every probed arm; the
+refined arm also runs `PALMETTO_FILE_TRACE=1`, `PALMETTO_DSTORAGE_TRACE=1` and `PALMETTO_DS_LOAD_TRACE=0,300`.
+
+| arm | binary SHA-256 (first 16) | wall | stage 3 (state clock) | session word | stop | device loss | exec entries in the timeline | captures / readbacks |
+|---|---|---|---|---|---|---|---|---|
+| `dispatchek` (smoke) | `7526D314E76EDFC6` | 60.3 s (timeout) | not reached | 0 -> 1 | ALIVE, 0 exceptions | 0 | 3,645 | 20 / 0 |
+| `dispatch1` | `7526D314E76EDFC6` | 51.0 s | not reached (init 2, loading 2) | 0 | STOP `game+0x28CF870` read `0x5c` | 1 | 2,528 | 14 / 0 |
+| `dispatch2` | `7526D314E76EDFC6` | 300.2 s (timeout) | 66.0 s | 3 from 66.0 s to 298.0 s | ALIVE, 0 exceptions | 0 | 18,800 | 30, all mean rgb `0.00`; 6, all mean 0 |
+| `dispatch3` | `F99B54163D4EE3D9` | 300.3 s (timeout) | 58.0 s | 3 from 58.0 s to 298.0 s | ALIVE, 0 exceptions | 0 | 23,521 | 30, all mean rgb `0.00`; 6, all mean 0 |
+
+`dispatch1` is the pre-stage crash family sections 10.2 and 12.1 record (`game+0x28CF870` is a new member of it), so it
+carries no post-stage-3 measurement and its only loss was one device. The two clean arms ran two probe builds: `dispatch2`
+the eight-site build, which is also the smoke and failed arms' binary, and `dispatch3` the twelve-site build with the two
+extra sampler threads. Stage 3 arrived at 66.0 s and 58.0 s, the same 52-116 s spread the whole stage-3 programme
+records, and both boots kept submitting command lists to the kill (18,800 and 23,521 timeline executions, the last
+within 0.5 s of the timeout).
+
+### 13.3 What the sites measured
+
+Every value below is from the same boot as its control. `dispatch2` and `dispatch3` agree wherever both probed a site.
+
+| measurement | `dispatch2` | `dispatch3` |
+|---|---|---|
+| `subscriber-start` | 1 hit | 1 hit |
+| `job-exec` | 1 hit | 1 hit |
+| `async-submit` | 1 hit | 1 hit |
+| `async-attach` | not probed | 1 hit |
+| `owner-attach-request` | not probed | 1 hit |
+| `owner-attach-notify` | not probed | 0 hits |
+| `subscriber-completion`  | **0 hits** | **0 hits** |
+| `task-callback` | **0 hits** | **0 hits** |
+| `async-request-consume` | not probed | **0 hits** |
+| `event-bus-raise` | **0 hits**, 0 events of any id | **0 hits**, 0 events of any id |
+| `subscriber-bus-handler` | **0 hits** | **0 hits** |
+| `completion-writer` | 2 hits, both other records | 2 hits, both other records |
+| DirectStorage record sampler | 480 samples, max completion dword `0x0` | 480 samples, max completion dword `0x0` |
+| fine change log | - | 1 line (the attach snapshot); no change after it |
+| state words at the last sample | init 3 / loading 2 / session 3, machine 3/3 | init 3 / loading 2 / session 3, machine 3/3 |
+| movie player at the last sample | state `0x9`, handle non-null, `buffers 0` | state `0x9`, handle non-null, `buffers 0` |
+
+The start hit reads the same shape in both arms: `rcx` is the subscriber object (vtable `game+0x61B2790`), `rdx` the
+event payload whose qwords are `0,0,0,0x100000000` (the dword the start copies at payload `+0x18` is 0, the command id),
+`r8` is `0xFFFFFFFF00000001` (the third argument is 1). At the hit the record is already reset: poll index 4, header
+`+0x198`/`+0x1A0`/`+0x1A8`/`+0x1C0` all zero, slot 0 tick carrying a title tick, slot 4 tick carrying a title tick, and
+all five completion dwords zero. The `job-exec` hit reads the command block on the stack (`command-id 0`, the rest zero)
+and the subscriber handle still zero. The `async-submit` hit reads `rdx 0` (command id 0), `r8b 1` and the handle at
+subscriber `+0x58` still zero, i.e. the submission had not happened yet at the entry. A `subscriber-completion` hit
+would have printed the unwound caller chain and so named the `+0x60` dispatch site itself; the site never fired in
+either arm, which is why section 12's dispatch caller is still unnamed by call chain rather than measured.
+
+The attach hits then name the job: `async-attach` reads request `0x25443F4DF80` with vtable `game+0x658DE18`, refcount
+2, empty completion fields and owner slot `+0x30` = the stream object; `owner-attach-request` reads the stream object
+`0x2542A7B5D00` (vtable `game+0x658DE48`), the request and key `0x9837FB2E`, and the stream's `+0x100` fields. The
+`owner-attach-notify` site did not run because the attach's pre-check returned "already attached". The writer's two hits
+are records `0x1474511B8` index 0 and `0x147BD2320` index 2, the same pair section 12 measured, and never the session-3
+record `0x78AC9C8`.
+
+The subscriber's bus entry is registered from the first post-start sample to the end: entry owner `+0x80` = the
+subscriber, handler `+0x88` = `0x142355EF0`, and a non-zero bucket pointer at `+0xA0`, so the start's registration is
+live and the event id it waits for (`0xe`) simply never arrives.
+
+### 13.4 The job's state: the case split
+
+The refined arm's 100 ms fine log printed exactly one line, the post-attach snapshot at trace t 58.9 s; after it, for the
+remaining 240 s, neither the request's first 0x40 bytes nor the stream object's `+0x100..+0x120` block changed. The
+request's layout is the one the attach measured: vtable `game+0x658DE18`, refcount at `+8` = 2, `+0x10`/`+0x18` zero,
+callback array `+0x20` zero with count `+0x28` zero, owner `+0x30` = the stream object, key `+0x38` = `0x9837FB2E`, flag
+`+0x3C` zero. The stream object's pending slot `+0x120` held the same request and did not move either.
+
+The case split follows from which fields a finished job would have moved. The routine that a completion first runs is
+`0x4043300` (reached from the completion method through `0x22FEF70`, which loads `rcx = *(subscriber+0x50)` and
+`rdx = *(subscriber+0x58)` and tail-jumps to the consume path): it reads the sub-operation count `+0x18`, walks the
+callback array `+0x20`/`+0x28`, consumes the owner `+0x30` and clears the flag `+0x3C`. So a job that finished has to
+have its completion fields filled **before** any dispatch can consume them, and the measured boot never filled one. The
+alternative case, "the job finished and its completion was never dispatched", would show the request's fields filled and
+no consumer; that did not happen. What is measured is the third state: the request was created, keyed, attached to the
+stream object and left pending, and the only consumer stayed at zero for 240 s. The session-3 record's completion dword
+therefore stays zero because the job it waits for never completed, not because its completion was misrouted.
+
+The event side says the same. The global at `image+0x7F00518` is an event bus object with three API entries, all of them
+measured statically in this slice: subscribe `0x58A6510(bus, id, entry)`, unsubscribe `0x2209460(bus, id, entry)` and
+raise/dispatch `0x224CD60(bus, event)`; the event structure is `{vtable, id at +8, payload at +0x18}`, and the subscriber
+entry is `{owner at +0x80, handler at +0x88}` plus the list links at `+0x90..+0xA0`. The start registers that entry for
+id `0xe` and the completion method unregisters it; **neither the raise nor the handler ran in either clean arm**, and the
+raise counters show zero events of any id in 300 s. Section 12.2's sentence "posts event type `0xe` into the loading
+event queue `0x147F00518`" is therefore corrected here: the start subscribes the entry, it does not post; a posted event
+would have shown in the raise site's counters, and none did.
+
+### 13.5 What the job waits on, and the storage/file reach
+
+The request is one of the streaming subsystem's own async requests: the manager is the streaming manager's request-cache
+object at `*image+0x999ABE0` (used through the submit `0x44043570`, consumed through `0x4043300`, and cleared by the
+streaming stop `0x22306070`), and the stream object passed as the attach context is the subscriber's `+0x50` object. The
+refined arm ran the file and storage reach switches in the same boot as the probe:
+
+| trace | measurement |
+|---|---|
+| file opens (`PALMETTO_FILE_TRACE`) | 121 opens, all in the loading burst; the last is at trace t 18.62 s |
+| file first-touch repairs | last at trace t 55.46 s (84.8 MiB `ReadFile` into uncommitted title memory, repaired) |
+| DirectStorage first-touch repairs | 10, last at trace t 55.13 s |
+| DirectStorage load heartbeat | 8,685 requests enqueued / 8,685 done at its last +20 s sample |
+| subscriber start | trace t 58.72 s (timeline origin 18,178.304, the start hit at steady 18,237.022) |
+
+The start is 3.3 s after the last file IO event and 3.6 s after the last storage repair, and no open, read or enqueue
+follows it. So the stream job did not issue an IO that any shim of this tree serves: it is waiting on its own producer,
+not on a storage answer. That is consistent with section 10.5's loader-side measurement (everything delivered) and adds
+the missing step: the awaited stream never reaches a storage call at all.
+
+### 13.6 Verdict, limits and the next falsifier
+
+- **Verdict: negative for the producer, with the case split resolved to "the job never finished".** The subscriber start
+  runs, the record resets, the command executes and the job is submitted and attached; from then on nothing moves: no
+  request completion field changes, no consumer runs, no bus event is raised or delivered, and the completion writer
+  never sees this record. The session word stays 3 because no completion was ever written, not because a written
+  completion was dropped.
+- **No runtime answer is on the path.** The reach switches show no file, ReadFile or DirectStorage call at or after the
+  start; the manager and the request are title-side objects (`0x44043570` and `0x4043300` are the title's stream
+  request cache), so no shim producer is measured to fix and the default path stays byte-identical.
+- **Corrected attribution.** Section 12's loading event queue `0x147F00518` is the global event bus, and the start's
+  `FUN_1458A6510(bus, 0xe, subscriber+0x80)` is a subscription, not a post; the three bus entries and the entry/event
+  layouts are named in 13.4. That also means the "queue consumer" section 12 named is not a queue consumer at all: an
+  id-`0xe` delivery would have run `0x2355EF0` and it never did.
+- **Limits.** Two clean arms, one stage-3 window each (66.0 s and 58.0 s); the fine log samples at 100 ms and could
+  miss a change between two samples, though the 2 s sampler's request fields agree with it; the "finished" reading rests
+  on the request's own completion fields, whose documented marker is the consumer's read order, not a published ABI;
+  and the probe's traps shift timings by their cost, so the stage-3 arrival spread is not compared between arms.
+- **Next falsifier.** Probe the stream request cache's completion producer directly: the request class vtable
+  `game+0x658DE18` and the stream class vtable `game+0x658DE48` slot functions, and the streaming manager
+  `_DAT_147455F40` vtable slot that reaps finished requests (the handler family around `0x234A870`, which looks a request
+  up by key and calls into it). A change in the request's `+0x18`/`+0x20`/`+0x28` or the stream's `+0x120` without a
+  completion hit would flip the case split to "finished but not dispatched"; no change at all keeps the job's producer
+  as the wall. A write watch on those fields would date the change without polling.
+- **The picture is unchanged.** No session advance means no movie draw: the player holds state `0x9` with `buffers 0`
+  in both arms, and all 30 presenter captures and all 6 full-target readbacks are mean 0 in both boots.
+
+### 13.7 Tests and gates
+
+- No test target is added: the slice is an opt-in diagnostic path in `port/src/main.cpp` with no pure helper to
+  exercise, and the switch is off in every default run.
+- Gates on the changed tree: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints
+  `TESTS_BUILT`, the GPU-free gate targets exit 0, and every `tests/test_docs_*.py` check passes.
+- Evidence outside the repository: `D:\leonida-work\fsrstable\boot-dispatch1`, `boot-dispatch2`, `boot-dispatch3`,
+  `boot-dispatchek`, with `stderr.log`/`stdout.log`/`summary.txt`/`boot.jsonl`; `capture-dispatch2`,
+  `capture-dispatch3`, `readback-dispatch2`, `readback-dispatch3`; and `D:\leonida-work\s3dispatch` (`run_arm.ps1`,
+  `analyze.py`). No game data: RVAs, offsets, register/pointer values, counts, times and image means only.
+
+### 13.8 Attribution
+
+This section was implemented from this project's own measurement: the twelve-site probe, the two clean 300 s arms and
+the smoke/failed arms, the site hits and register reads, the two samplers and the fine change log, the file/storage reach
+switches in the refined arm, and the disassembled/decompiled start, completion, attach, request-consume and event-bus
+functions. The static check reused the read-only Ghidra project copy section 1 describes
+(`D:\leonida-work\decomp-stage\ghidra-proj`, decompiled ranges under `D:\leonida-work\decomp-stage\decomp-q1` through
+`decomp-q16` and `D:\leonida-work\s3record`); no peer code was used and no game data is added: RVAs, field offsets,
+instruction bytes, values, counts and outcomes only.
+

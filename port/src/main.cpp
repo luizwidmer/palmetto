@@ -6063,6 +6063,518 @@ void start_slot_watch(std::uintptr_t image_base, std::size_t image_size, const c
     watch.ready.store(true, std::memory_order_relaxed);
 }
 
+// ---- Session-3 completion dispatch probe (PALMETTO_S3DISPATCH) ------------------------------------------------------
+// docs/decomp_stage.md section 12 measured the recording side of the session-3 wall: the loading record's completion
+// dword game+0x78ACB20 is written by game+0x5862370, and the only two callers that pass this record are the streaming
+// subscriber's completion method game+0x2355D40 (vtable +0x60) and the task callback game+0x27ED3A0, and neither ran in
+// two 300 s arms. Section 12's next falsifier is exactly this probe: an execution probe on the vtable +0x60 dispatch,
+// on the task callback, on the loading event queue consumer and on the job the subscriber start builds, so one boot
+// separates "the awaited streaming job finished and nobody dispatched the completion" from "the job never finished".
+//
+// The measured static shape this probe reads at run time (docs/decomp_stage.md section 12 plus this slice's decompile):
+//   0x2355DD0  subscriber start (vtable +0x68), runs once at the stage-3 transition through the loading update;
+//              builds a command block from the event payload's +0x18, calls 0x5BB4DE0, then registers the entry at
+//              subscriber+0x80 on the global event bus for event type 0xe (the bus object is *image+0x7F00518);
+//   0x5BB4DE0  the start's command execution; 0x1DBC0F0 dispatches the command and submits the async operation whose
+//              handle it stores at subscriber+0x58 (the handle's +0x30 is the job-finished marker, 0x5DE07F0's test);
+//   0x2355D40  the subscriber completion method (vtable +0x60): would write the record completion dword, unregister the
+//              0xe entry and call the media state object's +0x70;
+//   0x27ED3A0  the task callback that also writes this record's completion dword (a virtual method, slot +0x48 of its
+//              class vtable at game+0x62EC448);
+//   0x224CD60  the global event bus raise/post: the event id is *(u32*)(event+8), and the subscriber's registered
+//              0x2355EF0 handler is what an id-0xe delivery would run;
+//   0x5862370  the completion writer itself, logged with the record and index it is called for (control: section 12
+//              measured it live for two other loading records).
+//
+// Everything is opt-in and bounded: the sites are int3 traps that restore the original byte, single-step it and re-arm
+// (the allocation watch's discipline), the raise site logs at most three events per id, the whole log has a line cap,
+// and a 2 s sampler prints the subscriber/async/record/state/bus fields so a boot without any hit still shows whether
+// the job reached its finished marker. RVAs, offsets, values and counts only; no game data.
+constexpr std::uint32_t kS3BusGlobalRva = 0x7F00518;             // qword: the global event bus object
+constexpr std::uint32_t kS3WriterRva = 0x5862370;                // the record-completion writer
+constexpr unsigned kS3DispatchSiteCount = 12;
+constexpr unsigned kS3TotalLines = 600;
+constexpr unsigned kS3SamplerLines = 170;
+constexpr unsigned kS3FineLines = 150;
+
+struct S3DispatchSite {
+    std::uint32_t rva;
+    const char* name;
+    unsigned cap;  // logged hits per site (the raise site's cap is per event id)
+};
+
+constexpr S3DispatchSite kS3DispatchSites[kS3DispatchSiteCount] = {
+    {0x2355DD0, "subscriber-start", 4},
+    {0x5BB4DE0, "job-exec", 4},
+    {0x1DBC0F0, "async-submit", 4},
+    {0x2355D40, "subscriber-completion", 8},
+    {0x27ED3A0, "task-callback", 8},
+    {0x224CD60, "event-bus-raise", 3},
+    {0x2355EF0, "subscriber-bus-handler", 8},
+    {kS3WriterRva, "completion-writer", 12},
+    {0x4043300, "async-request-consume", 8},   // the SDK routine the completion method runs first (0x22FD000 tail-jumps here)
+    {0x402F0F0, "owner-attach-request", 4},    // the stream object's pending-request registration at submit
+    {0x402F110, "owner-attach-notify", 4},     // its notification step
+    {0x1D1B8D0, "async-attach", 4},            // the attach check FUN_145A9FD90 runs
+};
+
+struct S3Dispatch {
+    std::atomic<bool> ready{false};
+    std::atomic<std::uintptr_t> address[kS3DispatchSiteCount]{};
+    std::atomic<unsigned> original[kS3DispatchSiteCount]{};
+    std::atomic<unsigned> hits[kS3DispatchSiteCount]{};
+    std::atomic<unsigned> logged[kS3DispatchSiteCount]{};
+    std::atomic<unsigned> lines{0};
+    std::atomic<std::uintptr_t> subscriber{0};
+    std::atomic<unsigned> raise_total{0};
+    std::atomic<unsigned> raise_other{0};
+    std::atomic<unsigned> raise_count[0x100]{};
+    std::atomic<unsigned> raise_logged[0x100]{};
+    std::atomic<unsigned> sampler_lines{0};
+    std::atomic<unsigned> fine_lines{0};
+};
+
+S3Dispatch& s3_dispatch() {
+    static S3Dispatch watch;
+    return watch;
+}
+
+std::uintptr_t s3_dispatch_image_base = 0;
+std::mutex& s3_dispatch_print_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+void s3_dispatch_print(const std::string& text) {
+    std::lock_guard lock(s3_dispatch_print_mutex());
+    std::fwrite(text.data(), 1, text.size(), stderr);
+    std::fflush(stderr);
+}
+
+// A code/data label for a value: image addresses as game+RVA, other modules by name, anything else in hex.
+std::string s3_dispatch_label(std::uint64_t value) {
+    if (value >= s3_dispatch_image_base && value < s3_dispatch_image_base + 0x18000000ull) {
+        const auto rva = static_cast<std::uint32_t>(value - s3_dispatch_image_base);
+        char buffer[32];
+        std::snprintf(buffer, sizeof buffer, "game+0x%x", rva);
+        return buffer;
+    }
+    return rt::shims::module_offset(static_cast<std::uintptr_t>(value));
+}
+
+std::string s3_dispatch_qwords(const char* what, std::uintptr_t address, unsigned count) {
+    std::string text = std::string(" ") + what + " " + executor_watch_hex(address) + ":";
+    for (unsigned i = 0; i < count; ++i) text += " " + executor_watch_hex(executor_watch_read_u64(address + i * 8));
+    return text;
+}
+
+std::string s3_dispatch_event_text(std::uintptr_t event) {
+    if (!event) return " event 0";
+    const std::uint32_t id = executor_watch_read_u32(event + 8);
+    const std::uintptr_t payload = static_cast<std::uintptr_t>(executor_watch_read_u64(event + 0x18));
+    std::string text = " event " + executor_watch_hex(event) + " vtable " +
+                       s3_dispatch_label(executor_watch_read_u64(event)) + " id 0x" +
+                       executor_watch_hex(id).substr(2) + " payload " + executor_watch_hex(payload);
+    if (payload) {
+        text += " payload+8 0x" + executor_watch_hex(executor_watch_read_u32(payload + 8)).substr(2);
+        text += s3_dispatch_qwords("payload qwords", payload, 4);
+    }
+    return text;
+}
+
+std::string s3_dispatch_record_text() {
+    bool ok = false;
+    const std::uint32_t index = title_read_u32(s3_dispatch_image_base, kTitleLoadingRecordIndexRva, ok);
+    std::string text = " record index " + std::to_string(index) + " header +198 0x" +
+                       executor_watch_hex(title_read_u32(s3_dispatch_image_base, kTitleLoadingRecordRva + 0x198, ok)).substr(2) +
+                       " +1a0 " + executor_watch_hex(title_read_u64(s3_dispatch_image_base, kTitleLoadingRecordRva + 0x1a0, ok)) +
+                       " +1a8 " + executor_watch_hex(title_read_u64(s3_dispatch_image_base, kTitleLoadingRecordRva + 0x1a8, ok)) +
+                       " +1c0 " + executor_watch_hex(title_read_u64(s3_dispatch_image_base, kTitleLoadingRecordRva + 0x1c0, ok));
+    text += " slots tick/comp:";
+    for (unsigned slot = 0; slot < 5; ++slot) {
+        const auto base = static_cast<std::uint32_t>(kTitleLoadingRecordRva + slot * 0x50u);
+        text += " " + std::to_string(slot) + " " +
+                std::to_string(title_read_u32(s3_dispatch_image_base, base, ok)) + "/" +
+                std::to_string(title_read_u32(s3_dispatch_image_base, base + 0x18, ok));
+    }
+    return text;
+}
+
+// The subscriber object the start is called on, and the async handle it submits: the handle's +0x30 is the async
+// library's own finished marker (0x5DE07F0 returns *(u64*)(handle+0x30) == 0 ? not-ready : ready), so the sampler can
+// tell "the job finished" from "the job never finished" without a hit on any dispatch path.
+std::string s3_dispatch_subscriber_text(std::uintptr_t subscriber) {
+    if (!subscriber) return " subscriber 0";
+    std::string text = " subscriber " + executor_watch_hex(subscriber) + " vtable " +
+                       s3_dispatch_label(executor_watch_read_u64(subscriber));
+    text += s3_dispatch_qwords("+0x18", subscriber + 0x18, 3);
+    text += s3_dispatch_qwords("+0x50", subscriber + 0x50, 2);
+    const std::uintptr_t stream = static_cast<std::uintptr_t>(executor_watch_read_u64(subscriber + 0x50));
+    const std::uintptr_t handle = static_cast<std::uintptr_t>(executor_watch_read_u64(subscriber + 0x58));
+    if (stream) {
+        text += " stream vtable " + s3_dispatch_label(executor_watch_read_u64(stream));
+        text += s3_dispatch_qwords("stream +0x108", stream + 0x108, 2);
+        text += s3_dispatch_qwords("stream pending +0x120", stream + 0x120, 1);
+        text += " stream +0xfc 0x" + executor_watch_hex(executor_watch_read_u32(stream + 0xfc)).substr(2) + " +0x100 " +
+                executor_watch_hex(executor_watch_read_u64(stream + 0x100));
+    }
+    text += " handle " + executor_watch_hex(handle);
+    if (handle) {
+        text += " vtable " + s3_dispatch_label(executor_watch_read_u64(handle)) + " +0x18 0x" +
+                executor_watch_hex(executor_watch_read_u32(handle + 0x18)).substr(2) + " +0x30 owner " +
+                executor_watch_hex(executor_watch_read_u64(handle + 0x30)) + " callbacks " +
+                executor_watch_hex(executor_watch_read_u64(handle + 0x20)) + "/" +
+                executor_watch_hex(executor_watch_read_u32(handle + 0x28)) + " key 0x" +
+                executor_watch_hex(executor_watch_read_u32(handle + 0x38)).substr(2) + " flag 0x" +
+                executor_watch_hex(executor_watch_read_u32(handle + 0x3c)).substr(2);
+    }
+    text += s3_dispatch_qwords("+0x80 bus-entry", subscriber + 0x80, 1);
+    text += s3_dispatch_qwords("+0x88 handler", subscriber + 0x88, 1);
+    text += s3_dispatch_qwords("+0x90 links", subscriber + 0x90, 3);
+    text += " progress +a8 " + executor_watch_hex(executor_watch_read_u64(subscriber + 0xa8)) + " +ac 0x" +
+            executor_watch_hex(executor_watch_read_u32(subscriber + 0xac)).substr(2) + " +b1 0x" +
+            executor_watch_hex(executor_watch_read_u32(subscriber + 0xb1)).substr(2);
+    return text;
+}
+
+std::string s3_dispatch_state_text() {
+    bool ok = false;
+    const std::uint64_t machine = title_read_u64(s3_dispatch_image_base, kTitleStateMachineRva, ok);
+    std::uint16_t current = 0, next = 0;
+    if (machine && (machine & 7) == 0) {
+        current = title_read_u16_at(static_cast<std::uintptr_t>(machine) + 0x10, ok);
+        next = title_read_u16_at(static_cast<std::uintptr_t>(machine) + 0x12, ok);
+    }
+    std::string text = " init " + std::to_string(title_read_u32(s3_dispatch_image_base, kTitleInitStateRva, ok)) +
+                       " loading " + std::to_string(title_read_u32(s3_dispatch_image_base, kTitleLoadingStateRva, ok)) +
+                       " session " + std::to_string(title_read_u32(s3_dispatch_image_base, kTitleSessionStateRva, ok)) +
+                       " machine " + std::to_string(current) + "/" + std::to_string(next);
+    const std::uintptr_t bus = static_cast<std::uintptr_t>(title_read_u64(s3_dispatch_image_base, kS3BusGlobalRva, ok));
+    text += " bus " + executor_watch_hex(bus);
+    if (bus) {
+        text += " bus+0x10 " + executor_watch_hex(executor_watch_read_u64(bus + 0x10)) + " bus+0x28 " +
+                executor_watch_hex(executor_watch_read_u32(bus + 0x28));
+    }
+    const std::uintptr_t entity = static_cast<std::uintptr_t>(
+        title_read_u64(s3_dispatch_image_base, kTitleMovieSlot0EntityRva, ok));
+    text += " movie entity " + executor_watch_hex(entity);
+    if (entity) {
+        unsigned char state = 0, probe = 0, open = 0;
+        executor_watch_read_block(entity + 0x1c4, &state, 1);
+        executor_watch_read_block(entity + 0x23d, &probe, 1);
+        executor_watch_read_block(entity + 0x23e, &open, 1);
+        text += " state 0x" + executor_watch_hex(state).substr(2) + " handle " +
+                executor_watch_hex(executor_watch_read_u64(entity + 0x50)) + " buffers " +
+                std::to_string(executor_watch_read_u32(entity + 0x1b8)) + " probe 0x" +
+                executor_watch_hex(probe).substr(2) + " open 0x" + executor_watch_hex(open).substr(2) + " error 0x" +
+                executor_watch_hex(executor_watch_read_u32(entity + 0x240)).substr(2);
+    }
+    return text;
+}
+
+std::string s3_dispatch_raise_summary() {
+    S3Dispatch& watch = s3_dispatch();
+    std::string text = " raises " + std::to_string(watch.raise_total.load(std::memory_order_relaxed));
+    unsigned shown = 0;
+    for (unsigned id = 0; id < 0x100 && shown < 12; ++id) {
+        const unsigned count = watch.raise_count[id].load(std::memory_order_relaxed);
+        if (!count) continue;
+        text += " 0x" + executor_watch_hex(id).substr(2) + ":" + std::to_string(count);
+        ++shown;
+    }
+    const unsigned other = watch.raise_other.load(std::memory_order_relaxed);
+    if (other) text += " other:" + std::to_string(other);
+    return text;
+}
+
+std::string s3_dispatch_hits_summary() {
+    S3Dispatch& watch = s3_dispatch();
+    std::string text = " hits";
+    for (unsigned i = 0; i < kS3DispatchSiteCount; ++i)
+        text += std::string(" ") + kS3DispatchSites[i].name + " " +
+                std::to_string(watch.hits[i].load(std::memory_order_relaxed));
+    return text;
+}
+
+// One logged hit; the site-specific body reads the arguments the measured call shape passes.
+void s3_dispatch_log_hit(unsigned slot, CONTEXT& context) {
+    S3Dispatch& watch = s3_dispatch();
+    if (watch.lines.fetch_add(1, std::memory_order_relaxed) >= kS3TotalLines) return;
+    const std::uintptr_t rcx = static_cast<std::uintptr_t>(context.Rcx);
+    const std::uintptr_t rdx = static_cast<std::uintptr_t>(context.Rdx);
+    const std::uintptr_t r8 = static_cast<std::uintptr_t>(context.R8);
+    char head[192];
+    std::snprintf(head, sizeof head, "[rt] s3dispatch t=%.3f site %s hit %u tid %lu rcx 0x%llx rdx 0x%llx r8 0x%llx",
+                  executor_watch_seconds(), kS3DispatchSites[slot].name,
+                  watch.hits[slot].load(std::memory_order_relaxed), static_cast<unsigned long>(GetCurrentThreadId()),
+                  static_cast<unsigned long long>(rcx), static_cast<unsigned long long>(rdx),
+                  static_cast<unsigned long long>(r8));
+    std::string text = head;
+    switch (slot) {
+        case 0:  // subscriber start (vtable +0x68): the subscriber object and the event payload it consumed
+            watch.subscriber.store(rcx, std::memory_order_relaxed);
+            text += s3_dispatch_subscriber_text(rcx) + s3_dispatch_event_text(rdx) + s3_dispatch_record_text();
+            break;
+        case 1:  // job-exec 0x5BB4DE0: subscriber object + the command block the start built
+            text += " subscriber 0x" + executor_watch_hex(rcx).substr(2);
+            if (rcx) text += " handle " + executor_watch_hex(executor_watch_read_u64(rcx + 0x58));
+            if (rdx) {
+                text += s3_dispatch_qwords("block", rdx, 6);
+                text += " command-id 0x" + executor_watch_hex(executor_watch_read_u32(rdx + 0x18)).substr(2);
+            }
+            break;
+        case 2:  // async-submit 0x1DBC0F0: command id in edx, flag in r8b, the handle before/after the submission
+            text += " subscriber 0x" + executor_watch_hex(rcx).substr(2);
+            if (rcx) {
+                const std::uintptr_t handle = static_cast<std::uintptr_t>(executor_watch_read_u64(rcx + 0x58));
+                text += " stream-object " + executor_watch_hex(executor_watch_read_u64(rcx + 0x50)) + " handle " +
+                        executor_watch_hex(handle);
+                if (handle)
+                    text += " finished " + executor_watch_hex(executor_watch_read_u64(handle + 0x30));
+            }
+            text += " command-id 0x" + executor_watch_hex(context.Rdx & 0xFFFFFFFFu).substr(2);
+            break;
+        case 3:  // subscriber completion (vtable +0x60): the method that would write the record's completion dword
+            watch.subscriber.store(rcx, std::memory_order_relaxed);
+            text += s3_dispatch_subscriber_text(rcx) + s3_dispatch_record_text();
+            break;
+        case 4:  // task callback 0x27ED3A0: its object and the record completion it would write
+            text += " object 0x" + executor_watch_hex(rcx).substr(2);
+            if (rcx) text += s3_dispatch_qwords("object", rcx, 8);
+            text += s3_dispatch_record_text();
+            break;
+        case 5: {  // event bus raise (logged by the handler itself; this body is a fallback)
+            const std::uintptr_t caller = static_cast<std::uintptr_t>(executor_watch_read_u64(context.Rsp));
+            text += s3_dispatch_event_text(rdx) + " caller " + s3_dispatch_label(caller);
+            break;
+        }
+        case 6:  // subscriber's registered 0xe handler: the delivery path, when the bus dispatches an event to it
+            text += s3_dispatch_subscriber_text(rcx) + s3_dispatch_event_text(rdx);
+            break;
+        case 7: {  // the completion writer: record + poll index + the slot dword it would store
+            const std::uint32_t index = rdx ? executor_watch_read_u32(rdx) : 0xFFFFFFFFu;
+            const std::uint32_t tick = executor_watch_read_u32(rcx + static_cast<std::uintptr_t>(index) * 0x50);
+            const std::uint32_t completion =
+                executor_watch_read_u32(rcx + 0x18 + static_cast<std::uintptr_t>(index) * 0x50);
+            text += " record 0x" + executor_watch_hex(rcx).substr(2) + " index " + std::to_string(index) +
+                    " slot-tick " + std::to_string(tick) + " slot-completion " + std::to_string(completion) +
+                    " ours " + ((rcx == s3_dispatch_image_base + kTitleLoadingRecordRva) ? "yes" : "no");
+            break;
+        }
+        case 8:  // the SDK async-request consume routine the completion method runs first
+            text += " request 0x" + executor_watch_hex(rcx).substr(2) + " object2 0x" + executor_watch_hex(rdx).substr(2);
+            if (rcx) {
+                text += s3_dispatch_qwords("request", rcx, 7);
+                text += " owner " + executor_watch_hex(executor_watch_read_u64(rcx + 0x30)) + " callbacks " +
+                        executor_watch_hex(executor_watch_read_u64(rcx + 0x20)) + "/" +
+                        executor_watch_hex(executor_watch_read_u32(rcx + 0x28));
+            }
+            break;
+        case 9:  // the stream object's pending-request registration (attach): owner + request + key
+            text += " owner 0x" + executor_watch_hex(rcx).substr(2) + " request 0x" +
+                    executor_watch_hex(rdx).substr(2) + " key 0x" +
+                    executor_watch_hex(r8 & 0xFFFFFFFFu).substr(2);
+            if (rcx) text += s3_dispatch_qwords("owner +0xf8", rcx + 0xf8, 6);
+            break;
+        case 10:  // the attach notification step
+            text += " owner 0x" + executor_watch_hex(rcx).substr(2) + " arg 0x" + executor_watch_hex(rdx).substr(2);
+            break;
+        case 11:  // the attach check inside FUN_145A9FD90
+            text += " request 0x" + executor_watch_hex(rcx).substr(2) + " owner 0x" +
+                    executor_watch_hex(rdx).substr(2);
+            if (rcx) {
+                text += s3_dispatch_qwords("request", rcx, 7);
+                text += " owner-slot " + executor_watch_hex(executor_watch_read_u64(rcx + 0x30));
+            }
+            break;
+        default:
+            break;
+    }
+    text += "\n  chain:" + slot_watch_chain(context) + "\n";
+    s3_dispatch_print(text);
+}
+
+void s3_dispatch_write_byte(unsigned slot, unsigned char value) {
+    S3Dispatch& watch = s3_dispatch();
+    const auto address = watch.address[slot].load(std::memory_order_relaxed);
+    if (!address) return;
+    DWORD old_protect = 0;
+    if (VirtualProtect(reinterpret_cast<void*>(address), 1, PAGE_EXECUTE_READWRITE, &old_protect)) {
+        *reinterpret_cast<unsigned char*>(address) = value;
+        VirtualProtect(reinterpret_cast<void*>(address), 1, old_protect, &old_protect);
+    }
+}
+
+thread_local unsigned s3_dispatch_repoke_slot = 0;
+
+LONG CALLBACK s3_dispatch_exception(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT& context = *info->ContextRecord;
+    S3Dispatch& watch = s3_dispatch();
+    if (!watch.ready.load(std::memory_order_relaxed)) return EXCEPTION_CONTINUE_SEARCH;
+    if (info->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT) {
+        const auto at = reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress);
+        unsigned slot = kS3DispatchSiteCount;
+        for (unsigned i = 0; i < kS3DispatchSiteCount; ++i)
+            if (watch.address[i].load(std::memory_order_relaxed) == at) {
+                slot = i;
+                break;
+            }
+        if (slot == kS3DispatchSiteCount) return EXCEPTION_CONTINUE_SEARCH;
+        const unsigned hit = watch.hits[slot].fetch_add(1, std::memory_order_relaxed) + 1;
+        const bool log_this_hit =
+            slot == 5 ? (hit <= 512) : (hit <= kS3DispatchSites[slot].cap || (hit % 4096 == 0));
+        if (log_this_hit && watch.logged[slot].fetch_add(1, std::memory_order_relaxed) < 512) {
+            if (slot != 5) {
+                s3_dispatch_log_hit(slot, context);
+            } else {
+                // The raise site is shared by every event on the bus: three logged lines per id, then counts only.
+                const std::uintptr_t event = static_cast<std::uintptr_t>(context.Rdx);
+                const std::uint32_t id = executor_watch_read_u32(event + 8);
+                const unsigned total = watch.raise_total.fetch_add(1, std::memory_order_relaxed) + 1;
+                bool log_raise = false;
+                if (id < 0x100) {
+                    watch.raise_count[id].fetch_add(1, std::memory_order_relaxed);
+                    log_raise = watch.raise_logged[id].fetch_add(1, std::memory_order_relaxed) < 3;
+                } else {
+                    log_raise = watch.raise_other.fetch_add(1, std::memory_order_relaxed) < 8;
+                }
+                if (log_raise) {
+                    char head[192];
+                    std::snprintf(head, sizeof head,
+                                  "[rt] s3dispatch t=%.3f site event-bus-raise hit %u (total %u) tid %lu rcx "
+                                  "0x%llx rdx 0x%llx r8 0x%llx",
+                                  executor_watch_seconds(), hit, total,
+                                  static_cast<unsigned long>(GetCurrentThreadId()),
+                                  static_cast<unsigned long long>(context.Rcx),
+                                  static_cast<unsigned long long>(context.Rdx),
+                                  static_cast<unsigned long long>(context.R8));
+                    const std::uintptr_t caller = static_cast<std::uintptr_t>(executor_watch_read_u64(context.Rsp));
+                    std::string text = head;
+                    text += s3_dispatch_event_text(event) + " caller " + s3_dispatch_label(caller) + "\n";
+                    s3_dispatch_print(text);
+                }
+            }
+        }
+        s3_dispatch_write_byte(slot, static_cast<unsigned char>(watch.original[slot].load(std::memory_order_relaxed)));
+        s3_dispatch_repoke_slot = slot + 1;
+        context.EFlags |= 0x100;  // trap after the original instruction, then put the int3 back
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (info->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP) {
+        // The trap flag is only raised by this probe's own restore-and-single-step, and the pending slot is
+        // thread-local; the saved context does not reliably keep TF set for the trap, so the slot is the test.
+        if (!s3_dispatch_repoke_slot) return EXCEPTION_CONTINUE_SEARCH;
+        const unsigned slot = s3_dispatch_repoke_slot - 1;
+        s3_dispatch_repoke_slot = 0;
+        s3_dispatch_write_byte(slot, 0xCC);
+        context.EFlags &= ~static_cast<DWORD>(0x100);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// Starts the probe: the int3 sites, a 2 s sampler (subscriber/async/record/state/bus) and a 10 s counter reporter.
+void start_s3_dispatch_probe(std::uintptr_t image_base, std::size_t image_size) {
+    (void)image_size;
+    S3Dispatch& watch = s3_dispatch();
+    s3_dispatch_image_base = image_base;
+    unsigned armed = 0;
+    AddVectoredExceptionHandler(1, s3_dispatch_exception);
+    watch.ready.store(true, std::memory_order_relaxed);
+    std::string list;
+    for (unsigned i = 0; i < kS3DispatchSiteCount; ++i) {
+        auto* const at = reinterpret_cast<unsigned char*>(image_base + kS3DispatchSites[i].rva);
+        DWORD old_protect = 0;
+        if (!VirtualProtect(at, 1, PAGE_EXECUTE_READWRITE, &old_protect)) {
+            list += std::string(" ") + kS3DispatchSites[i].name + "=FAILED";
+            continue;
+        }
+        watch.original[i].store(*at, std::memory_order_relaxed);
+        watch.address[i].store(reinterpret_cast<std::uintptr_t>(at), std::memory_order_relaxed);
+        *at = 0xCC;
+        VirtualProtect(at, 1, old_protect, &old_protect);
+        ++armed;
+        char item[64];
+        std::snprintf(item, sizeof item, " %s=game+0x%x", kS3DispatchSites[i].name, kS3DispatchSites[i].rva);
+        list += item;
+    }
+    std::fprintf(stderr,
+                 "[rt] s3dispatch: %u/%u int3 site(s) armed:%s; sampling the subscriber/async record every 2 s\n",
+                 armed, kS3DispatchSiteCount, list.c_str());
+    std::fflush(stderr);
+    std::thread([] {
+        for (unsigned tick = 1; tick <= 320; ++tick) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (tick % 2 != 0) continue;
+            S3Dispatch& watch = s3_dispatch();
+            const std::uintptr_t subscriber = watch.subscriber.load(std::memory_order_relaxed);
+            if (!subscriber) continue;
+            if (watch.sampler_lines.fetch_add(1, std::memory_order_relaxed) >= kS3SamplerLines) return;
+            char head[96];
+            std::snprintf(head, sizeof head, "[rt] s3dispatch at %u s:", tick);
+            std::string text = head;
+            text += s3_dispatch_subscriber_text(subscriber) + s3_dispatch_record_text() + s3_dispatch_state_text() +
+                    s3_dispatch_raise_summary() + s3_dispatch_hits_summary() + "\n";
+            s3_dispatch_print(text);
+        }
+    }).detach();
+    std::thread([] {
+        for (unsigned sample = 1; sample <= 31; ++sample) {
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+            S3Dispatch& watch = s3_dispatch();
+            std::fprintf(stderr, "[rt] s3dispatch counters at %u s:%s%s\n", sample * 10,
+                         s3_dispatch_raise_summary().c_str(), s3_dispatch_hits_summary().c_str());
+            std::fflush(stderr);
+            if (watch.raise_total.load(std::memory_order_relaxed) > 100000) return;
+        }
+    }).detach();
+    // The fine change log: after the start captured a subscriber, poll the async request's first 0x40 bytes (the owner
+    // slot, the sub-operation count, the callback array/count, the key and the flag) and the stream object's pending
+    // slot every 100 ms, and print one line per change. A request that never changes is a job whose completion record
+    // never appeared; a request whose fields move is a job that is progressing.
+    std::thread([] {
+        S3Dispatch& watch = s3_dispatch();
+        std::uint64_t last[7] = {};
+        std::uintptr_t last_handle = 0, last_stream = 0;
+        bool have = false;
+        for (unsigned tick = 0; tick < 3100; ++tick) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            const std::uintptr_t subscriber = watch.subscriber.load(std::memory_order_relaxed);
+            if (!subscriber) continue;
+            const std::uintptr_t handle = static_cast<std::uintptr_t>(executor_watch_read_u64(subscriber + 0x58));
+            const std::uintptr_t stream = static_cast<std::uintptr_t>(executor_watch_read_u64(subscriber + 0x50));
+            if (!handle) continue;
+            std::uint64_t now[7] = {};
+            for (unsigned i = 0; i < 7; ++i) now[i] = executor_watch_read_u64(handle + i * 8);
+            bool changed = !have || handle != last_handle || stream != last_stream;
+            for (unsigned i = 0; i < 7; ++i)
+                if (now[i] != last[i]) changed = true;
+            if (!changed) continue;
+            if (watch.fine_lines.fetch_add(1, std::memory_order_relaxed) >= kS3FineLines) return;
+            char head[128];
+            std::snprintf(head, sizeof head, "[rt] s3dispatch t=%.3f fine-change request 0x%llx stream 0x%llx",
+                          executor_watch_seconds(), static_cast<unsigned long long>(handle),
+                          static_cast<unsigned long long>(stream));
+            std::string text = head;
+            text += s3_dispatch_qwords("request", handle, 7);
+            text += " owner " + executor_watch_hex(executor_watch_read_u64(handle + 0x30)) + " callbacks " +
+                    executor_watch_hex(executor_watch_read_u64(handle + 0x20)) + "/" +
+                    executor_watch_hex(executor_watch_read_u32(handle + 0x28));
+            if (stream) {
+                text += " stream-vtable " + s3_dispatch_label(executor_watch_read_u64(stream));
+                text += s3_dispatch_qwords("stream +0x100", stream + 0x100, 5);
+            }
+            text += "\n";
+            s3_dispatch_print(text);
+            for (unsigned i = 0; i < 7; ++i) last[i] = now[i];
+            last_handle = handle;
+            last_stream = stream;
+            have = true;
+        }
+    }).detach();
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -6586,6 +7098,14 @@ int wmain(int argc, wchar_t** argv) {
         // (diagnostic; see the loading-record writer watch above). Off by default.
         if (const char* watch = std::getenv("PALMETTO_SLOT_WATCH"); watch && *watch && *watch != '0')
             start_slot_watch(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, watch);
+        // PALMETTO_S3DISPATCH=1: int3 sites on the session-3 record's two completion callers (the streaming subscriber
+        // completion vtable +0x60 and the task callback), on the subscriber start and the job/async submission it runs,
+        // on the global event bus raise and the subscriber's registered 0xe handler, plus the completion writer as a
+        // control; a 2 s sampler prints the subscriber's async handle state and the record/state words, so one boot
+        // separates a finished job with no dispatched completion from a job that never finished (diagnostic; see the
+        // session-3 completion dispatch probe above). Off by default.
+        if (const char* dispatch = std::getenv("PALMETTO_S3DISPATCH"); dispatch && *dispatch && *dispatch != '0')
+            start_s3_dispatch_probe(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size);
         // PALMETTO_LOADER_WATCH=1: hardware data watchpoints on the loader object's armed flag (+0x78) and in-flight
         // count (+0x64), so the storing title code and its stack are captured at each transition (diagnostic; see the
         // loader write watch above). Off by default.
