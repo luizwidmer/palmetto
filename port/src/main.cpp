@@ -5505,6 +5505,428 @@ void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_siz
     }).detach();
 }
 
+// ---- Session-3 loading-record writer watch (PALMETTO_SLOT_WATCH) ----------------------------------------------------
+// docs/decomp_stage.md section 10 named this slice as the falsifier for its negative: the session-3 poll 0x21B7070 tests
+// the completion dword of the loading record 0x78AC9C8 slot 4 at image+0x78ACB20 (slot field +0x18), that dword stayed
+// zero in every sampled window of six boots, and the store that would write it has no static call site because it goes
+// through a register. A polling sampler cannot name it; a hardware write watch raises a debug exception after the storing
+// instruction executed and the exception context carries the writing thread and its stack.
+//
+// Windows debug registers are per-thread, so the probe arms every thread of the process (CreateToolhelp32Snapshot +
+// SuspendThread/GetThreadContext/SetThreadContext) and keeps arming threads created later. A thread is only armed after
+// it has been seen across two scans, the rule the executor watch documents: suspending a thread between its creation and
+// its first instruction can leave a suspend count its owner never balances and stall the loader. Four data breakpoints
+// exist and all four are used, all as aligned 8-byte write watches:
+//
+//   DR0  the target completion dword (image+0x78AC9C8 + slot*0x50 + 0x18) - the measurement;
+//   DR1  slot 0's tick dword (image+0x78AC9C8), the progress write section 10.3 measured moving during the loading pass:
+//        the same-boot live control, proving the watch catches title stores into this record at all;
+//   DR2  the target slot's tick dword (image+0x78AC9C8 + slot*0x50): the session-3 poll 0x41E8C0 writes its own tick
+//        there, so a fire dates the first poll pass without sampling the state word;
+//   DR3  a port-owned control slot written every 50 ms by a probe thread: if that never fires, the debug registers are
+//        not honoured in this environment and a silent DR0 is a method failure, not a measurement.
+//
+// Every line prints the steady clock (the PALMETTO_TIMELINE clock) and the process-relative second (the state trace's
+// clock), the three state words with the machine's current/requested pair, the loader object's armed/in-flight fields,
+// all five slots' tick/completion/state dwords and the poll index, the bytes leading up to the writer's RIP (the
+// breakpoint fires after the store), the registers and the call chain from RtlVirtualUnwind (image frames as game+RVA,
+// other modules by name). Bounded: a per-watch log cap, a 96-line total cap and a 10 s counter reporter, so a negative
+// boot still shows what the watch saw. RVAs, offsets, values and counts only; no game data.
+//
+// PALMETTO_SLOT_WATCH=1 watches slot 4 (the poll's slot); =<slot> (2, 3 or 4) overrides it. Off when unset or "0".
+struct SlotWatch {
+    std::atomic<bool> ready{false};
+    std::atomic<std::uintptr_t> completion{0};      // DR0: 8-byte write watch, slot +0x18
+    std::atomic<std::uintptr_t> live_control{0};    // DR1: 8-byte write watch, slot 0 tick
+    std::atomic<std::uintptr_t> poll_tick{0};       // DR2: 8-byte write watch, the target slot's tick
+    std::atomic<std::uintptr_t> method_control{0};  // DR3: 8-byte write watch, the probe's own control slot
+    std::atomic<std::uint64_t> completion_last{0}, live_control_last{0}, poll_tick_last{0};
+    std::atomic<unsigned> completion_hits{0}, live_control_hits{0}, poll_tick_hits{0}, method_control_hits{0};
+    std::atomic<unsigned> lines{0};
+    std::atomic<unsigned> configured{0};
+};
+
+SlotWatch& slot_watch() {
+    static SlotWatch watch;
+    return watch;
+}
+
+// The method control: a port-owned slot a probe thread writes every 50 ms. If DR3 never fires, data breakpoints are not
+// honoured on this machine. Aligned and volatile only; contains no title data.
+alignas(8) volatile std::uint64_t slot_watch_control_slot = 0;
+std::uintptr_t slot_watch_image_base = 0, slot_watch_image_size = 0;
+// The loading/streaming record the session-3 poll reads (docs/decomp_stage.md section 10.1): 0x50-byte slots, entry +0x18
+// is the completion dword, entry +0x0 the poll's tick. The poll index at the record's +0x1D8 selects the slot.
+constexpr std::uint32_t kTitleLoadingRecordRva = 0x78AC9C8;
+constexpr std::uint32_t kTitleLoadingRecordIndexRva = 0x78ACBA0;
+constexpr std::uint32_t kTitleLoaderObjectRva = 0x79F6D70;
+
+std::mutex& slot_watch_print_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+void slot_watch_print(const char* text) {
+    std::lock_guard lock(slot_watch_print_mutex());
+    std::fwrite(text, 1, std::strlen(text), stderr);
+    std::fflush(stderr);
+}
+
+const char* slot_watch_kind(unsigned index) {
+    switch (index) {
+        case 0: return "COMPLETION";
+        case 1: return "LIVE-CONTROL";
+        case 2: return "POLL-TICK";
+        default: return "METHOD-CONTROL";
+    }
+}
+
+std::uintptr_t slot_watch_address_of(unsigned index) {
+    SlotWatch& watch = slot_watch();
+    switch (index) {
+        case 0: return watch.completion.load(std::memory_order_relaxed);
+        case 1: return watch.live_control.load(std::memory_order_relaxed);
+        case 2: return watch.poll_tick.load(std::memory_order_relaxed);
+        default: return watch.method_control.load(std::memory_order_relaxed);
+    }
+}
+
+std::atomic<std::uint64_t>& slot_watch_last_of(unsigned index) {
+    SlotWatch& watch = slot_watch();
+    switch (index) {
+        case 0: return watch.completion_last;
+        case 1: return watch.live_control_last;
+        case 2: return watch.poll_tick_last;
+        default: return watch.completion_last;  // the method control is not compared
+    }
+}
+
+std::atomic<unsigned>& slot_watch_hits_of(unsigned index) {
+    SlotWatch& watch = slot_watch();
+    switch (index) {
+        case 0: return watch.completion_hits;
+        case 1: return watch.live_control_hits;
+        case 2: return watch.poll_tick_hits;
+        default: return watch.method_control_hits;
+    }
+}
+
+// A label for one code address: image addresses as game+RVA without taking the shim registry lock (the common case in
+// this handler), other modules through module_offset() so a host-runtime frame is named rather than guessed.
+void slot_watch_label_into(char* out, std::size_t cap, std::uint64_t address) {
+    if (address >= slot_watch_image_base && address < slot_watch_image_base + slot_watch_image_size) {
+        std::snprintf(out, cap, "game+0x%x", static_cast<unsigned>(address - slot_watch_image_base));
+        return;
+    }
+    const std::string label = rt::shims::module_offset(address);
+    std::snprintf(out, cap, "%s", label.c_str());
+}
+
+// The writer's real call chain from the .pdata unwind info (RtlLookupFunctionEntry/RtlVirtualUnwind), the same walk the
+// stage-3 pump probe uses on suspended threads. Bounded and fault-tolerant inside unwind_call_chain; the frame text is a
+// fixed buffer so the handler stays allocation-light.
+std::string slot_watch_chain(const CONTEXT& context) {
+    std::uint64_t frames[40] = {};
+    const unsigned found = unwind_call_chain(context, frames, 40);
+    std::string text;
+    text.reserve(768);
+    unsigned shown = 0;
+    for (unsigned i = 0; i < found && shown < 24; ++i) {
+        char label[96];
+        slot_watch_label_into(label, sizeof label, frames[i]);
+        text += ' ';
+        text += label;
+        ++shown;
+    }
+    return text.empty() ? std::string(" (none)") : text;
+}
+
+// One hardware write-watch hit: the writer's RIP and bytes before it (the breakpoint fires after the store), the value
+// now and before, the state words and the record at that instant, and the unwound writer chain.
+void slot_watch_hit(unsigned index, CONTEXT& context) {
+    static constexpr unsigned kLogCap[4] = {48, 8, 12, 3};
+    SlotWatch& watch = slot_watch();
+    const std::uintptr_t address = slot_watch_address_of(index);
+    const unsigned hit = slot_watch_hits_of(index).fetch_add(1, std::memory_order_relaxed) + 1;
+    std::uint64_t now = 0;
+    const bool read_ok = executor_watch_read_block(address, &now, 8);
+    std::uint64_t previous = 0;
+    if (index != 3) previous = slot_watch_last_of(index).exchange(now, std::memory_order_relaxed);
+    const bool log = hit <= kLogCap[index] || (hit % 4096 == 0);
+    if (!log || watch.lines.fetch_add(1, std::memory_order_relaxed) >= 96) return;
+
+    const double absolute = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double relative =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - sampler_epoch()).count();
+    char writer[96];
+    slot_watch_label_into(writer, sizeof writer, context.Rip);
+
+    // The state words the record and the session machine read, and the loader object the storage path arms.
+    bool ok_init = false, ok_loading = false, ok_session = false, ok_loading_tick = false, ok_machine = false;
+    const std::uint32_t init = title_read_u32(slot_watch_image_base, kTitleInitStateRva, ok_init);
+    const std::uint32_t loading = title_read_u32(slot_watch_image_base, kTitleLoadingStateRva, ok_loading);
+    const std::uint32_t loading_tick = title_read_u32(slot_watch_image_base, kTitleLoadingTickRva, ok_loading_tick);
+    const std::uint32_t session = title_read_u32(slot_watch_image_base, kTitleSessionStateRva, ok_session);
+    const std::uint64_t machine = title_read_u64(slot_watch_image_base, kTitleStateMachineRva, ok_machine);
+    bool ok_current = false, ok_next = false;
+    std::uint16_t machine_current = 0, machine_next = 0;
+    if (ok_machine && machine && (machine & 7) == 0) {
+        machine_current = title_read_u16_at(static_cast<std::uintptr_t>(machine) + 0x10, ok_current);
+        machine_next = title_read_u16_at(static_cast<std::uintptr_t>(machine) + 0x12, ok_next);
+    }
+    bool ok_poll_index = false;
+    const std::uint32_t poll_index = title_read_u32(slot_watch_image_base, kTitleLoadingRecordIndexRva, ok_poll_index);
+    bool ok_loader = false;
+    const std::uint64_t loader = title_read_u64(slot_watch_image_base, kTitleLoaderObjectRva, ok_loader);
+    std::uint32_t loader_armed = 0, loader_inflight = 0;
+    if (ok_loader && loader) {
+        loader_armed = executor_watch_read_u32(static_cast<std::uintptr_t>(loader) + 0x78);
+        loader_inflight = executor_watch_read_u32(static_cast<std::uintptr_t>(loader) + 0x64);
+    }
+    unsigned tick[5] = {}, completion[5] = {}, state[5] = {};
+    bool slots_ok = true;
+    for (unsigned slot = 0; slot < 5; ++slot) {
+        bool ok_tick = false, ok_completion = false, ok_state = false;
+        const auto base = static_cast<std::uint32_t>(kTitleLoadingRecordRva + slot * 0x50u);
+        tick[slot] = title_read_u32(slot_watch_image_base, base, ok_tick);
+        completion[slot] = title_read_u32(slot_watch_image_base, base + 0x18, ok_completion);
+        state[slot] = title_read_u32(slot_watch_image_base, base + 0x20, ok_state);
+        slots_ok = slots_ok && ok_tick && ok_completion && ok_state;
+    }
+
+    // The bytes leading up to the writer's RIP name the store instruction without a disassembler.
+    char store_bytes[80] = " (unreadable)";
+    unsigned char bytes[16] = {};
+    if (context.Rip >= 16 && executor_watch_read_block(static_cast<std::uintptr_t>(context.Rip) - 16, bytes, 16)) {
+        int at = 0;
+        for (unsigned i = 0; i < 16 && at < static_cast<int>(sizeof store_bytes) - 4; ++i)
+            at += std::snprintf(store_bytes + at, sizeof store_bytes - at, " %02x", bytes[i]);
+    }
+    const std::string chain = slot_watch_chain(context);
+
+    char line[4096];
+    std::snprintf(line, sizeof line,
+                  "[rt] slot watch t=%.3f (%.1f s) %s hit %u tid %lu writer %s value %s0x%llx (was 0x%llx)\n"
+                  "  state: init %s%u machine %s%u/%s%u loading %s%u (tick %s%u) session %s%u; poll index %s%u; "
+                  "loader 0x%llx armed %u in-flight %u\n"
+                  "  record: slots 0..4 tick/comp/state 0:%u/%u/%u 1:%u/%u/%u 2:%u/%u/%u 3:%u/%u/%u 4:%u/%u/%u%s\n"
+                  "  bytes before writer rip:%s\n"
+                  "  rax %llx rbx %llx rcx %llx rdx %llx rsi %llx rdi %llx r8 %llx r9 %llx r14 %llx r15 %llx\n"
+                  "  stack (RtlVirtualUnwind):%s\n",
+                  absolute, relative, slot_watch_kind(index), hit, static_cast<unsigned long>(GetCurrentThreadId()),
+                  writer, read_ok ? "" : "UNREADABLE ", static_cast<unsigned long long>(now),
+                  static_cast<unsigned long long>(previous), ok_init ? "" : "?", init, ok_current ? "" : "?",
+                  machine_current, ok_next ? "" : "?", machine_next, ok_loading ? "" : "?", loading,
+                  ok_loading_tick ? "" : "?", loading_tick, ok_session ? "" : "?", session, ok_poll_index ? "" : "?",
+                  poll_index, static_cast<unsigned long long>(loader), loader_armed, loader_inflight, tick[0],
+                  completion[0], state[0], tick[1], completion[1], state[1], tick[2], completion[2], state[2], tick[3],
+                  completion[3], state[3], tick[4], completion[4], state[4], slots_ok ? "" : " (partial)",
+                  store_bytes, static_cast<unsigned long long>(context.Rax),
+                  static_cast<unsigned long long>(context.Rbx), static_cast<unsigned long long>(context.Rcx),
+                  static_cast<unsigned long long>(context.Rdx), static_cast<unsigned long long>(context.Rsi),
+                  static_cast<unsigned long long>(context.Rdi), static_cast<unsigned long long>(context.R8),
+                  static_cast<unsigned long long>(context.R9), static_cast<unsigned long long>(context.R14),
+                  static_cast<unsigned long long>(context.R15), chain.c_str());
+    slot_watch_print(line);
+}
+
+LONG CALLBACK slot_watch_exception(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT& context = *info->ContextRecord;
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
+    if ((context.EFlags & 0x100u) != 0) return EXCEPTION_CONTINUE_SEARCH;  // a trap another probe's machinery set
+    SlotWatch& watch = slot_watch();
+    if (!watch.ready.load(std::memory_order_relaxed)) return EXCEPTION_CONTINUE_SEARCH;
+    const DWORD dr6 = context.Dr6;
+    if ((dr6 & 0xFu) == 0) return EXCEPTION_CONTINUE_SEARCH;
+    context.Dr6 = 0;
+    for (unsigned index = 0; index < 4; ++index)
+        if ((dr6 & (1u << index)) != 0) slot_watch_hit(index, context);
+    return EXCEPTION_CONTINUE_EXECUTION;  // a data breakpoint does not consume the instruction
+}
+
+// DR7: four local data breakpoints, RW=01 (write), LEN=11 (8 bytes). An address that is not 8-byte aligned cannot take an
+// 8-byte watch and its slot is left disabled (the arm log names it).
+DWORD slot_watch_dr7(const std::uintptr_t points[4]) {
+    DWORD dr7 = 0;
+    for (unsigned index = 0; index < 4; ++index) {
+        if (!points[index] || (points[index] & 7u) != 0) continue;
+        dr7 |= 0x1u << (2 * index);           // L_i
+        dr7 |= 0x1u << (16 + 4 * index);      // RW_i = 01, write
+        dr7 |= 0x3u << (18 + 4 * index);      // LEN_i = 11, 8 bytes
+    }
+    return dr7;
+}
+
+// Arms the four data breakpoints in one thread. Called with no title lock held: it suspends the thread for the length of
+// one Get/SetThreadContext only.
+bool slot_watch_configure_thread(DWORD tid, const std::uintptr_t points[4], DWORD dr7) {
+    const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, tid);
+    if (!thread) return false;
+    bool configured = false;
+    if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
+        CONTEXT context{};
+        context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        if (GetThreadContext(thread, &context)) {
+            context.Dr0 = points[0];
+            context.Dr1 = points[1];
+            context.Dr2 = points[2];
+            context.Dr3 = points[3];
+            context.Dr6 = 0;
+            context.Dr7 = dr7;
+            configured = SetThreadContext(thread, &context) != FALSE;
+        }
+        ResumeThread(thread);
+    }
+    CloseHandle(thread);
+    return configured;
+}
+
+// The arming sweep: every thread is configured once, after it has been alive across two scans, and threads created
+// later are picked up. Fixed arrays only, and no allocation between SuspendThread and ResumeThread (a thread suspended
+// inside its own heap allocation holds the process heap lock).
+void start_slot_watch_threads() {
+    std::thread([] {
+        for (;;) {
+            ++slot_watch_control_slot;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }).detach();
+    // A bounded reporter, so a watch that never fires still shows the counters in the boot log.
+    std::thread([] {
+        for (int sample = 1; sample <= 30; ++sample) {
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+            SlotWatch& watch = slot_watch();
+            std::fprintf(stderr,
+                         "[rt] slot watch at %d s: %u thread(s) armed; completion hits %u (logged), live-control hits %u, "
+                         "poll-tick hits %u, method-control hits %u\n",
+                         sample * 10, watch.configured.load(std::memory_order_relaxed),
+                         watch.completion_hits.load(std::memory_order_relaxed),
+                         watch.live_control_hits.load(std::memory_order_relaxed),
+                         watch.poll_tick_hits.load(std::memory_order_relaxed),
+                         watch.method_control_hits.load(std::memory_order_relaxed));
+            std::fflush(stderr);
+        }
+    }).detach();
+    std::thread([] {
+        static constexpr unsigned kMaxThreads = 4096, kPending = 512;
+        static DWORD configured[kMaxThreads];
+        static DWORD seen_tid[kMaxThreads];
+        static ULONGLONG seen_at[kMaxThreads];
+        unsigned configured_count = 0, seen_count = 0;
+        unsigned long loops = 0;
+        const auto find = [](const DWORD* table, unsigned count, DWORD tid) -> int {
+            for (unsigned i = 0; i < count; ++i)
+                if (table[i] == tid) return static_cast<int>(i);
+            return -1;
+        };
+        for (;;) {
+            SlotWatch& watch = slot_watch();
+            const std::uintptr_t points[4] = {watch.completion.load(std::memory_order_relaxed),
+                                              watch.live_control.load(std::memory_order_relaxed),
+                                              watch.poll_tick.load(std::memory_order_relaxed),
+                                              watch.method_control.load(std::memory_order_relaxed)};
+            const DWORD dr7 = slot_watch_dr7(points);
+            const ULONGLONG now = GetTickCount64();
+            DWORD pending[kPending];
+            unsigned pending_count = 0, refused = 0;
+            const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if (snapshot != INVALID_HANDLE_VALUE) {
+                THREADENTRY32 entry{};
+                entry.dwSize = sizeof entry;
+                const DWORD pid = GetCurrentProcessId();
+                const DWORD self = GetCurrentThreadId();  // never suspend this sweep: a self-suspend never resumes
+                if (Thread32First(snapshot, &entry))
+                    do {
+                        if (entry.th32OwnerProcessID != pid || entry.th32ThreadID == self) continue;
+                        if (find(configured, configured_count, entry.th32ThreadID) >= 0) continue;
+                        const int seat = find(seen_tid, seen_count, entry.th32ThreadID);
+                        if (seat < 0) {
+                            if (seen_count < kMaxThreads) {
+                                seen_tid[seen_count] = entry.th32ThreadID;
+                                seen_at[seen_count] = now;
+                                ++seen_count;
+                            }
+                            continue;  // first sight: wait one scan before suspending it
+                        }
+                        if (now - seen_at[seat] < 1000) continue;
+                        if (pending_count < kPending) pending[pending_count++] = entry.th32ThreadID;
+                    } while (Thread32Next(snapshot, &entry));
+                CloseHandle(snapshot);
+            }
+            for (unsigned i = 0; i < pending_count; ++i) {
+                if (slot_watch_configure_thread(pending[i], points, dr7)) {
+                    if (configured_count < kMaxThreads) configured[configured_count++] = pending[i];
+                } else {
+                    ++refused;
+                }
+            }
+            watch.configured.store(configured_count, std::memory_order_relaxed);
+            if (++loops % 600 == 0)
+                std::fprintf(stderr, "[rt] slot watch sweep: %u thread(s) armed, %u refused this pass\n",
+                             configured_count, refused);
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        }
+    }).detach();
+}
+
+// Starts the loading-record writer watch. Measurement only: the breakpoints trap and are continued, and no layer or
+// title call changes. `spec` is the PALMETTO_SLOT_WATCH value: "1" is slot 4, 2/3/4 select another slot.
+void start_slot_watch(std::uintptr_t image_base, std::size_t image_size, const char* spec) {
+    unsigned slot = 4;
+    if (!(spec && spec[0] == '1' && spec[1] == '\0')) {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(spec ? spec : "", &end, 0);
+        if (!spec || end == spec || *end != '\0') {
+            std::fprintf(stderr, "[rt] slot watch: PALMETTO_SLOT_WATCH=%s is not a slot index; not armed\n",
+                         spec ? spec : "");
+            return;
+        }
+        if (parsed < 2 || parsed > 4) {
+            std::fprintf(stderr, "[rt] slot watch: slot %lu is not one of 2..4 (1 means slot 4); not armed\n", parsed);
+            return;
+        }
+        slot = static_cast<unsigned>(parsed);
+    }
+    const std::uintptr_t record = image_base + kTitleLoadingRecordRva;
+    const std::uintptr_t completion = record + static_cast<std::uintptr_t>(slot) * 0x50 + 0x18;
+    const std::uintptr_t live_control = record;  // slot 0's tick dword: the loading pass's own progress write
+    const std::uintptr_t poll_tick = record + static_cast<std::uintptr_t>(slot) * 0x50;
+    const std::uintptr_t method_control = reinterpret_cast<std::uintptr_t>(&slot_watch_control_slot);
+    if (!executor_watch_readable(completion, 8) || !executor_watch_readable(live_control, 8) ||
+        !executor_watch_readable(poll_tick, 8)) {
+        std::fprintf(stderr,
+                     "[rt] slot watch: the loading record at game+0x%x is not readable; not armed (image base %p, size "
+                     "0x%zx)\n",
+                     static_cast<unsigned>(kTitleLoadingRecordRva), reinterpret_cast<void*>(image_base), image_size);
+        return;
+    }
+    SlotWatch& watch = slot_watch();
+    slot_watch_image_base = image_base;
+    slot_watch_image_size = image_size;
+    watch.completion.store(completion, std::memory_order_relaxed);
+    watch.live_control.store(live_control, std::memory_order_relaxed);
+    watch.poll_tick.store(poll_tick, std::memory_order_relaxed);
+    watch.method_control.store(method_control, std::memory_order_relaxed);
+    watch.completion_last.store(executor_watch_read_u64(completion), std::memory_order_relaxed);
+    watch.live_control_last.store(executor_watch_read_u64(live_control), std::memory_order_relaxed);
+    watch.poll_tick_last.store(executor_watch_read_u64(poll_tick), std::memory_order_relaxed);
+    std::fprintf(stderr,
+                 "[rt] slot watch: slot %u; completion game+0x%x -> 0x%llx (initial 0x%llx), live control game+0x%x "
+                 "(initial 0x%llx), poll tick game+0x%x (initial 0x%llx), method control 0x%llx; arming every thread\n",
+                 slot, static_cast<unsigned>(completion - image_base),
+                 static_cast<unsigned long long>(completion), static_cast<unsigned long long>(watch.completion_last.load()),
+                 static_cast<unsigned>(live_control - image_base),
+                 static_cast<unsigned long long>(watch.live_control_last.load()),
+                 static_cast<unsigned>(poll_tick - image_base),
+                 static_cast<unsigned long long>(watch.poll_tick_last.load()),
+                 static_cast<unsigned long long>(method_control));
+    std::fflush(stderr);
+    start_slot_watch_threads();
+    AddVectoredExceptionHandler(1, slot_watch_exception);
+    watch.ready.store(true, std::memory_order_relaxed);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -5957,6 +6379,12 @@ int wmain(int argc, wchar_t** argv) {
                 }
             }).detach();
         }
+        // PALMETTO_SLOT_WATCH=<slot>: a hardware 8-byte write watch on the session-3 loading record's slot completion
+        // dword (default slot 4 = game+0x78ACB20), with a live control on the record's own slot 0 tick and a method
+        // control on a probe-owned slot, so the writer of the value the session-3 poll waits for is named in one boot
+        // (diagnostic; see the loading-record writer watch above). Off by default.
+        if (const char* watch = std::getenv("PALMETTO_SLOT_WATCH"); watch && *watch && *watch != '0')
+            start_slot_watch(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, watch);
         // PALMETTO_LOADER_WATCH=1: hardware data watchpoints on the loader object's armed flag (+0x78) and in-flight
         // count (+0x64), so the storing title code and its stack are captured at each transition (diagnostic; see the
         // loader write watch above). Off by default.

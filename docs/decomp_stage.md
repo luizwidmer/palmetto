@@ -488,3 +488,170 @@ This section was implemented from this project's own measurement: the record tra
 timeline and the storage counters. No peer code was used and no game data is added: RVAs, field offsets, values,
 counts and outcomes only.
 
+## 11. Measured: the loading record's completion dword is written only by the record reset
+
+**Status: measured, diagnostic only, negative for the producer; the writer of the dword is named.** Section 10 left the
+store that would complete slot 4 unnamed and named a hardware write watchpoint on `image+0x78ACB20` as its next
+falsifier. This section adds one opt-in probe, `PALMETTO_SLOT_WATCH`, to `port/src/main.cpp`, and reports two boots. The
+probe arms four hardware data breakpoints in every thread: the target completion dword, a live control on the record's
+own slot 0 tick, the target slot's poll tick, and a probe-owned control slot. In the one arm that reached session 3 the
+completion dword was written exactly once, with value zero, by the loading record's own reset `0x22310D0` (store at
+`0x223111E`), invoked through the streaming subscriber method `0x2355DD0` from the loading update `0x2257700`. No
+producer store followed before the title stopped, and none arrived before the process exited. The probe therefore names
+the reset as the dword's only writer and measures the completing producer as not dispatched in the window; it changes no
+shim behaviour.
+
+### 11.1 What ran
+
+| | |
+|---|---|
+| probe | `PALMETTO_SLOT_WATCH=1` in `port/src/main.cpp` (unset: one cached `getenv`, no thread and no handler) |
+| boots | two, one at a time under `_setup/boot_lock.ps1` (`-Who slotwatch`), harness `tooling/boot_report.py`, 300 s timeout |
+| environment | section 10.2's standard arm: the deferred-compile environment of [3d_textures.md](3d_textures.md) section 11.1, `PALMETTO_STATE_TRACE=2,300`, `PALMETTO_STAGE3_PUMP=1,2,4,6,9,14,20,30`, `PALMETTO_WAIT_TRACE=105,110,115`, `PALMETTO_DS_RECORD=500,300`, `PALMETTO_TIMELINE=1`, plus the slot watch; `slot2` also ran `PALMETTO_DS_LOAD_TRACE=0,300` |
+| binary | SHA-256 `F0A45CD2...` (first 8) in both arms |
+| logs | `D:\leonida-work\slotwatch\boot-slot1` and `boot-slot2` (outside the repository) |
+
+| arm | wall | stage 3 / session 3 | stop | slot-watch counters at the last reporter |
+|:--|--:|:--|:--|:--|
+| `slot1` | 79.5 s | machine current 3 at 63.1 s, init 3 at 64.0 s, session 3 at 64.0 s | first exception trace t 66.3 s, `game+0x515ACF5` read `0x18` | 70 s: 109 threads armed; completion 1, live-control 281, poll-tick 149, method-control 1,327 |
+| `slot2` | 158.1 s | not reached (machine 2/2, init 2 at 20.0 s, loading 2 at 70.0 s, session 1 from 70.0 s) | first exception trace t 73.6 s, `0x0` execute | 80 s: 105 threads armed; completion 0, live-control 8, poll-tick 0, method-control 1,373 |
+
+The arm table's `t` is the startup trace's clock, which opens at process start; the watch times in 11.3 and the state
+changes are on the state trace's process-relative clock, which starts when the first sampler starts, later in the same
+startup. The two clocks are adjacent but not the same timebase, so comparisons between them are read to the nearest
+second, not to the decimal.
+
+The second arm is the stage-3 spread section 10.2 and [3d_textures.md](3d_textures.md) section 11.1 already record: it
+stopped pre-stage in the `0x0`-execute family (the same t-versus-wall split that page's `record5` arm shows, t 75.8 s,
+wall 142.0 s), so one arm carries the session-3 measurement and the other is a pre-stage negative with the live control
+still firing. Both arms recorded their D3D12 call counts and appeared in the ordinary trace: 172,654 calls and 9,615
+events with one exception (`slot1`), and 162,721 calls and 9,204 events with three exceptions (`slot2`).
+
+### 11.2 The probe
+
+`port/src/main.cpp` gains the section `PALMETTO_SLOT_WATCH`. Windows debug registers are per-thread, so the probe arms
+every thread of the process with the same enumeration and two-scan rule the executor watch documents (a thread is only
+suspended once it has been alive across two scans, because suspending a thread between creation and its first
+instruction can leave a suspend count its owner never balances), and keeps arming threads created later. Four data
+breakpoints exist and all four are used, each as an aligned 8-byte write watch:
+
+| breakpoint | address | role |
+|---|---|---|
+| DR0 | `image+0x78ACB20` (slot 4, `+0x18`) | the target: the dword the session-3 poll's predicate `0x41E8C0` reads |
+| DR1 | `image+0x78AC9C8` (slot 0 tick) | the same-boot live control: a title store into this record that section 10.3 measured moving during the loading pass |
+| DR2 | `image+0x78ACB08` (slot 4 tick) | the session-3 poll's own tick store, which dates its first pass without sampling the state word |
+| DR3 | a port-owned slot written every 50 ms | the method control: if it never fires, the debug registers are not honoured here and a silent DR0 is a method failure |
+
+A hit prints the steady clock (the `PALMETTO_TIMELINE` clock) and the process-relative second (the state trace's
+clock), the writer's RIP with the sixteen bytes before it (a data breakpoint fires after the store, so those bytes are
+the storing instruction), the value now and before, the three state words with the machine's current/requested pair,
+the loader object's armed and in-flight fields, all five slots' tick/completion/state dwords, the poll index, the
+registers and the call chain from `RtlVirtualUnwind` (`RtlLookupFunctionEntry`, image frames as game+RVA, other modules
+by name). It is bounded: a per-watch log cap, a 96-line total cap, and a 10 s counter reporter, so a boot without a hit
+still shows what the watch saw. `PALMETTO_SLOT_WATCH=1` watches slot 4; `=<slot>` (2, 3 or 4) selects another slot. Off
+when unset or `0`; with the switch unset no thread starts, no handler is installed and the default path is unchanged.
+
+### 11.3 What the watch caught in `slot1`
+
+| t (s) | watch | writer | value | what the stack says |
+|---:|:--|:--|:--|:--|
+| 1.1 | method control | `host:palmetto.exe+0x7814f` | increments | data breakpoints are honoured in this environment; the control slot is the one writer |
+| 60.2 | live control | `game+0x41E8FD` (inside `0x41E8C0`) | a title tick | tid 51832, the loading task: `0x41E8C0` <- `0x85E892`/`0x85E823` (`0x85E860`) <- `0x22347F3` <- `0x22577AD` (`0x2257700`) <- `0x11F749` (loading poll `0x11F740`) - the loading pass polling slot 0 |
+| 63.1 | poll tick | `game+0x41E8FD` | a title tick | tid 43580, the frame thread: `0x41E8C0` <- `0x21B7097` (session-3 poll `0x21B7070`) <- `0x1D83996` <- `0x81AFB9` <- `0x53EC079` <- `0x53EBF66` <- `0x661F0` <- `0x1D109C9` <- `0x5A91C0D` <- `0x56A1E5A` - the same chain section 10.4 measured |
+| 65.1 | **completion** | `game+0x2231126` (inside the reset `0x22310D0`) | `0x0` (was `0x0`) | tid 51832, the loading task: `0x22310D0` <- `0x2355DF2` (`0x2355DD0`) <- `0x22FE404` <- `0x22FDDF8` <- `0x5AB5914` <- `0x31F721` <- `0x51D99FE` <- `0x51D9842` <- `0x31F6C1` <- `0xCAB143` <- `0x14EACE5` <- `0x2257807` (`0x2257700`) <- `0x11F749` (loading poll) <- `0x4FD1AE0` (loading task) <- `0x23CF247`/`0x23CF104` (task executor) |
+
+The completion hit is one line in the whole boot. Its state read is `init 3`, machine `3/3`, `loading 2`, `session 3`,
+poll index 4; the loader object at `game+0x79F6D70` read armed `0` and in-flight `0`; all five slots read `0/0/0`. The
+sixteen bytes before the writer's RIP are `00 00 89 81 10 01 00 00 c5 fc 11 81 40 01 00 00`, i.e. the last executed
+instruction is `vmovups [rcx+0x140], ymm0` with `rcx` = the record base: a 32-byte zero store that covers slot 4's tick,
+`+0x10` and the completion dword at `+0x18`. The counters at 70 s read one completion hit, and no later reporter ran
+before the process exited, so the dword was written once in the boot and written zero.
+
+After the reset the record was rebuilt by title code, not completed: the dstorage shim's record trace (section 10.1's
+`PALMETTO_DS_RECORD`) sampled slot 4's tick at `29503570` and `29507143` in its +67.05 s and +70.61 s lines with the
+completion dword still `0`, session 3 and machine 3/3, while the poll kept writing ticks. No `SLOT n COMPLETION dword`
+line was printed by that trace in either arm.
+
+### 11.4 The writer, statically
+
+The function containing the writer RIP is `0x22310D0`-`0x223120B` [M, disassembly and Ghidra decompile]. Its first
+instructions read the record's own-slot pointer at `record+0x190`, dereference it (the index dword at
+`image+0x78ACBA0`, value 4) and compare it with the function's second argument; when they match it zeroes the five
+0x50-byte slots at record offsets `+0x0`, `+0x50`, `+0xA0`, `+0xF0` and `+0x140` with 32-byte stores and the five state
+dwords at `+0x20`/`+0x70`/`+0xC0`/`+0x110`/`+0x160`, then walks and calls the record's callback list at
+`+0x1A8`/`+0x1C0`. So the dword's measured writer is the record's **reset/initialisation**, not a completion: it writes
+a zero over the completion field.
+
+Its caller is `0x2355DD0` [M, decompiled C]: `FUN_142355dd0` first calls the reset with the literal record
+`game+0x78AC9C8` and the poll index `[game+0x78ACBA0]`, then builds a command block from the event payload's `+0x18`
+(`0x2309DB0`), calls `0x5BB4DE0`, and posts event type `0xe` into the global at `[game+0x147F00518]`. That function is
+the virtual method at vtable slot `+0x68` of a streaming subscriber object, and the dispatch chain above it is the
+loading update: `0x11F740` (loading poll, on the loading task) -> `0x2257700` (loading update) -> `0x14EABB0` ->
+`0x31F670`/`0x51D9800`/`0x51D9990`/`0x31F700` -> `0x5AB58E0` (walks 0x68-byte subscriber entries and calls each
+entry's `+0x50`) -> `0x22FDDE0`/`0x22FE3F0` (vtable call `+0x68`) -> `0x2355DD0` -> reset. In one sentence: a queued
+streaming event delivered by the loading update starts a subscriber, and that subscriber's start method resets the
+loading record to zero with the current poll slot.
+
+### 11.5 Attribution
+
+- **The writer is reachable title code, and it ran.** `slot1` executed it at 65.1 s on the loading task thread (tid
+  51832): 3.1 s after the state trace first read the loading word 2 (62.0 s), 2.0 s after the session-3 poll's first
+  slot 4 tick write (63.1 s) and 1.1 s after the session word first read 3 (64.0 s). The hit is not a method failure:
+  the live control and the method control both fired in the same boot, and the poll tick shows the target slot's own
+  bookkeeping.
+- **It is not the media/boot-media dead-code cluster.** That cluster is `0x2218180` and its selector thunks
+  `0x2217C70`/`0x2217C90`, unreferenced in this image ([decomp_first_ui.md](decomp_first_ui.md) section 11.2). Every
+  frame of the measured writer stack is the loading/streaming family; no frame is in the media subscriber path and the
+  boot-media AC chain was not involved.
+- **No runtime answer of ours is in this event.** The hit read the loader object armed 0 and in-flight 0, and section
+  10.5 measured the storage path with every request delivered and nothing outstanding in the session-3 arm. The reset
+  is title bookkeeping when the loading update delivers a queued event to a subscriber; no shim answer produces it and
+  none is implied to change it.
+- **The completion producer did not run in the window.** From the poll's first pass (63.1 s) to the title's first
+  exception (trace t 66.3 s, the allocator free path `0x515ABB0`, whose measured `0x515ACF5` site is its first read of
+  the resolved tree node at `+0x18`; [decomp_memory.md](decomp_memory.md) section 4), and for the rest of the process,
+  no non-zero write to `game+0x78ACB20` arrived. The predicate `0x41E8C0` therefore never read true, which is why the
+  session word stayed 3.
+
+### 11.6 Verdict, limits and the next falsifier
+
+The verdict on the producer is a negative with the writer named: the completion dword's only writer in the measured
+boot is the record reset `0x22310D0`, which writes zero, and the completing store never happened before the title
+stopped. This is consistent with section 10's producer-side measurement (nothing outstanding, no shim producer) and
+adds the missing attribution: the write the poll waits for is a title job-completion path, not the reset and not our
+storage layer.
+
+- **The session-3 window was short.** The session word first read 3 at 64.0 s (state trace clock) and the title's first
+  exception is at trace t 66.3 s, so the poll ran a couple of seconds and the negative covers that window plus the rest
+  of the process. The dword was watched from 1.1 s and the watch stayed armed to process exit; a second completion write
+  would have been logged (the per-watch cap is 48 lines and one was used), so the one hit is the boot's only write.
+- **One boot carries the session-3 evidence.** The second arm stopped pre-stage in the `0x0`-execute family; stage 3
+  reached in one of two arms is the same spread section 10.2 reports for six arms.
+- **Watched threads are threads that lived long enough.** A thread created and destroyed between two sweeps is never
+  armed; a writer on such a thread would be missed. Every thread in the measured writer stack was armed (the counters
+  show 109 threads by 70 s) and a title store into the record was caught, so the method was live.
+- **The probe adds debug exceptions.** The method control traps ~20 times a second, and the live control and poll tick
+  trap on each title store into the record (281 and 149 by 70 s in `slot1`); the boot's timings can shift by the cost of
+  those traps. The stop site is the title's own allocator free-path crash family ([decomp_memory.md](decomp_memory.md)
+  section 4), not a fault in the probe's path, but no probe-off arm was run in this environment.
+- **Next falsifier.** Name the completing path by its event, not its address: an execution breakpoint on `0x2355DD0`'s
+  call site would print the event payload's command id, and a write watch on the slot state dword (`+0x20`) and on the
+  record's callback list (`+0x1A8`/`+0x1C0`) would date the job the reset started. A boot with a longer session-3
+  window (section 10.4's `record1` arm ran 9.9 s) is the other half: a non-zero completion store there would name the
+  producer in one line; none there would move the question to whatever dispatches the job.
+
+### 11.7 Tests and gates
+
+- No test target is added: the slice is a hardware-observation path in `port/src/main.cpp` with no pure helper to
+  exercise, and the switch is off in every default run (one cached `getenv`, no thread, no handler, no allocation).
+- Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, the built
+  targets exit 0, and every `tests/test_docs_*.py` check passes.
+
+### 11.8 Attribution
+
+This section was implemented from this project's own measurement: the writer watch, the two boot arms, the hit logs,
+the state-word timeline, the disassembled and decompiled reset and dispatch functions, and the dstorage record
+sampler's lines. The static check reused the read-only Ghidra project copy section 1 describes
+(`D:\leonida-work\decomp-stage\ghidra-proj`), with decompiled C under `D:\leonida-work\slotwatch\decomp-writer`; no
+peer code was used and no game data is added: RVAs, field offsets, instruction bytes, values, counts and outcomes only.
+
