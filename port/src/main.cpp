@@ -3941,6 +3941,21 @@ constexpr std::uint32_t kTitleMovieSlot0EntityRva = 0x9165BA0;  // qword: player
 constexpr std::uint32_t kTitleMovieSlot0ActiveRva = 0x916622C;  // byte: player slot 0 + 0x694, set by the request
 constexpr std::uint32_t kTitleMovieSlot0ArmedRva = 0x916618A;   // byte: player slot 0 + 0x5f2, per-frame armed flag
 constexpr std::uint32_t kTitleMovieSlot0MediaIdRva = 0x9166060; // dword: player slot 0 + 0x4c8, the request's media id
+// The front-end manager the movie/UI request path runs through (docs/decomp_first_ui.md section 14). The title's
+// front-end module init FUN_1422082D0(2) calls FUN_143DA1560 -> FUN_143DA1A80, which creates the manager singleton
+// FUN_1419DB790() (0x98 bytes, vtable 0x654CF30) and stores it in the image global 0x98C0F20. The singleton's vtable
+// slots 0x28..0x58 are seven service getters returning the seven 8-byte service objects the singleton's slot 0
+// (FUN_145AF53B0) allocates at manager+0x60..+0x90; each service has a vtable whose slot +8 is its start. The per-frame
+// path FUN_142208B90 -> FUN_140267FD0 calls FUN_1403DB3F0, which calls the manager's slot 0x10 and then every service's
+// slot 0x18 (the render step). Sampling the manager and its seven service pointers/vtable words says whether the
+// manager was created, whether a service holder is freed (the destroy FUN_143DADD00 zeroes each field after calling the
+// service's destructor) or overwritten, without an int3 on the per-frame path.
+constexpr std::uint32_t kTitleFrontEndManagerRva = 0x98C0F20;   // qword: the manager singleton pointer
+constexpr std::uint32_t kTitleFrontEndReadyRva = 0x98C0E98;     // byte: 1 after the manager's service checks pass
+constexpr std::uint32_t kTitleFrontEndContextRva = 0x98C0EA0;   // qword: the context the init was given
+constexpr std::uint32_t kTitleFrontEndRunningRva = 0x7453DB8;   // byte: 1 while the front-end frame tick runs
+constexpr std::uint32_t kTitleFrontEndService0Offset = 0x60;    // the seven service getters return manager+0x60..+0x90
+constexpr unsigned kTitleFrontEndServiceCount = 7;              // +0x60, +0x68, +0x70, +0x78, +0x80, +0x88, +0x90
 
 // RVAs of the state machine's own entry points: a thread whose RIP or stack names one of these is holding the machine.
 constexpr std::uint32_t kTitleStateOwners[] = {
@@ -5462,6 +5477,19 @@ void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_siz
                 title_read_u32(image_base, kTitleMovieSlot0ArmedRva, ok_movie_slot_armed);
             const std::uint32_t movie_media_id =
                 title_read_u32(image_base, kTitleMovieSlot0MediaIdRva, ok_movie_media_id);
+            bool ok_fe_manager = false, ok_fe_ready = false, ok_fe_context = false, ok_fe_running = false;
+            const std::uint64_t fe_manager = title_read_u64(image_base, kTitleFrontEndManagerRva, ok_fe_manager);
+            const std::uint32_t fe_ready = title_read_u32(image_base, kTitleFrontEndReadyRva, ok_fe_ready);
+            const std::uint64_t fe_context = title_read_u64(image_base, kTitleFrontEndContextRva, ok_fe_context);
+            const std::uint32_t fe_running = title_read_u32(image_base, kTitleFrontEndRunningRva, ok_fe_running);
+            std::uint64_t fe_service[kTitleFrontEndServiceCount] = {};
+            std::uint64_t fe_service_vtable[kTitleFrontEndServiceCount] = {};
+            for (unsigned i = 0; i < kTitleFrontEndServiceCount; ++i) {
+                bool ok_service = false;
+                fe_service[i] = title_read_u64_at(
+                    static_cast<std::uintptr_t>(fe_manager) + kTitleFrontEndService0Offset + i * 8, ok_service);
+                if (fe_service[i]) fe_service_vtable[i] = title_read_u64_at(fe_service[i], ok_service);
+            }
             const std::uint64_t state_machine = title_read_u64(image_base, kTitleStateMachineRva, ok_machine);
             std::uint16_t machine_current = 0, machine_next = 0;
             if (ok_machine && state_machine && (state_machine & 7) == 0) {
@@ -5531,6 +5559,21 @@ void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_siz
                          movie_slot_active & 0xFF, ok_movie_slot_armed ? "" : "?", movie_slot_armed & 0xFF,
                          ok_movie_media_id ? "" : "?", movie_media_id);
             ++sample;
+            // The front-end manager the movie/UI request path runs through (docs/decomp_first_ui.md section 14): the
+            // singleton pointer proves FUN_143DA1A80 ran; the ready/context/running words prove its service checks and the
+            // frame tick; the seven service pointers and their vtable words prove a holder is live, freed (the destroy
+            // zeroes the field) or overwritten (its first qword is not the service vtable the constructor wrote).
+            std::fprintf(stderr,
+                         "[rt] state trace at %.1f s: front-end manager %s0x%llx ready %s0x%x context %s0x%llx running"
+                         " %s0x%x services",
+                         at, ok_fe_manager ? "" : "?", static_cast<unsigned long long>(fe_manager),
+                         ok_fe_ready ? "" : "?", fe_ready & 0xFF, ok_fe_context ? "" : "?",
+                         static_cast<unsigned long long>(fe_context), ok_fe_running ? "" : "?", fe_running & 0xFF);
+            for (unsigned i = 0; i < kTitleFrontEndServiceCount; ++i)
+                std::fprintf(stderr, " %u:0x%llx/0x%llx", i,
+                             static_cast<unsigned long long>(fe_service[i]),
+                             static_cast<unsigned long long>(fe_service_vtable[i]));
+            std::fputc('\n', stderr);
             const bool census_now = censuses < 12 || (sample % 10 == 0 && censuses < 24);
             if (census_now) {
                 state_trace_census(image_base, image_size, at);
@@ -6266,14 +6309,18 @@ int wmain(int argc, wchar_t** argv) {
             }
         }
         // PALMETTO_MOVIE_PROBE=<group>: bounded opt-in int3 entry probes on the movie/Bink path
-        // (docs/decomp_first_ui.md section 13). "player" is the four middleware play steps the component's per-player
+        // (docs/decomp_first_ui.md sections 13-14). "player" is the four middleware play steps the component's per-player
         // update drives: per-frame decode 0x2EF0E0, probe/metadata open 0x442EA70, playback open 0x199EF20 and
         // frame-buffer registration 0x442F760. "trigger" is the game-side request chain: module init 0x577F500, play
-        // request 0x3A16260, descriptor helper 0x18501E0 and stop 0x3A1A860. Same one-shot machinery and logging as
-        // PALMETTO_POKE_LOG; a hit means the measured boot reached a path that the static negative says it does not,
-        // so the probe set is a reach signal, not a hot-path trace. Off when unset.
+        // request 0x3A16260, descriptor helper 0x18501E0 and stop 0x3A1A860. "frontend" is the front-end manager the
+        // request's UI owner runs through: manager create/init 0x3DA1A80, manager teardown 0x3DA2FB0, member destroy
+        // 0x3DADD00 and the last service getter of the per-frame render FUN_1403DB3F0 0x3DB492 (the site whose indirect
+        // jump is the measured stop). Same one-shot machinery and logging as PALMETTO_POKE_LOG; a hit means the measured
+        // boot reached a path that the static negative says it does not, so the probe set is a reach signal, not a
+        // hot-path trace. Off when unset.
         constexpr std::uint32_t kMoviePlayerProbeSites[] = {0x2EF0E0, 0x442EA70, 0x199EF20, 0x442F760};
         constexpr std::uint32_t kMovieTriggerProbeSites[] = {0x577F500, 0x3A16260, 0x18501E0, 0x3A1A860};
+        constexpr std::uint32_t kMovieFrontEndProbeSites[] = {0x3DA1A80, 0x3DA2FB0, 0x3DADD00, 0x3DB492};
         auto poke_log_sites = [&main_module](const std::uint32_t* rvas, unsigned count) {
             std::uintptr_t addresses[4] = {};
             unsigned char originals[4] = {};
@@ -6321,8 +6368,12 @@ int wmain(int argc, wchar_t** argv) {
             } else if (value == L"trigger") {
                 std::printf("[rt] PALMETTO_MOVIE_PROBE=trigger: %u movie request-chain probe(s)\n",
                             poke_log_sites(kMovieTriggerProbeSites, 4));
+            } else if (value == L"frontend") {
+                std::printf("[rt] PALMETTO_MOVIE_PROBE=frontend: %u front-end manager probe(s)\n",
+                            poke_log_sites(kMovieFrontEndProbeSites, 4));
             } else {
-                std::printf("[rt] PALMETTO_MOVIE_PROBE: unknown group (use player or trigger); no probe installed\n");
+                std::printf("[rt] PALMETTO_MOVIE_PROBE: unknown group (use player, trigger or frontend); no probe "
+                            "installed\n");
             }
         }
         // PALMETTO_BACK_IMAGES=1 commits zeroed memory over the console image-address range, which starts at 4 GiB. Our

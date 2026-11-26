@@ -729,3 +729,87 @@ answer this tree can serve differently.
 - **No git write**: the lead commits the two uncommitted files of this slice (`port/src/main.cpp`,
   `docs/decomp_first_ui.md`). The tree also carries other slices' uncommitted files, which are not this slice's.
 
+
+## 14. Measured: the movie slot's stop at game+0x3DB49C is the front-end render's seventh service getter, and with the device alive the play steps run
+
+**Status: measured, attributed statically and with in-process probes; no runtime-answer fix, and the picture frontier moved one layer in.** The picture task asked what stops the boot at `game+0x3DB49C` right after the movie request binds a slot, and whether a runtime answer of this tree is on that path. The stop site is attributed exactly: it is the tail virtual call of the title's own front-end manager render `FUN_1403DB3F0`, reached from the front-end module's async worker thread, and the object it calls through had its first qword (the vtable word) overwritten with a small negative value (`0xFFFFFFFFFFFFFFE7` = -25) - a stray write/lifetime artefact in the title's heap, not a layer refusal. The probes measure the manager created once, its seven service holders live and the render called 1,786 times with a valid service holder and vtable, and the manager's teardown and member-destroy functions never called in the window. The stop did not reproduce on the three light arms run here; on the one light arm that did not lose the Vulkan device the movie chain advanced past the request: the metadata/probe open `0x442EA70` fired three times, the playback open `0x199EF20` fired once, the Bink 2 library's async threads appear in the stage-3 thread census, and the boot stopped later at the pre-existing renderer-executor fault `game+0x1335DCB`. Frame-buffer registration `0x442F760` and per-frame decode `0x2EF0E0` did not run and every presenter capture is black, so no movie frame is claimed. No shim, resource, view or presenter answer is changed; the default path is byte-identical.
+
+### 14.1 The static attribution of game+0x3DB49C
+
+`0x3DB49C` is the last instruction of `FUN_1403DB3F0` (`0x3DB3F0..0x3DB4A0`): `jmp qword ptr [rdx+0x18]`, after `mov rdx,[rax]`/`mov rcx,rax`/`add rsp,0x28`. The function is the front-end manager's per-frame render:
+
+| step | RVA | measured shape |
+|---|---|---|
+| render function | `0x3DB3F0` | loads the image global `0x98C0F20` (`_DAT_1498c0f20`), calls the manager vtable slot `+0x10`, then for each vtable slot `+0x28`, `+0x30`, `+0x38`, `+0x40`, `+0x48`, `+0x50`, `+0x58` calls the getter and then calls the returned object's vtable slot `+0x18`; the last getter is the tail-called one at the stop |
+| the manager single ton | `0x98C0F20` qword | written only by `FUN_143DA1A80` at `0x3DA1B1C`, from `FUN_1419DB790()` - the factory cache global `0x98C1040`, a 0x98-byte object constructed by `FUN_145800410` with vtable `0x654CF30` |
+| manager create/init | `0x3DA1A80` | `(**vtable)(manager, context)` = slot 0 `0x5AF53B0`, which allocates the seven service objects with `operator new` (`0x4F97130`, 8 bytes each) and stores them at manager `+0x60,+0x68,+0x70,+0x78,+0x80,+0x88,+0x90`, then checks each service's vtable slot `+8` and sets the ready byte `0x98C0E98 = 1`; bails with a logged line (0x4F..0x64) on the first service whose start returns 0 |
+| the seven getters | vtable slots `+0x28..+0x58` | `mov rax,[rcx+0x60]` ... `mov rax,[rcx+0x90]` (service 6 is the `+0x58` getter `0x4DEE990` returning `[manager+0x90]`); measured service vtables: `0x654D830`, `0x654D870`, `0x654D920`, `0x654D200`, `0x654D2C0`, `0x654D960`, `0x654D350` |
+| service 6's class | vtable `0x654D350` | slot 0 destructor `0x3DADEC0`, slot `+8` start `0x5DB1D80` (sets `0x98C10A0 = 1`, registers the front-end callback `0x3DAF4D0`), slot `+0x10` stop `0x3DADEF0`, slot `+0x18` **`0x4380` = bare `ret`**, slot `+0x20` `0x4380` |
+| manager destroy | `0x3DADD00` (vtable slot `+8`) | for each of the seven fields: call service vtable slot 0 (destructor, `edx=1` frees the 8-byte holder), then zero the field; then destroy the manager itself and clear `0x98C1040`; it does **not** clear `0x98C0F20` |
+| manager teardown caller | `0x3DA2FB0` | calls each service's slot `+0x10`, then the manager's slot `+8`; called from `FUN_143DA2880` (front-end shutdown) <- `FUN_14220F3B0(1)` (module callback) |
+| front-end module init | `0x22082D0` (`FUN_1422082D0(2)`) | sets up the front-end config (including the code pointer `FUN_142208B90` and the async worker's argument), then calls `FUN_143DA1560` -> `FUN_143DA1A80`; sets the front-end running byte `0x7453DB8 = 1` |
+| per-frame caller | `0x2208B90` -> `0x267FD0` | the front-end async worker's registered callback `FUN_142208B90` calls the frame routine `FUN_140267FD0`, which (when the bit test `FUN_14512A480(0)` is set) calls `FUN_1403DB3F0` |
+| the worker thread | `0x3DA3D60` <- `0x2215EA0` | a worker loop that, while a byte flag reads 1, calls the registered callback with its argument, then sleeps; `FUN_142215EA0` is the thread entry |
+
+The exception's own stack in the measured stop names exactly that chain, innermost first: `game+0x3DB49C`, `+0x268021` (return address after the call to `FUN_1403DB3F0` in `FUN_140267FD0`), `+0x2208BC1` (return address after the call to `FUN_140267FD0` in `FUN_142208B90`), `+0x3DA3D9D` (return address after the indirect callback call in the worker loop `FUN_143DA3D60`) and `+0x2215ECA` (the worker thread entry `FUN_142215EA0`). So the call sequence from the movie slot arming to the stop is: game side arms the movie slot -> the front-end UI/video-widget request runs on the front-end page path -> the front-end async worker's frame renders the seven services -> the seventh service getter returns an object whose vtable word is garbage -> the tail call faults.
+
+### 14.2 What the faulting word is
+
+`jmp qword ptr [rdx+0x18]` faults at address `0xFFFFFFFFFFFFFFFF` (= -1) when `rdx = 0xFFFFFFFFFFFFFFE7` (= -25): `mov rdx,[rax]` loaded the service-6 holder's first qword as -25, and -25 + 0x18 = -1. So the object at `[manager+0x90]` had its 8-byte vtable word overwritten by a small negative value. With the measured class that word must be `0x14654D350`; the render call on a live holder is the bare `ret` at `0x4380`, i.e. a no-op. The value is not the manager's teardown (which zeroes the field, giving a `[0x18]` fault) and not a failed allocation (which would be a null getter result); it is a stray 8-byte write or a freed-block first word. The same signature appears in this session's other fast arms: `game+0x1335DCB` is `call [rax+0x10]` with the object's first qword `0xFFFFFFFFFFFFFFEF` (-17; -17 + 0x10 = -1) - the renderer executor `0x1335A20..0x13361ED`, the family [3d_textures.md](3d_textures.md) already records stopping at `0x13360A3` after three `ExecuteCommandLists`.
+
+### 14.3 The in-process probes and the measured state
+
+`port/src/main.cpp` gains two diagnostics, both off unless set:
+
+- `PALMETTO_MOVIE_PROBE=frontend`: a third four-site group through the existing one-shot poke-log machinery (each site's byte becomes `0xCC`, registers and the six register windows are logged, the instruction is restored and single-stepped, and the probe re-arms): `0x3DA1A80` (manager create/init), `0x3DA2FB0` (manager teardown), `0x3DADD00` (member destroy) and `0x3DB492` (the render's last getter, the instruction whose operand is the faulted object). The `player` and `trigger` groups are unchanged.
+- The existing `PALMETTO_STATE_TRACE` line gains a front-end line: the manager pointer `0x98C0F20`, the ready byte `0x98C0E98`, the context qword `0x98C0EA0`, the running byte `0x7453DB8`, and for each of the seven service fields `+0x60..+0x90` the holder pointer and its first qword (vtable word).
+
+One arm ran `PALMETTO_MOVIE_PROBE=frontend` (`moviefe1`), the section-12 content environment plus presenter captures; three further arms ran `PALMETTO_MOVIE_PROBE=player` (`movieplay1` before this slice's diagnostics, `movierepro1`, `movieplay2`). All arms are light (no `PALMETTO_DUMP_REGS`/`PALMETTO_FAULT_MEM`), one at a time under `_setup/boot_lock.ps1`, 120-130 s timeout, logs and captures outside the repository.
+
+| measure (moviefe1) | value |
+|---|---|
+| manager created | between the 20.0 s and 22.0 s state-trace samples (first non-zero line at 22.0 s): pointer, ready 1, context, running 1 |
+| seven services at the last samples | `0x60/0x654D830`, `0x68/0x654D870`, `0x70/0x654D920`, `0x78/0x654D200`, `0x80/0x654D2C0`, `0x88/0x654D960`, `0x90/0x654D350` - all constant through the arm |
+| init probe `0x3DA1A80` | **1** hit, rax=0x2 (the process-init parameter), rcx=the front-end context |
+| render last-getter probe `0x3DB492` | **1,786** hits, every one `rax` = the service-6 holder (`...1A270`) and `rdx` = the service-5 vtable (`0x14654D960`, the previous iteration's value), i.e. the render ran with a live holder and a valid vtable |
+| teardown probe `0x3DA2FB0` / member-destroy probe `0x3DADD00` | **0** hits |
+| movie slot | armed at the 58-60 s samples (slot0 entity non-null, active 1, armed 1, media-id `0x540714f3`) |
+| stop | `game+0x43AE303` read `0x10000007E`, trace t 62.39 s, wall 63.7 s |
+
+The render ran from the manager's creation (~20-22 s) to the stop, so the 3DB49C manifestation is not a first-call race on the manager's construction. The teardown and member-destroy sites were never reached, so the manager and its services were still live when the arm stopped; the corrupted word must therefore have been written by something else in the title's heap (or be a freed block's first word in a heap whose reuse the probes do not see).
+
+### 14.4 The reproduction and the play-step measurement
+
+The 3DB49C stop did not reproduce: `movieplay1` (before this slice) stopped there, and three light arms with the same content environment plus `PALMETTO_MOVIE_PROBE=player` stopped elsewhere: `movierepro1` at `game+0x1335DCB` read -1 (wall 96.9 s, trace t 95.17 s), `movieplay2` at `game+0x43AE303` read -1 (wall 62.2 s, trace t 60.91 s) and a first reproduction attempt at `game+0x1335DCB` read -1. In every arm that stopped at `0x3DB49C`/`0x43AE303` the log also contains `[rt] replay: the Vulkan device was lost` shortly before the stop (stderr line 216,987 of 221,613 in `movieplay1`, 222,625 of 227,244 in `movieplay2`, 239,933 of 244,426 in `moviefe1`); the one arm without a device loss, `movierepro1`, did not stop there. The device loss is the host GPU condition the FSR pages already record; this page does not claim it as a shim answer, and after the second device loss the arms were stopped per the task's rule.
+
+The positive measurement is `movierepro1`, the same light environment and `PALMETTO_MOVIE_PROBE=player`, with no device loss:
+
+| measure (movierepro1) | value |
+|---|---|
+| movie slot | armed by the 54.0 s sample: slot0 entity non-null, active 1, armed 1, media-id `0x540714f3` |
+| probe `0x442EA70` (metadata/probe open) | **3** hits; each with rcx/rdi = the bound entity and the player-slot pointers |
+| probe `0x199EF20` (playback open) | **1** hit; rcx = the player slot (entity pointer), i.e. the playback open step ran |
+| probes `0x442F760` (frame-buffer registration) and `0x2EF0E0` (per-frame decode) | **0** hits |
+| Bink 2 library at stage 3 | `Bink2Scarlett.dll` mapped and `DllMain` = 1; the stage-3 thread census at stage3+2.0 s lists 4 threads waiting in `NtWaitForAlertByThreadId` with `Bink2Scarlett.dll+0x237D8`/`+0xA505`/`+0x9CAC`/`+0xAAEE`/`+0xA609` frames and 1 with `+0x23878`/`+0x5D56` - the decoder's async thread surface is up |
+| stage/session words | init 3 at 56.0 s (last change), loading 2 at 54.0 s, session 3 at 56.0 s, machine current 3 next 3 |
+| xmem/file reach switches | no `xmem_caller` or `file_open` event names the library in `movieplay2` (the only xmem callers are the two title sites section 13 records, and the archive opens are the boot sets) |
+| stop | `game+0x1335DCB` read -1, trace t 95.17 s, wall 96.9 s |
+| presenter captures | 11 captures (`movierepro1`, frames 1..2,001 at every 200), each 2564x1421, **mean rgb 0.00 0.00 0.00** (black) |
+
+So the request path now reaches two of the four middleware play steps and starts the decoder's thread surface - the first time this tree measures any play step - and the first visible frame is still not reached: the boot stops at the renderer executor before frame-buffer registration and decode. That executor fault `0x1335DCB` takes the same garbage-vtable-word shape as the 3DB49C site (`-17` at slot `+0x10`), so it is a separate title-side lifetime/stray-write symptom, not the movie layer refusing a call.
+
+### 14.5 Verdict, fix, limits and the next falsifier
+
+**Verdict: attributed, and not a runtime answer on the measured path.** The 3DB49C stop is the front-end render's seventh service getter returning an object whose vtable word has been replaced by a small negative value; the call sequence from the front-end worker to the site is measured in the exception stack, the manager and its seven services are measured live by the state trace, the render site is measured called with a valid holder and vtable 1,786 times, and its two teardown sites are measured never called. No shim, resource, view, display or file answer sits between the holder's creation and the fault. **No shim change is made and the default path is unchanged**; the only source change is the two diagnostics above.
+
+- **Limits.** The stop is intermittent and did not reproduce in three light arms; the probe arm measured the render valid, not the writer. The corrupted word is an 8-byte heap cell; the layer has no write watch on a dynamically allocated title heap cell, so this page names the corruption's shape and victim, not the storing instruction. The device-loss correlation is measured (every 3DB49C/43AE303 stop follows `[rt] replay: the Vulkan device was lost`) but not causal here. The one play-step arm is a single boot; two of four play steps ran, and the stop that follows is the executor fault below, not this slice's site. The captures are black in every arm (11 in `movierepro1`, 12 in the other two arms, at every 200 presented frames); they cover only the loading frames.
+- **The next wall** is `game+0x1335DCB`: `call qword ptr [rax+0x10]` in the renderer executor `0x1335A20..0x13361ED`, with the command object's first qword `0xFFFFFFFFFFFFFFEF`, reached from the UI/video-widget submit chain `0x186424` <- `0x18573B` <- `0x184F42` <- `0x1847D8` <- `0x1837A2` ... (the stack the exception reports) - i.e. the movie display job. Its shape (`-17 + 0x10 = -1`) is the same stray-word symptom as this stop, and the docs already record its family at `0x13360A3`.
+- **Next falsifier**: a boot in which the render's last getter returns a holder whose first qword is a measured service vtable and the boot still stops (would move the attribution off the holder), or a write watch on the 8-byte cell `[manager+0x90]` / the service-6 holder naming the storing instruction (would make it a named title-side stray write or a layer write). For the picture, the falsifier is a boot that passes `0x1335DCB` and fires `0x442F760` or `0x2EF0E0`: the moment the decode step runs, `PALMETTO_XMEM_CALLERS`/`PALMETTO_FILE_TRACE` on the same boot say whether the decoder follows and the presenter capture answers the frame.
+
+### 14.6 Files, tests, evidence and gates
+
+- **Source change**: `port/src/main.cpp` only - the front-end manager constants and the state-trace front-end line, and `PALMETTO_MOVIE_PROBE=frontend` (a third four-site group in the existing poke-log switch). Both opt-in; the default path, every shim and every build target are unchanged.
+- **This page**: the section above. `docs/README.md` needs one index row; that file is outside this slice's write scope, so the lead adds it.
+- **Tests and gates**: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`; `_setup\build_tests.cmd` prints `TESTS_BUILT`; the GPU-free gate subset exits 0 (`unimplemented_policy_test` 98, `graphics_record_test` 180, `graphics_pso_test` 350, `xbox_present_test` all cases, `dstorage_test` 234, `xapu_chad_test` 87, `deferred_compile_test` 18, `frame_dump_test`, `xs_proxy_mock_test`, `buffer_va_index_test`); the pre-existing quarantined `d3d12_fence_timing_test` crash is unchanged ([testing.md](testing.md) line 95 - not a gate check); the docs checks (`tests/test_docs_*.py`) pass. No shim, test source or build target changed in this slice.
+- **Evidence (outside the repository)**: `D:\leonida-work\fsrstable\boot-movieplay1` (the stop), `boot-moviefe1` (the front-end probes and state trace), `boot-movierepro1` and `boot-movieplay2` (the play-step arms) with their `stderr.log`/`stdout.log`/`summary.txt`/`boot.jsonl`, `capture-movierepro1` (11 captures + `index.txt`), and the static work under `D:\leonida-work\moviecrash` (decompiles of the manager, its vtable slots and the call-chain functions; `.pdata` function map; the exception stacks). No game data: RVAs, runtime pointers, vtable words, counts, times and image means only.
+- **No git write**: the lead commits this slice's two uncommitted files (`port/src/main.cpp`, `docs/decomp_first_ui.md`). The tree otherwise has no uncommitted files from this slice.
