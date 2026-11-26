@@ -3204,6 +3204,33 @@ inline bool submission_launches_a_shader(std::span<const CommandList* const> lis
     return false;
 }
 
+// ---- Submission pacing knobs (PALMETTO_PACE_IDLE / PALMETTO_PACE_DELAY_US) -------------------------------------
+// docs/vertex_buffer_va.md section 12: the renderer stop is a CPU-side lifetime race in the title's job/command
+// graph, not a layer answer, so the measurement question is whether the reuse is timing-induced. These two knobs
+// slow the layer's own submission path on purpose. Both are off by default and the default path is unchanged:
+// PALMETTO_PACE_IDLE drains the queue after each accepted ExecuteCommandLists (vkQueueWaitIdle, so the submitting
+// thread does not run ahead of the GPU; emulation-only - a console submission is asynchronous), and
+// PALMETTO_PACE_DELAY_US sleeps that many microseconds after the submission, spacing the title's producer thread.
+struct SubmissionPace {
+    bool idle_after_execute = false;
+    std::uint64_t delay_us = 0;
+};
+
+// The pure mapping of the two values; the device reads it once at startup. Kept separate so a test can pin the
+// truth table without an environment or a device (port/test/frame_dump_test.cpp).
+inline SubmissionPace submission_pace_from(const char* idle, const char* delay) {
+    SubmissionPace pace;
+    pace.idle_after_execute = idle && *idle && *idle != '0';
+    if (delay && *delay) pace.delay_us = std::strtoull(delay, nullptr, 10);
+    return pace;
+}
+
+inline const SubmissionPace& submission_pace() {
+    static const SubmissionPace pace =
+        submission_pace_from(std::getenv("PALMETTO_PACE_IDLE"), std::getenv("PALMETTO_PACE_DELAY_US"));
+    return pace;
+}
+
 // One D3D12 command queue on one VkQueue. D3D12 lets one thread use a queue at a time per call and the COM wrapper
 // serialises its calls; state_mutex_ additionally serialises them against the thread that releases a held batch
 // (Wait-before-Signal, queue_holds.h), the only other thread that touches a queue.
@@ -3413,6 +3440,19 @@ public:
         retired.clear();
         timeline::line("exec return n=%u result=%d held=%d us=%.0f", static_cast<unsigned>(lists.size()),
                        static_cast<int>(result), held ? 1 : 0, (timeline::seconds() - started) * 1e6);
+        // The pacing knobs (see SubmissionPace; docs/vertex_buffer_va.md section 12). Off by default: with none set
+        // this block is two atomic-free loads and changes no call.
+        if (!held && result == ReplayResult::success) {
+            const SubmissionPace& pace = submission_pace();
+            if (pace.delay_us) std::this_thread::sleep_for(std::chrono::microseconds(pace.delay_us));
+            if (pace.idle_after_execute) {
+                const double idle_started = timeline::seconds();
+                const VkResult idle = context_.vk.vkQueueWaitIdle(queue_);
+                timeline::line("pace idle ok=%d us=%.0f", idle == VK_SUCCESS ? 1 : 0,
+                               (timeline::seconds() - idle_started) * 1e6);
+                if (idle == VK_ERROR_DEVICE_LOST) context_.mark_device_lost();
+            }
+        }
         if (held) context_.holds().pump_ready();  // a Signal may have been submitted since the check
         return result;
     }

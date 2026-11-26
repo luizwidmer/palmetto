@@ -3,6 +3,7 @@
 // be explained by what writes its target after the draws; these cases pin the classification and the order it relies
 // on, including a resolve that writes the target AFTER its last draw. No Vulkan loader, GPU or game data.
 #include "../src/vulkan_replay.h"
+#include "../src/vulkan_backend.h"  // docs/vertex_buffer_va.md section 12: the pacing knobs' pure mapping
 
 #include <cmath>
 #include <cstdint>
@@ -446,6 +447,21 @@ int main() {
         expect(frame_dump::draw_readback_arms(false, true), "a title-import submission arms every draw it holds");
         expect(frame_dump::draw_readback_arms(true, true), "both triggers together arm the readback");
         expect(!frame_dump::draw_readback_arms(false, false), "an unlisted draw of an ordinary submission stays unread");
+    }
+
+    {
+        // docs/vertex_buffer_va.md section 12: the two opt-in submission pacing knobs' truth table. Both are off by
+        // default, "0" is off, and the delay is decimal microseconds; the queue reads them once at startup.
+        const palmetto::SubmissionPace none = palmetto::submission_pace_from(nullptr, nullptr);
+        expect(!none.idle_after_execute && none.delay_us == 0, "no value leaves both pacing knobs off");
+        const palmetto::SubmissionPace zero = palmetto::submission_pace_from("0", "0");
+        expect(!zero.idle_after_execute && zero.delay_us == 0, "\"0\" leaves both pacing knobs off");
+        const palmetto::SubmissionPace idle = palmetto::submission_pace_from("1", nullptr);
+        expect(idle.idle_after_execute && idle.delay_us == 0, "only the idle knob is set");
+        const palmetto::SubmissionPace delayed = palmetto::submission_pace_from(nullptr, "1000");
+        expect(!delayed.idle_after_execute && delayed.delay_us == 1000, "the delay is decimal microseconds");
+        const palmetto::SubmissionPace both = palmetto::submission_pace_from("1", "25");
+        expect(both.idle_after_execute && both.delay_us == 25, "both knobs together keep both values");
     }
 
     if (failures) return 1;

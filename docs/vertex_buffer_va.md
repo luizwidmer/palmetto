@@ -563,3 +563,146 @@ This section was implemented from this project's own measurements: the two in-pr
 the probe boots named above and the 300 s default-path boot. The stop sites and the executor/job chain were
 decompiled with the project's Ghidra tooling from the user's own image; no peer code was used and no game data is
 added. RVAs, VAs, field offsets, counts, shapes and outcomes only.
+
+## 12. The int3 route works once the hardware point is gone; the writer is not the executor thread; pacing moves the stop and the frame stays black
+
+**Status: measured, with one method failure named, one object corrected and one negative result on the writer.** Section 11
+left three open items: its int3 over the executor entry never trapped and the failure was called a page/alias property; the
+object it tracked was never written; and the writer of the corrupted vtable was unnamed. This section measures the first
+two: the int3 was masked by the section-11 hardware execution breakpoint at the same linear address, and the object the
+executor virtual-calls through is its own argument (`RCX`), not the graph's `+0x10`. With the hardware point removed the
+int3 traps and names the stage-3 job, including the job the stop later calls through. Four hardware data points in the
+executor thread and a 104-thread sweep armed on that job's first qword then never fire, so no armed thread is measured
+making the store; the arm carries no live control in the same boot, which is the limit this negative is stated under. Two
+opt-in pacing knobs move the stop site (one moves it into a different, pre-existing family) and change nothing about the
+black content frame. Counts, RVAs, VAs and register values only; no game data.
+
+### 12.1 The int3 method failure, named
+
+Section 11 planted an int3 at `game+0x1335A20` while `PALMETTO_EXECUTOR_WATCH` armed a hardware execution breakpoint
+(DR0) at the same linear address; it measured 0 int3 entries and 51,097 hardware hits in one boot, while a control int3 at
+`game+0x2215EA0` trapped normally. The arms here isolate the cause: the same int3 traps as soon as no debug register is
+armed at its address. A hardware instruction breakpoint is a debug fault, and the resume path sets `EFLAGS.RF`, which makes
+the processor ignore the debug exception of the next instruction - at the entry that instruction is the INT3. The two
+routes cannot share an address, and the failure was not a page or alias property at all.
+`port/src/main.cpp`'s `PALMETTO_WRITER_WATCH` is that arm: an int3 over the executor entry, re-written on the single-step
+after each pass, with no debug register at the site.
+
+| arm | debug register at the int3 site | int3 entries | hardware entry hits |
+|---|---|---|---|
+| `boot-probe8` (section 11.2) | DR0 at `game+0x1335A20` | 0 | 51,097 |
+| `boot-w1` | none | 2 by 19 s (the boot stopped before stage 3) | - |
+| `boot-w2` | none | 3, the third at the stage-3 entry | - |
+| `boot-w3` | none | 3, the third at the stage-3 entry | - |
+
+### 12.2 The object is the executor's own argument
+
+Section 11 tracked `object = *(*(job+0x28)+0x10)` (the graph's `+0x10`) and never saw a store. The executor's own
+disassembly shows that field is not what it calls through:
+
+| site | instruction | what it means |
+|---|---|---|
+| `game+0x1335A4E` | `MOV RAX,qword ptr [RCX] ; CALL qword ptr [RAX+0x28]` | the entry calls the argument's own vtable slot 0x28 |
+| `game+0x1335A51` | `MOV RSI,RCX` | the argument is kept in RSI for the whole function |
+| `game+0x1335B1F` | `MOV RBX,qword ptr [RSI+0x28]` | the graph is the argument's `+0x28` field (section 11's "job+0x28") |
+| `game+0x133609A` | `MOV RAX,qword ptr [RSI] ; CALL qword ptr [RAX+0xB0]` | the stop's call reads the argument's vtable |
+
+The stop confirms it. In `boot-w3` the first trace exception at `game+0x13360A3` has `RCX = RSI = 0x2d40f338520`, exactly
+the job the int3 logged at the stage-3 entry a few seconds earlier, `RBX = graph+0x18 = 0x2d40e67f0a8` and
+`RAX = 0x3F8000003F800000`; the fault dump at the job is `float4(1,1,1,0)` repeated, the same 1.0f constant block section
+10 measured. `boot-p1` stops at another call in the same executor (`game+0x1335DCB`) through a different argument
+(`RCX = 0x13c0453e4e0`) whose first qword is the same constant block: one race, two windows.
+
+### 12.3 The writer arms: no armed thread made the store
+
+| arm | what was armed | int3 entries | stage-3 entry | data hits | first trace exception |
+|---|---|---|---|---|---|
+| `boot-w2` | 4 points in the executor thread: job first qword, `+0x28`, `+0x30`, `+0x40` | 3 | yes, machine stage 3 | 0 | `game+0x13360A3` read -1, t 57.12 s |
+| `boot-w3` | the job first qword in 104 threads (suspend, Get/SetThreadContext, resume) plus the executor thread's 4 | 3 | yes, machine stage 3 | 0 | `game+0x13360A3` read -1, t 64.48 s |
+| `boot-w4` | the same with the arming guard shortened | 2 (loading only) | none: the boot stopped at `game+0x86F981` t 61.88 s | 0 | `game+0x86F981` read `0xa5d5` |
+
+In `boot-w2` and `boot-w3` the job's vtable was valid at the stage-3 entry and 1.0f constants at the stop, so the store
+happened between the two, and no armed thread fired. Two explanations remain and neither is measured. The store may have
+come from a thread the sweep had not armed yet (it arms a thread 500 ms after its first sight, and a stage-3 writing
+thread can be younger; `boot-w4` shortened that but its boot stopped in a pre-existing family before stage 3). The store
+may also not be a user-mode store at all (a driver or DMA write would not raise a debug register). The honest limit is
+that the arm has no live control in the same boot: the `+0x40` state point, which the job executor writes after a
+returning pass, did not fire either, so this run cannot separate "the writer is another thread" from "the points were not
+honoured". Section 11's control showed the suspend/SetThreadContext mechanism works on this host, and that is why the
+sweep is still the named next falsifier rather than a dead end.
+
+The page-granular watch built first is a measured dead end and is recorded so it is not retried: `boot-w1` made the
+stage-3 job's own 4 KiB page `PAGE_READONLY` and the title's allocator-side code (`game+0x538D5xx`, `game+0x515B25x`) then
+made 18,409 writable stores into that page in one pass (19,770 page faults), none of them at the object's first qword.
+The pass slowed by tens of seconds, the boot stopped at `game+0x28CF870` before stage 3 and the device was lost once.
+A 4 KiB page in that heap is shared with hot allocator traffic, so only an 8-byte point is usable there.
+
+### 12.4 The pacing knobs and what they measured
+
+`port/src/vulkan_backend.h` gains two opt-in knobs; both are off by default and the default path changes no call.
+`PALMETTO_PACE_IDLE` drains the queue with `vkQueueWaitIdle` after each accepted `ExecuteCommandLists`;
+`PALMETTO_PACE_DELAY_US` sleeps that many microseconds after the submission. The pure mapping is `submission_pace_from`
+and `port/test/frame_dump_test.cpp` pins it. One boot per arm, the section-10 environment, one knob at a time:
+
+| measurement | default (`boot-final300`, section 11.5) | `PALMETTO_PACE_IDLE=1` (`boot-p1`) | `PALMETTO_PACE_DELAY_US=1000` (`boot-p2`) |
+|---|---|---|---|
+| stage 3 (machine current 3) | 56.0 s | 51.7 s | 51.0 s |
+| first trace exception (the stop) | `game+0x13360A3` read -1, t 59.04 s | `game+0x1335DCB` read -1, t 54.69 s | `game+0x4E5984B` read `0x100000040`, t 56.24 s, then 6 cascading exceptions |
+| `RAX` at the stop | `0x3F8000003F800000` | `0x3F8000003F800000` | not the vtable family |
+| title pages imported / content submissions | 2 | 2 | **0** |
+| content-frame readback, first capture per target | black `0 0 0`, 0/16,384 | black `0 0 0`, 0/16,384 | not reached |
+| write control on the same target | `51 102 204`, 16,384/16,384 | `51 102 204`, 16,384/16,384 | not reached |
+| presenter captures black | 10 of 10 | 9 of 9 | 8 of 8 |
+| pacing cost | none | 3,575 idle waits, 1.7 s in total, longest 7.7 ms | 3,160 sleeps of 1 ms, about 3.2 s |
+| device-lost lines | 0 | 0 | 0 |
+
+So the race is timing-induced (both knobs move the stop site) but neither knob removes it: the idle knob moves the same
+constant-block vtable to another call in the same executor, and the delay knob moves the failure into the pre-existing
+`game+0x4E5984B` cascade and the content submission never happens. Neither knob is console-faithful. `PALMETTO_PACE_IDLE`
+makes the CPU wait for the GPU, which a console submission does not; `PALMETTO_PACE_DELAY_US` adds latency the console
+does not have. The smallest measured knob costs 1.7 s of GPU wait over 3,575 submissions, and it did not let stage 3
+continue. The verdict is therefore "default path untouched, knobs emulation-only, race not fixed".
+
+### 12.5 The content pixels are still black
+
+`boot-w3` reached the same 3-draw content submission as section 10 (2 title-page imports, draws 5038, 5039 and 5041 on
+the presented resource ids, `format 37`, 3840x2160): the first capture of each target reads `mean 0 0 0,
+non-black 0/16,384`, the intermediate target reads the same, and the write control on the same target reads
+`mean 51 102 204, non-black 16,384/16,384, peak 204`, so the copy path works and the zero is the target's content.
+`boot-p1` reads the same on its content draws (3564, 3566, 3569 all `0 0 0`). All presenter captures in every arm read
+mean rgb 0.00. The pacing knobs change the stop and nothing about the picture, which is the same statement section 10
+made for the arena A/B: the first content frames draw black, and the renderer stop is a separate event.
+
+### 12.6 Verdict and the next falsifier
+
+- **The writer is not named.** The corrections stand: the int3 route is fixed (no debug register at the same address) and
+  the object is the executor's argument. The store is not observed in the executor thread or in 104 armed threads, and
+  the arm's missing same-boot control is named rather than hidden.
+- **Next falsifier (one boot).** Arm the job's first-qword point together with a point that is measured live in the same
+  pass (the job's `+0x40` state dword, or a page the caller writes), log both, and only then trust the vtable point's
+  silence. A second falsifier: arm every thread at stage 3 with no creation-window guard (`boot-w4` shortened it but its
+  boot never reached stage 3) and log each arm's thread id, so a young writer thread is either armed or named as missed.
+- **The pacing answer is a negative.** Both knobs are emulation-only, both move the stop site, neither lets stage 3
+  continue; the default path stays as it is.
+- **The content frame stays black.** No knob changed it, which closes the question section 6 left open for the
+  scheduling side: the black is the frame the title draws, not the schedule.
+
+### 12.7 Tests and gates
+
+- `port/test/frame_dump_test.cpp` gains six checks for `palmetto::submission_pace_from`: no value and `"0"` leave both
+  knobs off, the idle value alone sets only that knob, the delay is decimal microseconds, and both together keep both
+  values. The target exits 0.
+- Gate subset on the changed tree: `frame_dump_test`, `unimplemented_policy_test`, `graphics_record_test`,
+  `graphics_pso_test`, `buffer_va_index_test`, `dstorage_test`, `xapu_chad_test`, `deferred_compile_test`,
+  `arena_size_test`, `xbox_present_test` and `xs_proxy_mock_test` all exit 0; `d3d12_fence_timing_test` remains the
+  documented pre-existing crash.
+- Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints `TESTS_BUILT`, and every
+  `tests/test_docs_*.py` check passes (the environment-variable check is the one that requires `PALMETTO_WRITER_WATCH`,
+  `PALMETTO_PACE_IDLE` and `PALMETTO_PACE_DELAY_US` to be named in a page, which this section does).
+
+### 12.8 Attribution
+
+This section was implemented from this project's own measurements: the int3 arms, the four-point and sweep write watches,
+the executor disassembly at the four sites above, the fault registers and memory, the two pacing arms and the readbacks.
+The stop sites and the executor were decompiled with the project's Ghidra tooling from the user's own image; no peer code
+was used and no game data is added. RVAs, VAs, field offsets, register values, counts, shapes and outcomes only.
