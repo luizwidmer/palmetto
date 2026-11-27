@@ -389,3 +389,30 @@ effect kind, activation lifecycle, or that the object-held context pointer is an
 hit whose imported arguments do not match `RCX=context`, `RDX=stack descriptor (0x20)`, `R8=stack command-id dword` is the
 falsifier for this contract (and would also falsify the measured no-submit frontier). A matching hit proves reachability
 only, not valid audio data or decoded output.
+
+## 12. Task-236 P-34 live submit arm (2026-11-27)
+
+This separate light arm used the fixed integrated `port/build/palmetto.exe` (SHA-256
+`9355F4DA153720BBA61C3A66AAB438C92B3CBF2777AC89A0B5B8053932540069`, mtime
+`2026-11-27T11:23:21.4090967-03:00`) without a build or relink. It used the `D:\leonida-work\fsrstable\boot_arm.ps1`
+`-Light` 90 s content environment with the template's standard `--trace` output, `PALMETTO_TITLE_CLASS0A_SIZE=1`, `PALMETTO_STATE_TRACE=2,90`,
+`PALMETTO_TIMELINE=1`, `PALMETTO_AUDIO_SUBMIT_PROBE=1`, and `PALMETTO_AUDIO_DECODE=1`. The final environment explicitly
+set `PALMETTO_CAPTURE=` and `PALMETTO_READBACK_PPM=` so no frame or readback payload was collected.
+
+| measure | P-34 live submit arm |
+|---|---|
+| window | `2026-11-27T11:47:42.7597882-03:00`–`11:49:13.5831203-03:00`; 90.3 s, ended at the 90 s harness timeout |
+| outcome | `ALIVE` at timeout; 179,177 D3D12 calls; 0 exceptions; no device-loss line |
+| probe | `armed-one-shot`; no `XDspSubmitCommand` hit or descriptor-shape result, and no `XDspActivate` or `XApuEnqueueCommand` call was observed |
+| audio state | 350 XMA contexts; five scans of 5,600 dwords each, all 0 non-zero; one AcpHal `cmd=2` event |
+| decode boundary | `palmetto_xma2_decoder.dll` missing; named refusal; no command was sent and no decode occurred |
+| state words | at 88 s: `init=2`, `loading=1`, `session=0`, machine current/next `2` |
+| captures | not collected; the capture and readback directories are empty by design |
+
+The local evidence is outside the repository under `D:\leonida-work\fsrstable\boot-task236-p34-audio` (`meta.txt`,
+`summary_console.txt`, `stderr.log`, `boot.jsonl`).
+
+**Limits and falsifier.** This arm confirms that the opt-in probe installed, but does not advance the live submit frontier:
+there was no `XDspSubmitCommand` call to classify. The static roles in section 11 remain dynamically unverified. A future live
+hit whose imports do not match `RCX=context`, `RDX=stack descriptor (0x20)`, `R8=stack command-id dword` falsifies that
+contract; a matching hit proves reachability only, not valid audio data or decoded output.

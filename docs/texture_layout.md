@@ -396,3 +396,33 @@ Result for this slice: 364 checks / 0 failures in linear mode and 33 / 0 in refu
 the full environment-documentation gate still reports one unrelated pre-existing missing entry in the current tree. No
 `palmetto` build/relink or git write was done; only the shape-only trace metadata was read, and no package assets or
 texture payload bytes were added to the repository.
+
+## 9. Task-236 P-35 XG slot-2 array observation (2026-11-27)
+
+This light arm used the fixed integrated `port/build/palmetto.exe` (SHA-256
+`9355F4DA153720BBA61C3A66AAB438C92B3CBF2777AC89A0B5B8053932540069`, mtime
+`2026-11-27T11:23:21.4090967-03:00`) without a build or relink. The `D:\leonida-work\fsrstable\boot_arm.ps1`
+`-Light` 90 s content environment with the template's standard `--trace` output, adding `PALMETTO_TITLE_CLASS0A_SIZE=1`, `PALMETTO_XG_LAYOUT=linear`,
+`PALMETTO_XG_LINEAR_ARRAYS=1`, `PALMETTO_XG_TRACE=1`, and `PALMETTO_XG_DUMP=1`; it also used
+`PALMETTO_STATE_TRACE=2,90` and `PALMETTO_TIMELINE=1`. `PALMETTO_CAPTURE=` and `PALMETTO_READBACK_PPM=` were explicitly
+empty, so no frame/readback payload was collected.
+
+| measure | P-35 XG arm |
+|---|---|
+| window | `2026-11-27T11:51:50.0380232-03:00`–`11:52:46.0570851-03:00`; 55.5 s |
+| outcome | `STOP` on a title exception (`0xC0000005`); 144,998 D3D12 calls; 1 exception; 1 `[rt] replay: the Vulkan device was lost` line; not a harness timeout |
+| state words | at 52 s: `init=2`, `loading=2`, `session=1`, machine current/next `2`; movie player state/next `3`, probe/open `1`, error `0` |
+| slot-2 calls | 2 total, both `array_size=1`: `SizeBytes=0x400000` at 2048x2048 and `SizeBytes=0x100000` at 1024x1024; each 0x1B40-byte record reported 0x100 alignment, one mip, one plane, dimension 3 |
+| measured linear arrays | format 28 (`R8G8B8A8_UNORM`), 1x1 counts 2/6/12: 256 B row pitch/slice (resources 512/1,536/3,072 B); create returned `S_OK`; none produced a slot-2 call |
+| array slot-2 result | no slot-2 layout read for `array_size > 1` appeared in this boot |
+| captures | not collected; the capture and readback directories are empty by design |
+
+The trace and census are retained outside the repository under `D:\leonida-work\fsrstable\boot-task236-p35-xgslot2`
+(`meta.txt`, `summary_console.txt`, `stderr.log`, `boot.jsonl`). P-44 and P-35 were consecutive loss-affected arms; the
+second device-loss line reached the two-loss stop rule, so the series ended at launch 3/3 with no retry. This arm ended at
+55.5 s and the post-run check found no Palmetto process or held boot lock; it was not a harness hang.
+
+**Limits and falsifier.** The two slot-2 records belong to one-slice descriptions, not arrays. The observed create/copy path
+for 1x1 arrays does not show that the title reads their slot-2 layout. The row-major array layout in section 8 therefore
+remains unvalidated by a live slot-2 read. A future slot-2 call for `array_size > 1` whose returned slice size differs from
+`0x100` or whose offsets differ from `i * 0x100` would falsify the model; this boot did not reach that observation.

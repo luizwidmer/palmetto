@@ -292,3 +292,33 @@ must keep the last valid table and the submission must continue; a reused spare 
 unresolvable key must increment its named refusal counter without throwing through the shim. If the boot sees no
 allocation/collision pressure, zero event counters remain expected and are not a failure. Do not interpret this task's
 unrun P-44 arm as evidence either way.
+
+## 11. Task-236 P-44 bindless arm (2026-11-27)
+
+The preceding section records the earlier task-228 series, which correctly stopped before a P-44 launch. This was a new,
+separately authorized light arm on the fixed integrated `port/build/palmetto.exe` (SHA-256
+`9355F4DA153720BBA61C3A66AAB438C92B3CBF2777AC89A0B5B8053932540069`, mtime
+`2026-11-27T11:23:21.4090967-03:00`), with no build or relink. The `D:\leonida-work\fsrstable\boot_arm.ps1`
+`-Light` 90 s content environment with the template's standard `--trace` output, adding `PALMETTO_TITLE_CLASS0A_SIZE=1`, `PALMETTO_BINDLESS_DEGRADATION=1`,
+`PALMETTO_STATE_TRACE=2,90`, and `PALMETTO_TIMELINE=1`. `PALMETTO_CAPTURE=` and `PALMETTO_READBACK_PPM=` were explicitly
+empty; no frame/readback payload was collected.
+
+| measure | P-44 bindless arm |
+|---|---|
+| window | `2026-11-27T11:50:10.7788893-03:00`–`11:51:13.6321357-03:00`; 62.3 s |
+| outcome | `STOP` on a title exception (`0xC0000005`); 177,657 D3D12 calls; 1 exception; 1 `[rt] replay: the Vulkan device was lost` line; not a harness timeout |
+| state words | at 60 s: `init=2`, `loading=2`, `session=1`, machine current/next `2`; movie player state/next `3`, probe/open `1`, error `0` |
+| bindless sizing | 65,536 2D images; 3,936 samplers; 16,384 2D-array; 4,096 each 3D and 1D; 4,096 storage indices in 2D |
+| degradation telemetry | no `BindlessStats` snapshot or counter event lines; `degraded_flushes`, `spares_reused`, and `keys_refused` are **unavailable, not zero** |
+| captures | not collected; the capture and readback directories are empty by design |
+
+The evidence remains outside the repository under `D:\leonida-work\fsrstable\boot-task236-p44-bindless` (`meta.txt`,
+`summary_console.txt`, `stderr.log`, `boot.jsonl`). The device-loss line and title exception are co-observations, not evidence
+that bindless degradation caused the stop. The next arm, P-35, had a second consecutive arm-level device loss and ended the
+series (see [the P-35 XG observation](texture_layout.md#9-task-236-p-35-xg-slot-2-array-observation-2026-11-27)).
+
+**Limits and falsifier.** This run verifies only the explicit override and the set-sizing line. It did not serialize the
+per-set counters, and therefore does not establish whether degraded flushes or spare reuse occurred. A meaningful
+falsifier requires an observed allocation/collision-pressure event with the counter snapshot: a degraded flush that does
+not retain the last valid table, a spare replacement that is not reused, or a refused key that escapes the named refusal
+path would refute the corresponding rule. Absence of telemetry here is not evidence either way.
