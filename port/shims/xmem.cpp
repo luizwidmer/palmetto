@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -597,6 +598,9 @@ struct MappedPage {
 };
 
 std::unordered_map<uintptr_t, MappedPage> g_mapped;
+// Alias-aware PAGE_GUARD maintenance is defined below with the watcher. All callers hold g_phys_mutex; the hook takes
+// g_watch_mutex second, preserving the one lock order used by page-list delivery and alias-watch arming.
+void watch_mapping_changed_locked(uintptr_t address);
 SRWLOCK g_fault_lock = SRWLOCK_INIT;
 
 struct FaultLockExclusive {
@@ -1031,36 +1035,61 @@ void* WINAPI XMemVirtualAlloc(void* address, SIZE_T size, DWORD allocation_type,
 }
 
 // With g_phys_mutex held. Unmaps the page at `address` if one is mapped there; the address becomes a placeholder again.
-bool unmap_page(uintptr_t address) {
-    const FaultLockExclusive lock;
-    const auto it = g_mapped.find(address);
-    if (it == g_mapped.end()) return true;
-    if (!placeholder_api().unmap_view2(GetCurrentProcess(), reinterpret_cast<void*>(address),
-                                       MEM_PRESERVE_PLACEHOLDER)) {
-        return false;
+// `notify` is false only while map_page is replacing this view; that caller sends one final old/new notification after
+// the replacement either succeeds or leaves the address unmapped.
+bool unmap_page(uintptr_t address, uint64_t* removed_page = nullptr, bool notify = true) {
+    if (removed_page) *removed_page = 0;
+    uint64_t old_page = 0;
+    {
+        const FaultLockExclusive lock;
+        const auto it = g_mapped.find(address);
+        if (it == g_mapped.end()) return true;
+        old_page = it->second.page;
+        if (!placeholder_api().unmap_view2(GetCurrentProcess(), reinterpret_cast<void*>(address),
+                                           MEM_PRESERVE_PLACEHOLDER)) {
+            return false;
+        }
+        g_mapped.erase(it);
     }
-    g_mapped.erase(it);
+    if (removed_page) *removed_page = old_page;
+    if (notify) watch_mapping_changed_locked(address);
     return true;
 }
 
 // With g_phys_mutex held. Maps physical page `page` (0: unmap) at the 64 KiB-aligned `address`, replacing what was
-// mapped there. The caller has found the window.
+// mapped there. The caller has found the window. One watcher notification follows the final map state, not the transient
+// placeholder that separates replacement's unmap and map calls.
 bool map_page(uintptr_t address, uint64_t page, DWORD protect) {
-    if (!unmap_page(address)) return false;
-    if (page == 0) return true;
+    uint64_t old_page = 0;
+    if (!unmap_page(address, &old_page, false)) return false;
+    if (page == 0) {
+        if (old_page) watch_mapping_changed_locked(address);
+        return true;
+    }
     const auto it = g_pages.find(page);
     if (it == g_pages.end()) {
         SetLastError(ERROR_INVALID_PARAMETER);
+        if (old_page) watch_mapping_changed_locked(address);
         return false;
     }
     void* const target = reinterpret_cast<void*>(address);
-    if (!isolate_placeholder(target, kPhysicalPageSize)) return false;
-    const FaultLockExclusive lock;
-    void* const view = placeholder_api().map_view3(it->second.section->handle, GetCurrentProcess(), target,
-                                                   it->second.offset, kPhysicalPageSize, MEM_REPLACE_PLACEHOLDER,
-                                                   protect, nullptr, 0);
-    if (!view) return false;
-    g_mapped[address] = MappedPage{page, it->second.section, it->second.offset};
+    if (!isolate_placeholder(target, kPhysicalPageSize)) {
+        if (old_page) watch_mapping_changed_locked(address);
+        return false;
+    }
+    void* view = nullptr;
+    {
+        const FaultLockExclusive lock;
+        view = placeholder_api().map_view3(it->second.section->handle, GetCurrentProcess(), target,
+                                           it->second.offset, kPhysicalPageSize, MEM_REPLACE_PLACEHOLDER, protect,
+                                           nullptr, 0);
+        if (view) g_mapped[address] = MappedPage{page, it->second.section, it->second.offset};
+    }
+    if (!view) {
+        if (old_page) watch_mapping_changed_locked(address);
+        return false;
+    }
+    watch_mapping_changed_locked(address);
     return true;
 }
 
@@ -1384,11 +1413,10 @@ bool copy_page_mappings(void* destination, const void* source, std::uint64_t pag
 // ~35 ms because every 4 KiB page of it trips once. That last figure is why the change signal alone is not a fix: the
 // full refresh scan must be narrowed to the changed pages (device-side, docs/card_copies.md "what remains") before a
 // gate on this tracker can pay, and why the tracker is landed behind switches and off by default.
-namespace {
-
 constexpr std::uintptr_t kWatchPage = 0x1000;     // the guard granularity: one PTE
 constexpr std::uintptr_t kWatchBlock = 0x10000;   // the measured console heap page: what one arm call covers
-constexpr unsigned kWatchRanges = 8;              // watched ranges (the title's shader-visible heaps)
+constexpr unsigned kWatchRanges = 8;              // published intervals; alias expansion refuses beyond this bound
+constexpr unsigned kWatchOwners = 8;              // independently forgettable caller ranges
 constexpr unsigned kWatchTrips = 16384;           // recorded pages between polls; past it the poll answers "unavailable"
 
 // Published for the exception handler, which must not take a lock (a fault can arrive on any thread, including one
@@ -1406,13 +1434,37 @@ std::atomic<bool> g_watch_overflow{false};
 std::atomic<bool> g_watch_changed{false};
 std::atomic<std::uint64_t> g_watch_write_trips{0}, g_watch_read_trips{0};
 std::atomic<std::uint64_t> g_watch_pages_guarded{0};
+std::atomic<unsigned> g_watch_alias_owners{0};
 
 std::mutex g_watch_mutex;
 struct WatchRange {
     std::uintptr_t start;
     std::uintptr_t end;
+    std::uintptr_t owner;  // the aligned range start passed to page_watch_arm[/_aliases]
 };
-std::vector<WatchRange> g_watch_ranges;
+struct WatchPageIdentity {
+    std::shared_ptr<Section> section;
+    std::uint64_t offset;
+};
+bool watch_page_identity_less(const WatchPageIdentity& a, const WatchPageIdentity& b) {
+    if (a.section.get() != b.section.get())
+        return std::less<const Section*>{}(a.section.get(), b.section.get());
+    return a.offset < b.offset;
+}
+bool watch_page_identity_equal(const WatchPageIdentity& a, const WatchPageIdentity& b) {
+    return a.section == b.section && a.offset == b.offset;
+}
+struct WatchOwner {
+    std::uintptr_t start;
+    std::uintptr_t end;
+    bool aliases;
+    bool valid;
+    std::vector<WatchPageIdentity> pages;  // backing-section pages the source range currently names (sorted, unique)
+};
+std::vector<WatchRange> g_watch_ranges;  // the merged, currently armed intervals across all owners
+std::vector<WatchOwner> g_watch_owners;
+bool g_watch_suspended = false;
+bool g_watch_mapping_changed_while_suspended = false;
 
 // Whether [address, address + kWatchBlock) can hold a guard: every host page committed and writable, and no guard
 // already set (a title may guard its own memory; the tracker must not adopt or clear it).
@@ -1460,10 +1512,162 @@ void disarm_range(std::uintptr_t start, std::uintptr_t end) {
     }
 }
 
-bool range_is_watched(std::uintptr_t start) {
-    for (const auto& range : g_watch_ranges)
-        if (range.start == start) return true;
+WatchOwner* find_watch_owner(std::uintptr_t start) {
+    for (auto& owner : g_watch_owners)
+        if (owner.start == start) return &owner;
+    return nullptr;
+}
+
+bool watch_page_is_published(std::uintptr_t page) {
+    const unsigned published = g_watch_published.load(std::memory_order_acquire);
+    for (unsigned i = 0; i < published && i < kWatchRanges; ++i) {
+        if (page >= g_watch_begin[i].load(std::memory_order_relaxed) &&
+            page < g_watch_end[i].load(std::memory_order_relaxed))
+            return true;
+    }
     return false;
+}
+
+void publish_watch_ranges() {
+    const unsigned count = static_cast<unsigned>((std::min)(g_watch_ranges.size(), std::size_t{kWatchRanges}));
+    for (unsigned i = 0; i < count; ++i) {
+        g_watch_begin[i].store(g_watch_ranges[i].start, std::memory_order_relaxed);
+        g_watch_end[i].store(g_watch_ranges[i].end, std::memory_order_relaxed);
+    }
+    g_watch_published.store(count, std::memory_order_release);
+}
+
+std::size_t watch_range_pages(const WatchRange& range) {
+    return static_cast<std::size_t>((range.end - range.start) / kWatchPage);
+}
+
+// The source range and every currently mapped xmem view of the same backing-section page. Frame numbers can be recycled
+// while a view still owns its old section, so page identity is (Section, offset), not the title's page number. The mapping
+// table is stable because alias-aware callers hold g_phys_mutex; direct page_watch_arm keeps its old single-view behavior.
+bool build_watch_layout(std::uintptr_t start, std::uintptr_t end, std::uintptr_t owner, bool aliases,
+                        std::vector<WatchPageIdentity>& pages, std::vector<WatchRange>& ranges) {
+    pages.clear();
+    ranges.clear();
+    ranges.push_back({start, end, owner});
+    if (!aliases) return true;
+
+    for (std::uintptr_t slot = start & ~static_cast<std::uintptr_t>(kPhysicalPageSize - 1); slot < end;) {
+        const auto it = g_mapped.find(slot);
+        if (it != g_mapped.end()) pages.push_back({it->second.section, it->second.offset});
+        if (slot > (std::numeric_limits<std::uintptr_t>::max)() - kPhysicalPageSize) return false;
+        slot += kPhysicalPageSize;
+    }
+    const auto less = [](const WatchPageIdentity& a, const WatchPageIdentity& b) {
+        return watch_page_identity_less(a, b);
+    };
+    std::sort(pages.begin(), pages.end(), less);
+    pages.erase(std::unique(pages.begin(), pages.end(), watch_page_identity_equal), pages.end());
+    if (pages.empty()) return true;
+
+    for (const auto& [address, mapping] : g_mapped) {
+        const WatchPageIdentity identity{mapping.section, mapping.offset};
+        if (!std::binary_search(pages.begin(), pages.end(), identity, less)) continue;
+        if (address > (std::numeric_limits<std::uintptr_t>::max)() - kPhysicalPageSize) return false;
+        ranges.push_back({address, address + kPhysicalPageSize, owner});
+    }
+    std::sort(ranges.begin(), ranges.end(), [](const WatchRange& a, const WatchRange& b) {
+        return a.start < b.start || (a.start == b.start && a.end < b.end);
+    });
+    std::size_t out = 0;
+    for (const auto& range : ranges) {
+        if (out && range.start <= ranges[out - 1].end) {
+            ranges[out - 1].end = (std::max)(ranges[out - 1].end, range.end);
+        } else {
+            ranges[out++] = range;
+        }
+    }
+    ranges.resize(out);
+    return true;
+}
+
+bool watch_layout_fits(std::uintptr_t owner, const std::vector<WatchRange>& candidate) {
+    std::size_t other_count = 0;
+    for (const auto& current : g_watch_ranges)
+        if (current.owner != owner) ++other_count;
+    if (candidate.size() > kWatchRanges - other_count) return false;
+    for (const auto& next : candidate) {
+        for (const auto& current : g_watch_ranges) {
+            if (current.owner == owner) continue;
+            if (next.start < current.end && current.start < next.end) return false;
+        }
+    }
+    return true;
+}
+
+bool watchable_range(std::uintptr_t start, std::uintptr_t end) {
+    for (std::uintptr_t at = start; at < end;) {
+        if (!watchable_block(at)) return false;
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<void*>(at), &info, sizeof(info)) != sizeof(info)) return false;
+        const std::uintptr_t region = reinterpret_cast<std::uintptr_t>(info.BaseAddress);
+        if (info.RegionSize > (std::numeric_limits<std::uintptr_t>::max)() - region) return false;
+        const std::uintptr_t next = region + info.RegionSize;
+        if (next <= at) return false;
+        at = (std::min)(end, next);
+    }
+    return true;
+}
+
+// Remove a watch owner's published intervals. The caller holds g_watch_mutex.
+std::size_t remove_watch_ranges(std::uintptr_t owner, bool disarm) {
+    std::size_t pages = 0;
+    for (std::size_t i = 0; i < g_watch_ranges.size();) {
+        if (g_watch_ranges[i].owner != owner) {
+            ++i;
+            continue;
+        }
+        const WatchRange range = g_watch_ranges[i];
+        if (disarm) disarm_range(range.start, range.end);
+        pages += watch_range_pages(range);
+        g_watch_ranges.erase(g_watch_ranges.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+    publish_watch_ranges();
+    return pages;
+}
+
+// Publish first so a guard that fires while the views are being armed is handled by the tracker. On any partial failure,
+// restore every view and leave the caller with no active range for that owner.
+bool install_watch_ranges(std::uintptr_t owner, const std::vector<WatchRange>& ranges, std::size_t& pages) {
+    pages = 0;
+    std::vector<WatchRange> armed;
+    try {
+        armed.reserve(ranges.size());
+        g_watch_ranges.insert(g_watch_ranges.end(), ranges.begin(), ranges.end());
+    } catch (...) {
+        remove_watch_ranges(owner, false);
+        return false;
+    }
+    publish_watch_ranges();
+    for (const auto& range : ranges) {
+        const std::size_t count = arm_range(range.start, range.end);
+        if (count != watch_range_pages(range)) {
+            for (const auto& undo : armed) disarm_range(undo.start, undo.end);
+            disarm_range(range.start, range.end);
+            remove_watch_ranges(owner, false);
+            return false;
+        }
+        armed.push_back(range);
+        pages += count;
+    }
+    g_watch_pages_guarded.fetch_add(pages, std::memory_order_relaxed);
+    return true;
+}
+
+void invalidate_watch_owner(WatchOwner& owner) {
+    if (!owner.valid) return;
+    const std::size_t pages = remove_watch_ranges(owner.start, true);
+    if (pages) g_watch_pages_guarded.fetch_sub(pages, std::memory_order_relaxed);
+    owner.valid = false;
+    if (owner.aliases) g_watch_alias_owners.fetch_sub(1, std::memory_order_relaxed);
+}
+
+bool any_invalid_watch_owner() {
+    return std::any_of(g_watch_owners.begin(), g_watch_owners.end(), [](const WatchOwner& owner) { return !owner.valid; });
 }
 
 // Re-guards the pages the handler recorded and clears the record. With `read_verdict`, the change flag is taken too.
@@ -1472,6 +1676,9 @@ rt::xmem::WriteWatchPoll drain_trips(bool read_verdict) {
     const bool changed = read_verdict ? g_watch_changed.exchange(false) : g_watch_changed.load();
     for (unsigned i = 0, count = g_watch_trip_count.exchange(0); i < count; ++i) {
         const auto page = g_watch_trips[i].load(std::memory_order_relaxed);
+        // A mapping change may have removed the view after the guard trip was queued. Never put a guard back on a
+        // placeholder or on an unrelated view that has since reused the same address.
+        if (!watch_page_is_published(page)) continue;
         DWORD old = 0;
         VirtualProtect(reinterpret_cast<void*>(page), kWatchPage, PAGE_READWRITE | PAGE_GUARD, &old);
     }
@@ -1502,17 +1709,8 @@ LONG CALLBACK watch_handler(EXCEPTION_POINTERS* info) {
     if (busy || !record || record->ExceptionCode != EXCEPTION_GUARD_PAGE || record->NumberParameters < 2)
         return EXCEPTION_CONTINUE_SEARCH;
     const auto page = static_cast<std::uintptr_t>(record->ExceptionInformation[1]) & ~(kWatchPage - 1);
-    const unsigned published = g_watch_published.load(std::memory_order_acquire);
-    bool ours = false;
-    for (unsigned i = 0; i < published && i < kWatchRanges; ++i) {
-        if (page >= g_watch_begin[i].load(std::memory_order_relaxed) &&
-            page < g_watch_end[i].load(std::memory_order_relaxed)) {
-            ours = true;
-            break;
-        }
-    }
     // Not a page this tracker guards: the title's own guard pages must keep their own exception handling.
-    if (!ours) return EXCEPTION_CONTINUE_SEARCH;
+    if (!watch_page_is_published(page)) return EXCEPTION_CONTINUE_SEARCH;
     busy = true;
     // 0 = read, 1 = write, 8 = execute (EXCEPTION_INFORMATION for an access violation; the guard page uses the same
     // layout). A read or an execute is not a change: only a store makes the mirror stale.
@@ -1527,64 +1725,159 @@ void install_watch_handler() {
     (void)installed;
 }
 
-bool watch_arm(const void* address, std::size_t bytes) {
+bool watch_arm_internal(const void* address, std::size_t bytes, bool aliases) {
     if (!address || !bytes) return false;
+    const std::uintptr_t raw_start = reinterpret_cast<std::uintptr_t>(address);
+    const std::uintptr_t max = (std::numeric_limits<std::uintptr_t>::max)();
+    if (bytes > max - raw_start || raw_start + bytes > max - (kWatchPage - 1)) return false;
+    const std::uintptr_t start = raw_start & ~(kWatchPage - 1);
+    const std::uintptr_t end = (raw_start + bytes + kWatchPage - 1) & ~(kWatchPage - 1);
+    if (end <= start) return false;
     install_watch_handler();
-    const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(address) & ~(kWatchPage - 1);
-    const std::uintptr_t end =
-        (reinterpret_cast<std::uintptr_t>(address) + bytes + kWatchPage - 1) & ~(kWatchPage - 1);
-    std::lock_guard lock(g_watch_mutex);
-    if (range_is_watched(start)) return true;  // already watched; arming twice would leak the original protection
-    for (std::uintptr_t at = start; at < end; at += kWatchBlock)
-        if (!watchable_block(at)) return false;
-    if (g_watch_ranges.size() >= kWatchRanges) return false;
-    // Publish the range before arming it: a fault that arrives between the two is then recognised as ours (a page
-    // that is not guarded yet cannot fault, and one that is guarded by a previous range must not be orphaned).
-    const unsigned slot = g_watch_published.load(std::memory_order_relaxed);
-    g_watch_begin[slot].store(start, std::memory_order_relaxed);
-    g_watch_end[slot].store(end, std::memory_order_relaxed);
-    g_watch_published.store(slot + 1, std::memory_order_release);
-    const std::size_t guarded = arm_range(start, end);
-    if (guarded != (end - start) / kWatchPage) {
-        disarm_range(start, end);
-        g_watch_published.store(slot, std::memory_order_release);
+
+    // Alias discovery reads g_mapped; keep the lock order g_phys_mutex -> g_watch_mutex, as in page-list delivery.
+    std::unique_lock<std::mutex> physical_lock(g_phys_mutex, std::defer_lock);
+    if (aliases) physical_lock.lock();
+    std::lock_guard watch_lock(g_watch_mutex);
+    if (WatchOwner* existing = find_watch_owner(start)) return existing->valid && existing->aliases == aliases;
+    if (g_watch_owners.size() >= kWatchOwners) return false;
+
+    std::vector<WatchPageIdentity> pages;
+    std::vector<WatchRange> ranges;
+    WatchOwner owner{start, end, aliases, true, {}};
+    try {
+        if (!build_watch_layout(start, end, start, aliases, pages, ranges) || !watch_layout_fits(start, ranges))
+            return false;
+        for (const auto& range : ranges)
+            if (!watchable_range(range.start, range.end)) return false;
+        owner.pages = std::move(pages);
+        g_watch_owners.reserve(g_watch_owners.size() + 1);
+    } catch (...) {
         return false;
     }
-    g_watch_ranges.push_back({start, end});
-    g_watch_pages_guarded.fetch_add(guarded, std::memory_order_relaxed);
+    std::size_t guarded = 0;
+    if (!install_watch_ranges(start, ranges, guarded)) return false;
+    g_watch_owners.push_back(std::move(owner));  // reserved above, after every protection change succeeded
+    if (aliases) {
+        g_watch_alias_owners.fetch_add(1, std::memory_order_relaxed);
+        // A newly armed alias set must compare once before it can earn an "unchanged" skip.
+        g_watch_changed.store(true, std::memory_order_relaxed);
+    }
     return true;
 }
+
+bool watch_arm(const void* address, std::size_t bytes) { return watch_arm_internal(address, bytes, false); }
+bool watch_arm_aliases(const void* address, std::size_t bytes) { return watch_arm_internal(address, bytes, true); }
 
 void watch_forget(const void* address) {
     if (!address) return;
     const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(address) & ~(kWatchPage - 1);
     std::lock_guard lock(g_watch_mutex);
-    for (std::size_t i = 0; i < g_watch_ranges.size(); ++i) {
-        if (g_watch_ranges[i].start != start) continue;
-        const std::uint64_t pages = (g_watch_ranges[i].end - g_watch_ranges[i].start) / kWatchPage;
-        disarm_range(g_watch_ranges[i].start, g_watch_ranges[i].end);
-        // Close the publication hole: move the last published range into this slot.
-        const unsigned last = g_watch_published.load(std::memory_order_relaxed) - 1;
-        if (last != i) {
-            g_watch_begin[i] = g_watch_begin[last].load(std::memory_order_relaxed);
-            g_watch_end[i] = g_watch_end[last].load(std::memory_order_relaxed);
+    for (std::size_t i = 0; i < g_watch_owners.size(); ++i) {
+        if (g_watch_owners[i].start != start) continue;
+        WatchOwner& owner = g_watch_owners[i];
+        if (owner.valid) {
+            const std::size_t pages = remove_watch_ranges(start, true);
+            if (pages) g_watch_pages_guarded.fetch_sub(pages, std::memory_order_relaxed);
+            if (owner.aliases) g_watch_alias_owners.fetch_sub(1, std::memory_order_relaxed);
         }
-        g_watch_published.store(last, std::memory_order_release);
-        g_watch_ranges.erase(g_watch_ranges.begin() + std::ptrdiff_t(i));
-        g_watch_pages_guarded.fetch_sub(pages, std::memory_order_relaxed);
+        g_watch_owners.erase(g_watch_owners.begin() + static_cast<std::ptrdiff_t>(i));
         return;
     }
 }
 
-rt::xmem::WriteWatchPoll watch_poll() {
+bool watch_rebuild_owner(WatchOwner& owner) {
+    std::vector<WatchPageIdentity> pages;
+    std::vector<WatchRange> ranges;
+    try {
+        if (!build_watch_layout(owner.start, owner.end, owner.start, true, pages, ranges) ||
+            !watch_layout_fits(owner.start, ranges)) {
+            invalidate_watch_owner(owner);
+            return false;
+        }
+    } catch (...) {
+        invalidate_watch_owner(owner);
+        return false;
+    }
+
+    // Remove the old alias views before validating the new ones: their PAGE_GUARD bit is ours, not a conflict. The
+    // mapping-change verdict below forces one full compare even if no CPU write fault lands during this short rebuild.
+    const std::size_t old_pages = remove_watch_ranges(owner.start, !g_watch_suspended);
+    if (old_pages) g_watch_pages_guarded.fetch_sub(old_pages, std::memory_order_relaxed);
+    owner.pages = std::move(pages);
+    for (const auto& range : ranges) {
+        if (!watchable_range(range.start, range.end)) {
+            invalidate_watch_owner(owner);
+            g_watch_changed.store(true, std::memory_order_relaxed);
+            return false;
+        }
+    }
+    if (g_watch_suspended) {
+        try {
+            g_watch_ranges.insert(g_watch_ranges.end(), ranges.begin(), ranges.end());
+        } catch (...) {
+            invalidate_watch_owner(owner);
+            g_watch_changed.store(true, std::memory_order_relaxed);
+            return false;
+        }
+        publish_watch_ranges();
+        std::size_t pages_to_track = 0;
+        for (const auto& range : ranges) pages_to_track += watch_range_pages(range);
+        g_watch_pages_guarded.fetch_add(pages_to_track, std::memory_order_relaxed);
+        g_watch_mapping_changed_while_suspended = true;
+        g_watch_changed.store(true, std::memory_order_relaxed);
+        return true;
+    }
+
+    std::size_t guarded = 0;
+    if (!install_watch_ranges(owner.start, ranges, guarded)) {
+        invalidate_watch_owner(owner);
+        g_watch_changed.store(true, std::memory_order_relaxed);
+        return false;
+    }
+    g_watch_changed.store(true, std::memory_order_relaxed);
+    return true;
+}
+
+// Called with g_phys_mutex held, after the mapping table has reached its final state. Only alias-aware owners need a
+// notification: plain page_watch_arm keeps its measured per-VA behavior. A changed source mapping or any alias view of a
+// watched physical page rebuilds the view list; capacity/protection failure removes the partial watch so polling falls
+// back to the full compare rather than trusting an incomplete alias set.
+void watch_mapping_changed_locked(std::uintptr_t address) {
+    if (!g_watch_alias_owners.load(std::memory_order_relaxed)) return;
     std::lock_guard lock(g_watch_mutex);
-    if (g_watch_ranges.empty()) return rt::xmem::WriteWatchPoll::unavailable;
+    const auto mapped = g_mapped.find(address);
+    const WatchPageIdentity new_identity =
+        mapped == g_mapped.end() ? WatchPageIdentity{} : WatchPageIdentity{mapped->second.section, mapped->second.offset};
+    for (auto& owner : g_watch_owners) {
+        if (!owner.aliases || !owner.valid) continue;
+        const std::uintptr_t source_page = address & ~static_cast<std::uintptr_t>(kPhysicalPageSize - 1);
+        const bool source = source_page < owner.end && owner.start < source_page + kPhysicalPageSize;
+        const bool watched_view = std::any_of(g_watch_ranges.begin(), g_watch_ranges.end(), [&](const WatchRange& range) {
+            return range.owner == owner.start && address >= range.start && address < range.end;
+        });
+        const bool new_alias = mapped != g_mapped.end() &&
+                               std::binary_search(owner.pages.begin(), owner.pages.end(), new_identity,
+                                                  watch_page_identity_less);
+        if (!source && !watched_view && !new_alias) continue;
+        if (!g_watch_suspended) (void)drain_trips(false);
+        (void)watch_rebuild_owner(owner);
+    }
+}
+
+rt::xmem::WriteWatchPoll watch_poll() {
+    // Serialize a poll with XMemMapPhysicalPages: the mapping table changes under g_phys_mutex before its alias-watch
+    // notification is emitted, so the poll must not consume "unchanged" before the callback refreshes coverage.
+    std::unique_lock<std::mutex> physical_lock(g_phys_mutex, std::defer_lock);
+    if (g_watch_alias_owners.load(std::memory_order_relaxed)) physical_lock.lock();
+    std::lock_guard watch_lock(g_watch_mutex);
+    if (g_watch_ranges.empty() || any_invalid_watch_owner()) return rt::xmem::WriteWatchPoll::unavailable;
     return drain_trips(true);
 }
 
 void watch_rearm() {
     std::lock_guard lock(g_watch_mutex);
-    if (g_watch_ranges.empty()) return;
+    if (g_watch_ranges.empty() || g_watch_suspended) return;
     (void)drain_trips(false);
 }
 
@@ -1592,18 +1885,41 @@ void watch_rearm() {
 // 39.8 MB heap), and resumes it afterwards. Used only when the caller runs the full work a poll could not skip.
 void watch_suspend() {
     std::lock_guard lock(g_watch_mutex);
+    if (g_watch_suspended) return;
     for (const auto& range : g_watch_ranges) disarm_range(range.start, range.end);
+    g_watch_suspended = true;
     // Trips recorded before the suspension are drained here: the full work that follows reads every page anyway.
     g_watch_trip_count.store(0, std::memory_order_relaxed);
 }
 
 void watch_resume() {
     std::lock_guard lock(g_watch_mutex);
-    g_watch_changed.store(false, std::memory_order_relaxed);
-    for (const auto& range : g_watch_ranges) {
-        if (arm_range(range.start, range.end) != (range.end - range.start) / kWatchPage) {
-            // A page that cannot be guarded again: the caller's poll will answer "unavailable" (range dropped).
-            g_watch_overflow.store(true, std::memory_order_relaxed);
+    if (!g_watch_suspended) return;
+    g_watch_suspended = false;
+    const bool changed_during_suspend = g_watch_mapping_changed_while_suspended;
+    g_watch_mapping_changed_while_suspended = false;
+    g_watch_changed.store(changed_during_suspend, std::memory_order_relaxed);
+    for (auto& owner : g_watch_owners) {
+        if (!owner.valid) continue;
+        WatchRange ranges[kWatchRanges];
+        WatchRange armed[kWatchRanges];
+        std::size_t count = 0, armed_count = 0;
+        for (const auto& range : g_watch_ranges)
+            if (range.owner == owner.start && count < kWatchRanges) ranges[count++] = range;
+        bool ok = count != 0;
+        for (std::size_t i = 0; ok && i < count; ++i) {
+            const auto& range = ranges[i];
+            if (arm_range(range.start, range.end) != watch_range_pages(range)) {
+                disarm_range(range.start, range.end);
+                ok = false;
+                break;
+            }
+            armed[armed_count++] = range;
+        }
+        if (!ok) {
+            for (std::size_t i = 0; i < armed_count; ++i) disarm_range(armed[i].start, armed[i].end);
+            invalidate_watch_owner(owner);
+            g_watch_changed.store(true, std::memory_order_relaxed);
         }
     }
 }
@@ -1613,21 +1929,24 @@ std::uint64_t watch_read_trips() { return g_watch_read_trips.load(std::memory_or
 std::uint64_t watch_pages() { return g_watch_pages_guarded.load(std::memory_order_relaxed); }
 
 // With g_phys_mutex held (the mapping table is read). One span of a physical-page destination write (xmem.h,
-// docs/peer_port_streaming.md section 13) repeated through every armed page-watch range that maps its page, and the
-// written 4 KiB pages recorded as the guarded store would have left them. Only an armed mapping is written through: the
+// docs/peer_port_streaming.md section 13) repeated through every armed page-watch range with the same backing-section
+// identity and offset. Frame numbers can be recycled while stale views remain mapped, so the view fanout must not key on
+// the title's page number alone. The written 4 KiB pages are recorded as the guarded store would have left them. Only an
+// armed mapping is written through: the
 // delivery already wrote the page, and only a host guard needs the write to happen through its own view. The range list
 // is under g_watch_mutex (a forget or a resume cannot drop a range under the scan), which is also what keeps the
 // handler's published range table stable for the guards this write trips. `recorded` counts the written 4 KiB pages
 // inside an armed range; the return value is the number of views written.
-std::uint32_t deliver_span_through_watch(std::uint64_t page, std::uint32_t offset, std::uint32_t bytes,
-                                        const std::uint8_t* source, std::uint32_t& recorded) {
+std::uint32_t deliver_span_through_watch(const std::shared_ptr<Section>& section, std::uint64_t page_offset,
+                                        std::uint32_t offset, std::uint32_t bytes, const std::uint8_t* source,
+                                        std::uint32_t& recorded) {
     std::lock_guard lock(g_watch_mutex);
     std::uint32_t views = 0;
     for (const auto& range : g_watch_ranges) {
         for (std::uintptr_t slot = range.start & ~static_cast<std::uintptr_t>(kWatchBlock - 1); slot < range.end;
              slot += kWatchBlock) {
             const auto it = g_mapped.find(slot);
-            if (it == g_mapped.end() || it->second.page != page) continue;
+            if (it == g_mapped.end() || it->second.section != section || it->second.offset != page_offset) continue;
             std::uint8_t* const at = reinterpret_cast<std::uint8_t*>(slot) + offset;
             for (std::uint32_t done = 0; done < bytes;) {
                 const std::uint32_t in_page = (offset + done) & (kWatchPage - 1);
@@ -1652,9 +1971,8 @@ std::uint32_t deliver_span_through_watch(std::uint64_t page, std::uint32_t offse
     return views;
 }
 
-}  // namespace
-
 [[maybe_unused]] const bool g_page_watch_installed = (rt::xmem::page_watch_arm = &watch_arm,
+                                                      rt::xmem::page_watch_arm_aliases = &watch_arm_aliases,
                                                       rt::xmem::page_watch_forget = &watch_forget,
                                                       rt::xmem::page_watch_poll = &watch_poll,
                                                       rt::xmem::page_watch_rearm = &watch_rearm,
@@ -2041,6 +2359,8 @@ bool write_physical_pages_impl(const rt::xmem::PhysicalPageWrite* spans, std::si
     }
     const std::lock_guard lock(g_phys_mutex);
     std::uint8_t* backing[64] = {};
+    std::shared_ptr<Section> backing_sections[64];
+    std::uint64_t backing_offsets[64] = {};
     for (std::size_t i = 0; i < count; ++i) {
         const auto it = g_pages.find(spans[i].page);
         if (it == g_pages.end() || !it->second.section->scratch) {
@@ -2054,6 +2374,8 @@ bool write_physical_pages_impl(const rt::xmem::PhysicalPageWrite* spans, std::si
             return false;
         }
         backing[i] = page_backing;
+        backing_sections[i] = it->second.section;
+        backing_offsets[i] = it->second.offset;
     }
     rt::xmem::PhysicalPageWriteStats result;
     std::size_t at = 0;
@@ -2061,7 +2383,8 @@ bool write_physical_pages_impl(const rt::xmem::PhysicalPageWrite* spans, std::si
         std::memcpy(backing[i] + spans[i].offset, data + at, spans[i].bytes);
         std::uint32_t recorded = 0;
         result.watch_views +=
-            deliver_span_through_watch(spans[i].page, spans[i].offset, spans[i].bytes, data + at, recorded);
+            deliver_span_through_watch(backing_sections[i], backing_offsets[i], spans[i].offset, spans[i].bytes,
+                                        data + at, recorded);
         result.watch_pages += recorded;
         at += spans[i].bytes;
     }

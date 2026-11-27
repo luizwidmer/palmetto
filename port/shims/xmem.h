@@ -379,6 +379,12 @@ enum class WriteWatchPoll : std::uint8_t {
 // armed when any page cannot be (not committed, not writable, or a guard call fails): the caller must then keep doing
 // the full work for that range. `address` and `bytes` are rounded down/up to 64 KiB.
 using PageWatchArmFn = bool (*)(const void* address, std::size_t bytes);
+// Opt-in alias-expanding arm. In addition to the requested range, this guards every live xmem view of each physical page
+// mapped in it; map/unmap changes refresh that alias set. Capacity or protection failures refuse the arm, and a failed
+// live refresh makes the shared poll unavailable until that owner is forgotten, so callers must use their full compare.
+using PageWatchArmAliasesFn = bool (*)(const void* address, std::size_t bytes);
+// PALMETTO_XMEM_ALIAS_WATCH uses the same unset/empty/0-off, any other non-empty-on convention as the runtime switches.
+inline bool page_watch_alias_switch_on(const char* value) { return value && *value && *value != '0'; }
 // Stops watching the range whose start is `address`; restores the protection of every page it still holds.
 using PageWatchForgetFn = void (*)(const void* address);
 // The verdict for all armed ranges, and the re-arm of the pages a trip took out of the guard state. Called once per
@@ -398,6 +404,7 @@ using PageWatchResumeFn = void (*)();
 // since the process started, and the 4 KiB pages currently guarded.
 using PageWatchCountFn = std::uint64_t (*)();
 inline PageWatchArmFn page_watch_arm = nullptr;
+inline PageWatchArmAliasesFn page_watch_arm_aliases = nullptr;
 inline PageWatchForgetFn page_watch_forget = nullptr;
 inline PageWatchPollFn page_watch_poll = nullptr;
 inline PageWatchRearmFn page_watch_rearm = nullptr;

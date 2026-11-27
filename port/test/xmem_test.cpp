@@ -995,6 +995,163 @@ void test_page_list_destination_request(const PhysicalApi& api) {
     check(api.free_pages(kPages, pages) == TRUE, "page-list request: free the fixture's physical pages");
 }
 
+// PALMETTO_XMEM_ALIAS_WATCH: opt-in guard coverage follows every current XMem view of a watched physical page. The
+// default hook remains per-VA; a map change rebuilds the set, while an over-bound set becomes unavailable so the device
+// must hash/compare instead of skipping an untracked alias.
+void test_alias_expanding_page_watch(const PhysicalApi& api) {
+    check(!rt::xmem::page_watch_alias_switch_on(nullptr) && !rt::xmem::page_watch_alias_switch_on("") &&
+              !rt::xmem::page_watch_alias_switch_on("0"),
+          "alias watch switch: absent, empty and zero stay off");
+    check(rt::xmem::page_watch_alias_switch_on("1") && rt::xmem::page_watch_alias_switch_on("true"),
+          "alias watch switch: non-empty non-zero values turn the opt-in on");
+    check(rt::xmem::page_watch_arm && rt::xmem::page_watch_arm_aliases && rt::xmem::page_watch_forget &&
+              rt::xmem::page_watch_poll && rt::xmem::page_watch_pages && rt::xmem::write_physical_pages,
+          "alias watch: xmem exposes the base and alias-expanding tracker hooks");
+    if (!api.allocate || !api.free_pages || !api.map || !api.virtual_alloc || !rt::xmem::page_watch_arm ||
+        !rt::xmem::page_watch_arm_aliases || !rt::xmem::page_watch_forget || !rt::xmem::page_watch_poll ||
+        !rt::xmem::page_watch_pages || !rt::xmem::write_physical_pages)
+        return;
+
+    // First isolate the measured default miss: two addresses map one page, but the switch-off arm names only `source`.
+    uint64_t pages[2] = {};
+    uint64_t count = 2;
+    const BOOL pages_allocated = api.allocate(0x280, &count, pages);
+    check(pages_allocated == TRUE && count == 2, "alias watch: allocate two physical pages");
+    if (pages_allocated != TRUE || count != 2) return;
+    auto* const source = static_cast<uint8_t*>(
+        api.virtual_alloc(nullptr, kPage64k, MEM_RESERVE | kXmem64kPages, 0x28, PAGE_READWRITE));
+    auto* const old_alias = static_cast<uint8_t*>(
+        api.virtual_alloc(nullptr, kPage64k, MEM_RESERVE | kXmem64kPages, 0x28, PAGE_READWRITE));
+    auto* const new_alias = static_cast<uint8_t*>(
+        api.virtual_alloc(nullptr, kPage64k, MEM_RESERVE | kXmem64kPages, 0x28, PAGE_READWRITE));
+    auto* const next_alias = static_cast<uint8_t*>(
+        api.virtual_alloc(nullptr, kPage64k, MEM_RESERVE | kXmem64kPages, 0x28, PAGE_READWRITE));
+    auto cleanup = [&] {
+        rt::xmem::page_watch_forget(source);
+        if (source) { api.map(source, 1, nullptr); VirtualFree(source, 0, MEM_RELEASE); }
+        if (old_alias) { api.map(old_alias, 1, nullptr); VirtualFree(old_alias, 0, MEM_RELEASE); }
+        if (new_alias) { api.map(new_alias, 1, nullptr); VirtualFree(new_alias, 0, MEM_RELEASE); }
+        if (next_alias) { api.map(next_alias, 1, nullptr); VirtualFree(next_alias, 0, MEM_RELEASE); }
+        api.free_pages(2, pages);
+    };
+    check(source && old_alias && new_alias && next_alias, "alias watch: reserve four independent CPU views");
+    if (!source || !old_alias || !new_alias || !next_alias) { cleanup(); return; }
+    const bool views_mapped = api.map(source, 1, pages) == source && api.map(old_alias, 1, pages) == old_alias &&
+                              api.map(next_alias, 1, pages + 1) == next_alias;
+    check(views_mapped, "alias watch: map a watched page twice and a second physical page once");
+    if (!views_mapped) { cleanup(); return; }
+    std::memset(source, 0, kPage64k);
+    std::memset(next_alias, 0, kPage64k);
+    auto poll_after_stale = [&] {
+        auto verdict = rt::xmem::page_watch_poll();
+        if (verdict == rt::xmem::WriteWatchPoll::changed) verdict = rt::xmem::page_watch_poll();
+        return verdict;
+    };
+    check(rt::xmem::page_watch_arm(source, kPage64k), "alias watch: default arm watches the requested view only");
+    check(poll_after_stale() == rt::xmem::WriteWatchPoll::unchanged,
+          "alias watch: clear prior process-global watch changes before the alias control");
+    old_alias[0x40] = 0x31;
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unchanged,
+          "alias watch: a direct store through an unarmed alias remains the documented switch-off negative");
+    rt::xmem::page_watch_forget(source);
+
+    check(rt::xmem::page_watch_arm_aliases(source, kPage64k),
+          "alias watch: opt-in arm includes both live views of the source page");
+    check(rt::xmem::page_watch_pages() == 32,
+          "alias watch: only the source and its same-backing view are guarded (not recycled frame-number views)");
+    check(poll_after_stale() == rt::xmem::WriteWatchPoll::unchanged,
+          "alias watch: two-view set starts with an unchanged poll");
+    old_alias[0x80] = 0x42;
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::changed,
+          "alias watch: direct store through the second view is reported");
+
+    // A page-list destination write still reaches every guarded view and records the one shared page as changed.
+    const uint8_t payload[4] = {0x91, 0x82, 0x73, 0x64};
+    const rt::xmem::PhysicalPageWrite span{pages[0], 0x2000, sizeof(payload)};
+    rt::xmem::PhysicalPageWriteStats stats{};
+    uint64_t failed_page = 0;
+    check(rt::xmem::write_physical_pages(&span, 1, payload, &stats, &failed_page),
+          "alias watch: physical-page delivery still writes through armed aliases");
+    check(stats.watch_views == 2 && source[0x2000] == payload[0] && old_alias[0x2000] == payload[0],
+          "alias watch: delivery fans out through both current views and keeps shared bytes coherent");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::changed,
+          "alias watch: physical-page delivery invalidates the shared-page shadow");
+
+    // A new alias arriving after arm is immediately guarded. Then remapping the source VA to another page replaces the
+    // tracked identity: the old aliases stop being watched and the second page's alias starts being watched.
+    check(api.map(new_alias, 1, pages) == new_alias, "alias watch: map a new view after the watcher is armed");
+    check(rt::xmem::page_watch_pages() == 48, "alias watch: map notification adds the third view's sixteen pages");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::changed,
+          "alias watch: adding an alias reports mapping change before a caller can skip");
+    new_alias[0x100] = 0x53;
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::changed,
+          "alias watch: the new mapping's subsequent store is guarded");
+
+    check(api.map(source, 1, pages + 1) == source, "alias watch: replace the source VA with the second physical page");
+    check(rt::xmem::page_watch_pages() == 32, "alias watch: source remap drops both stale page aliases");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::changed,
+          "alias watch: source remap dirties the current mirror");
+    old_alias[0x180] = 0x65;
+    new_alias[0x180] = 0x76;
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unchanged,
+          "alias watch: the former physical page is not left armed after the source remap");
+    next_alias[0x180] = 0x87;
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::changed,
+          "alias watch: an existing view of the new physical page is tracked after remap");
+    rt::xmem::page_watch_forget(source);
+    check(rt::xmem::page_watch_pages() == 0, "alias watch: forget releases the source and all discovered aliases");
+
+    cleanup();
+
+    // The fixed eight-interval bound fails closed. Eight disjoint aliases fit; a ninth added while watched removes the
+    // partial watch and makes every poll unavailable until forget, which forces the device's full compare fallback.
+    uint64_t overflow_page = 0;
+    count = 1;
+    check(api.allocate(0x280, &count, &overflow_page) == TRUE && count == 1,
+          "alias watch: allocate a page for the view-capacity test");
+    if (count != 1) return;
+    constexpr uint64_t kSlots = 17;
+    auto* const overflow_window = static_cast<uint8_t*>(api.virtual_alloc(
+        nullptr, kSlots * kPage64k, MEM_RESERVE | kXmem64kPages, 0x28, PAGE_READWRITE));
+    check(overflow_window != nullptr, "alias watch: reserve nine disjoint windows with eight initial mappings");
+    if (!overflow_window) { api.free_pages(1, &overflow_page); return; }
+    uint64_t initial[kSlots] = {};
+    for (uint64_t i = 0; i < 8; ++i) initial[i * 2] = overflow_page;
+    const bool eight_mapped = api.map(overflow_window, kSlots, initial) == overflow_window;
+    check(eight_mapped, "alias watch: map the same page into eight separated slots");
+    if (!eight_mapped) {
+        api.map(overflow_window, kSlots, nullptr);
+        VirtualFree(overflow_window, 0, MEM_RELEASE);
+        api.free_pages(1, &overflow_page);
+        return;
+    }
+    overflow_window[0] = 0x12;  // commit the shared section page so every alias view is guardable
+    check(rt::xmem::page_watch_arm_aliases(overflow_window, kPage64k),
+          "alias watch: eight disjoint view intervals fit the bound");
+    check(rt::xmem::page_watch_pages() == 8 * 16, "alias watch: the initial eight views are all guarded");
+    check(poll_after_stale() == rt::xmem::WriteWatchPoll::unchanged,
+          "alias watch: clear prior changes before the overflow mapping");
+    check(api.map(overflow_window + 16 * kPage64k, 1, &overflow_page) == overflow_window + 16 * kPage64k,
+          "alias watch: map a ninth view while the source is live");
+    check(rt::xmem::page_watch_pages() == 0,
+          "alias watch: over-capacity refresh disarms its partial interval set");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unavailable &&
+              rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unavailable,
+          "alias watch: mapping overflow remains unavailable so callers keep the hash fallback");
+    uint8_t overflow_data = 0xa6;
+    const rt::xmem::PhysicalPageWrite overflow_span{overflow_page, 0x100, 1};
+    stats = {};
+    check(rt::xmem::write_physical_pages(&overflow_span, 1, &overflow_data, &stats, &failed_page) &&
+              stats.watch_views == 0,
+          "alias watch: page-list delivery remains successful but has no stale partial watch to trust");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unavailable,
+          "alias watch: page-list delivery cannot turn a failed alias set into an unchanged verdict");
+    rt::xmem::page_watch_forget(overflow_window);
+    api.map(overflow_window, kSlots, nullptr);
+    VirtualFree(overflow_window, 0, MEM_RELEASE);
+    check(api.free_pages(1, &overflow_page) == TRUE, "alias watch: free the capacity-test page");
+}
+
 void test_first_touch_during_remap(const PhysicalApi& api) {
     constexpr uint64_t kSlice = 16;
     constexpr uint64_t kSlices = 256;
@@ -1945,6 +2102,7 @@ int main() {
         test_resolve_physical_page(physical);
         test_write_physical_pages(physical);  // docs/peer_port_streaming.md section 13: the page-list destination write
         test_page_list_destination_request(physical);  // section 14: the mapped-and-armed request shape end to end
+        test_alias_expanding_page_watch(physical);  // docs/title_memory_model.md: opt-in alias-aware dirty signal
         test_first_touch_during_remap(physical);
         test_placeholders(physical);
         test_gpu_view_pairing_runtime(physical);  // docs/peer_port_movie.md section 11: the pair through the shim

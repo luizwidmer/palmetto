@@ -95,6 +95,21 @@ void console_va_map_cases() {
     map.remove(title);
     check(!map.rebase(named, rebased, palmetto::ConsoleVaKind::buffer) && map.size() == 1,
           "a removed range no longer rebases");
+    // Two non-overlapping title VAs may intentionally rebase to one arena range. The pure VA map can express the GPU
+    // address equation for an alias once xmem supplies physical-page identity; it does not discover that identity itself.
+    constexpr std::uint64_t alias_title_a = 0x31000000000ull;
+    constexpr std::uint64_t alias_title_b = 0x32000000000ull;
+    constexpr std::uint64_t alias_arena = 0xa00000ull;
+    check(map.add(alias_title_a, 0x10000, alias_arena, palmetto::ConsoleVaKind::buffer),
+          "the first alias view is rebased into its page's arena range");
+    check(map.add(alias_title_b, 0x10000, alias_arena, palmetto::ConsoleVaKind::buffer),
+          "a second title VA may target the same arena bytes");
+    std::uint64_t alias_a = 0, alias_b = 0;
+    check(map.rebase(alias_title_a + 0x3000, alias_a, palmetto::ConsoleVaKind::buffer) &&
+              map.rebase(alias_title_b + 0x3000, alias_b, palmetto::ConsoleVaKind::buffer) &&
+              alias_a == alias_b && alias_a == alias_arena + 0x3000,
+          "distinct title VAs can resolve to one arena address when the caller supplies identity");
+
     // Measured (docs/page_address_space.md): a console descriptor-heap range and a placed buffer's range may overlap in
     // the title's address space, so the site decides which one a VA means.
     constexpr std::uint64_t buffer2 = 0x30000000000ull;

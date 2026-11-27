@@ -1693,6 +1693,23 @@ inline std::uint64_t pipeline_hold_budget_ms() {
     palmetto::PlaneRefreshCounters placed_refresh_counters;
     std::uint64_t placed_refresh_walks = 0;
     // The switches, parsed once per process: PALMETTO_PLANE_REFRESH=hash|watch and PALMETTO_PLANE_REFRESH_TRACE.
+    bool title_alias_watch_enabled() {
+        static const bool enabled = [] {
+            char value[16] = {};
+            std::size_t length = 0;
+            if (getenv_s(&length, value, "PALMETTO_XMEM_ALIAS_WATCH") != 0 || length <= 1) return false;
+            return rt::xmem::page_watch_alias_switch_on(value);
+        }();
+        if (enabled) {
+            static std::atomic<bool> logged{false};
+            if (!logged.exchange(true, std::memory_order_relaxed))
+                std::fprintf(stderr,
+                             "[rt] d3d12: PALMETTO_XMEM_ALIAS_WATCH=1: watched texture pages include every current "
+                             "xmem view; mapping changes rebuild the view set, with bounded failure using the hash "
+                             "fallback\n");
+        }
+        return enabled;
+    }
     palmetto::PlaneRefreshPlan plane_refresh_plan() {
         static const palmetto::PlaneRefreshPlan plan = [] {
             char refresh[24] = {};
@@ -4168,9 +4185,19 @@ public:
             // The tracker is the pre-filter (watch mode) and only for a span whose guard cost the measurement bounds
             // (port/src/plane_refresh.h): a larger texture keeps the hash compare. An arm that fails (a page not
             // committed, another owner's guard, the tracker's range slots full) is the documented fallback: hash.
-            if (refresh.arms_tracker() && sub_bytes <= palmetto::plane_refresh_watch_max_bytes &&
-                rt::xmem::page_watch_arm)
-                placed_watch_armed_ = rt::xmem::page_watch_arm(pages, static_cast<std::size_t>(sub_bytes));
+            if (refresh.arms_tracker() && sub_bytes <= palmetto::plane_refresh_watch_max_bytes) {
+                const bool alias_watch = device_.title_alias_watch_enabled();
+                const auto arm = alias_watch ? rt::xmem::page_watch_arm_aliases : rt::xmem::page_watch_arm;
+                if (arm) placed_watch_armed_ = arm(pages, static_cast<std::size_t>(sub_bytes));
+                if (alias_watch && !placed_watch_armed_) {
+                    static std::atomic<unsigned> alias_fallbacks{0};
+                    if (alias_fallbacks.fetch_add(1, std::memory_order_relaxed) < 4)
+                        std::fprintf(stderr,
+                                     "[rt] d3d12: placed texture 0x%llx: xmem alias watch unavailable or over its "
+                                     "range bound; this texture remains on the hash compare\n",
+                                     static_cast<unsigned long long>(id()));
+                }
+            }
         }
         device_.texture_imports.fetch_add(1, std::memory_order_relaxed);
 
@@ -5401,7 +5428,12 @@ void DeviceState::refresh_placed_textures() {
         ++walked;
         const std::uint64_t bytes = resource->placed_shadow_bytes();
         const bool fits = bytes != 0 && budget.take(bytes);
-        switch (palmetto::texture_refresh_step(plan.mode, verdict, fits)) {
+        // The tracker is global, but arming can fail for one texture (including an alias-view overflow) while another
+        // remains covered. An unarmed texture must always compare; a global "unchanged" is not evidence about it.
+        const rt::xmem::WriteWatchPoll resource_verdict = resource->placed_watch_armed()
+                                                              ? verdict
+                                                              : rt::xmem::WriteWatchPoll::unavailable;
+        switch (palmetto::texture_refresh_step(plan.mode, resource_verdict, fits)) {
         case palmetto::TextureRefreshStep::skip_tracker_unchanged:
             ++tracker_skips;
             continue;

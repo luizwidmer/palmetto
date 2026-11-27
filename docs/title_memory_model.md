@@ -1,9 +1,11 @@
 # The title-memory model: our copies against the peers' page heaps and write watch
 
-**Status: measured model, one reversible step landed behind a switch (off by default), and one boot A/B - the step is
-measured inert at today's frontier and the measurement says why.** This is the rank-3 slice of
-[cleanroom_peers.md](cleanroom_peers.md): the peers' title memory is aliased into GPU-visible memory and kept current
-by a write signal, while our tree copies the title's bytes into an arena and has no enabled change signal. This page
+**Status: measured model; two reversible, opt-in steps are off by default.** The per-submission pull coalescer has one
+boot A/B and is measured inert at today's frontier; the separate alias-expanded CPU page-watch has synthetic host tests
+only and has not been tried in a title boot. The measurement says why the first step has no population. This is the
+rank-3 slice of [cleanroom_peers.md](cleanroom_peers.md): the peers' title memory is aliased into GPU-visible
+memory and kept current by a write signal, while our tree copies the title's bytes into an arena and has no enabled
+change signal. This page
 measures the whole model as it stands (every consumer, its bytes and CPU cost, from our own counters), states for each
 peer mechanism what our Windows/Vulkan backend would need - measured in our tree wherever a measurement exists, and
 marked unmeasured where it does not - and lands the safest step the measurement supports: a per-submission **pull
@@ -181,15 +183,18 @@ constraints that are not on the peers' structures:
 4. **Aliased views defeat a per-VA guard.** One physical page can be mapped at several title addresses (xmem_test
    checks that both mappings see one memory; five-star documents the same invariant). A write through another view does
    not trip a guard armed on ours: victory-fork measured 0.8-1.0 million such writes in a five-minute run and added a
-   per-page alias report for them. Our tracker publishes per-VA ranges, so it would need the alias-view list and the
-   mapping-change report that [cleanroom_peers.md](cleanroom_peers.md) slice 3 names; xmem does not carry it.
-   The layer's own dstorage writes go through the page's backing view too (`resolve_physical_page` in
-   [xmem.cpp](../port/shims/xmem.cpp)), which no title-VA guard sees.
+   per-page alias report for them. The default tracker still publishes per-VA ranges. Section 10 adds a separate opt-in
+   hook that enumerates the current xmem views of each source physical page and rebuilds the watched intervals after a
+   relevant map/unmap; its eight-interval bound and rearm failures invalidate the watch and force an unavailable verdict.
+   This is only a CPU-VirtualProtect view set, not a GPU alias or title slot-31 mapping. `write_physical_pages` also
+   fans a physical-page delivery through each currently watched alias; that does not cover unmeasured kernel writers such
+   as the loader's first-touch ReadFile case.
 
-**Verdict:** the change signal is measured feasible and the narrowed copy is where the peers' win lives, but enabling
-it needs (a) a device-side changed-page hook, (b) the alias-view list and mapping reports, and (c) a census of kernel
-writes into title pages. None is a small reversible step; the safest first step this measurement supports is the one
-below.
+**Verdict:** the change signal and the new alias-list maintenance are measured feasible in synthetic xmem tests, but a
+narrowed copy still needs a device-side changed-page consumer and a census of kernel writes into title pages. The new
+alias hook does not make the title's pages GPU-visible; section 3.2's external-memory and shader-address blockers still
+apply. The safest first step this measurement supports remains the pull coalescer below, whose measured population is
+zero at this frontier.
 
 ## 4. What this slice implemented: a per-submission title-pull coalescer
 
@@ -317,12 +322,15 @@ Reproduction: `boot-a` and `boot-b` under `D:\leonida-work\memmodel` (outside th
   not against the device's own byte counter.
 - **The picture check is the capture, and at this frontier every capture is black.** The two arms' captures are
   byte-identical, which proves no drawn content changed - not that a black frame stayed black for the same reason.
-- **No write watch, no aliasing and no import were enabled.** The guard tracker stays readied (`PALMETTO_CARD_COPY_WATCH`,
-  off), the external-memory import is unchanged, and nothing about title memory is pinned.
-- **The cross-submission cache is measured to be worthless *here*, so the device-side hook is not worth writing for it
-  at this frontier.** The `previous-submission repeat 0` figure is the population and it is zero; section 3.4's
-  prerequisites (device changed-page hook, alias-view list and mapping reports, kernel-write census) stay the price of
-  enabling it wherever repeated reads do appear.
+- **No write watch, alias expansion or import was enabled in the A/B.** The guard tracker stays readied
+  (`PALMETTO_CARD_COPY_WATCH`, off), and nothing about title memory is pinned. Section 10's
+  `PALMETTO_XMEM_ALIAS_WATCH` was implemented later and has only synthetic host-test evidence; it was not part of these
+  runs.
+- **The cross-submission cache is measured to be worthless *here*, so a device-side changed-page hook is not worth
+  writing for it at this frontier.** The `previous-submission repeat 0` figure is the population and it is zero. The
+  CPU alias-view list/map-refresh primitive now exists behind the separate switch (section 10), but a changed-page
+  consumer, a title population that repeats reads and a kernel-write census remain prerequisites before a useful
+  guard-based cache could be considered.
 - **The next falsifier:** the content path. The first streamed block or texture fill that makes a draw re-read the same
   title pages (or the title's page-mapping batches reaching the boot, [cpu_view_mapping.md](cpu_view_mapping.md)) is
   where this step gets a population and where the guard-based cache's prerequisites become worth their cost. A negative
@@ -336,8 +344,11 @@ Reproduction: `boot-a` and `boot-b` under `D:\leonida-work\memmodel` (outside th
   (the lowest window is dropped and its range is copied again), and the real `VulkanContext` decision path with fake
   Vulkan procedures - TRACE counts a repeat and never skips, COALESCE skips a covered pull and copies a range that is
   not fully covered, and a new submission starts with an empty window. No device, no title memory, no game data.
-- `port/test/buffer_va_index_test.cpp` and `port/test/xmem_test.cpp` are unchanged; the runtime's default path is
-  proved by their existing checks plus the A/B's measurement arm (TRACE only changes counters).
+- Section 10 extends `port/test/xmem_test.cpp` with synthetic alias-watch controls (the default per-VA false negative,
+  writes via another view, a new alias mapped after arm, source remap, eight-range overflow/fallback, and
+  `write_physical_pages` coherence) and extends `port/test/buffer_va_index_test.cpp` to show two title VAs can rebase to
+  one arena address only when an alias identity is already supplied. These tests do not establish physical-to-GPU page
+  identity. The earlier coalescer A/B is unchanged and TRACE still only changes counters.
 - Gates: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`; `_setup\build_tests.cmd` prints `TESTS_BUILT`; the gate
   binaries pass (`xs_proxy_mock_test` PASS, `unimplemented_policy_test` 98 checks/0 failed, `graphics_record_test`
   180/0, `graphics_pso_test` 312/0, `xbox_present_test` all cases, `buffer_va_index_test` pass, `dstorage_test` 224/0,
@@ -372,3 +383,42 @@ are evidence sources here and not code sources - no code, comment text, identifi
 The upstream projects remain the copyright of their contributors under their own licenses. `NOTICE.md`'s attribution
 entry for this slice is owed by the lead if the mechanism (rather than only its measurement) is adopted; this page
 carries the credit now.
+
+## 10. Opt-in alias-expanded CPU page watch (not GPU-visible aliasing)
+
+Section 3.4's false-negative control is now implemented as a separate, opt-in xmem page-watch hook. It closes one
+narrow gap: when several CPU virtual addresses map the same xmem physical page, a PAGE_GUARD placed only on the source
+VA does not see a store through another VA. It does **not** change the Vulkan memory object, arena layout, shader address
+equation, or the bytes the GPU reads. The one-shot pull-coalescer A/B in section 6 remains the only title boot measured
+for this page; the alias-aware watcher has synthetic host-test evidence and is not A/B measured in a title boot.
+
+### Switch and selection
+
+| switch | effect |
+|---|---|
+| `PALMETTO_XMEM_ALIAS_WATCH=1` | Requests the alias-expanding arm only when the existing `PALMETTO_PLANE_REFRESH=watch` path is active and a placed texture is imported within its 1 MiB watch cap. Unset, empty, or a value beginning with `0` is off; any other non-empty value is on. This switch alone does not turn plane refresh or texture import on. |
+| `PALMETTO_XMEM_ALIAS_WATCH=0` (or unset) | Keeps the existing single-VA `page_watch_arm` behavior; no alias ranges are discovered. Default, unchanged. |
+
+With the alias switch on, a missing/failed alias hook does not silently fall back to a single-VA guard: that resource is marked unarmed and its per-resource refresh verdict is `unavailable`, so it hashes/compares even if another range made the shared tracker answer `unchanged`. This closes the shared-tracker case where an unarmed texture could otherwise inherit another texture's skip. Alias mode is deliberately selected only for `watch`; hash/off behavior stays as before.
+
+### Rebuild rule and bounds
+
+`page_watch_arm_aliases` rounds the requested source span to 4 KiB guard pages, looks up each backing-section identity and 64 KiB offset in xmem's `g_mapped` table, and includes every currently mapped view of those exact bytes. It deliberately does not key by title page number alone: XMem recycles frame numbers, while an old mapped view can still own a different section. Map, remap and unmap operations call the alias-watch notifier while the mapping lock is held; a poll serializes with that notifier while an alias owner exists. Each successful rebuild forces one `changed` verdict before a future skip. The ordinary `page_watch_arm` entry point remains a per-VA watcher.
+
+The published tracker is bounded to eight intervals and eight owners. A candidate that exceeds the interval cap, overlaps another owner's guard, or contains a page that cannot be made writable/guarded invalidates that alias owner and drops its partial intervals. A live rearm failure does the same. `page_watch_poll` then answers `unavailable` until the owner is forgotten; the device compares/hashes instead of trusting incomplete coverage. The separate existing 16,384-trip record is unchanged by this slice and is not what the alias-interval overflow test exercises. The bound is intentionally conservative; there is no claim that the title's map population fits it.
+
+`write_physical_pages` still writes the shared backing page and repeats the bytes through each current armed view so its PAGE_GUARD trips reach the same poll the plane refresh consumes. That is tested separately from any title DirectStorage activity: the measured boot still has zero page-list requests.
+
+### What the CPU-only tests establish
+
+- `port/test/xmem_test.cpp` pins the default negative: two VAs map one page, a store through the second VA does not trip the ordinary single-VA arm. The opt-in arm sees that store, expands after a new alias is mapped, changes coverage after the source VA is remapped, stops watching aliases of the old page, and watches an existing view of the new page.
+- The same test delivers a synthetic physical-page write through the active alias set and checks the bytes at both views, `watch_views`, and the `changed` poll. It maps a ninth disjoint view after an eight-view arm and checks that the partial watch is disarmed (`page_watch_pages()==0`) and repeated polls stay `unavailable`.
+- Switch parsing checks unset/null, empty, zero, and non-empty-on values. `port/test/buffer_va_index_test.cpp` checks that two distinct title VAs can be rebased to the same arena address if a caller supplies that identity. `BufferVaIndex` and `ConsoleVaMap` still index VA ranges; neither derives an xmem physical-page identity, and this test does not create a GPU mapping.
+- Device integration keeps a per-texture `placed_watch_armed` bit. When it is false, the texture sees `unavailable` regardless of the shared poll's `unchanged` result, which preserves the full-compare fallback for partial arm failure.
+- Final CPU verification: `cmake --build port/build --target xmem_test buffer_va_index_test -j 8` completed; `xmem_test: OK (496 checks)` and `buffer_va_index_test` reported that its fixed cases and 200 random tables agree with the linear scan. The first test run exposed that XMem recycles page numbers while old section-backed mappings can still exist; the implementation and the `write_physical_pages` fanout now compare backing `Section` identity plus offset. The alias test also first-touches the remap and capacity-fixture pages before guarding them, because the watch correctly refuses uncommitted section pages. `python -I tests/test_docs_env_vars.py` also passes (4/4) with this switch named in the tracked page. The coordinating agent is running the latest `palmetto` full gate; these host-only checks are not a title boot or GPU-alias proof.
+
+### Limits and next falsifier
+
+This is **CPU alias watch**, not the peers' GPU-visible page heap: it observes user-mode writes through current xmem CPU views and repairs the watched view set after xmem mapping calls. It does not make those pages a `VkDeviceMemory` object, prove `VK_KHR_external_memory_win32` accepts the section, map slot 31, or make a shader address resolve to the same physical page. Slot-31 page-mapping calls and title page-list destinations remain zero at the measured frontier (section 2.1). Kernel writers beyond the tested `write_physical_pages` hook, including first-touch `ReadFile`, remain a separate measurement and limitation.
+
+The falsifier for a future GPU-backed test is an actually populated, successfully imported title texture on a page with at least two xmem CPU views: arm alias mode; write through the non-source view; verify the poll cannot say `unchanged`; then verify the submitted GPU stand-in reflects the changed bytes after the compare/re-upload. Repeat after source remap and after an alias is removed. A stale GPU read or an `unchanged` verdict after a store through a live alias rejects the design. Until such a resource/population exists, no title GPU-alias or performance win is claimed.
