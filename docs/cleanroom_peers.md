@@ -58,7 +58,7 @@ evidence with URLs and commits in its page and in `NOTICE.md`. No peer source, c
 | VIctory and XCL: runtime services are **one signed-in offline user, licences, packages, saves that survive a kill at any step**, with menus, video and loading sound; input is XInput pads with a keyboard stand-in pad. | Our user shim answers creation but delivers no signed-in event by default and has no persistent store; our GameInput shim is not built when SDL3 is absent, so the canonical build leans on the host. | Same slices as above: user event on demand, persistent local storage, and the input backend that is always built. |
 | PercyScarlett: the world was black because it upscales with the console FSR 4 build, whose pipelines have no PC equivalent; **the upscale is now a stretch of the colour image**, so the lit picture reaches the screen. | Our frame's compose pass is exactly that console upscale (it samples the constant pass's 4K sibling). We have FSR stand-in switches; their state and the measured compose output must be settled. | Verify and, if needed, complete the upscale stand-in so the compose pass writes the sampled colour when the console pipelines cannot be made. |
 | VIctory fork: while streaming, about 850 title-memory page remaps, 260 texture uploads and 450 disk reads a frame make the card idle about 330 ms of a 490 ms frame; batching page mappings, keeping copies on the card, and in-place title memory are the measured fixes. | Our page resolver and slot-31 mapping exist but are not batched; streamed content will hit the same cost when it starts. | Batch the page-mapping path (one alias/copy per run instead of per page) and measure the cost before/after on our mapping route. |
-| XCL and Five Star: the game's own **Bink 2 video**, **XboxBvhBuilder**, and the **AMD FSR 4 console DLL** run from the package on a PC GPU; ray-traced light and reflections are the missing picture feature, with a **constant stand-in** used by several forks. | Our movie library loads but its code never runs; ray tracing is not reached yet. These become relevant once the content pass starts. | Deferred behind the stage/upscale slices; recorded here so the picture programme is not guessed later. |
+| XCL reports the game's **Bink 2**, **XboxBvhBuilder**, and **AMD FSR 4 console DLL** running on the PC GPU; Five Star's loader still logs and skips BVH builds. The latest victory-fork status says its builder now runs and ray-traced shadows/light appear after a scene streams in; VIctory still reports no structures built, while Percy lists ray-traced lighting as next. | Our movie library decodes 515/515 streams but the title's movie start is stage-gated; our BVH route is synthetic and the measured boot requests no RT work — [movies.md](movies.md), [bvh_route.md](bvh_route.md). RT is no longer a universal peer gap: the fork reports light, at 0.2–3 fps and with large copy costs. | Keep the build/consumer route behind the content and memory gates; use the fork result as a dependency and performance hypothesis, not as a reason to move RT ahead of the current stage frontier. |
 | Five Star: GPU hangs from **translated shader loops that never end** are bounded. | We landed the loop guard in the translator this week for exactly this class. | Done; keep the falsifier (a guarded loop exits) in the translator page. |
 
 ## Slice order (why this order)
@@ -99,19 +99,30 @@ relaxed: it is the reason the programme can cite the peers at all.
 
 ## Reference material consulted for this audit
 
-All README claims are from the downloads the tracker made on 2026-11-25 17:34; where a project is cloned locally the
-README and docs were re-read at the clone's commit. Nothing here is a game file or an extracted asset.
+The first audit used tracker downloads made on 2026-11-25 17:34 and the detailed material named below at its then-current
+clone pin. This refresh re-read the current peer README/status summaries and reviewed Five Star's documentation delta
+`ce2b333b..34b4dfed`; the detailed non-README material from the first audit remains tied to its historical pins. The
+current clone heads are recorded separately so a newer pin is not mistaken for a new measurement or a fresh source
+review. Nothing here is a game file or an extracted asset.
 
-| Peer | Repository and licence | Material read for this audit (commit or snapshot) |
-|---|---|---|
-| Five Star Recomp | <https://github.com/ThatRecompDev/five-star-recomp>, GPL-3.0-or-later | README; the loader, D3D12.X, memory, storage, ray-tracing and audio pages of its docs; loader shim headers — clone `0bfa755` |
-| XCL | <https://github.com/xcl-dev/xcl>, GPL-2.0-only | README; the dated design spec; the wave64 and shader-container pages — clone `6d12f58` |
-| VIctory | <https://github.com/Marvisak/VIctory>, GPL-3.0-or-later | README; architecture page; the runtime, GPU and memory/watch module headers — clone `13f91ca` |
-| victory-fork | <https://github.com/fxceless/victory-fork>, GPL-3.0-or-later | README status sections, including the night-of-25-November section that the downloaded snapshot predates — clone `9c184b3` |
-| PercyScarlett | <https://github.com/rpatty-dev/PercyScarlett>, GPL-2.0-only | README; the prologue guide; the upscale-takeover and stretch modules it names — clone `e44c465` |
-| g6shim | <https://github.com/gookie-dev/g6shim>, GPL-3.0-or-later | README only (no clone) |
-| OpenScarlett (Community Edition) | <https://github.com/OpenCommunityEdition/OpenScarlett>, AGPL-3.0-or-later | README only (no clone) |
-| TuxBox | <https://github.com/brcly/TuxBox>, Apache-2.0 | README only (no clone) |
+| Peer | Repository and licence | Material consulted | Current clone head (commit date) |
+|---|---|---|---|
+| Five Star Recomp | <https://github.com/ThatRecompDev/five-star-recomp>, GPL-3.0-or-later | README; `docs/loader.md`, `docs/running.md`, `docs/wiki/Status.md`, `docs/status/README.md`; documentation delta `ce2b333b..34b4dfed` | `34b4dfed` (2026-11-27) |
+| XCL | <https://github.com/xcl-dev/xcl>, GPL-2.0-only | Current README; prior audit: dated design spec, wave64 and shader-container pages at `6d12f58` | `623d02e` (2026-11-27) |
+| VIctory | <https://github.com/Marvisak/VIctory>, GPL-3.0-or-later | Current README; prior audit: architecture page and runtime, GPU, memory/watch material at `13f91ca` | `63bcca4` (2026-11-26) |
+| victory-fork | <https://github.com/fxceless/victory-fork>, GPL-3.0-or-later | Current README status sections; prior audit: README at `9c184b3` | `9a9091d` (2026-11-27) |
+| PercyScarlett | <https://github.com/rpatty-dev/PercyScarlett>, GPL-2.0-only | Current README; prior audit: prologue guide and upscale-takeover/stretch modules at `e44c465` | `e44c465` (2026-11-25) |
+| g6shim | <https://github.com/gookie-dev/g6shim>, GPL-3.0-or-later | README only (no clone) | — |
+| OpenScarlett (Community Edition) | <https://github.com/OpenCommunityEdition/OpenScarlett>, AGPL-3.0-or-later | README only (no clone) | — |
+| TuxBox | <https://github.com/brcly/TuxBox>, Apache-2.0 | README only (no clone) | — |
+
+**Latest snapshots.** The five local clones are Five Star Recomp `34b4dfed` (2026-11-27), VIctory `63bcca4`
+(2026-11-26), PercyScarlett `e44c465` (2026-11-25), victory-fork `9a9091d` (2026-11-27), and XCL `623d02e`
+(2026-11-27). The Five Star range contains four commits; `docs/loader.md` and `docs/running.md` changed, while the
+README and wiki Status page did not. The docs add NVIDIA shader-table safety and a keep-awake failure warning, not a
+new boot-stage result. The latest victory-fork README now reports its ray-tracing builder running
+and shadows/light appearing after a scene streams in, but at 0.2–3 fps; this supersedes its old “nothing is lit by it
+yet” snapshot. These are peer-reported claims, not measurements of Palmetto.
 
 The tracker itself is <https://vuyp.github.io/gta6-pc-race/>; its readings are quoted below where they add a stage
 number. The full evidence table, with every row's URL, commit, functional decoding and caveat, is kept outside the
@@ -136,11 +147,11 @@ BVH/ray tracing, and streamed page mapping/copies.
 | XCL | "starts in ~4 s ... shows its menus and goes on past the first one to its settings" | start to menus in seconds, stable | the loader protocol is served at the import-thunk level and the PC's own `xgameruntime` supplies task queues, async, networking and dialogs; the console D3D12.X object model is replayed on desktop D3D12 | first frame, draws and presents are reached (17,674-27,935 draws per 150 s, 0 refused submissions); the picture is black by design at this stage — [page_address_space.md](page_address_space.md), [colour_path.md](colour_path.md) | the same runtime files as the row above; the picture half is the content/state step, not a loader gap | M, no |
 | PercyScarlett (tracker stage) | tracker: "reaches the opening scene ... lit and textured, at about 2 to 3 frames a second" | in-world state reached | its runtime is the VIctory/victory-fork loader and services (the mechanism rows for those projects below), plus a Series S display fix | behind: no stage-3 transition measured | — | —, no |
 
-Five-star's README contradicts itself ("GTA VI does not run yet" and "does not get past its first screens yet" against
-the same file's table and narrative); the tracker reads the optimistic side. Treat the boot claims as their own tree's
-measurement, not a specification. The tracker also counts similar forks as separate projects, so a stage number is the
-tracker's reading, not a peer's assertion; it reads this tree at stage 4 ("first frames ... the picture still black"),
-one or two stages behind the peers above.
+Five Star's root README still contradicts itself ("GTA VI does not run yet" and "does not get past its first screens
+yet" against its table and narrative); its current wiki status, updated 27-Nov, claims the game boots to the world and
+shows a lit scene. Treat both as that tree's self-reported status, not a specification. The tracker snapshot downloaded
+on 25-Nov reads Five Star at stage 4 ("first frames ... the picture still black"); the tracker counts similar forks as
+separate projects, so that dated stage is the tracker's reading, not the current peer status or our measurement.
 
 ### User, saves and settings
 
@@ -184,6 +195,12 @@ one or two stages behind the peers above.
 | XCL | "26 698 / 26 698 programs of the retail pack; 0 DXC errors on random samples" | full corpus translates | as the row above; our residual list is the FidelityFX and builder sets, not the game corpus | as the row above | —, yes |
 | victory-fork | "World: all but under 300 of 24,387 programs ... Merged geometry stages (195 programs)" | residual coverage, merged geometry | our range is clean but the mesh/merged-stage path is not carried | `port/src/graphics_pso.cpp`, `tooling/rdna2spirv.py` | M, yes |
 
+### D3D12 pipeline tables and driver background work
+
+| Peer | Claim (docs, summarised) | Functional meaning | Mechanism as the peer documents it (reference only) | Our measured state (page) | Files that would implement it | Effort, testable |
+|---|---|---|---|---|---|---|
+| Five Star Recomp (27-Nov docs) | An NVIDIA driver's internal shader tables have a 512 MiB ceiling; background recompiles can fill them and remove the device. The new docs also warn that a keep-awake dispatch lost an RTX 5090, while the no-loop control ran 660 s. | Trade completeness/performance for survival when a vendor pipeline table is near its limit; avoid injecting unmeasured work to pin GPU clocks. | The loader disables D3D12 background shader work by default; Windows may refuse that unless Developer Mode is on, in which case periodic measurement discard only slows growth. The NVIDIA-only guard trusts a driver-read table or a refused disable request; an estimate alone only warns. It warns near 400 MiB, holds unused first-use pipelines as stand-ins from 470 MiB, and gives idle pipelines up near 495 MiB while preserving clears, blits, UI and lighting. Separately, the optional keep-awake switch runs a 64-thread busy compute loop; the new docs report RTX 5090 device loss at 100–154 s with it versus 660 s without it, so leave it off unless measuring. | Our backend is Vulkan, not D3D12. `memory_growth.md` measures a different NVIDIA issue (compiler host arenas and a ~40 GB plateau after bounding live VkPipelines); `pipeline_cache.md` measures a warm VkPipelineCache with 0 misses. Neither establishes the peer's 512 MiB D3D12 table failure or a Vulkan analogue — [memory_growth.md](memory_growth.md#4-what-the-cap-recovers-and-what-it-cannot), [pipeline_cache.md](pipeline_cache.md#4-coldwarm-ab). | None new; the existing live-pipeline cap/cache are not the same vendor-table guard. Do not transplant without a target-side Vulkan device-loss measurement. | Conditional monitor only; GPU-free policy test if a relevant failure is measured |
+
 ### D3D12.X descriptors, barriers and command signatures
 
 | Peer | Claim (quote) | Functional meaning | Mechanism as the peer implements it (reference only) | Our measured state (page) | Files that would implement it | Effort, testable |
@@ -200,8 +217,8 @@ one or two stages behind the peers above.
 |---|---|---|---|---|---|---|
 | five-star | "a page mapped at two addresses is one page and a remapped page keeps its contents"; GPU visibility by opening the page sections as heaps, 1 GiB windows, system-memory budget | 64 KiB physical pages aliased into GPU-addressable memory, remapped without losing contents | pagefile sections of 1024 pages, placeholders split per 64 KiB slot and replaced by views of the page's section; each page's CPU address works as its GPU address where an alias exists, else a buffer placed over the contiguous run; the page table drives the shaders' address map; page mappings batched through queue slot 31 with range kinds | placeholder and physical-page model with first-touch commit (271,044,608 bytes over 4,136 pages); VA rebasing for the two measured title ranges, 0 refused submissions at the current frontier; GPU visibility is by copies plus a full-heap mirror refresh of 3.4-4.4 ms per submission; no write-watch consumer — [page_address_space.md](page_address_space.md), [remaining_mechanisms.md](remaining_mechanisms.md) | `port/shims/xmem.cpp`, `port/shims/xmem.h`, `port/src/console_va_map.h`, `port/src/buffer_va_index.h`, `port/shims/d3d12_vulkan_device.cpp` | L, partly |
 | VIctory | title memory at raw GPU addresses via "the heap index of a pair of raw views (SRV, UAV) of the host copy holding the page"; writes found by read-only guards with aliasing reported by the runtime | shaders read and write title memory by computed address; copies stay current cheaply | a per-page table of host-copy raw views; each copy's pages are guarded, the first write faults into a vectored handler that marks the block changed in every copy holding it; aliased mappings are reported when they are made; kernel writes are declared before they write | as the row above (copies plus full mirror; no write tracking) | as the row above | L, partly |
-| victory-fork | "about 850 remaps of title memory, 260 texture uploads and 450 disk reads in one frame"; batching pool pages "1.8 to 4.2 pages a view, remap time 140 -> 79 ms a frame, BUT faces came out black or red ... Reverted" | streamed page remapping dominates streaming frames; the batched form was **refuted** on picture correctness | remap through the xmem alias hook on the CPU at the queue's fence; batching was measured, halved remap time and broke the picture in three launches of three, so it was reverted | queue slot 31 (`CopyPageMappingsBatchX`) is implemented but the boot never reaches it (0 calls in the A/B pair); the DirectStorage page-list resolver is implemented behind a switch with 0 measured requests — [cpu_view_mapping.md](cpu_view_mapping.md), [page_resolver.md](page_resolver.md) | `port/shims/xmem.cpp`, `port/shims/d3d12_xs_device.cpp` | assigned slice 4 (with a picture gate), yes (latent) |
-| victory-fork (newer than the downloaded snapshot) | "puts every copy in the card's memory: the title's lists went from 68.0 to 49.8 ms of card time a frame"; texture copy-back "22,900 read-backs landed in six minutes" | small title buffers live on the card; shader-written textures return to title memory | device-local copies of title buffers with on-card hashing for changes; shader-written pages copied back, marked in the list bitmap | neither is carried: the mirror is refreshed CPU-side and the sampled 4K texture's pages are never written by the title — [texture_source.md](texture_source.md), [page_address_space.md](page_address_space.md) | `port/shims/xmem.cpp`, `port/src/vulkan_backend.h`, `port/src/vulkan_replay.h` | M, yes (unit) |
+| victory-fork (25-Nov measurement; historical row) | "about 850 remaps of title memory, 260 texture uploads and 450 disk reads in one frame"; batching pool pages "1.8 to 4.2 pages a view, remap time 140 -> 79 ms a frame, BUT faces came out black or red ... Reverted" | streamed page remapping dominates streaming frames; the batched form was **refuted** on picture correctness | remap through the xmem alias hook on the CPU at the queue's fence; batching was measured, halved remap time and broke the picture in three launches of three, so it was reverted | queue slot 31 (`CopyPageMappingsBatchX`) is implemented but the boot never reaches it (0 calls in the A/B pair); the DirectStorage page-list resolver is implemented behind a switch with 0 measured requests — [cpu_view_mapping.md](cpu_view_mapping.md), [page_resolver.md](page_resolver.md) | `port/shims/xmem.cpp`, `port/shims/d3d12_xs_device.cpp` | assigned slice 4 (with a picture gate), yes (latent) |
+| victory-fork (25-Nov measurement; historical row) | "puts every copy in the card's memory: the title's lists went from 68.0 to 49.8 ms of card time a frame"; texture copy-back "22,900 read-backs landed in six minutes" | small title buffers live on the card; shader-written textures return to title memory | device-local copies of title buffers with on-card hashing for changes; shader-written pages copied back, marked in the list bitmap | neither is carried: the mirror is refreshed CPU-side and the sampled 4K texture's pages are never written by the title — [texture_source.md](texture_source.md), [page_address_space.md](page_address_space.md) | `port/shims/xmem.cpp`, `port/src/vulkan_backend.h`, `port/src/vulkan_replay.h` | M, yes (unit) |
 | XCL | "title graphics memory shared by CPU and GPU without copies, up to 16 GB (4 GiB windows)" | unified memory without copies | a memory registry plus GPU-visible mappings | as the five-star row: we copy; VA rebasing covers the two measured ranges | as the five-star row | L, partly |
 
 ### Ray tracing and BVH
@@ -210,8 +227,8 @@ one or two stages behind the peers above.
 |---|---|---|---|---|---|---|
 | XCL | "BLAS / TLAS built on the GPU by the game's own XboxBvhBuilder; RDNA2 BVH node format; BVH intersection instructions emulated in shaders" | the game's builder DLL runs on the PC; traversal emulated inline | the game's DLL constructor builds compute pipelines through the console compute-pipeline slot; builds go through the batched build export; sizes from the DLL's own prebuild query; traversal by emulated intersection instructions | 565,596 chunks in the BVH archive (271,627 BVH4 streams) inventoried; the builder's 52 embedded programs extracted, 51/52 pass the validator; the XDXR build descriptions are decoded; a GPU BVH4 build is implemented; `image_bvh*` is emulated with native-RDNA2-measured box and triangle rules (716 sites) — [bvh.md](bvh.md), [embedded_shaders.md](embedded_shaders.md), [xdxr.md](xdxr.md), [design.md](design.md) | `port/src/xdxr_build.h`, `port/shims/d3d12_com.h`, `port/test/bvh_builder_test.cpp`, `tooling/xdxr_bvh.py` | L, yes (synthetic) |
 | five-star | "the port must put structures in that layout at the console GPU addresses the game hands its shaders"; CPU design: sizes from the DLL's own prebuild, builds and rehydration at record time | console-sized structures written into game memory without the console GPU builder | rehydration on the CPU per build description from the game's own vertex data; bottom-up refit of box32 and box16 nodes; TLAS built on the CPU over instance bounds | as the row above; our alternative GPU build exists but is not wired | as the row above | L, yes |
-| victory-fork | "the hardware ray/box and ray/triangle test is emulated in DXIL ... 59 of the 64 trace programs translate. Nothing is lit by it yet." | same target, still not lit | emulated intersection in DXIL plus an address table for traversal | as the row above; no boot has built structures and no RT light is measured | as the row above | L, no (content) |
-| PercyScarlett / OpenScarlett | PercyScarlett: "shaded areas and interiors (ray-traced lighting)" is next; OpenScarlett: "Lumen hardware ray tracing is incomplete" | even the ports that reached the world still lack the RT picture | — | our ordering treats RT as parity, not as a differentiator: every peer is behind the same wall here | as the row above | L, no |
+| victory-fork (27-Nov snapshot) | "ray-traced shadows and light now show with the builder on, after a scene has streamed in" | the builder output is consumed by the title's RT passes; the picture is visible, but at 0.2–3 fps | the documented fix limits each list to the memory copies its dispatches name, tracks shader-written 64 KiB pages for copy-back, supplies the acceleration-structure address from the view description, and uses the peer's reported hardware node-hit semantics | our GPU builder and traversal exist in synthetic tests, but the title requests zero RT work at this frontier — [bvh_route.md](bvh_route.md#21-what-the-boot-requests); the dependency on write/copy tracking is distinct from the builder itself — [title_memory_model.md](title_memory_model.md#3-what-each-peer-mechanism-would-need-on-our-windowsvulkan-backend) | as the row above | L, conditional on content; yes (synthetic) |
+| PercyScarlett / OpenScarlett | PercyScarlett: "shaded areas and interiors (ray-traced lighting)" is next; OpenScarlett: "Lumen hardware ray tracing is incomplete" | Percy still lists the RT picture as next; peer maturity now differs by project | — | the fork's current report disproves a universal RT wall; our own title remains stage-gated and unmeasured for RT — [bvh_route.md](bvh_route.md) | as the row above | L, no (content) |
 
 ### Upscaling and FSR
 
@@ -250,10 +267,12 @@ one or two stages behind the peers above.
    memory and track writes with guards and aliasing reports; we copy and refresh a full heap mirror (3.4-4.4 ms per
    submission) with no write-watch consumer and no per-page write tracking. This is the streamed-content and memory
    frontier the mechanism page already ranks third and fourth.
-4. **Small title buffers on the card, and texture write-back, are not carried.** The fork's newest measured gains are
-   exactly that (buffers: 68.0 to 49.8 ms of card time a frame; copy-back: 22,900 read-backs in six minutes, and it
-   unblocked a mission). We have neither, and our memory figure (about 83.6 GB private bytes at 300 s) is the other
-   side of the same class.
+4. **Small title buffers on the card, and texture write-back, are not carried.** The fork's 25-Nov published run
+   measured this class (buffers: 68.0 to 49.8 ms of card time a frame; copy-back: 22,900 read-backs in six minutes,
+   unblocking a mission). We have neither, and our memory figure (about 83.6 GB private bytes at 300 s) is the other
+   side of the same class. Its 27-Nov RT-builder report makes selective list sync and page-granular write-back newly
+   relevant, but still counts about 8 GiB of copies / 150 ms CPU work a frame; this is a dependency result, not a new
+   performance win (see ranked slices 3, 4 and 6).
 5. **The FSR 4 console route is translated but not yet routed by the title.** 29 of 29 upscaler programs translate and validate (measured on the current tree; the route harness maps the package DLL, creates its context, records 20 compute passes and serves all 29 pipeline creations), and the title itself requests none of them in the boot.
    console upscaler pipelines are not created, where XCL runs all 29 pipelines and 20 passes of a frame. The stand-in
    is already done, so this is the picture-parity step behind content.
@@ -261,9 +280,12 @@ one or two stages behind the peers above.
    into the audio HAL and no Opus path exists, so menus and video are silent.
 7. **Bink is not a missing mechanism.** The package's own library decodes 515/515 streams' frame 0 through our loader
    and a playback test exists; the title's movie-start sites never execute because the title does not leave stage 2.
-8. **Ray tracing is parity, not a lead.** Every peer in the world still has black shadow and RT light; our inline
-   traversal is already emulated with native-measured rules. Wiring a build route is the last picture item, not the
-   first.
+8. **Ray tracing is a conditional picture gate, not a universal peer gap.** The latest victory-fork snapshot reports
+   visible ray-traced shadows and light after streaming, but at 0.2–3 fps and with about 8 GiB of copies per frame;
+   VIctory still says structures are not built, and Percy lists RT lighting as next. Our inline traversal and synthetic
+   build route exist, but the title requests zero RT work at this frontier — [bvh_route.md](bvh_route.md). Keep it behind
+   the content and memory gates; the fork's result makes write/copy behavior part of the RT prerequisite, not evidence
+   that our title is ready for it.
 
 ## What we already do, or have measured and refuted (do not redo)
 
@@ -365,10 +387,11 @@ measured call sites.
 
 ### Slice 4 - small title-buffer card copies and texture write-back (effort M)
 
-The fork's newest measurements are exactly this class and they are the largest in-world wins it reports: copies under
-1 MiB stay on the card (title lists 68.0 to 49.8 ms of card time a frame), and textures that shaders write are copied
-back into title memory where the title's own code reads them (22,900 read-backs in six minutes, unblocked a mission).
-Clean-room spec: place copies of title buffers in device-local memory under a measured size floor and a memory budget,
+The fork's 25-Nov published measurement of this class reports copies under 1 MiB staying on the card (title lists
+68.0 to 49.8 ms of card time a frame) and textures that shaders write copied back into title memory (22,900 read-backs
+in six minutes, unblocking a mission). Its 27-Nov RT-builder report adds a dependency result: selective list sync and
+page-granular write-back allow the builder to proceed, but its run still copies about 8 GiB / spends about 150 ms CPU
+per frame. Clean-room spec: place copies of title buffers in device-local memory under a measured size floor and a memory budget,
 hash the changed ranges on the card so only changed 256-byte chunks are sent back, and for textures whose shaders wrote
 them copy the written pages back into the title's pages, driven by the same changed-page information as slice 3 where
 it exists and by a bounded explicit request otherwise.
@@ -401,12 +424,16 @@ as the fallback and the control arm.
 
 Our translator already emulates the traversal instructions with native-measured rules; the missing half is building
 the structures in the node format at the addresses the title's shaders walk, and wiring the game's own builder
-exports. Two peer routes exist as evidence: five-star builds and rehydrates on the CPU from the game's own vertex data
-with sizes from the builder DLL's prebuild query; XCL runs the builder's own programs on the GPU. Clean-room spec:
-answer the builder's prebuild and build exports from our own measured shapes (sizes from the prebuild path, structures
-built into the title's pages by our GPU build path where it fits the console size, and a bounded CPU build for the
-fits-in-console-size case), route copy and rehydrate to our own implementations, and keep the ray-tracing pipelines
-and traversal otherwise unchanged.
+exports. The peer routes now differ: Five Star documents a CPU build/rehydration path from game vertex data and
+prebuild sizes; XCL runs the builder's own GPU programs; the 27-Nov victory-fork README reports the builder producing
+visible ray-traced shadows/light after a streamed scene. That fork's result followed a narrower memory-sync rule (only
+copies named by each list's dispatches plus page-granular shader-write tracking and copy-back) and fixes to the
+structure-view address and node-hit semantics; it also reports about 8 GiB of copy work / 150 ms per frame and only
+0.2–3 fps. This is evidence that builder, memory-sync and consumer semantics must be tested together, not that bulk
+synchronization is a portable fix. Clean-room spec: answer the builder's prebuild and build exports from our own measured
+shapes (sizes from the prebuild path, structures built into the title's pages by our GPU build path where it fits the
+console size, and a bounded CPU build for the fits-in-console-size case), route copy and rehydrate to our own
+implementations, and keep the ray-tracing pipelines and traversal otherwise unchanged.
 
 - **Files:** `port/src/xdxr_build.h`, `port/shims/d3d12_com.h` (build export answers), `port/test/bvh_builder_test.cpp`,
   `tooling/xdxr_bvh.py`, plus the slice page.
@@ -461,18 +488,22 @@ measured calls do not cover. The host endpoint already works, so the output can 
 - **Task-queue parity** is in flight and is not repeated here ([runtime_imports.md](runtime_imports.md)).
 - **Merged geometry stage coverage** (the fork's 195 programs) stays on the translator residual list; slice 7 covers
   the pipeline path, not the translator residual.
+- **NVIDIA D3D12 shader-table safety is conditional, not a new top-eight slice.** Five Star's new guard is specific to
+  that D3D12 driver-table failure and its fallback may skip draws; our Vulkan pipeline cap/cache address different
+  measured resources. Keep the eight-slice order unchanged unless a supported Vulkan run shows the same device-loss
+  boundary — [D3D12 pipeline-table row](#d3d12-pipeline-tables-and-driver-background-work), [memory_growth.md](memory_growth.md#4-what-the-cap-recovers-and-what-it-cannot), [pipeline_cache.md](pipeline_cache.md#4-coldwarm-ab).
 
 ## Limits of this audit
 
-- No boot was run and no code was changed; every "our measured state" entry is an existing page's measured claim, not
-  a re-measurement. A stale page would make a row stale with it.
-- Peer claims are self-reported; five-star's README contradicts itself and the tracker double-counts similar projects
-  (section on boot claims). The victory-fork copy here is the newer night-of-25-November README, which the downloaded
-  snapshot predates.
+- This 27-Nov refresh ran no boot and changed no code; every "our measured state" entry is an existing page's
+  measured claim, not a re-measurement. A stale page would make a row stale with it.
+- Peer claims are self-reported; Five Star's README contradicts itself and the dated tracker snapshot double-counts
+  similar forks (section on boot claims). The current victory-fork row uses its 27-Nov README at `9a9091d`, which
+  supersedes the older night-of-25 snapshot; its RT result remains a peer report, not a Palmetto measurement.
 - The mechanism column is a reference for understanding, not a design we are copying; where our host differs (Vulkan
   versus desktop D3D12; copies versus page aliasing) the row says so, and every slice remains our own implementation.
 - Effort sizes are planning estimates; the order is justified by our measured frontiers, not by the peers' release
   order.
-- The audit read peer source only where a mechanism had to be understood (module headers and docs); no peer code,
-  comment text or table entered this page. Each slice that lands adds its attribution to `NOTICE.md` and its own page,
-  with the peer project, licence and commit named in this page's reference table.
+- The first audit read peer source only where a mechanism had to be understood (module headers and docs). This refresh
+  inspected only peer READMEs and documentation/status pages; no source code or comment text was copied. Each slice that
+  lands adds its attribution to `NOTICE.md` and its own page, with the peer project, licence and commit named here.
