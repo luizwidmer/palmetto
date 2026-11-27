@@ -24,6 +24,9 @@ that landed our implementation, and whether the port was measured on a boot or i
 | Row-aware XG upload for movie planes | `peer_port_movie.md` section 12 | `6da738f85` | measured: records 3/3, uploads 1/3 before; readiness, no decode window yet |
 | Physical-page completion delivery | `peer_port_streaming.md` section 13 | `fdfacfdf2` | measured: zero physical-page destinations at this population, latent negative |
 | Measured display answers and UI page probe | `peer_port_first_ui.md` section 14 | `ef46566d1` | measured: UI layer runs, page flow does not; display answers console-correct |
+| Presenter attestation, fit rule and synthetic non-black control | `peer_port_first_ui.md` section 15 | `779ce8be0` | measured: synthetic bands reach the capture exactly; presenter is not the black cause |
+| Movie draw-path probes | `peer_port_movie.md` section 13 | `2e9915cbb` | measured: draw path never issued (all six sites zero); downstream of the session-3 poll |
+| Pull-request CI guarantees | board D-03 | `2bb13be8b` | measured: docs-only and runtime-path gaps closed and registered |
 
 Every port is opt-in and off by default, keeps the switch-off path byte-identical, has unit/GPU tests and credits the peer
 evidence with URLs and commits in its page and in `NOTICE.md`. No peer source, comment, identifier or data table is copied.

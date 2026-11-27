@@ -71,10 +71,10 @@ Priority order is top to bottom within each lane.
 
 | ID | area | task | owner | status | evidence page |
 |---|---|---|---|---|---|
-| P-01 | renderer | Presenter fit/scale/colour-space, plus a synthetic non-black present control through the presenter capture | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) rank 7 |
+| P-01 | renderer | Presenter fit/scale/colour-space, plus a synthetic non-black present control through the presenter capture | maintainer | done (`779ce8be0`) | [peer_port_first_ui.md](peer_port_first_ui.md) section 15 |
 | P-02 | platform | First-run screen-state input script (screen signatures/holds as the peers do), opt-in | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) rank 5 |
 | P-03 | movie | Bink import-level call witness and opt-in movie fast-advance | open | open | [peer_port_movie.md](peer_port_movie.md) rank 1 |
-| P-04 | movie | Movie draw-path probes (layer draw, draw submit, advance, decode control) | open | open | [peer_port_movie.md](peer_port_movie.md) rank 2 |
+| P-04 | movie | Movie draw-path probes (layer draw, draw submit, advance, decode control) | maintainer | done (`2e9915cbb`) | [peer_port_movie.md](peer_port_movie.md) section 13 |
 | P-05 | platform | Task-queue/async parity test against the vendored implementation (GPU-free) | open | open | [peer_port_streaming.md](peer_port_streaming.md) rank 6 |
 | P-06 | renderer | Overlap submission with the card: flights/copy lanes instead of one ordered queue | open | open | [peer_port_streaming.md](peer_port_streaming.md) rank 8 |
 | P-07 | movie | Bink audio witness: what the decoder asks the audio shims for (cannot make the draw issue) | open | open | [peer_port_movie.md](peer_port_movie.md) rank 8 |
@@ -93,6 +93,10 @@ Priority order is top to bottom within each lane.
 | P-20 | renderer | Content-window texture descriptor census: most distinct shapes are refused at create | open | open | [peer_port_movie.md](peer_port_movie.md) section 12 |
 | P-21 | streaming | Mapped physical-page destination arm: exercise the delivery through an armed page watch | open | open | [peer_port_streaming.md](peer_port_streaming.md) section 13 |
 | P-22 | platform | UI 2D-batch probe arm (draw mode): the batch path behind the page flow | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 14 |
+| P-23 | movie | Session-3 completion arm must produce a layer-draw hit, or locate the gate in the renderer job list | open | open | [peer_port_movie.md](peer_port_movie.md) section 13 |
+| P-24 | renderer | Decide the presenter fit default once a real content frame exists to judge (fill vs aspect) | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 15 |
+| P-25 | platform | DPI-unaware window: the title's window is oversized against the virtualized monitor; measure window fitting | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 15 |
+| P-26 | ci | Branch protection: require the guaranteed CI jobs in repository settings (not enforceable from the tree) | maintainer | open | [dev-tools.md](dev-tools.md) |
 
 ### Parity features (claimable with maintainer coordination)
 
@@ -113,7 +117,7 @@ Priority order is top to bottom within each lane.
 |---|---|---|---|---|---|
 | D-01 | coordination | Task-board maintenance and weekly triage: keep rows current, sequence overlapping claims | maintainer | in progress | this page |
 | D-02 | docs | Refresh the parity matrix audit trail for the peers' newest commits | open | open | [cleanroom_peers.md](cleanroom_peers.md) |
-| D-03 | ci | CI: run the GPU-free contract tests and the documentation checks on every pull request | open | open | [.github/workflows](../.github/workflows) |
+| D-03 | ci | CI: run the GPU-free contract tests and the documentation checks on every pull request | maintainer | done (`2bb13be8b`) | [.github/workflows](../.github/workflows), [dev-tools.md](dev-tools.md) |
 | D-04 | docs | Index/link sweep: stale HEADs, dead links and out-of-date frontier descriptions | open | open | [issues.md](issues.md), [README.md](README.md) |
 | D-05 | docs | Crash-report page follows the merged every-thread dump (O3): verify the page matches the shipped switch | open | open | [crash_report.md](crash_report.md) |
 | D-06 | platform | Synthetic benchmark and launcher measurement correctness | spyro24955 | claimed | issue #4 claim comment |

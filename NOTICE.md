@@ -132,3 +132,11 @@ XCL (`623d02e`) storage paths and the reference fork's page resolver. The measur
 (`63bcca4`), Five Star Recomp (`ce2b333b`) and XCL (`623d02e`) display/deferral handling. All are read as evidence of
 behaviour only; the implementations are our own, no source, comment, identifier or data table is copied, and the upstream
 projects remain the copyright of their contributors under their own licences.
+
+The presenter attestation, fit rule and synthetic non-black control ([docs/peer_port_first_ui.md](docs/peer_port_first_ui.md),
+section 15) were informed by Five Star Recomp (GPL-3.0-or-later, `ce2b333b`) aspect/colour-space present code, PercyScarlett
+(GPL-2.0-only, `e44c465`) overlay present, VIctory (GPL-3.0-or-later, `63bcca4`) compositor and XCL (GPL-2.0-only,
+`623d02e`) present window handling. The movie draw-path probes ([docs/peer_port_movie.md](docs/peer_port_movie.md), section
+13) were informed by XCL (`623d02e`), Five Star Recomp (`ce2b333b`) and VIctory (`63bcca4`) movie draw/middleware notes. All
+are read as evidence of behaviour only; the implementations are our own, no source, comment, identifier or data table is
+copied, and the upstream projects remain the copyright of their contributors under their own licences.
