@@ -179,6 +179,107 @@ void test_simulated_120_injection() {
           "simulation must refuse a missing current resolution without changing host modes");
 }
 
+void test_mode_trace_shape_and_switch_off() {
+    using rt::dxgi::mode_answer::TraceCall;
+    using rt::dxgi::mode_answer::TraceCallSite;
+    using rt::dxgi::mode_answer::TraceEvent;
+    using rt::dxgi::mode_answer::TraceEventKind;
+    using rt::dxgi::mode_answer::TracePhase;
+
+    std::array<DXGI_MODE_DESC, 20> modes{};
+    for (std::size_t i = 0; i < modes.size(); ++i)
+        modes[i] = rt::dxgi::mode_answer::shape_mode(static_cast<UINT>(1280 + i), 720, static_cast<UINT>(60 + i),
+                                                     DXGI_FORMAT_B8G8R8A8_UNORM);
+    modes.back() = rt::dxgi::mode_answer::shape_mode(2560, 1440, 120, DXGI_FORMAT_B8G8R8A8_UNORM);
+
+    TraceCall fill{};
+    fill.policy = Policy::simulate_120;
+    fill.call_site = TraceCallSite::get_display_mode_list1;
+    fill.phase = TracePhase::fill;
+    fill.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    fill.simulation = SimulationResult::added;
+    fill.sample = 2;
+    fill.available_count = modes.size();
+    fill.input_capacity = modes.size();
+    fill.reported_count = modes.size();
+    fill.copied_count = modes.size();
+    fill.status = static_cast<std::int32_t>(S_OK);
+    fill.available_has_120 = true;
+
+    std::vector<TraceEvent> events;
+    rt::dxgi::mode_answer::emit_trace_events(fill, modes,
+                                              [&](const TraceEvent& event) { events.push_back(event); });
+    check(events.size() == 18, "simulate-120 trace must emit one header, at most 16 records, and one omission row");
+    if (events.size() == 18) {
+        const TraceEvent& header = events.front();
+        check(header.kind == TraceEventKind::header && header.shape.record_count == modes.size(),
+              "trace header must retain the complete returned record count");
+        check(header.call.call_site == TraceCallSite::get_display_mode_list1 &&
+                  header.call.phase == TracePhase::fill && header.call.copied_count == modes.size(),
+              "trace header must identify the GetDisplayModeList1 fill and copied count");
+        check(header.shape.shown_count == 16 && header.shape.omitted_count == 4,
+              "trace must bound output to 16 records and count omissions");
+        check(header.shape.has_120 && header.shape.shown_has_120 && header.shape.indices[15] == 19,
+              "the bounded shape must retain a 120-numerator record outside the prefix");
+        check(events[1].kind == TraceEventKind::mode && events[1].index == 0 &&
+                  events[16].kind == TraceEventKind::mode && events[16].index == 19 &&
+                  events[16].mode.RefreshRate.Numerator == 120,
+              "the emitted record events must carry the returned 120/1 tail record");
+        check(events.back().kind == TraceEventKind::omitted && events.back().omitted_count == 4,
+              "the final trace event must name the four omitted records");
+        check(rt::dxgi::mode_answer::trace_call_site_name(header.call.call_site) ==
+                  "IDXGIOutput1::GetDisplayModeList1" &&
+                  rt::dxgi::mode_answer::trace_phase_name(header.call.phase) == "fill",
+              "trace labels must name the exact DXGI method and fill phase");
+    }
+    check(rt::dxgi::mode_answer::trace_call_site_name(TraceCallSite::get_display_mode_list) ==
+                  "IDXGIOutput::GetDisplayModeList" &&
+              rt::dxgi::mode_answer::trace_call_site_name(TraceCallSite::find_closest_matching_mode) ==
+                  "IDXGIOutput::FindClosestMatchingMode" &&
+              rt::dxgi::mode_answer::trace_call_site_name(TraceCallSite::find_closest_matching_mode1) ==
+                  "IDXGIOutput1::FindClosestMatchingMode1",
+          "all supported DXGI output callsite labels must remain distinct");
+
+    TraceCall count = fill;
+    count.phase = TracePhase::count_query;
+    count.input_capacity = 0;
+    count.reported_count = modes.size();
+    count.copied_count = 0;
+    std::vector<TraceEvent> count_events;
+    rt::dxgi::mode_answer::emit_trace_events(count, modes,
+                                              [&](const TraceEvent& event) { count_events.push_back(event); });
+    check(!count_events.empty() && count_events.front().shape.has_120 && count_events.front().call.copied_count == 0 &&
+              rt::dxgi::mode_answer::trace_phase_name(count_events.front().call.phase) == "count",
+          "count-query trace must identify available modes without claiming any record was copied");
+
+    TraceCall partial = fill;
+    partial.input_capacity = 8;
+    partial.reported_count = 8;
+    partial.copied_count = 8;
+    std::vector<TraceEvent> partial_events;
+    rt::dxgi::mode_answer::emit_trace_events(
+        partial, std::span<const DXGI_MODE_DESC>(modes.data(), 8),
+        [&](const TraceEvent& event) { partial_events.push_back(event); });
+    check(!partial_events.empty() && partial_events.front().call.available_has_120 &&
+              !partial_events.front().shape.has_120 && partial_events.front().call.copied_count == 8,
+          "trace must distinguish a 120 mode available in the full list from one copied to a short buffer");
+
+    TraceCall off = fill;
+    off.policy = rt::dxgi::mode_answer::parse_policy(true, "off").policy;
+    std::size_t off_sink_calls = 0;
+    rt::dxgi::mode_answer::emit_trace_events(off, modes,
+                                              [&](const TraceEvent&) { ++off_sink_calls; });
+    check(off_sink_calls == 0, "unset/off mode policy must not invoke the trace sink or emit output");
+    check(!rt::dxgi::mode_answer::trace_enabled(off.policy), "off policy must remain default-off");
+
+    TraceCall host = fill;
+    host.policy = Policy::host_modes_trace;
+    std::size_t host_sink_calls = 0;
+    rt::dxgi::mode_answer::emit_trace_events(host, modes,
+                                              [&](const TraceEvent&) { ++host_sink_calls; });
+    check(host_sink_calls > 0, "explicit host policy must exercise the same bounded trace path");
+}
+
 struct SyntheticTitleWords {
     std::uint8_t high_refresh_flag = 0xA5;
     std::array<std::uint8_t, 7> padding{};
@@ -241,6 +342,7 @@ int main() {
     test_switch_parser();
     test_host_list_shape_and_order();
     test_simulated_120_injection();
+    test_mode_trace_shape_and_switch_off();
     test_consumed_refresh_and_synthetic_writes();
 
     if (failures) {

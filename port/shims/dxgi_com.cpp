@@ -804,6 +804,19 @@ mode_answer::ParseResult read_mode_answer_policy() {
     return parsed;
 }
 
+void report_mode_trace_armed() {
+    const mode_answer::ParseResult parsed = read_mode_answer_policy();
+    if (!mode_answer::trace_enabled(parsed.policy)) return;
+
+    static std::atomic<bool> reported{false};
+    bool expected = false;
+    if (!reported.compare_exchange_strong(expected, true, std::memory_order_relaxed)) return;
+    const std::string_view source = mode_answer::policy_name(parsed.policy);
+    std::fprintf(stderr,
+                 "[rt] dxgi: mode-answer trace armed source=%.*s; waiting for output mode-list/closest-mode calls\n",
+                 static_cast<int>(source.size()), source.data());
+}
+
 void report_simulated_mode_refusal() {
     static std::atomic<bool> reported{false};
     bool expected = false;
@@ -813,50 +826,63 @@ void report_simulated_mode_refusal() {
                      "width/height; host modes unchanged\n");
 }
 
-void trace_mode_list(mode_answer::Policy policy, DXGI_FORMAT fmt, const std::vector<DXGI_MODE_DESC>& modes,
-                     mode_answer::SimulationResult simulation) {
+void trace_mode_list(mode_answer::TraceCall call, std::span<const DXGI_MODE_DESC> records) {
+    if (!mode_answer::trace_enabled(call.policy)) return;
+
     static std::atomic<unsigned> samples{0};
     const unsigned sample = samples.fetch_add(1, std::memory_order_relaxed);
-    if (sample >= 4) return;
+    if (sample >= mode_answer::max_trace_samples) return;
+    call.sample = sample + 1;
 
-    const auto high = std::find_if(modes.begin(), modes.end(), [](const DXGI_MODE_DESC& mode) {
-        return mode.RefreshRate.Numerator == mode_answer::title_high_refresh_numerator;
-    });
-    const bool has_120 = high != modes.end();
-    const std::size_t high_index = has_120 ? static_cast<std::size_t>(high - modes.begin()) : modes.size();
-    std::size_t prefix_count = std::min<std::size_t>(modes.size(), has_120 && high_index >= 16 ? 15 : 16);
-    const bool print_120_tail = has_120 && high_index >= prefix_count;
-    const std::size_t shown = prefix_count + (print_120_tail ? 1 : 0);
-
-    const char* source = policy == mode_answer::Policy::simulate_120 ? "simulate-120" : "host";
-    const char* simulation_note = "";
-    if (policy == mode_answer::Policy::simulate_120) {
-        switch (simulation) {
-        case mode_answer::SimulationResult::already_offered: simulation_note = "; host already offered numerator 120"; break;
-        case mode_answer::SimulationResult::added: simulation_note = "; one current-size 120/1 mode added"; break;
-        case mode_answer::SimulationResult::refused_no_current_size:
-            simulation_note = "; refused because current dimensions are unavailable";
-            break;
-        case mode_answer::SimulationResult::not_requested: simulation_note = "; no synthetic mode requested"; break;
+    mode_answer::emit_trace_events(call, records, [](const mode_answer::TraceEvent& event) {
+        const mode_answer::TraceCall& trace = event.call;
+        if (event.kind == mode_answer::TraceEventKind::header) {
+            const std::string_view site = mode_answer::trace_call_site_name(trace.call_site);
+            const std::string_view phase = mode_answer::trace_phase_name(trace.phase);
+            const std::string_view source = mode_answer::policy_name(trace.policy);
+            const std::string_view simulation = mode_answer::simulation_result_name(trace.simulation);
+            std::fprintf(stderr,
+                         "[rt] dxgi: mode answer sample %u: call=%.*s phase=%.*s source=%.*s format=%u "
+                         "available=%zu capacity=%zu reported=%zu copied=%zu status=0x%08X "
+                         "available120=%s records120=%s simulation=%.*s\n",
+                         trace.sample, static_cast<int>(site.size()), site.data(), static_cast<int>(phase.size()),
+                         phase.data(), static_cast<int>(source.size()), source.data(),
+                         static_cast<unsigned>(trace.format), trace.available_count, trace.input_capacity,
+                         trace.reported_count, trace.copied_count, static_cast<unsigned>(trace.status),
+                         trace.available_has_120 ? "yes" : "no", event.shape.shown_has_120 ? "yes" : "no",
+                         static_cast<int>(simulation.size()), simulation.data());
+            return;
         }
-    }
-    std::fprintf(stderr, "[rt] dxgi: display mode answer sample %u: source=%s format=%u count=%zu has120=%s%s\n",
-                 sample + 1, source, static_cast<unsigned>(fmt), modes.size(), has_120 ? "yes" : "no",
-                 simulation_note);
-    auto print_mode = [](std::size_t index, const DXGI_MODE_DESC& mode) {
-        std::fprintf(stderr,
-                     "[rt] dxgi: mode[%zu]=%ux%u @%u/%u format=%u scanline=%u scaling=%u stereo=0\n", index,
-                     mode.Width, mode.Height, mode.RefreshRate.Numerator, mode.RefreshRate.Denominator,
-                     static_cast<unsigned>(mode.Format), static_cast<unsigned>(mode.ScanlineOrdering),
-                     static_cast<unsigned>(mode.Scaling));
-    };
-    for (std::size_t i = 0; i < prefix_count; ++i) print_mode(i, modes[i]);
-    if (print_120_tail) print_mode(high_index, modes[high_index]);
-    if (shown < modes.size())
-        std::fprintf(stderr, "[rt] dxgi: mode list trace omitted %zu other record(s)\n", modes.size() - shown);
+        if (event.kind == mode_answer::TraceEventKind::mode) {
+            const char* kind = trace.phase == mode_answer::TracePhase::count_query
+                                   ? "available-mode"
+                                   : (trace.phase == mode_answer::TracePhase::fill ? "returned-mode" : "closest-mode");
+            const DXGI_MODE_DESC& mode = event.mode;
+            std::fprintf(stderr,
+                         "[rt] dxgi: %s[%zu]=%ux%u @%u/%u format=%u scanline=%u scaling=%u stereo=0\n", kind,
+                         event.index, mode.Width, mode.Height, mode.RefreshRate.Numerator,
+                         mode.RefreshRate.Denominator, static_cast<unsigned>(mode.Format),
+                         static_cast<unsigned>(mode.ScanlineOrdering), static_cast<unsigned>(mode.Scaling));
+            return;
+        }
+        std::fprintf(stderr, "[rt] dxgi: mode answer trace omitted %zu additional record(s)\n",
+                     event.omitted_count);
+    });
 }
 
-std::vector<DXGI_MODE_DESC> collect_modes(const DisplayInfo& info, DXGI_FORMAT fmt) {
+bool modes_contain_120(std::span<const DXGI_MODE_DESC> modes) noexcept {
+    return std::any_of(modes.begin(), modes.end(), [](const DXGI_MODE_DESC& mode) {
+        return mode.RefreshRate.Numerator == mode_answer::title_high_refresh_numerator;
+    });
+}
+
+struct CollectedModeList {
+    std::vector<DXGI_MODE_DESC> modes;
+    mode_answer::Policy policy = mode_answer::Policy::host_modes;
+    mode_answer::SimulationResult simulation = mode_answer::SimulationResult::not_requested;
+};
+
+CollectedModeList collect_modes(const DisplayInfo& info, DXGI_FORMAT fmt) {
     if (!is_supported_display_format(fmt)) return {};
 
     mode_answer::ModeListBuilder builder(fmt);
@@ -883,10 +909,7 @@ std::vector<DXGI_MODE_DESC> collect_modes(const DisplayInfo& info, DXGI_FORMAT f
         builder, policy.policy, info.current_width, info.current_height);
     if (simulation == mode_answer::SimulationResult::refused_no_current_size) report_simulated_mode_refusal();
 
-    std::vector<DXGI_MODE_DESC> modes = std::move(builder).finish_sorted();
-    if (policy.policy == mode_answer::Policy::host_modes_trace || policy.policy == mode_answer::Policy::simulate_120)
-        trace_mode_list(policy.policy, fmt, modes, simulation);
-    return modes;
+    return {std::move(builder).finish_sorted(), policy.policy, simulation};
 }
 
 constexpr DXGI_MODE_DESC from_mode_desc1(const DXGI_MODE_DESC1& m) noexcept {
@@ -894,28 +917,72 @@ constexpr DXGI_MODE_DESC from_mode_desc1(const DXGI_MODE_DESC1& m) noexcept {
 }
 
 template <class DescT, class ConvertFn>
-HRESULT fill_mode_list(const DisplayInfo& info, DXGI_FORMAT fmt, UINT* num_modes, DescT* out, ConvertFn convert) {
+HRESULT fill_mode_list(const DisplayInfo& info, DXGI_FORMAT fmt, UINT* num_modes, DescT* out,
+                       mode_answer::TraceCallSite call_site, ConvertFn convert) {
     if (!num_modes) return DXGI_ERROR_INVALID_CALL;
-    const std::vector<DXGI_MODE_DESC> modes = collect_modes(info, fmt);
+    const CollectedModeList answer = collect_modes(info, fmt);
+    const std::vector<DXGI_MODE_DESC>& modes = answer.modes;
+    const UINT capacity = out ? *num_modes : 0;
     const UINT total = static_cast<UINT>(modes.size());
+    auto trace_answer = [&](mode_answer::TracePhase phase, UINT reported, UINT copied, HRESULT status,
+                            std::span<const DXGI_MODE_DESC> records) {
+        mode_answer::TraceCall trace{};
+        trace.policy = answer.policy;
+        trace.call_site = call_site;
+        trace.phase = phase;
+        trace.format = fmt;
+        trace.simulation = answer.simulation;
+        trace.available_count = modes.size();
+        trace.input_capacity = capacity;
+        trace.reported_count = reported;
+        trace.copied_count = copied;
+        trace.status = static_cast<std::int32_t>(status);
+        trace.available_has_120 = modes_contain_120(modes);
+        trace_mode_list(trace, records);
+    };
+
     if (!out) {
         *num_modes = total;
+        // The count-only query returns the required count. Trace its complete available list separately from
+        // a later fill call, which identifies the records copied into the caller's buffer.
+        trace_answer(mode_answer::TracePhase::count_query, total, 0, S_OK, modes);
         return S_OK;
     }
-    const UINT to_copy = std::min(*num_modes, total);
+    const UINT to_copy = std::min(capacity, total);
     for (UINT i = 0; i < to_copy; ++i) out[i] = convert(modes[i]);
     // Host DXGI writes the number of copied entries back into *pNumModes when returning MORE_DATA.
     *num_modes = to_copy;
-    return (to_copy < total) ? DXGI_ERROR_MORE_DATA : S_OK;
+    const HRESULT result = (to_copy < total) ? DXGI_ERROR_MORE_DATA : S_OK;
+    trace_answer(mode_answer::TracePhase::fill, to_copy, to_copy, result,
+                 std::span<const DXGI_MODE_DESC>(modes).first(to_copy));
+    return result;
 }
 
 HRESULT find_closest_mode(const DisplayInfo& info, const DXGI_MODE_DESC& req, IUnknown* concerned_device,
-                          DXGI_MODE_DESC& out) {
+                          DXGI_MODE_DESC& out, mode_answer::TraceCallSite call_site) {
     out = {};
     if (req.Format == DXGI_FORMAT_UNKNOWN && !concerned_device) return DXGI_ERROR_INVALID_CALL;
     const DXGI_FORMAT target_fmt = (req.Format == DXGI_FORMAT_UNKNOWN) ? DXGI_FORMAT_B8G8R8A8_UNORM : req.Format;
-    const std::vector<DXGI_MODE_DESC> modes = collect_modes(info, target_fmt);
-    if (modes.empty()) return DXGI_ERROR_NOT_FOUND;
+    const CollectedModeList answer = collect_modes(info, target_fmt);
+    const std::vector<DXGI_MODE_DESC>& modes = answer.modes;
+    auto trace_answer = [&](HRESULT status, std::span<const DXGI_MODE_DESC> records) {
+        mode_answer::TraceCall trace{};
+        trace.policy = answer.policy;
+        trace.call_site = call_site;
+        trace.phase = mode_answer::TracePhase::closest;
+        trace.format = target_fmt;
+        trace.simulation = answer.simulation;
+        trace.available_count = modes.size();
+        trace.reported_count = records.size();
+        trace.copied_count = records.size();
+        trace.status = static_cast<std::int32_t>(status);
+        trace.available_has_120 = modes_contain_120(modes);
+        trace_mode_list(trace, records);
+    };
+    if (modes.empty()) {
+        trace_answer(DXGI_ERROR_NOT_FOUND, {});
+        return DXGI_ERROR_NOT_FOUND;
+    }
 
     const UINT target_w = req.Width ? req.Width : info.current_width;
     const UINT target_h = req.Height ? req.Height : info.current_height;
@@ -943,7 +1010,9 @@ HRESULT find_closest_mode(const DisplayInfo& info, const DXGI_MODE_DESC& req, IU
             best_score = s;
         }
     }
-    out = *best;
+    const DXGI_MODE_DESC selected = *best;
+    out = selected;
+    trace_answer(S_OK, std::span<const DXGI_MODE_DESC>(&selected, 1));
     return S_OK;
 }
 
@@ -963,6 +1032,7 @@ class Output final : public IDXGIOutput6 {
 public:
     Output(IDXGIAdapter* parent, DisplayInfo info) : parent_(parent), info_(info) {
         if (parent_) parent_->AddRef();
+        report_mode_trace_armed();
     }
 
     ~Output() {
@@ -1007,12 +1077,14 @@ public:
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetDisplayModeList(DXGI_FORMAT fmt, UINT, UINT* num_modes, DXGI_MODE_DESC* desc) override {
-        return fill_mode_list(info_, fmt, num_modes, desc, [](const DXGI_MODE_DESC& m) { return m; });
+        return fill_mode_list(info_, fmt, num_modes, desc, mode_answer::TraceCallSite::get_display_mode_list,
+                              [](const DXGI_MODE_DESC& m) { return m; });
     }
     HRESULT STDMETHODCALLTYPE FindClosestMatchingMode(const DXGI_MODE_DESC* mode_to_match, DXGI_MODE_DESC* closest,
                                                       IUnknown* concerned_device) override {
         if (!mode_to_match || !closest) return DXGI_ERROR_INVALID_CALL;
-        return find_closest_mode(info_, *mode_to_match, concerned_device, *closest);
+        return find_closest_mode(info_, *mode_to_match, concerned_device, *closest,
+                                 mode_answer::TraceCallSite::find_closest_matching_mode);
     }
     HRESULT STDMETHODCALLTYPE WaitForVBlank() override {
         wait_for_vblank();
@@ -1041,13 +1113,15 @@ public:
     // IDXGIOutput1
     HRESULT STDMETHODCALLTYPE GetDisplayModeList1(DXGI_FORMAT fmt, UINT, UINT* num_modes,
                                                   DXGI_MODE_DESC1* desc) override {
-        return fill_mode_list(info_, fmt, num_modes, desc, mode_answer::to_mode_desc1);
+        return fill_mode_list(info_, fmt, num_modes, desc, mode_answer::TraceCallSite::get_display_mode_list1,
+                              mode_answer::to_mode_desc1);
     }
     HRESULT STDMETHODCALLTYPE FindClosestMatchingMode1(const DXGI_MODE_DESC1* mode_to_match, DXGI_MODE_DESC1* closest,
                                                        IUnknown* concerned_device) override {
         if (!mode_to_match || !closest) return DXGI_ERROR_INVALID_CALL;
         DXGI_MODE_DESC best{};
-        const HRESULT hr = find_closest_mode(info_, from_mode_desc1(*mode_to_match), concerned_device, best);
+        const HRESULT hr = find_closest_mode(info_, from_mode_desc1(*mode_to_match), concerned_device, best,
+                                             mode_answer::TraceCallSite::find_closest_matching_mode1);
         *closest = SUCCEEDED(hr) ? mode_answer::to_mode_desc1(best) : DXGI_MODE_DESC1{};
         return hr;
     }

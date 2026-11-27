@@ -172,9 +172,15 @@ install a probe.
 
 The previous light arms measured flag `0` and refresh `60/1` on this 60 Hz host, through the long samples (the last at
 298 s); see [section 14.4](peer_port_first_ui.md). Those arms established the consumed answer, but did not dump the
-mode-list length or tuples. The next `PALMETTO_DXGI_MODE_ANSWER=host` trace records the count and up to 16 shaped records
-(while preserving a numerator-120 record in that bound); any other records are omitted by design. It is the bounded
-falsifier for whether the current host answer offered a 120 numerator.
+mode-list length or tuples. The default-off trace now emits a one-time `mode-answer trace armed` line for an output when
+`host` or `simulate-120` is selected, then records the exact DXGI output method and phase (`count`, `fill`, or `closest`),
+format, available count, input capacity, reported/copied count and HRESULT. It records at most 8 API-call samples and 16
+mode records per sample, preserving a numerator-120 record in the bound. Count-query rows are labelled `available-mode`;
+fill rows are labelled `returned-mode` and are shaped from the shim's local records actually copied, not by reading the
+caller's buffer. The header distinguishes `available120` (full answer) from `records120` (this phase's bounded record
+span). The trace is the bounded falsifier for whether a 120 numerator was available and actually returned at that call.
+A trace-armed line without any API-call sample means this DXGI output object was reached but the title did not ask it for a
+mode list or closest mode during the sample window.
 
 The existing DXGI source path is `collect_modes` in `port/shims/dxgi_com.cpp`: it enumerates `EnumDisplaySettingsW`
 records (bounded to 4096), takes width/height where both fields are valid, uses a concrete `dmDisplayFrequency` when it
@@ -190,36 +196,44 @@ The title's observed 32-byte layout is asserted in the pure test below.
 | value | answer |
 |---|---|
 | unset, empty, `off`, `0`, `false` or `no` | the prior host mode list, with no injected record and no trace output |
-| `host` | the same host answer, plus a bounded trace of at most 4 mode-list samples and 16 records per sample |
-| `simulate-120` | keep the host list; if no record has refresh numerator 120, add one at the current output's size with rational `{120,1}`, requested format, progressive scanline order, unspecified scaling, and stereo false; trace the bounded list |
+| `host` | the same host answer, plus an armed marker and at most 8 bounded API-call samples (16 records each) |
+| `simulate-120` | keep the host list; if no record has refresh numerator 120, add one at the current output's size with rational `{120,1}`, requested format, progressive scanline order, unspecified scaling, and stereo false; trace the same bounded call/result shape |
 | any other value or a value longer than 63 bytes | name the refusal once and fall back to the unmodified host answer |
 
 A host that already offers any numerator-120 record receives its native list unchanged, even when simulation is selected.
 If no such record exists but the current width or height is zero, the simulation request is refused by name and the host
 list remains unchanged. The switch changes only the answer exposed by the shim; it does not ask Windows to change the monitor mode, patch title memory,
 or directly pace presentation. `GetDisplayModeList`, `GetDisplayModeList1` and closest-mode matching share the same
-collector, so the optional mode is consistent across those methods. With the switch unset, mode creation, filtering,
-deduplication, sort order and `DXGI_MODE_DESC1` conversion retain the pre-slice host shape; no trace line or synthetic
-mode is produced.
+collector, so the optional mode is consistent across those methods. Each call sample reports its exact method and phase,
+full available count, input capacity, API-reported/copied count and HRESULT. A count query lists available records; a fill
+lists only the local records the shim copied, without reading the caller's output buffer. `available120` means the full
+answer contains numerator 120; `records120` means this phase's bounded record span includes it. With the switch unset,
+mode creation, filtering, deduplication, sort order and `DXGI_MODE_DESC1` conversion retain the pre-slice host shape; no
+trace line or synthetic mode is produced.
 
 ### 7.3 GPU-free tests and arm readiness
 
-The new [mode-answer test source](../port/test/dxgi_mode_answer_test.cpp) is a standalone GPU-free contract test: when the
-lead wires it into CMake, it needs no DXGI factory, D3D12 device, Vulkan device, window or game image. It covers switch
-parsing/refusal, host record shaping and order, duplicate/zero rejection, the default no-injection branch, current-size
-120/1 injection, already-present and missing-size refusals, `DXGI_MODE_DESC1` field shape, the title's numerator-only
-120 predicate, and a synthetic byte/rational store for flag `0`/`1` and `{60,1}`/`{120,1}`. The synthetic store is only a
-model of the measured words; no title memory is written. CMake/CTest registration is pending lead integration. The C++
-test source has **not yet been built or run**: the lead's Palmetto integration gate is still closed, and this slice did not
-build or relink the runtime.
+The [mode-answer test source](../port/test/dxgi_mode_answer_test.cpp) is a standalone GPU-free contract test; CMake already
+registers the `dxgi_mode_answer_test` target and CTest case `dxgi_mode_answer`. It covers switch parsing/refusal, host
+record shaping and order, duplicate/zero rejection, the default no-injection branch, current-size 120/1 injection,
+already-present and missing-size refusals, `DXGI_MODE_DESC1` field shape, the title's numerator-only 120 predicate, and a
+synthetic byte/rational store for flag `0`/`1` and `{60,1}`/`{120,1}`. The trace tests additionally verify the exact
+DXGI method/phase labels, the 16-record cap with a 120 tail, full-availability versus copied-buffer shape, and that an
+`off` policy invokes no trace sink. The synthetic store and trace records use only test data; they never access title
+memory. The test target was rebuilt and run: **61 GPU-free checks passed**. The edited `dxgi_com.cpp` translation unit
+also compiled successfully via its existing object target (with only pre-existing warnings in shared headers); no
+`palmetto.exe` was linked or relinked.
 
-The lead confirmed that the host and boot lock were free at the time of coordination, but no arm was taken: the changed
-answer is not in a permitted build yet. Readiness is one `-Light` boot with `PALMETTO_DXGI_MODE_ANSWER=simulate-120` and
-the existing state trace, after the lead clears integration and the lock is rechecked. Expected observation: the bounded
-DXGI trace includes a 120/1 record and the subsequent state trace reads high-refresh flag `1`, refresh `120/1`. If the
-mode list contains that record but the title still stores `0`/`60/1`, the consumer-path hypothesis is falsified; if the
-record is absent, the answer switch or its mode-list call path is falsified. The arm is capped at one light run; stop
-research after two device losses. No game data is needed.
+The acceptance criteria for any later, separately authorized corrected arm remain: use a binary built from the call-site
+trace changes and save its exact executable hash in the arm metadata; set `PALMETTO_DXGI_MODE_ANSWER=simulate-120` and the
+existing state trace; then show (1) a `mode-answer trace armed` line with `source=simulate-120`; (2) a
+`GetDisplayModeList1` (or observed alternative) `count` call and its `fill` call, with the current-size `{120,1}` tuple
+among `returned-mode[...]`, `available120=yes`, `records120=yes`, and the reported/copied counts/status; (3) the next state
+sample reading high-refresh flag `1`, refresh `120/1`. If an armed marker appears but no mode-list/closest-mode sample
+follows, the title did not reach these DXGI mode-answer APIs in that window, so the state negative does not test the
+returned record. If a fill sample actually returns numerator 120 but state remains `0`/`60/1`, the measured consumer path
+is falsified (or another consumer/answer path is in play). A missing armed marker requires checking the executable hash
+and whether the output object was created before attributing anything.
 
 ### 7.4 Attribution and NOTICE handoff
 
@@ -243,25 +257,37 @@ ours, with no peer source, comment, identifier or table copied.”
 
 ### 7.5 P-36 follow-up: simulate-120 was not reflected in sampled state
 
-The lead cleared the integration gate; no build or relink was run. One `-Light` 90 s arm used the integrated `palmetto.exe`
-(SHA-256 `1DD3A3E84789BDB06EDBB0D078A724F940FC1E38B0C05CF4A3A7CB1F077A28E6`) and
-`PALMETTO_DXGI_MODE_ANSWER=simulate-120`, with the boot template's state, timeline, slot-67 and capture/readback probes.
-It ran under the shared boot lock at 10:08:51.629–10:10:22.469 (-03), wall 90.3 s; the runner ended it at the 90 s
-limit, verdict `ALIVE`, zero exceptions, and no device-loss line.
+The P-36 `-Light` 90 s arm used `palmetto.exe` SHA-256
+`1DD3A3E84789BDB06EDBB0D078A724F940FC1E38B0C05CF4A3A7CB1F077A28E6` (mtime 2026-11-27 09:43:37 -03) with
+`PALMETTO_DXGI_MODE_ANSWER=simulate-120`, as confirmed by the arm's `meta.txt`. It ran under the shared boot lock at
+10:08:51.629–10:10:22.469 (-03), wall 90.3 s; the runner ended it at the 90 s limit, verdict `ALIVE`, zero exceptions,
+and no device-loss line. The stderr log contains no DXGI mode-answer line.
+
+The no-trace outcome is now attributed to a binary mismatch, not to a demonstrated title rejection or a host-only trace
+branch. At the follow-up's measurement, the current Palmetto executable was a different build: SHA-256
+`52C7A57172893CF3E5EC8586DC2CD40DEC9DD118D965B3AED427F1DC1D759B59`, mtime 2026-11-27 10:24:54 -03; its DXGI shim
+object was rebuilt at 10:24:47 -03. The arm binary predates the integrated DXGI mode-answer/trace implementation, so its
+silence does not establish that the title's mode enumeration was or was not reached. The run's state words remain a
+bounded observation of that older executable only; it did not observe a returned 120/1 record and cannot attribute the
+consumer's negative to rejection of one. The new source-level trace reports when a trace-enabled output is created and,
+on a later call, the actual DXGI method, query/fill phase, copied records and result; the source/object is compiled, but no
+Palmetto executable with those call-site records was linked for another arm.
 
 At the last state sample (t=88 s), the words were `init=2`, `loading=1`, `session=0`, machine `current=2 next=2`; the
-high-refresh flag remained `0` and refresh remained `60/1`. No `[rt] dxgi: display mode answer sample` or `mode[...]`
-line appeared in stdout or stderr. Although §7.2 documents a trace for `simulate-120`, this integrated run did not emit it;
-the trace may be emitted only under the `host` policy in this binary, or the relevant mode-list enumeration may not have
-been reached. Neither the call nor the simulated `{120,1}` answer was observed; absence of a trace is not evidence that the
-title rejected a returned 120/1 record.
-
-The template recorded 12 presenter captures at 2564x1421, each mean RGB `0.00 0.00 0.00`; the PPMs remain only in the
-outside-repository capture folder. Raw boot evidence (`meta.txt`, `stderr.log`, `boot.jsonl`, `summary.txt`) is under
+high-refresh flag remained `0` and refresh remained `60/1`. The template recorded 12 presenter captures at 2564x1421,
+each mean RGB `0.00 0.00 0.00`; the PPMs remain only in the outside-repository capture folder. Raw boot evidence
+(`meta.txt`, `stderr.log`, `boot.jsonl`, `summary.txt`) is under
 `D:\leonida-work\fsrstable\boot-p36-120-20261127-1008` and captures are under
 `D:\leonida-work\fsrstable\capture-p36-120-20261127-1008`; no image or game content was copied here.
 
-**Next falsifier:** first observe a `host`-policy mode-list sample (or otherwise establish that the title reaches the
-mode-list call), then in a separately authorized bounded simulation arm verify a returned current-size 120/1 record and
-sample the consumer words. A confirmed 120/1 answer followed by flag `0` / refresh `60/1` would falsify the expected
-consumer path; this arm alone does not.
+**Next falsifier/readiness:** the coordinated boot owner completed its separate series on the fixed executable hash
+`52C7A57172893CF3E5EC8586DC2CD40DEC9DD118D965B3AED427F1DC1D759B59` and released the lock. The owner reported one
+Vulkan device-loss line followed by an AV at 65.6 s in arm 1, then two Vulkan device-loss lines at the end of the 90.3 s
+arm 2; the two-loss stop was reached, with no retry and no arm 3. No DXGI answer arm was launched by this follow-up. The
+fixed executable predates the new call-site trace edits; they were compile-checked as an object only, with no Palmetto
+relink, so the current executable is not yet a corrected trace arm. The DXGI falsifier remains one light run only under a
+new explicit stop-budget/lead authorization, using a trace-instrumented binary and saving its SHA-256. It must show the
+armed marker, then the `GetDisplayModeList1`/actual callsite count and fill result with a copied
+`{current_width,current_height,120,1}` record, followed by state flag `1` and refresh `120/1`. An armed marker with no mode
+API sample attributes the path as not reached in that window; a fill that returns 120/1 followed by `0`/`60/1` falsifies
+the measured consumer path. No game data is needed.

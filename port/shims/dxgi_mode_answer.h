@@ -6,6 +6,8 @@
 #include <dxgi1_6.h>
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <set>
 #include <span>
@@ -130,6 +132,157 @@ private:
 };
 
 enum class SimulationResult : std::uint8_t { not_requested, already_offered, added, refused_no_current_size };
+
+inline constexpr std::size_t max_trace_samples = 8;
+inline constexpr std::size_t max_trace_records = 16;
+
+enum class TraceCallSite : std::uint8_t {
+    get_display_mode_list,
+    get_display_mode_list1,
+    find_closest_matching_mode,
+    find_closest_matching_mode1,
+};
+
+constexpr std::string_view trace_call_site_name(TraceCallSite site) noexcept {
+    switch (site) {
+    case TraceCallSite::get_display_mode_list: return "IDXGIOutput::GetDisplayModeList";
+    case TraceCallSite::get_display_mode_list1: return "IDXGIOutput1::GetDisplayModeList1";
+    case TraceCallSite::find_closest_matching_mode: return "IDXGIOutput::FindClosestMatchingMode";
+    case TraceCallSite::find_closest_matching_mode1: return "IDXGIOutput1::FindClosestMatchingMode1";
+    }
+    return "unknown DXGI output call";
+}
+
+enum class TracePhase : std::uint8_t { count_query, fill, closest };
+
+constexpr std::string_view trace_phase_name(TracePhase phase) noexcept {
+    switch (phase) {
+    case TracePhase::count_query: return "count";
+    case TracePhase::fill: return "fill";
+    case TracePhase::closest: return "closest";
+    }
+    return "unknown";
+}
+
+constexpr bool trace_enabled(Policy policy) noexcept {
+    return policy == Policy::host_modes_trace || policy == Policy::simulate_120;
+}
+
+constexpr std::string_view policy_name(Policy policy) noexcept {
+    switch (policy) {
+    case Policy::host_modes: return "off";
+    case Policy::host_modes_trace: return "host";
+    case Policy::simulate_120: return "simulate-120";
+    }
+    return "unknown";
+}
+
+constexpr std::string_view simulation_result_name(SimulationResult result) noexcept {
+    switch (result) {
+    case SimulationResult::not_requested: return "not-requested";
+    case SimulationResult::already_offered: return "already-offered";
+    case SimulationResult::added: return "added";
+    case SimulationResult::refused_no_current_size: return "refused-no-current-size";
+    }
+    return "unknown";
+}
+
+// This is a pure summary of the DXGI call at the shim boundary. `available_count` is the complete
+// answer, while `copied_count` and the trace-record span describe what a caller with an output buffer
+// actually received. No title-owned memory is needed to construct the trace.
+struct TraceCall {
+    Policy policy = Policy::host_modes;
+    TraceCallSite call_site = TraceCallSite::get_display_mode_list;
+    TracePhase phase = TracePhase::count_query;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    SimulationResult simulation = SimulationResult::not_requested;
+    std::uint32_t sample = 0;
+    std::size_t available_count = 0;
+    std::size_t input_capacity = 0;
+    std::size_t reported_count = 0;
+    std::size_t copied_count = 0;
+    std::int32_t status = 0;
+    bool available_has_120 = false;
+};
+
+struct TraceShape {
+    std::array<std::size_t, max_trace_records> indices{};
+    std::size_t record_count = 0;
+    std::size_t shown_count = 0;
+    std::size_t omitted_count = 0;
+    bool has_120 = false;
+    bool shown_has_120 = false;
+};
+
+constexpr TraceShape shape_trace_records(std::span<const DXGI_MODE_DESC> modes) noexcept {
+    TraceShape shape{};
+    shape.record_count = modes.size();
+    std::size_t high_index = modes.size();
+    for (std::size_t i = 0; i < modes.size(); ++i) {
+        if (modes[i].RefreshRate.Numerator == title_high_refresh_numerator) {
+            high_index = i;
+            break;
+        }
+    }
+    shape.has_120 = high_index != modes.size();
+
+    const std::size_t prefix_limit =
+        shape.has_120 && high_index >= max_trace_records ? max_trace_records - 1 : max_trace_records;
+    const std::size_t prefix_count = std::min(modes.size(), prefix_limit);
+    for (std::size_t i = 0; i < prefix_count; ++i) shape.indices[shape.shown_count++] = i;
+    if (shape.has_120 && high_index >= prefix_count && shape.shown_count < shape.indices.size())
+        shape.indices[shape.shown_count++] = high_index;
+
+    shape.omitted_count = shape.record_count - shape.shown_count;
+    shape.shown_has_120 = shape.has_120 && high_index < modes.size() &&
+                          std::find(shape.indices.begin(), shape.indices.begin() + shape.shown_count, high_index) !=
+                              shape.indices.begin() + shape.shown_count;
+    return shape;
+}
+
+enum class TraceEventKind : std::uint8_t { header, mode, omitted };
+
+struct TraceEvent {
+    TraceEventKind kind = TraceEventKind::header;
+    TraceCall call{};
+    TraceShape shape{};
+    std::size_t index = 0;
+    std::size_t omitted_count = 0;
+    DXGI_MODE_DESC mode{};
+};
+
+// The runtime formats these bounded events for stderr; tests use the same gate and shape with a
+// counting/collecting sink. An off policy never invokes the sink, so the default path has no output.
+template <class Sink>
+void emit_trace_events(const TraceCall& call, std::span<const DXGI_MODE_DESC> records, Sink&& sink) {
+    if (!trace_enabled(call.policy)) return;
+
+    const TraceShape shape = shape_trace_records(records);
+    TraceEvent header{};
+    header.kind = TraceEventKind::header;
+    header.call = call;
+    header.shape = shape;
+    sink(header);
+
+    for (std::size_t i = 0; i < shape.shown_count; ++i) {
+        const std::size_t index = shape.indices[i];
+        TraceEvent event{};
+        event.kind = TraceEventKind::mode;
+        event.call = call;
+        event.shape = shape;
+        event.index = index;
+        event.mode = records[index];
+        sink(event);
+    }
+    if (shape.omitted_count) {
+        TraceEvent event{};
+        event.kind = TraceEventKind::omitted;
+        event.call = call;
+        event.shape = shape;
+        event.omitted_count = shape.omitted_count;
+        sink(event);
+    }
+}
 
 inline SimulationResult ensure_simulated_120(ModeListBuilder& builder, Policy policy, UINT current_width,
                                              UINT current_height) {
