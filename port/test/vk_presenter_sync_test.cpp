@@ -7,6 +7,10 @@
 //   3. Concurrent present() + VulkanQueue::execute() + add_resource()/remove_resource() follows VulkanContext's
 //      resource_mutex_ -> tracker_mutex_ -> submit_mutex_ lock hierarchy without data races or deadlocks.
 //   4. A swapchain-destroy WSI layer which calls vkDeviceWaitIdle cannot overlap vkQueueSubmit on another thread.
+//   5. The present fit/scale rule (src/present_fit.h) and the synthetic non-black control (docs/peer_port_first_ui.md
+//      section 15): a 16:9 source is stretched over the whole window by default and fitted with black bars when the rule
+//      is fit, and the presenter's own known pattern reads back its exact known colours through the same present path
+//      and capture, in both rules.
 // Skips with exit code 77 when no Vulkan 1.3 device with Win32 presentation is available. No game data.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -20,6 +24,7 @@
 #include "vk_presenter_capture_colour.h"
 #include "vk_test_device.h"
 #include "../src/vulkan_present.h"
+#include "../src/present_fit.h"
 
 #include <array>
 #include <atomic>
@@ -420,6 +425,127 @@ int main() {
             }
             EXPECT(presenter.presented() == shown + 1);
             std::printf("presenter sync: Present queued behind a destroyed queue's held work ran\n");
+        }
+
+        // 2d. The fit/scale rule and the synthetic non-black control (docs/peer_port_first_ui.md section 15). The source
+        //     here is a 16:9 texture cleared to one colour, so under the tree's default rule the whole 128x96 window is
+        //     that colour; under the fit rule the picture sits in the centred aspect rectangle and the rest of the window
+        //     is black. The synthetic control then presents the presenter's own known four-band pattern in place of the
+        //     title's plane through this same present path and capture, and its known colours are read back.
+        {
+            EXPECT(queue.idle());  // the section-2c holds are drained: a present below runs on this thread, not queued
+            constexpr std::uint32_t source_width = 32, source_height = 18;  // 16:9
+            const VkImage target_img = d.image(VK_FORMAT_R8G8B8A8_UNORM, source_width, source_height, 1,
+                                               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+            EXPECT(target_img != VK_NULL_HANDLE);
+            ResourceBinding target_rb = back_rb;
+            target_rb.image = target_img;
+            target_rb.width = source_width;
+            target_rb.height = source_height;
+            context.add_resource(3, target_rb, VK_IMAGE_LAYOUT_UNDEFINED);
+            {
+                CommandList paint;
+                EXPECT(paint.transition({3, 0, d3d12_state::common, d3d12_state::render_target}));
+                EXPECT(paint.clear_render_target({3, 0, 0, 1}, {0.2f, 0.6f, 0.9f, 1.0f}));  // the capture helper's clear
+                EXPECT(paint.transition({3, 0, d3d12_state::render_target, d3d12_state::common}));
+                EXPECT(paint.close());
+                const CommandList* ptr = &paint;
+                EXPECT(queue.execute({&ptr, 1}) == ReplayResult::success);
+            }
+            const auto shot = [&](std::vector<std::uint8_t>& pixels, VkExtent2D& extent, bool& bgra) {
+                VkFormat format = VK_FORMAT_UNDEFINED;
+                if (!presenter.read_back(pixels, &extent, &format)) return false;
+                bgra = (format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB);
+                return true;
+            };
+            const auto pixel = [](const std::vector<std::uint8_t>& pixels, const VkExtent2D& extent, bool bgra, int x,
+                                  int y) {
+                const std::size_t at = (std::size_t(y) * extent.width + std::size_t(x)) * 4;
+                return std::array<int, 3>{pixels[at + (bgra ? 2 : 0)], pixels[at + 1], pixels[at + (bgra ? 0 : 2)]};
+            };
+            const auto same = [](const std::array<int, 3>& a, const std::array<int, 3>& b, int tolerance) {
+                for (int i = 0; i < 3; ++i)
+                    if (std::abs(a[i] - b[i]) > tolerance) return false;
+                return true;
+            };
+            const std::array<int, 3> picture_colour{51, 153, 230};
+            const std::array<int, 3> black{0, 0, 0};
+            std::vector<std::uint8_t> pixels;
+            VkExtent2D extent{};
+            bool bgra = false;
+
+            // fill (the tree's measured rule): the whole window is the picture, no bars.
+            presenter.set_fit_rule(present_fit::Rule::fill);
+            EXPECT(presenter.present(3, true) == VK_SUCCESS);
+            EXPECT(shot(pixels, extent, bgra));
+            const auto fill_rect = present_fit::scale_rect(source_width, source_height, extent.width, extent.height,
+                                                           present_fit::Rule::fill);
+            EXPECT(fill_rect.left == 0 && fill_rect.top == 0 && fill_rect.right == std::int32_t(extent.width) &&
+                   fill_rect.bottom == std::int32_t(extent.height));
+            EXPECT(presenter_capture_matches_rgb(pixels, extent.width, extent.height, bgra, picture_colour, 2));
+
+            // fit: the 16:9 picture is width-limited in the 128x96 window, so the bars are above and below it.
+            presenter.set_fit_rule(present_fit::Rule::fit);
+            EXPECT(presenter.present(3, true) == VK_SUCCESS);
+            EXPECT(shot(pixels, extent, bgra));
+            const auto fit_rect = present_fit::scale_rect(source_width, source_height, extent.width, extent.height,
+                                                          present_fit::Rule::fit);
+            EXPECT(fit_rect.left == 0 && fit_rect.right == std::int32_t(extent.width));
+            EXPECT(fit_rect.top > 0 && fit_rect.bottom < std::int32_t(extent.height));  // bars exist
+            const int middle_x = int(extent.width / 2);
+            EXPECT(same(pixel(pixels, extent, bgra, middle_x, fit_rect.top + 2), picture_colour, 2));
+            EXPECT(same(pixel(pixels, extent, bgra, middle_x, (fit_rect.bottom - fit_rect.top) / 2 + fit_rect.top),
+                        picture_colour, 2));
+            EXPECT(same(pixel(pixels, extent, bgra, middle_x, fit_rect.top / 2), black, 2));
+            EXPECT(same(pixel(pixels, extent, bgra, middle_x, (fit_rect.bottom + std::int32_t(extent.height)) / 2), black,
+                        2));
+            std::printf("presenter sync: fill stretches and fit letterboxes the same 16:9 source ok\n");
+
+            // The synthetic control: the presenter's own 16:9 four-band pattern, first stretched over the window.
+            const std::uint32_t layout_before = std::uint32_t(context.layout(1, 0));
+            EXPECT(!presenter.synthetic_ready());
+            presenter.set_fit_rule(present_fit::Rule::fill);
+            presenter.set_synthetic_presents(1);
+            EXPECT(presenter.present(1, true) == VK_SUCCESS);
+            EXPECT(presenter.synthetic_ready());
+            EXPECT(presenter.synthetic_presents_left() == 0);
+            EXPECT(std::uint32_t(context.layout(1, 0)) == layout_before);  // the title's plane is not read or re-laid-out
+            EXPECT(shot(pixels, extent, bgra));
+            for (std::uint32_t band = 0; band < 4; ++band) {
+                const int x = int((band * extent.width) / 4 + extent.width / 8);
+                const std::array<int, 3> expected{VulkanPresenter::synthetic_bands[band][0],
+                                                  VulkanPresenter::synthetic_bands[band][1],
+                                                  VulkanPresenter::synthetic_bands[band][2]};
+                EXPECT(same(pixel(pixels, extent, bgra, x, int(extent.height / 2)), expected, 2));
+            }
+            std::printf("presenter sync: synthetic known pattern presented through present() and captured ok\n");
+
+            // The same pattern under the fit rule: the bands inside the aspect rectangle, black bars outside it.
+            presenter.set_fit_rule(present_fit::Rule::fit);
+            presenter.set_synthetic_presents(1);
+            EXPECT(presenter.present(1, true) == VK_SUCCESS);
+            EXPECT(shot(pixels, extent, bgra));
+            const auto synthetic_rect =
+                present_fit::scale_rect(int(VulkanPresenter::synthetic_width),
+                                        int(VulkanPresenter::synthetic_height), extent.width, extent.height,
+                                        present_fit::Rule::fit);
+            EXPECT(present_fit::has_bars(synthetic_rect, std::int32_t(extent.width), std::int32_t(extent.height)));
+            for (std::uint32_t band = 0; band < 4; ++band) {
+                const int x = synthetic_rect.left +
+                              int((band * (synthetic_rect.right - synthetic_rect.left)) / 4 +
+                                  (synthetic_rect.right - synthetic_rect.left) / 8);
+                const std::array<int, 3> expected{VulkanPresenter::synthetic_bands[band][0],
+                                                  VulkanPresenter::synthetic_bands[band][1],
+                                                  VulkanPresenter::synthetic_bands[band][2]};
+                EXPECT(same(pixel(pixels, extent, bgra, x, (synthetic_rect.top + synthetic_rect.bottom) / 2), expected,
+                            2));
+            }
+            EXPECT(same(pixel(pixels, extent, bgra, int(extent.width / 2), synthetic_rect.top / 2), black, 2));
+            presenter.set_fit_rule(present_fit::Rule::fill);
+            presenter.set_synthetic_presents(0);
+            context.remove_resource(3);
+            std::printf("presenter sync: synthetic pattern fitted with black bars through the same capture ok\n");
         }
 
         // 3. Concurrent present() + VulkanQueue::execute() + add/remove_resource() hammering LayoutTracker.

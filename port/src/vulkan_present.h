@@ -20,6 +20,16 @@
 // swapchain; with an HDR10 plane and a surface that lists an ST.2084 format the swapchain is created in it. The plain
 // blit above is unchanged.
 //
+// Fit, scale and colour-space attestation and the synthetic control (docs/peer_port_first_ui.md section 15):
+//   - PALMETTO_PRESENT_FIT=fit (off by default) keeps the presented source's aspect ratio inside the window and leaves
+//     the rest of the swapchain image black (present_fit.h) instead of stretching it over the whole client area;
+//   - PALMETTO_PRESENT_GEOMETRY=1 (off by default) prints once the window/monitor/plane geometry the presenter acts on
+//     and once the swapchain format and colour space it chose, so one boot attests fit, scale and colour space;
+//   - PALMETTO_PRESENT_SYNTHETIC=N (off by default, 1..8) presents the presenter's own known 16:9 non-black pattern
+//     instead of the title's plane for the first N presents of the title's own plain present path, through the same
+//     blit, swapchain and capture: the capture then reads the known values and the path is proven end to end.
+// With all three unset the recorded commands, formats and presents are the tree's byte for byte.
+//
 // Tearing on request (PresentX's ImmediateThresholdPercent): with VK_KHR_swapchain_maintenance1 (or the EXT original)
 // the vsync swapchain is created with FIFO plus IMMEDIATE (FIFO_RELAXED when the surface cannot switch to IMMEDIATE),
 // and a present that asks for it is queued in that mode alone. Without the extension, or without either mode, a
@@ -27,6 +37,7 @@
 
 #include "vulkan_backend.h"
 #include "vulkan_present_compose.h"
+#include "present_fit.h"
 
 // Use the original EXT spellings. They are aliases of the promoted KHR types and are available in older headers.
 #if defined(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME) && defined(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME)
@@ -186,6 +197,42 @@ public:
             std::fprintf(stderr, "[rt] present: capture on: every %d presented frame(s), at most %d, into %s\n",
                          capture_every_, capture_limit_, capture_dir_.c_str());
         }
+        // PALMETTO_PRESENT_FIT / PALMETTO_PRESENT_GEOMETRY / PALMETTO_PRESENT_SYNTHETIC: the section-15 measurement and
+        // control switches (see set_fit_rule, set_synthetic_presents and the header comment). All off by default; a
+        // value that is none of the documented spellings is refused by name once and leaves the default in place.
+        if (const char* value = std::getenv("PALMETTO_PRESENT_FIT"); value && *value) {
+            const char* refusal = nullptr;
+            present_fit::Rule parsed = present_fit::Rule::fill;
+            if (present_fit::parse_rule(value, parsed, &refusal)) {
+                fit_rule_ = parsed;
+                std::fprintf(stderr, "[rt] present: fit rule %s: the presented picture %s\n",
+                             present_fit::rule_name(fit_rule_),
+                             fit_rule_ == present_fit::Rule::fit
+                                 ? "keeps its aspect ratio inside the window, the rest of the window black "
+                                   "(PALMETTO_PRESENT_FIT)"
+                                 : "is stretched over the whole window (the measured path)");
+            } else {
+                std::fprintf(stderr, "[rt] present: %s: the fit rule stays fill\n", refusal);
+            }
+        }
+        if (const char* value = std::getenv("PALMETTO_PRESENT_GEOMETRY"); value && *value && std::strcmp(value, "0") != 0)
+            geometry_trace_ = true;
+        if (const char* value = std::getenv("PALMETTO_PRESENT_SYNTHETIC"); value && *value) {
+            char* end = nullptr;
+            const long count = std::strtol(value, &end, 10);
+            if (end && *end == '\0' && count >= 1 && count <= long(synthetic_max_presents)) {
+                synthetic_presents_left_.store(std::uint32_t(count), std::memory_order_relaxed);
+                std::fprintf(stderr,
+                             "[rt] present: synthetic control on: the first %ld present(s) of the plain present path show "
+                             "the presenter's known 16:9 pattern (PALMETTO_PRESENT_SYNTHETIC)\n",
+                             count);
+            } else {
+                std::fprintf(stderr,
+                             "[rt] present: PALMETTO_PRESENT_SYNTHETIC is not a whole number of presents in 1..%u: the "
+                             "title's plane is presented\n",
+                             synthetic_max_presents);
+            }
+        }
         ok_ = recreate(true, false);
         if (!ok_ && capture_to_disk_) {
             // The surface refused a TRANSFER_SRC swapchain, or the staging buffer could not be made: present
@@ -213,6 +260,7 @@ public:
         // A capture still pending has its copy complete once the queue is idle: write it before the buffer goes.
         finish_pending_capture();
         release_capture();
+        release_synthetic();
         composer_.reset();
         for (Frame& frame : frames_) {
             drop_views(frame);
@@ -276,7 +324,12 @@ public:
                             std::uint32_t(source_rect->right) > binding.width ||
                             std::uint32_t(source_rect->bottom) > binding.height))
             return VK_ERROR_UNKNOWN;
-        return submit(&binding, source, vsync, source_rect, detail::is_srgb_format(binding.format), tear);
+        // The section-15 synthetic control substitutes the presented picture inside this same call: the title's plane is
+        // still resolved, validated and (when the pattern is not used) blitted exactly as before, and the swapchain
+        // format family below is the title's own. Off unless PALMETTO_PRESENT_SYNTHETIC/set_synthetic_presents armed it.
+        const bool synthetic = synthetic_presents_left_.load(std::memory_order_relaxed) > 0;
+        return submit(&binding, source, vsync, source_rect, detail::is_srgb_format(binding.format), tear, nullptr,
+                      synthetic);
     }
 
     // PresentX with planes (docs section 4.5): one or two textures, each scaled from its source rectangle to its
@@ -321,6 +374,33 @@ public:
     // Tests, on surfaces without HDR10: compose as if the output were HDR10 but write the PQ values into the (8-bit,
     // UNORM) swapchain, so the encoder can be checked on any GPU. Takes effect with the next present_planes().
     void force_hdr_encoding(bool on) { force_hdr_encoding_ = on; }
+
+    // The fit/scale rule (port/src/present_fit.h) the plain present path and the synthetic control use. fill (the
+    // construction default and the tree's measured path) stretches the source over the whole window; fit keeps the
+    // source rectangle's aspect ratio and centres it, the rest of the swapchain image black. PALMETTO_PRESENT_FIT sets it
+    // at construction; tests set it per object (a GPU test changes only the scale of a present, nothing else). Takes
+    // effect with the next present()/present_blank().
+    void set_fit_rule(present_fit::Rule rule) { fit_rule_ = rule; }
+    present_fit::Rule fit_rule() const { return fit_rule_; }
+
+    // The synthetic non-black control (docs/peer_port_first_ui.md section 15). The next `count` presents through the
+    // title's own plain present path (present(), the path every measured PresentX takes) show the presenter's own known
+    // 16:9 pattern instead of the title's plane: the same swapchain, the same colour-space family, the same blit code and
+    // the same capture, so a capture that reads the known values proves the path end to end; a capture that stays black
+    // would make the presenter the divergence. Bounded to synthetic_max_presents. 0 turns it off. A device that cannot
+    // make the pattern fails the present with VK_ERROR_OUT_OF_HOST_MEMORY and the caller falls back to the title's plane
+    // after the once-only refusal line, so the control can never wedge a boot. PALMETTO_PRESENT_SYNTHETIC=N sets it once.
+    static constexpr std::uint32_t synthetic_max_presents = 8;
+    static constexpr std::uint32_t synthetic_width = 16, synthetic_height = 9;
+    // The pattern: four vertical bands, 4 texels each, RGBA8 UNORM, left to right.
+    static constexpr std::uint8_t synthetic_bands[4][3] = {{204, 51, 102}, {51, 204, 102}, {51, 102, 204}, {255, 255, 255}};
+    void set_synthetic_presents(std::uint32_t count) {
+        synthetic_presents_left_.store(count > synthetic_max_presents ? synthetic_max_presents : count, std::memory_order_relaxed);
+    }
+    std::uint32_t synthetic_presents_left() const { return synthetic_presents_left_.load(std::memory_order_relaxed); }
+    // True when the synthetic pattern image was made and can be presented (false until the first substitution, and for
+    // ever after a device that refused it: the named refusal line says which).
+    bool synthetic_ready() const { return synthetic_ready_; }
 
     // Polled while a present waits for a swapchain image (every 50 ms): when it returns true the present gives up with
     // VK_NOT_READY, so a caller that is being suspended is never held by a window that stopped taking frames.
@@ -381,15 +461,17 @@ public:
     static constexpr std::size_t max_deferred_presents = 8;
 
     VkResult submit(const ResourceBinding* binding, ResourceId source, bool vsync, const PresentRect* source_rect,
-                    bool srgb, bool tear = false, const PresentPlanes* planes = nullptr) {
+                    bool srgb, bool tear = false, const PresentPlanes* planes = nullptr, bool synthetic = false) {
         wait_for_room();
         std::lock_guard lock(present_mutex_);
         // `binding` null and `planes` null: clear instead of blit; `planes`: compose them (`binding`, `source`,
-        // `source_rect` unused). Only a present that reads a texture waits for held work.
+        // `source_rect` unused). `synthetic`: present the presenter's own known pattern instead of the source's picture
+        // (the section-15 control; the source is still resolved and validated by the caller). Only a present that reads a
+        // texture waits for held work.
         if (deferred_.empty() && !((binding || planes) && context_.holds().any_held()))
-            return submit_now(binding, source, vsync, source_rect, srgb, tear, planes);
+            return submit_now(binding, source, vsync, source_rect, srgb, tear, planes, synthetic);
         PendingPresent pending{binding != nullptr, source, vsync, source_rect != nullptr, {}, srgb, tear,
-                               planes != nullptr, {}};
+                               planes != nullptr, {}, synthetic};
         if (source_rect) pending.rect = *source_rect;
         if (planes) pending.planes = *planes;
         deferred_.push_back(pending);
@@ -436,6 +518,7 @@ private:
         bool tear;
         bool has_planes;
         PresentPlanes planes;
+        bool synthetic;
     };
 
     void run_deferred() {
@@ -446,14 +529,14 @@ private:
         ResourceBinding binding{};
         const VkResult result = submit_now(p.has_source ? &binding : nullptr, p.source, p.vsync,
                                            p.has_rect ? &p.rect : nullptr, p.srgb, p.tear,
-                                           p.has_planes ? &p.planes : nullptr);
+                                           p.has_planes ? &p.planes : nullptr, p.synthetic);
         if (result != VK_SUCCESS)
             std::fprintf(stderr, "[rt] d3d12: a Present held behind queued work failed when it was released (%d)\n",
                          int(result));
     }
 
     VkResult submit_now(const ResourceBinding* binding, ResourceId source, bool vsync, const PresentRect* source_rect,
-                        bool srgb, bool tear = false, const PresentPlanes* planes = nullptr) {
+                        bool srgb, bool tear = false, const PresentPlanes* planes = nullptr, bool synthetic = false) {
         last_tore_ = false;
         if (!ok_) return VK_ERROR_INITIALIZATION_FAILED;
         if (surface_lost_) {  // the window's display went away under a presented swapchain
@@ -544,6 +627,13 @@ private:
                     recorded = record_planes(frame, std::uint32_t(frame_index_ % frames_.size()), current, *planes, image);
                 }
             }
+        } else if (binding && synthetic && prepare_synthetic()) {
+            // The section-15 synthetic control: the presenter's own known pattern through this same command buffer,
+            // swapchain and capture. The title's resource is not read and its layout is not touched; a device that cannot
+            // make the pattern was refused once by prepare_synthetic() and falls through to the title's plane below.
+            record_synthetic(frame.commands, image);
+            recorded = true;
+            synthetic_presents_left_.fetch_sub(1, std::memory_order_relaxed);
         } else if (binding) {
             // Lock hierarchy: resource_mutex_ -> tracker_mutex_ -> submit_mutex_ (vulkan_backend.h).
             // record() only touches subresource 0 (mip 0, layer 0, color) of `source`, so saving that one layout
@@ -752,15 +842,27 @@ private:
         const PresentRect& src = source_rect ? *source_rect : whole;
         const std::int32_t sw = src.right - src.left, sh = src.bottom - src.top;
         const std::int32_t dw = std::int32_t(extent_.width), dh = std::int32_t(extent_.height);
+        // Where the picture goes: the whole window (the measured path) or its aspect rectangle centred with black bars
+        // (PALMETTO_PRESENT_FIT=fit, present_fit.h). A device without vkCmdClearColorImage keeps the stretch: uninitialised
+        // window pixels are not a picture either.
+        present_fit::Rect dest = present_fit::scale_rect(sw, sh, dw, dh, fit_rule_);
+        if (present_fit::has_bars(dest, dw, dh) && vk.vkCmdClearColorImage) {
+            const VkClearColorValue black{{0.0f, 0.0f, 0.0f, 1.0f}};
+            vk.vkCmdClearColorImage(commands, images_[image], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+        } else if (present_fit::has_bars(dest, dw, dh)) {
+            dest = {0, 0, dw, dh};  // no clear available: the window is fully covered, as the tree did
+        }
         VkImageBlit blit{};
         blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         blit.srcOffsets[0] = {src.left, src.top, 0};
         blit.srcOffsets[1] = {src.right, src.bottom, 1};
         blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        blit.dstOffsets[1] = {dw, dh, 1};
+        blit.dstOffsets[0] = {dest.left, dest.top, 0};
+        blit.dstOffsets[1] = {dest.right, dest.bottom, 1};
         vkCmdBlitImage_(commands, binding.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, images_[image],
                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
-                        sw == dw && sh == dh ? VK_FILTER_NEAREST : blit_filter(binding.format));
+                        sw == dest.right - dest.left && sh == dest.bottom - dest.top ? VK_FILTER_NEAREST
+                                                                                     : blit_filter(binding.format));
 
         finish_image(commands, image);
         for (const auto& piece : pieces)
@@ -775,6 +877,199 @@ private:
         bool tracked = false;
         VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     };
+
+    // Makes the synthetic control's own resources once: a 16x9 RGBA8_UNORM image holding the four known vertical bands of
+    // synthetic_bands, and the host-visible staging buffer the bands are written into (mapped for the process, so every
+    // substitution re-copies the same known bytes). False after the once-only named refusal when the device cannot do it;
+    // the caller then presents the title's plane, so the control can never wedge a present.
+    bool prepare_synthetic() {
+        if (synthetic_ready_) return true;
+        if (synthetic_failed_) return false;
+        auto& vk = context_.vk;
+        const VkDevice device = context_.device();
+        const auto fail = [&](const char* what, VkResult result) {
+            release_synthetic();
+            synthetic_failed_ = true;
+            std::fprintf(stderr,
+                         "[rt] present: synthetic control refused: %s (VkResult %d): the title's plane is presented\n",
+                         what, int(result));
+            return false;
+        };
+        if (!vk.vkCmdCopyBufferToImage || !vkCmdBlitImage_ || !vkCmdClearColorImage_ || !vkGetPhysicalDeviceMemoryProperties_)
+            return fail("the device is missing a command this control needs", VK_ERROR_FEATURE_NOT_PRESENT);
+        // RGBA8 UNORM is the format the measured path already blits and the capture already reads, and it is the format
+        // family of the title's measured plane (a non-sRGB 8-bit target, docs/first_visible.md section 3).
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties_(physical_, VK_FORMAT_R8G8B8A8_UNORM, &properties);
+        constexpr VkFormatFeatureFlags wanted = VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+        if ((properties.optimalTilingFeatures & wanted) != wanted)
+            return fail("the device cannot use R8G8B8A8_UNORM as a transfer source and destination",
+                        VK_ERROR_FORMAT_NOT_SUPPORTED);
+        VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        image_info.imageType = VK_IMAGE_TYPE_2D;
+        image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+        image_info.extent = {synthetic_width, synthetic_height, 1};
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = 1;
+        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vk.vkCreateImage(device, &image_info, nullptr, &synthetic_image_) != VK_SUCCESS)
+            return fail("creating the synthetic pattern image failed", VK_ERROR_OUT_OF_HOST_MEMORY);
+        VkMemoryRequirements image_requirements{};
+        vk.vkGetImageMemoryRequirements(device, synthetic_image_, &image_requirements);
+        VkPhysicalDeviceMemoryProperties memory{};
+        vkGetPhysicalDeviceMemoryProperties_(physical_, &memory);
+        std::uint32_t type = UINT32_MAX;
+        for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i)
+            if ((image_requirements.memoryTypeBits & (1u << i)) &&
+                (memory.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+                type = i;
+                break;
+            }
+        if (type == UINT32_MAX)
+            return fail("no device-local memory type for the synthetic pattern image", VK_ERROR_OUT_OF_DEVICE_MEMORY);
+        VkMemoryAllocateInfo image_allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        image_allocation.allocationSize = image_requirements.size;
+        image_allocation.memoryTypeIndex = type;
+        if (vk.vkAllocateMemory(device, &image_allocation, nullptr, &synthetic_memory_) != VK_SUCCESS ||
+            vk.vkBindImageMemory(device, synthetic_image_, synthetic_memory_, 0) != VK_SUCCESS)
+            return fail("allocating the synthetic pattern image failed", VK_ERROR_OUT_OF_DEVICE_MEMORY);
+        // The bands' bytes: four 4-texel columns of the 16x9 pattern, written once into a host-coherent staging buffer.
+        constexpr VkDeviceSize staging_size = VkDeviceSize(synthetic_width) * synthetic_height * 4;
+        VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        buffer_info.size = staging_size;
+        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vk.vkCreateBuffer(device, &buffer_info, nullptr, &synthetic_buffer_) != VK_SUCCESS)
+            return fail("creating the synthetic pattern staging buffer failed", VK_ERROR_OUT_OF_HOST_MEMORY);
+        VkMemoryRequirements buffer_requirements{};
+        vk.vkGetBufferMemoryRequirements(device, synthetic_buffer_, &buffer_requirements);
+        std::uint32_t buffer_type = UINT32_MAX;
+        constexpr VkMemoryPropertyFlags host_wanted =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i)
+            if ((buffer_requirements.memoryTypeBits & (1u << i)) &&
+                (memory.memoryTypes[i].propertyFlags & host_wanted) == host_wanted) {
+                buffer_type = i;
+                break;
+            }
+        if (buffer_type == UINT32_MAX)
+            return fail("no host-visible coherent memory type for the synthetic pattern staging buffer",
+                        VK_ERROR_OUT_OF_HOST_MEMORY);
+        VkMemoryAllocateInfo buffer_allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        buffer_allocation.allocationSize = buffer_requirements.size;
+        buffer_allocation.memoryTypeIndex = buffer_type;
+        void* mapped = nullptr;
+        if (vk.vkAllocateMemory(device, &buffer_allocation, nullptr, &synthetic_buffer_memory_) != VK_SUCCESS ||
+            vk.vkBindBufferMemory(device, synthetic_buffer_, synthetic_buffer_memory_, 0) != VK_SUCCESS ||
+            vk.vkMapMemory(device, synthetic_buffer_memory_, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)
+            return fail("mapping the synthetic pattern staging buffer failed", VK_ERROR_OUT_OF_HOST_MEMORY);
+        synthetic_staging_ = static_cast<std::uint8_t*>(mapped);
+        for (std::uint32_t y = 0; y < synthetic_height; ++y)
+            for (std::uint32_t x = 0; x < synthetic_width; ++x) {
+                const std::uint8_t* band = synthetic_bands[(x * 4) / synthetic_width % 4];
+                std::uint8_t* texel = synthetic_staging_ + (std::size_t(y) * synthetic_width + x) * 4;
+                texel[0] = band[0];
+                texel[1] = band[1];
+                texel[2] = band[2];
+                texel[3] = 255;
+            }
+        synthetic_ready_ = true;
+        std::fprintf(stderr,
+                     "[rt] present: synthetic control ready: a %ux%u RGBA8_UNORM pattern of four known vertical bands "
+                     "(%u,%u,%u) (%u,%u,%u) (%u,%u,%u) (%u,%u,%u)\n",
+                     synthetic_width, synthetic_height, synthetic_bands[0][0], synthetic_bands[0][1],
+                     synthetic_bands[0][2], synthetic_bands[1][0], synthetic_bands[1][1], synthetic_bands[1][2],
+                     synthetic_bands[2][0], synthetic_bands[2][1], synthetic_bands[2][2], synthetic_bands[3][0],
+                     synthetic_bands[3][1], synthetic_bands[3][2]);
+        return true;
+    }
+
+    void release_synthetic() {
+        auto& vk = context_.vk;
+        const VkDevice device = context_.device();
+        if (synthetic_buffer_) vk.vkDestroyBuffer(device, synthetic_buffer_, nullptr);
+        if (synthetic_buffer_memory_) vk.vkFreeMemory(device, synthetic_buffer_memory_, nullptr);  // unmaps
+        if (synthetic_image_) vk.vkDestroyImage(device, synthetic_image_, nullptr);
+        if (synthetic_memory_) vk.vkFreeMemory(device, synthetic_memory_, nullptr);
+        synthetic_staging_ = nullptr;
+        synthetic_buffer_ = VK_NULL_HANDLE;
+        synthetic_buffer_memory_ = VK_NULL_HANDLE;
+        synthetic_image_ = VK_NULL_HANDLE;
+        synthetic_memory_ = VK_NULL_HANDLE;
+        synthetic_image_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+        synthetic_ready_ = false;
+    }
+
+    // Records one synthetic-control present to swapchain image `image`: the known bands are copied into the pattern
+    // image, the pattern goes to TRANSFER_SRC and is blitted into the fit rectangle of the swapchain image (black bars
+    // outside it), and finish_image() adds the capture copy and the present transition exactly as a title plane's
+    // present does. The title's own resource is not read and its layout is not touched.
+    void record_synthetic(VkCommandBuffer commands, std::uint32_t image) {
+        auto& vk = context_.vk;
+        const ReplayFunctions& fn = context_.replay_;
+        vk.vkResetCommandBuffer(commands, 0);
+        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vk.vkBeginCommandBuffer(commands, &begin);
+        const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VkImageMemoryBarrier pattern{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        pattern.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        pattern.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        pattern.image = synthetic_image_;
+        pattern.subresourceRange = range;
+        pattern.oldLayout = synthetic_image_layout_;
+        pattern.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        pattern.srcAccessMask = synthetic_image_layout_ == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_TRANSFER_READ_BIT;
+        pattern.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vk.vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                                nullptr, 0, nullptr, 1, &pattern);
+        VkBufferMemoryBarrier staged{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        staged.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        staged.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        staged.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        staged.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        staged.buffer = synthetic_buffer_;
+        staged.size = VK_WHOLE_SIZE;
+        vk.vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
+                                1, &staged, 0, nullptr);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {synthetic_width, synthetic_height, 1};
+        vk.vkCmdCopyBufferToImage(commands, synthetic_buffer_, synthetic_image_,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        pattern.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        pattern.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        pattern.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        pattern.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vk.vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                                nullptr, 0, nullptr, 1, &pattern);
+        synthetic_image_layout_ = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        // The swapchain image: the black bars first when the fit rule leaves any, then the pattern in its rectangle.
+        ResourceBinding target = target_of(image);
+        detail::image_barrier(fn, commands, target, range, VK_IMAGE_LAYOUT_UNDEFINED,
+                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        const std::int32_t dw = std::int32_t(extent_.width), dh = std::int32_t(extent_.height);
+        const present_fit::Rect dest = present_fit::scale_rect(synthetic_width, synthetic_height, dw, dh, fit_rule_);
+        if (present_fit::has_bars(dest, dw, dh)) {
+            const VkClearColorValue black{{0.0f, 0.0f, 0.0f, 1.0f}};
+            vkCmdClearColorImage_(commands, images_[image], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+        }
+        VkImageBlit blit{};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.srcOffsets[1] = {std::int32_t(synthetic_width), std::int32_t(synthetic_height), 1};
+        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.dstOffsets[0] = {dest.left, dest.top, 0};
+        blit.dstOffsets[1] = {dest.right, dest.bottom, 1};
+        vkCmdBlitImage_(commands, synthetic_image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, images_[image],
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+        finish_image(commands, image);
+        vk.vkEndCommandBuffer(commands);
+    }
 
     void drop_views(Frame& frame) {
         for (VkImageView& view : frame.views)
@@ -1241,6 +1536,18 @@ private:
                     break;
                 }
         }
+        // PALMETTO_PRESENT_GEOMETRY=1: the section-15 attestation, once per presenter: the swapchain geometry and the
+        // colour-space handling the measured present path acts on. Measurement only; nothing here reads the switch later.
+        if (geometry_trace_ && !geometry_logged_) {
+            geometry_logged_ = true;
+            std::fprintf(stderr,
+                         "[rt] present geometry: swapchain %ux%u, format %d (%s), colour space %d, source format family %s, "
+                         "HDR10 request %s (surface has the format: %s), capture %s; the extent is the window's client "
+                         "area\n",
+                         extent.width, extent.height, int(chosen.format), capture_format_name(chosen.format),
+                         int(chosen.colorSpace), srgb ? "sRGB" : "UNORM", hdr ? "yes" : "no", chose_hdr ? "yes" : "no",
+                         capture_ ? "on" : "off");
+        }
         if (vkGetPhysicalDeviceSurfacePresentModesKHR_(physical_, surface_, &count, nullptr) != VK_SUCCESS || !count)
             return false;
         std::vector<VkPresentModeKHR> modes(count);
@@ -1455,6 +1762,21 @@ private:
     int capture_limit_ = 24;  // files at most
     VkFence pending_capture_ = VK_NULL_HANDLE;  // owns the shared staging bytes until written
     std::uint64_t capture_written_ = 0;
+    // The section-15 fit/geometry/synthetic switches (present_fit.h and the header comment). fit_rule_ is the whole
+    // difference PALMETTO_PRESENT_FIT can make; geometry_trace_ only prints; the synthetic fields own the control's own
+    // pattern image, staging buffer and remaining count, none of which is touched while PALMETTO_PRESENT_SYNTHETIC is off.
+    present_fit::Rule fit_rule_ = present_fit::Rule::fill;
+    bool geometry_trace_ = false;
+    bool geometry_logged_ = false;
+    std::atomic<std::uint32_t> synthetic_presents_left_{0};
+    bool synthetic_ready_ = false;
+    bool synthetic_failed_ = false;
+    VkImage synthetic_image_ = VK_NULL_HANDLE;
+    VkDeviceMemory synthetic_memory_ = VK_NULL_HANDLE;
+    VkBuffer synthetic_buffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory synthetic_buffer_memory_ = VK_NULL_HANDLE;
+    std::uint8_t* synthetic_staging_ = nullptr;
+    VkImageLayout synthetic_image_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
 
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR vkGetPhysicalDeviceSurfaceSupportKHR_ = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR vkGetPhysicalDeviceSurfaceCapabilitiesKHR_ = nullptr;

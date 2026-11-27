@@ -843,3 +843,182 @@ whose consumer is the title's 120 Hz check); XCL's `crates/xcl/src/hle/xgamerunt
 was copied: the answer rule, the DXGI probe, the power-request table, the probes and the tests are ours, derived from
 the call sites, the runtime arms and the unit tests above. The peers remain the copyright of their contributors and
 their licences continue to apply to their own trees.
+
+## 15. The implemented port: presenter fit/scale/colour-space attestation and a synthetic non-black present control (P7)
+
+This section is the record of the P7 slice in section 7. It was built from this tree's own measurements of the user's
+image, with the peers' mechanisms read as evidence only, as [upstream_port.md](upstream_port.md) requires; section 15.7
+repeats the credit. Status in one statement: **implemented, opt-in and off by default, with the pure and GPU tests green
+and two light arms taken; the arms attest the presenter end to end (a known non-black pattern reaches the presenter
+capture with its exact expected values, in both the measured stretch and the fitted rule) and both then lost the host
+device, so the two-loss stop rule ended the boots before stage 3.** The fit rule is the one measured divergence and is
+opt-in: the default present path is unchanged byte for byte.
+
+### 15.1 What was measured before the port
+
+Everything below is either a measurement of the current tree's present path in the two arms of 15.4 or a fact already
+recorded on a cited page. No game data and no package path is quoted: formats, extents, words and means only.
+
+| measurement | value and where |
+|---|---|
+| the window the presenter adopts | the title's own `sgaWindowClass` window: client 2564x1421 (aspect 1.804), outer 2580x1460; the monitor as the process sees it is 2560x1440 at 0,0 with a 2560x1392 work area (15.4's geometry line; [window.md](window.md) section 5) |
+| the process's DPI view | the host's physical output is 3840x2160 at 150% (the host probe of [peer_port_first_ui.md](peer_port_first_ui.md) section 14.1's arm was SDR; the resolution is this slice's host measurement), while the boot process reports a 2560x1440 monitor: the process is DPI-unaware, so the window's 2580x1460 outer rectangle is 20x20 pixels larger than its virtualized monitor. The title's window is therefore the "oversized window" a PC layer has to fit |
+| the swapchain | 2564x1421 (the window's client area, the presenter's `extent_fn`), `VK_FORMAT_B8G8R8A8_UNORM` (format 44), colour space 0 (`VK_COLOR_SPACE_SRGB_NONLINEAR_KHR`), source format family UNORM, no HDR10 request and no ST.2084 surface format; the capture copies the same extent and format |
+| the presented plane | 1 plane: 3840x2160, D3D12 format 28 (`R8G8B8A8_UNORM`, the replay layer's `VK_FORMAT_R8G8B8A8_UNORM`, "format 37"); colour-space word 0 (G22/P709 SDR), `ScaleFilter` 0, `Flags` 0x0; source rectangle 0,0..3840,2160 and placement 0,0..1,1, i.e. the whole plane to the whole output. The present path's placement validation maps the whole-output placement to none, so the plain blit path runs and the compose pass does not, which the arms confirm: the synthetic control substitutes only inside `present()`, and both arms' captures are the pattern |
+| the default fit | the plain blit stretches the whole source to the whole client area: scale x 2564/3840 = 0.6677, y 1421/2160 = 0.6579, so the 16:9 plane is shown about 1.5% horizontally stretched against its own aspect ratio and there are no bars |
+| the default scale filter | bilinear when the scale differs (the source format allows linear filtering), nearest when the blit is 1:1; the capture copies the swapchain image's bytes, so the mean is in the output's encoded 8-bit values and no transfer decode is applied to the readback |
+| the colour-space rule | the swapchain's format family follows the presented source's format family: an sRGB source gets an sRGB swapchain (the blit's decode and encode cancel), any other source a UNORM one; an HDR10 plane asks for the surface's ST.2084 format. On the measured plane (UNORM 8-bit, colour-space word 0) the chosen output is UNORM 8-bit with the sRGB-nonlinear colour space, and the UNORM-to-UNORM blit is an exact value copy: 15.4's band means are the pattern's own bytes |
+| the console/peer model | a console presents its output plane to a fixed-aspect display, so the picture's aspect ratio is the plane's; Five Star Recomp fits its oversized window to the monitor, scales the plane into the client area as its aspect rectangle over black bars (its PresentScaler) and picks the swap-chain colour space from the plane's format family, and the other peers present the console plane whole. The colour-space family rule is what the tree already measured as its own behaviour; the fit is not |
+| the divergence | geometry only: the tree stretches where the console/peer model preserves the plane's aspect ratio, and it does not fit the title's oversized window. The scale filter and the colour-space family rule are measured equal |
+
+The two readings that decided the design: (1) the picture geometry is the only measured difference, so the port has to be a
+fit rule and nothing else about which texture, which colour space or which filter; (2) the present path cannot be judged
+from a black content frame, so the control has to present a known non-black source through the same call, and the capture
+has to read its exact values.
+
+### 15.2 What was implemented
+
+| change | what it is |
+|---|---|
+| new include-only header [port/src/present_fit.h](../port/src/present_fit.h) | the pure fit/scale rule: `Rule` `fill`/`fit`, `scale_rect` (integer pixels, nearest-pixel rounding, source aspect preserved, centred, the rest of the output black), `has_bars`, and the `PALMETTO_PRESENT_FIT` parser with a named refusal. No Vulkan dependency, so the whole rule is testable without a GPU |
+| [port/src/vulkan_present.h](../port/src/vulkan_present.h), the fit rule | `record()` blits into the rule's destination rectangle; under `fit` the swapchain image is cleared to black first when the rectangle leaves bars, and a device without `vkCmdClearColorImage` keeps the stretch rather than writing uninitialised pixels. The filter stays the measured one (nearest only when source and destination are the same size). The compose path keeps the title's own placements: the measured plane never composes |
+| [port/src/vulkan_present.h](../port/src/vulkan_present.h), the attestation | `PALMETTO_PRESENT_GEOMETRY=1` prints once the swapchain extent, chosen format name and number, colour space number, source format family, HDR10 request/availability and capture state, so one boot attests the colour-space decision instead of inferring it from code |
+| [port/src/vulkan_present.h](../port/src/vulkan_present.h), the synthetic control | `PALMETTO_PRESENT_SYNTHETIC=N` (1..8) presents the presenter's own known 16:9 pattern instead of the title's plane for the first N presents of the title's own plain present path. The pattern is a 16x9 `R8G8B8A8_UNORM` image of four known vertical bands - (204,51,102), (51,204,102), (51,102,204), (255,255,255), four texels each - filled once from a mapped staging buffer and blitted by the same command buffer, swapchain, format family and capture the title's present uses; the title's own resource is not read and its tracked layout is not touched. Bounded to 8 presents; the resources are made lazily and a device that cannot make them is refused by name once, after which the title's plane is presented as before; unset/empty/non-numeric or out-of-range values are refused by name and the title's plane is presented |
+| [port/shims/xbox_present.cpp](../port/shims/xbox_present.cpp), the geometry attestation | `PALMETTO_PRESENT_GEOMETRY=1` prints once the window's client/outer rectangle, the monitor and work area as this process sees them, and once the plane words (count, width, height, format, colour space, scale filter, flags, source rectangle, placement), the swapchain extent, the fit rule and the resulting picture rectangle with its x/y scale. Measurement only: the path answers nothing differently when it is on |
+| [port/test/vk_presenter_sync_test.cpp](../port/test/vk_presenter_sync_test.cpp), [port/test/vk_presenter_capture_colour_test.cpp](../port/test/vk_presenter_capture_colour_test.cpp) | the pure rule/parser cases and the GPU cases of 15.3 |
+
+**The switches.** All three are off by default and read once per process. `PALMETTO_PRESENT_FIT` takes
+unset/empty/`0`/`off`/`false`/`no`/`fill`/`stretch` as `fill` (the tree's measured path) and
+`1`/`on`/`true`/`yes`/`fit`/`aspect`/`letterbox` as `fit`; anything else is refused by name, leaves `fill`, and is printed
+once (`PALMETTO_PRESENT_FIT is not fill/off or fit/on: refusing to guess the present geometry`).
+`PALMETTO_PRESENT_SYNTHETIC` takes a whole number 1..8; the refusal is
+`PALMETTO_PRESENT_SYNTHETIC is not a whole number of presents in 1..8`. `PALMETTO_PRESENT_GEOMETRY=1` (or any value that is
+not `0`) turns the two attestation lines on.
+
+**The switch-off proof.** With all three unset the presenter's chosen rule is `fill`, whose destination rectangle is the
+whole output and whose `has_bars` is false, so `record()` records exactly the same barriers, blit offsets and filter as
+before, the synthetic branch is never taken, and the attestation prints nothing; the only added work is three `getenv`
+reads at construction. The A/B for the fit rule is therefore the two arms of 15.4, whose captures are the synthetic
+pattern in both, and the GPU test pins the same two rectangles.
+
+### 15.3 Tests
+
+| target | what it covers | result |
+|---|---|---|
+| `vk_presenter_capture_colour` (`port/test/vk_presenter_capture_colour_test.cpp`) | the pure fit/scale rule and parser: `fill` covers the whole output for three aspect ratios; the measured plane in the measured window fits to 19,0..2545,1421 with 19-pixel bars; exact aspect leaves no bars; a 16:9 source in a 128x96 window becomes 0,12..128,84; a square source is pillarboxed to 96 pixels with 16 on each side; a 4:3 source in the measured window is 1895 wide and centred at 334; every 1..40x1..40 output keeps the picture inside the output with bars within one pixel of each other; a zero, negative or negative-size source keeps the whole-output rectangle (never a guessed geometry); the parser accepts all off/fill and on/fit spellings (case and blanks included) and refuses `2`, `banana`, `fitt`, `offf` and `fit fill` with the named reason while leaving the caller's value alone | the target exits 0 and prints `present fit/scale rule: fill, fit and the switch spellings ok` (47 `EXPECT` checks in the file, most inside the 1..40 loops) |
+| `vk_presenter_sync` (`port/test/vk_presenter_sync_test.cpp`, section 2d) | the GPU path through the same `present()` the title uses: a 16:9 source cleared to (51,153,230) covers the whole 128x96 window under `fill` and, under `fit`, sits in 0,12..128,84 with black bars above and below; the synthetic control then presents its four bands through the same call and capture, each band's centre reads its own exact colour (tolerance 2), the title resource's tracked layout is unchanged, `synthetic_ready()` becomes true and the armed count is consumed; the same pattern under `fit` reads inside 0,12..128,84 with a black bar at row 6 | exits 0 after the four section-5 lines; the test's 110 `EXPECT` checks include the new ones |
+| the tree's existing presenter tests | `xbox_present` (the whole PresentX/frame-event/window suite), `xs_proxy_mock` (the hook-only proxy path), `frame_pacer` and `unimplemented_policy` | all pass unchanged: `xbox_present_test: all cases pass`, `xs_proxy_mock_test: PASS`, `frame_pacer_test: all cases pass`, `unimplemented_policy_test: 98 checks, 0 failed` |
+
+### 15.4 The arms
+
+Two light boots under the shared lock, one at a time, with the section-12 content environment and
+`PALMETTO_TITLE_CLASS0A_SIZE=1` in both, and the arm's own switches added: `PALMETTO_PRESENT_GEOMETRY=1`,
+`PALMETTO_PRESENT_SYNTHETIC=8`, `PALMETTO_CAPTURE_EVERY=1`, `PALMETTO_CAPTURE_LIMIT=8`; arm A adds
+`PALMETTO_PRESENT_FIT=fill` (the default rule) and arm B `PALMETTO_PRESENT_FIT=fit`. The two binaries differ only by a
+printout improvement made between them (the plane line prints the source rectangle and placement numerically in arm B);
+the fit/synthetic behaviour is identical. Each arm reached the first present, presented the pattern for its first eight
+frames, and then the host dropped the device: one loss in each arm, so the two-loss stop rule ended the boots (no third
+arm, no stage-3 window).
+
+| measurement | arm A: rule `fill` | arm B: rule `fit` |
+|---|---|---|
+| binary (SHA-256 first 16) | `988FAE9EED74D47D` | `4D894B2E2959D64C` |
+| limit / verdict | 90 s limit; STOP `game+0x559468F` reading `0x1ea00000008`, exit `0xC0000005`, wall 69.9 s | 90 s limit; STOP `game+0x86F9DF` reading `0x3506e`, exit `0xC0000005`, wall 66.8 s |
+| device loss | 1, `[rt] replay: the Vulkan device was lost` at timeline t=69,492.0 ms, before the stop | 1, same line at timeline t=69,605.5 ms, before the stop |
+| title window line | client 2564x1421 (aspect 1.804), outer 2580x1460; monitor 2560x1440 at 0,0, work 2560x1392 (the process's DPI-virtualized view) | identical |
+| presented plane line | 1 plane, plane 0 3840x2160 format 28 colour space 0 scale filter 0 flags 0x0, source rect and placement set to the whole plane/output; the presenter's swapchain 2564x1421 | the same, with the rectangles printed numerically: source rect 0,0..3840,2160, placement 0,0..1,1 |
+| presenter colour line | swapchain 2564x1421, format 44 (`VK_FORMAT_B8G8R8A8_UNORM`), colour space 0, source format family UNORM, HDR10 request no (surface has the format: no), capture on | identical |
+| fit rule line / picture rectangle | `fill`: picture 0,0..2564,1421, scale 0.6677 x 0.6579 (the plane stretched to the window) | `fit`: picture 19,0..2545,1421, scale 0.6578 x 0.6579 (aspect preserved, 19-pixel black bars left and right) |
+| synthetic control / capture frame count | on, 8 presents; 8 captures, extent 2564x1421, format 44 | on, 8 presents; 8 captures, extent 2564x1421, format 44 |
+| captured band means (left to right) | 204,51,102 / 51,204,102 / 51,102,204 / 255,255,255 | 204,51,102 / 51.24,203.76,102 / 51,102,204 / 254.68,254.76,254.92 |
+| bars | none (the picture is the whole window) | left and right bars mean `0.00 0.00 0.00` |
+| picture mean / whole-frame mean | picture = whole window: `140.25 153.00 165.75` = the four bands' exact mean | picture `140.24 152.94 165.74`; whole frame `138.16 150.67 163.28` (= the picture mean times the 2526/2564 content fraction, within 0.06) |
+| frames identical | all 8 captures have the same whole-frame mean | all 8 captures have the same whole-frame mean |
+| `PresentX` at the stop | 2,618 ok / 1 failed (the present attempted after the loss) | 1,773 ok / 1 failed (the same) |
+| state words at the last sample | at 66.0 s: init 2 (change 20.0 s), loading 2 (64.0 s), session 1 (64.0 s), machine current/next 2/2, boot-media gate 0x2, platform gate 0x101, loading-active 0x1, movie player state 0x3 with `buffers 0`, front-end ready 1 running 1, high-refresh flag 0 refresh 60/1 | at 64.0 s: init 2 (change 30.0 s), loading 2 (62.0 s), session 1 (62.0 s), machine 2/2, the same gate, platform, loading-active, movie and front-end words, high-refresh 0 refresh 60/1 |
+
+The state-word columns are the same words at each arm's last sample; only the change times differ, and those differ by the
+arms' own boot timing (the same difference the earlier sections record between arms of one binary). Both arms stop in the
+post-device-loss title crash family the page's earlier sections record, one loss each.
+
+### 15.5 Verdict, limits and the next falsifier
+
+**Verdict: the presenter shows known content end to end, and the only measured geometry divergence was real.** The
+synthetic pattern reached the presenter capture through the title's own `PresentX` present path with its exact expected
+values in both arms (each band's bytes, and the fitted picture's mean), so the blit, the swapchain format family, the
+colour-space choice and the capture are not the reason the content frames read black: the content frames' source is black
+(`0/8,294,400` non-black in the earlier readbacks). The geometry attestation shows the measured tree stretched a 16:9 plane
+into a 1.804-aspect client area (0.6677 x 0.6579) and left no bars, while the opt-in `fit` rule produces a centred
+19-pixel-pillarboxed picture (0.6578 x 0.6579). The title state does not move with the rule: the same state words and the
+same movie/front-end words at each arm's last sample, and the synthetic control only replaces the presented picture. The
+colour-space rule measured as the peers' - the swapchain family follows the plane's format family, and a UNORM-to-UNORM
+blit copies values exactly - is recorded as parity, not as a port.
+
+Limits:
+
+- **The control substitutes the source, it does not read the title's resource.** The title's resource identity as the
+  presented plane is already measured ([vertex_buffer_va.md](vertex_buffer_va.md) section 10.2, the write control's
+  `51 102 204` readback and the movie-frame present test in `port/test/d3d12_boot_movie_test.cpp`); the control proves the
+  conversion and capture after that resource, not the resource selection.
+- **The fit rule is opt-in and this content proves the geometry, not the picture.** There is no non-black content frame to
+  judge, so the default stays `fill` (the tree's measured path, byte for byte). What would make `fit` the default is a boot
+  with a real content frame in the window whose correct picture is the plane's aspect ratio and whose title UI is not laid
+  out for the stretched window: the same two arms then compare a content capture, not the pattern.
+- **No window fitting was implemented.** The attestation measures the title's oversized window (2580x1460 outer on a
+  2560x1440 virtualized monitor) and the DPI-unaware process view; resizing the title's own window is a behaviour change
+  outside the presenter's present path (five-star fits its own window, not the title's), and the next falsifier for it is
+  a boot in which the title's window rectangle is outside the monitor in physical pixels as well.
+- **The colour path is attested on this host only.** SDR, 8-bit, UNORM, sRGB-nonlinear output; an HDR10 surface, a
+  10-bit swapchain and an sRGB-family source are covered by the compose pass's existing tests, not by these two arms, and
+  the next falsifier is the same boot on an HDR10 output where the geometry line must print the ST.2084 format and the
+  capture's colour space number must change accordingly.
+- **The compose path is not refitted.** A plane with its own placement keeps the title's placement; only the plain blit
+  path (the measured path, which this title always takes) gets the rule. A title-presented second plane or an explicit
+  placement would need a rule of its own.
+- **The two arms lost the host device.** Both losses are the host family the page records, each at about 69.5 s of trace
+  clock, after the eight synthetic captures; no stage-3 window exists in this pair and the two-loss rule ended the boots.
+  The synthetic captures and the geometry lines are all before the loss and are unaffected.
+
+### 15.6 Files, gates and the index row
+
+- **Files changed by this slice**: the new include-only [port/src/present_fit.h](../port/src/present_fit.h),
+  [port/src/vulkan_present.h](../port/src/vulkan_present.h) (the fit rule in `record()`, the swapchain colour/geometry
+  attestation in `recreate()`, the synthetic control and its resources, the three switch parsers, the test hooks),
+  [port/shims/xbox_present.cpp](../port/shims/xbox_present.cpp) (the window/plane geometry attestation and its
+  switch), [port/test/vk_presenter_capture_colour_test.cpp](../port/test/vk_presenter_capture_colour_test.cpp) (the pure
+  rule/parser section), [port/test/vk_presenter_sync_test.cpp](../port/test/vk_presenter_sync_test.cpp) (the GPU section 2d)
+  and this section of `docs/peer_port_first_ui.md`. No shim interface, device proxy, build file, README or NOTICE file
+  changed; `xbox_present.h` and `vulkan_present_compose.h` are unchanged, and the default present path is unchanged when
+  the three switches are unset.
+- **Gates on this tree**: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK` on the final tree,
+  `_setup\build_tests.cmd` prints `TESTS_BUILT`, the GPU-free targets above pass, the two GPU presenter targets pass on the
+  RTX 4090 host (`vk_presenter_sync_test: ok`, `xbox_present_test: all cases pass`), and the docs checks run with the
+  session's broken `GIT_CONFIG_*` variables cleared. This section names `PALMETTO_PRESENT_FIT`,
+  `PALMETTO_PRESENT_GEOMETRY` and `PALMETTO_PRESENT_SYNTHETIC` as whole words, so the environment-variable check finds
+  them.
+- **Index row**: [docs/README.md](README.md) already carries this page's row; the lead may extend its description with
+  "presenter fit/scale/colour-space attestation and a synthetic non-black control (section 15)".
+- **Stale neighbour rows**: [first_visible.md](first_visible.md) T3 ("a synthetic non-black present control ... not
+  covered") and its D5 row ("the presenter stretches and presents the plane") are now measured by this section; that page
+  is outside this slice's write scope, so the lead should refresh those two cells.
+- **NOTICE row needed**: the attribution paragraph of 15.7, appended to the existing "Implemented peer ports (reference
+  only)" section of [NOTICE.md](../NOTICE.md), with the peer commits refreshed to `ce2b333b` for Five Star Recomp.
+- **Evidence (outside the repository)**: `D:\leonida-work\fsrstable\boot-portfit-fill1`, `boot-portfit-fit1`,
+  `capture-portfit-fill1` and `capture-portfit-fit1` (stderr/stdout/summary/boot trace/meta plus the eight presenter PPMs
+  each) and `D:\leonida-work\portpresentfit\present_fit_arm.py`, the band/bar analysis of those captures. Extents, format
+  numbers, words and image means only; no game data and no peer code.
+- **No git write**: the lead commits the uncommitted list.
+
+### 15.7 Attribution
+
+This slice was implemented from this project's own measurements (the window, plane and swapchain words above, the two
+arms and the capture analysis, and the pure/GPU tests). The behaviour was cross-checked against the public GPL projects
+named in section 11, read as evidence only: Five Star Recomp's
+[d3d12x-shim.md](https://github.com/ThatRecompDev/five-star-recomp/blob/45071d52/docs/d3d12x-shim.md) at `45071d52`
+(Present: an oversized window fitted to the monitor, the plane scaled into the client area as its aspect rectangle over
+black bars, and the swap-chain colour space picked from the plane's format family), refreshed at `ce2b333b`; VIctory's
+presenter at `63bcca4` and PercyScarlett's present and stretch files at `e44c465` (a console plane presented whole, and the
+stretch stand-in) as the other ends of the comparison. No code, comment text, identifier or table from those projects was
+copied into this tree: the fit rule, the attestation lines, the synthetic pattern, the resource handling, the switch
+parsers and the tests are ours, derived from the measurements above. The peers remain the copyright of their contributors
+and their licences continue to apply to their own trees.

@@ -5,6 +5,7 @@
 
 #include "../src/vulkan_present.h"
 #include "../src/plane_compose_rule.h"  // docs/peer_port_movie.md: the measured second-plane rule
+#include "../src/present_fit.h"         // docs/peer_port_first_ui.md section 15: the fit/scale rule and its attestation
 
 #include <cerrno>
 #include <chrono>
@@ -62,6 +63,95 @@ void trace_present_pacing(palmetto::FramePacer& pacer, std::uint64_t token) {
                  pacer.present_driven() ? "present-driven" : "grid", pacer.display_cadence_us(),
                  static_cast<unsigned long long>(pacer.flipped_token()),
                  static_cast<unsigned long long>(pacer.present_clock_fallbacks()));
+}
+
+// PALMETTO_PRESENT_GEOMETRY=1: the section-15 geometry attestation (docs/peer_port_first_ui.md). Off by default, and a
+// measurement only: nothing on the present path reads it to answer anything. On, the first present prints the window
+// (client, outer, monitor, work area as this process sees them), the plane words the present path acts on, the fit rule
+// and the output rectangle the picture will occupy, and the presenter prints the swapchain format and colour space it
+// chose. One boot then attests fit, scale and colour space instead of inferring them from the code.
+bool geometry_trace() {
+    static const bool on = [] {
+        char value[24] = {};
+        std::size_t length = 0;
+        return getenv_s(&length, value, "PALMETTO_PRESENT_GEOMETRY") == 0 && length > 1 && value[0] != '0';
+    }();
+    return on;
+}
+
+// The fit rule the presenter was built with, from the same variable (the presenter parses it too; this copy only names
+// it in the attestation line and never changes the presenter).
+palmetto::present_fit::Rule fit_rule_from_env() {
+    static const palmetto::present_fit::Rule rule = [] {
+        char value[32] = {};
+        std::size_t length = 0;
+        palmetto::present_fit::Rule parsed = palmetto::present_fit::Rule::fill;
+        if (getenv_s(&length, value, "PALMETTO_PRESENT_FIT") == 0 && length > 1) {
+            const char* refusal = nullptr;
+            if (!palmetto::present_fit::parse_rule(value, parsed, &refusal)) parsed = palmetto::present_fit::Rule::fill;
+        }
+        return parsed;
+    }();
+    return rule;
+}
+
+// The window half of the geometry attestation, from the presentation service, which owns the window handle.
+void attest_window_geometry(HWND window) {
+    static std::atomic<bool> done{false};
+    if (!geometry_trace() || done.exchange(true, std::memory_order_relaxed)) return;
+    RECT client{};
+    RECT outer{};
+    if (!window || !GetClientRect(window, &client) || !GetWindowRect(window, &outer)) {
+        std::fprintf(stderr, "[rt] present geometry: the window has no measurable client area\n");
+        return;
+    }
+    MONITORINFO monitor_info{};
+    monitor_info.cbSize = sizeof monitor_info;
+    const HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+    const bool have_monitor = monitor && GetMonitorInfoW(monitor, &monitor_info);
+    const double aspect = client.bottom ? double(client.right) / double(client.bottom) : 0.0;
+    std::fprintf(stderr,
+                 "[rt] present geometry: window client %ldx%ld (aspect %.3f), outer %ldx%ld; monitor %ldx%ld at %ld,%ld, "
+                 "work area %ldx%ld at %ld,%ld (the process's own DPI-virtualized view)\n",
+                 client.right, client.bottom, aspect, outer.right - outer.left, outer.bottom - outer.top,
+                 have_monitor ? monitor_info.rcMonitor.right - monitor_info.rcMonitor.left : 0,
+                 have_monitor ? monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top : 0,
+                 have_monitor ? monitor_info.rcMonitor.left : 0L, have_monitor ? monitor_info.rcMonitor.top : 0L,
+                 have_monitor ? monitor_info.rcWork.right - monitor_info.rcWork.left : 0,
+                 have_monitor ? monitor_info.rcWork.bottom - monitor_info.rcWork.top : 0,
+                 have_monitor ? monitor_info.rcWork.left : 0L, have_monitor ? monitor_info.rcWork.top : 0L);
+}
+
+// The plane half of the geometry attestation: the plane words, the swapchain extent and where the picture goes under
+// the rule in force (fill: the whole window; fit: the source's aspect ratio centred, the rest black).
+void attest_plane_geometry(UINT plane_count, const XboxPresentPlaneParameters* planes, int output_width,
+                           int output_height, palmetto::present_fit::Rule rule) {
+    static std::atomic<bool> done{false};
+    if (!geometry_trace() || !plane_count || !planes || done.exchange(true, std::memory_order_relaxed)) return;
+    ID3D12Resource* resource = planes[0].ppResources ? planes[0].ppResources[0] : nullptr;
+    if (!resource) return;
+    const D3D12_RESOURCE_DESC desc = resource->GetDesc();
+    const auto* src_rect = planes[0].pSrcViewRects;
+    const auto* place = planes[0].pDestPlacementBase;
+    const std::int32_t source_width =
+        src_rect ? std::int32_t(src_rect->right - src_rect->left) : std::int32_t(desc.Width);
+    const std::int32_t source_height = src_rect ? std::int32_t(src_rect->bottom - src_rect->top) : std::int32_t(desc.Height);
+    const palmetto::present_fit::Rect picture =
+        palmetto::present_fit::scale_rect(source_width, source_height, output_width, output_height, rule);
+    const double scale_x = source_width > 0 ? double(picture.right - picture.left) / double(source_width) : 0.0;
+    const double scale_y = source_height > 0 ? double(picture.bottom - picture.top) / double(source_height) : 0.0;
+    std::fprintf(stderr,
+                 "[rt] present geometry: %u plane(s), plane 0 %llux%u format %u colour space %d scale filter %d flags 0x%x, "
+                 "source rect %s%ld,%ld..%ld,%ld, placement %s%.3f,%.3f..%.3f,%.3f; swapchain %dx%d; rule %s -> picture "
+                 "%d,%d..%d,%d (scale %.4f x %.4f)\n",
+                 plane_count, static_cast<unsigned long long>(desc.Width), desc.Height, unsigned(desc.Format),
+                 planes[0].ColorSpace, planes[0].ScaleFilter, planes[0].Flags, src_rect ? "" : "none ",
+                 src_rect ? src_rect->left : 0L, src_rect ? src_rect->top : 0L, src_rect ? src_rect->right : 0L,
+                 src_rect ? src_rect->bottom : 0L, place ? "" : "none ",
+                 static_cast<double>(place ? place->left : 0.0f), static_cast<double>(place ? place->top : 0.0f),
+                 static_cast<double>(place ? place->right : 0.0f), static_cast<double>(place ? place->bottom : 0.0f),
+                 output_width, output_height, palmetto::present_fit::rule_name(rule), picture.left, picture.top,
+                 picture.right, picture.bottom, scale_x, scale_y);
 }
 
 // PALMETTO_PRESENT_PLANE_RULE=measured: the measured second-plane rule (port/src/plane_compose_rule.h) replaces the
@@ -343,6 +433,13 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
             log_once(logged_resource_count_, "PresentX plane with ResourceCount other than 1: not implemented, refused");
             return DXGI_ERROR_UNSUPPORTED;
         }
+    }
+    // PALMETTO_PRESENT_GEOMETRY=1: once, the plane words and the geometry the presenter acts on (docs/peer_port_first_ui.md
+    // section 15). The swapchain extent is the window client area the swapchain was made for. Nothing is read or printed
+    // when the switch is off.
+    if (geometry_trace()) {
+        const VkExtent2D output = presenter_->extent();
+        attest_plane_geometry(plane_count, planes, int(output.width), int(output.height), fit_rule_from_env());
     }
     // Only a token that was never handed out is refused. Null, stale and repeated tokens are presented anyway (what the
     // console does with them is unmeasured, and a title that does it must not freeze); each kind is logged once.
@@ -745,6 +842,7 @@ HRESULT PresentService::present(std::uint32_t plane_count, const XboxPresentPlan
     std::lock_guard guard(mutex);
     XboxPresentation* target = ensure();
     if (!target) return DXGI_ERROR_UNSUPPORTED;  // logged by ensure(); nothing presented
+    attest_window_geometry(window.window);  // PALMETTO_PRESENT_GEOMETRY=1: once, see the helper
     const HRESULT result = target->PresentX(plane_count, planes, params);
     if (SUCCEEDED(result) && !window.shown && window.show_on_first_frame) show_xbox_present_window(window);
     return result;
