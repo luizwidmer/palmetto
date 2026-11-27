@@ -463,3 +463,38 @@ The fault handler publishes only fixed-size address intervals; it does not alloc
 No title arm was run: the host/boot slot was occupied by another agent's arm (`palmetto` was active and `D:\leonida-work\.boot-lock` existed), and the lead explicitly reserved that arm. The prior write-watch A/B counters above are not substituted for this missing title measurement. The next falsifier is to wire a small, explicitly selected committed xmem range with a known shadow into a consumer during a free, authorized host/boot window: a CPU store must increment the epoch, yield `changed`, and leave the shadow stale until refreshed; a second store after poll must fault again; a page-list write routed through `write_physical_pages` (DStorage's `PALMETTO_DS_PAGES_VIEW` branch) must change the epoch without a CPU fault; and a live alias/remap must yield `unavailable`, never `unchanged`. Separately, the default DStorage resolver-scatter path must remain on full compare until it is wired to an invalidation hook. Any stale shadow paired with `unchanged`, a lost retried store, or a mapping change that still permits a skip falsifies the implementation. A title result would still not cover `ReadFile`/other kernel writers without a separate mechanism.
 
 Peer context is behavior-only and is recorded in the existing [cleanroom_peers.md](cleanroom_peers.md) audit: Five Star's physical-page alias/first-touch model, VIctory's per-page guard and alias-reporting description at its historical review pin, and XCL's write-watch scan cost plus the `ReadFile`/kernel-writer limitation (also present in XCL `HANDOFF.md` at `623d02e`). The current clone-head inventory there names Five Star Recomp (`34b4dfed`, GPL-3.0-or-later), VIctory (`63bcca4`, GPL-3.0-or-later), and XCL (`623d02e`, GPL-2.0-only); those current pins are not a claim that each current snapshot adds new write-watch evidence. The implementation and synthetic tests are this tree's own; no peer code, comments, identifiers, or tables were copied. A supplemental `NOTICE.md` entry is drafted in the task report but is not applied here.
+
+## 13. Task-228 native write-watch arm (switch-on, telemetry unavailable, 2026-11-27)
+
+This later boot used the already-integrated binary from the prior gate, without a build or relink. Its SHA-256 was
+`52C7A57172893CF3E5EC8586DC2CD40DEC9DD118D965B3AED427F1DC1D759B59` and mtime was
+`2026-11-27T10:24:54.6694203-03:00`, the same as the slot-70 arm in [device_slot70.md](device_slot70.md#13-task-228-strict-validation-boot-device-loss-limited-2026-11-27).
+The 90 s `-Light` template added `PALMETTO_TITLE_CLASS0A_SIZE=1` and
+`PALMETTO_XMEM_NATIVE_WRITE_WATCH=1`; the template acquired/released the shared boot lock. Fresh process/lock checks were
+clear before the launch, and the binary hash remained unchanged after it.
+
+| measure | P-43 native write-watch arm |
+|---|---|
+| window | `2026-11-27T10:34:10.1804625-03:00`–`10:35:41.2792312-03:00`; 90.3 s, stopped by the 90 s harness timeout |
+| outcome | `ALIVE` to timeout, no startup-trace exception; 156,860 D3D12 calls recorded (max #169,165) |
+| state words | at 88 s: `init=2`, `loading=2`, `session=1`, machine current/next `2`, movie state/next `0x3`, `open=1`, `probe=1`; stage 3 was not observed |
+| watcher ranges / trips | no native-write-watch range, active-page, fault/retry or trip counter was emitted in `stderr.log` |
+| epoch / lock refusals | no native-write-watch epoch or lock-refusal count was emitted; these are **unavailable, not confirmed zero** |
+| captures | 12 presenter captures, `2564x1421`, all mean RGB `0.00 0.00 0.00`; raw files remain outside the repository under `D:\leonida-work\fsrstable\capture-task228-writewatch-01`. |
+
+At the final queue signal, the log contains two identical `[rt] replay: the Vulkan device was lost` messages at the same
+signal timestamp, followed by `Signal failed` (`ok=0`); these are duplicate diagnostics for one arm-level loss event, not
+two independently timed failures. Arm 1 in [device_slot70.md](device_slot70.md#13-task-228-strict-validation-boot-device-loss-limited-2026-11-27)
+had one device-loss line before its title exception, so this was the second consecutive loss-affected arm. The two-loss
+stop rule ended the series here: no retry and no P-44 bindless launch. The retained output is
+`D:\leonida-work\fsrstable\boot-task228-writewatch-01` (`meta.txt`, `summary_console.txt`, `stderr.log`, and
+`boot.jsonl`); the template released the lock, and the post-run check found no process or lock.
+
+**Interpretation and falsifier.** Section 12 already establishes that the switch only permits an explicit caller of
+`page_write_fault_arm`; no title consumer is wired to call it, and the boot-report path does not serialize the exported
+watch getters. Thus this switch-on boot is not a title write-watch measurement, and the missing counters do not prove
+zero ranges or zero writes. A future arm, only after the host is cleared, must select a known committed, unaliased xmem
+range through a caller and report the arm result, active pages, trips/retries and epoch: a CPU store should fault/retry,
+advance the epoch and yield `changed`, while a second post-poll store should be detected again. An `unchanged` verdict
+with a stale shadow, a lost retried store, or a mapping change that still permits a skip would falsify the mechanism.
+The bindless arm omitted by the stop rule is recorded in [bindless_degradation.md](bindless_degradation.md#10-task-228-bindless-arm-not-run-after-the-stop-rule).

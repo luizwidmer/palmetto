@@ -268,3 +268,27 @@ See [cleanroom_peers.md](cleanroom_peers.md) sections 108–112 and 204–211, a
 D3D12.X heap/table shapes; the Vulkan limits and allocation-failure behavior were derived from this tree's own code and
 tests. No source, comments, identifiers or tables were copied, and the implementation, override and tests are this
 project's own. Each referenced project remains the copyright of its contributors under its stated licence.”
+
+## 10. Task-228 bindless arm not run after the stop rule
+
+P-44 did not launch. The bounded series used the fixed prior-gate binary (SHA-256
+`52C7A57172893CF3E5EC8586DC2CD40DEC9DD118D965B3AED427F1DC1D759B59`, mtime
+`2026-11-27T10:24:54.6694203-03:00`) and stopped after two consecutive loss-affected arms: P-40 logged one Vulkan
+device-loss line before a title exception; P-43 logged one loss event on a failed queue signal (the same event was printed
+twice at one timestamp). The three-launch cap and stop rule therefore left no launch for the bindless override. No
+`PALMETTO_BINDLESS_DEGRADATION=1` arm ran, no bindless telemetry was collected, and no P-44 output/capture directory was
+created. The per-set degraded/spare/refused values for this task are **not measured**, not zero. The fixed artifact and
+the two completed arm records are in [device_slot70.md](device_slot70.md#13-task-228-strict-validation-boot-device-loss-limited-2026-11-27)
+and [title_memory_model.md](title_memory_model.md#13-task-228-native-write-watch-arm-switch-on-telemetry-unavailable-2026-11-27).
+
+This is a stop-rule negative only; it does not change section 9's existing readiness result or falsify bindless
+allocation-failure degradation. Section 9 notes that `BindlessStats` is exported but the boot-report parser does not
+serialize it, and today's 32-image population does not pressure the failure path.
+
+**Next falsifier, only after the host is cleared and a separate arm is authorized.** Use the exact override
+`PALMETTO_BINDLESS_DEGRADATION=1` with a reporter that reads and records `degraded_flushes`, `spares_reused` and
+`keys_refused`, alongside set sizing and submission/refusal lines. Under an observed allocation failure, a degraded flush
+must keep the last valid table and the submission must continue; a reused spare must increment its counter; an
+unresolvable key must increment its named refusal counter without throwing through the shim. If the boot sees no
+allocation/collision pressure, zero event counters remain expected and are not a failure. Do not interpret this task's
+unrun P-44 arm as evidence either way.

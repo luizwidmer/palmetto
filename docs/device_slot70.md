@@ -526,3 +526,37 @@ range, and whether the published descriptor remains the matrix V# accepted by th
 [slot70_publication.md](slot70_publication.md). Any named refusal on the measured dominant shape, a V# whose declared bytes
 are not fully covered, or a zero compose-control readback with the descriptor present would refute this increment's intended
 boundary or its downstream interpretation. The outcome remains **unmeasured on the changed binary** until that arm.
+
+## 13. Task-228 strict-validation boot (device-loss-limited, 2026-11-27)
+
+This is a later follow-up to section 12, after the lead cleared the integration hold. It ran the already-integrated
+`port/build/palmetto.exe` without a build or relink; the binary was fixed for the series at SHA-256
+`52C7A57172893CF3E5EC8586DC2CD40DEC9DD118D965B3AED427F1DC1D759B59`, mtime
+`2026-11-27T10:24:54.6694203-03:00`. Each launch used the section-12 content environment from
+`D:\leonida-work\fsrstable\boot_arm.ps1`, `-Light`, a 90 s limit, and `PALMETTO_TITLE_CLASS0A_SIZE=1`; the slot-70 arm
+added `PALMETTO_SLOT70_PUBLISH=1`. The template acquired and released the shared boot lock. Fresh pre-launch checks
+found no `palmetto` process or lock; the hash stayed unchanged, and the post-run check found no process or lock.
+
+| measure | P-40 slot-70 strict arm |
+|---|---|
+| window | `2026-11-27T10:32:15.1387014-03:00`–`10:33:21.3310096-03:00`; 65.6 s of the 90 s limit |
+| outcome | 132,593 D3D12 calls recorded; one startup-trace exception at 63.819 s (`0xc0000005`, read, `game_scarlett_master.exe+0x86f981`); process exited `0xc0000005`, not a harness timeout |
+| device loss | one `[rt] replay: the Vulkan device was lost` line before the title exception; this is the first loss-affected arm in the series |
+| state words | at 60 s: `init=2`, `loading=2`, `session=1`, machine current/next `2`, movie state/next `0x3`, `open=1`, `probe=0`; at 62 s `probe=1`. No stage-3 state was observed before the stop. |
+| shape/range evidence | one bounded texture-shape refusal (`dim=3`, `0x100x0x80`, format `0x3d`) and one bounded refusal because a buffer description was not the measured `0x80` shape. The expected 4,096-call `slot 70 publish` summary did not appear before the stop, so exact candidate/pass/refusal totals are **unavailable**, not zero. |
+| compose V# | no compose V# acceptance or compose readback line was observed in this run; this does not establish that no descriptor was written. |
+| captures | 10 presenter captures, `2564x1421`, all mean RGB `0.00 0.00 0.00`; raw captures stay outside the repository under `D:\leonida-work\fsrstable\capture-task228-slot70-strict-01`. |
+
+The retained boot output is under `D:\leonida-work\fsrstable\boot-task228-slot70-strict-01` (`meta.txt`,
+`summary_console.txt`, `stderr.log`, and `boot.jsonl`). No retry was run: the series limit was three launches, and the
+one permitted first arm produced one device-loss line. The second arm and the stop decision are recorded in
+[title_memory_model.md](title_memory_model.md#13-task-228-native-write-watch-arm-switch-on-telemetry-unavailable-2026-11-27); the bindless arm
+was not launched ([bindless_degradation.md](bindless_degradation.md#10-task-228-bindless-arm-not-run-after-the-stop-rule)).
+
+**Negative and falsifier.** This short, loss-limited arm did not produce the periodic counters needed to decide whether
+strict shape/range validation accepted or refused the measured per-frame record, and the compose acceptance path was not
+instrumented in this template arm. Do not promote the two refusal diagnostics to total counters or interpret absent
+summary lines as zero. A later, separately cleared arm must reach the slot-70 summary milestone and record its written,
+shape-refused, range-refused, empty, unplaced and unreadable totals; an instrumented compose control must then show a
+rebased matrix V# and readback. A refusal of the measured valid shape/range, acceptance of a range beyond its placement,
+or a present V# that fails the compose control would falsify the intended boundary or downstream mapping.
