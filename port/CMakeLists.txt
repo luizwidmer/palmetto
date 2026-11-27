@@ -88,6 +88,17 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
   target_compile_options(root_signature_test PRIVATE /W4 /permissive- /utf-8)
   target_link_options(root_signature_test PRIVATE /OPT:NOREF)
 
+  # The PE-loader rewrite's parsing core (docs/pe_loader_rewrite.md): a bounds-safe PE32+ decoder over synthetic
+  # fixtures. Pure CPU, no Windows loader calls, no game image.
+  add_executable(pe_image_test
+    test/pe_image_test.cpp
+    src/pe_image.cpp
+  )
+  target_include_directories(pe_image_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_compile_definitions(pe_image_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(pe_image_test PRIVATE /W4 /permissive- /utf-8)
+  target_link_options(pe_image_test PRIVATE /OPT:NOREF)
+
   # Host CPU preflight of --init/--run (src/host_cpu.h): AVX, OSXSAVE and XCR0 YMM state. The test feeds synthetic
   # CPUID/XCR0 words.
   add_executable(host_cpu_test test/host_cpu_test.cpp src/host_cpu.cpp)
@@ -1434,6 +1445,9 @@ if(BUILD_TESTING)
   endif()
   if(WIN32 AND TARGET root_signature_oracle_test)
     add_test(NAME root_signature_oracle COMMAND root_signature_oracle_test)
+  endif()
+  if(WIN32 AND TARGET pe_image_test)
+    add_test(NAME pe_image COMMAND pe_image_test)
   endif()
 endif()
 

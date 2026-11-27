@@ -113,6 +113,8 @@ Priority order is top to bottom within each lane.
 | P-45 | memory | Title-VA production BDA ordering: real-adapter window creation currently refuses with window_below_heap_base | open | open | [vertex_buffer_va.md](vertex_buffer_va.md) section 24 |
 | P-46 | renderer | Synthetic shader reads a strict direct-heap base dword and fetches a known descriptor (strict-on missing-base controls) | open | open | [root_packing.md](root_packing.md) section 10 |
 | P-47 | renderer | Post-integration GPU draw-test target for multi-count viewport (manual PASS recorded; CTest integration deferred) | open | open | [d3d12_vulkan.md](d3d12_vulkan.md) |
+| P-49 | platform | PE-loader rewrite phase 0: bounds-safe PE32+ parsing core (headers, sections, directories, exports/aliases, imports, relocations, TLS, exceptions) with synthetic fixtures | maintainer | done (this slice; `pe_image` CTest passes) | [pe_loader_rewrite.md](pe_loader_rewrite.md) |
+| P-50 | platform | PE-loader rewrite phase 1: mapper over the parsed image, with the old loader as the oracle on the existing fixtures and malformed corpus | open | open | [pe_loader_rewrite.md](pe_loader_rewrite.md) |
 
 ### Parity features (claimable with maintainer coordination)
 
