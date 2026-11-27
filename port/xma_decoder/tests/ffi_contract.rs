@@ -225,3 +225,94 @@ fn multiple_packet_buffer_matches_serial_decoder_calls() {
         palmetto_xma2_decoder_destroy(decoder);
     }
 }
+
+#[test]
+fn measured_command_region_and_partial_packets_are_refused_without_a_block() {
+    let decoder = make_decoder(48_000, 2);
+    // These bytes stand in for the measured 0x280-byte command descriptor region. They are
+    // generated here; the measured region is only a shape, not captured title contents.
+    let bytes = [0u8; PACKET_BYTES + 1];
+    let mut block = ptr::dangling_mut::<PalmettoXma2PcmBlock>();
+
+    for len in [0, 0x280, PACKET_BYTES - 1, PACKET_BYTES + 1] {
+        let result =
+            unsafe { palmetto_xma2_decode_buffer(decoder, bytes.as_ptr(), len, &mut block) };
+        assert_eq!(result, PALMETTO_XMA2_BAD_PACKET_SIZE, "length {len}");
+        assert!(
+            block.is_null(),
+            "failed decode must clear output for length {len}"
+        );
+    }
+
+    unsafe { palmetto_xma2_decoder_destroy(decoder) };
+}
+
+#[test]
+fn synthetic_silent_frames_have_exact_interleaved_size_and_no_eos_drain() {
+    const CHANNELS: usize = 2;
+    const EXPECTED_FRAMES: usize = 448;
+    const MAX_FRAMES_PER_PACKET: usize = 64;
+    const SAMPLES_PER_FRAME: usize = 512;
+
+    let decoder = make_decoder(48_000, CHANNELS as u32);
+    let packet = synthetic_silent_packet(CHANNELS);
+    // The first packet has no coded frame; the next two each carry one test-generated silent
+    // frame. The pinned decoder skips its startup frame and 64 more samples before returning PCM.
+    let mut input = [0u8; PACKET_BYTES * 3];
+    input[PACKET_BYTES..PACKET_BYTES * 2].copy_from_slice(&packet);
+    input[PACKET_BYTES * 2..].copy_from_slice(&packet);
+    let mut block = ptr::null_mut();
+
+    assert_eq!(
+        unsafe { palmetto_xma2_decode_buffer(decoder, input.as_ptr(), input.len(), &mut block) },
+        PALMETTO_XMA2_OK
+    );
+    assert!(!block.is_null());
+    let sample_count = unsafe { palmetto_xma2_pcm_sample_count(block) };
+    let packet_count = input.len() / PACKET_BYTES;
+    assert!(
+        sample_count <= packet_count * MAX_FRAMES_PER_PACKET * SAMPLES_PER_FRAME * CHANNELS,
+        "returned samples must fit the wrapper's per-packet reserve bound for this vector"
+    );
+    assert_eq!(sample_count, EXPECTED_FRAMES * CHANNELS);
+    let pcm = unsafe { palmetto_xma2_pcm_data(block) };
+    assert!(!pcm.is_null());
+    assert!(unsafe { std::slice::from_raw_parts(pcm, sample_count) }
+        .iter()
+        .all(|sample| *sample == 0));
+
+    // The FFI has no flush/end-of-stream export. Empty input is refused as a bad packet-size
+    // request, and never returns an extra block that a caller could mistake for drained samples.
+    let mut drained = ptr::dangling_mut::<PalmettoXma2PcmBlock>();
+    assert_eq!(
+        unsafe { palmetto_xma2_decode_buffer(decoder, input.as_ptr(), 0, &mut drained) },
+        PALMETTO_XMA2_BAD_PACKET_SIZE
+    );
+    assert!(drained.is_null());
+
+    unsafe {
+        palmetto_xma2_pcm_destroy(block);
+        palmetto_xma2_decoder_destroy(decoder);
+    }
+}
+
+#[test]
+fn zero_length_xma2_packet_header_is_not_a_codec_error_from_the_public_api() {
+    let decoder = make_decoder(48_000, 2);
+    // A complete synthetic 2048-byte packet whose 15-bit payload length is zero. This tests the
+    // pinned API's error-reporting limit; it is not used as a claim about title packet validity.
+    let packet = [0u8; PACKET_BYTES];
+    let mut block = ptr::null_mut();
+
+    assert_eq!(
+        unsafe { palmetto_xma2_decode_buffer(decoder, packet.as_ptr(), packet.len(), &mut block) },
+        PALMETTO_XMA2_OK
+    );
+    assert!(!block.is_null());
+    assert_eq!(unsafe { palmetto_xma2_pcm_sample_count(block) }, 0);
+
+    unsafe {
+        palmetto_xma2_pcm_destroy(block);
+        palmetto_xma2_decoder_destroy(decoder);
+    }
+}

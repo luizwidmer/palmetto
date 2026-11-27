@@ -248,7 +248,7 @@ Synthetic bitstreams only; no fixture, no game data, no extracted asset.
 
 | Test | Covers | Result |
 |---|---|---|
-| `port/xma_decoder` Rust unit + FFI tests | XMA2 creation/refusals/ownership plus the existing six FFI tests, and seven new Opus FFI tests: ABI version, creation refusals (including 32 kHz), a one-byte synthetic TOC packet that decodes to exactly 960 silence frames at 48 kHz, mono/stereo frame counts, null/oversize/short-room refusals, block ownership, deterministic synthetic packets without unwinding across the FFI | 15 tests pass (`cargo test --locked`), `cargo fmt --check` clean |
+| `port/xma_decoder` Rust unit + FFI tests | XMA2 creation/refusals/ownership, a generated silent XMA2 vector, packet-size boundary checks (including the measured 0x280-byte descriptor shape), exact interleaved PCM sizing, and the vendor API's zero-length-field behavior; plus Opus ABI/creation, a one-byte synthetic TOC packet (960 silent frames at 48 kHz), mono/stereo counts, packet/frame-room refusals, block ownership, and deterministic synthetic packets without FFI unwind | 18 tests pass (`cargo test --locked --offline`), `cargo fmt --check` clean |
 | `port/xma_decoder/tests/ffi_cpp_smoke.cpp` | the C ABI of both halves through MSVC, including the Opus packet path and the 960-frame count | builds and runs, exit 0 |
 | `port/test/acphal_test.cpp` | the boundary itself with an in-process synthetic backend (`port/test/audio_decode_fake_backend.h`): switch off, a synthetic two-packet XMA2 decode (frame and byte counts, sink counters), the 0x280-byte `packet_size` refusal, the three-channel `format` refusal, a synthetic Opus decode and its 32 kHz / zero-room refusals, the 350-context registration and scan (0 then 1 programmed dword, cleared on release), and the `backend_missing` refusal | 82 checks, 0 failures |
 | `port/test/xapu_chad_test.cpp` | the runtime wiring: connect with decode on, the command path's `packet_size` refusal, a direct XMA2 and Opus decode through the boundary, the poll-scheduled context scans (0 then 1 programmed dword), the `dsp_transform` refusal, and the `audio_decode` trace events by name and count | 87 checks, 0 failures |
@@ -312,10 +312,42 @@ Then implement only that measured route behind `PALMETTO_AUDIO_DECODE`, keep uns
 synthetic contract tests for the measured fields, and verify that switch-off remains byte-identical. A zero-context,
 zero-command boot or a peer claim alone does not unlock the path.
 
-**Arm and data limits.** No new arm was run for this docs-only result: section 5 already records a 130 s switch-on boot
-(ALIVE 130.3 s, 0 exceptions) with the decoder library loaded and no submitted commands or decode attempts. No boot lock
-was acquired. No audio bytes, package bytes, or decoded samples were captured or added to the repository.
+**Arm and data limits.** No title arm was run for this synthetic contract-test update: section 5 already records a 130 s
+switch-on boot (ALIVE 130.3 s, 0 exceptions) with the decoder library loaded and no submitted commands or decode attempts.
+No boot lock was acquired. No title audio bytes, package bytes, or captured decoded samples were collected or added to the
+repository; the new PCM is generated and checked in memory by the tests.
 
 **NOTICE.** The existing `NOTICE.md` row `xma / opusdec decoder packages` (LGPL-2.1-or-later / BSD-3-Clause) credits the
 third-party decoder dependencies and our wrapper. This status note adds no dependency or peer implementation, so no new
 NOTICE row is needed.
+
+## 10. Synthetic XMA2 contract and what the vendor API cannot prove
+
+The test vectors are constructed in memory by `port/xma_decoder/tests/ffi_contract.rs`; no audio fixture or title packet is
+read. The dependency is pinned in `port/xma_decoder/Cargo.toml`/`Cargo.lock` to the `xma` package at
+`27122f7dfcceb9a899555362ee0dde2d530e033c`. `vendor/xma` retains its licence and notice only, not source. I inspected the
+pinned crate's public `Xma2Stream` API: `new`/`new_hardware`, `decode_packet(&[u8], &mut Vec<i16>) -> usize`,
+`decode_packet_planar`, and the 2048-byte packet / 512-sample frame constants. Its packet decode returns a sample count,
+not a `Result`; there is no public per-packet header error, caller-supplied output buffer, or end-of-stream/flush method.
+The C ABI wrapper is therefore the tested contract boundary, not a claim that the vendor parser validates every title
+header.
+
+| Contract edge | Test-generated input and observed boundary | What this establishes (and what it does not) |
+|---|---|---|
+| Packet extent | Test-generated input lengths 0, 640 (0x280, the measured descriptor shape), 2047, and 2049 all return `PALMETTO_XMA2_BAD_PACKET_SIZE`; the out-block is cleared. | The wrapper requires a non-empty multiple of 2048 bytes before calling `Xma2Stream`. The C++ fake-backend test also proves the runtime labels the measured 0x280-byte shape `packet_size`. This does not identify the unknown source buffer behind a programmed XMA context. |
+| Header/error reporting | A full zero-filled 2048-byte synthetic packet has a zero 15-bit payload-length field; the FFI returns `PALMETTO_XMA2_OK` with an empty PCM block. | The pinned API does not surface this header shape as a codec error. It is a no-payload test vector, not proof that a particular title header is valid or that all malformed headers are safe. Codec-header validation remains unproven and must not be inferred from packet-size validation. |
+| Decode/output sizing | `synthetic_silent_packet()` builds its XMA2 frame bits with `xma::bits::BitWriter`. Two such stereo frames, preceded by one generated no-frame packet, produce exactly 448 frames / 896 interleaved `i16` samples; every sample is zero. The multi-packet FFI result is also compared sample-for-sample with serial calls to the pinned `Xma2Stream`. | This proves the tested vector's framing, startup skip and returned sample count; the test also checks this output fits the wrapper's per-packet reserve bound. The wrapper reserves up to 64 × 512 × channels samples per packet with checked arithmetic and `try_reserve`; it returns an owned block, so there is no caller-provided PCM capacity to overrun. The reserve is not a vendor-enforced frame limit and is not a corpus-wide maximum. |
+| End of input | Calling the FFI with `input_len=0` returns `PALMETTO_XMA2_BAD_PACKET_SIZE` and a null block. | No flush/drain operation exists in this C ABI or the inspected public XMA2 stream API. Empty input is a malformed decode request, not an EOS signal. This does not measure any title stream's delayed-frame behavior. |
+
+`cargo test --manifest-path port/xma_decoder/Cargo.toml --locked --offline` now passes 18 tests (2 crate unit tests,
+9 XMA2 FFI tests, 7 Opus FFI tests); `cargo fmt --manifest-path port/xma_decoder/Cargo.toml -- --check` is clean.
+The new cases are part of Cargo's existing integration-test target; no CMake target or `port/CMakeLists.txt` stanza was
+added. The C++ shim test remains a separate wiring test with an in-process synthetic backend, not a call into the Rust
+library.
+
+**Limit and next falsifier.** The known runtime command input is only 640 bytes and is rejected; the actual stream source,
+header fields, packet sequencing, and EOS condition have not been measured because no enqueue, programmed context, or DSP
+submit occurs in the title trace. Reopen this path only after a trace establishes an own-title packet range, packet extent,
+header/framing semantics, and the mapped output cursor (record field shapes/counts only). Then add a synthetic vector for
+those measured fields and require an explicit validation/refusal result before decode where the vendor API cannot report
+header errors. A zero-length-field packet, a peer description, or a zero-context boot alone is not a falsifier.
