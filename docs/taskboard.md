@@ -97,19 +97,22 @@ Priority order is top to bottom within each lane.
 | P-24 | renderer | Decide the presenter fit default once a real content frame exists to judge (fill vs aspect) | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 15 |
 | P-25 | platform | DPI-unaware window: the title's window is oversized against the virtualized monitor; measure window fitting | maintainer | done (`f2d6736a2`) | [peer_port_first_ui.md](peer_port_first_ui.md) section 16 |
 | P-26 | ci | Branch protection: require the guaranteed CI jobs in repository settings (not enforceable from the tree) | maintainer | open | [dev-tools.md](dev-tools.md) |
-| P-32 | renderer | Full multi-viewport/scissor array replay (needs the d3d12_com array copy and dynamic viewport count) | open | open | [d3d12_vulkan.md](d3d12_vulkan.md) |
+| P-32 | renderer | Full multi-viewport/scissor array replay (needs the d3d12_com array copy and dynamic viewport count) | maintainer | done (`6351f6846`, GPU PASS) | [d3d12_vulkan.md](d3d12_vulkan.md) |
 | P-33 | memory | Title-VA device integration: outside-arena GPU windows, raw-VA buffer resolve, shader-visible rewrites and page pulls | maintainer | done (`75e9991a2`, GPU falsifier remains) | [vertex_buffer_va.md](vertex_buffer_va.md) section 24 |
-| P-34 | audio | Measured audio effect descriptor and DSP send with formats/lifecycle | open | open | [audio_shims.md](audio_shims.md) section 9 |
+| P-34 | audio | Measured audio effect descriptor and DSP send with formats/lifecycle | maintainer | first step done (`9d00b09d7`: submit pointer roles); live submit unmeasured | [audio_decode.md](audio_decode.md) |
 | P-35 | renderer | XG array slot-2 layout observation (the row-major array layout is still a hypothesis) | open | open | [texture_layout.md](texture_layout.md) section 8 |
 | P-36 | platform | DXGI simulate-120 light arm (does the consumer take 120/1 and set the flag) | maintainer | attempted (`5746b8123`, bounded negative) | [window.md](window.md) |
 | P-37 | renderer | Presenter HDR10 surface arm (the ST.2084 surface was unavailable on the test host) | open | open | [present_wiring.md](present_wiring.md) section 9 |
 | P-38 | platform | Device-health post-gate arm with the helper enabled | open | open | [device_health.md](device_health.md) |
 | P-39 | quality | Triage the remaining full-suite failures: synthetic CRT file round trip, queue-proxy signal causes, console-heap precondition | maintainer | CRT fixture fixed (`688a4742e`); queue/console-heap causes documented | [testing.md](testing.md) |
-| P-40 | renderer | Slot-70 strict-validation arm: do the measured dominant-site calls pass and is the matrix V# accepted by compose | open | open | [device_slot70.md](device_slot70.md) section 12 |
-| P-41 | renderer | Pipeline dynamic viewport/scissor states and multiViewport capability (the other half of P-32) | open | open | [d3d12_vulkan.md](d3d12_vulkan.md) |
-| P-42 | memory | Title-VA window GPU test and arbitrary shader-UAV writeback limit (named unsupported) | open | open | [vertex_buffer_va.md](vertex_buffer_va.md) section 24 |
-| P-43 | memory | Native write-watch title arm (the watch has no title consumer/auto-arm yet) | open | open | [title_memory_model.md](title_memory_model.md) section 12 |
-| P-44 | renderer | Bindless exhaustion arm (synthetic full-limit sizing only; real title degradation unmeasured) | open | open | [bindless_degradation.md](bindless_degradation.md) section 9 |
+| P-40 | renderer | Slot-70 strict-validation arm: do the measured dominant-site calls pass and is the matrix V# accepted by compose | maintainer | attempted (`a331289cf`), device-loss limited | [device_slot70.md](device_slot70.md) |
+| P-41 | renderer | Pipeline dynamic viewport/scissor states and multiViewport capability (the other half of P-32) | maintainer | done (`6351f6846`) | [d3d12_vulkan.md](d3d12_vulkan.md) |
+| P-42 | memory | Title-VA window GPU test and arbitrary shader-UAV writeback limit (named unsupported) | maintainer | test seam + synthetic GPU evidence (`6351f6846`); production BDA ordering open | [vertex_buffer_va.md](vertex_buffer_va.md) |
+| P-43 | memory | Native write-watch title arm (the watch has no title consumer/auto-arm yet) | maintainer | attempted (`a331289cf`), device-loss stop; counters unavailable | [title_memory_model.md](title_memory_model.md) |
+| P-44 | renderer | Bindless exhaustion arm (synthetic full-limit sizing only; real title degradation unmeasured) | maintainer | not run (two-loss stop) | [bindless_degradation.md](bindless_degradation.md) |
+| P-45 | memory | Title-VA production BDA ordering: real-adapter window creation currently refuses with window_below_heap_base | open | open | [vertex_buffer_va.md](vertex_buffer_va.md) section 24 |
+| P-46 | renderer | Synthetic shader reads a strict direct-heap base dword and fetches a known descriptor (strict-on missing-base controls) | open | open | [root_packing.md](root_packing.md) section 10 |
+| P-47 | renderer | Post-integration GPU draw-test target for multi-count viewport (manual PASS recorded; CTest integration deferred) | open | open | [d3d12_vulkan.md](d3d12_vulkan.md) |
 
 ### Parity features (claimable with maintainer coordination)
 

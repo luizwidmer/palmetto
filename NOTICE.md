@@ -184,3 +184,14 @@ VIctory and XCL at the same campaign snapshots. The synthetic audio decoder cont
 was informed by the in-tree decoder only; peers were behavioural evidence. The 120 Hz/kind-7 arm results are measurements of
 this host, not peer claims. All are evidence only; no source, comments, identifiers or data tables were copied, and each
 upstream remains the copyright of its contributors under its own licence.
+
+The multi-count viewport/scissor replay and the strict direct-heap admission ([docs/d3d12_vulkan.md](docs/d3d12_vulkan.md),
+[docs/root_packing.md](docs/root_packing.md)) were cross-checked against the peers' D3D12.X replay/root-signature
+descriptions (Five Star Recomp GPL-3.0-or-later `34b4dfed`, VIctory GPL-3.0-or-later `63bcca4`, XCL GPL-2.0-only `623d02e`).
+The title-VA window test seam and the GPU evidence ([docs/vertex_buffer_va.md](docs/vertex_buffer_va.md)) were checked
+against Five Star Recomp, VIctory and XCL at the same snapshots. The native-library MS publication path
+([docs/mesh_stage.md](docs/mesh_stage.md)) was checked against Five Star Recomp and XCL. The audio submit-probe contract
+([docs/audio_decode.md](docs/audio_decode.md)) was derived from this project's own read-only disassembly of the local
+retail image; peers were behavioural context only. The translator plain-SGPR-move rule and the boot-arm results are this
+host/project's measurements. All are evidence only; no source, comments, identifiers or data tables were copied, and each
+upstream remains the copyright of its contributors under its own licence.

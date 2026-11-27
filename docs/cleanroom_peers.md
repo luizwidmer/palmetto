@@ -36,6 +36,12 @@ that landed our implementation, and whether the port was measured on a boot or i
 | Native write-fault watch and shadow invalidation | `title_memory_model.md` section 12 | `805b42ed4` | measured: 545 xmem checks, synthetic fault stress; no title consumer yet |
 | Synthetic audio decoder contract | `audio_decode.md` | `cd47ec306` | 18 Rust FFI contract tests; codec-header validation unproven |
 | 120 Hz and kind-7 arms | `window.md` / `fsr_route.md` | `5746b8123` | measured negatives: no enumeration trace; no post-map FSPX consumer |
+| Multi-count viewport/scissor replay | `d3d12_vulkan.md` | `6351f6846` | GPU PASS pixel (8,8)=0,255,0,255, 0 validation errors; capability-gated |
+| Strict direct-heap admission | `root_packing.md` section 10 | `6351f6846` | measured: no direct-index population; synthetic falsifier named |
+| Title-VA window test seam | `vertex_buffer_va.md` section 24 | `6351f6846` | synthetic raw-VA resolve/pull readback; production BDA ordering unmeasured |
+| Native-library MS publication | `mesh_stage.md` | `3eebb1bae` | synthetic end-to-end; real MS resolver keys still 0 |
+| Audio submit pointer roles | `audio_decode.md` | `9d00b09d7` | resolved RCX/RDX/R8 via read-only disassembly; no live submit |
+| Plain SGPR move in a gap | `translator_fixes.md` section 14 | `13f423532` | 12 gaps recovered, 0 full-program closure, prior bytes identical |
 | Presenter attestation, fit rule and synthetic non-black control | `peer_port_first_ui.md` section 15 | `779ce8be0` | measured: synthetic bands reach the capture exactly; presenter is not the black cause |
 | Movie draw-path probes | `peer_port_movie.md` section 13 | `2e9915cbb` | measured: draw path never issued (all six sites zero); downstream of the session-3 poll |
 | Pull-request CI guarantees | board D-03 | `2bb13be8b` | measured: docs-only and runtime-path gaps closed and registered |
