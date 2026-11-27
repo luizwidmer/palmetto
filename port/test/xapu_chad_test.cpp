@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "audio_decode.h"
+#include "audio_submit_probe.h"
 #include "shims.h"
 #include "startup_trace.h"
 #include "xapu_effects.h"
@@ -411,6 +412,50 @@ void test_effect_switch(XDspConnectFn dsp_connect, XDspActivateFn activate, XDsp
     _putenv_s("PALMETTO_AUDIO_EFFECTS", "0");
 }
 
+namespace audio_submit = palmetto::audio_submit_probe;
+
+void test_audio_submit_shape_classifier() {
+    const audio_submit::Arguments measured{0x8000, 0x1000, 0x1040, 0x1000, 0x2000};
+    check(audio_submit::classify(measured) == audio_submit::ShapeResult::Measured,
+          "submit classifier accepts context + stack descriptor + stack command-id dword");
+    check(std::strcmp(audio_submit::shape_name(audio_submit::ShapeResult::Measured),
+                      "measured-context-descriptor-0x20-command-id-u32") == 0,
+          "submit classifier names the measured argument shape");
+
+    auto args = measured;
+    args.submit_context = 0;
+    check(audio_submit::classify(args) == audio_submit::ShapeResult::ContextNull,
+          "submit classifier names a null context pointer");
+    args = measured;
+    args.command_descriptor = 0;
+    check(audio_submit::classify(args) == audio_submit::ShapeResult::DescriptorNull,
+          "submit classifier names a null descriptor pointer");
+    args = measured;
+    args.command_id_out = 0;
+    check(audio_submit::classify(args) == audio_submit::ShapeResult::CommandIdNull,
+          "submit classifier names a null command-id out pointer");
+    args = measured;
+    args.stack_base = args.stack_limit;
+    check(audio_submit::classify(args) == audio_submit::ShapeResult::InvalidStackBounds,
+          "submit classifier refuses invalid stack bounds");
+    args = measured;
+    args.command_descriptor += 1;
+    check(audio_submit::classify(args) == audio_submit::ShapeResult::DescriptorUnaligned,
+          "submit classifier requires an 8-byte-aligned descriptor");
+    args = measured;
+    args.command_id_out += 1;
+    check(audio_submit::classify(args) == audio_submit::ShapeResult::CommandIdUnaligned,
+          "submit classifier requires a 4-byte-aligned command-id dword");
+    args = measured;
+    args.command_descriptor = 0x1FE8;
+    check(audio_submit::classify(args) == audio_submit::ShapeResult::DescriptorOutsideStack,
+          "submit classifier refuses a descriptor range that crosses the stack base");
+    args = measured;
+    args.command_id_out = 0x2000;
+    check(audio_submit::classify(args) == audio_submit::ShapeResult::CommandIdOutsideStack,
+          "submit classifier refuses an id dword outside the stack");
+}
+
 }  // namespace
 
 int main() {
@@ -573,6 +618,7 @@ int main() {
     // ---- Pure endpoint-format and effect-contract boundary tests ----
     test_endpoint_format_negotiation();
     test_effect_contract_model();
+    test_audio_submit_shape_classifier();
     test_effect_switch(dsp_connect, activate, deactivate, dsp_disconnect, submit);
 
     std::printf("xapu_chad_test complete: %d checks, %d failures\n", g_checks, g_failures);

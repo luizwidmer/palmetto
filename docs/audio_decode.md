@@ -291,7 +291,7 @@ remain evidence of possible mechanisms, not proof of what this boot submitted. A
 |---|---|---|
 | XMA2 / SHAPE | 350 XMA contexts allocated; five bounded scans read 5,600 dwords each and find 0 non-zero. The only observed `AcpHal::SubmitCommand` is `cmd=2`, `d1=0xF0F0F0F0`, `d2=0xFFFFFFFF`, a config pointer, and `d3=0`. | No programmed context identifies an APU input range, packet bounds, or output-ring cursor. The one ACP command does not establish a stream input. |
 | XApu queue | `XApuConnect` succeeds and `XApuGetResultCount` is polled 19,094 times; `XApuEnqueueCommand` and `XApuDequeueResult` are both 0. Static sites show command types 5/1/2/3 with a stream slot and a 0x280-byte per-slot input area, but no live packet or length/codec value is captured. | The 0x280-byte region is not an XMA2 packet. The existing opt-in XMA2 attempt on that region is a tested `packet_size` refusal, not stream decoding; its contents are not proven to be an Opus packet either. |
-| Opus / DSP | `XDspConnectWithMaximumStreamLimit` receives the title's 0x60000-byte buffer, but `XDspActivate` and `XDspSubmitCommand` are both 0. The wrapper swaps the activate outputs, and the submit-command pointer roles are not resolved by the current measurement. | No measured Opus packet, format, or stream-buffer range reaches the decoder. Direct Opus tests use synthetic packets only. |
+| Opus / DSP | `XDspConnectWithMaximumStreamLimit` receives the title's 0x60000-byte buffer, but `XDspActivate` and `XDspSubmitCommand` are both 0. The wrapper swaps the activate outputs; section 11 now resolves the static submit-command argument roles, while runtime `XDspActivate` and `XDspSubmitCommand` calls remain 0. | No measured Opus packet, format, or stream-buffer range reaches the decoder. Direct Opus tests use synthetic packets only. |
 
 **C-03 is not yet wired to a measured title stream at this frontier.** The Rust decoders and the existing opt-in boundary
 are readiness; the tests in section 7 prove decoder/boundary behavior with synthetic data, not title-stream playback. No
@@ -305,8 +305,8 @@ least one of these:
 title's writes (record fields and counts only, never payload bytes); or
 - a non-zero XMA context plus enough measured fields to map its input address/range and output ring through the title's
   APU mapping calls; or
-- an `XDspActivate`/`XDspSubmitCommand` call with the swapped output roles resolved at the title call site and the
-  submitted stream's bounds, format and packet framing established.
+- a live `XDspActivate`/`XDspSubmitCommand` call that confirms section 11's static argument roles and establishes the
+  submitted stream's bounds, format and packet framing.
 
 Then implement only that measured route behind `PALMETTO_AUDIO_DECODE`, keep unsupported shapes as named refusals, add
 synthetic contract tests for the measured fields, and verify that switch-off remains byte-identical. A zero-context,
@@ -351,3 +351,41 @@ submit occurs in the title trace. Reopen this path only after a trace establishe
 header/framing semantics, and the mapped output cursor (record field shapes/counts only). Then add a synthetic vector for
 those measured fields and require an explicit validation/refusal result before decode where the vendor API cannot report
 header errors. A zero-length-field packet, a peer description, or a zero-context boot alone is not a falsifier.
+
+## 11. XDspSubmitCommand: static pointer roles and an opt-in shape probe
+
+**Status: the submit ABI roles are now statically resolved; no title submit was observed at runtime.** The task-specified
+`F:\Torrent\GTA6.Xbox.v1.0.2.1-CYBERLEEK\game_scarlett_master.exe` path was absent in this environment. After lead
+confirmation, the local read-only source was `D:\Torrent\GTA6.Xbox.v1.0.2.1-CYBERLEEK\game_scarlett_master.exe`
+(120,181,760 bytes; retail 1.0.2.1). `tooling/import_call_sites.py` supplied import counts/RVAs; Capstone disassembly
+was limited to the import wrapper and its `.pdata`-bounded callers. No game-specific instruction byte sequence, package data,
+or audio data was copied into the repository.
+
+| Evidence | Count / RVA | What it resolves |
+|---|---:|---|
+| `chad.dll!XDspSubmitCommand` import | 1 thunk at `0x5F3FF30`; 1 direct import call at `0x4E5B20D` | The call at `0x4E5B20D` is inside the title wrapper at `0x4E5B200`. |
+| Argument wrapper | `0x4E5B010` tail-jumps to `0x4E5B200`; `0x4E5B200` swaps its first two arguments before the import call and leaves the third in place | At the import call, the submit-context object-field pointer is in RCX, the descriptor pointer is in RDX, and the command-id pointer is in R8. |
+| Direct callers of the alias | 6: `0x43B2D45`, `0x43B3A63`, `0x43B3B02`, `0x43B3BA2`, `0x43B3C49`, `0x4E5AF74` | Before the wrapper swap, RCX points at a local `0x20`-byte descriptor; RDX is an object-field value; R8 points at a local 32-bit command-id word. |
+| Object-field arguments | 4 caller sites load `[object+0x38]`; 2 load `[object+0x70]` | The imported API's first argument is named `submit-context` here because the title passes this object-held pointer through the wrapper. Its pointee and relationship to an activated DSP stream are not established by this disassembly alone. |
+| Descriptor / ID use | The descriptor's qwords at `+0x8` and `+0x10` are populated from buffer-pointer registers; its qword at `+0x18` is zero. The local ID dword is zeroed before submission and copied to caller state on the success path. | The second imported argument is a command descriptor carrying buffer pointers, not a separately passed raw command-buffer pointer. The third is a command-id out pointer. |
+
+The runtime probe is opt-in with exactly `PALMETTO_AUDIO_SUBMIT_PROBE=1`. It validates the measured call-site shape before
+arming one one-shot breakpoint at `game+0x4E5B20D`, and refuses by name if the mapped image is too small, the call-site
+instruction/target has changed, or installation fails. On the first hit it logs the argument roles by name (`RCX
+submit-context`, `RDX command-descriptor`, `R8 command-id-out`) and a named shape result. The pure classifier requires a
+non-null context pointer, an 8-byte-aligned `0x20` descriptor wholly inside the current thread's stack, and a 4-byte-aligned
+32-bit ID word wholly inside that stack. It performs no argument-memory reads or writes, prints no raw addresses, restores
+the original call instruction, then resumes the original API call unchanged. A shape mismatch is diagnostic refusal only;
+it does not block or rewrite the title's call. When unset, no handler or code patch is installed and the submit path has
+no added per-call work (only the startup environment check remains).
+
+`port/test/xapu_chad_test.cpp` exercises the pure classifier with the measured shape and named refusals for null arguments,
+invalid stack bounds, alignment, and ranges outside the stack; the focused `xapu_chad_test` build and run passed 136 checks
+with 0 failures. This is synthetic pointer-shape testing only, not a title boot or a live submit measurement.
+
+**Limits and falsifier.** The existing boot trace still reports zero `XDspActivate` and zero `XDspSubmitCommand`. Static
+argument flow does not establish descriptor field meanings beyond their pointer-shaped slots, buffer extents/content, DSP
+effect kind, activation lifecycle, or that the object-held context pointer is an `XDspActivate` output. A real title submit
+hit whose imported arguments do not match `RCX=context`, `RDX=stack descriptor (0x20)`, `R8=stack command-id dword` is the
+falsifier for this contract (and would also falsify the measured no-submit frontier). A matching hit proves reachability
+only, not valid audio data or decoded output.

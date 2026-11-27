@@ -42,6 +42,7 @@
 #include "host_cpu.h"
 #include "mods.h"
 #include "movie_draw_probe.h"
+#include "audio_submit_probe.h"
 #include "pe_loader.h"
 #include "title_class0a.h"
 #include "title_watchdog.h"
@@ -10429,6 +10430,18 @@ int wmain(int argc, wchar_t** argv) {
         // Off when unset.
         if (const char* spec = std::getenv("PALMETTO_STATE_TRACE"); spec && *spec)
             start_title_state_trace(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size, spec);
+        // PALMETTO_AUDIO_SUBMIT_PROBE=1: one-shot shape check at the measured XDspSubmitCommand call; off by default.
+        if (const char* spec = std::getenv("PALMETTO_AUDIO_SUBMIT_PROBE"); spec && *spec) {
+            if (std::strcmp(spec, "1") != 0) {
+                std::fprintf(stderr, "[rt] audio submit probe: NOT armed: use exactly 1\n");
+            } else {
+                const auto result = palmetto::audio_submit_probe::start(
+                    reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size);
+                std::fprintf(stderr, "[rt] audio submit probe: %s\n",
+                             palmetto::audio_submit_probe::install_result_name(result));
+            }
+            std::fflush(stderr);
+        }
         // PALMETTO_STAGE3_PUMP=<seconds,...>: wait for the state machine's current stage to read 3, then unwind every
         // other thread's call chain at those offsets after it and print the chains that reach the pump, the transition
         // executor or the per-frame heartbeat tick (diagnostic; see the stage-3 pump probe above). Off when unset.
