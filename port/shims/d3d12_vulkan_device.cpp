@@ -41,6 +41,7 @@
 #include "../src/deferred_compile.h"  // docs/deferred_compile.md: off-thread compute-pipeline compilation
 #include "../src/device_health.h"  // opt-in, bounded loss attribution; no driver fault-info query
 #include "../src/console_texture.h"  // the console's depth-stencil + unordered-access translation (docs/3d_textures.md)
+#include "../src/title_va_alias.h"  // opt-in outside-arena title-VA BDA windows (docs/vertex_buffer_va.md)
 
 #include <chrono>
 #include <vulkan/vulkan_win32.h>
@@ -62,6 +63,7 @@
 #include <functional>
 #include <iterator>
 #include <map>
+#include <limits>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -1976,6 +1978,49 @@ inline std::uint64_t pipeline_hold_budget_ms() {
         std::uint64_t allocations = 0, failures = 0;
     } arena;
 
+    // Outside-arena title-VA windows (docs/vertex_buffer_va.md): fixed metadata and budget; Vulkan buffers are owned by
+    // Device teardown. Each window holds one raw title span and its own host-visible, device-addressable backing.
+    struct TitleVaWindow {
+        std::uint64_t id = 0;
+        std::uint64_t title_va = 0;
+        std::uint64_t bytes = 0;
+        std::uint64_t device_address = 0;
+        std::uint64_t console_va = 0;
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        std::uint8_t* mapped = nullptr;
+        VkDeviceSize allocation_bytes = 0;
+    };
+    std::mutex title_va_windows_mutex;
+    std::array<TitleVaWindow, palmetto::TitleVaAliasTable::kMaxWindows> title_va_windows{};
+    std::size_t title_va_window_count = 0;
+    std::uint64_t title_va_window_allocation_bytes = 0;
+    std::atomic<std::uint64_t> next_title_va_window_id{1};
+    std::unique_ptr<palmetto::TitleVaAliasTable> title_va_aliases;
+    palmetto::TitleVaWindowsSwitch title_va_windows_mode = palmetto::TitleVaWindowsSwitch::off;
+
+    void configure_title_va_windows() {
+        title_va_windows_mode = palmetto::title_va_windows_switch_from(std::getenv("PALMETTO_TITLE_VA_WINDOWS"));
+        if (title_va_windows_mode == palmetto::TitleVaWindowsSwitch::invalid) {
+            std::fprintf(stderr,
+                         "[rt] d3d12: PALMETTO_TITLE_VA_WINDOWS: invalid_switch; outside-arena title VA windows stay "
+                         "disabled\n");
+            return;
+        }
+        if (title_va_windows_mode != palmetto::TitleVaWindowsSwitch::on) return;
+        try {
+            title_va_aliases = std::make_unique<palmetto::TitleVaAliasTable>(title_va_windows_mode,
+                                                                            arena.address, arena.size);
+        } catch (...) {
+            std::fprintf(stderr,
+                         "[rt] d3d12: PALMETTO_TITLE_VA_WINDOWS: window_table_allocation_failed; registration stays "
+                         "refused\n");
+        }
+        std::fprintf(stderr,
+                     "[rt] d3d12: PALMETTO_TITLE_VA_WINDOWS=1: outside-arena host-coherent BDA windows enabled "
+                     "(32 windows, 4 MiB each, 32 MiB total; raw title pages are pulled before reads)\n");
+    }
+
     // The arena staging copies of title spans a translated shader must fetch by a heap-relative address
     // (docs/vertex_buffer_va.md section 18.3): one range per title VA, re-copied on each use. Bounded to eight ranges.
     struct StagedSpan {
@@ -3076,14 +3121,24 @@ inline std::uint64_t pipeline_hold_budget_ms() {
     }
 
     // The heap-relative address a buffer_at result starts at, for the console driver-block V# (docs/vertex_buffer_va.md
-    // section 18.3): only the GPU address arena itself is reachable through the shader's heap_base + value model. False
-    // for any other buffer, including a title-pages import whose device address heap_base cannot name; those go through
-    // stage_title_span.
+    // section 18.3): the arena uses its own offset; an opt-in title window uses the exact BDA delta registered by
+    // TitleVaAliasTable. Legacy title-page imports still go through stage_title_span.
     bool buffer_arena_address(VkBuffer buffer, VkDeviceSize offset, std::uint64_t& address) {
         address = 0;
-        if (!buffer || buffer != arena.buffer || offset >= arena.size) return false;
-        address = offset;
-        return true;
+        if (!buffer) return false;
+        if (buffer == arena.buffer && offset < arena.size) {
+            address = offset;
+            return true;
+        }
+        if (title_va_windows_mode != palmetto::TitleVaWindowsSwitch::on) return false;
+        std::lock_guard lock(title_va_windows_mutex);
+        for (std::size_t i = 0; i < title_va_window_count; ++i) {
+            const auto& window = title_va_windows[i];
+            if (window.buffer != buffer || offset >= window.bytes) continue;
+            address = window.console_va + offset;
+            return true;
+        }
+        return false;
     }
 
     // A cached arena staging copy of a span of the title's own memory (docs/vertex_buffer_va.md section 18.3): a vertex
@@ -9223,6 +9278,7 @@ public:
         }
         if (info.buffer_device_address && state_.context->loaded() && !create_arena())
             std::fprintf(stderr, "[rt] d3d12: the GPU address arena could not be created\n");
+        state_.configure_title_va_windows();
         // Pooled and deferred image memory (docs/streamed_image_backing.md): both are off by default. The pool exists
         // only with PALMETTO_IMAGE_MEM_POOL=1; the binder is registered always so a deferred image is backed before a
         // submission can use it (a no-op when PALMETTO_IMAGE_DEFERRED is unset and no image was deferred).
@@ -9246,13 +9302,31 @@ public:
                 console_pull_table(table_va, max_descriptors);
             },
             [this](std::uint64_t arena_va, std::uint64_t bytes) { console_pull_arena(arena_va, bytes); });
-        // Title pages a command names directly (docs/vertex_buffer_va.md): a vertex/index view or WriteBufferImmediate
-        // address whose VA no mapping resolves is imported over the title's own committed pages at first use. The
-        // replay side decides which spans to offer and bounds the number and bytes; the device does the Vulkan import.
-        state_.context->set_title_page_importer(
-            [this](std::uint64_t va, std::uint64_t bytes, VkBuffer& buffer, VkDeviceSize& offset, const char*& why) {
-                return import_title_pages(va, bytes, buffer, offset, why);
-            });
+        // Title pages a command names directly (docs/vertex_buffer_va.md): off preserves the existing host-pointer
+        // import path. The explicit window opt-in allocates a bounded coherent BDA copy, registers its raw title alias,
+        // and resolves command views through that device backing. Malformed switch text refuses by the stable name.
+        if (state_.title_va_windows_mode == palmetto::TitleVaWindowsSwitch::on) {
+            state_.context->set_title_va_window_allocator(
+                [this](std::uint64_t va, std::uint64_t bytes, VkBuffer& buffer, VkDeviceSize& offset, const char*& why) {
+                    return create_title_va_window(va, bytes, buffer, offset, why);
+                });
+            state_.context->set_title_va_window_buffer_resolver(
+                [this](std::uint64_t va, std::uint64_t bytes, VkBuffer& buffer, VkDeviceSize& offset) {
+                    return title_va_window_buffer_at(va, bytes, buffer, offset);
+                });
+        } else if (state_.title_va_windows_mode == palmetto::TitleVaWindowsSwitch::invalid) {
+            state_.context->set_title_page_importer(
+                [](std::uint64_t, std::uint64_t, VkBuffer& buffer, VkDeviceSize& offset, const char*& why) {
+                    buffer = VK_NULL_HANDLE;
+                    offset = 0;
+                    why = "invalid_switch";
+                    return false;
+                });
+        } else {
+            state_.context->set_title_page_importer(
+                [this](std::uint64_t va, std::uint64_t bytes, VkBuffer& buffer, VkDeviceSize& offset,
+                       const char*& why) { return import_title_pages(va, bytes, buffer, offset, why); });
+        }
         // Diagnostic (docs/frame_capture.md): the frame dump's sampled-texture readback reads a draw's descriptor table
         // from the console heap mirror and resolves its first T# to the layer image set 0 holds. Reads only.
         state_.context->set_sampled_table_probe(
@@ -9464,6 +9538,23 @@ public:
         palmetto::BindlessFeatures features{};
         features.update_after_bind = true;  // VulkanDeviceInfo::bindless promises it
         features.partially_bound = state_.info.bindless_partially_bound;
+        char degradation_override_text[32]{};
+        std::size_t degradation_override_length = 0;
+        const int degradation_override_status =
+            getenv_s(&degradation_override_length, degradation_override_text, "PALMETTO_BINDLESS_DEGRADATION");
+        const auto degradation_override =
+            palmetto::bindless::parse_degradation_override(degradation_override_text);
+        if (degradation_override_status != 0 ||
+            degradation_override == palmetto::bindless::DegradationOverride::invalid) {
+            // Invalid values never turn off the already-measured path; name the refusal once at device creation.
+            features.degradation = true;
+            std::fprintf(stderr, "[rt] d3d12: bindless_degradation_override_invalid: expected exact 0 or 1; "
+                                 "keeping current policy\n");
+        } else {
+            features.degradation = palmetto::bindless::degradation_enabled(degradation_override);
+            if (!features.degradation)
+                std::fprintf(stderr, "[rt] d3d12: bindless_degradation_override=legacy_preslice\n");
+        }
         const auto get_properties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
             state_.info.get_instance_proc(state_.info.instance, "vkGetPhysicalDeviceProperties2"));
         if (get_properties) {
@@ -9721,6 +9812,26 @@ public:
             state_.bindless.reset();
         }
         state_.report_arena();
+        if (state_.context && state_.title_va_windows_mode == palmetto::TitleVaWindowsSwitch::on) {
+            state_.context->set_title_va_window_buffer_resolver({});
+            state_.context->set_title_va_window_allocator({});
+            std::lock_guard lock(state_.title_va_windows_mutex);
+            auto& vk = state_.context->vk;
+            for (std::size_t i = 0; i < state_.title_va_window_count; ++i) {
+                auto& window = state_.title_va_windows[i];
+                state_.context->remove_console_va_range(window.title_va);
+                if (state_.title_va_aliases) {
+                    state_.title_va_aliases->remove_alias(window.id);
+                    state_.title_va_aliases->remove_window(window.id);
+                }
+                if (window.mapped) vk.vkUnmapMemory(state_.info.device, window.memory);
+                if (window.buffer) vk.vkDestroyBuffer(state_.info.device, window.buffer, nullptr);
+                if (window.memory) vk.vkFreeMemory(state_.info.device, window.memory, nullptr);
+                window = {};
+            }
+            state_.title_va_window_count = 0;
+            state_.title_va_window_allocation_bytes = 0;
+        }
         if (state_.context && state_.arena.buffer) {
             auto& vk = state_.context->vk;
             vk.vkDestroyBuffer(state_.info.device, state_.arena.buffer, nullptr);
@@ -9748,16 +9859,127 @@ public:
 
     bool ok() const { return state_.context && state_.context->loaded(); }
 
+    // The new window allocator's replay-side raw-VA hit. The alias table validates the entire requested view before the
+    // device buffer is returned; a miss leaves the legacy arena/index resolver to produce its ordinary refusal.
+    bool title_va_window_buffer_at(std::uint64_t va, std::uint64_t bytes, VkBuffer& buffer, VkDeviceSize& offset) {
+        if (state_.title_va_windows_mode != palmetto::TitleVaWindowsSwitch::on || !state_.title_va_aliases) return false;
+        palmetto::TitleVaAliasResolution resolved{};
+        if (state_.title_va_aliases->resolve(va, bytes, resolved) != palmetto::TitleVaAliasRefusal::none) return false;
+        std::lock_guard lock(state_.title_va_windows_mutex);
+        for (std::size_t i = 0; i < state_.title_va_window_count; ++i) {
+            const auto& window = state_.title_va_windows[i];
+            if (window.id != resolved.window_id || resolved.device_address < window.device_address) continue;
+            const std::uint64_t at = resolved.device_address - window.device_address;
+            if (at > window.bytes || bytes > window.bytes - at) return false;
+            buffer = window.buffer;
+            offset = static_cast<VkDeviceSize>(at);
+            return true;
+        }
+        return false;
+    }
+
+    static bool title_pages_readable(std::uint64_t va, std::uint64_t bytes) {
+        if (!va || !bytes || bytes > (std::numeric_limits<std::uintptr_t>::max)() -
+                                       static_cast<std::uintptr_t>(va))
+            return false;
+        const std::uintptr_t start = static_cast<std::uintptr_t>(va);
+        std::uint64_t done = 0;
+        while (done < bytes) {
+            MEMORY_BASIC_INFORMATION region{};
+            const auto address = start + static_cast<std::uintptr_t>(done);
+            if (::VirtualQuery(reinterpret_cast<const void*>(address), &region, sizeof(region)) != sizeof(region) ||
+                region.State != MEM_COMMIT || (region.Protect & (PAGE_GUARD | PAGE_WRITECOMBINE | PAGE_NOCACHE)))
+                return false;
+            const DWORD protection = region.Protect & 0xff;
+            switch (protection) {
+                case PAGE_READONLY:
+                case PAGE_READWRITE:
+                case PAGE_WRITECOPY:
+                case PAGE_EXECUTE_READ:
+                case PAGE_EXECUTE_READWRITE:
+                case PAGE_EXECUTE_WRITECOPY: break;
+                default: return false;
+            }
+            const auto region_start = reinterpret_cast<std::uintptr_t>(region.BaseAddress);
+            if (region.RegionSize > (std::numeric_limits<std::uintptr_t>::max)() - region_start) return false;
+            const std::uintptr_t region_end = region_start + region.RegionSize;
+            if (region_end <= address) return false;
+            const std::uint64_t chunk = std::min<std::uint64_t>(bytes - done, region_end - address);
+            if (!chunk) return false;
+            done += chunk;
+        }
+        return true;
+    }
+
+    bool pull_title_va_window(const palmetto::TitleVaAliasResolution& resolved, std::uint64_t va,
+                              std::uint64_t bytes) {
+        if (!title_pages_readable(va, bytes)) return false;
+        std::lock_guard lock(state_.title_va_windows_mutex);
+        for (std::size_t i = 0; i < state_.title_va_window_count; ++i) {
+            auto& window = state_.title_va_windows[i];
+            if (window.id != resolved.window_id || resolved.device_address < window.device_address) continue;
+            const std::uint64_t at = resolved.device_address - window.device_address;
+            if (at > window.bytes || bytes > window.bytes - at || !window.mapped) return false;
+            std::memcpy(window.mapped + at, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(va)),
+                        static_cast<std::size_t>(bytes));
+            return true;
+        }
+        return false;
+    }
+
     // ---- The title's page content (docs/page_content.md) ---------------------------------------------------------
     //
     // The slot-133 handler runs after rt::xmem::commit_physical_range (main.cpp, set_placed_at_va_pages_hook), so the
     // title's pages are committed and the CPU can read what it wrote; the GPU, however, reads the arena range that
     // stands in for the title VA (docs/page_address_space.md). These two callbacks copy the bytes across, on demand:
     // console_pull_pages for a buffer VA the draw names (vertex/index views, root descriptors), console_pull_table for
-    // the V#s inside a descriptor table the draw's root arguments name. A pull is a host copy into the arena's mapped
-    // memory, so it has to happen before the submission that reads it is recorded - prepare_draw does that.
+    // the V#s inside a descriptor table the draw's root arguments name. A pull is a host copy into the mapped arena or
+    // opt-in window backing, so it has to happen before the submission that reads it is recorded - prepare_draw does that.
     void console_pull_pages(std::uint64_t title_va, std::uint64_t bytes) {
-        if (!title_pages_enabled() || !title_va || !bytes) return;
+        if (!title_va || !bytes) return;
+        if (state_.title_va_windows_mode == palmetto::TitleVaWindowsSwitch::on && state_.title_va_aliases) {
+            palmetto::TitleVaAliasResolution first{};
+            if (state_.title_va_aliases->resolve(title_va, 1, first) == palmetto::TitleVaAliasRefusal::none) {
+                if (!title_pages_enabled()) return;
+                palmetto::TitleVaAliasResolution full{};
+                const auto refusal = state_.title_va_aliases->resolve(title_va, bytes, full);
+                if (refusal != palmetto::TitleVaAliasRefusal::none) {
+                    static std::atomic<unsigned> logged{0};
+                    if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
+                        std::fprintf(stderr,
+                                     "[rt] d3d12: outside-arena title page pull refused: VA 0x%llx + 0x%llx (%s); "
+                                     "draws stay refused\n",
+                                     static_cast<unsigned long long>(title_va), static_cast<unsigned long long>(bytes),
+                                     palmetto::title_va_alias_refusal_name(refusal));
+                    state_.context->mark_console_va_incomplete();
+                    return;
+                }
+                if (!pull_title_va_window(full, title_va, bytes)) {
+                    static std::atomic<unsigned> logged{0};
+                    if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
+                        std::fprintf(stderr,
+                                     "[rt] d3d12: outside-arena title page pull refused: VA 0x%llx + 0x%llx "
+                                     "(title_pages_unreadable_or_window_missing); draws stay refused\n",
+                                     static_cast<unsigned long long>(title_va), static_cast<unsigned long long>(bytes));
+                    state_.context->mark_console_va_incomplete();
+                    return;
+                }
+                state_.context->count_console_pages(bytes);
+                const std::uint64_t pulls = state_.pages_pulled.fetch_add(1, std::memory_order_relaxed) + 1;
+                const std::uint64_t total = state_.pages_pulled_bytes.fetch_add(bytes, std::memory_order_relaxed) + bytes;
+                if (pulls % 65536 == 0)
+                    std::fprintf(stderr, "[rt] d3d12: page content: %llu pull(s), %.1f MiB copied\n",
+                                 static_cast<unsigned long long>(pulls), double(total) / double(1 << 20));
+                static std::atomic<unsigned> logged{0};
+                if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
+                    std::fprintf(stderr,
+                                 "[rt] d3d12: page pull: title VA 0x%llx + 0x%llx -> outside-arena BDA 0x%llx\n",
+                                 static_cast<unsigned long long>(title_va), static_cast<unsigned long long>(bytes),
+                                 static_cast<unsigned long long>(full.device_address));
+                return;
+            }
+        }
+        if (!title_pages_enabled()) return;
         std::uint64_t arena_va = 0, available = 0;
         if (!state_.context->console_va_span(title_va, palmetto::ConsoleVaKind::buffer, arena_va, available)) return;
         if (arena_va >= state_.arena.size) return;
@@ -9924,6 +10146,197 @@ public:
         }
         out_buffer = buffer;
         out_offset = offset;
+        return true;
+    }
+
+    // Opt-in device adapter for the portable title-VA policy. Each request gets a separate VkBuffer and coherent
+    // host-visible allocation, so heap_base + console_va is exactly the buffer's real BDA without consuming arena room.
+    bool create_title_va_window(std::uint64_t va, std::uint64_t bytes, VkBuffer& out_buffer, VkDeviceSize& out_offset,
+                                const char*& why) {
+        out_buffer = VK_NULL_HANDLE;
+        out_offset = 0;
+        why = "window_allocator_refused";
+        if (state_.title_va_windows_mode != palmetto::TitleVaWindowsSwitch::on) {
+            why = state_.title_va_windows_mode == palmetto::TitleVaWindowsSwitch::invalid ? "invalid_switch" :
+                                                                                             "switch_off";
+            return false;
+        }
+        if (!state_.title_va_aliases) {
+            why = "window_table_allocation_failed";
+            return false;
+        }
+        if (!state_.context || !state_.context->loaded() || !state_.arena.buffer || !state_.arena.address ||
+            !state_.arena.size) {
+            why = "no_arena_geometry";
+            return false;
+        }
+        if (!state_.info.buffer_device_address || !state_.context->vk.vkGetBufferDeviceAddress) {
+            why = "buffer_device_address_unavailable";
+            return false;
+        }
+        if (!title_va_rebasing()) {
+            why = "title_va_rebasing_disabled";
+            return false;
+        }
+        if (!va || !bytes || bytes > palmetto::TitleVaAliasTable::kMaxWindowBytes) {
+            why = bytes > palmetto::TitleVaAliasTable::kMaxWindowBytes ? "window_too_large" : "zero_address_or_bytes";
+            return false;
+        }
+        if (bytes > (std::numeric_limits<std::uintptr_t>::max)() - static_cast<std::uintptr_t>(va)) {
+            why = "range_overflow";
+            return false;
+        }
+        if (!title_pages_readable(va, bytes)) {
+            why = "title_pages_unreadable";
+            return false;
+        }
+        if (bytes > palmetto::TitleVaAliasTable::kMaxTotalWindowBytes - state_.title_va_aliases->window_bytes()) {
+            why = "window_budget_spent";
+            return false;
+        }
+        {
+            std::lock_guard lock(state_.title_va_windows_mutex);
+            if (state_.title_va_window_count >= state_.title_va_windows.size()) {
+                why = "window_table_full";
+                return false;
+            }
+        }
+
+        auto& vk = state_.context->vk;
+        VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        info.size = bytes;
+        info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                     VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        state_.share(info);
+        VkBuffer buffer = VK_NULL_HANDLE;
+        if (vk.vkCreateBuffer(state_.info.device, &info, nullptr, &buffer) != VK_SUCCESS) {
+            why = "window_buffer_create_failed";
+            return false;
+        }
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        void* mapped = nullptr;
+        const auto discard = [&] {
+            if (mapped) vk.vkUnmapMemory(state_.info.device, memory);
+            if (memory) vk.vkFreeMemory(state_.info.device, memory, nullptr);
+            if (buffer) vk.vkDestroyBuffer(state_.info.device, buffer, nullptr);
+            mapped = nullptr;
+            memory = VK_NULL_HANDLE;
+            buffer = VK_NULL_HANDLE;
+        };
+        VkMemoryRequirements requirements{};
+        vk.vkGetBufferMemoryRequirements(state_.info.device, buffer, &requirements);
+        if (!requirements.size || requirements.size > palmetto::TitleVaAliasTable::kMaxWindowBytes) {
+            discard();
+            why = "window_allocation_too_large";
+            return false;
+        }
+        {
+            std::lock_guard lock(state_.title_va_windows_mutex);
+            if (state_.title_va_window_allocation_bytes > palmetto::TitleVaAliasTable::kMaxTotalWindowBytes ||
+                requirements.size > palmetto::TitleVaAliasTable::kMaxTotalWindowBytes -
+                                        state_.title_va_window_allocation_bytes) {
+                discard();
+                why = "window_budget_spent";
+                return false;
+            }
+        }
+        memory = state_.allocate(requirements,
+                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, nullptr, true);
+        if (!memory) {
+            discard();
+            why = "host_coherent_memory_unavailable";
+            return false;
+        }
+        if (vk.vkBindBufferMemory(state_.info.device, buffer, memory, 0) != VK_SUCCESS) {
+            discard();
+            why = "window_memory_bind_failed";
+            return false;
+        }
+        if (vk.vkMapMemory(state_.info.device, memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS || !mapped) {
+            discard();
+            why = "window_memory_map_failed";
+            return false;
+        }
+        // Capture the current title bytes before publishing the alias. Later pull callbacks refresh the same backing
+        // immediately before the dependent submission; only host-coherent memory is accepted, so no flush is omitted.
+        if (!title_pages_readable(va, bytes)) {
+            discard();
+            why = "title_pages_unreadable";
+            return false;
+        }
+        std::memcpy(mapped, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(va)),
+                    static_cast<std::size_t>(bytes));
+        VkBufferDeviceAddressInfo address_info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+        address_info.buffer = buffer;
+        const std::uint64_t device_address = vk.vkGetBufferDeviceAddress(state_.info.device, &address_info);
+        if (!device_address) {
+            discard();
+            why = "window_device_address_unavailable";
+            return false;
+        }
+
+        const std::uint64_t id = state_.next_title_va_window_id.fetch_add(1, std::memory_order_relaxed);
+        if (!id) {
+            discard();
+            why = "zero_window_id";
+            return false;
+        }
+        auto refusal = state_.title_va_aliases->add_window(id, device_address, bytes);
+        if (refusal != palmetto::TitleVaAliasRefusal::none) {
+            discard();
+            why = palmetto::title_va_alias_refusal_name(refusal);
+            return false;
+        }
+        refusal = state_.title_va_aliases->add_alias(id, va, bytes, id);
+        if (refusal != palmetto::TitleVaAliasRefusal::none) {
+            state_.title_va_aliases->remove_window(id);
+            discard();
+            why = palmetto::title_va_alias_refusal_name(refusal);
+            return false;
+        }
+        palmetto::TitleVaAliasResolution resolved{};
+        refusal = state_.title_va_aliases->resolve(va, bytes, resolved);
+        if (refusal != palmetto::TitleVaAliasRefusal::none) {
+            state_.title_va_aliases->remove_alias(id);
+            state_.title_va_aliases->remove_window(id);
+            discard();
+            why = palmetto::title_va_alias_refusal_name(refusal);
+            return false;
+        }
+        if (!state_.context->add_console_va_range(va, bytes, resolved.console_va, palmetto::ConsoleVaKind::buffer, true)) {
+            state_.title_va_aliases->remove_alias(id);
+            state_.title_va_aliases->remove_window(id);
+            discard();
+            why = "console_va_overlap";
+            return false;
+        }
+        {
+            std::lock_guard lock(state_.title_va_windows_mutex);
+            if (state_.title_va_window_count >= state_.title_va_windows.size()) {
+                state_.context->remove_console_va_range(va);
+                state_.title_va_aliases->remove_alias(id);
+                state_.title_va_aliases->remove_window(id);
+                discard();
+                why = "window_table_full";
+                return false;
+            }
+            state_.title_va_windows[state_.title_va_window_count++] = {
+                id, va, bytes, device_address, resolved.console_va, buffer, memory,
+                static_cast<std::uint8_t*>(mapped), requirements.size};
+            state_.title_va_window_allocation_bytes += requirements.size;
+        }
+        out_buffer = buffer;
+        out_offset = 0;
+        why = "";
+        std::fprintf(stderr,
+                     "[rt] d3d12: outside-arena title VA window %llu: raw VA 0x%llx + 0x%llx -> BDA 0x%llx "
+                     "(console VA 0x%llx)\n",
+                     static_cast<unsigned long long>(id), static_cast<unsigned long long>(va),
+                     static_cast<unsigned long long>(bytes), static_cast<unsigned long long>(device_address),
+                     static_cast<unsigned long long>(resolved.console_va));
         return true;
     }
 
@@ -13693,6 +14106,9 @@ BindlessStats bindless_stats(ID3D12Device* device) {
     stats.generations_made = d->bindless()->generations_made();
     stats.retired_pending = d->bindless()->retired_count();
     stats.device_idle_waits = d->state().bindless_idle_waits.load(std::memory_order_relaxed);
+    stats.degraded_flushes = d->bindless()->degraded_flushes();
+    stats.spares_reused = d->bindless()->spares_reused();
+    stats.keys_refused = d->bindless()->keys_refused();
     return stats;
 }
 

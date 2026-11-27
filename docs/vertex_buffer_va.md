@@ -2893,3 +2893,89 @@ the measured title-buffer window model, not a claim that the peers share one imp
 > GPL-2.0-only; rpatty-dev), victory-fork (`9a9091d`, GPL-3.0-or-later; fxceless) and XCL (`623d02e`,
 > GPL-2.0-only; Prime1997). No code, comment text, identifier or measurement table was copied; the local address checks,
 > refusal set, bounds and tests are independently written.
+
+## 24. Outside-arena title-VA window device adapter
+
+**Status: implemented behind `PALMETTO_TITLE_VA_WINDOWS`; portable and replay-lookup units pass; no GPU arm was made.**
+This extends section 23's tested policy into the Vulkan device path. The public runtime switch is strict: unset/false keeps the prior
+external-host import path; an explicit true value selects the window adapter; malformed text logs `invalid_switch` and refuses
+new raw spans. The off branch installs no window allocator/resolver, creates no window Vulkan objects, and keeps the existing
+buffer/index/import path unchanged.
+
+### 24.1 Measured lookup and lifecycle
+
+The measured content window remains the section 2 trace: the refused list has 11 commands, its first unresolved direct draw
+is the `0x120000`-byte vertex view, the nearby index view is `0x60000` bytes, and the two later submissions repeat a view in
+the same title allocation. None of the 3,282 then-registered placed-buffer/heap ranges held the raw VA. The title wrote the
+span into committed, readable host memory without a D3D12 resource, so no resource-creation event could register it. The
+section-1 A/B established that the refusal is separate from the later boot stop; this adapter does not claim to repair that
+stop or to import the title's physical pages by identity.
+
+The registry's existing CPU lookup is `VulkanContext::buffer_at`: it first applies `ConsoleVaMap` for registered title aliases,
+then asks `BufferVaIndex::find(va, size)`, and finally checks the legacy title-page import range. `BufferVaIndex` orders by
+starting VA and ID, searches backward from the nearest start, prefers a range that holds the whole requested span, and bounds
+the overlap walk using the longest currently indexed range. The new opt-in branch intercepts a raw outside-arena alias before
+that rebasing/index path and returns its actual window buffer plus byte offset; it does not invent an arena index entry.
+
+Lifecycle from existing code and traces: the queue offers unresolved draw buffer views before list preparation; the adapter
+validates the requested title pages, allocates one bounded window, registers the raw alias, and keeps that backing until device
+teardown because these title-owned spans have no D3D12 resource release hook. Repeated direct-view, root-argument and V# pulls
+copy current bytes into the mapped backing before the dependent submission. The alias is explicitly one device's bounded
+snapshot, not a cross-process or physical-page alias, and not a change to XMem remapping/write-watch semantics.
+
+### 24.2 Device mapping and safety bounds
+
+With `PALMETTO_TITLE_VA_WINDOWS=1`, the adapter creates a `VkBuffer` with vertex/index, uniform/storage, indirect, transfer and
+shader-device-address usages, binds dedicated `HOST_VISIBLE | HOST_COHERENT` memory, maps it, and obtains the real Vulkan BDA.
+Only the mapped title bytes are copied into it; no `VK_EXT_external_memory_host` support is required. `TitleVaAliasTable`
+accepts the window only when its full BDA span is nonzero, overflow-safe, above and non-overlapping with the arena, and the
+heap-relative delta plus extent fits the 48-bit V# base. The device registers `raw title VA -> (BDA - heap_base)` in the
+existing `ConsoleVaMap`, so its established root/table rebase and V# base patch paths emit the same console-relative value.
+For direct buffer views the raw resolver selects the window's `VkBuffer` and offset. The driver-block buffer-address helper
+also returns the same BDA delta rather than staging a second arena copy.
+
+The existing pull hooks reverse-map a patched V# base to its title span and copy those pages into the window before reads.
+If the source becomes uncommitted/unreadable, a pull exceeds the alias, or the alias cannot be installed, the adapter logs a
+stable refusal and marks the console VA map incomplete, keeping draws refused instead of using stale/unrebased bytes.
+`WriteBufferImmediate` ranges that overlap a window are refused as `write_buffer_immediate_unsupported`: the measured class
+is read-only vertex/index streaming, and GPU-to-title writeback is not implemented. Arbitrary shader UAV writes through a V#
+are not introspected and are unsupported (not silently claimed to sync back); only the known immediate-write path has a
+named runtime refusal today. `PALMETTO_PAGE_PULL=0` continues to suppress recurring page copies as it does for arena-backed
+spans.
+
+Bounds are fixed and checked twice: no more than 32 windows/aliases, 4 MiB per window, and 32 MiB total logical window bytes;
+the device separately caps actual Vulkan allocation bytes at 32 MiB. Only host-coherent memory is accepted, so the upload
+path never omits a required non-coherent flush. No window is reclaimed before device teardown; exhausting a table or byte
+budget is a named refusal (`window_table_full` / `window_budget_spent`), not an unbounded allocation. Other named device
+refusals include `no_arena_geometry`, `buffer_device_address_unavailable`, `title_va_rebasing_disabled`,
+`title_pages_unreadable`, `host_coherent_memory_unavailable`, buffer/memory create-bind-map failures, below-arena/overlap,
+48-bit-unrepresentable BDA, alias overlap/out-of-bounds, and `invalid_switch`.
+
+### 24.3 Verification and limits
+
+`port/test/buffer_va_index_test.cpp` retains the switch and policy-boundary cases and adds a synthetic replay composition:
+raw title VA -> `ConsoleVaMap` -> `BufferVaIndex` -> exact `heap_base + console VA` BDA, plus a V# patch that preserves its
+format/stride bits. This is CPU-only and uses synthetic addresses; it does not claim a Vulkan allocation, page-read, GPU fetch,
+or title-boot result. The target GPU test/one light boot was not run: the shared boot-lock policy was not free while
+`palmetto.exe` was active. No game bytes, shader bytes, package paths or extracted tables were used.
+
+**Falsifier for the device claim:** when the host and boot lock are free, run a one-window synthetic GPU check with a local
+committed byte-pattern page and the opt-in switch. It must show (a) `buffer_at(raw_va, n)` returning the allocated window and
+exact offset, (b) `heap_base + rebased_va == vkGetBufferDeviceAddress(buffer) + offset` for root/table/V# values, and (c) a
+GPU readback after the page-pull hook equals the synthetic source pattern, while switch-off leaves the prior path/output
+unchanged. A below-base/overlap/over-budget/unreadable/out-of-bounds input must refuse by name and submit no bad address.
+Any mismatch, stale GPU readback, unexplained device loss, or switch-off delta falsifies this adapter as measured here.
+
+### 24.4 Attribution and NOTICE draft
+
+The implementation is based on this tree's section-2 raw-VA refusal trace, section-18 staging bounds, and the measured
+`buffer_at`/`BufferVaIndex`/`ConsoleVaMap` paths. The public peer notes and snapshots named in
+[cleanroom_peers.md](cleanroom_peers.md) and [title_memory_model.md](title_memory_model.md) were consulted as behavior evidence
+only: Five Star Recomp (`34b4dfed`, GPL-3.0-or-later), VIctory (`63bcca4`, GPL-3.0-or-later), and XCL (`623d02e`,
+GPL-2.0-only). No peer implementation, code, comments, identifiers, game data or measurement table were copied; the Vulkan
+adapter, resolver ordering, checks, refusal handling and tests are independently written.
+
+> **Draft NOTICE.md row (not applied; NOTICE.md remains unchanged):** The opt-in outside-arena title-VA device-window
+> adapter in `port/shims/d3d12_vulkan_device.cpp` and `port/src/vulkan_backend.h` was implemented from this project's
+> own traces and APIs. Five Star Recomp (`34b4dfed`, GPL-3.0-or-later), VIctory (`63bcca4`, GPL-3.0-or-later), and XCL
+> (`623d02e`, GPL-2.0-only) were consulted as mechanism evidence only. No source, comments or identifiers were copied.

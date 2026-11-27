@@ -30,6 +30,7 @@
 #include "../shims/xmem.h"  // docs/card_copies.md: the guard-page write tracker the mirror gate polls
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -1191,6 +1192,36 @@ public:
         // A range that runs past its buffer is cut at the buffer's end (`size` is updated): D3D12 reads past a view's
         // buffer as out of bounds, which is no reason to drop the submission.
         replay_.buffer_at = [this](std::uint64_t va, std::uint64_t& size, VkBuffer& buffer, VkDeviceSize& offset) {
+            // The opt-in outside-arena path resolves the raw title VA to the actual device-address window before the
+            // arena alias translation below. Window writes are not pulled back to title memory, so any command batch
+            // naming the same bytes through WriteBufferImmediate refuses this lookup by name.
+            if (title_va_window_buffer_resolver_) {
+                VkBuffer window_buffer = VK_NULL_HANDLE;
+                VkDeviceSize window_offset = 0;
+                if (title_va_window_buffer_resolver_(va, size, window_buffer, window_offset)) {
+                    bool write_conflict = title_va_window_write_overflow_;
+                    if (!write_conflict && va && size && size <= UINT64_MAX - va) {
+                        const std::uint64_t end = va + size;
+                        for (std::size_t i = 0; i < title_va_window_write_count_; ++i) {
+                            const auto [write_va, write_bytes] = title_va_window_write_ranges_[i];
+                            if (write_va && write_bytes && write_bytes <= UINT64_MAX - write_va &&
+                                va < write_va + write_bytes && write_va < end) {
+                                write_conflict = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (write_conflict) {
+                        note_title_window_refusal(va, size, title_va_window_write_overflow_
+                                                                        ? "write_range_cap"
+                                                                        : "write_buffer_immediate_unsupported");
+                        return false;
+                    }
+                    buffer = window_buffer;
+                    offset = window_offset;
+                    return true;
+                }
+            }
             // A command argument that names a title-placed buffer by the VA the title chose: the title VA is an alias
             // for the arena range that stands in for it (docs/page_address_space.md), so the view resolves to the
             // stand-in's bytes through the same lookup as every other buffer.
@@ -1591,16 +1622,25 @@ public:
     // descriptor heap gets a range in the arena that stands in for it: `title` is the VA the title names it by, `size`
     // its bytes and `arena` the arena VA of the stand-in. The title VA stays an alias for command arguments through
     // buffer_at; every shader-visible copy of it is rebased (replay_.rebase_console_va) before a shader sees it.
-    void add_console_va_range(std::uint64_t title, std::uint64_t size, std::uint64_t arena, ConsoleVaKind kind) {
+    bool add_console_va_range(std::uint64_t title, std::uint64_t size, std::uint64_t arena, ConsoleVaKind kind,
+                              bool outside_arena = false) {
         if (console_vas_.add(title, size, arena, kind)) {
             if (kind == ConsoleVaKind::descriptors) note_console_mirror_added(title, size);
             static std::atomic<unsigned> logged{0};
-            if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
-                std::fprintf(stderr,
-                             "[rt] replay: title VA range 0x%llx + 0x%llx (%s) is arena VA 0x%llx\n",
-                             static_cast<unsigned long long>(title), static_cast<unsigned long long>(size),
-                             console_va_kind_name(kind), static_cast<unsigned long long>(arena));
-            return;
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+                if (outside_arena)
+                    std::fprintf(stderr,
+                                 "[rt] replay: title VA range 0x%llx + 0x%llx (%s) maps to outside-arena console VA "
+                                 "0x%llx\n",
+                                 static_cast<unsigned long long>(title), static_cast<unsigned long long>(size),
+                                 console_va_kind_name(kind), static_cast<unsigned long long>(arena));
+                else
+                    std::fprintf(stderr,
+                                 "[rt] replay: title VA range 0x%llx + 0x%llx (%s) is arena VA 0x%llx\n",
+                                 static_cast<unsigned long long>(title), static_cast<unsigned long long>(size),
+                                 console_va_kind_name(kind), static_cast<unsigned long long>(arena));
+            }
+            return true;
         }
         // Two stand-ins for one VA is a range the layer cannot decide; refuse rather than execute a guess.
         console_vas_.mark_incomplete();
@@ -1609,6 +1649,7 @@ public:
                      "refused\n",
                      static_cast<unsigned long long>(title), static_cast<unsigned long long>(size),
                      console_va_kind_name(kind));
+        return false;
     }
     void remove_console_va_range(std::uint64_t title) {
         note_console_mirror_removed(title);
@@ -1915,23 +1956,88 @@ public:
     using TitlePageImporter =
         std::function<bool(std::uint64_t va, std::uint64_t bytes, VkBuffer& buffer, VkDeviceSize& offset,
                            const char*& why)>;
+    using TitleVaWindowAllocator = TitlePageImporter;
+    using TitleVaWindowBufferResolver =
+        std::function<bool(std::uint64_t va, std::uint64_t bytes, VkBuffer& buffer, VkDeviceSize& offset)>;
     void set_title_page_importer(TitlePageImporter importer) {
         std::unique_lock lock(resource_mutex_);
         title_page_importer_ = std::move(importer);
     }
+    // Opt-in device-address windows are distinct from host-pointer imports: the device creates a copy-backed buffer and
+    // registers its raw title-VA alias before returning. `buffer_at` uses the resolver for direct command views, while
+    // ConsoleVaMap rewrites root/table/V# addresses to the returned heap-relative BDA.
+    void set_title_va_window_allocator(TitleVaWindowAllocator allocator) {
+        std::unique_lock lock(resource_mutex_);
+        title_va_window_allocator_ = std::move(allocator);
+    }
+    void set_title_va_window_buffer_resolver(TitleVaWindowBufferResolver resolver) {
+        std::unique_lock lock(resource_mutex_);
+        title_va_window_buffer_resolver_ = std::move(resolver);
+    }
     // Called by the submitting queue thread once per submission, before the lists are prepared (and before the shared
-    // resource lock is taken): every buffer VA the lists name that no mapping resolves is offered to the importer. A
-    // span that stays unresolved is left to the replay's named refusal, as before. Returns the number imported.
+    // resource lock is taken): every unresolved buffer VA is offered either to the legacy host-pointer importer or to
+    // the opt-in outside-arena window allocator. Window requests coalesce overlapping views, but remain bounded by the
+    // policy table; unsupported immediate writes are left unresolved rather than writing only the mirror.
     std::size_t register_title_command_buffers(std::span<const CommandList* const> lists) {
-        if (!title_page_importer_ || lists.empty()) return 0;
+        const bool window_mode = bool(title_va_window_allocator_);
+        if (!window_mode && !title_page_importer_) return 0;
+
         std::vector<std::pair<std::uint64_t, std::uint64_t>> requests;
         requests.reserve(16);
+        std::array<std::pair<std::uint64_t, std::uint64_t>, title_buffers::kMaxRanges> window_writes{};
+        std::size_t window_write_count = 0;
+        bool window_write_overflow = false;
         for (const CommandList* list : lists) {
-            if (!list || requests.size() >= title_buffers::kMaxRanges) continue;
-            title_buffers::collect_requests(*list, requests);
+            if (!list) continue;
+            if (requests.size() < title_buffers::kMaxRanges) title_buffers::collect_requests(*list, requests);
+            if (!window_mode) continue;
+            for (const Command& command : list->commands()) {
+                const auto* write = std::get_if<WriteImmediate>(&command);
+                if (!write) continue;
+                if (window_write_count < window_writes.size())
+                    window_writes[window_write_count++] = {write->address, 4};
+                else
+                    window_write_overflow = true;
+            }
+        }
+
+        if (window_mode) {
+            // One alias must name one unambiguous byte mapping. Merge exact/overlapping views into their smallest union;
+            // a view that would need more than the policy's 4 MiB window is refused by the allocator, not guessed.
+            std::sort(requests.begin(), requests.end());
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> merged;
+            merged.reserve(requests.size());
+            for (const auto& request : requests) {
+                const auto [va, bytes] = request;
+                const bool valid = va && bytes && bytes <= UINT64_MAX - va;
+                bool joined = false;
+                if (valid && !merged.empty()) {
+                    auto& previous = merged.back();
+                    const bool previous_valid = previous.first && previous.second &&
+                                                previous.second <= UINT64_MAX - previous.first;
+                    if (previous_valid) {
+                        const std::uint64_t previous_end = previous.first + previous.second;
+                        const std::uint64_t request_end = va + bytes;
+                        if (va <= previous_end) {
+                            previous.second = std::max(previous_end, request_end) - previous.first;
+                            joined = true;
+                        }
+                    }
+                }
+                if (!joined) merged.push_back(request);
+            }
+            requests.swap(merged);
+        }
+        if (!window_mode && requests.empty()) return 0;
+
+        std::unique_lock lock(resource_mutex_);
+        if (window_mode) {
+            title_va_window_write_ranges_ = window_writes;
+            title_va_window_write_count_ = window_write_count;
+            title_va_window_write_overflow_ = window_write_overflow;
         }
         if (requests.empty()) return 0;
-        std::unique_lock lock(resource_mutex_);
+
         std::size_t imported = 0;
         for (const auto& [va, bytes] : requests) {
             {
@@ -1943,9 +2049,58 @@ public:
                 if (imported_title_range(va, imported_size, imported_buffer, imported_offset)) continue;
             }
             std::uint64_t rebased = 0;
-            if (console_vas_.rebase(va, rebased, palmetto::ConsoleVaKind::buffer)) continue;  // a registered title range
+            if (window_mode) {
+                std::uint64_t available = 0;
+                if (console_vas_.rebase_span(va, palmetto::ConsoleVaKind::buffer, rebased, available)) {
+                    if (bytes > available) note_title_window_refusal(va, bytes, "alias_view_out_of_bounds");
+                    continue;  // a registered title range; never create an overlapping second stand-in
+                }
+            } else if (console_vas_.rebase(va, rebased, palmetto::ConsoleVaKind::buffer)) {
+                continue;  // a registered title range
+            }
             BufferVaIndex<ResourceId>::Hit hit{};
             if (buffer_vas_.find(va, hit)) continue;  // an ordinary or arena buffer, or an earlier import
+
+            if (window_mode) {
+                bool write_overlap = window_write_overflow;
+                const bool valid = va && bytes && bytes <= UINT64_MAX - va;
+                if (!write_overlap && valid) {
+                    const std::uint64_t end = va + bytes;
+                    for (std::size_t i = 0; i < window_write_count; ++i) {
+                        const auto [write_va, write_bytes] = window_writes[i];
+                        if (write_va && write_bytes && write_bytes <= UINT64_MAX - write_va &&
+                            va < write_va + write_bytes && write_va < end) {
+                            write_overlap = true;
+                            break;
+                        }
+                    }
+                }
+                if (write_overlap) {
+                    note_title_window_refusal(va, bytes, window_write_overflow ? "write_range_cap" :
+                                                                          "write_buffer_immediate_unsupported");
+                    continue;
+                }
+                if (!valid) {
+                    note_title_window_refusal(va, bytes, "range_overflow");
+                    continue;
+                }
+                VkBuffer buffer = VK_NULL_HANDLE;
+                VkDeviceSize offset = 0;
+                const char* why = nullptr;
+                if (!title_va_window_allocator_(va, bytes, buffer, offset, why) || buffer == VK_NULL_HANDLE) {
+                    note_title_window_refusal(va, bytes, why && *why ? why : "window_allocator_refused");
+                    continue;
+                }
+                ++imported;
+                static std::atomic<unsigned> logged{0};
+                if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
+                    std::fprintf(stderr,
+                                 "[rt] replay: title VA window registered: raw VA 0x%llx + 0x%llx (outside-arena "
+                                 "device backing; root/table/V# addresses use its heap-relative BDA)\n",
+                                 static_cast<unsigned long long>(va), static_cast<unsigned long long>(bytes));
+                continue;
+            }
+
             if (const char* why = title_buffers::refusal(va, bytes, imported_title_ranges(),
                                                           imported_title_bytes())) {
                 note_title_import_refusal(va, bytes, why);
@@ -2006,6 +2161,12 @@ public:
         if (title_import_refusals_.fetch_add(1, std::memory_order_relaxed) < 8)
             std::fprintf(stderr,
                          "[rt] replay: title pages a command names stay refused: VA 0x%llx + 0x%llx (%s)\n",
+                         static_cast<unsigned long long>(va), static_cast<unsigned long long>(bytes), why);
+    }
+    void note_title_window_refusal(std::uint64_t va, std::uint64_t bytes, const char* why) {
+        if (title_window_refusals_.fetch_add(1, std::memory_order_relaxed) < 8)
+            std::fprintf(stderr,
+                         "[rt] replay: outside-arena title VA window refused: VA 0x%llx + 0x%llx (%s)\n",
                          static_cast<unsigned long long>(va), static_cast<unsigned long long>(bytes), why);
     }
     // Called with a console descriptor heap's mirror (a shader-visible V# the title wrote can name a title VA): a base
@@ -3107,11 +3268,17 @@ private:
     // VkBuffer at first use; these are those buffers and their byte counts. `imported_title_mutex_` is taken after
     // resource_mutex_ (registration) and alone from the descriptor patch, so the lock order is consistent.
     TitlePageImporter title_page_importer_;
+    TitleVaWindowAllocator title_va_window_allocator_;
+    TitleVaWindowBufferResolver title_va_window_buffer_resolver_;
+    std::array<std::pair<std::uint64_t, std::uint64_t>, title_buffers::kMaxRanges> title_va_window_write_ranges_{};
+    std::size_t title_va_window_write_count_ = 0;
+    bool title_va_window_write_overflow_ = false;
     mutable std::mutex imported_title_mutex_;
     std::vector<ImportedTitleBuffer> imported_title_buffers_;
     std::atomic<std::uint64_t> imported_title_bytes_{0};
     std::atomic<std::uint64_t> imported_title_hits_{0};
     std::atomic<unsigned> title_import_refusals_{0};
+    std::atomic<unsigned> title_window_refusals_{0};
     std::atomic<bool> import_conflict_{false};  // a title descriptor named an imported range: draws stay refused
     // The content-frame readback trigger (docs/vertex_buffer_va.md section 10): set for the submission whose lists
     // imported title pages at first use and the two after it, so the replay's draw readback arms on the content draws.

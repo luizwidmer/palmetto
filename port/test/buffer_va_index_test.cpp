@@ -194,6 +194,29 @@ void title_va_alias_cases() {
               a.console_va == b.console_va && a.device_address == b.device_address &&
               a.available_bytes == 0x100000 - inside,
           "both aliases resolve to the same representable GPU address with remaining bounds");
+
+    // Replay integration contract: raw title VA -> ConsoleVaMap -> console-relative BDA window -> buffer_at index.
+    // The same mapping also patches the V# base while preserving its non-base dword bits.
+    palmetto::ConsoleVaMap replay_map;
+    const std::uint64_t window_console_base = external - arena + 0x10000;
+    Index window_buffers;
+    window_buffers.insert(window_console_base, 0x100000, 707);
+    std::uint64_t replay_va = 0;
+    Index::Hit window_hit{};
+    check(replay_map.add(title_a, 0x100000, window_console_base, palmetto::ConsoleVaKind::buffer) &&
+              replay_map.rebase(title_a + inside, replay_va, palmetto::ConsoleVaKind::buffer) &&
+              replay_va == a.console_va && window_buffers.find(replay_va, window_hit, 0x200) &&
+              window_hit.id == 707 && replay_va - window_hit.start == inside && arena + replay_va == a.device_address,
+          "raw replay VA rebases and resolves through buffer_at to the window's exact BDA");
+    std::uint32_t window_descriptor[8]{};
+    window_descriptor[0] = std::uint32_t(title_a + inside);
+    window_descriptor[1] = std::uint32_t((title_a + inside) >> 32) | 0xabcd0000u;
+    check(replay_map.patch_descriptor_bases(reinterpret_cast<std::uint8_t*>(window_descriptor),
+                                            sizeof(window_descriptor)) == 1 &&
+              (std::uint64_t(window_descriptor[0]) | (std::uint64_t(window_descriptor[1] & 0xffffu) << 32)) ==
+                  a.console_va && arena + a.console_va == a.device_address &&
+              (window_descriptor[1] & 0xffff0000u) == 0xabcd0000u,
+          "shader-visible V# base rewrites to the external BDA delta without changing format/stride bits");
     check(table.resolve(title_a - 0x1000, 0x20, a) == TitleVaAliasRefusal::alias_unmapped,
           "unregistered raw title VA is refused by name");
     check(table.resolve(title_a + 0xfffff, 2, a) == TitleVaAliasRefusal::alias_view_out_of_bounds,
