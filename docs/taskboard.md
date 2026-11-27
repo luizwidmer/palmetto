@@ -97,6 +97,15 @@ Priority order is top to bottom within each lane.
 | P-24 | renderer | Decide the presenter fit default once a real content frame exists to judge (fill vs aspect) | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 15 |
 | P-25 | platform | DPI-unaware window: the title's window is oversized against the virtualized monitor; measure window fitting | maintainer | done (`f2d6736a2`) | [peer_port_first_ui.md](peer_port_first_ui.md) section 16 |
 | P-26 | ci | Branch protection: require the guaranteed CI jobs in repository settings (not enforceable from the tree) | maintainer | open | [dev-tools.md](dev-tools.md) |
+| P-32 | renderer | Full multi-viewport/scissor array replay (needs the d3d12_com array copy and dynamic viewport count) | open | open | [d3d12_vulkan.md](d3d12_vulkan.md) |
+| P-33 | memory | Title-VA device integration: outside-arena GPU windows, raw-VA buffer resolve, shader-visible rewrites and page pulls | open | open | [vertex_buffer_va.md](vertex_buffer_va.md) |
+| P-34 | audio | Measured audio effect descriptor and DSP send with formats/lifecycle | open | open | [audio_shims.md](audio_shims.md) section 9 |
+| P-35 | renderer | XG array slot-2 layout observation (the row-major array layout is still a hypothesis) | open | open | [texture_layout.md](texture_layout.md) section 8 |
+| P-36 | platform | DXGI simulate-120 light arm (does the consumer take 120/1 and set the flag) | open | open | [window.md](window.md) |
+| P-37 | renderer | Presenter HDR10 surface arm (the ST.2084 surface was unavailable on the test host) | open | open | [present_wiring.md](present_wiring.md) section 9 |
+| P-38 | platform | Device-health post-gate arm with the helper enabled | open | open | [device_health.md](device_health.md) |
+| P-39 | quality | Triage the remaining full-suite failures: synthetic CRT file round trip, queue-proxy signal causes, console-heap precondition | open | open | [testing.md](testing.md) |
+| P-40 | renderer | Slot-70 strict-validation arm: do the measured dominant-site calls pass and is the matrix V# accepted by compose | open | open | [device_slot70.md](device_slot70.md) section 12 |
 
 ### Parity features (claimable with maintainer coordination)
 
@@ -131,12 +140,3 @@ Priority order is top to bottom within each lane.
   exists.
 - Please add a row when you land a port or a measurement that changes a lane: [docs/README.md](README.md) names the page,
   and the board row links it.
-| P-32 | renderer | Full multi-viewport/scissor array replay (needs the d3d12_com array copy and dynamic viewport count) | open | open | [d3d12_vulkan.md](d3d12_vulkan.md) |
-| P-33 | memory | Title-VA device integration: outside-arena GPU windows, raw-VA buffer resolve, shader-visible rewrites and page pulls | open | open | [vertex_buffer_va.md](vertex_buffer_va.md) |
-| P-34 | audio | Measured audio effect descriptor and DSP send with formats/lifecycle | open | open | [audio_shims.md](audio_shims.md) section 9 |
-| P-35 | renderer | XG array slot-2 layout observation (the row-major array layout is still a hypothesis) | open | open | [texture_layout.md](texture_layout.md) section 8 |
-| P-36 | platform | DXGI simulate-120 light arm (does the consumer take 120/1 and set the flag) | open | open | [window.md](window.md) |
-| P-37 | renderer | Presenter HDR10 surface arm (the ST.2084 surface was unavailable on the test host) | open | open | [present_wiring.md](present_wiring.md) section 9 |
-| P-38 | platform | Device-health post-gate arm with the helper enabled | open | open | [device_health.md](device_health.md) |
-| P-39 | quality | Triage the remaining full-suite failures: synthetic CRT file round trip, queue-proxy signal causes, console-heap precondition | open | open | [testing.md](testing.md) |
-| P-40 | renderer | Slot-70 strict-validation arm: do the measured dominant-site calls pass and is the matrix V# accepted by compose | open | open | [device_slot70.md](device_slot70.md) section 12 |
