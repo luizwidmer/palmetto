@@ -370,6 +370,52 @@ These switches are opt-in and off by default unless stated; `PALMETTO_SHADERS`, 
 | `PALMETTO_XS_SLOT57_LAYOUT_DUMP` | Dumps the slot-57 input layout of the first records. |
 | `PALMETTO_XS_WAIT_EVENT_SLOT` | Runtime diagnostic switch; opt-in and off by default. |
 
+## Guaranteed pull-request checks
+
+Two workflows start on every pull request: `CI` (`.github/workflows/ci.yml`) and `No Game Data`
+(`.github/workflows/no-game-data.yml`). The `Runtime` workflow builds and tests the port when a pull request
+touches the paths it lists (`port/`, `vendor/`, `tooling/scripts/`, `.gitattributes` and the `tooling/` files its
+jobs read), and `jactionlint` parses the workflow files when `.github/` changes. None of the checks needs a GPU,
+game data or the retail package.
+
+- **Every pull request** - `CI` compiles the Python tree, runs the standard-library test loop (one `python -I` run
+  per test file without a pytest or package dependency), the pytest files, the translator semantic suite and the
+  viewer streaming tests.
+- **Documentation only** - when the only changes are `README.md`, `CONTRIBUTING.md`, `AGENTS.md` or a Markdown
+  page under `docs/`, `CI` skips the build and test jobs and runs the tests that read those documents instead:
+  every `tests/test_docs_*.py`, `tests/test_design_contract_rows.py` (it reads `docs/design.md`) and
+  `tests/test_i18n_index.py`.
+- **No game data** - `No Game Data` rejects a tracked game or binary extension and runs
+  `tooling/scripts/check_no_game_data.py` over the tree, which reads the first bytes so a renamed file is caught.
+- **Runtime paths** - `Runtime` configures and builds the port, then runs `ctest`, the GPU-free contract targets
+  among them, on Windows, on Linux with Mesa's llvmpipe and on macOS. The build step runs before ctest because a
+  test target whose link fails would otherwise be silently absent from a green ctest ([testing.md](testing.md)
+  covers that trap).
+
+Two registration tests keep those guarantees from drifting. `tests/test_ci_registration.py` fails when a test
+file no job selects, when a document test is not run for a documentation-only pull request, and when `Runtime`
+would stop building and running `ctest` for a pull request that changes the port. `tests/test_runtime_paths.py`
+recomputes the `tooling/` files the `Runtime` jobs read and fails when the path filter lists one less. Run them,
+with the checks they guard, from the checkout root:
+
+```powershell
+python -I tests/test_ci_registration.py
+python -I tests/test_runtime_paths.py
+python -I tests/test_ctest_registration.py
+foreach ($t in Get-ChildItem tests/test_docs_*.py) { python -I $t.FullName }
+python -I tests/test_design_contract_rows.py
+python -I tests/test_i18n_index.py
+```
+
+The GPU-free runtime contract targets need the port built. On Linux or macOS configure the portable subset and
+run ctest:
+
+```sh
+cmake -S port -B port/build
+cmake --build port/build --parallel
+ctest --test-dir port/build --output-on-failure
+```
+
 ## Console vtable slot maps
 
 [console_slots.md](console_slots.md) keeps the measured map of the console D3D12 vtable slots. The

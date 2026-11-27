@@ -25,6 +25,10 @@ drift) and fails on the three ways a test goes missing without CI turning red --
 It also runs the ``check`` loop itself, taken from the workflow, under bash on a synthetic tree: the loop has
 to run every file and then fail, since stopping at the first failure hides the files sorted after it.
 
+And it checks the other half of the same guarantee: the Runtime workflow (``.github/workflows/port.yml``) still
+builds every target and runs ``ctest`` for a pull request that touches the paths it lists, so the GPU-free
+contract targets it names in ``docs/testing.md`` are not a local gate that a review can skip.
+
 Only the tracked test files and the workflow are read; no game files, no build tools, no pytest. The loop check
 needs bash (Git for Windows' on Windows) and skips without it, except on a GitHub runner.
 """
@@ -41,6 +45,7 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORKFLOW = os.path.join(".github", "workflows", "ci.yml")
+RUNTIME_WORKFLOW = os.path.join(".github", "workflows", "port.yml")
 
 # What a file has to be called to claim it is a test. Any of these that no job selects is a bug, which is why
 # the suffix form (tests/thing_test.py) counts even though no job's glob matches it today.
@@ -184,8 +189,9 @@ def job_of(root: str, rel: str, rules: tuple[str, str, str, str, str]) -> str | 
 
 DOCS_ONLY_STEP = "Check documentation when only documentation changed"
 # The tests that read only the documents. `check` is skipped for a docs-only pull request, so the docs-only step
-# of `change-scope` is the one place they run for it.
-DOCUMENT_TESTS = ("tests/test_docs_*.py", "tests/test_i18n_index.py")
+# of `change-scope` is the one place they run for it. tests/test_design_contract_rows.py reads only docs/design.md
+# and catches the duplicated contract-table row that a docs-only merge can carry into main.
+DOCUMENT_TESTS = ("tests/test_docs_*.py", "tests/test_design_contract_rows.py", "tests/test_i18n_index.py")
 
 
 def docs_only_patterns(root):
@@ -625,6 +631,55 @@ class StdlibLoopTest(unittest.TestCase):
         script = step_script(ROOT, STDLIB_STEP)
         self.assertIn('python -I "$t"', script)
         self.assertIn("-name 'test_*.py'", script)
+
+
+RUNTIME_CTEST_STEP = "CPU runtime tests"
+
+
+def workflow_job(workflow, name):
+    """One job of a workflow, up to the next top-level job."""
+    match = re.search(r"^  %s:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)" % re.escape(name), workflow, re.M | re.S)
+    if not match:
+        raise AssertionError(f"the workflow no longer has a `{name}:` job; update tests/test_ci_registration.py "
+                             "together with the workflow")
+    return match.group(1)
+
+
+class RuntimeWorkflowTest(unittest.TestCase):
+    """The Runtime workflow runs the ctest suite on pull requests that can affect the runtime.
+
+    ``docs/testing.md`` calls the GPU-free contract targets a local gate; ``port.yml`` is what runs them for a
+    review. ``tests/test_runtime_paths.py`` checks the ``tooling/`` entries of that path filter; this checks that
+    the filtered run still builds every target and runs ctest, so a target whose link breaks cannot be silently
+    absent from a green ctest (``docs/testing.md``) and the GPU-free suite cannot become local-only.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = read(ROOT, RUNTIME_WORKFLOW)
+
+    def test_a_pull_request_that_can_affect_the_runtime_runs_ctest(self):
+        trigger = re.search(r"^  pull_request:\n(.*?)(?=^  [a-z_]+:\n|\Z)", self.workflow, re.M | re.S)
+        self.assertIsNotNone(trigger, f"{RUNTIME_WORKFLOW} no longer triggers on pull_request")
+        self.assertIn('"port/**"', trigger.group(1),
+                      f"a pull request that changes port/** would not start {RUNTIME_WORKFLOW}, so the GPU-free "
+                      "ctest suite would not run for it")
+        windows = workflow_job(self.workflow, "windows")
+        self.assertIsNone(re.search(r"^    if:", windows, re.M),
+                          f"the `windows` job of {RUNTIME_WORKFLOW} is guarded by an `if:`, so a pull request can "
+                          "skip the GPU-free ctest suite; limit the run with the event's paths instead")
+        self.assertIsNone(re.search(r"- name: %s\n\s+if:" % re.escape(RUNTIME_CTEST_STEP), windows),
+                          f"the `{RUNTIME_CTEST_STEP}` step is guarded by an `if:`")
+        self.assertIn("-DPALMETTO_D3D12_SHIM_TESTS=ON", windows,
+                      "the `windows` job no longer configures the shim tests, so ctest has no GPU-free targets")
+        self.assertIn("cmake --build port/build", windows,
+                      "the `windows` job no longer builds every target: a test whose link fails is then absent from "
+                      "ctest and the job stays green (docs/testing.md), so the build step has to stay before ctest")
+        step = re.search(r"^\s*- name: %s\n\s*run: ([^\n]+)" % re.escape(RUNTIME_CTEST_STEP), windows, re.M)
+        self.assertIsNotNone(step, f"the `windows` job has no `{RUNTIME_CTEST_STEP}` step that runs one command; "
+                                   "update tests/test_ci_registration.py together with the workflow")
+        self.assertIn("ctest --test-dir port/build --output-on-failure", step.group(1),
+                      f"the `{RUNTIME_CTEST_STEP}` step no longer runs the ctest suite the job built")
 
 
 if __name__ == "__main__":
