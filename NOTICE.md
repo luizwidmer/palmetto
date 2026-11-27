@@ -110,3 +110,14 @@ Recomp's memory-wait/list-split/write code, XCL's list and CPU-write code and vi
 these are read as evidence of behaviour only; the implementations in this repository are our own, no source, comment,
 identifier or data table is copied, and the upstream projects remain the copyright of their contributors under their own
 licences.
+
+The present attestation and hang-watchdog pause hold ([docs/peer_port_first_ui.md](docs/peer_port_first_ui.md), section 13)
+were informed by PercyScarlett (GPL-2.0-only, `e44c465`), VIctory (GPL-3.0-or-later, `63bcca4`) and Five Star Recomp
+(GPL-3.0-or-later, `ce2b333b`) pause/poke notes. The terminal read outcome port
+([docs/peer_port_streaming.md](docs/peer_port_streaming.md), section 12) was informed by Five Star Recomp (`ce2b333b`),
+PercyScarlett (`e44c465`), VIctory (`63bcca4`), victory-fork (`9a9091d`) and XCL (`623d02e`) loader/storage paths, and
+cross-checked against the reference fork (`ubiquitarianism/leonida`, GPL-3.0, `779f901084`) first-touch handling. The
+GPU-view reservation pairing ([docs/peer_port_movie.md](docs/peer_port_movie.md), section 11) was informed by XCL
+(`623d02e') mirror code and Five Star Recomp (`ce2b333b`) reservation pairing. All are read as evidence of behaviour only;
+the implementations are our own, no source, comment, identifier or data table is copied, and the upstream projects remain
+the copyright of their contributors under their own licences.

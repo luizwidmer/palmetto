@@ -5,6 +5,26 @@ running the same console build on a PC. This page records the feature claims tho
 themselves, what each means for this runtime, and the clean-room slice we will implement next. It is a
 policy page as much as a plan: the peer projects are **evidence**, not a code source.
 
+
+## Implemented peer ports (audit trail)
+
+The port campaign reads the five public ports as evidence and lands our own implementations one coherent slice at a time.
+This table is the audit trail: each row names the port page section that records the peer evidence and commits, the commit
+that landed our implementation, and whether the port was measured on a boot or is readiness only.
+
+| port | page / section | landed in | measured status |
+|---|---|---|---|
+| Present-driven frame clock and flip token | `peer_port_first_ui.md` section 12 | `7c867c03e` | measured A/B: handshake moved, title state unchanged |
+| Never build or wait for a pipeline on a title thread | `peer_port_streaming.md` section 10 | `8b7a800be` | measured A/B: title-thread waits removed, worker pool still parked |
+| Per-submission plane refresh and measured plane composition | `peer_port_movie.md` sections 8-9 | `9a86418c4` | measured: refresh live and free, one plane per present |
+| Cross-list memory wait and GPU-ordered bottom-of-pipe writes | `peer_port_streaming.md` section 11 | `81841a3a6` | measured: unexercised at this population, GPU form falls back |
+| Present attestation and hang-watchdog pause hold | `peer_port_first_ui.md` section 13 | `c14a70c26` | measured: switches exercised, stage-3 question blocked by device loss |
+| Terminal read outcomes | `peer_port_streaming.md` section 12 | `4970e3c23` | measured: success half live, conversion unexercised |
+| GPU-view reservation pairing | `peer_port_movie.md` section 11 | `4b0821bcb` | measured: pair present, no population yet |
+
+Every port is opt-in and off by default, keeps the switch-off path byte-identical, has unit/GPU tests and credits the peer
+evidence with URLs and commits in its page and in `NOTICE.md`. No peer source, comment, identifier or data table is copied.
+
 ## Rules of the programme
 
 1. **Documentation only.** The raw material is each project's public README, status page and the tracker's
