@@ -403,6 +403,7 @@ passes can run, and **PercyScarlett** (GPL-2.0-only, reference clone `e44c465`) 
 are mechanism references only; no code, comments, identifiers or tables were copied. The existing attribution in section
 8 and the clean-room rule in [upstream_port.md](upstream_port.md) remain in force.
 
-**Lead-owned NOTICE row to add:** the kind-7 consumer readiness planner and synthetic compose seam were implemented from
-this project's own measurements and cross-checked against XCL (`623d02e`) and PercyScarlett (`e44c465`), both GPL-2.0-only;
-no peer code was copied, and each project's copyright and licence continue to apply to its own tree.
+**NOTICE row:** the kind-7 consumer readiness planner and synthetic compose seam were implemented from this project's own
+measurements and cross-checked against XCL (`623d02e`) and PercyScarlett (`e44c465`), both GPL-2.0-only; no peer code was
+copied, and each project's copyright and licence continue to apply to its own tree. The row is recorded under the
+implemented-peer-port credits in `NOTICE.md`.
