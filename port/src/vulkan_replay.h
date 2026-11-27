@@ -2342,6 +2342,11 @@ struct Prepared {
 };
 
 inline constexpr std::size_t max_render_targets = 8;  // D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT
+// The graphics-pipeline builder currently fixes both state counts at one. Strict COM recording rejects any draw that
+// would consume more than one viewport/scissor; keep these exact count-1 updates in draw order until the pipeline path
+// uses VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT / VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT and enables multiViewport.
+inline constexpr std::uint32_t fixed_pipeline_viewport_count = 1;
+inline constexpr std::uint32_t fixed_pipeline_scissor_count = 1;
 
 // What a draw needs beyond Prepared, kept apart in PreparedList::draws: every command's entry is refilled on every
 // ExecuteCommandLists, and most commands are not draws.
@@ -7213,16 +7218,19 @@ inline void emit(const PreparedList& prepared, VkCommandBuffer command_buffer, c
                                         &set0, 0, nullptr);
             }
             vk.push_constants(command_buffer, graphics.layout, graphics.push_stages, 0, sizeof(data), &data);
+            // This IR path still has one value of each state (the graphics pipeline is count-1). Strict COM recording
+            // refuses a draw that would consume an array count >1 before it can reach here. State is replayed immediately
+            // before each draw, preserving the command list's ordering for the supported single-element case.
             // Translated vertex shaders write D3D clip coordinates (y up); a negative-height viewport keeps the
             // image upright, and winding as D3D12 sees it.
             const Viewport& v = draw->viewport;
             const VkViewport viewport{v.x, v.y + v.height, v.width, -v.height, v.min_depth, v.max_depth};
-            vk.set_viewport(command_buffer, 0, 1, &viewport);
+            vk.set_viewport(command_buffer, 0, detail::fixed_pipeline_viewport_count, &viewport);
             const Rect& s = draw->scissor;
             const VkRect2D scissor{{std::max(0, s.left), std::max(0, s.top)},
                                    {std::uint32_t(std::max(0, s.right - std::max(0, s.left))),
                                     std::uint32_t(std::max(0, s.bottom - std::max(0, s.top)))}};
-            vk.set_scissor(command_buffer, 0, 1, &scissor);
+            vk.set_scissor(command_buffer, 0, detail::fixed_pipeline_scissor_count, &scissor);
             // A mesh pipeline has no input assembly: its topology comes from the shader, and neither the topology
             // nor primitive restart is dynamic state there (VUID-VkGraphicsPipelineCreateInfo-pDynamicStates-07065).
             if (!draw->mesh) {

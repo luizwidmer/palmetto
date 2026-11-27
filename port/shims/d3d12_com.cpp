@@ -8,6 +8,7 @@
 #include "../src/gfx10_descriptors.h"
 #include "../src/graphics_pso.h"  // console_graphics_user_data/console_table_value: the console user-SGPR layout
 #include "../src/bvh_route.h"
+#include "../src/viewport_replay_readiness.h"
 
 #include <algorithm>
 #include <array>
@@ -30,6 +31,8 @@
 
 namespace rt::d3d12 {
 
+static_assert(D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE ==
+              palmetto::viewport_replay_readiness::kD3D12ViewportScissorLimit);
 static_assert(palmetto::xdxr::command_route::kVkR32G32Sfloat == VK_FORMAT_R32G32_SFLOAT);
 static_assert(palmetto::xdxr::command_route::kVkR32G32B32Sfloat == VK_FORMAT_R32G32B32_SFLOAT);
 static_assert(sizeof(D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC) ==
@@ -104,6 +107,14 @@ void note_once(const char* what) {
     static std::set<std::string> seen;
     std::lock_guard lock(mutex);
     if (seen.insert(what).second) std::fprintf(stderr, "[rt] d3d12: %s\n", what);
+}
+
+void note_viewport_refusal(const char* method, palmetto::viewport_replay_readiness::Refusal refusal) {
+    char text[256] = {};
+    std::snprintf(text, sizeof(text), "PALMETTO_D3D12X_STRICT_VIEWPORTS=1 refused %s: %s", method,
+                  palmetto::viewport_replay_readiness::refusal_name(refusal));
+    note_once(text);
+    d3d12_trace::record(method, "unsupported");
 }
 
 void note_bvh_route_refusal(const char* operation, palmetto::xdxr::route::Refusal refusal) {
@@ -821,26 +832,57 @@ public:
     // A count of 0 unbinds the viewports; draws then rasterize nothing (record_draw).
     void STDMETHODCALLTYPE RSSetViewports(UINT count, const D3D12_VIEWPORT* viewports) override {
         if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) return check(false);
+        const bool strict = palmetto::viewport_replay_readiness::strict_enabled();
         if (!count) {
             viewport_ = {};
+            if (strict) viewport_scissor_arrays_.capture_viewports(0, nullptr);
             return;
         }
-        if (!viewports || count > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE) return check(false);
-        if (count > 1) stub("ID3D12GraphicsCommandList::RSSetViewports (more than one viewport; the first is used)");
+        if (!viewports || count > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE) {
+            if (strict && count > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE)
+                note_viewport_refusal("ID3D12GraphicsCommandList::RSSetViewports",
+                                      palmetto::viewport_replay_readiness::Refusal::viewport_count_exceeds_limit);
+            return check(false);
+        }
+        if (strict) {
+            std::array<palmetto::Viewport, palmetto::viewport_replay_readiness::kD3D12ViewportScissorLimit> copy{};
+            for (UINT i = 0; i < count; ++i) {
+                const D3D12_VIEWPORT& v = viewports[i];
+                copy[i] = {v.TopLeftX, v.TopLeftY, v.Width, v.Height, v.MinDepth, v.MaxDepth};
+            }
+            if (!viewport_scissor_arrays_.capture_viewports(count, copy.data())) return check(false);
+        } else if (count > 1) {
+            stub("ID3D12GraphicsCommandList::RSSetViewports (more than one viewport; the first is used)");
+        }
         const D3D12_VIEWPORT& v = viewports[0];
         viewport_ = {v.TopLeftX, v.TopLeftY, v.Width, v.Height, v.MinDepth, v.MaxDepth};
     }
 
     void STDMETHODCALLTYPE RSSetScissorRects(UINT count, const D3D12_RECT* rects) override {
         if (type_ == D3D12_COMMAND_LIST_TYPE_BUNDLE) return check(false);
+        const bool strict = palmetto::viewport_replay_readiness::strict_enabled();
         // A zero-count call disables all previously bound rectangles; it is not a no-op.
         // With no scissor bound, the rasterizer clips every fragment, as on native D3D12.
         if (!count) {
             scissor_ = {};
+            if (strict) viewport_scissor_arrays_.capture_scissors(0, nullptr);
             return;
         }
+        if (count > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE) {
+            if (strict)
+                note_viewport_refusal("ID3D12GraphicsCommandList::RSSetScissorRects",
+                                      palmetto::viewport_replay_readiness::Refusal::scissor_count_exceeds_limit);
+            return check(false);
+        }
         if (!rects) return;
-        if (count > 1) stub("ID3D12GraphicsCommandList::RSSetScissorRects (more than one rectangle; the first is used)");
+        if (strict) {
+            std::array<palmetto::Rect, palmetto::viewport_replay_readiness::kD3D12ViewportScissorLimit> copy{};
+            for (UINT i = 0; i < count; ++i)
+                copy[i] = {rects[i].left, rects[i].top, rects[i].right, rects[i].bottom};
+            if (!viewport_scissor_arrays_.capture_scissors(count, copy.data())) return check(false);
+        } else if (count > 1) {
+            stub("ID3D12GraphicsCommandList::RSSetScissorRects (more than one rectangle; the first is used)");
+        }
         scissor_ = {rects[0].left, rects[0].top, rects[0].right, rects[0].bottom};
     }
 
@@ -898,6 +940,9 @@ public:
         d3d12_trace::record("ID3D12GraphicsCommandList6::DispatchMesh");
         if (x > 65535 || y > 65535 || z > 65535 || std::uint64_t(x) * y * z > (1u << 22)) return check(false);
         if (!graphics_pipeline_ || !graphics_.layout) return check(false);
+        if (viewport_arrays_may_affect_draw(x && y && z) &&
+            !viewport_array_path_supported("ID3D12GraphicsCommandList6::DispatchMesh"))
+            return check(false);
         if (!(viewport_.width > 0) || !(viewport_.height > 0)) return;  // as record_draw: nothing is rasterized
         trace_root_data("mesh draw");
         palmetto::Draw draw{graphics_pipeline_, graphics_.data, draw_views(), depth_, {}, 0, viewport_,
@@ -1235,6 +1280,10 @@ public:
         palmetto::IndirectKind kind = palmetto::IndirectKind::draw;
         UINT stride = 0;
         if (!command_signature_info(signature, kind, stride) || !argument_buffer)
+            return check(false);
+        if ((kind == palmetto::IndirectKind::draw || kind == palmetto::IndirectKind::draw_indexed) &&
+            max_command_count && viewport_arrays_may_affect_draw(true) &&
+            !viewport_array_path_supported("ID3D12GraphicsCommandList::ExecuteIndirect"))
             return check(false);
         const auto arg_desc = argument_buffer->GetDesc();
         if (arg_desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || argument_buffer_offset % 4 != 0)
@@ -2153,6 +2202,7 @@ private:
     palmetto::IndexBufferView index_{};
     palmetto::Viewport viewport_{};
     palmetto::Rect scissor_{};
+    palmetto::viewport_replay_readiness::Arrays viewport_scissor_arrays_{};
     std::array<palmetto::TargetView, D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT> render_targets_{};
     UINT render_target_count_ = 0;
     // One block shared by every draw that keeps the same targets and buffers, rebuilt when either changes, so a
@@ -2272,6 +2322,7 @@ private:
         index_ = {};
         viewport_ = {};
         scissor_ = {};
+        viewport_scissor_arrays_.reset();
         render_targets_.fill({});
         render_target_count_ = 0;
         draw_views_stale_ = true;
@@ -2322,9 +2373,30 @@ private:
         return draw_views_;
     }
 
+    bool viewport_arrays_may_affect_draw(bool has_work) const {
+        if (!has_work || !palmetto::viewport_replay_readiness::strict_enabled()) return false;
+        if (!viewport_scissor_arrays_.viewport_count) return false;  // no viewport: this list has no raster output
+        if (viewport_scissor_arrays_.viewport_count == 1 && (!(viewport_.width > 0) || !(viewport_.height > 0)))
+            return false;
+        // More than one viewport may use a later non-empty element even if element 0 is empty.
+        return true;
+    }
+
+    bool viewport_array_path_supported(const char* method) {
+        const auto assessment = palmetto::viewport_replay_readiness::assess(
+            viewport_scissor_arrays_.viewport_count, viewport_scissor_arrays_.scissor_count, true);
+        if (assessment.disposition != palmetto::viewport_replay_readiness::Disposition::refuse) return true;
+        note_viewport_refusal(method, assessment.refusal);
+        return false;
+    }
+
     // A draw needs a graphics pipeline, a graphics root signature and a topology.
     void record_draw(bool indexed, UINT count, UINT instances, UINT first, INT base_vertex, UINT first_instance) {
         if (!graphics_pipeline_ || !graphics_.layout || !topology_) return check(false);
+        if (viewport_arrays_may_affect_draw(count && instances) &&
+            !viewport_array_path_supported(indexed ? "ID3D12GraphicsCommandList::DrawIndexedInstanced"
+                                                   : "ID3D12GraphicsCommandList::DrawInstanced"))
+            return check(false);
         if (root_pack::enabled()) {
             if (graphics_.layout->flags & rt::rootsig::kDirectHeapFlags)
                 root_pack::note_direct_command(false, *graphics_.layout, graphics_.direct_heaps,

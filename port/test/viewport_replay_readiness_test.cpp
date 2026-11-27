@@ -137,6 +137,67 @@ int scissor_count_limit_case() {
     return 0;
 }
 
+int capture_all_array_elements_case() {
+    using namespace palmetto::viewport_replay_readiness;
+    Arrays arrays;
+    palmetto::Viewport viewports[] = {
+        {1.0f, 2.0f, 10.0f, 20.0f, 0.0f, 1.0f},
+        {30.0f, 40.0f, 50.0f, 60.0f, 0.25f, 0.75f},
+        {70.0f, 80.0f, 90.0f, 100.0f, 0.1f, 0.9f},
+    };
+    palmetto::Rect scissors[] = {{1, 2, 11, 22}, {31, 42, 51, 62}};
+    CHECK(arrays.capture_viewports(3, viewports));
+    CHECK(arrays.viewport_count == 3 && arrays.scissor_count == 0);
+    CHECK(arrays.viewports[0].x == 1.0f && arrays.viewports[1].x == 30.0f && arrays.viewports[2].x == 70.0f);
+    viewports[1].x = -1.0f;
+    CHECK(arrays.viewports[1].x == 30.0f);  // the caller may change its input after RSSetViewports returns
+    viewports[1].x = 30.0f;
+    CHECK(arrays.viewports[2].min_depth == 0.1f && arrays.viewports[2].max_depth == 0.9f);
+    CHECK(arrays.capture_scissors(2, scissors));
+    CHECK(arrays.viewport_count == 3 && arrays.scissor_count == 2);
+    CHECK(arrays.scissors[0].left == 1 && arrays.scissors[1].right == 51);
+    scissors[1].left = -1;
+    CHECK(arrays.scissors[1].left == 31);  // the caller may change its input after RSSetScissorRects returns
+    scissors[1].left = 31;
+    CHECK(arrays.capture_viewports(1, viewports + 1));
+    CHECK(arrays.viewport_count == 1 && arrays.viewports[0].x == 30.0f);
+    CHECK(arrays.viewports[1].x == 0.0f);  // elements past the new count cannot become stale replay state
+    CHECK(arrays.scissor_count == 2 && arrays.scissors[1].top == 42);
+
+    std::array<palmetto::Viewport, kD3D12ViewportScissorLimit> max_viewports{};
+    std::array<palmetto::Rect, kD3D12ViewportScissorLimit> max_scissors{};
+    for (std::uint32_t i = 0; i < kD3D12ViewportScissorLimit; ++i) {
+        max_viewports[i] = {float(i), 2.0f, 3.0f, 4.0f, 0.0f, 1.0f};
+        max_scissors[i] = {int(i), 2, int(i + 3), 4};
+    }
+    CHECK(arrays.capture_viewports(kD3D12ViewportScissorLimit, max_viewports.data()));
+    CHECK(arrays.viewport_count == kD3D12ViewportScissorLimit && arrays.viewports[15].x == 15.0f);
+    CHECK(arrays.capture_scissors(kD3D12ViewportScissorLimit, max_scissors.data()));
+    CHECK(arrays.scissor_count == kD3D12ViewportScissorLimit && arrays.scissors[15].right == 18);
+
+    CHECK(arrays.capture_scissors(0, nullptr));
+    CHECK(arrays.scissor_count == 0 && arrays.scissors[0].left == 0);
+    arrays.reset();
+    CHECK(arrays.viewport_count == 0 && arrays.scissor_count == 0);
+    return 0;
+}
+
+int capture_rejects_unreadable_or_over_limit_case() {
+    using namespace palmetto::viewport_replay_readiness;
+    Arrays arrays;
+    const palmetto::Viewport one[] = {{1, 2, 3, 4, 0, 1}};
+    const palmetto::Rect one_scissor[] = {{1, 2, 3, 4}};
+    CHECK(arrays.capture_viewports(1, one));
+    CHECK(arrays.capture_scissors(1, one_scissor));
+    CHECK(!arrays.capture_viewports(17, nullptr));
+    CHECK(!arrays.capture_scissors(17, nullptr));
+    CHECK(!arrays.capture_viewports(1, nullptr));
+    CHECK(!arrays.capture_scissors(1, nullptr));
+    CHECK(arrays.viewport_count == 1 && arrays.viewports[0].x == 1.0f);
+    CHECK(arrays.scissor_count == 1 && arrays.scissors[0].left == 1);
+    return 0;
+}
+
 struct NamedCase {
     const char* name;
     int (*run)();
@@ -155,6 +216,8 @@ int main() {
         {"multiple scissors return a named refusal", multiple_scissors_case},
         {"viewport count over the API limit is refused", viewport_count_limit_case},
         {"scissor count over the API limit is refused", scissor_count_limit_case},
+        {"all viewport and scissor array elements are copied", capture_all_array_elements_case},
+        {"array capture rejects null and over-limit input atomically", capture_rejects_unreadable_or_over_limit_case},
     };
     for (const NamedCase& test : cases) {
         current_case = test.name;

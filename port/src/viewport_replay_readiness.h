@@ -1,12 +1,13 @@
 #pragma once
 
+#include "command_list.h"
+
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 
-// A CPU-only, fail-closed preflight for the part of D3D12 raster state that this replay path does not carry yet.
-// The live command-list shim still records element 0 of RSSetViewports / RSSetScissorRects; this helper lets an
-// opt-in diagnostic caller name multi-element shapes without changing the default replay path. It is intentionally
-// not wired to d3d12_com.cpp until that file is clear for integration.
+// CPU-only, bounded storage and fail-closed preflight for D3D12 viewport/scissor arrays. The live COM shim uses this
+// state only when its exact opt-in switch is set; the current Vulkan pipeline path still has a count of one.
 namespace palmetto::viewport_replay_readiness {
 
 inline constexpr char kStrictSwitch[] = "PALMETTO_D3D12X_STRICT_VIEWPORTS";
@@ -40,6 +41,38 @@ constexpr bool switch_value_enabled(const char* value) noexcept {
 inline bool strict_enabled() noexcept {
     return switch_value_enabled(std::getenv(kStrictSwitch));
 }
+
+// Fixed-size, per-command-list copies of the arrays. The COM shim does not retain the caller's pointers. These helpers
+// validate count before reading input and leave state unchanged on refusal, so an over-limit count cannot over-read.
+struct Arrays {
+    std::array<Viewport, kD3D12ViewportScissorLimit> viewports{};
+    std::array<Rect, kD3D12ViewportScissorLimit> scissors{};
+    std::uint32_t viewport_count = 0;
+    std::uint32_t scissor_count = 0;
+
+    constexpr void reset() noexcept {
+        viewports.fill(Viewport{});
+        scissors.fill(Rect{});
+        viewport_count = 0;
+        scissor_count = 0;
+    }
+
+    constexpr bool capture_viewports(std::uint32_t count, const Viewport* values) noexcept {
+        if (count > kD3D12ViewportScissorLimit || (count && !values)) return false;
+        for (std::uint32_t i = 0; i < count; ++i) viewports[i] = values[i];
+        for (std::uint32_t i = count; i < kD3D12ViewportScissorLimit; ++i) viewports[i] = Viewport{};
+        viewport_count = count;
+        return true;
+    }
+
+    constexpr bool capture_scissors(std::uint32_t count, const Rect* values) noexcept {
+        if (count > kD3D12ViewportScissorLimit || (count && !values)) return false;
+        for (std::uint32_t i = 0; i < count; ++i) scissors[i] = values[i];
+        for (std::uint32_t i = count; i < kD3D12ViewportScissorLimit; ++i) scissors[i] = Rect{};
+        scissor_count = count;
+        return true;
+    }
+};
 
 // Counts only; no input pointer is inspected. Zero counts are valid existing D3D12 states (no viewport means no draw;
 // no scissor rectangles clips all fragments). More than one of either array is not replayed exactly yet.
