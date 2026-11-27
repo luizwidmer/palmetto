@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "base_reservation.h"
+#include "bink_witness.h"
 #include "code_hooks.h"
 #include "host_cpu.h"
 #include "mods.h"
@@ -8925,6 +8926,694 @@ void start_movie_draw_probe(std::uintptr_t image_base, std::size_t image_size) {
     std::fflush(stderr);
 }
 
+// ---- Bink import witness and non-looping-movie fast-advance (PALMETTO_BINK_WITNESS / PALMETTO_BINK_FASTFORWARD) ----
+// docs/peer_port_movie.md section 14. The measured state this instrument is for: the movie player reaches the
+// middleware's playing state 0x9 with a non-null Bink handle and `buffers 0`, while frame-buffer registration
+// 0x442F760 and the per-frame decode wrapper 0x2EF0E0 never run (docs/decomp_first_ui.md sections 15-18, section 13 of
+// the peer-port page). The title's 23 decoder imports are bound by the loader to the package's own Bink2Scarlett.dll,
+// and the measured call shape is `call qword ptr [rip+disp]` reading the import's IAT slot directly (bink_witness.h).
+//
+// The witness therefore redirects the title image's 23 measured IAT slots to counted wrappers that forward every call
+// to the mapped decoder export with the argument count the title's own call sites pass. This is an import-level
+// witness: it sees exactly the calls the title makes through those slots, and nothing else. The fast-advance answers
+// the measured advance export (BinkNextFrame) for a non-looping movie from the BINK header contract, and suppresses the
+// decode exports for that handle; it never claims a decoded frame and it never runs on a movie the title told the
+// decoder loops. Both switches are off by default; with them unset the whole cost is two getenv calls and nothing is
+// parsed, patched, logged or counted.
+namespace bw = palmetto::bink_witness;
+
+constexpr unsigned kBinkWitnessHandleSlots = 8;   // the middleware's 8 player slots (docs/decomp_first_ui.md 13.1)
+constexpr unsigned kBinkWitnessOpenLogCap = 16;   // every open/close/registration is logged, up to this many
+constexpr unsigned kBinkWitnessConfigLogCap = 4;  // callback/memory installs are logged up to this many
+constexpr unsigned kBinkWitnessAdvanceLogCap = 8; // applied advances are logged up to this many
+constexpr unsigned kBinkWitnessSampleSeconds = 10;
+
+inline constexpr unsigned bink_witness_index(bw::Wrapper wrapper) {
+    for (unsigned i = 0; i < bw::kImportCount; ++i)
+        if (bw::kImports[i].wrapper == wrapper) return i;
+    return bw::kImportCount;
+}
+
+struct BinkWitnessHandle {
+    void* handle = nullptr;
+    unsigned char loop_state = 0xFF;  // 0 = the title said non-looping, 1 = looping, 0xFF = not measured yet
+    bool advanced = false;            // the fast-advance rule wrote this handle's header words
+};
+
+struct BinkWitness {
+    std::atomic<bool> installed{false};
+    bool fast_advance = false;  // set before installed; read by the wrappers after a call has reached them
+    std::atomic<void*> real[bw::kImportCount] = {};  // the mapped decoder export each slot was redirected from
+    std::atomic<unsigned> calls[bw::kImportCount] = {};
+    std::atomic<unsigned> opened{0}, closed{0}, registration{0}, decoded{0};
+    std::atomic<unsigned> advance_requested{0}, advance_applied{0}, decode_suppressed{0};
+    std::atomic<unsigned> advance_refusals[static_cast<unsigned>(bw::AdvanceRefusal::kCount)] = {};
+    std::atomic<unsigned> handle_overflows{0};
+    std::uintptr_t image_base = 0;  // the mapped title image the slots belong to, for the log
+    std::size_t image_size = 0;
+    std::mutex handles_mutex;
+    BinkWitnessHandle handles[kBinkWitnessHandleSlots];
+};
+
+BinkWitness& bink_witness() {
+    static BinkWitness state;
+    return state;
+}
+
+void bink_witness_emit(const std::string& text) {
+    char head[64];
+    std::snprintf(head, sizeof head, "[rt] bink witness t=%.3f ", executor_watch_seconds());
+    executor_watch_print(std::string(head) + text + "\n");
+}
+
+unsigned bink_witness_note_call(BinkWitness& state, unsigned import) {
+    return state.calls[import].fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+void bink_witness_log_call(unsigned import, unsigned call, const std::string& detail) {
+    if (!bw::log_wanted(call) || import >= bw::kImportCount) return;
+    bink_witness_emit(std::string("call ") + bw::kImports[import].name + " #" + std::to_string(call) + " " + detail);
+}
+
+// The rare exports (open, close, frame-buffer info/registration, the loop statement, the two callback installs) get a
+// different bound: every one of their calls up to `cap` is printed, not only the first three and every 256th, because a
+// boot with four opens should show the fourth one and its header words. Past the cap only the counters move.
+void bink_witness_log_capped(unsigned import, unsigned call, unsigned cap, const std::string& detail) {
+    if (import >= bw::kImportCount || call > cap) return;
+    bink_witness_emit(std::string("call ") + bw::kImports[import].name + " #" + std::to_string(call) + " " + detail);
+}
+
+int bink_witness_find_handle_locked(BinkWitness& state, void* handle) {
+    if (!handle) return -1;
+    for (unsigned i = 0; i < kBinkWitnessHandleSlots; ++i)
+        if (state.handles[i].handle == handle) return static_cast<int>(i);
+    return -1;
+}
+
+void bink_witness_remember_open(void* handle) {
+    BinkWitness& state = bink_witness();
+    std::lock_guard lock(state.handles_mutex);
+    for (auto& slot : state.handles) {
+        if (slot.handle) continue;
+        slot.handle = handle;
+        slot.loop_state = 0xFF;
+        slot.advanced = false;
+        return;
+    }
+    if (state.handle_overflows.fetch_add(1, std::memory_order_relaxed) == 0)
+        bink_witness_emit("handle table full: an open beyond the 8 player slots is witnessed but not advanced");
+}
+
+bool bink_witness_handle_advanced(void* handle) {
+    BinkWitness& state = bink_witness();
+    std::lock_guard lock(state.handles_mutex);
+    const int at = bink_witness_find_handle_locked(state, handle);
+    return at >= 0 && state.handles[at].advanced;
+}
+
+// Writes the two header words the fast-advance rule targets. The page's readability is checked first and the write is
+// guarded, so a handle that turns unreadable between the read and the write costs a named refusal, not a fault.
+bool bink_witness_write_header_words(void* handle, std::uint32_t frame_num, std::uint32_t last_frame_num) {
+    if (!handle || !executor_watch_readable(reinterpret_cast<std::uintptr_t>(handle), bw::kHeaderBytes)) return false;
+    auto* const at = static_cast<std::uint8_t*>(handle);
+    __try {
+        *reinterpret_cast<std::uint32_t*>(at + bw::kFrameNumOffset) = frame_num;
+        *reinterpret_cast<std::uint32_t*>(at + bw::kLastFrameNumOffset) = last_frame_num;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+bool bink_witness_suppress_decode(unsigned import, const char* what) {
+    BinkWitness& state = bink_witness();
+    const unsigned total = state.decode_suppressed.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (total <= kBinkWitnessAdvanceLogCap || bw::log_wanted(total))
+        bink_witness_emit(std::string("suppressed ") + bw::kImports[import].name + " #" + std::to_string(total) +
+                          " on a fast-advanced handle: no frame decoded (the instrument never claims one), returning " +
+                          what);
+    return true;
+}
+
+// --- the wrappers: measured ABI only, each forwarding to the slot's real decoder export -----------------------------
+void* bink_witness_open(const void* name, const void* options, std::uint32_t flags) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kOpen);
+    using Fn = void* (*)(const void*, const void*, std::uint32_t);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    void* const handle = real ? real(name, options, flags) : nullptr;
+    if (handle) {
+        const unsigned opened = state.opened.fetch_add(1, std::memory_order_relaxed) + 1;
+        bink_witness_remember_open(handle);
+        if (call <= kBinkWitnessOpenLogCap) {
+            bw::HeaderWords words{};
+            const bool read = executor_watch_read_block(reinterpret_cast<std::uintptr_t>(handle), &words,
+                                                        bw::kHeaderBytes);
+            char detail[256];
+            std::snprintf(detail, sizeof detail,
+                          "-> handle %p, open #%u, header %s%u x %u, frames %u, frame %u, last %u, rate %u/%u, "
+                          "flags 0x%x",
+                          handle, opened, read ? "" : "unreadable, ", read ? words.width : 0u,
+                          read ? words.height : 0u, read ? words.frames : 0u, read ? words.frame_num : 0u,
+                          read ? words.last_frame_num : 0u, read ? words.frame_rate : 0u,
+                          read ? words.frame_rate_div : 0u, read ? words.open_flags : 0u);
+            bink_witness_log_capped(index, call, kBinkWitnessOpenLogCap, detail);
+        }
+    } else if (call <= kBinkWitnessOpenLogCap) {
+        bink_witness_log_capped(index, call, kBinkWitnessOpenLogCap, "-> null handle");
+    }
+    return handle;
+}
+
+void bink_witness_close(void* handle) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kClose);
+    using Fn = void (*)(void*);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    bool known = false;
+    {
+        std::lock_guard lock(state.handles_mutex);
+        const int at = bink_witness_find_handle_locked(state, handle);
+        if (at >= 0) {
+            state.handles[at] = BinkWitnessHandle{};
+            known = true;
+        }
+    }
+    const unsigned closed = state.closed.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (real) real(handle);
+    if (call <= kBinkWitnessOpenLogCap) {
+        char detail[128];
+        std::snprintf(detail, sizeof detail, "handle %p, close #%u (%s)", handle, closed,
+                      known ? "the witness opened it" : "not in the witness's handle table");
+        bink_witness_log_capped(index, call, kBinkWitnessOpenLogCap, detail);
+    }
+}
+
+void bink_witness_get_frame_buffers_info(void* handle, void* out) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kGetFrameBuffersInfo);
+    using Fn = void (*)(void*, void*);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    if (real) real(handle, out);
+    const unsigned registrations = state.registration.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (call <= kBinkWitnessOpenLogCap) {
+        char detail[160];
+        std::snprintf(detail, sizeof detail, "handle %p, out block %p, info call #%u", handle, out, registrations);
+        bink_witness_log_capped(index, call, kBinkWitnessOpenLogCap, detail);
+    }
+}
+
+void bink_witness_register_frame_buffers(void* handle, const void* buffers) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kRegisterFrameBuffers);
+    using Fn = void (*)(void*, const void*);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    if (real) real(handle, buffers);
+    const unsigned registrations = state.registration.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (call <= kBinkWitnessOpenLogCap) {
+        // The first dword of the block is the buffer count the caller's own registration loop reads (measured at
+        // 0x442F760: `cmp dword [rdi],0`, `movsxd rax,[rdi]`). Bounded: a count outside the plausible range is "?".
+        const std::uint32_t count =
+            executor_watch_readable(reinterpret_cast<std::uintptr_t>(buffers), 4)
+                ? executor_watch_read_u32(reinterpret_cast<std::uintptr_t>(buffers))
+                : 0xFFFFFFFFu;
+        char detail[176];
+        std::snprintf(detail, sizeof detail, "handle %p, buffers block %p, buffer count %s, registration #%u", handle,
+                      buffers, count <= 64 ? std::to_string(count).c_str() : "?", registrations);
+        bink_witness_log_capped(index, call, kBinkWitnessOpenLogCap, detail);
+    }
+}
+
+void bink_witness_set_will_loop(void* handle, std::uint32_t will_loop) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kSetWillLoop);
+    using Fn = void (*)(void*, std::uint32_t);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    {
+        std::lock_guard lock(state.handles_mutex);
+        const int at = bink_witness_find_handle_locked(state, handle);
+        if (at >= 0) state.handles[at].loop_state = will_loop ? 1 : 0;
+    }
+    if (real) real(handle, will_loop);
+    if (call <= kBinkWitnessOpenLogCap) {
+        char detail[128];
+        std::snprintf(detail, sizeof detail, "handle %p, will_loop %u (the title's own loop statement)", handle,
+                      will_loop);
+        bink_witness_log_capped(index, call, kBinkWitnessOpenLogCap, detail);
+    }
+}
+
+void bink_witness_next_frame(void* handle) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kNextFrame);
+    using Fn = void (*)(void*);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    if (!state.fast_advance) {
+        if (real) real(handle);
+        if (call <= kBinkWitnessAdvanceLogCap)
+            bink_witness_log_capped(index, call, kBinkWitnessAdvanceLogCap,
+                                    "handle " + executor_watch_hex(reinterpret_cast<std::uint64_t>(handle)) +
+                                                   ", forwarded (fast-advance off)");
+        return;
+    }
+    state.advance_requested.fetch_add(1, std::memory_order_relaxed);
+    bw::AdvanceInputs inputs;
+    inputs.fast_advance = true;
+    bool applied = false;
+    {
+        std::lock_guard lock(state.handles_mutex);
+        const int at = bink_witness_find_handle_locked(state, handle);
+        inputs.handle_opened = at >= 0;
+        if (at >= 0) {
+            inputs.loop_state_known = state.handles[at].loop_state != 0xFF;
+            inputs.will_loop = state.handles[at].loop_state == 1;
+        }
+        inputs.handle_read = inputs.handle_opened &&
+                             executor_watch_read_block(reinterpret_cast<std::uintptr_t>(handle), &inputs.header,
+                                                        bw::kHeaderBytes);
+        const bw::AdvanceDecision decision = bw::decide_advance(inputs);
+        if (decision.apply && bink_witness_write_header_words(handle, decision.target_frame, decision.target_frame)) {
+            state.handles[at].advanced = true;
+            applied = true;
+            const unsigned total = state.advance_applied.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (total <= kBinkWitnessAdvanceLogCap) {
+                char detail[320];
+                std::snprintf(detail, sizeof detail,
+                              "handle %p: fast-advance #%u wrote frame_num=last_frame_num=%u (was frame %u of %u, "
+                              "%ux%u, flags 0x%x); the decoder is NOT asked to advance, no frame is decoded or claimed",
+                              handle, total, decision.target_frame, inputs.header.frame_num, inputs.header.frames,
+                              inputs.header.width, inputs.header.height, inputs.header.open_flags);
+                bink_witness_emit(std::string("advance ") + bw::kImports[index].name + " " + detail);
+            }
+        } else {
+            const bw::AdvanceRefusal refusal = decision.apply ? bw::AdvanceRefusal::kHandleNotRead : decision.refusal;
+            const unsigned count =
+                state.advance_refusals[static_cast<unsigned>(refusal)].fetch_add(1, std::memory_order_relaxed) + 1;
+            if (count == 1 || bw::log_wanted(call)) {
+                char detail[320];
+                std::snprintf(detail, sizeof detail,
+                              "handle %p: not advanced (%s)%s; forwarded to the decoder", handle,
+                              bw::advance_refusal_name(refusal),
+                              inputs.handle_read
+                                  ? (", header " + std::to_string(inputs.header.width) + "x" +
+                                     std::to_string(inputs.header.height) + ", frames " +
+                                     std::to_string(inputs.header.frames) + ", frame " +
+                                     std::to_string(inputs.header.frame_num) + ", last " +
+                                     std::to_string(inputs.header.last_frame_num))
+                                        .c_str()
+                                  : "");
+                bink_witness_emit(std::string("advance ") + bw::kImports[index].name + " " + detail);
+            }
+        }
+    }
+    if (!applied && real) real(handle);
+}
+
+std::uint32_t bink_witness_do_frame(void* handle) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kDoFrame);
+    if (bink_witness_handle_advanced(handle)) {
+        bink_witness_suppress_decode(index, "0 (the value the decoder returned on every measured call)");
+        return 0;
+    }
+    using Fn = std::uint32_t (*)(void*);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    const std::uint32_t result = real ? real(handle) : 0;
+    state.decoded.fetch_add(1, std::memory_order_relaxed);
+    if (bw::log_wanted(call)) {
+        char detail[96];
+        std::snprintf(detail, sizeof detail, "handle %p -> %u", handle, result);
+        bink_witness_log_call(index, call, detail);
+    }
+    return result;
+}
+
+std::uint32_t bink_witness_do_frame_async_multi(void* handle, const void* frames, std::int32_t count) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kDoFrameAsyncMulti);
+    if (bink_witness_handle_advanced(handle)) {
+        bink_witness_suppress_decode(index, "0 (the title ignores this return at both measured call sites)");
+        return 0;
+    }
+    using Fn = std::uint32_t (*)(void*, const void*, std::int32_t);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    const std::uint32_t result = real ? real(handle, frames, count) : 0;
+    state.decoded.fetch_add(1, std::memory_order_relaxed);
+    if (bw::log_wanted(call)) {
+        char detail[128];
+        std::snprintf(detail, sizeof detail, "handle %p, frame list %p, count %d -> %u", handle, frames, count, result);
+        bink_witness_log_call(index, call, detail);
+    }
+    return result;
+}
+
+std::uint32_t bink_witness_do_frame_async_wait(void* handle, std::int32_t timeout) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kDoFrameAsyncWait);
+    if (bink_witness_handle_advanced(handle)) {
+        bink_witness_suppress_decode(index, "0 (the title ignores this return at both measured call sites)");
+        return 0;
+    }
+    using Fn = std::uint32_t (*)(void*, std::int32_t);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    const std::uint32_t result = real ? real(handle, timeout) : 0;
+    state.decoded.fetch_add(1, std::memory_order_relaxed);
+    if (bw::log_wanted(call)) {
+        char detail[96];
+        std::snprintf(detail, sizeof detail, "handle %p, timeout %d -> %u", handle, timeout, result);
+        bink_witness_log_call(index, call, detail);
+    }
+    return result;
+}
+
+std::uint32_t bink_witness_wait(void* handle) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kWait);
+    if (bink_witness_handle_advanced(handle)) {
+        bink_witness_suppress_decode(index, "0 (the frame is due: the fast-advanced movie is not paced)");
+        return 0;
+    }
+    using Fn = std::uint32_t (*)(void*);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    const std::uint32_t result = real ? real(handle) : 0;
+    state.decoded.fetch_add(1, std::memory_order_relaxed);
+    if (bw::log_wanted(call)) {
+        char detail[96];
+        std::snprintf(detail, sizeof detail, "handle %p -> %u", handle, result);
+        bink_witness_log_call(index, call, detail);
+    }
+    return result;
+}
+
+std::uint32_t bink_witness_should_skip(void* handle) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kShouldSkip);
+    if (bink_witness_handle_advanced(handle)) {
+        bink_witness_suppress_decode(index, "0 (the title's own skip branch is not taken)");
+        return 0;
+    }
+    using Fn = std::uint32_t (*)(void*);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    const std::uint32_t result = real ? real(handle) : 0;
+    state.decoded.fetch_add(1, std::memory_order_relaxed);
+    if (bw::log_wanted(call)) {
+        char detail[96];
+        std::snprintf(detail, sizeof detail, "handle %p -> %u", handle, result);
+        bink_witness_log_call(index, call, detail);
+    }
+    return result;
+}
+
+void bink_witness_pause(void* handle, std::uint32_t pause) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kPause);
+    using Fn = void (*)(void*, std::uint32_t);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    if (real) real(handle, pause);
+    if (bw::log_wanted(call)) {
+        char detail[96];
+        std::snprintf(detail, sizeof detail, "handle %p, pause %u", handle, pause);
+        bink_witness_log_call(index, call, detail);
+    }
+}
+
+void bink_witness_request_stop_async(void* handle) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kRequestStopAsync);
+    using Fn = void (*)(void*);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    if (real) real(handle);
+    if (call <= kBinkWitnessConfigLogCap)
+        bink_witness_log_capped(index, call, kBinkWitnessConfigLogCap,
+                                "handle " + executor_watch_hex(reinterpret_cast<std::uint64_t>(handle)));
+}
+
+void bink_witness_wait_stop_async(void* handle) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kWaitStopAsync);
+    using Fn = void (*)(void*);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    if (real) real(handle);
+    if (call <= kBinkWitnessConfigLogCap)
+        bink_witness_log_capped(index, call, kBinkWitnessConfigLogCap,
+                                "handle " + executor_watch_hex(reinterpret_cast<std::uint64_t>(handle)));
+}
+
+void bink_witness_set_memory(void* alloc, void* free_fn) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kSetMemory);
+    using Fn = void (*)(void*, void*);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    if (real) real(alloc, free_fn);
+    if (call <= kBinkWitnessConfigLogCap) {
+        char detail[128];
+        std::snprintf(detail, sizeof detail, "allocator %p, free %p", alloc, free_fn);
+        bink_witness_log_capped(index, call, kBinkWitnessConfigLogCap, detail);
+    }
+}
+
+void bink_witness_set_os_file_callbacks(void* open, void* close, void* read, void* seek) {
+    BinkWitness& state = bink_witness();
+    constexpr unsigned index = bink_witness_index(bw::Wrapper::kSetOsFileCallbacks);
+    using Fn = void (*)(void*, void*, void*, void*);
+    const auto real = reinterpret_cast<Fn>(state.real[index].load(std::memory_order_relaxed));
+    const unsigned call = bink_witness_note_call(state, index);
+    if (real) real(open, close, read, seek);
+    if (call <= kBinkWitnessConfigLogCap) {
+        char detail[160];
+        std::snprintf(detail, sizeof detail, "callbacks open %p, close %p, read %p, seek %p", open, close, read, seek);
+        bink_witness_log_capped(index, call, kBinkWitnessConfigLogCap, detail);
+    }
+}
+
+void* bink_witness_wrapper(bw::Wrapper wrapper) {
+    switch (wrapper) {
+        case bw::Wrapper::kOpen: return reinterpret_cast<void*>(&bink_witness_open);
+        case bw::Wrapper::kGetFrameBuffersInfo: return reinterpret_cast<void*>(&bink_witness_get_frame_buffers_info);
+        case bw::Wrapper::kRegisterFrameBuffers: return reinterpret_cast<void*>(&bink_witness_register_frame_buffers);
+        case bw::Wrapper::kSetWillLoop: return reinterpret_cast<void*>(&bink_witness_set_will_loop);
+        case bw::Wrapper::kNextFrame: return reinterpret_cast<void*>(&bink_witness_next_frame);
+        case bw::Wrapper::kPause: return reinterpret_cast<void*>(&bink_witness_pause);
+        case bw::Wrapper::kDoFrame: return reinterpret_cast<void*>(&bink_witness_do_frame);
+        case bw::Wrapper::kDoFrameAsyncMulti: return reinterpret_cast<void*>(&bink_witness_do_frame_async_multi);
+        case bw::Wrapper::kDoFrameAsyncWait: return reinterpret_cast<void*>(&bink_witness_do_frame_async_wait);
+        case bw::Wrapper::kWait: return reinterpret_cast<void*>(&bink_witness_wait);
+        case bw::Wrapper::kShouldSkip: return reinterpret_cast<void*>(&bink_witness_should_skip);
+        case bw::Wrapper::kClose: return reinterpret_cast<void*>(&bink_witness_close);
+        case bw::Wrapper::kRequestStopAsync: return reinterpret_cast<void*>(&bink_witness_request_stop_async);
+        case bw::Wrapper::kWaitStopAsync: return reinterpret_cast<void*>(&bink_witness_wait_stop_async);
+        case bw::Wrapper::kSetMemory: return reinterpret_cast<void*>(&bink_witness_set_memory);
+        case bw::Wrapper::kSetOsFileCallbacks: return reinterpret_cast<void*>(&bink_witness_set_os_file_callbacks);
+        default: return nullptr;
+    }
+}
+
+// Reads one bounded C string out of the mapped image. False when it does not terminate inside the image or the cap.
+bool bink_witness_image_string(const std::uint8_t* base, std::size_t size, std::uint32_t rva, char* out,
+                               std::size_t cap) {
+    if (!out || cap < 2 || rva >= size) return false;
+    for (std::size_t i = 0; i + 1 < cap && rva + i < size; ++i) {
+        out[i] = static_cast<char>(base[rva + i]);
+        if (out[i] == '\0') return true;
+    }
+    out[cap - 1] = '\0';
+    return false;
+}
+
+// Finds the title image's import-table slot for one decoder import. Only the mapped image is read, and every RVA is
+// bounds-checked against it first.
+bool bink_witness_find_import_slot(const std::uint8_t* base, std::size_t size, const char* dll, const char* name,
+                                   std::uint32_t& slot_rva) {
+    slot_rva = 0;
+    if (!base || size < sizeof(IMAGE_DOS_HEADER)) return false;
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) return false;
+    const std::uint64_t nt_at = static_cast<std::uint64_t>(dos->e_lfanew);
+    if (nt_at + sizeof(IMAGE_NT_HEADERS64) > size) return false;
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + nt_at);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return false;
+    const IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (dir.VirtualAddress == 0 || dir.Size == 0) return false;
+    if (static_cast<std::uint64_t>(dir.VirtualAddress) + dir.Size > size) return false;
+    for (std::uint64_t at = dir.VirtualAddress;
+         at + sizeof(IMAGE_IMPORT_DESCRIPTOR) <= static_cast<std::uint64_t>(dir.VirtualAddress) + dir.Size;
+         at += sizeof(IMAGE_IMPORT_DESCRIPTOR)) {
+        const auto* descriptor = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + at);
+        if (!descriptor->Name) break;
+        char module[96] = {};
+        if (!bink_witness_image_string(base, size, descriptor->Name, module, sizeof module)) continue;
+        if (!bw::same_text(module, dll)) continue;
+        const std::uint64_t lookup_rva =
+            descriptor->OriginalFirstThunk ? descriptor->OriginalFirstThunk : descriptor->FirstThunk;
+        const std::uint64_t slots_rva = descriptor->FirstThunk;
+        if (lookup_rva >= size || slots_rva >= size) return false;
+        for (std::uint64_t entry = 0; entry < 65536; ++entry) {
+            const std::uint64_t thunk_at = lookup_rva + entry * 8;
+            const std::uint64_t slot_at = slots_rva + entry * 8;
+            if (thunk_at + 8 > size || slot_at + 8 > size) return false;
+            const std::uint64_t value = *reinterpret_cast<const std::uint64_t*>(base + thunk_at);
+            if (value == 0) break;
+            if ((value & 0x8000000000000000ull) != 0) continue;  // an ordinal import has no name to compare
+            const std::uint64_t name_rva = value & 0x7FFFFFFFull;
+            if (name_rva + 2 >= size) continue;
+            char symbol[128] = {};
+            if (!bink_witness_image_string(base, size, static_cast<std::uint32_t>(name_rva + 2), symbol,
+                                           sizeof symbol))
+                continue;
+            if (!bw::same_text(symbol, name)) continue;
+            slot_rva = static_cast<std::uint32_t>(slot_at);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Counters and verdict for the reporter. Only atomics are read here, so the reporter holds no title lock.
+void bink_witness_report(unsigned sample) {
+    BinkWitness& state = bink_witness();
+    bw::Counters counters;
+    counters.open = state.opened.load(std::memory_order_relaxed);
+    counters.close = state.closed.load(std::memory_order_relaxed);
+    counters.registration = state.registration.load(std::memory_order_relaxed);
+    counters.decode = state.decoded.load(std::memory_order_relaxed);
+    counters.advance_requested = state.advance_requested.load(std::memory_order_relaxed);
+    counters.advance_applied = state.advance_applied.load(std::memory_order_relaxed);
+    counters.decode_suppressed = state.decode_suppressed.load(std::memory_order_relaxed);
+    std::string text = "at " + std::to_string(sample * kBinkWitnessSampleSeconds) + " s: open " +
+                       std::to_string(counters.open) + " close " + std::to_string(counters.close) + " register " +
+                       std::to_string(counters.registration) + " decode " + std::to_string(counters.decode) +
+                       " advance " + std::to_string(counters.advance_requested) + " applied " +
+                       std::to_string(counters.advance_applied) + " suppressed " +
+                       std::to_string(counters.decode_suppressed);
+    for (unsigned i = 0; i < bw::kImportCount; ++i) {
+        const unsigned calls = state.calls[i].load(std::memory_order_relaxed);
+        if (bw::kImports[i].wrapper == bw::Wrapper::kNone || calls == 0) continue;
+        text += " ";
+        text += bw::kImports[i].name;
+        text += "=" + std::to_string(calls);
+    }
+    text += " refusals";
+    bool any_refusal = false;
+    for (unsigned r = 1; r < static_cast<unsigned>(bw::AdvanceRefusal::kCount); ++r) {
+        const unsigned count = state.advance_refusals[r].load(std::memory_order_relaxed);
+        if (count == 0) continue;
+        any_refusal = true;
+        text += " ";
+        text += bw::advance_refusal_name(static_cast<bw::AdvanceRefusal>(r));
+        text += "=" + std::to_string(count);
+    }
+    if (!any_refusal) text += " none";
+    const bw::Verdict verdict = bw::verdict_of(counters);
+    text += " verdict ";
+    text += bw::verdict_name(verdict);
+    bink_witness_emit(text);
+}
+
+// Validates every measured import slot against the mapped image and the mapped decoder, redirects the slots the table's
+// rules accept, and starts the counter reporter. Called after the image is mapped and before any image code runs.
+void start_bink_witness(std::uint8_t* base, std::size_t size) {
+    const bw::Switch witness_switch = bw::parse_switch(std::getenv("PALMETTO_BINK_WITNESS"));
+    const bw::Switch advance_switch = bw::parse_switch(std::getenv("PALMETTO_BINK_FASTFORWARD"));
+    if (witness_switch.state == bw::SwitchState::kRefused)
+        std::fprintf(stderr,
+                     "[rt] bink witness: PALMETTO_BINK_WITNESS is not a spelling this switch answers (%s); the switch "
+                     "stays off\n",
+                     witness_switch.refusal ? witness_switch.refusal : "?");
+    if (advance_switch.state == bw::SwitchState::kRefused)
+        std::fprintf(stderr,
+                     "[rt] bink witness: PALMETTO_BINK_FASTFORWARD is not a spelling this switch answers (%s); the "
+                     "switch stays off\n",
+                     advance_switch.refusal ? advance_switch.refusal : "?");
+    const bool witness_on = witness_switch.state == bw::SwitchState::kOn;
+    const bool advance_on = advance_switch.state == bw::SwitchState::kOn;
+    if (!witness_on && !advance_on) return;  // the whole default cost: two getenv calls and nothing else
+    void* const module = rt::shims::find_loaded_bundled_module(bw::kDecoderDllName);
+    if (!module) {
+        std::fprintf(stderr,
+                     "[rt] bink witness: %s is not mapped through the bundled loader; nothing is installed\n",
+                     bw::kDecoderDllName);
+        std::fflush(stderr);
+        return;
+    }
+    BinkWitness& state = bink_witness();
+    state.image_base = reinterpret_cast<std::uintptr_t>(base);
+    state.image_size = size;
+    state.fast_advance = advance_on;
+    unsigned wrapped = 0, refused = 0;
+    for (unsigned i = 0; i < bw::kImportCount; ++i) {
+        const bw::ImportShape& shape = bw::kImports[i];
+        bw::SlotObservation observed;
+        observed.found = bink_witness_find_import_slot(base, size, bw::kDecoderDllName, shape.name,
+                                                       observed.found_slot_rva);
+        bool owns = false;
+        void* const real = rt::shims::get_bundled_proc_address(module, shape.name, owns);
+        observed.export_found = real != nullptr;
+        observed.export_address = reinterpret_cast<std::uintptr_t>(real);
+        if (observed.found)
+            observed.slot_value = *reinterpret_cast<const std::uintptr_t*>(base + observed.found_slot_rva);
+        const bw::InstallRefusal refusal = bw::check_slot(i, observed);
+        if (refusal != bw::InstallRefusal::kNone) {
+            ++refused;
+            std::fprintf(stderr, "[rt] bink witness: not wrapped %s image+0x%x (%s)\n", shape.name, shape.iat_rva,
+                         bw::install_refusal_name(refusal));
+            continue;
+        }
+        auto* const slot = reinterpret_cast<void**>(base + observed.found_slot_rva);
+        const std::uintptr_t page = reinterpret_cast<std::uintptr_t>(slot) & ~static_cast<std::uintptr_t>(0xFFF);
+        const std::uintptr_t end = reinterpret_cast<std::uintptr_t>(slot) + sizeof(void*);
+        const std::size_t span = static_cast<std::size_t>(end - page);
+        DWORD old = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(page), span, PAGE_READWRITE, &old)) {
+            ++refused;
+            std::fprintf(stderr, "[rt] bink witness: not wrapped %s image+0x%x (%s)\n", shape.name, shape.iat_rva,
+                         bw::install_refusal_name(bw::InstallRefusal::kNotWritable));
+            continue;
+        }
+        *slot = bink_witness_wrapper(shape.wrapper);
+        DWORD ignored = 0;
+        VirtualProtect(reinterpret_cast<void*>(page), span, old, &ignored);
+        state.real[i].store(real, std::memory_order_release);
+        ++wrapped;
+        std::fprintf(stderr, "[rt] bink witness: wrapped %s image+0x%x -> decoder export %p (%u measured call site(s))\n",
+                     shape.name, shape.iat_rva, real, shape.call_site_count);
+    }
+    if (wrapped == 0) {
+        std::fprintf(stderr, "[rt] bink witness: no import slot validated; not installed\n");
+        std::fflush(stderr);
+        return;
+    }
+    state.installed.store(true, std::memory_order_release);
+    std::thread([] {
+        for (unsigned sample = 1; sample <= 120; ++sample) {
+            std::this_thread::sleep_for(std::chrono::seconds(kBinkWitnessSampleSeconds));
+            if (!bink_witness().installed.load(std::memory_order_acquire)) return;
+            bink_witness_report(sample);
+        }
+    }).detach();
+    std::fprintf(stderr,
+                 "[rt] bink witness: %u of %u measured import slot(s) wrapped, %u refused (named above); fast-advance "
+                 "%s; counters and verdict every %u s\n",
+                 wrapped, bw::kImportCount, refused,
+                 advance_on ? "on (non-looping movies only, diagnostic: no frame is decoded or claimed)" : "off",
+                 kBinkWitnessSampleSeconds);
+    std::fflush(stderr);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -9042,6 +9731,11 @@ int wmain(int argc, wchar_t** argv) {
     try {
         rt::Loader loader(game_dir);
         rt::Module& main_module = loader.load(image);  // maps, binds and installs TLS; runs no image code
+        // PALMETTO_BINK_WITNESS / PALMETTO_BINK_FASTFORWARD (docs/peer_port_movie.md section 14): the Bink import-level
+        // witness and the non-looping-movie fast-advance. Installed here, after the decoder module is mapped and before
+        // any image code runs, so every title call through the measured import slots is seen. Off by default: with both
+        // switches unset this is two getenv calls and no slot, log or counter.
+        if (init || run) start_bink_witness(reinterpret_cast<std::uint8_t*>(main_module.base), main_module.size);
         // The mods' archetype swaps (docs/modding.md): hooked here, before any image code runs, when the lookup's RVA
         // for this executable is given. The count of redirected calls shows whether the RVA is the real lookup.
         if (view_mode_getter_rva) {

@@ -216,3 +216,131 @@ the dispatch-mode model and the process queue's default were compared against Mi
 `c5007fd9cbdc785518ea6dccc5751b125d451cc1` (`vendor/xtaskqueue/README.md`). The upstream projects remain the copyright
 of their contributors and their licenses continue to apply to their own trees. The lead adds the `NOTICE.md` entry;
 this slice makes no git writes.
+
+## 9. Measured: the GPU-free task-queue/XAsync parity test (rank 6)
+
+**Status: measured; test-only. No shim change, no behaviour change, no boot run by this slice.** This section
+implements rank 6 of the plan in [peer_port_streaming.md](peer_port_streaming.md) section 6: "task-queue and async
+parity test against the vendored implementation - close the contract gap only if one exists". The measurement in
+section 2 says the title's whole task-queue surface is queue setup only and silent after +25.51 s, so the open
+question is not a missing dispatch; it is whether the shim's `IXThreadingImpl` forwarding still matches the contract
+the vendored queue implements, so that a later port (a callback trampoline, a dispatch-mode translation, a handle
+wrapper) cannot silently diverge. The answer measured here is **no divergence**: every task-queue and XAsync slot the
+title can reach (section 2's vtable) forwards the vendored contract unchanged, and the shim's named exports are the
+vendored function addresses themselves. The new GPU-free test pins that contract on both paths; it is registered as
+`task_queue_parity` (328 checks) and changes no runtime file.
+
+### 9.1 The contract surface
+
+Read from the vendored public headers (`vendor/xtaskqueue/Include/XTaskQueue.h`, `XAsync.h`, `XAsyncProvider.h`), the
+implementation (`Source/Task/TaskQueue.cpp`, `AsyncLib.cpp`), the measured slot table in section 2 and the shim's slot
+forwarding (`port/shims/xgameruntime.cpp`). "Shim path" is the vtable slot the title's generic thunk helper calls; the
+test drives every point through that slot and through the vendored export, and requires the same answer.
+
+| # | contract point | contract implemented by the vendored queue | test scenario |
+|---:|---|---|---|
+| 1 | queues and ports | `XTaskQueueCreate` takes a work and a completion dispatch mode; a queue owns both ports; `XTaskQueueGetPort` returns a port handle, `XTaskQueueDuplicateHandle` a second queue handle of the same queue | `scenario_dispatch_modes` |
+| 2 | four dispatch modes | `Manual`, `ThreadPool`, `SerializedThreadPool` and `Immediate` are all accepted for either port; the measured title shape is two distinct `ThreadPool`/`ThreadPool` queues and one `Immediate`/`Immediate` | `scenario_dispatch_modes` |
+| 3 | composite | `XTaskQueueCreateComposite` duplicates the handles of the queues owning the given ports and accepts the same port value for both arguments, the measured title call | `scenario_dispatch_modes` |
+| 4 | Manual dispatch | a Manual-port callback runs only inside `XTaskQueueDispatch` for that port, once, on the dispatching thread; the empty port reports false | `scenario_manual_dispatch` |
+| 5 | ThreadPool dispatch | the callback runs on the system thread pool without a dispatch call, not on the submitting thread; a ThreadPool completion port delivers the same way | `scenario_thread_pool`, `scenario_completion_port` |
+| 6 | SerializedThreadPool | as ThreadPool but one callback at a time (eight sleeping callbacks never overlap) | `scenario_serialized_thread_pool` |
+| 7 | Immediate | the callback runs on the submitting thread before the submit returns, leaving nothing queued | `scenario_immediate` |
+| 8 | delayed callback | `XTaskQueueSubmitDelayedCallback` queues after `delayMs`; the callback runs in the dispatch call that reaches the deadline, not before | `scenario_delayed` |
+| 9 | process queue | the default process queue exists and is thread-pool backed; an `XAsyncBlock` with a null queue completes with no dispatch call | `scenario_process_queue` |
+| 10 | E_PENDING | a provider's `DoWork` returning `E_PENDING` leaves the status `E_PENDING`; `XAsyncComplete(E_PENDING, ...)` is ignored; a second `XAsyncSchedule` while work is queued returns `E_UNEXPECTED` | `scenario_async_e_pending` |
+| 11 | completion routine and port | `XAsyncComplete` sets the terminal status first and submits the block's routine to the completion port; on a Manual completion port the routine runs only in `XTaskQueueDispatch` of that port, on the dispatching thread, with the status already terminal (as `XAsync.h` documents) | `scenario_completion_port` |
+| 12 | completion ordering | completion routines reach a Manual completion port in submission order; three Immediate-work calls deliver in order | `scenario_completion_order` |
+| 13 | cancellation | `XAsyncCancel` delivers `XAsyncOp::Cancel` once; a provider that completes with `E_ABORT` in that op makes the status `E_ABORT`, invokes the routine with that status, suppresses the queued `DoWork` and cleans up once | `scenario_cancellation` |
+| 14 | cancel a provider ignores | the vendored library only delivers `XAsyncOp::Cancel` and leaves the `E_ABORT` completion to the provider (`XAsyncProvider.h` names that responsibility), so a provider that ignores the op leaves the call `E_PENDING`; five-star and VIctory complete it themselves, the recorded cross-check difference (section 9.4) | `scenario_cancellation` |
+| 15 | quit and cancel pending items | `XTaskQueueTerminate` cancels queued callbacks (they run with `canceled=true`), invokes the termination callback after them, and refuses later submissions with `E_ABORT` | `scenario_termination` |
+| 16 | `XAsyncBlock` lifetime | a block is refused (`E_INVALIDARG`) while its call is in flight and accepted again after the completion routine has returned (`XAsync.h` documents both) | `scenario_block_reuse` |
+| 17 | cleanup and result once | the provider sees `XAsyncOp::Cleanup` exactly once per call, `GetResult` once, and a second `XAsyncGetResult` is `E_ILLEGAL_METHOD_CALL` | `scenario_result_cleanup`, `scenario_async_e_pending` |
+| 18 | waiter | `XTaskQueueRegisterWaiter` on a signaled handle queues its callback on the requested port, uncanceled, on the dispatching thread; `XTaskQueueUnregisterWaiter` stops further delivery | `scenario_waiter_monitor` |
+| 19 | monitor | `XTaskQueueRegisterMonitor` runs synchronously on every submission with the right port (direct submits and waiter entries); `XTaskQueueUnregisterMonitor` stops it | `scenario_waiter_monitor` |
+| 20 | named exports | the 23 task-queue/XAsync names the shim serves for `xgameruntime.dll` are the vendored function addresses themselves, not wrappers | `check_named_exports` |
+
+### 9.2 The test, and the two named expectations
+
+`port/test/task_queue_parity_test.cpp` (target and `add_test(NAME task_queue_parity)` in `port/CMakeLists.txt`,
+executed by `ctest`, so `tests/test_ctest_registration.py` covers it automatically) builds two facades over the same
+contract: `shim_face` asks `QueryApiImpl` for `IXThreadingImpl` and calls vtable slots 3-25 exactly as the title's
+thunks do, and `vendored_face` calls the `vendor/xtaskqueue` exports the test is linked against. One set of scenario
+functions runs once per facade; every assertion names its face and has to hold for both, so a slot that stops
+forwarding the contract fails against the vendored face's answer. `check_named_exports()` covers the third path, the
+shim's registry entries: each of the 23 names must resolve to the vendored function address. The test is standard C++
+plus Win32 handles and the vendored headers, no GPU and no game data.
+
+Two expectations are deliberately outside forwarding, and the test pins them as such rather than pretending parity:
+
+- **Slot 8 (`XAsyncBeginAlloc`).** Private, no public page, no measured caller; the shim refuses it with `E_NOTIMPL`
+  (section 5 retired it), while the vendored library does export and serve it. The test checks both sides: the slot
+  refuses, the vendored call begins a provider and still cleans it up once. A future port flips this one expectation.
+- **Slots 27-30 (thread time sensitivity).** `XThreadSetTimeSensitive`, `XThreadIsTimeSensitive`,
+  `XThreadAssertNotTimeSensitive` and the private slot 28 are the shim's own per-thread code, not vendored functions;
+  the test pins the shim's flag semantics (set/read/clear, and the assert slot leaves the flag as it was) and says so.
+  Slot 28 (`XTaskQueueIsEmpty`, private) has no measured caller and is not exercised.
+
+No shim divergence was measured, so no shim file was changed: [upstream_port.md](upstream_port.md) requires a slice to
+follow its measurement, and a wrapper change here would be unmeasured guesswork. The test therefore does not "fix"
+slot 8 either; it records the gap instead.
+
+### 9.3 Test evidence
+
+| gate | result |
+|---|---|
+| build | `task_queue_parity_test` linked by Ninja `RelWithDebInfo` (MSVC 14.50.35717); the new file compiles at `/W4 /permissive- /utf-8` with no warning from it |
+| build gates | `_setup\build_tests.cmd` prints `TESTS_BUILT` and `_setup\build_gta6rt.cmd` prints `PALMETTO_OK` on this tree |
+| direct run | `task_queue_parity_test: OK (328 checks)`, 0 failures, 1.6-1.9 s; eight consecutive runs identical |
+| `ctest` registration | `ctest -C RelWithDebInfo -R "^task_queue_parity$"`: Test #100 `task_queue_parity` Passed, 1.63 s |
+| GPU-free task-queue subset | 35/35 passed (2.5 s): `task_queue_parity`, `xgameruntime`, `xgameruntime_user`, `xgameruntime_user_gamertag`, `xgameruntime_user_gamertag_long`, `xgameruntime_gamesave`, `xgameruntime_store`, `xgameruntime_offline`, `xgameruntime_offline_hdr`, `api_global_refs`, `api_ref_state`, the five `context_*` cases and the 19 `wait_registration_*` cases |
+| registration fixture | `python -I tests/test_ctest_registration.py`: 4 tests OK; the fixture derives its expectations from `add_executable`/`add_test` pairs, so adding the target needed no edit to it |
+| docs checks | the twelve `tests/test_docs_*.py` run with the session's `GIT_CONFIG_*` variables cleared: this page passes every check that reads it (links, repo paths, encoding, tables, repeated lines, list items). `test_docs_env_vars.py` is red on this uncommitted tree because sibling slices' in-flight shims read new `PALMETTO_*` variables before their pages are written (the tree named `PALMETTO_DS_PAGES_ARM` in `port/shims/dstorage.cpp` while this was measured; earlier a `PALMETTO_BINK_*` pair in `port/src/main.cpp`); this slice adds no variable and none of its three files is in that report |
+| A/B boot | none: the parity test is host-side only. Section 2 already records the rank-6 trace arm (one 130 s boot with `PALMETTO_USER_TRACE` and zero submit/dispatch/wait/XAsync slots), so a second queue-probe boot was not repeated; the falsifier below is what would need one |
+| default path | unchanged: no runtime file is edited, and the test links its own executable |
+
+### 9.4 Limits and the next falsifier
+
+- **The contract is the vendored implementation's, not the console's beyond it.** The test pins `vendor/xtaskqueue`'s
+  behaviour, which is the same libHttpClient family the GDK documents, but it cannot prove a console-only ordering
+  the documentation does not state. Points where the GDK docs and the code agree (dispatch modes, `E_PENDING`, the
+  completion port, one cleanup) are the ones asserted; the cancel-completion responsibility is the one place the
+  peers differ (below).
+- **Host thread pools.** ThreadPool and SerializedThreadPool callbacks run on the Windows system thread pool, as the
+  vendored README says; "is a pool thread and not the submitter" is the assertion, not any console worker identity.
+  The peers five-star and VIctory own and grow their pools, a difference the audit already names; the test does not
+  compare pool identity across implementations.
+- **Timing bounds.** The delayed-callback check waits up to 3 s for a 400 ms delay and only asserts "not before the
+  delay"; the serialized check uses 1 ms sleeps. Both are generous for a host test but are not scheduling proofs.
+- **Not covered.** `XTaskQueueTerminate(wait=true)` on an all-Manual queue (its termination callback needs dispatches
+  from another thread, by design), delayed-callback order between two live timers, waiter retirement races (covered in
+  depth by the 19 `wait_registration_*` cases directly on the vendored API), and slot 28. The test deliberately avoids
+  booting the title, so no title call site is exercised; section 2's measured call table stands for that.
+- **The cross-check difference recorded.** For a provider that ignores `XAsyncOp::Cancel`, Five Star Recomp's
+  `AsyncService.cs` and VIctory's `xasync.rs` complete the call with `E_ABORT` themselves (five-star's comment says a
+  provider that handles Cancel completes it, "otherwise ... complete here"; VIctory's `XAsyncCancel` calls the provider
+  and then completes with `E_ABORT`), while the vendored libHttpClient leaves that completion to the provider. Our
+  shim inherits the vendored behaviour, so the call stays `E_PENDING`; the test pins that, and it is the one peer
+  difference this slice records rather than ports. No measured title call exercises it (section 2: zero XAsync calls).
+- **Next falsifier, unchanged from rank 6.** A boot with `PALMETTO_USER_TRACE` that shows a submit, dispatch, waiter,
+  monitor or XAsync slot in the load window would make this test the comparison contract for the measured shape; while
+  the surface stays silent, the negative in section 2 stands and this test is its regression gate.
+
+### 9.5 Attribution
+
+The slice was implemented from this tree's own measurements (section 2's slot table, the vendored headers and the
+shim's forwarding) plus the mechanism table in [peer_port_streaming.md](peer_port_streaming.md) sections 2.1, 3 and 9.
+No peer code, comment text or table was copied; the test is our own and the peer trees were consulted at mechanism
+level only, at the snapshots the audit pins: Five Star Recomp (`45071d52`; refresh `ce2b333b` read for this slice)
+`src/FiveStar.Loader/Shims/Gdk/TaskPort.cs`, `TaskQueueService.cs`, `AsyncService.cs`, `TaskWaiter.cs`,
+`TaskQueueMonitor.cs`; VIctory (`63bcca4`) `crates/victory-hle/src/modules/xasync.rs`; PercyScarlett (`e44c465`)
+`PercyPort/crates/percyport-hle/src/modules/xasync.rs` and the same module under `runtime/victory`; victory-fork
+(`9a9091d`) `crates/victory-hle/src/modules/xasync.rs`; XCL (`623d02e`)
+`crates/xcl/src/hle/xgameruntime/taskqueue.rs` and `xasync.rs`. The dispatch-mode model and the process queue's
+default were checked against Microsoft's public GDK documentation (section 4's links). The vendored implementation is
+Microsoft's MIT-licensed libHttpClient, credited in `vendor/xtaskqueue/README.md`; that credit is unchanged. No
+`NOTICE.md` row is proposed: this slice adds no ported mechanism and no third-party code, only a test over code the
+repository already vendors (the peer-campaign row for [peer_port_streaming.md](peer_port_streaming.md) already exists).
+Uncommitted files this slice leaves for the lead: the new `port/test/task_queue_parity_test.cpp`, `port/CMakeLists.txt`,
+and this appended page section. No shim file, no registration fixture, no git write.
+

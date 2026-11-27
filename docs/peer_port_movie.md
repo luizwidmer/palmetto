@@ -2,8 +2,10 @@
 
 **Status: peer audit (sections 1-7, written as a read-only audit: documentation only, no boot, every page quoted) plus
 four implemented ports (sections 8-9, 11 and 12, with their own tests and their light boots), one implemented
-measurement (section 13, the movie draw-path probe, with its test and its one clean 300 s arm), their attribution
-(sections 8.7, 9.6, 11.7, 12.7 and 13.8) and the uncommitted file lists (sections 10, 11.8, 12.8 and 13.9).** The five
+measurement (section 13, the movie draw-path probe, with its test and its one clean 300 s arm), one implemented
+instrument (section 14, the Bink import-level witness and the non-looping-movie fast-advance, with its test and its one
+clean 300 s arm), their attribution (sections 8.7, 9.6, 11.7, 12.7, 13.8 and 14.8) and the uncommitted file lists
+(sections 10, 11.8, 12.8, 13.9 and 14.9).** The five
 peer ports
 were re-cloned and read
 at the commits in section 1 to answer one question: how does a port get a movie from the title's
@@ -1353,6 +1355,281 @@ Implementation: the new include-only header [movie_draw_probe.h](../port/src/mov
 workflow file is touched; the tree's other modified files, if any, belong to the other in-flight slices. No git write
 was made and no peer code is in the tree. No game data is in the code, the tests or this page: RVAs, instruction bytes,
 field offsets, register/pointer values, counts, times and image means only.
+
+## 14. Implemented: the Bink import-level witness and the non-looping-movie fast-advance (section 4 item 1)
+
+**Status: implemented, tested and measured on one clean 300 s arm; the witness answers the export question and the
+fast-advance is implemented but never asked.** The retail image calls its 23 `Bink2Scarlett.dll` imports directly through
+their IAT slots (measured by disassembly; this corrects section 2.1). A new opt-in import-level witness redirects the 16
+measured slots and refuses the other 7 by name, counts and bounds every call, and logs the measured `BINK` header words;
+an opt-in fast-advance answers the measured advance export for a non-looping movie whose loop state the title itself
+stated, and is off by default. In the clean arm the movie player holds state `0x9` for 242 s and the witness shows the
+title calls only the callbacks, three metadata opens, one playback open, one pause and one non-looping statement - no
+decode, no frame-buffer registration and no advance - so the fast-advance never applies and the draw path stays
+`never-issued`. No shim, default path or presented pixel changed.
+
+### 14.1 The measured import surface, and the correction to section 2.1
+
+The instrument needed a measurement first: which decoder exports the title actually calls, and how. A read-only
+disassembly pass over the retail image (outside the repository: `tooling/pe_inspect.py` for the RVA-to-file-offset
+mapping plus a disassembler) found the 23 `Bink2Scarlett.dll` imports bound into one 8-byte IAT slot each, at
+image+0x67941C0 .. image+0x6794270, and the title calls them **directly at the slot**: `call qword ptr [rip+disp]` with
+the displacement pointing into the import address table. At the metadata open, image+0x442EBE6 is `ff 15 24 56 36 02`,
+whose target is image+0x6794210 (`BinkOpenWithOptions`); 17 of the 23 imports have such a call site.
+
+**That corrects section 2.1 and [movie_path.md](movie_path.md) section 2.1's reading.** Their "0 direct call sites for
+every import; function pointers built at run time" is a property of the instrument, not of the image:
+`tooling/import_call_sites.py` counts calls to import **thunks** (`jmp qword [rip+disp]`, reached by `E8`/`E9 rel32`),
+and this image has one thunk (`BinkSetSoundSystem`) that nothing calls; a direct `call [rip+disp]` reads the IAT slot
+with no thunk in between, so the tool reports zero (its own header says a call through a register is not seen; a later
+tool fix belongs to the tooling ticket, not this slice). The measurement here is the image's own instruction stream, and
+it is why the witness below patches the IAT slot and sees the call go through it.
+
+| import | kind | measured IAT slot | measured call site(s) | measured register arguments | instrument |
+|---|---|---|---|---|---|
+| `BinkClose` | close | image+0x67941C0 | 0x442E8F5, 0x442EC52 | 1 (handle) | wrapped |
+| `BinkDoFrame` | decode | image+0x67941C8 | 0x2EF309 | 1 (handle) | wrapped |
+| `BinkDoFrameAsyncMulti` | decode | image+0x67941D0 | 0x2EF265, 0x2EF3BE | 3 | wrapped |
+| `BinkDoFrameAsyncWait` | decode | image+0x67941D8 | 0x2EF274, 0x2EF3CD | 2 | wrapped |
+| `BinkFreeGlobals` | close | image+0x67941E0 | 0x442FDFF | none measured | refused: no-measured-abi |
+| `BinkGetFrameBuffersInfo` | register | image+0x67941E8 | 0x199F066, 0x20EEDAA, 0x442EBFC | 2 | wrapped |
+| `BinkGetKeyFrame` | config | image+0x67941F0 | 0x442F5D7 | none measured | refused: no-measured-abi |
+| `BinkGetPlatformInfo` | config | image+0x67941F8 | none | none measured | refused: no-call-site |
+| `BinkGoto` | advance | image+0x6794200 | none | none measured | refused: no-call-site |
+| `BinkNextFrame` | advance | image+0x6794208 | 0x2EF253, 0x2EF2FF | 1 (handle) | wrapped |
+| `BinkOpenWithOptions` | open | image+0x6794210 | 0x442EBE6, 0x442F056 | 3 | wrapped |
+| `BinkPause` | advance | image+0x6794218 | 0x11D8BD1, 0x442F30C, 0x442F398, 0x442F400, 0x442F42A, 0x5536EA6 | 2 | wrapped |
+| `BinkRegisterFrameBuffers` | register | image+0x6794220 | 0x442F9B8 | 2 | wrapped |
+| `BinkRequestStopAsyncThreadsMulti` | close | image+0x6794228 | 0x442FDDE | 1 (handle) | wrapped |
+| `BinkSetMemory` | config | image+0x6794230 | 0x15E3C4F | 2 (alloc, free) | wrapped |
+| `BinkSetOSFileCallbacks` | config | image+0x6794238 | 0x15E3C3B | 4 (callbacks) | wrapped |
+| `BinkSetSoundSystem` | config | image+0x6794240 | none | none measured | refused: no-call-site |
+| `BinkSetVolume` | config | image+0x6794248 | none | none measured | refused: no-call-site |
+| `BinkSetWillLoop` | advance | image+0x6794250 | 0x2EF109, 0x442F3B9, 0x5536EB7 | 2 | wrapped |
+| `BinkShouldSkip` | decode | image+0x6794258 | 0x442FA4E | 1 (handle) | wrapped |
+| `BinkStartAsyncThread` | config | image+0x6794260 | none | none measured | refused: no-call-site |
+| `BinkWait` | decode | image+0x6794268 | 0x442F3DF, 0x442F9F1 | 1 (handle) | wrapped |
+| `BinkWaitStopAsyncThreadsMulti` | close | image+0x6794270 | 0x442FDED | 1 (handle) | wrapped |
+
+The measured register arguments are fixed by the title's own call sites: the decoder is a title import, so the caller
+passes exactly the arity the callee reads. The table is the same one the header carries
+([bink_witness.h](../port/src/bink_witness.h)): RVAs, names, counts and measured argument numbers only.
+
+The slot values were cross-checked at install time: each slot must already hold the mapped decoder's export for its
+name before it is redirected, and the wrap line prints that export. The install measured decoder+0x4710 for
+`BinkOpenWithOptions`, the same export RVA `PALMETTO_BINK_PROBE` derives the module base from
+([main.cpp](../port/src/main.cpp)), so the two measurements agree on the base.
+
+### 14.2 The design: the import-level witness
+
+Two switches, both off by default: `PALMETTO_BINK_WITNESS` and `PALMETTO_BINK_FASTFORWARD`. An unrecognised spelling is
+refused by name and leaves that switch off. With both unset the whole cost is two `getenv` calls: nothing is parsed,
+patched, logged or counted, and the default path is byte-identical.
+
+- **The slot redirect is installed after the image is mapped and before any image code runs**
+  ([main.cpp](../port/src/main.cpp), next to the other opt-in patches). It walks the title image's own import table,
+  bounds-checks every RVA against the mapped image, and for each of the 23 measured names validates, in order: the name
+  is in the table (refusal `not-in-import-table`); the slot is at the measured RVA (`slot-rva-mismatch`, i.e. a different
+  image build); the mapped decoder exports the name (`export-not-found`); the slot currently holds that export
+  (`bound-elsewhere`, e.g. a compat module or another hook); and the slot's page can be made writable
+  (`not-writable`). Only then is the slot written. 16 slots wrapped, 7 refused with their named reason; the arm's
+  install log is the evidence line (14.5).
+- **The wrappers use the measured ABI only**: open 3 arguments (path, options block, flags), get-frame-buffers-info 2,
+  register-frame-buffers 2, set-will-loop 2, next-frame 1, pause 2, do-frame 1, async-multi 3, async-wait 2, wait 1,
+  should-skip 1, close 1, stop-async 1, wait-stop 1, set-memory 2, set-file-callbacks 4. Each forwards to the real
+  decoder export in the slot with the caller's arguments unchanged; the two tick-ish decode exports the measured call
+  sites ignore come back with the value the decoder itself returned on every measured call.
+- **Bounded logs and exact counters.** Per export the first three calls are logged in full and then every 256th up to 64
+  lines, so a hot export cannot become the measurement; every open/close/registration is logged up to 16, the two
+  callback installs up to 4, an applied fast-advance up to 8. Counters are always exact. An opened handle is remembered
+  in an eight-entry table (the middleware's eight player slots), and a close forgets it. A reporter prints the counters,
+  the non-zero per-export counts, the named advance refusals and a verdict every 10 s (120 samples at most).
+- **The verdict is a pure function of seven counters** ([bink_witness.h](../port/src/bink_witness.h)): `advance-applied`
+  wins, then `decode-suppressed`, then `advance-requested`, then `decoded-no-advance`, `registered-no-decode`,
+  `opened-and-closed`, `open-only`, `no-decoder-call`. The reporter's answer is the same rule the test's checks cover.
+
+### 14.3 The fast-advance rule, and what it is not
+
+The rule answers one measured question: when the title asks the decoder to advance a non-looping movie, can the movie's
+end state be reached without decoding frames. The lever is the title's own read of the header: the per-frame decode
+wrapper 0x2EF0E0 compares `[HBINK+0x10]` with the player's stop frame `[player+0x208]` at 0x2EF1E9 and 0x2EF22E and
+skips its async decode loop while the header's word is not smaller. Writing that word is therefore a measured way to
+make the title skip decoding.
+
+- **Applied only at the measured advance export.** The decision runs in the `BinkNextFrame` wrapper (2 measured call
+  sites, both inside 0x2EF0E0); `BinkPause`, `BinkSetWillLoop` and the decode exports are forwarded normally unless the
+  handle was advanced. There is no mode that advances a looping movie.
+- **The loop state is the title's own statement, not an inferred flag.** The witness records the argument of each
+  measured `BinkSetWillLoop` call (the title passes `player+0x1e5` at 0x2EF109, and two other measured sites); a handle
+  whose loop state the title never stated is refused `loop-state-unmeasured`, and a stated loop is refused `looping`.
+- **The header is validated before anything is written**, in this order: the handle was read, the witness opened it, the
+  loop state is known and zero, width and height inside 1..8192, frame count inside 1..100000, current frame inside
+  1..frame count, `[+0x10]` either the decoder's `-1` sentinel or inside the frame count, and the read-error word 0. The
+  `-1` sentinel is measured: a real open of a 450-frame stream reads 0xFFFFFFFF at +0x10 before the first advance
+  (14.5). A header already at the last frame is refused `already-last-frame`. Every refusal has a name and the call is
+  forwarded untouched.
+- **The write is the header's own frame count**: `frame_num` and `last_frame_num` both become `frames`. After that,
+  decode calls for the handle answer without decoding (do-frame 0, async-multi 0, async-wait 0, wait 0, should-skip 0,
+  each counted as suppressed) so the decoder is not asked to produce frames the diagnostic would not show. The rule
+  never claims a decoded frame, and the log line says so.
+
+### 14.4 Tests
+
+The pure seam is a new ctest target, `bink_witness`, built from
+[bink_witness_test.cpp](../port/test/bink_witness_test.cpp) and registered in [CMakeLists.txt](../port/CMakeLists.txt):
+**487 checks, 0 failures** on synthetic data only. It covers the `BINK` header layout (every measured offset and a
+round-trip read from a synthetic block), the 23-row import table (unique names and slots, measured argument counts, 16
+wrapped / 5 no-call-site / 2 no-measured-abi, ascending call sites), the slot validation order with every named
+install refusal, the switch spellings (off, on, refused, case-insensitive, whitespace refused), the fast-advance rule
+(each refusal, the sentinel acceptance, ordering, the pure target value), the bounded-log rule and the verdict
+precedence. The desktop compile used for the test is `bink_witness_test`; nothing in it reads a package file.
+
+### 14.5 The arm
+
+Three light arms ran under the shared boot lock (`-Who portbinkwitness`), one at a time: the section-12 content
+environment plus `PALMETTO_TITLE_CLASS0A_SIZE=1`, `PALMETTO_MOVIE_PROBE=draw`, `PALMETTO_BINK_WITNESS=1` and
+`PALMETTO_BINK_FASTFORWARD=1`, 300 s timeout, logs/captures/readbacks outside the repository. Arm 1 stopped at the
+intermittently recorded title-heap corruption after the host GPU dropped the device (the `game+0x43AE303` stop
+[decomp_first_ui.md](decomp_first_ui.md) section 14.5 names; one device loss, under the task's two-loss stop rule). Arm 2
+is the clean 300 s window and is the arm this section reports; the third arm, on the rebuilt binary, is described at the
+end of this section and lost the second device, which ended the arm series.
+
+| measure | arm 1 (`binkwitness1`) | arm 2 (`binkwitness2`) |
+|---|---|---|
+| binary | SHA-256 `12132745FCB5E853133E9AC8613C62297B5919739A5E5A4E4FD926D6C78155C3` | the same binary |
+| wall / verdict | 58.0 s, `STOP game+0x43AE303` | 300.2 s, killed by the harness timeout, `VERDICT: ALIVE` |
+| exceptions / device losses | 1 / 1 | 0 / 0 |
+| trace events / d3d12 calls | 6,394 / 124,709 | 51,999 / 1,098,344 |
+| install | 16 of 23 slots wrapped, 7 refused by name, fast-advance on | the same |
+| stage words | init 2, loading 1, session 0 from the 20 s sample to the stop | init 3 at 54 s, loading 2 at 52 s, **session 3 at 54 s**, machine current 3 next 3 |
+| movie slot | not armed (slot 0 all zero at the 52 s sample) | armed at 54 s: entity non-null, active 1, armed 1, media id `0x540714f3`, held to 298 s |
+| movie player | not reached (`?0x0` at the 50 s sample) | **state `0x9`, handle non-null, `buffers 0`, probe 0, open 1, error 0 from the 56 s sample to 298 s** |
+| decoder calls | open 1, get-frame-buffers-info 1, close 1 at +52.9 s | open 4, get-frame-buffers-info 5, close 3, pause 1, set-will-loop 1; decode 0, advance 0, registration 0 |
+| witness verdict | `no-decoder-call` at the 10-50 s samples (the open came after the last one) | `registered-no-decode` at every sample from 60 s to 290 s |
+| fast-advance | never asked (advance 0) | never asked (advance 0; the title stated `will_loop 0` at +55.0 s; applied 0, suppressed 0, refusals none) |
+| draw path | `never-issued` at the 10-50 s samples (all six counters 0) | `never-issued` at every sample 10-290 s (layer 0 draw 0 ready 0 advance 0 advance-decode 0 decode 0) |
+| pixels | 9 captures, frames 1-1601, each mean rgb `0.00 0.00 0.00`; no readback completed | 12 captures, frames 1-2201, each mean rgb `0.00 0.00 0.00`; 4 centre readbacks 128x128 at the target's 1856,1016: two mean `51 102 204` (the layer's write-control colour) and two `0 0 0` |
+
+The decoder call timeline in arm 2 is the whole export evidence, with times relative to the boot start: the title
+installs its own memory and OS-file callbacks through the decoder at +22.1 s (`BinkSetMemory` and
+`BinkSetOSFileCallbacks`, the 0x15E3C10 pair), then at +54.8 s it runs the metadata/probe open three times in 0.13 s -
+each open returning the same handle, header `3840 x 2160`, `frames 450`, `frame 1`, `[+0x10] = 0xFFFFFFFF` (the measured
+sentinel), `rate 30/1`, `open_flags 0x0c04445a` - each followed by `BinkGetFrameBuffersInfo` and `BinkClose`; the fourth
+open is the playback open and keeps the handle, with the fourth get-info call; the fifth get-info is the frame-buffer
+list read at the measured call site 0x20EEDAA. At +55.0 s the player update calls `BinkPause(handle, 1)` and then
+`BinkSetWillLoop(handle, 0)`, and that is the last decoder call: no frame-buffer registration, no decode, no advance for
+the next 240 s. The playback handle's `open_flags` word also has the peer-measured `BINKWILLLOOP` bit clear, so both the
+title's own statement and the peer's flag rule agree the movie is non-looping - the fast-advance is eligible and simply
+never asked.
+
+**Gates on the changed tree.** `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`; `_setup\build_tests.cmd` prints
+`TESTS_BUILT`; the GPU-free gate subset exits 0, 15 of 15 including the new `bink_witness` target - `code_hooks`,
+`frame_dump`, `unimplemented_policy`, `graphics_record`, `graphics_pso`, `buffer_va_index`, `dstorage`, `xapu_chad`,
+`deferred_compile`, `arena_size`, `xbox_present`, `xs_proxy_mock`, `xmem`, `movie_draw_probe` and `bink_witness`. All
+twelve `tests/test_docs_*.py` checks pass; the links check's `git init` subtest needs the shell's own injected
+`GIT_CONFIG_*` variables cleared first (they make `git init` fail in a temp directory - an environment artefact, not a
+page problem), and with them unset the check is OK.
+
+A third arm ran the same environment on the rebuilt binary after two post-arm edits: the fast-advance rule's acceptance
+of the measured `-1` sentinel at `[+0x10]` (the arm's own open evidence exposed it) and the rare-call logging fix (output
+only). That binary is SHA-256 `77E82DB10E5A513BFDA84EFD0899E1D0170059181E84646CBB8238C6E7DE9F7B`; the arm lost the
+Vulkan device (the second and final device loss under the task's stop rule) and stopped at 69.8 s at `game+0x86F9DF`
+reading `0x6`, the early post-loss family `game+0x86F97E`/`0x86F981` [console_type_branches.md](console_type_branches.md)
+and [decomp_first_ui.md](decomp_first_ui.md) sections 16, 17 record. It had measured the first metadata open (same 3840 x
+2160, 450-frame header) before the stop. **Arm 2 therefore remains the clean window reported above**; the two differences
+between its binary and the delivered tree cannot change its result, because the arm never calls `BinkNextFrame` (the
+sentinel branch is inside that wrapper, advance calls 0) and the logging change only prints more of the rare calls the
+delivered build would show.
+
+The arm's install log is the witness's own gate evidence: `16 of 23 measured import slot(s) wrapped, 7 refused (named
+above)` with the per-slot validation lines (the measured IAT RVA, the decoder export the slot held, the measured call-site
+count), and no `slot-rva-mismatch`, `bound-elsewhere`, `export-not-found` or `not-writable` refusal in any arm - the image
+build and the mounted decoder are the ones the table was measured against.
+
+### 14.6 Verdict, limits and the next falsifier
+
+**Verdict: the witness answers the export question, and the fast-advance is never asked in a window that reaches the
+playing state.** In the clean arm the movie player holds state `0x9` with a non-null handle from the 56 s sample to the
+298 s last sample, and the witness measures the whole decoder surface the title touches: three metadata opens (each
+followed by `BinkGetFrameBuffersInfo` and `BinkClose`), one playback open that keeps the handle, one `BinkPause` and one
+`BinkSetWillLoop` with argument 0, and then nothing - `BinkDoFrame` 0, `BinkDoFrameAsyncMulti` 0, `BinkDoFrameAsyncWait` 0,
+`BinkWait` 0, `BinkShouldSkip` 0, `BinkNextFrame` 0, `BinkRegisterFrameBuffers` 0. The witness verdict is
+`registered-no-decode` at every 10 s sample from 60 s to 290 s. **The condition the fast-advance rule needs is measured
+present** - the title itself states the handle non-looping at +55.0 s and the logged `open_flags` word has the peer's
+`BINKWILLLOOP` bit clear - **but the advance is never asked**, so the rule never applies: applied 0, suppressed 0,
+advance refusals none. That is section 4 item 1's named falsifier in the "the title does not call the exports in that
+window" direction, for the advance/decode half: the movie cannot be what holds the session-3 record in this window,
+because the title never asks the decoder to advance or decode it. The register/open/close half of the falsifier does
+fire: those exports are called, and the witness pins them and their header words.
+
+- **One clean window; the other two arms stopped after a device loss.** Arm 2 is a clean 300.2 s window (0 exceptions,
+  0 device losses). Arm 1 stopped at 58.0 s at `game+0x43AE303` reading `0x100000078`, after the host GPU dropped the
+  device - the intermittent title-heap corruption [decomp_first_ui.md](decomp_first_ui.md) section 14.5 records; it had
+  already measured the first metadata open and its close. Arm 3, on the rebuilt binary, lost the second device and
+  stopped at 69.8 s at `game+0x86F9DF` reading `0x6`, the early post-loss family the console-type page records; the
+  second loss ended the arm series under the task's rule. Only arm 2 has the full playing window, and its open/decode
+  counts are the evidence this section reports.
+- **The advance rule itself is tested on synthetic headers only.** No real call exercised it in any arm (zero
+  `BinkNextFrame` calls), so its refusals, bounds, sentinel acceptance and write are unit-tested, not boot-tested. The
+  first boot that reaches the decode wrapper 0x2EF0E0 exercises it; until then the arm measures that it cannot.
+- **The exact caller of the pause/loop pair is not logged.** `BinkPause` has six measured call sites and `BinkSetWillLoop`
+  three; the runtime call order (pause then loop, 0.1 ms apart at +55.0 s) matches the player-update pair at 0x442F30C
+  and 0x442F3B9 rather than the decode wrapper 0x2EF0E0, which never ran (decode 0). That attribution is the static
+  table plus the order, not a captured return address; a later arm can log the caller RVA in the wrapper.
+- **The witness sees the static import path only.** It redirects the image's IAT slots; a `GetProcAddress` of a decoder
+  export, or a cached function pointer copied out of the slot before the install, would not be seen. The install runs
+  before any image code, so nothing can copy a slot first, and no `GetProcAddress` of a decoder name is measured in
+  this tree; a title that resolves the decoder dynamically would need the resolver-side hook instead (the peers' shape).
+- **No movie-picture claim and no default-path change.** Every presenter capture stays black and every draw-path counter
+  stays zero, exactly as section 13 measured without the witness; the open/get-info/close calls are metadata traffic, not
+  decoded video. No shim, resource, view or display answer changed; with both switches unset the code path is identical
+  to section 13's arm.
+- **Next falsifiers, in the order they would decide.** (a) A boot in which the renderer's draw (section 13's `layer-draw`
+  hit) or the second advance 0x51B45B0 issues the decode wrapper: the same witness then reports `BinkNextFrame` and the
+  decode exports, and with `PALMETTO_BINK_FASTFORWARD=1` the rule applies on the first advance - if the session-3 word
+  still does not move with the movie's header at its last frame, the movie is a consequence, not the gate. (b) A boot in
+  which frame-buffer registration 0x442F760 fires: the witness's `BinkRegisterFrameBuffers` line then prints the buffer
+  count the title passed, which is the registration question section 3.1 left open. (c) A longer window that repeats
+  `BinkSetWillLoop` with instruction 1 (a looping movie): the rule must refuse `looping` and forward, which the synthetic
+  tests cover and a real looping movie would confirm.
+
+### 14.7 Cross-check against the peers (reference only, no code copied)
+
+The five peers were read at section 1's commits. **XCL's `bink.rs` is the one Bink-specific mechanism in any peer tree**
+and the idea this slice reimplements; everything below was written from this tree's own measurement, and the differences
+are recorded, not reconciled away.
+
+| peer mechanism | what this slice does | difference |
+|---|---|---|
+| XCL (`8b957be`, `bink.rs`): an opt-in `XCL_SKIP_BINK` wraps the playback exports at import/`GetProcAddress` time, records the measured `BINK` header layout, fast-advances a non-looping movie by writing `frame_num` and `last_frame_num` to `frames`, and forwards open/close, buffer sizing/registration and the memory hooks | an opt-in `PALMETTO_BINK_WITNESS` redirects the 23 measured IAT slots after the loader has bound them, with a measured-ABI wrapper per export; `PALMETTO_BINK_FASTFORWARD` applies the same write at the measured advance export and suppresses the decode calls for that handle | same mechanism class, our own implementation: we redirect the slots the title actually reads (measurement 14.1), decide eligibility from the title's own `BinkSetWillLoop` argument instead of the header flag, bound and name every refusal, and count the suppressed decode calls. XCL's resolver-time wrap also covers `GetProcAddress`, which our static-slot witness does not; XCL's `all` mode (advance looping movies too) is deliberately not implemented here |
+| Five Star Recomp (`45071d5`): no Bink-specific code; runs the shipped decoder under its loader and lets the title decode into frame buffers it registers | the witness sees the same arrangement from the import side: the open/get-info/register/decode exports are the title's own calls, and the fast-advance still forwards open/close/buffer sizing | Five Star's measured point is that no HLE is needed; this slice's arm agrees for the metadata half (the title services its own opens) and adds the negative that the decode half is never called in this window |
+| VIctory (`63bcca4`) and victory-fork (`52ac4ec`): no Bink HLE; their titles play the intro because their loading/first-run flow completes | the same negative from our side: a window that reaches the playing state and the stage-3 words still never asks the decoder to advance or decode | their evidence says the movie is a consequence of their completed loading; this arm gives the import-level version of that statement for our tree, with the advance export at zero |
+| PercyScarlett (`e44c465`): the victory lineage, no Bink code; the movie surface it owns is the console's overlay plane | no movie surface is touched by this slice; the witness is import-level only | the overlay/composition question stays section 4 item 6's port, not this one |
+
+### 14.8 Attribution
+
+This slice was implemented from this project's own measurements. The behaviour was cross-checked against the public
+GPL projects named in section 1 at the commits there - **XCL** (`8b957be`, `bink.rs`: the opt-in skip wrapper, the
+measured `BINK` header layout and the fast-advance idea), **Five Star Recomp** (`45071d5`, the shipped-decoder-under-the-
+loader arrangement), **VIctory** (`63bcca4`) and **victory-fork** (`52ac4ec`, the completed-loading evidence) and
+**PercyScarlett** (`e44c465`, the same lineage) - as evidence for the mechanism class. **No code from those projects was
+copied.** The upstream projects remain the copyright of their contributors and their licences continue to apply to their
+own trees (XCL and PercyScarlett GPL-2.0-only; Five Star, VIctory and the reference GPL-3.0). The
+[upstream_port.md](upstream_port.md) section 6 template is the text for a [NOTICE.md](../NOTICE.md) entry if the lead
+wants one for this slice (that file is outside this page's write scope); the page is already indexed in
+`docs/README.md`, whose row covers "the implemented ports and their measured follow-ups", so no new index row is owed.
+
+### 14.9 Uncommitted files of this slice
+
+Implementation: the new include-only header [bink_witness.h](../port/src/bink_witness.h) and
+[main.cpp](../port/src/main.cpp) (the witness section, the 16 wrappers, the install call after the image is mapped).
+Tests: the new [bink_witness_test.cpp](../port/test/bink_witness_test.cpp) and one target/test registration in
+[CMakeLists.txt](../port/CMakeLists.txt). Docs: this page. No shim, `NOTICE.md`, `docs/README.md`, other docs page or
+workflow file is touched; the tree's other modified files, if any, belong to the other in-flight slices. No git write
+was made and no peer code is in the tree. No game data is in the code, the tests or this page: RVAs, instruction bytes,
+field offsets, register/pointer values, counts, times and image means only.
+
+
 
 
 

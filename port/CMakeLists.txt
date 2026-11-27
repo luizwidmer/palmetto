@@ -385,6 +385,27 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
   target_link_options(xgameruntime_test PRIVATE /OPT:NOREF)
   target_link_libraries(xgameruntime_test PRIVATE palmetto_xtaskqueue)
 
+  # GPU-free parity contract test for the task-queue/XAsync surface (docs/task_queue_parity.md section 9, rank 6 of
+  # docs/peer_port_streaming.md): the IXThreadingImpl vtable slots the title calls vs the vendored queue's own
+  # exports, for the dispatch modes, E_PENDING, completion delivery, cancellation, XAsyncBlock reuse and the
+  # waiter/monitor entries. Host-side only: no GPU, no device, no boot.
+  add_executable(task_queue_parity_test
+    test/task_queue_parity_test.cpp
+    shims/xgameruntime.cpp
+    shims/xgameruntime_user.cpp
+    shims/xgameruntime_gamesave.cpp
+    shims/xgameruntime_store.cpp
+    shims/xgameruntime_offline.cpp
+    shims/library_loader.cpp
+    shims/registry.cpp
+    shims/file_system.cpp
+  )
+  target_include_directories(task_queue_parity_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
+  target_compile_definitions(task_queue_parity_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(task_queue_parity_test PRIVATE /W4 /permissive- /utf-8)
+  target_link_options(task_queue_parity_test PRIVATE /OPT:NOREF)
+  target_link_libraries(task_queue_parity_test PRIVATE palmetto_xtaskqueue)
+
   # XUserImpl (offline local user) through QueryApiImpl, slot by slot as xgameruntime.lib's thunks call it.
   add_executable(xgameruntime_user_test
     test/xgameruntime_user_test.cpp
@@ -1319,6 +1340,10 @@ if(BUILD_TESTING)
     # Longer than getenv_s's old 64-byte buffer: still the "Player" fallback (and its message), not a silent one.
     add_test(NAME xgameruntime_user_gamertag_long COMMAND xgameruntime_user_test --expect-gamertag Player)
     set_tests_properties(xgameruntime_user_gamertag_long PROPERTIES ENVIRONMENT "PALMETTO_GAMERTAG=GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG")
+  endif()
+  if(WIN32 AND TARGET task_queue_parity_test)
+    add_test(NAME task_queue_parity COMMAND task_queue_parity_test)
+    set_tests_properties(task_queue_parity PROPERTIES TIMEOUT 120)
   endif()
   # The active-input tracker the GameInput shim feeds (src/active_input.h), on synthetic samples: no SDL, no
   # controller, no GPU, so it builds and runs everywhere, with or without SDL3.
@@ -3451,6 +3476,11 @@ if(TARGET Vulkan::Headers)
     # rule and the counter verdict that names the step reached (docs/peer_port_movie.md section 13).
     add_executable(movie_draw_probe_test test/movie_draw_probe_test.cpp)
     add_test(NAME movie_draw_probe COMMAND movie_draw_probe_test)
+    # bink_witness.h: the measured Bink2Scarlett import surface (IAT slot RVAs, call sites, measured argument counts),
+    # the switch spellings, the installer and fast-advance refusal rules, the bounded-log rule and the counter verdict
+    # (docs/peer_port_movie.md section 14).
+    add_executable(bink_witness_test test/bink_witness_test.cpp)
+    add_test(NAME bink_witness COMMAND bink_witness_test)
     # The subgroup size a pipeline stage asks for, from synthetic index entries and device properties.
     add_executable(subgroup_size_test test/subgroup_size_test.cpp)
     target_link_libraries(subgroup_size_test PRIVATE Vulkan::Headers)
