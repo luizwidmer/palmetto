@@ -3,9 +3,9 @@
 **Status: peer audit (sections 1-7, written as a read-only audit: documentation only, no boot, every page quoted) plus
 four implemented ports (sections 8-9, 11 and 12, with their own tests and their light boots), one implemented
 measurement (section 13, the movie draw-path probe, with its test and its one clean 300 s arm), one implemented
-instrument (section 14, the Bink import-level witness and the non-looping-movie fast-advance, with its test and its one
-clean 300 s arm), their attribution (sections 8.7, 9.6, 11.7, 12.7, 13.8 and 14.8) and the uncommitted file lists
-(sections 10, 11.8, 12.8, 13.9 and 14.9).** The five
+instrument (sections 14-15, the Bink import-level witness, non-looping-movie fast-advance and the measured audio-surface
+negative, with their tests and the section-14 clean 300 s arm), their attribution (sections 8.7, 9.6, 11.7, 12.7, 13.8,
+14.8 and 15.6) and the uncommitted file lists (sections 10, 11.8, 12.8, 13.9, 14.9 and 15.7).** The five
 peer ports
 were re-cloned and read
 at the commits in section 1 to answer one question: how does a port get a movie from the title's
@@ -1628,6 +1628,99 @@ Tests: the new [bink_witness_test.cpp](../port/test/bink_witness_test.cpp) and o
 workflow file is touched; the tree's other modified files, if any, belong to the other in-flight slices. No git write
 was made and no peer code is in the tree. No game data is in the code, the tests or this page: RVAs, instruction bytes,
 field offsets, register/pointer values, counts, times and image means only.
+
+## 15. Bink audio import/callback surface: measured negative at this frontier
+
+**Status: two measured audio-related imports are now classified in the witness table and unit-tested; no audio callback
+or ABI is invented.** This is the audio extension of section 14's import witness, not an audio shim or a claim that the
+movie has no soundtrack. The retail image's 23-name `Bink2Scarlett.dll` import table is the boundary: it contains two
+audio-related names, but neither has a measured direct call site. Section 14.1 is the source for the slot and call-site
+measurements; the full decoder import table and the title's 23-slot witness remain unchanged.
+
+### 15.1 Measured export/import and callback surface
+
+| Retail title import / callback surface | Measured IAT slot | Direct title call sites | Measured ABI or callback | Witness result |
+|---|---|---|---|---|
+| `BinkSetSoundSystem` (sound-system registration import) | `image+0x6794240` | **none** | No argument/return shape or callback pointer is measured; the title does not reach a measured registration call | Existing generic installer refuses `unwrapped-no-call-site`; no wrapper installed |
+| `BinkSetVolume` (volume-control import) | `image+0x6794248` | **none** | No argument/return shape is measured | Existing generic installer refuses `unwrapped-no-call-site`; no wrapper installed |
+| Title-supplied sound callback(s) | Not an import-table row: they would be function pointers passed to `BinkSetSoundSystem` | **none measured** because the registration import has no call site | No callback address, type, or invocation is observed | None added or guessed |
+| Track API names (`BinkOpenTrack`, `BinkGetTrackType`, `BinkGetTrackData`, `BinkSetSoundTrack`) | **No slot in the retail image's 23 Bink imports** | None through the measured import table; no dynamic decoder `GetProcAddress` path is measured in section 14.6 | The offline `Bink2Console.dll` track tests and peer reports do not establish this retail title's call ABI | No import row or wrapper added |
+
+The callback itself would be title code supplied to the decoder, not another Bink import. Since the title has no measured
+call to the only imported registration API, the callback arguments and their ABI are unknown. The measured negative is
+therefore **no reachable audio-registration/callback surface through the import path at this frontier**, not a claim
+that the package has no audio exports or that no other dynamically resolved path could exist.
+
+### 15.2 Design and switch
+
+The include-only [bink_witness.h](../port/src/bink_witness.h) now has `kAudioImports`, a two-row metadata view over the
+measured audio-related import names. It keeps the actual 23-row `kImports` table authoritative for IAT slots, call sites,
+wrappers, and installer refusals; a compile-time side table cannot create a fake slot or measured callback ABI. The
+case-insensitive `find_audio_import()` lookup and role labels are pure helpers used by the unit test. No wrapper, callback
+trampoline, decoder export name, or argument contract is added.
+
+`PALMETTO_BINK_WITNESS` remains the one opt-in switch for the import-level witness. With it unset, `start_bink_witness`
+returns after its existing two `getenv` calls; the audio metadata is not iterated, logged, patched, or counted at runtime.
+With it on, the existing generic installer already sees the `BinkSetSoundSystem` and `BinkSetVolume` rows in `kImports`
+and logs each named `unwrapped-no-call-site` refusal. The fast-forward switch and default path are unchanged. No
+`main.cpp` hunk or new switch is needed for this measured negative.
+
+### 15.3 Tests
+
+The `bink_witness_test` unit target was rebuilt and run after the change: **525 checks, 0 failures**, synthetic table data
+only. The new audio-table checks cover the two role/name rows, unique names, case-insensitive lookup and exact-match
+failure cases, the mapping back to the two measured IAT slots, zero call-site/ABI/wrapper metadata, the generic installer's
+named refusal, and the absence of unmeasured track API names from the retail import table. The existing switch parser,
+23-row import surface, header layout, installer checks, fast-advance decisions, bounded log, and verdict tests continue to
+run in the same target. The full `PALMETTO_OK` / `TESTS_BUILT` gate builds are deferred until the boot binary is released
+for rebuild; this slice did not relink `palmetto.exe`.
+
+### 15.4 Arm result
+
+**No new light arm was run for this metadata-only negative.** The shared boot lock and fixed `palmetto.exe` were reserved
+for another coordinated boot series. The relevant local evidence is static and already measured: the two import rows have zero
+call sites and no measured ABI (section 14.1), and section 14.6 records no measured dynamic `GetProcAddress` of a Bink
+name. The existing clean arm in section 14.5 is context only: `BinkSetSoundSystem` was not wrapped because its import row
+was refused before runtime, so that arm did **not** produce a runtime sound-registration counter. No audio bytes, decoded
+samples, or game data were read or recorded.
+
+### 15.5 Limits and the falsifier
+
+- **Static import-path negative only.** The witness observes the title's measured IAT slots. It does not prove that the
+  decoder contains no sound path, and a future dynamic lookup or cached call path outside those slots would need a new
+  measurement.
+- **No callback ABI is known.** A call site for `BinkSetSoundSystem` must first be measured before its argument registers,
+  return use, callback pointer, and callback lifetime can be instrumented. A wrapper before that would invent a contract.
+- **The track exports belong to a distinct offline test surface.** `docs/movies.md` exercises the package's
+  `Bink2Console.dll` track API; section 6 already warns that it is not proven identical to the retail
+  `Bink2Scarlett.dll`. Those tests and peer movie-sound claims are not evidence of a retail title import or callback.
+- **Not the console audio-decode frontier.** `docs/audio_decode.md` separately measures the title's XMA/DSP command path
+  at this stage (350 contexts allocated, no programmed context or submitted decode command). This Bink import result
+  does not change that measurement or prove audio playback/silence.
+- **Falsifier.** A new own-title disassembly or trace showing a call to `BinkSetSoundSystem`, a newly measured Bink audio
+  import, or dynamic resolution followed by an invocation changes this negative. First measure its caller and ABI and
+  the callback addresses/counts; then add only bounded forwarding wrappers and synthetic table/parser tests, with no audio
+  payload capture.
+
+### 15.6 Peer cross-check and attribution
+
+The peers are evidence only, not a source of callback signatures: Five Star Recomp (`34b4dfed`, middleware's
+`BinkSetSoundSystem`/game-open callback note), XCL (`623d02e`, Bink import/resolver material), VIctory (`63bcca4`),
+victory-fork (`9a9091d`) and PercyScarlett (`e44c465`, movie/sound status). Their sound claims do not contradict this
+local negative: their titles may reach a route our measured import table does not. This table and test were derived from
+Palmetto's own measured import table and existing call-site records. **No peer code, comments, names, or callback ABI were
+copied or ported.**
+
+No new peer audio mechanism landed, so this metadata-only negative does not require an additional `NOTICE.md` row. The
+existing section-14 XCL witness/fast-advance attribution remains a separate lead-owned NOTICE decision; this section only
+credits the peer evidence above. The page is already covered by the existing `docs/README.md` movie-port row.
+
+### 15.7 Uncommitted files of this extension
+
+Implementation: [bink_witness.h](../port/src/bink_witness.h) (audio-import metadata and lookup helper). Tests:
+[bink_witness_test.cpp](../port/test/bink_witness_test.cpp). Docs: this page. `port/src/main.cpp`, the CMake files,
+`NOTICE.md`, and `docs/README.md` are unchanged by this extension; no boot binary was relinked. No git write, game data,
+or audio bytes were added.
 
 
 

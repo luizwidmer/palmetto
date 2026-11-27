@@ -1,6 +1,7 @@
-// bink_witness.h: the measured Bink 2 import surface, the BINK header words, the switch spellings, the installer and
-// fast-advance refusal rules, the bounded-log rule and the counter verdict, on synthetic data only. No game files: the
-// tests build header words and slot observations themselves (docs/peer_port_movie.md section 14).
+// bink_witness.h: the measured Bink 2 import/audio surface, the BINK header words, the switch spellings, the installer
+// and fast-advance refusal rules, the bounded-log rule and the counter verdict, on synthetic data only. The audio table
+// is cross-checked against the measured import table; it adds no guessed callback ABI or export. No game files: the tests
+// build header words and slot observations themselves (docs/peer_port_movie.md sections 14-15).
 #include "../src/bink_witness.h"
 
 #include <cstddef>
@@ -138,6 +139,69 @@ void test_import_table() {
     check(named("BinkPause").call_site_count == 6, "all six measured pause call sites are in the table");
     check(named("BinkGoto").wrapper == bw::Wrapper::kNone, "BinkGoto has no measured call site and is not wrapped");
     check(named("BinkSetSoundSystem").kind == bw::Kind::kConfig, "the sound system is a configuration import");
+}
+
+void test_audio_import_table() {
+    check(bw::kAudioImportCount == 2, "the audio metadata names only measured audio-related title imports");
+    const struct {
+        const char* name;
+        bw::AudioImportRole role;
+        std::uint32_t slot_rva;
+        const char* role_name;
+    } expected[] = {
+        {"BinkSetSoundSystem", bw::AudioImportRole::kSoundSystemRegistration, 0x6794240,
+         "sound-system-registration"},
+        {"BinkSetVolume", bw::AudioImportRole::kVolumeControl, 0x6794248, "volume-control"},
+    };
+    std::set<std::string> names;
+    for (unsigned audio_index = 0; audio_index < bw::kAudioImportCount; ++audio_index) {
+        const bw::AudioImportShape& audio = bw::kAudioImports[audio_index];
+        check(std::strcmp(audio.name, expected[audio_index].name) == 0,
+              "the audio row is one of the two names measured in the title import table");
+        check(audio.role == expected[audio_index].role, "the audio row has its measured classification");
+        check(names.insert(audio.name).second, "audio import names are unique");
+        check(std::strcmp(bw::audio_import_role_name(audio.role), expected[audio_index].role_name) == 0,
+              "each audio role has a stable diagnostic name");
+        check(bw::find_audio_import(audio.name) == &audio, "an exact audio import name resolves to its row");
+
+        unsigned matches = 0;
+        unsigned import_index = bw::kImportCount;
+        for (unsigned i = 0; i < bw::kImportCount; ++i) {
+            if (std::strcmp(bw::kImports[i].name, audio.name) != 0) continue;
+            ++matches;
+            import_index = i;
+        }
+        check(matches == 1, "each audio metadata row maps to exactly one measured import row");
+        if (import_index == bw::kImportCount) continue;
+
+        const bw::ImportShape& import = bw::kImports[import_index];
+        check(import.iat_rva == expected[audio_index].slot_rva, "the audio row uses its measured IAT slot");
+        check(import.kind == bw::Kind::kConfig, "the two audio names are measured configuration imports");
+        check(import.wrapper == bw::Wrapper::kNone, "no audio wrapper is invented without a measured ABI");
+        check(import.unwrapped == bw::UnwrappedReason::kNoCallSite,
+              "the audio import is refused by the measured no-call-site result");
+        check(import.arg_count == 0 && import.call_site_count == 0 && import.call_sites == nullptr,
+              "no argument count or callback site is inferred for an uncalled audio import");
+        check(bw::check_slot(import_index, bw::SlotObservation{}) == bw::InstallRefusal::kUnwrappedNoCallSite,
+              "the generic installer refuses the audio import by its measured reason");
+    }
+    check(names.size() == bw::kAudioImportCount, "the audio metadata table has no duplicate rows");
+    check(bw::find_audio_import("binksetsoundsystem") == &bw::kAudioImports[0],
+          "audio import lookup is case-insensitive like the existing switch/parser helpers");
+    check(bw::find_audio_import("BINKSETVOLUME") == &bw::kAudioImports[1], "volume lookup is case-insensitive");
+    check(bw::find_audio_import(nullptr) == nullptr && bw::find_audio_import("") == nullptr,
+          "null and empty names do not resolve to audio rows");
+    check(bw::find_audio_import("BinkSetSoundSystem2") == nullptr,
+          "audio import lookup does not accept a longer export-name prefix");
+
+    const char* absent_track_imports[] = {"BinkOpenTrack", "BinkGetTrackType", "BinkGetTrackData", "BinkSetSoundTrack"};
+    for (const char* name : absent_track_imports) {
+        bool found = false;
+        for (const bw::ImportShape& import : bw::kImports)
+            if (std::strcmp(import.name, name) == 0) found = true;
+        check(!found, "an unmeasured track export is not invented as a title import row");
+        check(bw::find_audio_import(name) == nullptr, "an unimported track name is not a reachable audio witness row");
+    }
 }
 
 void test_check_slot() {
@@ -378,6 +442,7 @@ void test_verdict() {
 int main() {
     test_header_words();
     test_import_table();
+    test_audio_import_table();
     test_check_slot();
     test_switches();
     test_advance_rule();

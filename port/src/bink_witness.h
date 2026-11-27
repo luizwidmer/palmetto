@@ -204,6 +204,28 @@ static_assert(kImportCount == 23, "the retail image's measured Bink2Scarlett imp
 
 inline constexpr const char* kDecoderDllName = "bink2scarlett.dll";
 
+// Audio-related names are already present in kImports, but their measured title call-site population is zero. Keep this
+// small metadata table separate from the complete 23-row import table so it cannot invent an IAT slot or callback ABI.
+// The generic installer still encounters these two rows in kImports and refuses them as no-call-site; this classification
+// is pure metadata/test seam and adds no runtime work. The BinkSetSoundSystem callback signature and callback addresses
+// are not measured because no measured title call site reaches the registration export at this frontier.
+enum class AudioImportRole : unsigned char {
+    kSoundSystemRegistration = 0,
+    kVolumeControl,
+};
+
+struct AudioImportShape {
+    const char* name;  // exact import name; slot and call-site evidence remain in the matching ImportShape row
+    AudioImportRole role;
+};
+
+inline constexpr AudioImportShape kAudioImports[] = {
+    {"BinkSetSoundSystem", AudioImportRole::kSoundSystemRegistration},
+    {"BinkSetVolume", AudioImportRole::kVolumeControl},
+};
+inline constexpr unsigned kAudioImportCount = sizeof kAudioImports / sizeof kAudioImports[0];
+static_assert(kAudioImportCount == 2, "only the two measured sound-system and volume imports are audio-related here");
+
 // The measured title-side consumers of the header words, as evidence for the fast-advance lever:
 //   the per-frame decode wrapper 0x2EF0E0 calls BinkSetWillLoop, BinkNextFrame and the async decode exports;
 //   0x2EF1E9 and 0x2EF22E compare [HBINK+0x10] with [player+0x208] and skip the async decode loop while the header's
@@ -243,6 +265,21 @@ inline bool same_text(const char* a, const char* b) {
         ++b;
     }
     return *a == *b;
+}
+
+inline const AudioImportShape* find_audio_import(const char* name) {
+    if (!name || !*name) return nullptr;
+    for (const AudioImportShape& shape : kAudioImports)
+        if (same_text(shape.name, name)) return &shape;
+    return nullptr;
+}
+
+inline const char* audio_import_role_name(AudioImportRole role) {
+    switch (role) {
+        case AudioImportRole::kSoundSystemRegistration: return "sound-system-registration";
+        case AudioImportRole::kVolumeControl: return "volume-control";
+    }
+    return "?";
 }
 
 inline const char* switch_state_name(SwitchState state) {
