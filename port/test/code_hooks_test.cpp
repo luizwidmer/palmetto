@@ -3,6 +3,7 @@
 #include "../src/code_hooks.h"
 #include "../src/mods.h"
 #include "../src/title_class0a.h"
+#include "../src/title_watchdog.h"
 
 #include <cstdio>
 #include <cstring>
@@ -508,6 +509,260 @@ int main() {
                   "a refused install leaves the callers byte for byte");
             VirtualFree(img, 0, MEM_RELEASE);
         }
+    }
+
+    // ---- title_watchdog.h: the watchdog pause hold and the present attestation (docs/peer_port_first_ui.md sec. 13) --
+    // The parsers, the hold rule and the present classification are pure; the measured image constants are checked on a
+    // synthetic image buffer (commit is lazy, only the few measured offsets are written); the counting thunk is built and
+    // called through a real function.
+    {
+        using namespace palmetto::title_watchdog;
+        check(!flag_enabled(nullptr), "the present-attest switch is off when unset");
+        check(!flag_enabled(""), "the present-attest switch is off when empty");
+        check(!flag_enabled("0"), "the present-attest switch is off for 0");
+        check(!flag_enabled(" off "), "the present-attest switch is off for off");
+        check(!flag_enabled("FALSE"), "the present-attest switch is off for false");
+        check(!flag_enabled("no"), "the present-attest switch is off for no");
+        check(flag_enabled("1"), "the present-attest switch is on for 1");
+        check(flag_enabled("yes"), "the present-attest switch is on for an arbitrary value");
+
+        check(parse_hold_spec(nullptr).mode == HoldMode::Off, "the hold switch is off when unset");
+        check(parse_hold_spec("").mode == HoldMode::Off, "the hold switch is off when empty");
+        check(parse_hold_spec("0").mode == HoldMode::Off, "the hold switch is off for 0");
+        check(parse_hold_spec(" OFF ").mode == HoldMode::Off, "the hold switch is off for off");
+        check(parse_hold_spec("false").mode == HoldMode::Off, "the hold switch is off for false");
+        check(parse_hold_spec("no").mode == HoldMode::Off, "the hold switch is off for no");
+        check(parse_hold_spec("watch").mode == HoldMode::Watch, "the hold switch is watch-only for watch");
+        check(parse_hold_spec(" WATCH ").mode == HoldMode::Watch, "the watch spelling ignores case and blanks");
+        check(parse_hold_spec("watch").bound_seconds == 0.0, "watch mode has no hard bound");
+        check(parse_hold_spec("1").mode == HoldMode::Hold, "a whole number of seconds enables the hold");
+        check(parse_hold_spec("1").bound_seconds == 1.0, "the 1 s bound is the minimum");
+        check(parse_hold_spec("600").bound_seconds == 600.0, "the 600 s bound is the maximum");
+        check(parse_hold_spec("601").refusal != nullptr, "a bound above 600 s is refused by name");
+        check(parse_hold_spec("1.5").refusal != nullptr, "a fractional bound is refused");
+        check(parse_hold_spec("-3").refusal != nullptr, "a negative bound is refused");
+        check(parse_hold_spec("0x10").refusal != nullptr, "a hexadecimal bound is refused");
+        check(parse_hold_spec("hold").refusal != nullptr, "an unknown word is refused");
+        check(parse_hold_spec("601").mode == HoldMode::Off, "a refused bound leaves the hold off");
+        for (const ImageShape shape : {ImageShape::Ok, ImageShape::NotMapped, ImageShape::TooSmall,
+                                       ImageShape::PauseSetterMismatch, ImageShape::WatchdogReadMismatch,
+                                       ImageShape::AbortSiteMismatch, ImageShape::BodyEntryMismatch})
+            check(image_shape_name(shape) != nullptr, "every image-shape refusal has a name");
+        for (const HoldPhase phase : {HoldPhase::Idle, HoldPhase::Waiting, HoldPhase::Holding,
+                                      HoldPhase::ReleasedResolved, HoldPhase::ReleasedBound,
+                                      HoldPhase::RefusedWatchdogStopped})
+            check(hold_phase_name(phase) != nullptr, "every hold phase has a name");
+
+        // The measured shape: a synthetic image buffer with the measured bytes at the measured RVAs.
+        check(validate_image(nullptr, 0x71B7000u, false) == ImageShape::NotMapped, "a null image is refused");
+        check(validate_image(reinterpret_cast<const std::uint8_t*>(&g_checks), 0, false) == ImageShape::NotMapped,
+              "a zero image size is refused");
+        check(validate_image(reinterpret_cast<const std::uint8_t*>(&g_checks), 16, false) == ImageShape::TooSmall,
+              "an image shorter than the measured RVAs is refused");
+        constexpr std::uint32_t kFakeImageSize = 0x71B7000u;  // past the measured watchdog block (commit is lazy)
+        auto* const fake =
+            static_cast<std::uint8_t*>(VirtualAlloc(nullptr, kFakeImageSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        check(fake != nullptr, "a synthetic image buffer for the measured watchdog shape");
+        if (fake) {
+            std::memcpy(fake + kPauseSetterRva, kPauseSetterBytes, sizeof kPauseSetterBytes);
+            std::memcpy(fake + kWatchdogPauseReadRva, kWatchdogPauseReadBytes, sizeof kWatchdogPauseReadBytes);
+            std::memcpy(fake + kWatchdogAbortRva, kWatchdogAbortBytes, sizeof kWatchdogAbortBytes);
+            check(validate_image(fake, kFakeImageSize, false) == ImageShape::Ok,
+                  "the measured watchdog bytes validate on the synthetic image");
+            check(validate_image(fake, kFakeImageSize, true) == ImageShape::BodyEntryMismatch,
+                  "the present body is refused when its entry is not the measured prefix");
+            std::memcpy(fake + kBodyEntryRva, kBodyEntryPrefix, sizeof kBodyEntryPrefix);
+            check(validate_image(fake, kFakeImageSize, true) == ImageShape::Ok,
+                  "the measured body entry validates on the synthetic image");
+            check(validate_image(fake, kPauseByteRva + kWatchdogBlockBytes - 1u, false) == ImageShape::TooSmall,
+                  "an image one byte short of the measured watchdog block is refused");
+            check(validate_image(fake, kBodyEntryRva + static_cast<std::uint32_t>(sizeof kBodyEntryPrefix) - 1u, true) ==
+                      ImageShape::TooSmall,
+                  "an image one byte short of the measured body entry is refused");
+            fake[kPauseSetterRva] ^= 0xFF;
+            check(validate_image(fake, kFakeImageSize, false) == ImageShape::PauseSetterMismatch,
+                  "a different pause setter is refused by name");
+            fake[kPauseSetterRva] ^= 0xFF;
+            fake[kWatchdogPauseReadRva] ^= 0xFF;
+            check(validate_image(fake, kFakeImageSize, false) == ImageShape::WatchdogReadMismatch,
+                  "a watchdog that does not read the pause byte is refused by name");
+            fake[kWatchdogPauseReadRva] ^= 0xFF;
+            fake[kWatchdogAbortRva] ^= 0xFF;
+            check(validate_image(fake, kFakeImageSize, false) == ImageShape::AbortSiteMismatch,
+                  "a different abort site is refused by name");
+            fake[kWatchdogAbortRva] ^= 0xFF;
+            fake[kBodyEntryRva] ^= 0xFF;
+            check(validate_image(fake, kFakeImageSize, true) == ImageShape::BodyEntryMismatch,
+                  "a different body entry is refused by name");
+            VirtualFree(fake, 0, MEM_RELEASE);
+        }
+
+        // The counting thunk: layout, refusals, and a real call-through that counts an entry and preserves both 64-bit
+        // arguments (the thunk touches no argument register).
+        const auto add = +[](std::uint64_t a, std::uint64_t b) { return a + b; };
+        const void* const add_void = reinterpret_cast<const void*>(add);
+        std::atomic<std::uint64_t> entries{0};
+        std::uint8_t thunk_bytes[kCountThunkBytes + 8] = {};
+        check(build_count_thunk(thunk_bytes, sizeof thunk_bytes, &entries, add_void) == kCountThunkBytes,
+              "the counting thunk's builder answers its 26 bytes");
+        check(thunk_bytes[0] == 0x48 && thunk_bytes[1] == 0xB8, "the counting thunk starts with mov rax, imm64");
+        check(thunk_bytes[10] == 0xF0 && thunk_bytes[11] == 0x48 && thunk_bytes[12] == 0xFF && thunk_bytes[13] == 0x00,
+              "the counting thunk increments the counter with lock inc qword ptr [rax]");
+        check(thunk_bytes[24] == 0xFF && thunk_bytes[25] == 0xE0, "the counting thunk ends with jmp rax");
+        check(build_count_thunk(thunk_bytes, 10, &entries, add_void) == 0, "a short counting-thunk buffer is refused");
+        check(build_count_thunk(nullptr, sizeof thunk_bytes, &entries, add_void) == 0, "a null buffer is refused");
+        check(build_count_thunk(thunk_bytes, sizeof thunk_bytes, nullptr, add_void) == 0, "a null counter is refused");
+        check(build_count_thunk(thunk_bytes, sizeof thunk_bytes, &entries, nullptr) == 0, "a null original is refused");
+        std::uint8_t* const count_thunk = make_count_thunk(add_void, &entries, add_void);
+        check(count_thunk != nullptr, "a counting thunk is allocated near the function and made executable");
+        if (count_thunk) {
+            using AddFn = std::uint64_t (*)(std::uint64_t, std::uint64_t);
+            const auto call = reinterpret_cast<AddFn>(count_thunk);
+            check(call(7, 5) == 12, "the counting thunk reaches the original with its arguments");
+            check(entries.load() == 1, "the counting thunk counted one entry");
+            const std::uint64_t wide_a = 0x123456789ull, wide_b = 0xABCDEFull;
+            check(call(wide_a, wide_b) == wide_a + wide_b,
+                  "the counting thunk preserves both 64-bit arguments (it touches no argument register)");
+            check(entries.load() == 2, "the counting thunk counted the second entry");
+            free_thunk(count_thunk);
+        }
+
+        // The pause-hold rule: hold, re-write, release on resolution, the hard bound and its stickiness, the heartbeat
+        // gate, the watch/off modes and the title's own stop byte.
+        HoldConfig hold;
+        hold.mode = HoldMode::Hold;
+        hold.bound_seconds = 60.0;
+        HoldState state;
+        HoldSample words;
+        words.now_seconds = 1.0;
+        words.loading = 2;
+        words.stage_current = 3;
+        words.heartbeat_advanced = true;
+        words.pause_byte = 0;
+        const auto step = [&](HoldAction expected, const char* what) {
+            check(hold_step(hold, state, words) == expected, what);
+        };
+        step(HoldAction::WriteOne, "an outstanding load wait starts a hold with one write");
+        check(state.phase == HoldPhase::Holding && state.writes == 1 && state.holds == 1, "the hold is recorded");
+        words.now_seconds = 1.2;
+        step(HoldAction::WriteOne, "the hold re-writes while the title can clear the byte");
+        check(state.writes == 2, "the re-write is counted");
+        words.now_seconds = 2.0;
+        words.loading = 1;
+        words.stage_current = 2;
+        step(HoldAction::Restore, "a resolved loading wait releases the hold");
+        check(state.phase == HoldPhase::ReleasedResolved && state.held_seconds > 0.0, "the released hold keeps its time");
+        words.loading = 0;
+        step(HoldAction::None, "with no load wait nothing is written");
+        check(state.phase == HoldPhase::Idle, "the rule returns to idle after a release");
+
+        hold.bound_seconds = 5.0;
+        HoldState bound_state;
+        HoldSample bound_words;
+        bound_words.now_seconds = 10.0;
+        bound_words.loading = 2;
+        bound_words.stage_current = 3;
+        bound_words.heartbeat_advanced = true;
+        check(hold_step(hold, bound_state, bound_words) == HoldAction::WriteOne, "a bounded hold starts");
+        bound_words.now_seconds = 16.0;
+        check(hold_step(hold, bound_state, bound_words) == HoldAction::Restore,
+              "the hard bound releases the hold while the wait is still outstanding");
+        check(bound_state.phase == HoldPhase::ReleasedBound, "the bound release is named");
+        bound_words.now_seconds = 17.0;
+        check(hold_step(hold, bound_state, bound_words) == HoldAction::None,
+              "the expired bound does not re-arm for the same wait");
+        bound_words.loading = 0;
+        check(hold_step(hold, bound_state, bound_words) == HoldAction::None, "the resolved wait re-arms nothing");
+        bound_words.loading = 2;
+        bound_words.now_seconds = 30.0;
+        check(hold_step(hold, bound_state, bound_words) == HoldAction::WriteOne,
+              "a new load wait after the resolved one can hold again");
+        check(bound_state.holds == 2, "the second hold is counted");
+
+        HoldState early_state;
+        HoldSample early_words;
+        early_words.now_seconds = 2.0;
+        early_words.loading = 2;
+        early_words.stage_current = 2;
+        early_words.heartbeat_advanced = false;
+        check(hold_step(hold, early_state, early_words) == HoldAction::None,
+              "a load wait before the heartbeat has advanced is not held");
+        check(early_state.phase == HoldPhase::Waiting, "the early wait is named waiting");
+        early_words.heartbeat_advanced = true;
+        check(hold_step(hold, early_state, early_words) == HoldAction::WriteOne,
+              "the hold starts once the heartbeat has been seen");
+
+        HoldState stopped_state;
+        HoldSample stopped_words;
+        stopped_words.now_seconds = 3.0;
+        stopped_words.loading = 2;
+        stopped_words.stage_current = 3;
+        stopped_words.heartbeat_advanced = true;
+        stopped_words.watchdog_stopped = true;
+        check(hold_step(hold, stopped_state, stopped_words) == HoldAction::None,
+              "the title's stopped watchdog is refused instead of held");
+        check(stopped_state.phase == HoldPhase::RefusedWatchdogStopped && stopped_state.why != nullptr,
+              "the stopped-watchdog refusal is named");
+
+        HoldConfig watch;
+        watch.mode = HoldMode::Watch;
+        HoldState watch_state;
+        HoldSample watch_words;
+        watch_words.now_seconds = 9.0;
+        watch_words.loading = 2;
+        watch_words.stage_current = 3;
+        watch_words.heartbeat_advanced = true;
+        check(hold_step(watch, watch_state, watch_words) == HoldAction::None, "watch mode never writes while a wait is out");
+        check(watch_state.writes == 0, "watch mode counts no write");
+        check(watch_state.phase == HoldPhase::Waiting, "watch mode names the outstanding wait");
+        HoldConfig off;
+        HoldState off_state;
+        check(hold_step(off, off_state, words) == HoldAction::None, "the off mode never writes");
+
+        HoldState closed_state;
+        HoldSample closed_words;
+        closed_words.now_seconds = 4.0;
+        closed_words.loading = 2;
+        closed_words.stage_current = 4;
+        closed_words.heartbeat_advanced = true;
+        check(hold_step(hold, closed_state, closed_words) == HoldAction::None,
+              "a stage outside the measured load window is not held");
+        closed_words.stage_current = 3;
+        closed_words.loading = 6;
+        check(hold_step(hold, closed_state, closed_words) == HoldAction::None,
+              "a loading word outside the measured 2..5 band is not held");
+        closed_words.loading = 2;
+        check(load_wait_outstanding(closed_words), "the measured loading/stage window is the hold's window");
+        closed_words.stage_current = 1;
+        check(!load_wait_outstanding(closed_words), "a pre-boot stage is outside the hold's window");
+
+        // The present-side classification: the four named states and the bounded line's change key.
+        PresentCounters counters;
+        check(present_body_state(counters) == PresentBodyState::NothingYet, "nothing yet before the first present");
+        counters.presents = 5;
+        check(present_body_state(counters) == PresentBodyState::PresentWithoutBody,
+              "a presented frame with no body entry is named present-without-body");
+        counters.body_entries = 9;
+        counters.flag = 1;
+        check(present_body_state(counters) == PresentBodyState::BodyExitsOnKeys,
+              "a body that ran with one key still 0 is named body-exits-on-keys");
+        counters.active = 1;
+        counters.flag = 0;
+        check(present_body_state(counters) == PresentBodyState::BodyExitsOnKeys,
+              "the second key alone also names body-exits-on-keys");
+        counters.flag = 1;
+        check(present_body_state(counters) == PresentBodyState::BodyPresentPass,
+              "both keys set with a running body name the present pass");
+        for (const PresentBodyState state_name : {PresentBodyState::NothingYet, PresentBodyState::PresentWithoutBody,
+                                                  PresentBodyState::BodyExitsOnKeys, PresentBodyState::BodyPresentPass})
+            check(present_body_state_name(state_name) != nullptr, "every present-body state has a name");
+        AttestLine before_line, after_line;
+        check(!attest_changed(before_line, after_line), "an unchanged attestation line is not a change");
+        after_line.state = PresentBodyState::BodyExitsOnKeys;
+        check(attest_changed(before_line, after_line), "a state change is a change");
+        after_line.state = PresentBodyState::NothingYet;
+        after_line.active = 2;
+        check(attest_changed(before_line, after_line), "a key change is a change");
     }
 
     std::printf("code_hooks_test: %d checks, %d failures\n", g_checks, g_failures);

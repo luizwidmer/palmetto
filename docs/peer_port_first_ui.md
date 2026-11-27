@@ -421,3 +421,223 @@ No code, comment text, identifier or table from those projects was copied into t
 callbacks and the tests are ours, derived from the call sites and boots above. The peers remain the copyright of their
 contributors and their licences continue to apply to their own trees.
 
+## 13. The implemented port: present-side attestation and an opt-in title hang-watchdog pause hold (P2, P3)
+
+This section is the record of the P2 and P3 slices in section 7. Both are implemented in this tree's own structure from
+this project's own measurements of the user's image, with the peers' mechanisms read as evidence only, as
+[upstream_port.md](upstream_port.md) requires; section 13.7 repeats the credit. Status in one statement: **implemented,
+opt-in and off by default, with pure rule/parser/thunk tests and the gates green; the A/B pair was taken but both arms
+lost the host GPU before stage 3 (two losses, the task's stop rule) and stopped in the tree's post-device-loss crash
+family, so the pair measured the hold engaging on the measured loading wait and the attestation counting the present
+side, and it did not answer the stage-3 watchdog question. That question is section 13.5's next falsifier.**
+
+### 13.1 What was measured before the port
+
+Everything below is a measurement of the retail image (RVAs, relative to the preferred base 0x140000000) and of the two
+arms in 13.4; no game data is quoted. The watchdog's engine-level shape was already recorded in
+[3d_textures.md](3d_textures.md) section 10.6 and corrected in section 11.2; this slice re-read it to the byte it writes.
+
+| measurement | value and where |
+|---|---|
+| hang watchdog | `game+0x2215A60`, a thread created by `image+0x2215A20` at the image's run-once point (0xA000 stack); each pass reads QueryPerformanceCounter and sleeps 1000 ms; after `0x1E` passes without the heartbeat advancing it calls the callback at `image+0x71B6348` and executes the deliberate null write `game+0x2215C35` (`mov dword ptr [0], 0`) then int3 |
+| heartbeat | the qword at `image+0x71B6338`, petted by `image+0x22159F0` from the per-frame tick call sites `0x120799` and `0xC9E368`; the section-10.6 address `0x1471B6338` is the Ghidra operand address, not an RVA (section 11.2's correction) |
+| pause byte | the **byte at `image+0x71B6330`** (the first byte of the block). The watchdog reads it at `image+0x2215B50` (`mov cl, byte ptr [rip+disp32]`); while bit 0 is set it stores the current counter into the heartbeat and resets the pass budget, so the abort is deferred instead of taken |
+| pause setter | `image+0x2214A90`, a 7-byte leaf: `mov byte ptr [image+0x71B6330], 1; ret` (bytes `C6 05 99 18 FA 04 01`). Direct callers measured in the image: `image+0x21B6969` and `image+0x2214814`, both in the title's own loading/transition code |
+| pause release/teardown | `image+0x22161B0` clears the pause byte and sets the watchdog's **stop byte** at `image+0x71B6340`; a set stop byte makes the watchdog thread tear down at `image+0x2215AB8` instead of deferring |
+| budget and write shape | 0x1E one-second passes (about 30 s) and one writable byte; the peers' `+0x71b6330` pause byte and `+0x2214a90` setter are therefore this image's own word and instruction, re-measured here |
+| media/UI present body | `image+0x22185A0`; its measured 16-byte entry prefix is `56 48 83 EC 40 80 3D 01 0B FA 04 01 0F 85 E8 00` (`push rsi; sub rsp,0x40; cmp byte [image+0x71B90AD],1; jne exit; cmp byte [image+0x71B90AC],1; jne exit`), and the disp32 in bytes 7..10 is the check that this is the measured body |
+| present-pass keys and gate | `0x71B9048` (the boot-media gate, 2 = the stage the stage-2 wait releases on), `0x71B90AD` (first key), `0x71B90AC` (second key); the body exits at its first two compares until both keys read 1, as [decomp_first_ui.md](decomp_first_ui.md) sections 11 and 17 measured |
+| presented-frame counters | the console queue proxy's slot 32 (PresentX) and slot 35 (submit) call counters and the allocator proxy's slot 9 per-presented-frame calls are readable from the runtime process, so the present side can be attested without touching a shim or the presenter |
+
+Three readings made the design decisions:
+
+1. **The peers' pause byte is this title's own switch, not an invented one.** The peer runtime holds
+   `image+0x71b6330` by writing its own setter's byte repeatedly; this image's watchdog reads that byte and its own
+   loading/transition code writes it through the same setter. A port that writes the same byte while a load the title
+   is waiting for is legitimately outstanding is re-asserting the title's console behaviour, not synthesising state.
+2. **Console-faithfulness is a window, not a switch.** The measured loading word `image+0x7453ED0` reads 2 for a load
+   that is running (2..5 in the state trace's own meaning) and the state machine's current stage (`[[image+0x71273C8]
+   +0x10]`) reads 2..3 during the boot's load; outside that window, and whenever the title's own stop byte is set, a
+   hold would mask something that is no longer a load. The rule therefore holds only inside that window, only after the
+   per-frame heartbeat has been seen advancing at least once, for a caller-chosen hard bound, releases as soon as the
+   wait resolves, refuses by name when the title's watchdog is already stopped or the words are outside the measured
+   band, and does not re-arm after a bound expiry while the same wait is still outstanding.
+3. **The present side can name its state from counters it already has.** The body's entry counter plus the body's own
+   gate and two keys separate "the body never ran", "the body ran and exits on its keys" (the measured state) and "the
+   present pass was entered"; the console proxy counters separate "the layer presented" from "nothing yet". A draw that
+   was issued but produced no pixel stays the presenter capture path's measurement (section 13.5).
+
+The peers' five-star evidence (its documented type-`0x24` set event, [debugging.md](https://github.com/ThatRecompDev/five-star-recomp/blob/45071d52/docs/debugging.md))
+is about the present-pass keys this tree already measured as unreachable in this build ([decomp_first_ui.md](decomp_first_ui.md)
+sections 11.2 and 11.4); this slice samples those keys but does not synthesise their producer.
+
+### 13.2 What was implemented
+
+| change | what it is |
+|---|---|
+| a new include-only header under port/src ([title_watchdog.h](../port/src/title_watchdog.h)) | the measured watchdog/body constants, a byte-shape validation of the mapped image with named refusals, the two switch parsers, the pure pause-hold rule (phases, actions, hard bound, named reasons), the present-side classification, and the counting-thunk builder/installer for the body entry |
+| `port/src/main.cpp` | the opt-in install and the two monitor threads: a 100 ms watchdog monitor that applies the rule to the measured words and writes only the pause byte, and a 2 s present-attestation sampler that prints the counters and the body's words (bounded: a line per state change, every thirtieth second otherwise, at most 80 periodic lines) |
+| `port/test/code_hooks_test.cpp` | the pure parser/rule/classification checks, the image-shape refusals on a synthetic image buffer, the counting thunk's layout/refusals and a real call-through, and the present-state change key |
+
+**The hold** ([title_watchdog.h](../port/src/title_watchdog.h), `hold_step`). One observation is `loading`, `stage`,
+`heartbeat`, `heartbeat_advanced`, `watchdog_stopped` and the pause byte. The rule's phases are `idle`, `waiting`
+(the measured wait is outstanding but the heartbeat has not been seen yet, so nothing is written), `holding`,
+`released-resolved`, `released-bound` and `refused-watchdog-stopped`; a hold writes 1 every 100 ms because the title's
+own code clears the byte, exactly as the peers re-write theirs. The write is a single `volatile` byte store to
+`image+0x71B6330`; on release the monitor writes back the value it observed before its first write (normally 0, and it
+does not touch the byte when the title had already set it). No title code is patched by the hold, no other title word is
+written, and outside the switch the code path does not run at all.
+
+**The attestation** ([title_watchdog.h](../port/src/title_watchdog.h) and the sampler in `port/src/main.cpp`). A 26-byte
+counting thunk (`mov rax, counter; lock inc qword ptr [rax]; mov rax, original; jmp rax`) is placed within 2 GiB of the
+image and every direct `E8`/`E9` branch to `image+0x22185A0` is redirected to it, in this process's mapped image only;
+the thunk touches no stack and no argument register and is registered as a leaf. Each sample prints the console queue
+proxy's PresentX/submit counts, the allocator proxy's per-presented-frame count, the body entries, the body's gate and
+the low bytes of its two keys, the two semaphores and the classification. The body's words are read as dwords the way the
+state trace reads them and masked to the key byte, so a neighbouring 0xff cannot be mistaken for a set key.
+
+**Switches** (both off by default; unset and every off spelling keep the tree's path byte-identical):
+
+- `PALMETTO_TITLE_WATCHDOG_HOLD`: unset/empty/`0`/`off`/`false`/`no` = off; `watch` = read the measured words and log,
+  never write; a whole number of seconds in 1..600 = hold with that hard bound. Anything else is refused by name at
+  startup (`PALMETTO_TITLE_WATCHDOG_HOLD is not off, watch or a whole number of seconds in 1..600`, or above the 600 s
+  maximum), so a typo cannot silently arm a hold with a bound nobody chose.
+- `PALMETTO_PRESENT_ATTEST`: set and not `0`/`off`/`false`/`no` = install the counting hook and start the sampler.
+
+**Named refusals** (printed once, never guessed at): switch off; not off/watch/seconds or bound above 600; the image is
+not mapped or is too small for the measured RVAs; `image+0x2214A90` is not the measured pause setter; the watchdog does
+not read the measured pause byte; `image+0x2215C35` is not the measured abort; `image+0x22185A0` is not the measured
+present body; no executable page within 2 GiB for a thunk; no direct call site of the body could be redirected; the
+title's watchdog stop byte is set; the loading wait is outstanding but the heartbeat has not been seen; the hard bound
+expired while the wait is still outstanding (sticky for that wait).
+
+### 13.3 Tests
+
+`port/test/code_hooks_test.cpp` gains the section-13 block in its own `check` group; the target prints `210 checks, 0
+failures` (the file's class-0xa block had taken it to 105 before this slice). The block covers:
+
+- **Switch parsers**: unset/empty/`0`/`off`/`false`/`no`/case+blank spellings; `watch`; 1 s and 600 s accepted; 601 s,
+  `1.5`, `-3`, `0x10` and an unknown word refused by name; a refused value leaves the hold off.
+- **Image shape**: a null image, a zero size and an image shorter than the measured RVAs refused; the measured setter,
+  watchdog read, abort site and body entry accepted on a synthetic buffer; a one-byte-short buffer refused for both the
+  watchdog block and the body entry; each of the four measured byte sites flipped and refused with its own name; the
+  body entry is required only when the attestation asks for it.
+- **Counting thunk**: the 26-byte layout (mov/lock inc/mov/jmp), short-buffer, null-buffer, null-counter and
+  null-original refusals; allocation near the function and a real call-through that reaches the original, counts one
+  entry per call and preserves both 64-bit arguments (the thunk changes no argument register).
+- **The pause-hold rule**: an outstanding wait starts a hold with one write and re-writes while the title can clear it;
+  a resolved wait releases with the held time recorded and returns to idle; a 5 s bound releases while the wait is still
+  outstanding, does not re-arm for that wait, and a new wait after the resolution holds again (two holds counted); an
+  outstanding wait before the heartbeat has been seen is `waiting` and writes nothing, then holds once the heartbeat has
+  been seen; the title's stopped watchdog is refused and writes nothing; watch and off modes never write; a stage outside
+  2..3 and a loading word outside 2..5 are not held.
+- **Present attestation**: the four classification states and the line's change key.
+
+The tree's GPU-free gate subset still passes in the same run: `frame_dump`, `unimplemented_policy` (98 checks),
+`graphics_record`, `graphics_pso`, `buffer_va_index`, `dstorage`, `xapu_chad`, `deferred_compile` (50 checks),
+`arena_size`, `xbox_present`, `xs_proxy_mock`, `xmem`, plus `code_hooks` (210 checks) and `frame_pacer`; the
+pre-existing quarantined `d3d12_fence_timing_test` is not part of the subset.
+
+### 13.4 A/B measurement
+
+One light pair, one boot at a time under `_setup/boot_lock.ps1` (`-Who portwatchdog`), the boot template's content
+environment (section 12's), `PALMETTO_TITLE_CLASS0A_SIZE=1` in both arms, one binary for both arms (SHA-256 first 16
+`3BE83E409FE9A0D0`, the tree's gate build for the slice; the final tree rebuild after the two print/mask fixes of 13.5
+has first 16 `B66AFC9E2B2BFF56`), 240 s limit per arm. The OFF arm adds
+`PALMETTO_TITLE_WATCHDOG_HOLD=watch` and `PALMETTO_PRESENT_ATTEST=1` (read-only diagnostics); the ON arm adds
+`PALMETTO_TITLE_WATCHDOG_HOLD=180` and the same attestation, so the pair's only difference is the hold's writes. Each
+arm recorded one `[rt] replay: the Vulkan device was lost` and then stopped in the tree's post-device-loss crash family;
+two losses in a row ended the boots per the task rule, so no stage-3 arm exists in this pair.
+
+| measurement (one arm per column) | OFF: watch only | ON: hold, hard bound 180 s |
+|---|---|---|
+| verdict | STOP `game+0x4D9F636` read `0x223000007d0`, first exception at trace 55.5 s (harness wall 81.1 s), exit `0xC0000005` | STOP `game+0x86F97E` read `0x1a30001bfac`, first exception at trace 61.0 s (harness wall 146.2 s), exit `0xC0000005` |
+| device loss | 1, between the 52.7 s and 54.8 s monitor samples | 1, between the 59.0 s and 61.0 s samples |
+| stage 3 | not reached (`PALMETTO_STAGE3_PUMP` took no sample; state words stayed init 2 / loading 2 / session 1) | not reached (same) |
+| state words through the last clean sample | init 2 at 20.0 s, loading 1 at 20.0 s, loading 2 and session 1 at 52.3 s, machine current/next 2/2 | init 2 at 18.0 s, loading 1 at 18.0 s, loading 2 and session 1 at 58.0 s, machine current/next 2/2 at 60.0 s |
+| movie/front-end words | movie slot bound at 52.3 s (entity non-null, active 1, armed 1, media id `0x540714f3`), player state 0x1, `buffers 0`; front-end ready 1 running 1 | movie slot bound at 58.0 s, player state 0x3, probe 1, open 1, `buffers 0`; front-end ready 1 running 1 |
+| watchdog words | pause byte `0x0` and stop byte `0x0` in every sample to 54.8 s; heartbeat advanced in every sample from 19.5 s; loading read 1 until 50.2 s, 2 at 51.4/52.7/54.8 s (phase waited, no write) | pause byte `0x0` in every sample to 57.0 s, `0x1` from the hold at 57.2 s (19 writes by 59.0 s, 39 by 61.0 s); stop byte `0x0`; heartbeat advanced throughout |
+| hold | not armed (watch only): no write, `holds 0` | armed at 57.2 s on exactly the measured window (loading 2, stage 2, heartbeat seen), one hold, hard bound never reached before the loss |
+| present attestation | 2.0 s: body-entries 164, presents 0; 32.1 s: presents 602, submits 1,204, frame-callbacks 603, body-entries 1,442, gate `0x2`, keys `0x0`/`0x0`, `body-exits-on-keys` | 2.0 s: body-entries 165, presents 0; 32.0 s: presents 656, submits 1,314, frame-callbacks 658, body-entries 3,001, gate `0x2`, keys `0x0`/`0x0`, `body-exits-on-keys` |
+| `PresentX ok` / failed lines at the stop | 1,605 / 1 | 2,159 / 1 |
+| presenter captures | 9 (frames 1-1,601), 2564x1421, every one mean rgb `0.00 0.00 0.00` | 11 (frames 1-2,001), 2564x1421, every one mean rgb `0.00 0.00 0.00` |
+| exceptions recorded in the boot trace (all access violations; the first is the stop site, the rest follow the loss) | 6, including the same `game+0x86F97E` family the ON arm stopped at | 4, including the `game+0x52716EC` site the OFF arm also recorded |
+
+**Verdict: the switches were exercised, the pair is not a stage-3 pair, and it is parity where it can be read.** In the
+measured pre-loss window the control's pause byte was 0 during the loading wait (the title did not hold its own watchdog
+there), and the ON arm's monitor engaged on exactly that window, wrote the pause byte and left the stop byte alone; the
+attestation counted the body's thousands of entries and classified the present side as `body-exits-on-keys` in both
+arms, with the same gate and key values and every capture black. Both arms then stopped in the same post-device-loss
+crash family a second or two after the loss (the ON arm even after the OFF arm's secondary `0x52716EC` site appears in
+its own list), so the difference between the columns is which thread faulted first after the host GPU dropped, not a
+port effect. The prior abort point the plan wanted to run past (the watchdog's ~30 s after the heartbeat's last advance,
+[3d_textures.md](3d_textures.md) section 10.6) is not reached in either arm because stage 3 is not reached; the pair
+therefore does not claim that the hold keeps the title alive past it.
+
+The same host dropped the device in a concurrent boot of this tree from the pre-slice binary, with neither switch set
+(the concurrent slice's evidence, outside this repository), and that boot also stopped at a title site after the loss;
+the pair's stops are the host family the FSR pages record, not a regression this slice can attribute.
+
+### 13.5 Limits and the next falsifier
+
+- **The A/B is device-loss-limited.** Two arms, two losses, no stage-3 window: the hold's engagement and the
+  attestation's counts are measured, the stage-3 watchdog question is not. The next falsifier is a clean-host pair at
+  the same environment with `PALMETTO_TITLE_WATCHDOG_HOLD=watch` in the control and `=180` in the ON arm, carried to
+  the first stage-3 sample and beyond: compare the pause-byte series (does the title hold its own byte at stage 3?),
+  the heartbeat's advance count and age, the stage/session words, the movie player state and the captures. If the pause
+  byte is already 1 at stage 3 in the control, the hold is parity and should be recorded as such; if it is 0 while the
+  heartbeat is stale, the hold is the measured difference and a longer ON arm says whether it defers the abort.
+- **The A/B binary predates two polish changes.** After the pair, the attestation's key words are masked to the byte the
+  body compares and a phase/classification change is logged even past the periodic-line cap. The hold rule, the write
+  shape and the switches' off path are unchanged; the pair's logs printed the dword reads (the measured low bytes were
+  0/0, so the quoted classification is the same) and its last printed sample was the 61.0 s holding line, so the
+  post-loss transitions are unmeasured in that arm.
+- **The hold's console-faithfulness is a model, not a console trace.** The title's setter, the watchdog's read and the
+  byte's meaning are measured; that the console's loading code would hold the byte exactly while this title's loading
+  word reads 2..5 is this slice's reading. A different image build changes the RVAs; the validation refuses by name
+  rather than writing a byte whose meaning was not measured there.
+- **Masking risk is bounded and named.** A hold that never released would mask a real hang; the hard bound, the sticky
+  bound expiry, the stop-byte refusal and the loading/stage window are the bounds, and the unit tests cover each. The
+  bound is the caller's number (1..600 s) and the monitor prints every phase change.
+- **The presented plane's identity and the capture mean are not part of this attestation.** They stay the presenter
+  path's measurements ([frame_capture.md](frame_capture.md), [window.md](window.md)); P2's remaining half is one line
+  in the presenter capture hook, which is outside this slice's file scope.
+- **The attestation hooks the body's direct callers only.** A body entered through a computed pointer would not be
+  counted; the measured entry is reached by direct calls (the counter moved from the first seconds), and the body's own
+  words are sampled regardless. The thunk's page lives for the process (the mapped image is this process's private
+  copy; nothing on disk changes).
+
+### 13.6 Files, gates and the index row
+
+- **Files changed by this slice**: the new include-only header [title_watchdog.h](../port/src/title_watchdog.h),
+  `port/src/main.cpp` (the include, the two monitor classes, and the opt-in start block after the class-0xa install),
+  `port/test/code_hooks_test.cpp` (the section-13 block) and this section of `docs/peer_port_first_ui.md`. No shim,
+  presenter, build-file, README or NOTICE file changed; `port/src/main.cpp`'s default path is unchanged when both
+  switches are unset.
+- **Gates on this tree**: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints
+  `TESTS_BUILT`, the GPU-free subset of section 13.3 (14 targets including `code_hooks` and `frame_pacer`) exits 0, and
+  of the docs checks all files pass except the environment-variable check, which reports one concurrent slice's
+  variable (`PALMETTO_GPU_VIEW_PAIR_TRACE` in `port/shims/xmem.cpp`) and not this slice's two, which this page names. The
+  two new variable names are `PALMETTO_TITLE_WATCHDOG_HOLD` and `PALMETTO_PRESENT_ATTEST`.
+- **Index row**: [docs/README.md](README.md) already carries this page's row, so no index change is needed for the
+  section; the lead may extend that row's description with "implemented watchdog hold and present attestation" if the
+  row is refreshed. The [NOTICE.md](../NOTICE.md) row needed is the section-13.7 attribution, appended to the existing
+  "Implemented peer ports (reference only)" paragraph.
+- **No git write**: the lead commits the uncommitted list. Evidence is outside the repository under
+  `D:\leonida-work\fsrstable\boot-watchdog-off`, `boot-watchdog-on`, `capture-watchdog-off`, `capture-watchdog-on` and
+  `D:\leonida-work\portwatchdog` (the analyzer and the static measurement scripts).
+
+### 13.7 Attribution
+
+This slice was implemented from this project's own measurements (the watchdog's bytes and call sites, the body's entry
+bytes and the two boots above). The behaviour was cross-checked against the public GPL projects named in section 11,
+files and commits as follows: PercyScarlett's `runtime/victory/apps/victory/src/run.rs` at `e44c465` (its watchdog hold
+sets the title's byte at `+0x71b6330` through the setter at `+0x2214a90` every 200 ms, from the same image revision),
+VIctory's `apps/victory/src/run.rs` at `63bcca4` (the `VICTORY_POKE` poke that writes a title byte twice a second and names
+the 30 s tick), and Five Star Recomp's [debugging.md](https://github.com/ThatRecompDev/five-star-recomp/blob/45071d52/docs/debugging.md)
+at `45071d52` (the watchdog flag and its type-`0x24` set event, the present-pass chain this tree measured as
+unreachable). No code, comment text, identifier or table from those projects was copied into this tree: the measured
+constants, the rule, the thunk, the parsers and the tests are ours, derived from the call sites and boots above. The
+peers remain the copyright of their contributors and their licences continue to apply to their own trees.
+
+

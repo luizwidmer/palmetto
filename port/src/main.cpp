@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <tlhelp32.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -41,6 +42,7 @@
 #include "mods.h"
 #include "pe_loader.h"
 #include "title_class0a.h"
+#include "title_watchdog.h"
 #include "wait_trace.h"
 #include "../shims/d3d12_trace.h"
 #include "../shims/d3d12_xs_device.h"
@@ -4432,6 +4434,193 @@ void start_stage3_pump_probe(std::uintptr_t image_base, const char* spec) {
     }).detach();
 }
 
+// ---- Title hang-watchdog hold and present-side attestation (PALMETTO_TITLE_WATCHDOG_HOLD / PALMETTO_PRESENT_ATTEST) --
+// docs/peer_port_first_ui.md section 13 (P2 and P3 of that page's plan). Both probes are off by default and write
+// nothing when off, so the default path stays the tree's:
+//   * PALMETTO_TITLE_WATCHDOG_HOLD=watch reads the title's own watchdog words (the pause byte image+0x71B6330, the stop
+//     byte image+0x71B6340 and the heartbeat image+0x71B6338) beside the loading/stage words; a value in seconds instead
+//     also holds the pause byte while the measured loading wait is outstanding, for at most that many seconds. The rule,
+//     the hard bound and the named refusals are port/src/title_watchdog.h.
+//   * PALMETTO_PRESENT_ATTEST=1 counts the media/UI present body's entries (a counting thunk on image+0x22185A0) and the
+//     console queue/allocator proxy calls, and classifies the present side per line: nothing yet, the body never ran, the
+//     body ran and exits on its keys, or the body's present pass was entered.
+// The hold writes exactly one measured title byte (the pause byte the title's own setter writes); it patches no title
+// code. The attestation's counting thunk redirects the body's direct callers in this process's mapped image only.
+
+// The measured watchdog hold's runtime: one sampler thread every 100 ms applies the pure rule to the measured words and
+// writes the pause byte only when the rule says so. The thread stops and restores the byte when the run's C++ scope
+// exits; a title-initiated exit ends the process with the last write in place, which is process-local (the mapped image
+// is this process's private copy, nothing on disk changes).
+class TitleWatchdogHold {
+  public:
+    TitleWatchdogHold() = default;
+    TitleWatchdogHold(const TitleWatchdogHold&) = delete;
+    TitleWatchdogHold& operator=(const TitleWatchdogHold&) = delete;
+    ~TitleWatchdogHold() {
+        stop_.store(true, std::memory_order_relaxed);
+        if (thread_.joinable()) thread_.join();
+        if (wrote_.load(std::memory_order_relaxed) && pause_ != nullptr) {
+            *pause_ = restore_;
+            pause_ = nullptr;
+        }
+    }
+    void start(std::uintptr_t image_base, palmetto::title_watchdog::HoldConfig config) {
+        thread_ = std::thread([this, image_base, config] {
+            const auto* image = reinterpret_cast<const std::uint8_t*>(image_base);
+            pause_ = const_cast<std::uint8_t*>(image + palmetto::title_watchdog::kPauseByteRva);
+            palmetto::title_watchdog::HoldState state;
+            std::uint64_t last_heartbeat = 0;
+            bool heartbeat_seen = false, heartbeat_advanced = false;
+            palmetto::title_watchdog::HoldPhase last_phase = palmetto::title_watchdog::HoldPhase::Idle;
+            const char* last_why = nullptr;
+            unsigned sample = 0, lines = 0;
+            for (;;) {
+                if (stop_.load(std::memory_order_relaxed)) break;
+                const double now =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - sampler_epoch()).count();
+                bool ok_loading = false, ok_machine = false, ok_stage = false, ok_heartbeat = false, ok_pause = false,
+                     ok_stop = false;
+                const std::uint32_t loading =
+                    title_read_u32(image_base, palmetto::title_watchdog::kLoadingStateRva, ok_loading);
+                const std::uint64_t machine =
+                    title_read_u64(image_base, palmetto::title_watchdog::kStateMachinePointerRva, ok_machine);
+                std::uint16_t stage = 0;
+                if (ok_machine && machine != 0 && (machine & 7) == 0)
+                    stage = title_read_u16_at(static_cast<std::uintptr_t>(machine) +
+                                                  palmetto::title_watchdog::kStateMachineCurrentStageOffset,
+                                              ok_stage);
+                const std::uint64_t heartbeat = title_read_u64_at(
+                    image_base + static_cast<std::uintptr_t>(palmetto::title_watchdog::kHeartbeatRva), ok_heartbeat);
+                const std::uint32_t pause_word =
+                    title_read_u32(image_base, palmetto::title_watchdog::kPauseByteRva, ok_pause);
+                const std::uint32_t stop_word =
+                    title_read_u32(image_base, palmetto::title_watchdog::kWatchdogStopByteRva, ok_stop);
+                if (ok_heartbeat) {
+                    if (heartbeat_seen && heartbeat != last_heartbeat) heartbeat_advanced = true;
+                    heartbeat_seen = true;
+                    last_heartbeat = heartbeat;
+                }
+                palmetto::title_watchdog::HoldSample sample_words;
+                sample_words.now_seconds = now;
+                sample_words.loading = loading;
+                sample_words.stage_current = stage;
+                sample_words.heartbeat = heartbeat;
+                sample_words.heartbeat_advanced = heartbeat_advanced;
+                sample_words.watchdog_stopped = ok_stop && (stop_word & 1u) != 0;
+                sample_words.pause_byte = static_cast<std::uint8_t>(pause_word & 0xFFu);
+                const palmetto::title_watchdog::HoldAction action =
+                    palmetto::title_watchdog::hold_step(config, state, sample_words);
+                if (action == palmetto::title_watchdog::HoldAction::WriteOne && pause_ != nullptr) {
+                    *pause_ = 1;
+                    wrote_.store(true, std::memory_order_relaxed);
+                    restore_ = state.restore_value;
+                } else if (action == palmetto::title_watchdog::HoldAction::Restore && pause_ != nullptr) {
+                    *pause_ = state.restore_value;
+                }
+                const bool transition = state.phase != last_phase || (state.why != nullptr && last_why != state.why &&
+                                                                      std::strcmp(state.why, last_why ? last_why : "") != 0);
+                const bool periodic = (sample % 20u) == 0;
+                if (transition || (periodic && lines < 80)) {
+                    std::fprintf(stderr,
+                                 "[rt] title watchdog at %.1f s: phase %s (%s) loading %s%u stage %s%u heartbeat "
+                                 "0x%llx (%u advances), pause 0x%x stop 0x%x; writes %llu holds %u\n",
+                                 now, palmetto::title_watchdog::hold_phase_name(state.phase), state.why,
+                                 ok_loading ? "" : "?", loading, ok_stage ? "" : "?", stage,
+                                 static_cast<unsigned long long>(heartbeat), heartbeat_advanced ? 1u : 0u,
+                                 ok_pause ? (pause_word & 0xFFu) : 0u, ok_stop ? (stop_word & 0xFFu) : 0u,
+                                 static_cast<unsigned long long>(state.writes), state.holds);
+                    ++lines;
+                }
+                last_phase = state.phase;
+                last_why = state.why;
+                ++sample;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        });
+    }
+
+  private:
+    std::atomic<bool> stop_{false};
+    std::atomic<bool> wrote_{false};
+    std::thread thread_;
+    std::uint8_t* pause_ = nullptr;  // the mapped pause byte while the thread runs
+    std::uint8_t restore_ = 0;       // the value observed before the first hold write (normally 0)
+};
+
+// The present-side attestation's sampler: every 2 s it prints the present-body/proxy counters with the body's own words.
+// Bounded: a line per classification change and every thirtieth second, at most 80 lines.
+class PresentAttestation {
+  public:
+    PresentAttestation() = default;
+    PresentAttestation(const PresentAttestation&) = delete;
+    PresentAttestation& operator=(const PresentAttestation&) = delete;
+    ~PresentAttestation() {
+        stop_.store(true, std::memory_order_relaxed);
+        if (thread_.joinable()) thread_.join();
+    }
+    void start(std::uintptr_t image_base, const palmetto::title_watchdog::BodyCountHook* hook) {
+        // Reading the counters enables them, so the first proxy call is already counted.
+        (void)rt::d3d12_xs::queue_slot_hits(32);
+        (void)rt::d3d12_xs::queue_slot_hits(35);
+        (void)rt::d3d12_xs::allocator_slot_hits(9);
+        thread_ = std::thread([this, image_base, hook] {
+            palmetto::title_watchdog::AttestLine last_line;
+            bool first = true;
+            unsigned sample = 0, lines = 0;
+            for (;;) {
+                if (stop_.load(std::memory_order_relaxed)) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+                if (stop_.load(std::memory_order_relaxed)) break;
+                const double now =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - sampler_epoch()).count();
+                bool ok_gate = false, ok_active = false, ok_flag = false, ok_sem_a = false, ok_sem_b = false;
+                palmetto::title_watchdog::PresentCounters counters;
+                counters.presents = rt::d3d12_xs::queue_slot_hits(32);
+                counters.submits = rt::d3d12_xs::queue_slot_hits(35);
+                counters.frame_callbacks = rt::d3d12_xs::allocator_slot_hits(9);
+                counters.body_entries = hook != nullptr ? hook->entries.load(std::memory_order_relaxed) : 0;
+                // The gate and the two present-pass keys are the body's own bytes; read as dwords (the state trace's rule)
+                // and keep the low byte, so a neighbouring 0xff can never be mistaken for a set key.
+                counters.gate = title_read_u32(image_base, palmetto::title_watchdog::kBootMediaGateRva, ok_gate) & 0xFFu;
+                counters.active =
+                    title_read_u32(image_base, palmetto::title_watchdog::kBootMediaActiveRva, ok_active) & 0xFFu;
+                counters.flag = title_read_u32(image_base, palmetto::title_watchdog::kBootMediaFlagRva, ok_flag) & 0xFFu;
+                counters.semaphore_a = title_read_u64(image_base, palmetto::title_watchdog::kBootMediaSemaphoreARva, ok_sem_a);
+                counters.semaphore_b = title_read_u64(image_base, palmetto::title_watchdog::kBootMediaSemaphoreBRva, ok_sem_b);
+                palmetto::title_watchdog::AttestLine line;
+                line.state = palmetto::title_watchdog::present_body_state(counters);
+                line.presents = counters.presents;
+                line.body_entries = counters.body_entries;
+                line.active = counters.active;
+                line.flag = counters.flag;
+                const bool changed = first || palmetto::title_watchdog::attest_changed(last_line, line);
+                const bool periodic = (sample % 15u) == 0;
+                if (changed || (periodic && lines < 80)) {
+                    std::fprintf(stderr,
+                                 "[rt] present attest at %.1f s: presents %llu submits %llu frame-callbacks %llu "
+                                 "body-entries %llu, gate %s0x%x keys %s0x%x/%s0x%x semaphores %s0x%llx/%s0x%llx; %s\n",
+                                 now, static_cast<unsigned long long>(counters.presents),
+                                 static_cast<unsigned long long>(counters.submits),
+                                 static_cast<unsigned long long>(counters.frame_callbacks),
+                                 static_cast<unsigned long long>(counters.body_entries), ok_gate ? "" : "?", counters.gate,
+                                 ok_active ? "" : "?", counters.active, ok_flag ? "" : "?", counters.flag,
+                                 ok_sem_a ? "" : "?", static_cast<unsigned long long>(counters.semaphore_a),
+                                 ok_sem_b ? "" : "?", static_cast<unsigned long long>(counters.semaphore_b),
+                                 palmetto::title_watchdog::present_body_state_name(line.state));
+                    ++lines;
+                }
+                last_line = line;
+                first = false;
+                ++sample;
+            }
+        });
+    }
+
+  private:
+    std::atomic<bool> stop_{false};
+    std::thread thread_;
+};
+
 // ---- Stage-2 wait wake probe (PALMETTO_STAGE2_WAKE) -----------------------------------------------------------------
 // The measured stage-2 stop: the boot sequence FUN_1421B8960 calls FUN_1421B8BD0 (RVA 0x21B8BD0) at 0x21B8A70, whose
 // first call is FUN_14258DB70 (RVA 0x258DB70), and that function waits INFINITE at RVA 0x258DBA6 on the event the
@@ -8615,6 +8804,65 @@ int wmain(int argc, wchar_t** argv) {
                              "[rt] class-0xa size mitigation: NOT installed (no executable direct caller of "
                              "image+0x%x could be redirected); the default path runs\n",
                              palmetto::title_class0a::kRowStrideRva);
+            std::fflush(stderr);
+        }
+        // PALMETTO_PRESENT_ATTEST=1 and PALMETTO_TITLE_WATCHDOG_HOLD=watch|<seconds>: the P2/P3 ports of
+        // docs/peer_port_first_ui.md section 13. The attestation's counting thunk and the hold's monitor are both set up
+        // here, after the image is mapped and before the title's entry point runs; with both switches unset this block
+        // installs nothing and starts no thread, so the default path is the tree's unchanged one.
+        palmetto::title_watchdog::BodyCountHook present_attest_hook;
+        const bool present_attest = palmetto::title_watchdog::flag_enabled(std::getenv("PALMETTO_PRESENT_ATTEST"));
+        if (present_attest) {
+            const palmetto::title_watchdog::ImageShape shape = palmetto::title_watchdog::install_body_count_hook(
+                main_module.base, main_module.size, present_attest_hook);
+            if (shape != palmetto::title_watchdog::ImageShape::Ok)
+                std::fprintf(stderr, "[rt] present attest: NOT installed: %s\n",
+                             palmetto::title_watchdog::image_shape_name(shape));
+            else if (!present_attest_hook.ok)
+                std::fprintf(stderr, "[rt] present attest: NOT installed: %s\n", present_attest_hook.error);
+            else
+                std::fprintf(stderr,
+                             "[rt] present attest: counting hook on image+0x%x at %zu direct call site(s); the present "
+                             "body's words and the console proxy counters are sampled every 2 s\n",
+                             palmetto::title_watchdog::kBodyEntryRva, present_attest_hook.redirected);
+            std::fflush(stderr);
+        }
+        PresentAttestation present_attestation;
+        if (present_attest)
+            present_attestation.start(reinterpret_cast<std::uintptr_t>(main_module.base), &present_attest_hook);
+        // The title's own hang-watchdog pause byte (docs/peer_port_first_ui.md section 13): off unless the switch names
+        // "watch" or a hard bound in seconds. The image shape is validated first, so a different build is refused by
+        // name instead of writing a byte whose meaning was not measured there.
+        TitleWatchdogHold title_watchdog_hold;
+        const palmetto::title_watchdog::HoldSpec hold_spec =
+            palmetto::title_watchdog::parse_hold_spec(std::getenv("PALMETTO_TITLE_WATCHDOG_HOLD"));
+        if (hold_spec.refusal != nullptr) {
+            std::fprintf(stderr, "[rt] title watchdog: NOT started: %s\n", hold_spec.refusal);
+            std::fflush(stderr);
+        } else if (hold_spec.mode != palmetto::title_watchdog::HoldMode::Off) {
+            const palmetto::title_watchdog::ImageShape shape = palmetto::title_watchdog::validate_image(
+                main_module.base, main_module.size, /*need_body_entry=*/false);
+            if (shape != palmetto::title_watchdog::ImageShape::Ok) {
+                std::fprintf(stderr, "[rt] title watchdog: NOT started: %s\n",
+                             palmetto::title_watchdog::image_shape_name(shape));
+            } else {
+                palmetto::title_watchdog::HoldConfig config;
+                config.mode = hold_spec.mode;
+                config.bound_seconds = hold_spec.bound_seconds;
+                title_watchdog_hold.start(reinterpret_cast<std::uintptr_t>(main_module.base), config);
+                std::string limit;
+                if (hold_spec.mode == palmetto::title_watchdog::HoldMode::Watch)
+                    limit = "watch only: no title byte is written";
+                else
+                    limit = "hold enabled, hard bound " + std::to_string(static_cast<int>(hold_spec.bound_seconds)) +
+                            " s, released as soon as the wait resolves";
+                std::fprintf(stderr,
+                             "[rt] title watchdog: %s; pause byte image+0x%x, stop byte image+0x%x, heartbeat "
+                             "image+0x%x\n",
+                             limit.c_str(), palmetto::title_watchdog::kPauseByteRva,
+                             palmetto::title_watchdog::kWatchdogStopByteRva,
+                             palmetto::title_watchdog::kHeartbeatRva);
+            }
             std::fflush(stderr);
         }
         std::exception_ptr init_failure;
