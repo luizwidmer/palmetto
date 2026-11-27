@@ -1403,3 +1403,43 @@ Files for this section: `port/src/queue_holds.h`, `port/src/vulkan_backend.h`, `
 trace only; its slot-57 block is luna-mesh's), `port/test/vk_queue_test.cpp`, `port/test/frame_dump_test.cpp`,
 `port/test/xs_proxy_mock_test.cpp` and this section of `docs/peer_port_streaming.md`. No git write or game data was made.
 
+## 16. P-31 title A/B: bounded submission window
+
+**Status: one off/on pair plus the single permitted retry after device loss.** The follow-up executes section 15.4's
+stable-host falsifier with the `boot_arm.ps1` light/content environment and `PALMETTO_TITLE_CLASS0A_SIZE=1`. Every arm
+uses `PALMETTO_SUBMIT_TRACE=1`; only `PALMETTO_SUBMIT_OVERLAP` changes within the pair (`0` for A, `1` for B). The
+retry repeats B unchanged. All three runs used `palmetto.exe` SHA-256
+`7A16BF8F65458B18500AAF19A3F9B2FB9D70E95E68E9E193BA1D32B70315BB81`. All times below are 2026-11-27 in
+America/Sao_Paulo (`-03:00`); each arm acquired and released the shared boot lock independently. The output directories
+below are outside the repository; their `meta.txt`, summary, raw stderr, startup trace and captures are retained there.
+
+| arm | local start–end | termination and title state | D3D12 trace | captures | device-loss / exception |
+|---|---|---|---:|---|---|
+| A, overlap off | 08:42:32.391–08:44:43.495 (-03:00) | ALIVE 130.3 s, then harness timeout; at 128 s init/loading/session = 3/2/3. Movie player `0x9`, next `0x3`, non-null handle, buffers 0, open 1. | 295,577 calls; max call #308,949 | 12 of 12, frames 1–2,201; every capture 2564×1421, mean RGB 0.00 | No device-loss line; 0 startup-trace exceptions. `boot-p31-overlap-off-20261127`. |
+| B, overlap on | 08:45:39.569–08:46:44.441 (-03:00) | STOP at 64.3 s; at 60 s init/loading/session = 2/2/1. Movie player `0x3`, next `0x3`, handle 0, buffers 0, open 1. | 143,462 calls; max call #154,941 | 11 captures, frames 1–2,001; every capture mean RGB 0.00 | One `[rt] replay: the Vulkan device was lost` (`stderr.log:218324`), then exception `0xC0000005` read at `game_scarlett_master.exe+0x502b2ff`; one startup-trace exception. `boot-p31-overlap-on-20261127`. |
+| B retry, overlap on | 08:47:10.236–08:48:19.371 (-03:00) | STOP at 68.5 s; at 66 s init/loading/session = 2/2/1. Movie player `0x3`, next `0x3`, handle 0, buffers 0, open 1. | 150,100 calls; max call #161,018 | 12 captures, frames 1–2,201; every capture mean RGB 0.00 | One `[rt] replay: the Vulkan device was lost` (`stderr.log:225726`), then exception `0xC0000005` read at `game_scarlett_master.exe+0x43ae303`; one startup-trace exception. `boot-p31-overlap-on-retry-20261127`. |
+
+The off arm selected the legacy 64-buffer bound. Both on-arm logs explicitly selected direct/compute/copy bound 96 (hard cap 128). In
+all three stderr logs, no `submit-flight: room-wait` record appeared. The bounded slot-35 trace emitted 128 records per run;
+every recorded path was `single-submit`, and the corresponding `execute` records had `held=0`. The first slot-35 call was
+740,747 µs off (`execute` 740,714 µs; `vkQueueSubmit` driver 68 µs), 742,339 µs on (`execute` 742,301 µs; driver 75 µs),
+and 750,001 µs on-retry (`execute` 749,962 µs; driver 73 µs). Subsequent recorded calls were in the low single-digit to
+roughly 19 ms range. Thus the large first-call time is not measured as a queue-room wait or driver-submit stall, and the
+on switch did not change the sampled title submissions into a held/overlap path; it changed the configured flight bound,
+which the title did not visibly saturate at 64 in A.
+
+**Comparison and limit.** Section 15's synthetic `vk_queue_test` recorded direct-bound-64 waits (196 waits, 470,280 µs total, 2,912 µs max)
+and COPY-bound-72 waits (89 waits, 41,711 µs total, 961 µs max); it proves the
+bounded fallback under its test shim, not title behavior. This live trace does not show a title room wait at 64 or a
+submission-path improvement at 96. The D3D12 totals above are cumulative; the on arms stopped earlier and those counts
+are not a per-second rate comparison. Both on attempts logged one device loss and then stopped in the title, whereas the
+off arm reached its 130 s timeout without a loss or exception. That is a
+real safety signal correlated with the on condition, not proof that the switch caused either loss: the runs reached
+non-identical title states, and only one off arm completed. After the second consecutive on-arm device loss, the series
+was stopped as required; **do not recommend enabling the switch on the strength of this pair**. The next falsifier is a
+settled-host on-arm after the cause of the paired losses is understood, or a narrower switch split that isolates the
+changed bound from other host/device conditions. No source or test code was added by this follow-up.
+
+P-30's alias/watch arm was not run after the two consecutive losses. Its status is recorded in
+[title_memory_model.md](title_memory_model.md); it is **not** a controlled negative about aliases or page-list activity.
+
