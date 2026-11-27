@@ -198,7 +198,7 @@ mode field untouched, the computer still stored, every slot returns `E_NOTIMPL` 
 
 Implementation: `port/shims/xg_xs.cpp`. The record offsets, the exact fill (guard bytes past 0x1B40 untouched, all
 unwritten fields zeroed), the two measured descriptions, the linear pitch/size arithmetic and the named refusals are
-pinned by `port/test/xg_xs_test.cpp` (86 checks in the default mode, 16 in refuse mode).
+pinned by `port/test/xg_xs_test.cpp` (122 checks in the default mode, 16 in refuse mode).
 
 ## 4. The A/B: the linear layout as the default
 
@@ -302,6 +302,6 @@ record (header, plane, mip) to the trace, so one boot shows the shapes above. Th
 (`[rt] xg_xs counters (...)`) and the slot-8 arguments are what the tables read; `PALMETTO_XG_TRACE=1` alone gives
 the first calls without the record dump.
 
-Tests: `cmake --build port\\build --target xg_xs_test` then `port\\build\\xg_xs_test.exe` (86 checks, 0 failures;
+Tests: `cmake --build port\\build --target xg_xs_test` then `port\\build\\xg_xs_test.exe` (122 checks, 0 failures;
 `PALMETTO_XG_LAYOUT=refuse` runs the same binary with 16 checks, 0 failures). The other test targets and the palmetto
 build gate are unchanged.

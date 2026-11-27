@@ -82,9 +82,17 @@ Priority order is top to bottom within each lane.
 | P-09 | memory | GPU-view pairing population/refusal arm on a settled tree | open | open | [peer_port_movie.md](peer_port_movie.md) section 11 |
 | P-10 | memory | Plane-refresh changed-content arm: a boot where an imported plane actually changes | open | open | [peer_port_movie.md](peer_port_movie.md) section 8 |
 | P-11 | memory | Memory-wait unmet-cell arm: find a population where a slot-74 cell is short at record time | open | open | [peer_port_streaming.md](peer_port_streaming.md) section 11 |
-| P-12 | renderer | XG layout/upload coverage for the movie-plane shapes | maintainer | in progress | [peer_port_movie.md](peer_port_movie.md) rank 7 |
-| P-13 | platform | UI resource probe and measured display capability answers | maintainer | in progress | [peer_port_first_ui.md](peer_port_first_ui.md) ranks 4/6 |
-| P-14 | streaming | Physical-page completion destinations for DirectStorage | maintainer | in progress | [peer_port_streaming.md](peer_port_streaming.md) rank 3 |
+| P-12 | renderer | XG layout/upload coverage for the movie-plane shapes | maintainer | done (`6da738f85`) | [peer_port_movie.md](peer_port_movie.md) section 12 |
+| P-13 | platform | UI resource probe and measured display capability answers | maintainer | done (`ef46566d1`) | [peer_port_first_ui.md](peer_port_first_ui.md) section 14 |
+| P-14 | streaming | Physical-page completion destinations for DirectStorage | maintainer | done (`fdfacfdf2`) | [peer_port_streaming.md](peer_port_streaming.md) section 13 |
+| P-15 | platform | HDR-desktop boot: does the Enabled HDR answer reach the plane colour space or the capture | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 14 |
+| P-16 | platform | 120 Hz-host display answer: compare the consumed refresh when the mode answer is not the host's (dxgi path) | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 14 |
+| P-17 | platform | Probe the RBF0 handler one level below the dispatcher and the page-flow step's reachability | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 14 |
+| P-18 | platform | Deferral-acquiring boot: exercise the display timeout deferral end to end | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 14 |
+| P-19 | movie | Movie-plane decode-run census: the XG row rule and the placed-stride consumer when decode first runs | open | open | [peer_port_movie.md](peer_port_movie.md) section 12 |
+| P-20 | renderer | Content-window texture descriptor census: most distinct shapes are refused at create | open | open | [peer_port_movie.md](peer_port_movie.md) section 12 |
+| P-21 | streaming | Mapped physical-page destination arm: exercise the delivery through an armed page watch | open | open | [peer_port_streaming.md](peer_port_streaming.md) section 13 |
+| P-22 | platform | UI 2D-batch probe arm (draw mode): the batch path behind the page flow | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 14 |
 
 ### Parity features (claimable with maintainer coordination)
 

@@ -463,12 +463,16 @@ on the executable, the rest is not:
   data) refuse the handle they were never given (`E_INVALIDARG`, outputs zeroed). The closed-caption properties (3)
   and the speech-to-text display calls (6, 7, 17-20) fail with `E_FAIL`, writing nothing: their parameter lists
   are not in the docs' layout.
-- **`XLauncherImpl`** (`IXLauncherImpl`, slots 3-5): `XLaunchUri`, `XDisplayAcquireTimeoutDeferral` (null handle)
-  and `XDisplayCloseTimeoutDeferralHandle` fail with `E_FAIL`; nothing is launched.
+- **`XLauncherImpl`** (`IXLauncherImpl`, slots 3-5): the display timeout deferral is served by holding an OS
+  display-required power request per deferral (an owned-handle table), so a deferral-holding caller keeps the display
+  awake; `PALMETTO_DISPLAY_DEFERRAL=0` restores the earlier `E_FAIL`. `XLaunchUri` still fails before starting and
+  nothing is launched.
 - **ASSUMPTION:** the parameter lists of the speech calls and `XHighContrastGetMode` (Off is 0), from the GDK
   reference; only the argument counts were measured, from `tooling/gdk_runtime_calls.py` on the executable.
-- **HDR:** `XDisplayTryEnableHdrMode` answers Disabled, because the host output is SDR. With `PALMETTO_HDR=1` it
-  answers Enabled with the documented default tone-map luminances (0.01, 1000, 1000 nits).
+- **HDR:** `XDisplayTryEnableHdrMode` answers the host desktop's own answer, read from the real DXGI output when it can
+  be asked: Disabled on an SDR output, Enabled with the measured luminance on an HDR10 output. `PALMETTO_HDR=1` forces
+  Enabled with the documented default tone-map luminances (0.01, 1000, 1000 nits) and `PALMETTO_HDR=0` forces Disabled;
+  other values are refused by name and fall back to the host answer.
 - **Devices:** every device belongs to the offline user (`XUserFindForDevice` hands out an `XUserHandle` the title
   closes). `XUserRegisterForDeviceAssociationChanged` (slot 4) and
   `XUserRegisterForDefaultAudioEndpointUtf16Changed` (7) keep each registration (its queue, duplicated, its context

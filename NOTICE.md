@@ -121,3 +121,14 @@ GPU-view reservation pairing ([docs/peer_port_movie.md](docs/peer_port_movie.md)
 (`623d02e') mirror code and Five Star Recomp (`ce2b333b`) reservation pairing. All are read as evidence of behaviour only;
 the implementations are our own, no source, comment, identifier or data table is copied, and the upstream projects remain
 the copyright of their contributors under their own licences.
+
+The row-aware XG movie-plane upload ([docs/peer_port_movie.md](docs/peer_port_movie.md), section 12) was informed by XCL
+(GPL-2.0-only, `623d02e`) XG code and Five Star Recomp (GPL-3.0-or-later, `ce2b333b`) XG writers, with the movie-plane
+shape measurement cross-checked against the reference fork (`ubiquitarianism/leonida`, GPL-3.0, `273b3bdf9`). The
+physical-page completion delivery ([docs/peer_port_streaming.md](docs/peer_port_streaming.md), section 13) was informed by
+Five Star Recomp (`ce2b333b`) page-sink code, PercyScarlett (`e44c465`), VIctory (`63bcca4`), victory-fork (`9a9091d`) and
+XCL (`623d02e`) storage paths and the reference fork's page resolver. The measured display answers and UI page probe
+([docs/peer_port_first_ui.md](docs/peer_port_first_ui.md), section 14) were informed by PercyScarlett (`e44c465`), VIctory
+(`63bcca4`), Five Star Recomp (`ce2b333b`) and XCL (`623d02e`) display/deferral handling. All are read as evidence of
+behaviour only; the implementations are our own, no source, comment, identifier or data table is copied, and the upstream
+projects remain the copyright of their contributors under their own licences.
