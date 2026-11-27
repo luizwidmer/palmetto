@@ -323,7 +323,8 @@ std::size_t collect_xbox_present_window_candidates(XboxPresentWindowCandidate* o
 // when it is visible, not minimised, not owned, not a tool window, not an IME window, not this module's own class, and
 // has a non-empty client area. A usable window of the title's class wins outright (the first in enumeration order);
 // otherwise the usable one with the largest client area wins. `own_window` (the one created here, when there is one) is
-// never chosen.
+// never chosen. PALMETTO_WINDOW_FIT=workarea (off by default) may request a non-activating fit for the measured title
+// class only; unknown styles, geometry or switch spellings are refused by name. No process DPI awareness is changed.
 const XboxPresentWindowCandidate* choose_xbox_present_window(const XboxPresentWindowCandidate* candidates,
                                                              std::size_t count, HWND own_window = nullptr);
 // The rule over a fresh enumeration of this process's windows: true and `out` filled when there is one to adopt.

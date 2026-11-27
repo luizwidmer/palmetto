@@ -17,6 +17,7 @@
 #include "../shims/d3d12_trace.h"
 #include "../shims/xbox_present.h"
 #include "../src/plane_compose_rule.h"  // docs/peer_port_movie.md: the measured second-plane rule (pure half)
+#include "../src/window_fit.h"         // docs/peer_port_first_ui.md section 16: pure title-window fit seam
 
 #include <algorithm>
 #include <chrono>
@@ -31,6 +32,7 @@
 #include <future>
 #include <io.h>
 #include <iterator>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -331,6 +333,46 @@ int main() {
     }
 
     {
+        using namespace palmetto::window_fit;
+        Rule parsed = Rule::work_area;
+        EXPECT(parse_rule(nullptr, parsed, nullptr) && parsed == Rule::off);
+        EXPECT(parse_rule("  \t", parsed, nullptr) && parsed == Rule::off);
+        for (const char* off : {"off", "FALSE", "no", "0", "leave"})
+            EXPECT(parse_rule(off, parsed, nullptr) && parsed == Rule::off);
+        for (const char* on : {"on", "True", "yes", "1", "fit", "workarea", "work-area"})
+            EXPECT(parse_rule(on, parsed, nullptr) && parsed == Rule::work_area);
+        const char* refusal = nullptr;
+        parsed = Rule::work_area;
+        EXPECT(!parse_rule("fitt", parsed, &refusal));
+        EXPECT(parsed == Rule::work_area);  // a malformed switch leaves the caller's previous value alone
+        EXPECT(refusal && std::string(refusal).find("PALMETTO_WINDOW_FIT") != std::string::npos);
+
+        // The measured local dimensions: 2580x1460 outer / 2564x1421 client, against the process-view 2560x1392 work area.
+        const Plan measured = fit_work_area({0, 0, 2580, 1460}, {0, 0, 2564, 1421}, {0, 0, 2560, 1392});
+        EXPECT(measured.status == PlanStatus::changed && measured.refusal == Refusal::none);
+        EXPECT(measured.outer.left == 51 && measured.outer.top == 0 && measured.outer.right == 2508 &&
+               measured.outer.bottom == 1392);
+        EXPECT(measured.client_width == 2441 && measured.client_height == 1353);
+        EXPECT(measured.outer.left >= 0 && measured.outer.top >= 0 && measured.outer.right <= 2560 &&
+               measured.outer.bottom <= 1392);
+        // An already-fitting window is exactly preserved; a fitting-size window offscreen is only translated.
+        const Plan already_fits = fit_work_area({100, 80, 1100, 780}, {0, 0, 984, 661}, {0, 0, 2560, 1392});
+        EXPECT(already_fits.status == PlanStatus::unchanged);
+        EXPECT(already_fits.outer.left == 100 && already_fits.outer.top == 80 && already_fits.outer.right == 1100 &&
+               already_fits.outer.bottom == 780);
+        const Plan moved = fit_work_area({2500, 1300, 3500, 2100}, {0, 0, 984, 761}, {0, 0, 2560, 1392});
+        EXPECT(moved.status == PlanStatus::changed && moved.outer.left == 1560 && moved.outer.top == 592 &&
+               moved.outer.right == 2560 && moved.outer.bottom == 1392);
+        EXPECT(fit_work_area({0, 0, 0, 10}, {0, 0, 1, 1}, {0, 0, 100, 100}).refusal ==
+               Refusal::invalid_outer_rect);
+        EXPECT(fit_work_area({0, 0, 200, 100}, {0, 0, 210, 100}, {0, 0, 300, 200}).refusal ==
+               Refusal::client_larger_than_outer);
+        EXPECT(fit_work_area({0, 0, 400, 300}, {0, 0, 100, 50}, {0, 0, 200, 200}).refusal ==
+               Refusal::frame_larger_than_work_area);
+        std::printf("window fit (pure): parser, measured fit, preserve/move, and named refusals: ok\n");
+    }
+
+    {
         // The callback's narrow exception must match the sRGB swapchain VUID, including its follow-ons, and nothing else.
         VkDebugUtilsMessengerCallbackDataEXT data{};
         data.messageIdNumber = 0xc036022f;
@@ -427,6 +469,7 @@ int main() {
     // the tests that present through a window they know set it below.
     {
         using rt::d3d12::XboxPresentWindowCandidate;
+        _putenv_s("PALMETTO_WINDOW_FIT", "");  // the measured default leaves adopted geometry untouched
         const auto candidate = [](const wchar_t* class_name, HWND handle, bool visible = true, bool minimised = false,
                                   bool owned = false, bool tool = false, bool ime = false, UINT w = 640, UINT h = 480) {
             XboxPresentWindowCandidate c;
@@ -514,9 +557,17 @@ int main() {
         EXPECT(found.window == title_window);
         EXPECT(std::wstring(found.class_name) == rt::d3d12::xbox_title_window_class);
         EXPECT(found.client_width == 400 && found.client_height == 300);
-        // ...and the default path adopts it instead of creating a second window, without touching its visibility.
+        // ...and the default path adopts it instead of creating a second window, without touching its geometry or visibility.
         _putenv_s("PALMETTO_PRESENT_ADOPT", "");
-        rt::d3d12::XboxPresentWindow adopted = rt::d3d12::create_or_adopt_xbox_present_window();        EXPECT(adopted.window == title_window && adopted.adopted);
+        RECT default_outer_before{};
+        EXPECT(GetWindowRect(title_window, &default_outer_before));
+        rt::d3d12::XboxPresentWindow adopted = rt::d3d12::create_or_adopt_xbox_present_window();
+        EXPECT(adopted.window == title_window && adopted.adopted);
+        RECT default_outer_after{};
+        EXPECT(GetWindowRect(title_window, &default_outer_after));
+        EXPECT(default_outer_after.left == default_outer_before.left && default_outer_after.top == default_outer_before.top &&
+               default_outer_after.right == default_outer_before.right &&
+               default_outer_after.bottom == default_outer_before.bottom);
         EXPECT(adopted.width == 400 && adopted.height == 300);
         EXPECT(adopted.shown && !adopted.show_on_first_frame);
         rt::d3d12::show_xbox_present_window(adopted);  // a no-op for an adopted window: the title owns its visibility
@@ -535,7 +586,68 @@ int main() {
         EXPECT(!rt::d3d12::find_xbox_present_title_window(&found));
         ShowWindow(window, SW_SHOWNOACTIVATE);
         pump();
+
+        // The opt-in geometry path uses only the exact title class and the work area reported in this process view.
+        ShowWindow(title_window, SW_SHOWNOACTIVATE);
+        UpdateWindow(title_window);
+        pump();
+        MONITORINFO fit_monitor_info{};
+        fit_monitor_info.cbSize = sizeof fit_monitor_info;
+        const HMONITOR fit_monitor = MonitorFromWindow(title_window, MONITOR_DEFAULTTONEAREST);
+        EXPECT(fit_monitor && GetMonitorInfoW(fit_monitor, &fit_monitor_info));
+        const LONG work_width = fit_monitor_info.rcWork.right - fit_monitor_info.rcWork.left;
+        const LONG work_height = fit_monitor_info.rcWork.bottom - fit_monitor_info.rcWork.top;
+        EXPECT(work_width > 0 && work_height > 0);
+        EXPECT(SetWindowPos(title_window, nullptr, fit_monitor_info.rcWork.left, fit_monitor_info.rcWork.top,
+                            static_cast<int>(work_width + 128), static_cast<int>(work_height + 128),
+                            SWP_NOZORDER | SWP_NOACTIVATE));
+        pump();
+        RECT before_outer{}, before_client{};
+        EXPECT(GetWindowRect(title_window, &before_outer) && GetClientRect(title_window, &before_client));
+        const auto fit_rect = [](const RECT& rect) {
+            return palmetto::window_fit::Rect{rect.left, rect.top, rect.right, rect.bottom};
+        };
+        const palmetto::window_fit::Plan expected_fit = palmetto::window_fit::fit_work_area(
+            fit_rect(before_outer), fit_rect(before_client), fit_rect(fit_monitor_info.rcWork));
+        EXPECT(expected_fit.status == palmetto::window_fit::PlanStatus::changed);
+        _putenv_s("PALMETTO_WINDOW_FIT", "workarea");
+        rt::d3d12::XboxPresentWindow fitted = rt::d3d12::create_or_adopt_xbox_present_window();
+        EXPECT(fitted.window == title_window && fitted.adopted);
+        pump();  // the fit uses SWP_ASYNCWINDOWPOS so a render thread never waits on the title's window thread
+        RECT after_outer{}, after_client{};
+        EXPECT(GetWindowRect(title_window, &after_outer) && GetClientRect(title_window, &after_client));
+        EXPECT(after_outer.left == expected_fit.outer.left && after_outer.top == expected_fit.outer.top &&
+               after_outer.right == expected_fit.outer.right && after_outer.bottom == expected_fit.outer.bottom);
+        EXPECT(after_client.right - after_client.left == expected_fit.client_width &&
+               after_client.bottom - after_client.top == expected_fit.client_height);
+        EXPECT(after_outer.left >= fit_monitor_info.rcWork.left && after_outer.top >= fit_monitor_info.rcWork.top &&
+               after_outer.right <= fit_monitor_info.rcWork.right && after_outer.bottom <= fit_monitor_info.rcWork.bottom);
+        rt::d3d12::destroy_xbox_present_window(fitted);
+        EXPECT(IsWindow(title_window) != FALSE);  // the fit request never takes ownership of the title's HWND
         DestroyWindow(title_window);
+
+        // A title-class popup is outside the measured style: the switch must name and refuse it without resizing.
+        HWND popup_title = CreateWindowExW(0, title_class.lpszClassName, L"Palmetto: unsupported style",
+                                           WS_POPUP | WS_VISIBLE, fit_monitor_info.rcWork.left,
+                                           fit_monitor_info.rcWork.top, static_cast<int>(work_width + 128),
+                                           static_cast<int>(work_height + 128), nullptr, nullptr,
+                                           title_class.hInstance, nullptr);
+        EXPECT(popup_title != nullptr);
+        pump();
+        RECT popup_before{}, popup_after{};
+        EXPECT(GetWindowRect(popup_title, &popup_before));
+        rt::d3d12::XboxPresentWindow refused_style = rt::d3d12::create_or_adopt_xbox_present_window();
+        EXPECT(refused_style.window == popup_title && refused_style.adopted);
+        pump();
+        EXPECT(GetWindowRect(popup_title, &popup_after));
+        EXPECT(popup_after.left == popup_before.left && popup_after.top == popup_before.top &&
+               popup_after.right == popup_before.right && popup_after.bottom == popup_before.bottom);
+        rt::d3d12::destroy_xbox_present_window(refused_style);
+        EXPECT(IsWindow(popup_title) != FALSE);
+        DestroyWindow(popup_title);
+        _putenv_s("PALMETTO_WINDOW_FIT", "");
+        std::printf("window fit (Win32): work-area resize, preserved frame/client ratio, unsupported style refused: ok\n");
+
         std::printf("adoption: title class wins, largest otherwise, unusable kinds skipped (invisible/minimised/owned/tool/"
                     "IME/empty class/own class/own window), a real title-like window adopted by name and left alive on "
                     "destroy, a hidden one skipped, PALMETTO_PRESENT_ADOPT=off keeps the own window: ok\n");

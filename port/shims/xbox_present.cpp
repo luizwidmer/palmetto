@@ -6,6 +6,7 @@
 #include "../src/vulkan_present.h"
 #include "../src/plane_compose_rule.h"  // docs/peer_port_movie.md: the measured second-plane rule
 #include "../src/present_fit.h"         // docs/peer_port_first_ui.md section 15: the fit/scale rule and its attestation
+#include "../src/window_fit.h"          // docs/peer_port_first_ui.md section 16: the opt-in outer-window clamp
 
 #include <cerrno>
 #include <chrono>
@@ -95,6 +96,45 @@ palmetto::present_fit::Rule fit_rule_from_env() {
     return rule;
 }
 
+// These optional, diagnostic-only user32 queries are resolved dynamically so an older Windows build keeps the same
+// window geometry path. They are reached only under PALMETTO_PRESENT_GEOMETRY or PALMETTO_WINDOW_FIT=workarea and
+// never change the title's DPI context.
+template<class Function>
+Function user32_function(const char* name) {
+    static_assert(sizeof(Function) == sizeof(FARPROC));
+    const HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    FARPROC symbol = user32 ? GetProcAddress(user32, name) : nullptr;
+    Function function = nullptr;
+    std::memcpy(&function, &symbol, sizeof(function));
+    return function;
+}
+
+using GetWindowDpiContextCall = HANDLE(WINAPI*)(HWND);
+using GetDpiAwarenessCall = int(WINAPI*)(HANDLE);
+using GetDpiForWindowCall = UINT(WINAPI*)(HWND);
+
+int window_dpi_awareness(HWND window) {
+    static const auto get_context = user32_function<GetWindowDpiContextCall>("GetWindowDpiAwarenessContext");
+    static const auto get_awareness = user32_function<GetDpiAwarenessCall>("GetAwarenessFromDpiAwarenessContext");
+    if (!get_context || !get_awareness) return -1;
+    const HANDLE context = get_context(window);
+    return context ? get_awareness(context) : -1;
+}
+
+UINT window_dpi(HWND window) {
+    static const auto get_dpi = user32_function<GetDpiForWindowCall>("GetDpiForWindow");
+    return get_dpi ? get_dpi(window) : 0;
+}
+
+const char* dpi_awareness_name(int awareness) {
+    switch (awareness) {
+    case 0: return "unaware";
+    case 1: return "system-aware";
+    case 2: return "per-monitor-aware";
+    default: return "unavailable";
+    }
+}
+
 // The window half of the geometry attestation, from the presentation service, which owns the window handle.
 void attest_window_geometry(HWND window) {
     static std::atomic<bool> done{false};
@@ -120,6 +160,15 @@ void attest_window_geometry(HWND window) {
                  have_monitor ? monitor_info.rcWork.right - monitor_info.rcWork.left : 0,
                  have_monitor ? monitor_info.rcWork.bottom - monitor_info.rcWork.top : 0,
                  have_monitor ? monitor_info.rcWork.left : 0L, have_monitor ? monitor_info.rcWork.top : 0L);
+    const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
+    const LONG_PTR extended_style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+    const int awareness = window_dpi_awareness(window);
+    const UINT dpi = window_dpi(window);
+    std::fprintf(stderr,
+                 "[rt] present geometry: style 0x%08llx ex-style 0x%08llx; DPI awareness %s (code %d), window DPI %u\n",
+                 static_cast<unsigned long long>(static_cast<ULONG_PTR>(style)),
+                 static_cast<unsigned long long>(static_cast<ULONG_PTR>(extended_style)), dpi_awareness_name(awareness),
+                 awareness, dpi);
 }
 
 // The plane half of the geometry attestation: the plane words, the swapchain extent and where the picture goes under
@@ -152,6 +201,111 @@ void attest_plane_geometry(UINT plane_count, const XboxPresentPlaneParameters* p
                  static_cast<double>(place ? place->right : 0.0f), static_cast<double>(place ? place->bottom : 0.0f),
                  output_width, output_height, palmetto::present_fit::rule_name(rule), picture.left, picture.top,
                  picture.right, picture.bottom, scale_x, scale_y);
+}
+
+// PALMETTO_WINDOW_FIT=workarea adjusts only the measured title window, and only when explicitly requested. The planner
+// consumes Win32 rectangles in this process's coordinate view; no process DPI mode or other window is changed.
+bool fit_adopted_title_window(HWND window, const wchar_t* class_name) {
+    char value[40] = {};
+    std::size_t length = 0;
+    const int env_result = getenv_s(&length, value, sizeof value, "PALMETTO_WINDOW_FIT");
+    if (env_result == ERANGE) {
+        std::fprintf(stderr,
+                     "[rt] present: PALMETTO_WINDOW_FIT is longer than %zu bytes: refusing to guess title geometry\n",
+                     sizeof value - 1);
+        return false;
+    }
+    if (env_result != 0) {
+        std::fprintf(stderr, "[rt] present: PALMETTO_WINDOW_FIT could not be read (errno %d): refusing to resize\n",
+                     int(env_result));
+        return false;
+    }
+    palmetto::window_fit::Rule rule = palmetto::window_fit::Rule::off;
+    const char* parse_refusal = nullptr;
+    if (!palmetto::window_fit::parse_rule(length > 1 ? value : nullptr, rule, &parse_refusal)) {
+        std::fprintf(stderr, "[rt] present: %s; title geometry is unchanged\n", parse_refusal);
+        return false;
+    }
+    if (rule == palmetto::window_fit::Rule::off) return false;
+    if (!window || !class_name || _wcsicmp(class_name, xbox_title_window_class) != 0) {
+        std::fprintf(stderr,
+                     "[rt] present: PALMETTO_WINDOW_FIT=workarea applies only to an adopted sgaWindowClass window; "
+                     "refusing to resize another window\n");
+        return false;
+    }
+    if (IsZoomed(window)) {
+        std::fprintf(stderr,
+                     "[rt] present: PALMETTO_WINDOW_FIT=workarea will not override the title's maximized state; "
+                     "refusing to resize\n");
+        return false;
+    }
+
+    SetLastError(ERROR_SUCCESS);
+    const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
+    const DWORD style_error = GetLastError();
+    const DWORD_PTR style_bits = static_cast<DWORD_PTR>(style);
+    if ((style == 0 && style_error != ERROR_SUCCESS) ||
+        (style_bits & static_cast<DWORD_PTR>(WS_OVERLAPPEDWINDOW)) != static_cast<DWORD_PTR>(WS_OVERLAPPEDWINDOW)) {
+        std::fprintf(stderr,
+                     "[rt] present: PALMETTO_WINDOW_FIT=workarea only handles the peer-cross-checked WS_OVERLAPPEDWINDOW style; "
+                     "style 0x%08llx refused\n",
+                     static_cast<unsigned long long>(style_bits));
+        return false;
+    }
+
+    RECT outer{};
+    RECT client{};
+    MONITORINFO monitor_info{};
+    monitor_info.cbSize = sizeof monitor_info;
+    const HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+    if (!GetWindowRect(window, &outer) || !GetClientRect(window, &client) || !monitor ||
+        !GetMonitorInfoW(monitor, &monitor_info)) {
+        std::fprintf(stderr,
+                     "[rt] present: PALMETTO_WINDOW_FIT=workarea could not measure the title window or nearest monitor "
+                     "work area (error %lu): refusing to resize\n",
+                     GetLastError());
+        return false;
+    }
+    const auto convert = [](const RECT& rect) {
+        return palmetto::window_fit::Rect{rect.left, rect.top, rect.right, rect.bottom};
+    };
+    const palmetto::window_fit::Plan plan =
+        palmetto::window_fit::fit_work_area(convert(outer), convert(client), convert(monitor_info.rcWork));
+    if (plan.status == palmetto::window_fit::PlanStatus::refused) {
+        std::fprintf(stderr, "[rt] present: PALMETTO_WINDOW_FIT=workarea refused: %s; title geometry is unchanged\n",
+                     palmetto::window_fit::refusal_name(plan.refusal));
+        return false;
+    }
+    if (plan.status == palmetto::window_fit::PlanStatus::unchanged) {
+        std::fprintf(stderr,
+                     "[rt] present: PALMETTO_WINDOW_FIT=workarea: the title window already fits its nearest monitor "
+                     "work area; no geometry changed\n");
+        return false;
+    }
+
+    constexpr UINT fit_flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+    SetLastError(ERROR_SUCCESS);
+    if (!SetWindowPos(window, nullptr, plan.outer.left, plan.outer.top,
+                      plan.outer.right - plan.outer.left, plan.outer.bottom - plan.outer.top, fit_flags)) {
+        std::fprintf(stderr,
+                     "[rt] present: PALMETTO_WINDOW_FIT=workarea SetWindowPos failed (error %lu); title geometry is "
+                     "unchanged\n",
+                     GetLastError());
+        return false;
+    }
+    const LONG_PTR extended_style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+    const int awareness = window_dpi_awareness(window);
+    const UINT dpi = window_dpi(window);
+    std::fprintf(stderr,
+                 "[rt] present: PALMETTO_WINDOW_FIT=workarea requested outer %ld,%ld..%ld,%ld and client %dx%d inside "
+                 "work area %ld,%ld..%ld,%ld (style 0x%08llx ex-style 0x%08llx; DPI awareness %s, window DPI %u); "
+                 "title text and visibility unchanged\n",
+                 plan.outer.left, plan.outer.top, plan.outer.right, plan.outer.bottom, plan.client_width,
+                 plan.client_height, monitor_info.rcWork.left, monitor_info.rcWork.top, monitor_info.rcWork.right,
+                 monitor_info.rcWork.bottom, static_cast<unsigned long long>(style_bits),
+                 static_cast<unsigned long long>(static_cast<ULONG_PTR>(extended_style)),
+                 dpi_awareness_name(awareness), dpi);
+    return true;  // SetWindowPos accepted the asynchronous, non-activating work-area request.
 }
 
 // PALMETTO_PRESENT_PLANE_RULE=measured: the measured second-plane rule (port/src/plane_compose_rule.h) replaces the
@@ -974,6 +1128,7 @@ XboxPresentWindow create_or_adopt_xbox_present_window() {
                              "window (docs/window.md)\n");
         return create_xbox_present_window();
     }
+    const bool fit_requested = fit_adopted_title_window(chosen.window, chosen.class_name);
     XboxPresentWindow adopted;
     adopted.window = chosen.window;
     adopted.width = chosen.client_width;
@@ -981,11 +1136,18 @@ XboxPresentWindow create_or_adopt_xbox_present_window() {
     adopted.shown = chosen.visible;
     adopted.show_on_first_frame = false;  // the title owns its window's visibility
     adopted.adopted = true;
-    std::fprintf(stderr,
-                 "[rt] present: adopting the title's own window (class \"%ls\", %ux%u client) instead of creating a "
-                 "second one: frames are presented into it, its title, size and visibility stay the title's "
-                 "(docs/window.md)\n",
-                 chosen.class_name, adopted.width, adopted.height);
+    if (fit_requested) {
+        std::fprintf(stderr,
+                     "[rt] present: adopting the title's own window (class \"%ls\", %ux%u client before the requested "
+                     "work-area fit); its title and visibility stay title-owned (docs/window.md)\n",
+                     chosen.class_name, adopted.width, adopted.height);
+    } else {
+        std::fprintf(stderr,
+                     "[rt] present: adopting the title's own window (class \"%ls\", %ux%u client) instead of creating a "
+                     "second one: frames are presented into it, its title, size and visibility stay the title's "
+                     "(docs/window.md)\n",
+                     chosen.class_name, adopted.width, adopted.height);
+    }
     return adopted;
 }
 
