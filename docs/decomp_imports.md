@@ -51,7 +51,7 @@ marked pending for that page.
 ## 2. The imported surface (measured)
 
 All 587 import entries bind at the dry run's mapping stage (the per-image table is
-[`reports/pe/game_scarlett_master.exe.md`](../reports/pe/game_scarlett_master.exe.md)); this page is about the code
+the local, gitignored `reports/pe/game_scarlett_master.exe.md` (not part of the repository)); this page is about the code
 calls into them, not about binding.
 
 | count | value | note |

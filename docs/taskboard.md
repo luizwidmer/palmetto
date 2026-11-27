@@ -135,7 +135,7 @@ Priority order is top to bottom within each lane.
 | D-02 | docs | Refresh the parity matrix audit trail for the peers' newest commits | maintainer | done (`cf0fb8174`) | [cleanroom_peers.md](cleanroom_peers.md) |
 | D-03 | ci | CI: run the GPU-free contract tests and the documentation checks on every pull request | maintainer | done (`2bb13be8b`) | [.github/workflows](../.github/workflows), [dev-tools.md](dev-tools.md) |
 | D-04 | docs | Index/link sweep: stale HEADs, dead links and out-of-date frontier descriptions | maintainer | done (`9edd62c44`) | [issues.md](issues.md), [README.md](README.md) |
-| D-05 | docs | Crash-report page follows the merged every-thread dump (O3): verify the page matches the shipped switch | open | open | [crash_report.md](crash_report.md) |
+| D-05 | docs | Crash-report page follows the merged every-thread dump (O3): verify the page matches the shipped switch | maintainer | done (`bcb030b44`, PR #6) | [crash_report.md](crash_report.md) |
 | D-06 | platform | Synthetic benchmark and launcher measurement correctness | spyro24955 | claimed | issue #4 claim comment |
 | D-07 | platform | D3D12XboxCreateDevice COM proxy interface investigation | spyro24955 | claimed | issue #4 claim comment |
 | D-08 | docs | Every-thread crash dump (O3): implemented and merged as #5 | XccQ114 | done | [crash_report.md](crash_report.md) |
