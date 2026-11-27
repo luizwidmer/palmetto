@@ -435,8 +435,7 @@ available trace does not directly instrument the `ffxDispatch` API entry or iden
 Thus this remains readiness-only, not a translation failure and not evidence that kind 7 skips composition. The one retry
 followed one device loss and was loss-free; the two-consecutive-loss rule was not reached, but the task's one-retry/three-arm
 budget is exhausted. Boot logs, metadata and JSONL traces remain outside the repository under
-`D:\leonida-work\fsrstable\boot-p28-kind7-20261127-1011` and
-`D:\leonida-work\fsrstable\boot-p28-kind7-retry-20261127-1014`; capture PPMs remain in the corresponding outside-repo
+two outside-repo boot directories named for the kind-7 arms (the `-1011` run and its `-1014` retry); capture PPMs remain in the corresponding outside-repo
 capture folders and were not copied here.
 
 **Next falsifier:** only after a stable host and a separately authorized arm, observe the first post-load FFX pipeline
