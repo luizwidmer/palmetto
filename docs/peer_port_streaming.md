@@ -698,3 +698,194 @@ Uncommitted files of this slice: the new include-only header under `port/src`, `
 `port/shims/d3d12_xs_device.h`, `port/test/xs_proxy_mock_test.cpp` and this section of `docs/peer_port_streaming.md`. No
 git write was made by this slice; boots and captures are under `D:\leonida-work\fsrstable\` outside the repository, and
 no game data is added: RVAs, counts, addresses-as-shapes, state words and image means only.
+
+## 12. Measured: implemented port 2 - a load read succeeds or fails terminally, so the reader's retry loop cannot park a worker
+
+**Status: measured, implemented, tested; opt-in and off by default.** This section implements rank 2 of the section 6
+plan. The title's own load reader (`game+0x314200`, its `ReadFile` at `game+0x314275`) retries a failed read until one of
+three errors comes back, and the peer audit names that loop as the one IO answer that can park a title thread silently
+(sections 3, 5.2 and 6). The port is our own terminal-outcome rule: a synchronous load read either completes (the
+existing first-touch repair commits the destination pages and the one retry succeeds) or fails with one of the errors the
+measured reader ends on. The switch is `PALMETTO_READ_TERMINAL`; unset is the previous path exactly. No peer code was
+copied: sections 1-9 are the audit this port was planned from, [upstream_port.md](upstream_port.md) is the policy and
+section 12.6 is the attribution.
+
+### 12.1 The measured retry and terminal shapes
+
+One 130 s measurement boot (`boot-readmeas1`) on the committed binary of its moment (`4D97F918...`, before this
+section's code, light, the content environment of `D:\leonida-work\fsrstable\boot_arm.ps1` plus the class-0xa mitigation
+`PALMETTO_TITLE_CLASS0A_SIZE=1`, `PALMETTO_FILE_TRACE=1`, `PALMETTO_DSTORAGE_TRACE=1` and `PALMETTO_WAIT_TRACE=30,60`):
+STOP at 106.3 s with one exception at `game+0x28cd3cc` (the stage-3 race of [decomp_first_ui.md](decomp_first_ui.md)
+section 17, after the load window) and one device loss (`present failed (VkResult -4)` immediately before the fault),
+15,751 startup-trace events and 192,227 D3D12 calls.
+
+| measurement | value |
+|---|---|
+| title `ReadFile` callers seen | `game+0xf43690` 4,096 B at +1.33 s, `game+0x314275` 4,096 B at +1.33 s, `game+0xf43769` 94,208 B at +22.15 s (first call per caller) |
+| first-touch file reads | **2**: 271,044,608 B / 4,136 pages at +21.68 s, 84,824,064 B / 1,295 pages at +101.93 s |
+| repair retries per read | **1** each: both retries then returned the whole request (`repaired:true`, `read` = `size`) |
+| reads that survived the repair | **0** - no measured read reached the title with a retryable error |
+| DirectStorage first-touch reads | **10**, all repaired with one retry (752-230,208 B of destination, 1-4 pages), 0 unrepairable |
+| the reader's retry loop (`game+0x3142B2`) | **0** calls at the +30 s and +60 s wait-trace dumps (no `NtDelayExecution` row at that site), against 68,608 measured pre-repair ([readfile_first_touch.md](readfile_first_touch.md)) |
+| a worker parked inside the loop | not applicable in this boot: the loop does not start; the measured stop is the stage-3 title fault above |
+
+So at this content population the rule's **success half is measured and its failure half is a latent hazard**: the repair
+wins every measured read. The hazard is a destination the repair cannot make writable - a refused or poisoned range, a
+destination past the 1 GiB walk cap, or any other transient host error - and the previous path's answer for it is the
+host's error (`ERROR_NOACCESS`), which the measured reader treats as transient and re-issues after `Sleep(1)`. The port
+converts that survivor once; the boot that exercises the conversion is 12.5's next falsifier.
+
+### 12.2 The design
+
+Our own mechanism, in our structure and naming: a pure policy in `port/shims/first_touch.h` (the include-only header the
+two copy-into-title-memory shims already share for the page walk), the file shim's read path, and the storage shim's
+existing terminal status delivery.
+
+| piece | what it does |
+|---|---|
+| the terminal set | `rt::first_touch::is_terminal_read_error()` names the three errors the measured reader ends on: `ERROR_INVALID_HANDLE` (6), `ERROR_HANDLE_EOF` (0x26) and `ERROR_INVALID_PARAMETER` (0x57) ([wait_forensics.md](wait_forensics.md) section 5) |
+| the conversion | `kTerminalReadError` is `ERROR_INVALID_PARAMETER` (0x57): of the three it names the failed argument (the destination range the kernel cannot write) rather than the file's state, so it cannot read in the title as end-of-data and continue with a short buffer |
+| the refusals | `converts_to_terminal()` refuses an `ERROR_IO_PENDING` read (the host's overlapped contract owns that outcome), an error already in the terminal set, and a null or empty destination (the host's answer for a caller argument is already terminal); each refusal is named where it happens |
+| the switch | `terminal_reads_enabled()` parses `PALMETTO_READ_TERMINAL` with the project's spelling convention (set and not `0`/`off`/`false`/`no`, case-insensitive, blanks ignored); unset is the default path |
+
+- **The file path** (`port/shims/file_system.cpp`): a failed synchronous `ReadFile` gets one bounded retry and then a
+  terminal answer. A first-touch error (the shared `is_kernel_write_blocked` gate: `ERROR_NOACCESS`,
+  `ERROR_INVALID_USER_BUFFER`) commits the destination pages through `rt::first_touch::commit_range()` and retries once;
+  any other transient error is retried once unchanged. A successful retry is a completed read and the existing
+  `file_read_noaccess` repair event is unchanged. A failed retry that is already terminal is returned as it is; every
+  other survivor is converted once to `kTerminalReadError`, with `*read` set to 0, and the conversion is counted and
+  named. A destination whose repair and retry already failed is answered from the existing one-slot memo with the
+  terminal error and no second page walk, so a title re-issuing the read cannot spin the walk either; the walk keeps its
+  `rt::first_touch::kPageLimit` bound and one touch per page.
+- **The storage path** (`port/shims/dstorage.cpp`): the worker already runs each request exactly once and the status
+  array entry reports the first failure since the previous status entry ([streamed_consumer.md](streamed_consumer.md)
+  sections 6b-6d, section 3 of this page), so a file-range read's failure is already terminal to the title and the rule
+  changes no HRESULT there. The switch names and counts the failure that survived the one repair retry
+  (`dstorage_read_terminal`), so a boot can tell a repaired read from one the title received as a terminal request
+  status; with the switch off the function returns the same `read_error()` answer as before and writes nothing.
+- **Measurement only, bounded**: `file_read_terminal` (the first 256 conversions, then one per 1,024; api, from/to
+  error, size, pages, attempts, count, caller), `file_read_retry` and `file_read_terminal_refused` (first 64 each),
+  `dstorage_read_terminal` (first 128), one stderr line per run for the first conversion, one for the first storage
+  terminal status, and one startup sentence when the switch is on. No event or line appears with the switch off.
+- **What is deliberately not changed**: the default path is the previous code (the switch is consulted only after a
+  host read has already failed; the off arm's successful and repair paths are byte-for-byte the previous behaviour), the
+  page walk's bound, the memo's shape, the storage queue's status and HRESULT semantics, xmem, and the title's own
+  state. No `Sleep`, no retry loop and no attempt to write title-side state.
+
+### 12.3 Tests
+
+`port/test/file_system_test.cpp` (the gate target) went from 512 to **538 checks, 0 failures** (26 added). The fixture
+is the existing synthetic one - a temporary file of generated bytes, a `SEC_RESERVE` view and a vectored handler that
+commits a page only on user-mode touch, the shape `xmem` presents - and `_putenv_s` toggles the switch inside the one
+process. No xmem, no GPU, no game data. No DirectStorage test was added: `port/test/dstorage_test.cpp` does not link
+`port/shims/dstorage.cpp` (it covers `dstorage_advanced.h`), wiring a new target would need a `CMakeLists.txt` change
+outside this slice's write scope, and the storage half changes no behaviour - it only names and counts a survivor - so
+the A/B's zero `dstorage_read_terminal` events are its measurement.
+
+| check group | what it proves |
+|---|---|
+| switch parsing | every off spelling (unset, empty, `0`, `off`, `OFF`, `false`, `No`, surrounding blanks) leaves the default path and every on spelling enables the rule |
+| the terminal policy | the terminal set is exactly the three measured errors and not `998`/`997`; the conversion's error is `0x57`, not `0x26`; an `ERROR_IO_PENDING` read, an already-terminal error and a null/empty destination are refused |
+| terminal failure | a synchronous read into a destination page the handler refuses (never committable) returns `0x57` instead of the host's `998`, after exactly one repair retry |
+| retry-once | the refused destination is walked each page at most once through the one retry and the walk bound holds; a second call is answered from the memo with the same terminal error and no new walk |
+| terminal success | the existing repair checks still pass: a first-touch destination is committed and the read returns every byte; a committed destination reads the same through host and shim |
+| the reader's loop | a bounded simulation of the measured predicate (success or 6/0x26/0x57 ends it) never ends in 8 attempts with the switch off, and ends on the first attempt with the switch on |
+| the default path | with the switch off the same refused destination keeps the host's `ERROR_NOACCESS`, which is the measured loop's shape |
+
+### 12.4 A/B boots
+
+Two 130 s light boots, one binary `3BE83E40...`, one at a time under `_setup/boot_lock.ps1`, the content environment of
+`D:\leonida-work\fsrstable\boot_arm.ps1` plus the class-0xa mitigation `PALMETTO_TITLE_CLASS0A_SIZE=1` and
+`PALMETTO_FILE_TRACE=1` in every arm; arm A leaves `PALMETTO_READ_TERMINAL` unset, arm B sets it to `1` (both arms alive
+to the timeout). The stage-3 race cost retries: four of this slice's six boots stopped on it, three of them with a device
+loss (`present failed (VkResult -4)`, then a fatal `0xC0000005` at `game+0x43adfea`, `game+0x55aa29b` or
+`game+0x28cd3cc` 1-2 s later), each after the measured reads and on title code, never inside this slice's files; those
+excluded arms measured the same read shapes as the reported ones (for example the first off retry,
+`boot-readterm2-off`, stopped at 67.3 s with 2 file repairs, 10 direct storage repairs and 0 terminal conversions). The
+reported pair is the clean on arm (`boot-readterm2-on`, 130.3 s) with the clean off retry (`boot-readterm3-off`,
+130.2 s), both on the final binary; no arm after that pair was retried. The shared tree also carried other slices'
+in-flight `port/src/main.cpp`, `port/shims/xmem.cpp` and `port/shims/d3d12_vulkan_device.cpp` changes, identical in both
+arms and outside this slice's files, so the pair is a real A/B for this class but not a pristine one-file pair.
+
+| measurement | A: switch off (`boot-readterm3-off`) | B: switch on (`boot-readterm2-on`) |
+|---|---|---|
+| verdict / exceptions / device losses | ALIVE 130.2 s (harness timeout), 0, 0 | ALIVE 130.3 s (harness timeout), 0, 0 |
+| D3D12 calls / startup-trace events | 468,788 / 20,372 | 406,518 / 20,661 |
+| title `ReadFile` callers | the same 3 callers and first sizes as 12.1 | the same 3 callers and first sizes as 12.1 |
+| first-touch file reads repaired | **2**: 271,044,608 B / 4,136 pages at +22.74 s; 84,824,064 B / 1,295 pages at +61.22 s | **2**: 271,044,608 B / 4,136 pages at +21.26 s; 84,824,064 B / 1,295 pages at +59.02 s |
+| repair retries per read / reads that survived | 1 each / **0** | 1 each / **0** |
+| terminal conversions / retried transients / refusals | **0 / 0 / 0** (no event) | **0 / 0 / 0** (no event) |
+| the switch's startup sentence | absent | **1 line** |
+| DirectStorage first-touch reads (all repaired) | **16** | **11** |
+| DirectStorage terminal statuses | 0 | 0 |
+| state words at 128 s (init / loading / session / machine) | 3 / 2 / 3 / current 3 next 3 (last changes 64, 62, 64 s) | 3 / 2 / 3 / current 3 next 3 (last changes 62, 58, 62 s) |
+| movie player at 128 s | state `0x9`, buffers 0, open 1 | state `0x9`, buffers 0, open 1 |
+| class-0xa upload | `image+0x1555c10 redirected at 3 direct call site(s)` | the same line and count |
+| captures / pixels | 9 captured frames, 2564x1421, every mean rgb `0.00 0.00 0.00` | 12 captured frames, 2564x1421, every mean rgb `0.00 0.00 0.00` |
+
+**Verdict: the on arm runs the rule on both measured first-touch reads and changes nothing else; the conversion is
+unexercised at this content population, which is the port's stated falsifier.** The two arms agree on the reads, the
+repair counts, the one retry per read, the zero terminal outcomes, the state words, the movie state and the captured
+pixels. The only differences are rate counters - D3D12 calls and captured frames - where one pair on a shared host
+cannot separate the switch from host load and the title's own frame cadence (the same limit as section 10.5). The pair
+does not prove the written-off failure letter of the rule in a boot: no read fails twice here, which is exactly why the
+rule's unit tests carry the conversion and why 12.5 names the arm that would measure it.
+
+### 12.5 Limits and the next falsifier
+
+- **The failure half is unit-tested, not boot-tested.** Every measured read is repaired on its first retry, so no
+  conversion ran in either A/B arm and the written-off error (0x57) is a tested choice, not a measured title handling.
+  **Next falsifier:** one diagnostic arm whose measured load destination cannot be committed (a test-only switch that
+  refuses the first touched page of the first-touch repair) would show the `file_read_terminal` event, the terminal
+  error the loader reports and whether the loader fails the job instead of parking. It is not implemented here because
+  the A/B must first measure the untouched population; the unit test's simulated reader loop is the bounded stand-in.
+- **Which of the three terminal errors is best is unmeasured.** 6, 0x26 and 0x57 all end the measured loop; 0x57 is
+  chosen because it cannot read as end-of-data, but a loader that handles 0x26 as "this stream ended" and fails cleanly
+  would be a better mapping if a boot measured that. The mapping is one constant in `first_touch.h`.
+- **The 1 GiB walk cap becomes a terminal failure, not a silent retry.** A destination larger than 262,144 pages whose
+  tail cannot be committed gets the conversion after the one retry; the measured reads are 258.5 MiB and 80.9 MiB, so
+  the cap is a bound, not a measurement.
+- **Asynchronous reads are not converted.** An overlapped read that reports `ERROR_IO_PENDING` keeps the host's
+  answer because the completion is the host's; the title's final error for it is not something this shim observes. No
+  measured title call is asynchronous ([readfile_first_touch.md](readfile_first_touch.md) section 2.1), so this is a
+  named refusal, not a measured case.
+- **The storage half changes no HRESULT.** Its terminal delivery is the status array, measured before this slice; the
+  switch only names and counts a survivor. A title that re-enqueues a failed request would still retry title-side, and
+  that retry is not something the shim converts (unmeasured, and the loader's request stream measured no failed entry
+  in either arm).
+- **One machine, one copy, one backend.** The pair is one RTX 4090 / Vulkan boot each, the stage-3 race costs retries
+  (12.4), and the state words do not move in either arm because this port is not a stage mover at this population.
+- **Default off, honestly.** The switch is off because the failure half is unmeasured; what would make it default is a
+  measured population where a read survives the repair and the loader's own handling of the terminal answer is seen.
+
+### 12.6 Cross-check against the peers, attribution and uncommitted files
+
+The mechanism was cross-checked against the refreshed peer snapshots of this round (Five Star Recomp `ce2b333b`,
+VIctory `63bcca4`, PercyScarlett `e44c465`, victory-fork `9a9091d`, XCL `623d02e`; section 1 pins the audit's older
+SHAs), read as evidence only. **Five Star Recomp**: `src/FiveStar.Loader/Shims/Storage/StatusArrayMethods.cs`,
+`StatusEntry.cs`, `QueueItemKind.cs`, `ReadSlot.cs` and `RequestExecutor.cs` - a status entry completes with the first
+failure since the previous status entry and the worker runs each request once, and a short read in `ReadSlot.Wait` is
+`ERROR_HANDLE_EOF`; that is the terminal delivery our storage half composes with. **PercyScarlett, VIctory and
+victory-fork**: `crates/victory-hle/src/modules/dstorage.rs` - one worker pool, in-order status completion, one terminal
+result per request. **XCL**: `crates/xcl/src/hle/dstorage.rs` - one worker thread per queue and a status array whose
+entries carry the request failure. What agrees is the per-request terminal result; what is ours and differs is the
+delivery form: the title calls `ReadFile` directly, not through a queue, so the terminal answer has to be an error the
+title's own reader ends on, and the measured three-error set ([wait_forensics.md](wait_forensics.md) section 5) plus the
+one conversion are this project's own measurement. None of the five peers publishes the reader's loop. The public
+reference fork used for the earlier read slices, `ubiquitarianism/leonida` commit `779f901084`
+(`RT-READFILE-NOACCESS`), does the same one-repair retry and then returns the host's error; our A/B agrees with its
+measured failure and the port deliberately differs on the terminal answer.
+
+This section was implemented from this project's own measurements (the boot in 12.1, the reader's loop measured in
+[wait_forensics.md](wait_forensics.md) section 5, the repair A/B of [readfile_first_touch.md](readfile_first_touch.md)),
+with the peer files above read as reference only under [upstream_port.md](upstream_port.md). No code, comment text,
+identifier or table was copied from any of them, and their trees remain the copyright of their contributors under their
+own licences. The `NOTICE.md` row for this slice is the lead's to add at commit time: Five Star Recomp
+(GPL-3.0-or-later, `ce2b333b`), PercyScarlett (GPL-2.0-only, `e44c465`), VIctory (GPL-3.0-or-later, `63bcca4`),
+victory-fork (GPL-3.0-or-later, `9a9091d`), XCL (GPL-2.0-only, `623d02e`) and the reference
+`ubiquitarianism/leonida` (GPL-3.0, `779f901084`). Uncommitted files of this slice: `port/shims/first_touch.h`,
+`port/shims/file_system.cpp`, `port/shims/dstorage.cpp`, `port/test/file_system_test.cpp` and this section of
+`docs/peer_port_streaming.md`. No git write was made by this slice; boots and captures are under
+`D:\leonida-work\fsrstable\` outside the repository, and no game data is added: RVAs, Win32/HRESULT codes, sizes, page
+counts, counts, times, state words and image means only.
+

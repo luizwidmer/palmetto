@@ -1679,6 +1679,41 @@ void note_ds_first_touch(DWORD error, std::uint32_t size, DWORD pages, bool repa
                                      rt::startup_trace::where(reinterpret_cast<std::uint64_t>(caller))));
 }
 
+// PALMETTO_READ_TERMINAL on the storage path (docs/peer_port_streaming.md section 12). A file-range request's outcome
+// is already terminal to the title: the worker runs each entry exactly once (no requeue, no retry beyond the one
+// first-touch repair) and the status array entry reports the first failure since the previous status entry - the
+// measured delivery of docs/streamed_consumer.md and docs/peer_port_streaming.md section 3. This half of the rule
+// therefore changes no HRESULT; it names and counts the read failure that survived the one repair retry, so a boot can
+// tell a repaired read from one the title received as a terminal request failure. With the switch off it returns the
+// same HRESULT as before and writes nothing.
+std::atomic<std::uint64_t> g_ds_terminal_reads{0};
+
+HRESULT ds_read_failure(DWORD error, std::uint32_t size, DWORD pages, bool retried, const void* caller) {
+    const HRESULT hr = read_error(error);
+    if (!rt::first_touch::terminal_reads_enabled(std::getenv("PALMETTO_READ_TERMINAL"))) return hr;
+    const std::uint64_t count = g_ds_terminal_reads.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count == 1)
+        std::fprintf(stderr,
+                     "[rt] dstorage: a file-range read failure reaches the title as the terminal request status 0x%08lx "
+                     "(PALMETTO_READ_TERMINAL; %lu byte(s) of destination, %lu page(s) touched, retried=%s; counted, "
+                     "logged once per run)\n",
+                     static_cast<unsigned long>(hr), static_cast<unsigned long>(size),
+                     static_cast<unsigned long>(pages), retried ? "yes" : "no");
+    if (rt::startup_trace::enabled() && count <= kDsFirstTouchLogLimit) {
+        char fields[256];
+        std::snprintf(fields, sizeof fields,
+                      "\"api\":\"IDStorageQueueX::EnqueueRequest\",\"error\":%lu,\"hr\":\"0x%08lx\",\"size\":%lu,"
+                      "\"pages\":%lu,\"retried\":%s,\"count\":%llu,\"caller\":%s",
+                      static_cast<unsigned long>(error), static_cast<unsigned long>(hr),
+                      static_cast<unsigned long>(size), static_cast<unsigned long>(pages),
+                      retried ? "true" : "false", static_cast<unsigned long long>(count),
+                      rt::startup_trace::quote(rt::startup_trace::where(reinterpret_cast<std::uint64_t>(caller)))
+                          .c_str());
+        rt::startup_trace::event("dstorage_read_terminal", fields);
+    }
+    return hr;
+}
+
 // Reads exactly "size" bytes at "offset" of a synchronous handle into "destination".
 HRESULT read_file_range(HANDLE handle, uint64_t offset, void* destination, uint32_t size) {
     LARGE_INTEGER length{};
@@ -1695,12 +1730,14 @@ HRESULT read_file_range(HANDLE handle, uint64_t offset, void* destination, uint3
         DWORD got = 0;
         if (!ReadFile(handle, out + done, size - done, &got, &at)) {
             const DWORD error = GetLastError();
-            if (!rt::first_touch::is_kernel_write_blocked(error)) return read_error(error);
+            if (!rt::first_touch::is_kernel_write_blocked(error))
+                return ds_read_failure(error, size - done, 0, false, _ReturnAddress());
             const std::uint32_t left = size - done;
             const auto chunk = reinterpret_cast<std::uintptr_t>(out + done);
             if (g_ds_repair_failed_destination.load(std::memory_order_relaxed) == chunk &&
                 g_ds_repair_failed_size.load(std::memory_order_relaxed) == left) {
-                return read_error(error);  // walked once already and the retry failed: do not walk it again
+                // Walked once already and the retry failed: do not walk it again; the status reports this failure.
+                return ds_read_failure(error, left, 0, false, _ReturnAddress());
             }
             const DWORD pages = rt::first_touch::commit_range(out + done, left);
             OVERLAPPED retry{};
@@ -1713,7 +1750,7 @@ HRESULT read_file_range(HANDLE handle, uint64_t offset, void* destination, uint3
                 g_ds_repair_failed_size.store(left, std::memory_order_relaxed);
                 g_ds_repair_failed_destination.store(chunk, std::memory_order_relaxed);
                 note_ds_first_touch(retry_error, left, pages, false, _ReturnAddress());
-                return read_error(retry_error);
+                return ds_read_failure(retry_error, left, pages, true, _ReturnAddress());
             }
         }
         if (got == 0) return E_DSTORAGE_END_OF_FILE;  // the file shrank since the size check

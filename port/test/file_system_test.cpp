@@ -349,7 +349,113 @@ void run(const std::filesystem::path& folder, ReadFileFn host, ReadFileFn shim) 
         g_refuse = nullptr;
     }
 
+    // ---- PALMETTO_READ_TERMINAL: the terminal-outcome rule (docs/peer_port_streaming.md section 12) ------------------
+    // The measured title reader ends its retry loop only on ERROR_INVALID_HANDLE, ERROR_HANDLE_EOF and
+    // ERROR_INVALID_PARAMETER (docs/wait_forensics.md section 5); every other error is transient and re-issued. The
+    // rule converts a synchronous read that the one repair retry does not make succeed into the terminal error once.
+    // The pure policy first: the switch spellings, the terminal set, the conversion's own error, the refusal cases.
+    for (const char* off : {"", "0", "off", "OFF", "false", "No", " off "})
+        check(!rt::first_touch::terminal_reads_enabled(off), "PALMETTO_READ_TERMINAL is off for every off spelling");
+    for (const char* on : {"1", "on", "ON", "true", "yes", " on "})
+        check(rt::first_touch::terminal_reads_enabled(on), "PALMETTO_READ_TERMINAL is on for every on spelling");
+    check(rt::first_touch::is_terminal_read_error(ERROR_INVALID_HANDLE) &&
+              rt::first_touch::is_terminal_read_error(ERROR_HANDLE_EOF) &&
+              rt::first_touch::is_terminal_read_error(ERROR_INVALID_PARAMETER) &&
+              !rt::first_touch::is_terminal_read_error(ERROR_NOACCESS) &&
+              !rt::first_touch::is_terminal_read_error(ERROR_IO_PENDING),
+          "the terminal set is exactly the three errors the title's reader ends on");
+    check(rt::first_touch::kTerminalReadError == ERROR_INVALID_PARAMETER,
+          "the conversion uses the invalid-parameter error, not an end-of-file that reads as a truncated load");
+    char policy_buffer[0x1000] = {};
+    check(rt::first_touch::converts_to_terminal(ERROR_NOACCESS, policy_buffer, 0x1000) &&
+              !rt::first_touch::converts_to_terminal(ERROR_IO_PENDING, policy_buffer, 0x1000) &&
+              !rt::first_touch::converts_to_terminal(ERROR_HANDLE_EOF, policy_buffer, 0x1000) &&
+              !rt::first_touch::converts_to_terminal(ERROR_NOACCESS, nullptr, 0x1000) &&
+              !rt::first_touch::converts_to_terminal(ERROR_NOACCESS, policy_buffer, 0),
+          "a pending asynchronous read, an already-terminal error and a destination-less call are refused the "
+          "conversion");
+
+    // The rule in the shim: a page the handler refuses cannot be repaired, so the one retry fails. With the switch on
+    // the shim converts that survivor once into the terminal error; the next call is answered from the memo without a
+    // second page walk. With the switch off the host's ERROR_NOACCESS comes back - the measured shape the title's
+    // reader retries forever.
+    constexpr std::size_t kTermViewSize = 0x40000;
+    constexpr DWORD kTermReadSize = 0x20000;
+    HANDLE term_section = nullptr;
+    g_size = kTermViewSize;
+    char* const term_view = reserve_view(kTermViewSize, &term_section);
+    g_view = term_view;
+    check(term_view != nullptr, "a reserve-only view is set up for the terminal-outcome checks");
+    if (term_view) {
+        g_refuse = term_view + 0x10000;
+        const int faults_before = g_faults;
+        check(_putenv_s("PALMETTO_READ_TERMINAL", "1") == 0,
+              "the terminal switch can be set for one process's checks");
+        const auto converted = read_at(shim, file, 0, term_view, kTermReadSize);
+        check(!converted.ok && converted.error == rt::first_touch::kTerminalReadError,
+              "with the switch on a read the one repair retry cannot make succeed ends in the terminal error");
+        check(rt::first_touch::is_terminal_read_error(converted.error),
+              "the converted error is one the title's reader ends its retry loop on");
+        const int walked = g_faults - faults_before;
+        check(walked >= 1 && walked <= static_cast<int>(kTermReadSize / 0x1000),
+              "the conversion walked each destination page at most once through the one retry, then stopped");
+        const int faults_after_walk = g_faults;
+        const auto again = read_at(shim, file, 0, term_view, kTermReadSize);
+        check(!again.ok && again.error == rt::first_touch::kTerminalReadError && g_faults == faults_after_walk,
+              "a title re-issuing the same unreadable read is answered from memory with the same terminal error and no "
+              "second walk");
+        _putenv_s("PALMETTO_READ_TERMINAL", "0");
+        const auto off_again = read_at(shim, file, 0, term_view, kTermReadSize);
+        check(!off_again.ok && off_again.error == ERROR_NOACCESS,
+              "with the switch off the same read keeps the host's transient error (the previous path)");
+        g_refuse = nullptr;
+    }
+
+    // The title's loop itself, bounded at 8 attempts: the measured predicate (success or one of the three terminal
+    // errors ends it) never ends with the switch off, and ends on the first attempt with the switch on.
+    HANDLE loop_section = nullptr;
+    g_size = kTermViewSize;
+    char* const loop_view = reserve_view(kTermViewSize, &loop_section);
+    g_view = loop_view;
+    check(loop_view != nullptr, "a third reserve-only view runs the title reader's bounded retry loop");
+    if (loop_view) {
+        g_refuse = loop_view + 0x10000;
+        _putenv_s("PALMETTO_READ_TERMINAL", "0");
+        int off_attempts = 0;
+        bool off_terminal = false;
+        while (off_attempts < 8) {
+            ++off_attempts;  // 1-based, so the checks read as "attempts made"
+            const auto attempt = read_at(shim, file, 0, loop_view, kTermReadSize);
+            if (attempt.ok || rt::first_touch::is_terminal_read_error(attempt.error)) {
+                off_terminal = true;
+                break;
+            }
+        }
+        check(!off_terminal && off_attempts == 8,
+              "with the switch off the measured reader's loop never reaches a terminal outcome (8 attempts, all "
+              "transient)");
+        _putenv_s("PALMETTO_READ_TERMINAL", "1");
+        int on_attempts = 0;
+        bool on_terminal = false;
+        while (on_attempts < 8) {
+            ++on_attempts;
+            const auto attempt = read_at(shim, file, 0, loop_view, kTermReadSize);
+            if (attempt.ok || rt::first_touch::is_terminal_read_error(attempt.error)) {
+                on_terminal = true;
+                break;
+            }
+        }
+        check(on_terminal && on_attempts == 1,
+              "with the switch on the same loop ends on its first attempt with a terminal error");
+        _putenv_s("PALMETTO_READ_TERMINAL", "");
+        g_refuse = nullptr;
+    }
+
     ::RemoveVectoredExceptionHandler(handler);
+    if (loop_view) ::UnmapViewOfFile(loop_view);
+    if (loop_section) ::CloseHandle(loop_section);
+    if (term_view) ::UnmapViewOfFile(term_view);
+    if (term_section) ::CloseHandle(term_section);
     if (refused_view) ::UnmapViewOfFile(refused_view);
     if (refused_section) ::CloseHandle(refused_section);
     ::UnmapViewOfFile(first_view);

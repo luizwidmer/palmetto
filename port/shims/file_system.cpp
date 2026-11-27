@@ -778,6 +778,116 @@ void note_read_failure(DWORD size, DWORD pages, DWORD bytes_read, bool repaired,
                                  std::to_string(count) + ",\"caller\":" + rt::startup_trace::quote(read_caller(caller)));
 }
 
+// PALMETTO_READ_TERMINAL: the opt-in terminal-outcome rule (first_touch.h and docs/peer_port_streaming.md section 12).
+// The measured title reader (docs/wait_forensics.md section 5) ends its retry loop only on ERROR_INVALID_HANDLE (6),
+// ERROR_HANDLE_EOF (0x26) and ERROR_INVALID_PARAMETER (0x57); every other error is transient and re-issued after
+// Sleep(1). A synchronous read this shim cannot make succeed - the one repair retry also failed, or the failure is not
+// a first-touch one - is therefore converted once into rt::first_touch::kTerminalReadError instead of being returned as
+// a transient error the title would retry forever. The switch is consulted on a failed read only, so the default path
+// is the previous code exactly (the off arm of the A/B is byte-identical on the success path and on the repair path).
+std::atomic<std::uint64_t> g_terminal_conversions{0};
+std::atomic<std::uint64_t> g_terminal_retries{0};   // a transient failure the rule retried and the retry succeeded
+std::atomic<std::uint64_t> g_terminal_refusals{0};  // an ERROR_IO_PENDING read left to the host's overlapped contract
+
+void note_terminal_switch() {
+    static std::atomic<bool> announced{false};
+    if (announced.exchange(true, std::memory_order_relaxed)) return;
+    std::fprintf(stderr,
+                 "[rt] fs: terminal read outcomes on (PALMETTO_READ_TERMINAL): a synchronous ReadFile the one repair "
+                 "retry does not make succeed is converted once to the terminal error the title's reader ends on; an "
+                 "asynchronous read (ERROR_IO_PENDING) keeps the host's answer\n");
+}
+
+void note_terminal_conversion(DWORD from_error, DWORD to_error, DWORD size, DWORD pages, int attempts,
+                              const void* caller) {
+    const std::uint64_t count = g_terminal_conversions.fetch_add(1, std::memory_order_relaxed) + 1;
+    static std::atomic<bool> announced{false};
+    if (!announced.exchange(true, std::memory_order_relaxed))
+        std::fprintf(stderr,
+                     "[rt] fs: ReadFile at %s failed with the transient error %lu and the one retry failed too; "
+                     "converted it once to the terminal error %lu the title's reader ends on (%lu byte(s), %lu "
+                     "page(s) touched, %d attempt(s); logged once per run)\n",
+                     read_caller(caller).c_str(), static_cast<unsigned long>(from_error),
+                     static_cast<unsigned long>(to_error), static_cast<unsigned long>(size),
+                     static_cast<unsigned long>(pages), attempts);
+    if (!rt::startup_trace::enabled()) return;
+    if (count > kReadFailureLogLimit && (count & 1023) != 0) return;
+    rt::startup_trace::event("file_read_terminal",
+                             "\"api\":\"ReadFile\",\"from_error\":" + std::to_string(from_error) +
+                                 ",\"to_error\":" + std::to_string(to_error) +
+                                 ",\"size\":" + std::to_string(size) + ",\"pages\":" + std::to_string(pages) +
+                                 ",\"attempts\":" + std::to_string(attempts) + ",\"count\":" + std::to_string(count) +
+                                 ",\"caller\":" + rt::startup_trace::quote(read_caller(caller)));
+}
+
+void note_terminal_retry(DWORD error, DWORD size, const void* caller) {
+    const std::uint64_t count = g_terminal_retries.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (!rt::startup_trace::enabled() || count > 64) return;
+    rt::startup_trace::event("file_read_retry",
+                             "\"api\":\"ReadFile\",\"error\":" + std::to_string(error) +
+                                 ",\"size\":" + std::to_string(size) + ",\"attempts\":2,\"count\":" +
+                                 std::to_string(count) + ",\"caller\":" +
+                                 rt::startup_trace::quote(read_caller(caller)));
+}
+
+void note_terminal_refusal(const char* reason, DWORD error, DWORD size, const void* caller) {
+    const std::uint64_t count = g_terminal_refusals.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (!rt::startup_trace::enabled() || count > 64) return;
+    rt::startup_trace::event("file_read_terminal_refused",
+                             std::string("\"api\":\"ReadFile\",\"reason\":\"") + reason +
+                                 "\",\"error\":" + std::to_string(error) + ",\"size\":" + std::to_string(size) +
+                                 ",\"count\":" + std::to_string(count) + ",\"caller\":" +
+                                 rt::startup_trace::quote(read_caller(caller)));
+}
+
+// The conversion itself: no complete read was delivered, so the byte count is zero and the error is the terminal one.
+// The conversion is counted and named (one stderr line per run, a bounded startup-trace event per conversion).
+BOOL terminal_failure(DWORD from_error, DWORD size, DWORD pages, int attempts, const void* caller, LPDWORD read) {
+    if (read) *read = 0;
+    note_terminal_conversion(from_error, rt::first_touch::kTerminalReadError, size, pages, attempts, caller);
+    ::SetLastError(rt::first_touch::kTerminalReadError);
+    return FALSE;
+}
+
+// One failed synchronous read under PALMETTO_READ_TERMINAL: the repair path's retry, or one bounded retry of any other
+// transient error, and then a terminal conversion. Never a loop: the second failure is either already one of the three
+// errors the title ends on (returned as it is) or is converted once.
+BOOL read_file_terminal(HANDLE file, LPVOID buffer, DWORD size, LPDWORD read, LPOVERLAPPED overlapped, DWORD error,
+                        const void* caller) {
+    note_terminal_switch();
+    if (!rt::first_touch::converts_to_terminal(error, buffer, size)) {
+        if (error == ERROR_IO_PENDING) note_terminal_refusal("overlapped", error, size, caller);
+        ::SetLastError(error);
+        return FALSE;
+    }
+    // A destination whose repair and one retry already failed is answered from memory: convert immediately rather than
+    // walking it again, so a title re-issuing the same read cannot spin the page walk either.
+    if (g_repair_failed_buffer.load(std::memory_order_relaxed) == reinterpret_cast<std::uintptr_t>(buffer) &&
+        g_repair_failed_size.load(std::memory_order_relaxed) == size)
+        return terminal_failure(error, size, 0, 1, caller, read);
+    DWORD pages = 0;
+    if (rt::first_touch::is_kernel_write_blocked(error)) pages = rt::first_touch::commit_range(buffer, size);
+    if (::ReadFile(file, buffer, size, read, overlapped)) {  // the one and only retry
+        if (pages) {
+            note_read_failure(size, pages, read ? *read : 0, true, caller);
+        } else {
+            note_terminal_retry(error, size, caller);
+        }
+        return TRUE;
+    }
+    const DWORD retry_error = ::GetLastError();
+    if (rt::first_touch::is_kernel_write_blocked(error)) {
+        g_repair_failed_size.store(size, std::memory_order_relaxed);
+        g_repair_failed_buffer.store(reinterpret_cast<std::uintptr_t>(buffer), std::memory_order_relaxed);
+        note_read_failure(size, pages, 0, false, caller);
+    }
+    if (rt::first_touch::is_terminal_read_error(retry_error)) {
+        ::SetLastError(retry_error);  // already terminal to the measured reader: return it, do not convert it again
+        return FALSE;
+    }
+    return terminal_failure(retry_error, size, pages, 2, caller, read);
+}
+
 // Measurement only, behind the existing PALMETTO_FILE_TRACE switch: the first ReadFile of each distinct caller
 // (bounded to 16), so a boot says whether the title's reads go through this shim at all.
 std::atomic<std::uint64_t> g_read_callers[16]{};
@@ -809,6 +919,9 @@ BOOL WINAPI read_file(HANDLE file, LPVOID buffer, DWORD size, LPDWORD read, LPOV
         return TRUE;
     }
     const DWORD error = ::GetLastError();
+    if (rt::first_touch::terminal_reads_enabled(std::getenv("PALMETTO_READ_TERMINAL")))
+        return read_file_terminal(file, buffer, size, read, overlapped, error, _ReturnAddress());
+    // The default path: the measured ERROR_NOACCESS repair, one retry, and the host's error if that retry fails.
     if (error != ERROR_NOACCESS || !buffer || size == 0) {
         ::SetLastError(error);
         return FALSE;
