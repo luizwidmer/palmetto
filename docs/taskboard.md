@@ -22,8 +22,10 @@ claim does not start with a guess.
    claiming: <ID> — <one line on the approach and the files you expect to touch>
    ```
 
-   Only `P-`, `C-` and `D-` rows marked `open`, and only when nothing in the open pull requests already does the work. `F-`
-   rows and rows marked `maintainer` are the maintainer's lane: ask in the issue before starting one.
+   Only `P-`, `C-`, `D-` and `F-` rows marked `open`, and only when nothing in the open pull requests already does the
+work. Rows marked `maintainer` are the maintainer's lane: ask in the issue before starting one. The frame frontier is now
+claimable one at a time: an open `F-` row can be claimed by any contributor with a short plan and the evidence page;
+`F-01` and `F-02` stay blocked until the maintainer routes the diagnostic state-2 redirect.
 3. Open a small pull request that names the task: `Task: <ID>` in the body, plus the disclosure and test/GPU statements
    [AGENTS.md](../AGENTS.md) asks for. One task per pull request; if the work needs a second task, claim that one
    separately.
@@ -55,17 +57,17 @@ or a maintainer branch exists. `in review` - waiting on review/CI. `blocked` - t
 Rows the maintainer owns or that are running right now are marked in the owner column; everything else is claimable.
 Priority order is top to bottom within each lane.
 
-### Frame frontier (maintainer lane)
+### Frame frontier (claimable, one at a time)
 
 | ID | area | task | owner | status | evidence page |
 |---|---|---|---|---|---|
 | F-01 | frontier | Name and complete the title's session-3 out-record state so the loading record can complete; needs maintainer routing of the diagnostic state-2 redirect | maintainer | blocked | [decomp_stage.md](decomp_stage.md) sections 14-15 |
 | F-02 | frontier | Get the movie draw to issue (frame-buffer registration and decode hits) once F-01 moves | maintainer | blocked | [decomp_first_ui.md](decomp_first_ui.md) sections 14-17 |
-| F-03 | frontier | The media/UI present body still exits on two keys; its only type-0x24 producer is unreferenced - find the reachable path (static lead) | maintainer | open | [decomp_first_ui.md](decomp_first_ui.md) section 11 |
-| F-04 | frontier | Content producer and colour input: carry the content window's colour source once content runs | maintainer | open | [colour_path.md](colour_path.md), [frame_first_light.md](frame_first_light.md) |
-| F-05 | frontier | Class-0xa mitigation follow-ups: clean-host stage-3 pair, image-variant detection, keep off by default | maintainer | open | [decomp_first_ui.md](decomp_first_ui.md) section 16 |
-| F-06 | frontier | Watchdog pause hold: clean-host pair carried to stage 3 (A/B was device-loss-limited) | maintainer | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 13.5 |
-| F-07 | frontier | Present attestation polish: byte-masked keys and transitions logged past the periodic cap | maintainer | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 13 |
+| F-03 | frontier | The media/UI present body still exits on two keys; its only type-0x24 producer is unreferenced - find the reachable path (static lead) | open | open (claimable: one at a time) | [decomp_first_ui.md](decomp_first_ui.md) section 11 |
+| F-04 | frontier | Content producer and colour input: carry the content window's colour source once content runs | open | open (claimable: one at a time) | [colour_path.md](colour_path.md), [frame_first_light.md](frame_first_light.md) |
+| F-05 | frontier | Class-0xa mitigation follow-ups: clean-host stage-3 pair, image-variant detection, keep off by default | open | open (claimable: one at a time) | [decomp_first_ui.md](decomp_first_ui.md) section 16 |
+| F-06 | frontier | Watchdog pause hold: clean-host pair carried to stage 3 (A/B was device-loss-limited) | open | open (claimable: one at a time) | [peer_port_first_ui.md](peer_port_first_ui.md) section 13.5 |
+| F-07 | frontier | Present attestation polish: byte-masked keys and transitions logged past the periodic cap | open | open (claimable: one at a time) | [peer_port_first_ui.md](peer_port_first_ui.md) section 13 |
 
 ### Peer ports (claimable)
 
