@@ -218,6 +218,41 @@ void test_staging() {
     check(env_size("PALMETTO_DS_STAGING") == 0, "staging: an unset size is 0");
 }
 
+// ---- switch spelling ------------------------------------------------------------------------------------------------
+//
+// The runtime's one switch convention (docs/peer_port_streaming.md section 12.2): a switch is on unless it is unset,
+// empty, "0", "off"/"OFF" or "no"/"NO". A typo must never enable a path the measurement did not choose, which is why the
+// parse is a pure function here rather than an _stricmp at each use. It is also the parse PALMETTO_DS_PAGES_VIEW (section
+// 13's page-list destination write) reads through env_switch.
+
+void test_switch_parse() {
+    using palmetto::dstorage::env_switch;
+    using palmetto::dstorage::switch_text_on;
+    check(!switch_text_on(nullptr), "switch: unset is off");
+    check(!switch_text_on(""), "switch: empty is off");
+    check(!switch_text_on("0"), "switch: \"0\" is off");
+    check(!switch_text_on("off"), "switch: \"off\" is off");
+    check(!switch_text_on("OFF"), "switch: \"OFF\" is off");
+    check(!switch_text_on("Off"), "switch: \"Off\" is off");
+    check(!switch_text_on("no"), "switch: \"no\" is off");
+    check(!switch_text_on("NO"), "switch: \"NO\" is off");
+    check(switch_text_on("1"), "switch: \"1\" is on");
+    check(switch_text_on("on"), "switch: \"on\" is on");
+    check(switch_text_on("yes"), "switch: \"yes\" is on");
+    check(switch_text_on("true"), "switch: \"true\" is on");
+    check(switch_text_on("watch"), "switch: any other word is on (the value the mechanism reads is not a keyword)");
+
+    SetEnvironmentVariableA("PALMETTO_DS_TEST_VIEW", "1");
+    check(env_switch("PALMETTO_DS_TEST_VIEW"), "switch: an environment value goes through the same parse");
+    SetEnvironmentVariableA("PALMETTO_DS_TEST_VIEW", "off");
+    check(!env_switch("PALMETTO_DS_TEST_VIEW"), "switch: an environment \"off\" is off");
+    SetEnvironmentVariableA("PALMETTO_DS_TEST_VIEW", nullptr);
+    check(!env_switch("PALMETTO_DS_TEST_VIEW"), "switch: an unset environment variable is off");
+    SetEnvironmentVariableA("PALMETTO_DS_TEST_VIEW", "a-value-longer-than-the-buffer");
+    check(!env_switch("PALMETTO_DS_TEST_VIEW"), "switch: a value longer than the reader's buffer is off, never a guess");
+    SetEnvironmentVariableA("PALMETTO_DS_TEST_VIEW", nullptr);
+}
+
 // ---- loading-record trace spec --------------------------------------------------------------------------------------
 //
 // The session-3 loading/streaming record trace in shims/dstorage.cpp is a diagnostic and its grammar is pure
@@ -1169,6 +1204,7 @@ void test_bcpack_history(const testfiles::ScratchDir& scratch) {
 int main() {
     testfiles::ScratchDir scratch("palmetto_dstorage_test");
     test_staging();
+    test_switch_parse();
     test_record_trace_spec();
     test_pinning();
     test_page_lists();

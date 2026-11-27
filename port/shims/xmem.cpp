@@ -1478,6 +1478,24 @@ rt::xmem::WriteWatchPoll drain_trips(bool read_verdict) {
     return changed ? rt::xmem::WriteWatchPoll::changed : rt::xmem::WriteWatchPoll::unchanged;
 }
 
+// One entry in the trip record: the 4 KiB page plus the verdict. Shared by the guard handler (an access tripped the
+// guard) and by a physical-page destination delivery (xmem.h's write_physical_pages, which wrote the page behind the
+// guard instead). An overflow is not a lost write silently ignored: it makes the next poll answer "unavailable".
+void record_watch_trip(std::uintptr_t page, bool write) {
+    const unsigned slot = g_watch_trip_count.fetch_add(1, std::memory_order_relaxed);
+    if (slot >= kWatchTrips) {
+        g_watch_overflow.store(true, std::memory_order_relaxed);
+        return;
+    }
+    g_watch_trips[slot].store(page, std::memory_order_relaxed);
+    if (write) {
+        g_watch_write_trips.fetch_add(1, std::memory_order_relaxed);
+        g_watch_changed.store(true, std::memory_order_relaxed);
+    } else {
+        g_watch_read_trips.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
 LONG CALLBACK watch_handler(EXCEPTION_POINTERS* info) {
     thread_local bool busy = false;
     const EXCEPTION_RECORD* record = info ? info->ExceptionRecord : nullptr;
@@ -1496,20 +1514,10 @@ LONG CALLBACK watch_handler(EXCEPTION_POINTERS* info) {
     // Not a page this tracker guards: the title's own guard pages must keep their own exception handling.
     if (!ours) return EXCEPTION_CONTINUE_SEARCH;
     busy = true;
-    const unsigned slot = g_watch_trip_count.fetch_add(1, std::memory_order_relaxed);
-    if (slot < kWatchTrips) {
-        g_watch_trips[slot].store(page, std::memory_order_relaxed);
-        // 0 = read, 1 = write, 8 = execute (EXCEPTION_INFORMATION for an access violation; the guard page uses the
-        // same layout). A read or an execute is not a change: only a store makes the mirror stale.
-        if (record->ExceptionInformation[0] == 0 || record->ExceptionInformation[0] == 8) {
-            g_watch_read_trips.fetch_add(1, std::memory_order_relaxed);
-        } else {
-            g_watch_write_trips.fetch_add(1, std::memory_order_relaxed);
-            g_watch_changed.store(true, std::memory_order_relaxed);
-        }
-    } else {
-        g_watch_overflow.store(true, std::memory_order_relaxed);
-    }
+    // 0 = read, 1 = write, 8 = execute (EXCEPTION_INFORMATION for an access violation; the guard page uses the same
+    // layout). A read or an execute is not a change: only a store makes the mirror stale.
+    const bool write = !(record->ExceptionInformation[0] == 0 || record->ExceptionInformation[0] == 8);
+    record_watch_trip(page, write);
     busy = false;
     return EXCEPTION_CONTINUE_EXECUTION;
 }
@@ -1603,6 +1611,46 @@ void watch_resume() {
 std::uint64_t watch_write_trips() { return g_watch_write_trips.load(std::memory_order_relaxed); }
 std::uint64_t watch_read_trips() { return g_watch_read_trips.load(std::memory_order_relaxed); }
 std::uint64_t watch_pages() { return g_watch_pages_guarded.load(std::memory_order_relaxed); }
+
+// With g_phys_mutex held (the mapping table is read). One span of a physical-page destination write (xmem.h,
+// docs/peer_port_streaming.md section 13) repeated through every armed page-watch range that maps its page, and the
+// written 4 KiB pages recorded as the guarded store would have left them. Only an armed mapping is written through: the
+// delivery already wrote the page, and only a host guard needs the write to happen through its own view. The range list
+// is under g_watch_mutex (a forget or a resume cannot drop a range under the scan), which is also what keeps the
+// handler's published range table stable for the guards this write trips. `recorded` counts the written 4 KiB pages
+// inside an armed range; the return value is the number of views written.
+std::uint32_t deliver_span_through_watch(std::uint64_t page, std::uint32_t offset, std::uint32_t bytes,
+                                        const std::uint8_t* source, std::uint32_t& recorded) {
+    std::lock_guard lock(g_watch_mutex);
+    std::uint32_t views = 0;
+    for (const auto& range : g_watch_ranges) {
+        for (std::uintptr_t slot = range.start & ~static_cast<std::uintptr_t>(kWatchBlock - 1); slot < range.end;
+             slot += kWatchBlock) {
+            const auto it = g_mapped.find(slot);
+            if (it == g_mapped.end() || it->second.page != page) continue;
+            std::uint8_t* const at = reinterpret_cast<std::uint8_t*>(slot) + offset;
+            for (std::uint32_t done = 0; done < bytes;) {
+                const std::uint32_t in_page = (offset + done) & (kWatchPage - 1);
+                const std::uint32_t take = (std::min)(bytes - done, static_cast<std::uint32_t>(kWatchPage) - in_page);
+                std::uint8_t* const chunk = at + done;
+                // A guarded page records the store itself through the handler; a page whose guard an earlier access
+                // already cleared (before the next poll re-arms it) is recorded here, so no written page is lost.
+                MEMORY_BASIC_INFORMATION info{};
+                const bool guarded =
+                    VirtualQuery(chunk, &info, sizeof info) == sizeof info && (info.Protect & PAGE_GUARD) != 0;
+                std::memcpy(chunk, source + done, take);
+                const auto chunk_page = reinterpret_cast<std::uintptr_t>(chunk) & ~static_cast<std::uintptr_t>(kWatchPage - 1);
+                if (chunk_page >= range.start && chunk_page < range.end) {
+                    if (!guarded) record_watch_trip(chunk_page, true);
+                    ++recorded;
+                }
+                done += take;
+            }
+            ++views;
+        }
+    }
+    return views;
+}
 
 }  // namespace
 
@@ -1966,6 +2014,64 @@ std::uint8_t* resolve_physical_page(std::uint64_t page_number) {
 }
 [[maybe_unused]] const bool g_resolve_physical_page_installed =
     (rt::xmem::resolve_physical_page_fn = &resolve_physical_page, true);
+
+// rt::xmem::write_physical_pages (xmem.h, docs/peer_port_streaming.md section 13): the DirectStorage page-list
+// destination's delivery. The request path has already planned the spans (one live 64 KiB page each) and materialised
+// the bytes; this function locates and commits every page before the first byte (all-or-nothing), writes the bytes into
+// the pages' backing - the one memory every title mapping of a page reads - and repeats each write through the armed
+// page-watch ranges that map the page, recording the written pages for the guard-page tracker. A page nobody maps is
+// still delivered: the console's DMA writes frames, not views, and the delivery is what makes a later mapping see the
+// bytes. Bounds and refusals are xmem.h's; a page that is not live refuses the whole write before any byte moves.
+bool write_physical_pages_impl(const rt::xmem::PhysicalPageWrite* spans, std::size_t count, const std::uint8_t* data,
+                               rt::xmem::PhysicalPageWriteStats* stats, std::uint64_t* failed_page) {
+    if (failed_page) *failed_page = 0;
+    if (!spans || count == 0 || count > 64 || !data) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return false;
+    }
+    std::size_t total = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (spans[i].offset >= kPhysicalPageSize || spans[i].bytes == 0 ||
+            spans[i].bytes > kPhysicalPageSize - spans[i].offset ||
+            total > (std::numeric_limits<std::size_t>::max)() - spans[i].bytes) {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return false;
+        }
+        total += spans[i].bytes;
+    }
+    const std::lock_guard lock(g_phys_mutex);
+    std::uint8_t* backing[64] = {};
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto it = g_pages.find(spans[i].page);
+        if (it == g_pages.end() || !it->second.section->scratch) {
+            if (failed_page) *failed_page = spans[i].page;
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return false;
+        }
+        auto* const page_backing = static_cast<std::uint8_t*>(it->second.section->scratch) + it->second.offset;
+        if (!VirtualAlloc(page_backing, kPhysicalPageSize, MEM_COMMIT, PAGE_READWRITE)) {
+            if (failed_page) *failed_page = spans[i].page;
+            return false;
+        }
+        backing[i] = page_backing;
+    }
+    rt::xmem::PhysicalPageWriteStats result;
+    std::size_t at = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        std::memcpy(backing[i] + spans[i].offset, data + at, spans[i].bytes);
+        std::uint32_t recorded = 0;
+        result.watch_views +=
+            deliver_span_through_watch(spans[i].page, spans[i].offset, spans[i].bytes, data + at, recorded);
+        result.watch_pages += recorded;
+        at += spans[i].bytes;
+    }
+    result.spans = static_cast<std::uint32_t>(count);
+    result.bytes = total;
+    if (stats) *stats = result;
+    return true;
+}
+[[maybe_unused]] const bool g_write_physical_pages_installed =
+    (rt::xmem::write_physical_pages = &write_physical_pages_impl, true);
 
 }
 

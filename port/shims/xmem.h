@@ -312,6 +312,49 @@ inline CopyPageMappingsFn copy_page_mappings_fn = nullptr;
 using ResolvePhysicalPageFn = std::uint8_t* (*)(std::uint64_t page_number);
 inline ResolvePhysicalPageFn resolve_physical_page_fn = nullptr;
 
+// ---- The physical-page destination write (port/shims/dstorage.cpp, docs/peer_port_streaming.md section 13) ----------
+//
+// A console page-list request's destination is a list of 64 KiB physical pages: the console's DMA writes the frames, so
+// every title mapping of a frame sees the bytes. Here a frame is a pagefile-section page with exactly one backing view
+// (docs/page_resolver.md section 3), so writing the backing is the delivery and every mapping already sees it. What the
+// backing write cannot do is trip a host guard the page-watch tracker armed on a title mapping of that page: a
+// PAGE_GUARD is per view (docs/card_copies.md), and [title_memory_model.md] section 3.4 item 4 measured that the layer's
+// dstorage writes go through the backing view, which no title-VA guard sees. The peers answer the same host problem by
+// recording the write at the address the frame is mapped at (Five Star Recomp's XMemPhysicalMemory.WriteFrames invokes
+// its write observer for each written frame's last mapped address, and its device marks the textures there stale); this
+// hook is that answer in this tree's structures. The write goes into the pages, and every armed page-watch range that
+// maps one of them is written through and records its written 4 KiB pages, exactly as a guarded store would leave them.
+// So the tracker's next poll answers `changed` and the plane refresh re-uploads a streamed texture instead of keeping
+// stale bytes (docs/peer_port_movie.md section 8; the gap page_resolver.md section 6 named as its limit).
+//
+// All-or-nothing: every span's page is located and committed before the first byte moves, so a page with no live backing
+// refuses the whole write with `failed_page` set and no page changed. Bounded: the request path's page plan holds at most
+// 32 spans and this hook accepts at most 64; a span lies inside one 64 KiB page, so a span is not a page list and the
+// console's page-number rule (0 = unmapped) is already resolved by the caller's plan. A null hook keeps the dstorage
+// shim's pre-port path (the resolver scatter of docs/page_resolver.md). A GPU-free test replaces the hook and xmem.cpp
+// fills it in for the runtime (the shape of the two hooks above).
+struct PhysicalPageWrite {
+    std::uint64_t page = 0;    // the page number, a live 64 KiB physical page
+    std::uint32_t offset = 0;  // bytes into that page (below 64 KiB)
+    std::uint32_t bytes = 0;   // bytes written at that offset (the range stays inside the page)
+};
+
+// What one write did. `watch_views` counts the armed title mappings the bytes were repeated through and `watch_pages` the
+// 4 KiB pages the tracker recorded; both stay 0 when no page-watch range maps a written page.
+struct PhysicalPageWriteStats {
+    std::uint32_t spans = 0;
+    std::uint64_t bytes = 0;
+    std::uint32_t watch_views = 0;
+    std::uint32_t watch_pages = 0;
+};
+
+// Writes the spans in `data` order into their pages. False with `*failed_page` naming the first page that is not live
+// (nothing written), or with `*failed_page` left 0 for a malformed input (null spans or data, more than 64 spans, a span
+// outside its page).
+using WritePhysicalPagesFn = bool (*)(const PhysicalPageWrite* spans, std::size_t count, const std::uint8_t* data,
+                                      PhysicalPageWriteStats* stats, std::uint64_t* failed_page);
+inline WritePhysicalPagesFn write_physical_pages = nullptr;
+
 // The guard-page write tracker (docs/card_copies.md). The layer keeps a GPU-visible mirror of the title's CPU
 // descriptor-heap bytes and can only tell whether the mirror still matches them by comparing all of them - a
 // measured 3.4-4.4 ms pass over the 39.8 MB heap per submission on the page that first measured it, and 8.4-9.5 ms per

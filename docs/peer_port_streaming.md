@@ -889,3 +889,237 @@ victory-fork (GPL-3.0-or-later, `9a9091d`), XCL (GPL-2.0-only, `623d02e`) and th
 `D:\leonida-work\fsrstable\` outside the repository, and no game data is added: RVAs, Win32/HRESULT codes, sizes, page
 counts, counts, times, state words and image means only.
 
+## 13. Measured: implemented port 3 - the physical-page destination write, so every mapping of a page sees the delivery and the page watch records it
+
+**Status: measured, implemented, tested; opt-in and off by default.** This section implements rank 3 of the section 6
+plan. The rank has two halves. The first - "status, fence-signal and request entries run in queue order on the worker" -
+is the storage queue this tree already shipped: one worker thread per queue, a FIFO entry list, in-order status
+completion, and the first failure since the previous status entry reported to it, measured during the session-3 stall as
+complete arrays that terminate the poll ([streamed_consumer.md](streamed_consumer.md) sections 6b-6d); this section
+changes none of it. The second half is the destination: a request whose option bit names a physical page array has to be
+written into the pages the title maps, and in this tree the write also has to leave the signal the host substitute for
+"the GPU sees the memory" is built on - the guard-page write tracker ([card_copies.md](card_copies.md)). The switch is
+`PALMETTO_DS_PAGES_VIEW`; unset is the resolver scatter of [page_resolver.md](page_resolver.md) exactly. No peer code was
+copied: sections 1-9 are the audit this port was planned from, [upstream_port.md](upstream_port.md) is the policy and
+section 13.6 is the attribution.
+
+### 13.1 The measured destination shapes and the exact gap
+
+One 130 s light measurement boot (`boot-dspsink-base`) on the committed tree's binary (`B66AFC9E...`, before this
+section's code), the content environment of `D:\leonida-work\fsrstable\boot_arm.ps1` plus the class-0xa mitigation
+`PALMETTO_TITLE_CLASS0A_SIZE=1`, `PALMETTO_DS_PAGES=1` and `PALMETTO_DSTORAGE_TRACE=1`: **ALIVE 130.2 s, 0 exceptions,
+0 device losses**, 20,032 startup-trace events and 380,506 D3D12 calls.
+
+| measurement | value |
+|---|---|
+| requests at the last 1,024-request mark | **9,216**, 587.9 MiB decompressed in 47.2 s (the first 4,096 were 256.0 MiB in 1.9 s, 138.1 MiB/s) |
+| source / destination shape | every request `file -> buffer`; `zlib=6,005` at the mark, `bcpack=0`, `swizzle=0`, `source-pages=0` |
+| destination page lists | **`dest-pages=0`**; the page counters all 0: `pages planned=0 transferred=0 bytes=0 refused=0` |
+| request entry failures / refusals | 0 / 0 |
+| page-watch population this arm runs | 0 armed ranges (neither `PALMETTO_PLANE_REFRESH=watch` nor `PALMETTO_CARD_COPY_WATCH` is in the content environment) |
+| loading state at 128 s | init 3, loading 2, session 3, machine current 3 / next 3; movie player state `0x9`, buffers 0, open 1 |
+| captures / pixels | 13 captured frames, 2564x1421, every mean rgb `0.00 0.00 0.00`; two replay readbacks `51 102 204` and one `0 0 0` |
+
+So the measured population is **CPU virtual-address destinations only**, exactly as [page_resolver.md](page_resolver.md)
+and [directstorage_advanced.md](directstorage_advanced.md) measured: this boot asks for no physical-page destination.
+The delivery path per shape, before this section:
+
+| destination shape | measured | our delivery path | the gap |
+|---|---|---|---|
+| CPU VA (linear buffer) | 9,216 | the bytes are read straight into the title's own address (`read_file_range`), with the existing first-touch commit and repair; the title's address *is* the mapping it reads | none |
+| physical-page destination | 0 | with `PALMETTO_DS_PAGES=1`: the plan over the page numbers, every page resolved through xmem, the source materialised, then scattered into the page's **backing view** through the resolver | the delivery is the one memory every mapping reads ([page_resolver.md](page_resolver.md) section 3), but it is not the address the page watch armed: a `PAGE_GUARD` is per view, so a backing write trips no guard ([title_memory_model.md](title_memory_model.md) section 3.4 item 4), and `watch` mode would answer "unchanged" over a streamed texture whose pages were just delivered |
+| source page list (memory source) | 0 | gathered through the same resolver, then copied into the linear destination | none: a read needs no write signal |
+| source page list + linear destination | 0 | the same seam, linear publish | none |
+| both lists / BCPack / swizzle over a list | 0 requested; refused by name | `E_INVALIDARG`, `E_NOTIMPL` at the request path | unchanged, the named limits of [page_resolver.md](page_resolver.md) section 6 |
+| page 0 / short list / more than 32 spans | 0 requested; refused by name | the plan's `zero_page`, `too_short`, `too_many_pages`, `offset_out_of_range` | unchanged |
+
+**The exact gap is the write signal, not visibility.** The console DMA writes the frames and every mapping of a frame is
+that memory; our resolver already writes that one memory. What the backing write cannot do is leave the host-side signal
+this tree's page watch is built on: the guard-page tracker armed on the title's mapping of the page never sees the store,
+so a streamed texture a page-list request delivered into keeps its first bytes in `watch` mode. The peers answer the same
+host problem by recording the write at the address the frame is mapped at (section 13.6).
+
+Two smaller shapes belong in the same gap: a page the title maps at several addresses (an alias) needs the write seen at
+*each* armed address, and a page the title does not map right now has no view to write at all - the delivery still has to
+put the bytes in the page, because the console writes frames and the mapping may come later.
+
+### 13.2 The design
+
+Our own mechanism, in our structure and naming: a bounded write hook in `port/shims/xmem.cpp` (the page table and the
+guard-page tracker are its tables), the request-path seam in `port/shims/dstorage.cpp`, and one pure switch parse in
+`port/shims/dstorage_advanced.h`.
+
+| piece | what it does |
+|---|---|
+| the switch | `PALMETTO_DS_PAGES_VIEW`: on only when `PALMETTO_DS_PAGES` is on; unset, empty, `0`, `off` and `no` leave the resolver scatter exactly as it was (one cached boolean when unset: no line, no call, no allocation); one startup sentence when on |
+| the hook | `rt::xmem::write_physical_pages` (xmem.h): a span list `{page, offset, bytes}` plus the finished bytes; the pages are located in xmem's page table and committed before the first byte (all-or-nothing), the bytes are written into the page's backing, and each span is repeated through every armed page-watch range that maps the page |
+| the repeat | per 4 KiB page of a span inside an armed range the store goes through the title's mapping: a guarded page records it through the tracker's own handler (the exception the watch is designed around), and a page whose guard an earlier access already cleared before the poll re-armed it is recorded directly in the same trip record, so no delivered page is lost to that window |
+| the record | the trip record is the tracker's: the 4 KiB page, the write counter and the change flag the poll drains; a delivery therefore makes the next `page_watch_poll()` answer `changed`, which is what makes the plane refresh compare and re-upload ([card_copies.md](card_copies.md), [peer_port_movie.md](peer_port_movie.md) section 8) |
+| the locks | xmem's page-table lock is held across locate/commit/write, so a title mapping change through `XMemMapPhysicalPages` cannot interleave with a delivery; the tracker's range list is taken under its own mutex, so a `forget` or a `resume` cannot drop a range under the scan |
+| the bounds | the request plan's 32 spans; the hook accepts at most 64; a span lies inside one 64 KiB page; the trip record stays the tracker's 16,384 entries and keeps its `unavailable` answer past that |
+| the refusals | `E_NOTIMPL` when a build has no xmem write hook; `E_INVALIDARG` naming the page (`unresolved_page`) for a page that is not live, with nothing written; the plan's own names unchanged; an inaccessible page array keeps `E_DSTORAGE_ACCESS_VIOLATION` |
+| what is not changed | the switch-off path (`transfer_page_list` through the resolver, byte for byte), the status array and the in-order worker, linear destinations, the source direction, `resolve_physical_page`, the tracker itself, and title state |
+
+**Only armed views are written through.** A mapping nobody watches needs no repeat: visibility is the single backing's
+(a physical page here has one backing and every mapping is a view of it, [page_resolver.md](page_resolver.md) section 3),
+so the repeat exists only to give the tracker its store. That is also the safety argument: the tracker arms only
+committed, writable pages and refuses to adopt a page another owner already guards ([card_copies.md](card_copies.md)), so
+a delivery never writes through a read-only mapping or a foreign guard.
+
+**A page with no mapping is delivered, not refused.** `write_physical_pages` writes the page whatever its mappings are,
+and a later `XMemMapPhysicalPages` of that page shows the bytes. That is the console contract the resolver already
+states (a request's page list is live until its status completes; where the title maps it is the title's business), and
+it keeps the hook from turning a legal streaming pattern into a named refusal.
+
+**The worker order is not part of the switch.** A page-list destination is delivered by the queue worker inside the
+request's own entry, so the status entry behind it still completes after the bytes are in the pages and in queue order
+with the fence signals and events around it - the half of rank 3 the tree already had ([streamed_consumer.md](streamed_consumer.md)
+sections 6b-6d).
+
+### 13.3 Tests
+
+`port/test/xmem_test.cpp`, target `xmem_test` (this target links `shims/xmem.cpp`, so the real page table, placeholder
+mapping and guard-page tracker run; no GPU, no game data): **401 -> 428 checks, 0 failed (27 added)**, all through
+`rt::xmem::write_physical_pages` and real pages:
+
+- a two-span delivery over two mapped pages is repeated through both armed mappings (`watch_views == 2`), a non-zero
+  number of 4 KiB pages is recorded, and the bytes are visible at the title's mapping of both pages;
+- the tracker answers `changed` for the delivery, and again for a second delivery after the poll re-armed the tripped
+  pages;
+- a page nobody maps is delivered (`watch_views == 0`) and its later mapping shows the bytes, with the already-mapped
+  pages unchanged;
+- a not-live page number refuses the whole write, names that page, and leaves every mapped page as it was;
+- the bounds: a null span array, a null data buffer, a span that runs past its page, and more than 64 spans are refused;
+- with no range armed the delivery is the page write alone (`watch_views == 0`, `watch_pages == 0`) and the bytes still
+  reach the title's mapping.
+
+`port/test/dstorage_test.cpp`, target `dstorage_test` (GPU-free, no xmem): **234 -> 251 checks, 0 failed (17 added)**, the
+switch spelling convention the new switch reads through: unset, empty, `0`, `off`, `OFF`, `Off`, `no` and `NO` are off;
+`1`, `on`, `yes`, `true` and any other word are on; the environment reader parses through the same function; a value
+longer than its buffer is off. `dstorage_test` still does not link `port/shims/dstorage.cpp` (the request path is a shim
+that needs the whole runtime), so the request-path branch is covered by the two seams it calls plus the boot counters -
+the split [page_resolver.md](page_resolver.md) section 7 and section 12.3 use.
+
+```powershell
+cmake --build port\build --target dstorage_test xmem_test -j 24
+port\build\dstorage_test.exe      # 251 checks, 0 failed
+port\build\xmem_test.exe          # xmem_test: OK (428 checks)
+```
+
+### 13.4 A/B boots
+
+Two 130 s light boots, one at a time under `_setup/boot_lock.ps1`, **one executable**
+(`5B35ADCF...`, built from the shared tree at 06:52, so both arms carry the same other slices' in-flight changes and the
+differential below is only this switch), the content environment of `D:\leonida-work\fsrstable\boot_arm.ps1` plus the
+class-0xa mitigation `PALMETTO_TITLE_CLASS0A_SIZE=1`, `PALMETTO_DS_PAGES=1` and `PALMETTO_DSTORAGE_TRACE=1`; arm B adds
+`PALMETTO_DS_PAGES_VIEW=1`. Both arms are alive to the harness timeout with no exception and no device loss.
+
+| measurement | A: switch off (`boot-dspsink-off4`) | B: switch on (`boot-dspsink-view4`) |
+|---|---|---|
+| verdict / exceptions / device losses | **ALIVE 130.2 s**, 0, 0 | **ALIVE 130.3 s**, 0, 0 |
+| startup-trace events / D3D12 calls | 19,698 / 421,219 | 19,801 / 348,546 |
+| requests at the last mark / decompressed | 9,216 / 587.9 MiB in 58.8 s | 9,216 / 587.9 MiB in 48.7 s |
+| shape counters | `file=9216 zlib=6005 bcpack=0 swizzle=0 dest-pages=0 source-pages=0` | identical |
+| page-list delivery counters | `pages planned=0 transferred=0 refused=0`; no page-write section in the line | the same, plus `page-write delivered=0 bytes=0 views=0 watch-pages=0 refused=0` |
+| DirectStorage entry failures / refusals | 0 / 0 | 0 / 0 |
+| the switch's startup sentence | absent | **1 line** |
+| state at 128 s (init / loading / session) | 3 / 2 / 3, machine current 3 next 3 | 3 / 2 / 3, machine current 3 next 3 |
+| movie player at 128 s | state `0x9`, buffers 0, open 1 | state `0x9`, buffers 0, open 1 |
+| class-0xa upload | `image+0x1555c10 redirected at 3 direct call site(s)` | the same line and count |
+| replay checkpoint | submission 8,192 at 82.8 s | submission 8,192 at 103.1 s |
+| captures / pixels | 13 captured frames, 2564x1421, every mean rgb `0.00 0.00 0.00` | 13 captured frames, 2564x1421, every mean rgb `0.00 0.00 0.00` |
+
+**Reading it honestly.** The on arm does what the port says on this population: it runs the switch's startup sentence and
+delivers no page-list request, because the boot asks for none - `dest-pages=0` and every page-write counter 0, the same
+counters as the switch-off arm, and the same state words, movie state and capture means at the same timestamps. The port
+is therefore **unchanged on the boot gate, a latent negative**, exactly as `PALMETTO_DS_PAGES` was in
+[page_resolver.md](page_resolver.md): the mechanism is ready and counted, and this frontier never names it. The
+differences that remain are rate counters only: D3D12 calls 421,219 vs 348,546, the replay checkpoint 82.8 s vs 103.1 s
+and the decompression rate 10.0 vs 12.1 MiB/s - all inside the 9.9-25.1 MiB/s and 56-70 s replay spread this section's
+own arms measured across the day, and one pair on a shared host cannot separate them from the tree's frame cadence and
+host load (the same limit as sections 10.5 and 12.4). The pair does not exercise the delivery, which is why the unit tests
+carry it and 13.5 names the arm that would measure it.
+
+**Excluded arms.** The earlier boots of this window are named rather than reported: `boot-dspsink-base` is the 13.1
+measurement on the pre-slice binary (`B66AFC9E...`); `boot-dspsink-meas1` added `PALMETTO_TEXTURE_IMPORT=1` and
+`PALMETTO_PLANE_REFRESH=watch` to size the armed population and stopped at 67.2 s on the title's stage-3 race
+(`game+0x54bde92`), with its destination counters already complete and equal to the measurement arm's; and the three
+first port arms `boot-dspsink-view` (60.8 s, `game+0x43ae041`), `boot-dspsink-view2` (56.6 s, `game+0x86f9df`) and the
+switch-off control `boot-dspsink-off2` (70.8 s, `game+0x86f981`) each lost the device (`present failed (VkResult -4)`)
+1-2 s before the fatal title fault - the stage-3 race section 12.4 named its excluded arms for. A fourth arm on the same
+hybrid tree from another slice (`boot-xgplan1`) stopped the same way at `game+0x4d9f636`, and no arm stopped inside this
+slice's files; the clean pair above is the later binary that survives the window.
+
+### 13.5 Limits and the next falsifier
+
+- **No measured request.** Every boot so far, this section's included, measures `dest-pages=0`. The arms can only show
+  the mechanism is inert on the default boot and that the switch adds one line; they cannot show a delivery. **Next
+  falsifier:** a trace with `dest-pages` non-zero on an arm with `PALMETTO_DS_PAGES=1 PALMETTO_DS_PAGES_VIEW=1` must show
+  `page-write delivered` non-zero and every status `S_OK`, and - for the coherence this port exists for - a `changed`
+  plane-refresh compare over a watched texture whose pages it delivered.
+- **The watch's signal is a first access per arm window.** The tracker reports a write when the guard trips, and the
+  system clears that page's guard until the next poll re-arms it; a delivery that lands in that cleared window is
+  recorded by the hook's own trip (which is why the hook records unguarded pages), but a second *title* write in the same
+  window is still invisible - the tracker's documented property ([card_copies.md](card_copies.md)), not a new one.
+- **An alias is covered only where an armed view exists.** The repeat walks the tracker's armed ranges; a page mapped at
+  an address nobody armed is delivered through the backing and its mapping sees the bytes, but a guard on that unarmed
+  alias would not trip. The measured population has no aliased armed view.
+- **The source direction does not notify.** A page-list source gather reads the backing and trips no guard, and a write
+  watch does not want read reports ([card_copies.md](card_copies.md)); no read-side hook was added.
+- **The delivery still materialises the source.** The queue staging area is not used by the page-list stage
+  ([page_resolver.md](page_resolver.md) section 6), and BCPack or swizzle over a page list stay refused by name.
+- **The contract stays the console's.** `xmem` holds its page-table lock across the write, so a remap cannot interleave,
+  but a title that frees a page number while its own request is transferring is out of contract, as
+  [page_resolver.md](page_resolver.md) section 6 states; a concurrent free is still not defended.
+- **One machine, one backend, a shared tree.** The pair of 13.4 is one executable and one RTX 4090 / Vulkan boot per arm,
+  but that executable carries two other slices' uncommitted changes; they are identical in both arms, so the differential
+  is the switch, and the rate counters that differ between the arms are not separable from host load and the tree's own
+  frame cadence by one pair (the same limit as sections 10.5 and 12.4).
+- **Default off, honestly.** The switch stays off because this frontier issues no page-list destination; what would make
+  it default is a measured page-list destination whose consumer is a watched texture, with the `changed` compare in the
+  same boot.
+
+### 13.6 Cross-check against the peers, attribution and uncommitted files
+
+The mechanism was cross-checked against the refreshed peer snapshots of this round (Five Star Recomp `ce2b333b`,
+VIctory `63bcca4`, PercyScarlett `e44c465`, victory-fork `9a9091d`, XCL `623d02e`; section 1 pins the audit's older
+SHAs), read as evidence only. **Five Star Recomp is the same build as ours and the anchor for this port**: its
+`src/FiveStar.Loader/Shims/Storage/PhysicalPageSink.cs` names the option bit (`0x200000`, the same `1 << 21` as
+`options::kDestinationPages` in `port/shims/dstorage_xs_abi.h`), the 16-bit first-page offset after the destination word,
+and writes the frame list through `XMemPhysicalMemory.WriteFrames`; its `Shims/XMemPhysicalMemory.cs` writes into the page
+store and, for each frame, invokes its write observer with the address the frame is mapped at last, and its
+`Shims/Storage/IStorageDestinationSink.cs` + `Shims/D3D12X/XboxDeviceFactory.cs` mark the textures over that memory stale.
+**What agrees** is the whole shape: a page-list destination is 64 KiB page numbers plus an offset into the first page, the
+bytes go into the frames (so every mapping sees them), and the host layer has to record the write where the frame is
+mapped for the texture side to refresh. **What differs, and why:** their write observer feeds a texture registry they own
+and is keyed by the frame's last mapped address, while this tree's substitute for "the GPU sees the write" is the
+guard-page tracker, so our write repeats through every *armed* mapping and records the trip in the tracker the plane
+refresh already polls; our plan, refusals and staging stay in `port/shims/dstorage.cpp` and the page table and tracker
+stay in `xmem`, which is the same split [page_resolver.md](page_resolver.md) section 4 uses against the reference.
+**PercyScarlett, VIctory and victory-fork** (`crates/victory-hle/src/modules/dstorage.rs`) carry the same completion
+contract (one worker pool, in-order status completion, a destination that is an address or physical pages) and the fork's
+docs state that page views cannot be watched, hashing the memory instead - the host problem our hook answers inside the
+tracker. **XCL** (`crates/xcl/src/hle/dstorage.rs`) documents the identical request layout (bit 21
+`DestinationIsPhysicalPages`, bit 23 `SourceIsPhysicalPages`, `DestinationPageOffset` u16 at `0x10`) and its status
+arrays and `EnqueueSignal` are the completion half this tree already matched. **The public reference**
+`ubiquitarianism/leonida` (`273b3bdf9`, Moriz82; `0aecc5efa` for the slot-31 mapping) resolves the page list in
+`runtime/shims/xmem.cpp`'s `transfer_physical`, copies under its page-table lock and notifies its write watches
+([page_resolver.md](page_resolver.md) section 4); this hook is the same three steps with this tree's tracker as the watch.
+No identifier, comment text or table was copied from any of them.
+
+This section was implemented from this project's own measurements (the destination trace in section 13.1, the page table
+and guard-page tracker in [card_copies.md](card_copies.md) and [title_memory_model.md](title_memory_model.md), and the
+page-list seam of [page_resolver.md](page_resolver.md)), with the peer files above read as reference only under
+[upstream_port.md](upstream_port.md). The `NOTICE.md` row for this slice is the lead's to add at commit time: Five Star
+Recomp (GPL-3.0-or-later, `ce2b333b`, `src/FiveStar.Loader/Shims/Storage/PhysicalPageSink.cs`,
+`src/FiveStar.Loader/Shims/XMemPhysicalMemory.cs`, `src/FiveStar.Loader/Shims/Storage/IStorageDestinationSink.cs`,
+`src/FiveStar.Loader/Shims/D3D12X/XboxDeviceFactory.cs`), PercyScarlett (GPL-2.0-only, `e44c465`,
+`crates/victory-hle/src/modules/dstorage.rs`), VIctory (GPL-3.0-or-later, `63bcca4`, the same module), victory-fork
+(GPL-3.0-or-later, `9a9091d`, the same module), XCL (GPL-2.0-only, `623d02e`,
+`crates/xcl/src/hle/dstorage.rs`) and the reference `ubiquitarianism/leonida` (GPL-3.0, `273b3bdf9`, `runtime/shims/dstorage.cpp`
+and `runtime/shims/xmem.cpp`). Uncommitted files of this slice: `port/shims/dstorage.cpp`,
+`port/shims/dstorage_advanced.h`, `port/shims/xmem.cpp`, `port/shims/xmem.h`, `port/test/dstorage_test.cpp`,
+`port/test/xmem_test.cpp` and this section of `docs/peer_port_streaming.md`. No git write was made by this slice; boots
+and captures are under `D:\leonida-work\fsrstable\` outside the repository, and no game data is added: RVAs,
+Win32/HRESULT codes, sizes, page counts, counts, times, state words and image means only.
+

@@ -35,12 +35,20 @@ namespace palmetto::dstorage {
 // the same allocations and the same HRESULTs as before the slice. The values are documented in
 // docs/directstorage_advanced.md and named there for the docs environment-variable check.
 
+// A switch text as it is set: on unless it is unset/empty, "0", "off"/"OFF"/"Off" or "no"/"NO"/"No". The project's
+// spelling convention (docs/peer_port_streaming.md section 12.2): a typo must never enable a path the measurement did
+// not choose, so only these spellings are off. Pure, so the GPU-free test can check every spelling of a switch.
+inline bool switch_text_on(const char* value) {
+    if (!value || !*value) return false;
+    return std::strcmp(value, "0") != 0 && _stricmp(value, "off") != 0 && _stricmp(value, "no") != 0;
+}
+
 // A switch is on for any value except the empty string, "0", "off"/"OFF" and "no"/"NO".
 inline bool env_switch(const char* name) {
     char value[16] = {};
     const DWORD n = GetEnvironmentVariableA(name, value, sizeof value);
     if (n == 0 || n >= sizeof value) return false;
-    return std::strcmp(value, "0") != 0 && _stricmp(value, "off") != 0 && _stricmp(value, "no") != 0;
+    return switch_text_on(value);
 }
 
 // A byte count: decimal with an optional K/M/G suffix (64K, 1M), 0 when unset or unparsable.

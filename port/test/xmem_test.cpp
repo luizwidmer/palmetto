@@ -766,6 +766,103 @@ void test_resolve_physical_page(const PhysicalApi& api) {
     check(rt::xmem::resolve_physical_page_fn(pages[2]) == nullptr, "a freed page number no longer resolves");
 }
 
+// The physical-page destination write (port/shims/xmem.h, docs/peer_port_streaming.md section 13): a dstorage page-list
+// destination delivered into its pages by xmem, which repeats the bytes through every armed page-watch mapping of a page
+// and records the written pages for the tracker. The cases are the ones the request path and the plane refresh rely on:
+// the bytes visible at the title's mappings, the tracker answering "changed" for a delivery (its pre-filter must not skip
+// the re-upload), an all-or-nothing refusal on a page that is not live, a page nobody maps delivered anyway (the console
+// writes frames, not views), the bounds, and a delivery with no tracker armed.
+void test_write_physical_pages(const PhysicalApi& api) {
+    check(rt::xmem::write_physical_pages != nullptr, "xmem installs the physical-page destination write hook");
+    if (!rt::xmem::write_physical_pages || !rt::xmem::page_watch_arm || !rt::xmem::page_watch_forget ||
+        !rt::xmem::page_watch_poll)
+        return;
+    constexpr uint64_t kPages = 3;
+    auto* const window = static_cast<uint8_t*>(
+        api.virtual_alloc(nullptr, kPages * kPage64k, MEM_RESERVE | kXmem64kPages, 0x23, PAGE_READWRITE | PAGE_GRAPHICS_READWRITE));
+    check(window != nullptr, "XMemVirtualAlloc reserves a window for the destination write");
+    if (!window) return;
+    uint64_t pages[kPages] = {};
+    uint64_t count = kPages;
+    check(api.allocate(0x280, &count, pages) == TRUE && count == kPages, "physical pages for the destination write");
+    if (count != kPages) return;
+    check(api.map(window, 2, pages) == window, "two destination pages map into the window");
+    std::memset(window, 0, 2 * kPage64k);
+
+    // The armed range is the title's mapping of the pages; a delivery must leave the tracker a change, exactly as the
+    // guarded store the page watch was designed around would (docs/card_copies.md).
+    check(rt::xmem::page_watch_arm(window, 2 * kPage64k), "the destination window arms the page-watch tracker");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unchanged, "the armed window has no write to report");
+    constexpr std::uint32_t kFirstBytes = 60000, kSecondBytes = 40000;
+    std::vector<uint8_t> payload(std::size_t{kFirstBytes} + kSecondBytes);
+    for (std::size_t at = 0; at < payload.size(); ++at) payload[at] = static_cast<uint8_t>((at * 37 + 11) & 0xff);
+    const rt::xmem::PhysicalPageWrite writes[2] = {{pages[0], 4321, kFirstBytes}, {pages[1], 0, kSecondBytes}};
+    rt::xmem::PhysicalPageWriteStats stats;
+    std::uint64_t failed = 1;
+    check(rt::xmem::write_physical_pages(writes, 2, payload.data(), &stats, &failed) && failed == 0,
+          "the physical-page destination write delivers its two spans");
+    check(stats.spans == 2 && stats.bytes == payload.size(), "the write reports its spans and bytes");
+    check(stats.watch_views == 2 && stats.watch_pages > 0,
+          "the delivery is repeated through both armed title mappings and records its pages");
+    bool delivered = true;
+    for (std::uint32_t at = 0; at < kFirstBytes; ++at) delivered &= window[4321 + at] == payload[at];
+    for (std::uint32_t at = 0; at < kSecondBytes; ++at) delivered &= window[kPage64k + at] == payload[kFirstBytes + at];
+    check(delivered, "the delivered bytes are visible at the title's mapping of both pages");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::changed,
+          "the delivery is reported to the page-watch tracker as a change");
+
+    // A second delivery after the poll re-armed the tripped pages is reported again: the signal is not one-shot.
+    check(rt::xmem::write_physical_pages(writes + 1, 1, payload.data(), &stats, &failed) && stats.watch_views == 1,
+          "a second delivery through the re-armed mapping succeeds");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::changed, "the second delivery is reported as changed");
+
+    // A page nobody maps is still delivered: the console's DMA writes frames, and the mapping made later sees the bytes.
+    const std::vector<uint8_t> unmapped_pre(window, window + 2 * kPage64k);
+    const rt::xmem::PhysicalPageWrite unmapped[1] = {{pages[2], 0, 4096}};
+    check(rt::xmem::write_physical_pages(unmapped, 1, payload.data(), &stats, &failed) && stats.watch_views == 0 &&
+              stats.watch_pages == 0,
+          "a page with no title mapping is delivered without a page-watch view");
+    check(api.map(window + 2 * kPage64k, 1, pages + 2) == window + 2 * kPage64k,
+          "the delivered unmapped page maps into the window afterwards");
+    check(read_u32(window + 2 * kPage64k, 4) == read_u32(payload.data(), 4),
+          "the title's later mapping sees the bytes the delivery wrote before it");
+    check(std::vector<uint8_t>(window, window + 2 * kPage64k) == unmapped_pre,
+          "delivering the unmapped page left the mapped pages as they were");
+
+    // All-or-nothing: a page that is not live refuses the write with nothing changed, before any byte moves.
+    const rt::xmem::PhysicalPageWrite missing[2] = {{pages[0], 0, 4096}, {0x1fffff0, 0, 4096}};
+    const std::vector<uint8_t> before(window, window + 2 * kPage64k);
+    failed = 0;
+    check(!rt::xmem::write_physical_pages(missing, 2, payload.data(), &stats, &failed) && failed == 0x1fffff0,
+          "a page that is not live refuses the write and names it");
+    check(std::vector<uint8_t>(window, window + 2 * kPage64k) == before, "the refused write changed nothing");
+
+    // The bounds: no input, a span outside its page, and more spans than the hook accepts.
+    check(!rt::xmem::write_physical_pages(nullptr, 1, payload.data(), &stats, &failed) && failed == 0,
+          "a null span array is refused");
+    check(!rt::xmem::write_physical_pages(writes, 2, nullptr, &stats, &failed) && failed == 0,
+          "a null data buffer is refused");
+    const rt::xmem::PhysicalPageWrite outside[1] = {{pages[0], 65530, 16}};
+    check(!rt::xmem::write_physical_pages(outside, 1, payload.data(), &stats, &failed) && failed == 0,
+          "a span that runs past its 64 KiB page is refused");
+    std::vector<rt::xmem::PhysicalPageWrite> many(65, rt::xmem::PhysicalPageWrite{pages[0], 0, 1});
+    check(!rt::xmem::write_physical_pages(many.data(), many.size(), payload.data(), &stats, &failed),
+          "more than 64 spans is refused");
+
+    // With no tracker armed the delivery is the page write alone: every mapping still sees the bytes.
+    rt::xmem::page_watch_forget(window);
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unavailable, "the tracker is unavailable again");
+    std::vector<uint8_t> second_payload(kSecondBytes, 0x5a);
+    check(rt::xmem::write_physical_pages(writes + 1, 1, second_payload.data(), &stats, &failed) && stats.watch_views == 0 &&
+              stats.watch_pages == 0,
+          "with no range armed the delivery reports no page-watch work");
+    check(read_u32(window + kPage64k, 0) == 0x5a5a5a5au, "the untracked delivery's bytes are still at the title's mapping");
+
+    api.map(window, 2, nullptr);
+    api.map(window + 2 * kPage64k, 1, nullptr);
+    check(api.free_pages(kPages, pages) == TRUE, "free the destination write's pages");
+}
+
 void test_first_touch_during_remap(const PhysicalApi& api) {
     constexpr uint64_t kSlice = 16;
     constexpr uint64_t kSlices = 256;
@@ -1714,6 +1811,7 @@ int main() {
         test_commit_physical_pages(physical);
         test_copy_page_mappings(physical);
         test_resolve_physical_page(physical);
+        test_write_physical_pages(physical);  // docs/peer_port_streaming.md section 13: the page-list destination write
         test_first_touch_during_remap(physical);
         test_placeholders(physical);
         test_gpu_view_pairing_runtime(physical);  // docs/peer_port_movie.md section 11: the pair through the shim

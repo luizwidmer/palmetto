@@ -168,6 +168,7 @@ struct AdvancedConfig {
     bool pin = false;                 // PALMETTO_DS_PIN: hand a write-watched destination back to the consumer
     bool pin_resident = false;        // PALMETTO_DS_PIN_RESIDENT: VirtualLock the destination for the write
     bool pages = false;               // PALMETTO_DS_PAGES: transfer a page-list request live through the xmem resolver
+    bool pages_view = false;          // PALMETTO_DS_PAGES_VIEW: deliver a page-list destination through xmem's page write
     bool unshuffle = false;           // PALMETTO_DS_UNSHUFFLE: run a swizzle request's macro-unshuffle stage
     bool bcpack = false;              // PALMETTO_DS_BCPACK: load the predictor file and refuse by named limitation
     std::wstring predictor;           // PALMETTO_DS_BCPACK_PREDICTOR: the local predictor path (outside the repository)
@@ -180,12 +181,18 @@ const AdvancedConfig& advanced_config() {
         c.pin = palmetto::dstorage::env_switch("PALMETTO_DS_PIN");
         c.pin_resident = c.pin && palmetto::dstorage::env_switch("PALMETTO_DS_PIN_RESIDENT");
         c.pages = palmetto::dstorage::env_switch("PALMETTO_DS_PAGES");
+        c.pages_view = c.pages && palmetto::dstorage::env_switch("PALMETTO_DS_PAGES_VIEW");
         c.unshuffle = palmetto::dstorage::env_switch("PALMETTO_DS_UNSHUFFLE");
         c.bcpack = palmetto::dstorage::env_switch("PALMETTO_DS_BCPACK");
         wchar_t path[32768] = {};
         const DWORD capacity = static_cast<DWORD>(sizeof path / sizeof path[0]);
         const DWORD n = GetEnvironmentVariableW(L"PALMETTO_DS_BCPACK_PREDICTOR", path, capacity);
         if (n > 0 && n < capacity) c.predictor.assign(path, n);
+        if (c.pages_view)
+            std::fprintf(stderr,
+                         "[rt] dstorage: PALMETTO_DS_PAGES_VIEW=1: a physical-page destination is written through "
+                         "xmem's page write, so every title mapping sees the bytes and the page-watch tracker records "
+                         "the write (docs/peer_port_streaming.md section 13)\n");
         return c;
     }();
     return config;
@@ -201,6 +208,9 @@ struct AdvancedCounters {
     std::atomic<std::uint64_t> unshuffle_ok{0}, unshuffle_refused{0};
     std::atomic<std::uint64_t> bcpack_refused{0}, bcpack_decoded{0}, bcpack_blocks{0}, bcpack_bytes{0},
         bcpack_history_reads{0}, pages_planned{0}, pages_refused{0}, pages_transferred{0}, pages_bytes{0};
+    // PALMETTO_DS_PAGES_VIEW: the destination write through xmem (docs/peer_port_streaming.md section 13).
+    std::atomic<std::uint64_t> page_write_delivered{0}, page_write_bytes{0}, page_write_views{0}, page_write_watch_pages{0},
+        page_write_refused{0};
 };
 AdvancedCounters g_advanced;
 
@@ -2172,13 +2182,14 @@ private:
         // The advanced slice's counters: the request shapes the title asks for (so a negative is measured, not assumed)
         // and what the opt-in mechanisms did. Every switch is off by default, so these are the shapes the default boot
         // already had; with a switch on the same line shows its work.
-        char advanced[512];
+        char advanced[640];
         std::snprintf(advanced, sizeof advanced,
                       "advanced: shapes file=%llu memory=%llu zlib=%llu bcpack=%llu swizzle=%llu dest-pages=%llu "
                       "source-pages=%llu | staging hits=%llu fallbacks=%llu bytes=%llu | pins=%llu pages=%llu "
                       "write-watched=%llu lock-failures=%llu refusals=%llu | unshuffle ok=%llu refused=%llu | "
                       "bcpack refused=%llu decoded=%llu blocks=%llu bytes=%llu history=%llu | pages planned=%llu "
-                      "transferred=%llu bytes=%llu refused=%llu | predictor=%s",
+                      "transferred=%llu bytes=%llu refused=%llu | page-write delivered=%llu bytes=%llu views=%llu "
+                      "watch-pages=%llu refused=%llu | predictor=%s",
                       static_cast<unsigned long long>(g_advanced.file_source.load()),
                       static_cast<unsigned long long>(g_advanced.memory_source.load()),
                       static_cast<unsigned long long>(g_advanced.zlib.load()),
@@ -2204,7 +2215,12 @@ private:
                       static_cast<unsigned long long>(g_advanced.pages_planned.load()),
                       static_cast<unsigned long long>(g_advanced.pages_transferred.load()),
                       static_cast<unsigned long long>(g_advanced.pages_bytes.load()),
-                      static_cast<unsigned long long>(g_advanced.pages_refused.load()), predictor_state_name());
+                      static_cast<unsigned long long>(g_advanced.pages_refused.load()),
+                      static_cast<unsigned long long>(g_advanced.page_write_delivered.load()),
+                      static_cast<unsigned long long>(g_advanced.page_write_bytes.load()),
+                      static_cast<unsigned long long>(g_advanced.page_write_views.load()),
+                      static_cast<unsigned long long>(g_advanced.page_write_watch_pages.load()),
+                      static_cast<unsigned long long>(g_advanced.page_write_refused.load()), predictor_state_name());
         storage_trace(advanced);
     }
 
@@ -2848,15 +2864,57 @@ private:
         }
         // 3. Publish: scatter into the destination page list, or copy into the linear destination.
         if (destination_pages) {
-            const auto scattered = palmetto::dstorage::transfer_page_list(numbers, count, page_offset, data.size(),
-                                                                         resolve, nullptr, data.data(), true);
-            if (scattered.error != palmetto::dstorage::PageTransferError::ok) return refused_transfer(scattered);
-            g_advanced.pages_transferred.fetch_add(1, std::memory_order_relaxed);
-            g_advanced.pages_bytes.fetch_add(scattered.bytes, std::memory_order_relaxed);
-            log_once("pages-ok", "a physical-page request transferred (destination page list, " +
-                                     std::to_string(scattered.spans) + " span(s) over " +
-                                     std::to_string(scattered.bytes) + " byte(s), zlib " + (zlib ? "on" : "off") +
-                                     "; source " + size_band(r.SourceSize) + ")");
+            if (advanced_config().pages_view) {
+                // PALMETTO_DS_PAGES_VIEW (docs/peer_port_streaming.md section 13): the destination pages are written
+                // through xmem's physical-page write, which repeats the bytes through every armed page-watch mapping of
+                // the page and records the written pages for the tracker - the delivery difference the page watch needs
+                // (docs/page_resolver.md section 6 named it as its limit). Off, this branch is the resolver scatter the
+                // pre-port path runs.
+                const rt::xmem::WritePhysicalPagesFn write_hook = rt::xmem::write_physical_pages;
+                if (write_hook == nullptr)
+                    return refuse(E_NOTIMPL,
+                                  "this build has no physical-page write hook, so a page-list destination cannot be "
+                                  "delivered through xmem");
+                rt::xmem::PhysicalPageWrite write_spans[palmetto::dstorage::PagePlan::kMaxSpans] = {};
+                for (unsigned i = 0; i < plan.count; ++i) {
+                    write_spans[i].page = plan.spans[i].page;
+                    write_spans[i].offset = plan.spans[i].offset;
+                    write_spans[i].bytes = plan.spans[i].bytes;
+                }
+                rt::xmem::PhysicalPageWriteStats write_stats;
+                std::uint64_t failed_page = 0;
+                if (!write_hook(write_spans, plan.count, data.data(), &write_stats, &failed_page)) {
+                    g_advanced.page_write_refused.fetch_add(1, std::memory_order_relaxed);
+                    return refuse(E_INVALIDARG,
+                                  failed_page ? "page " + std::to_string(failed_page) +
+                                                    " has no live physical page (unresolved_page; the physical-page "
+                                                    "write is all-or-nothing)"
+                                              : "the physical-page write refused its arguments");
+                }
+                g_advanced.page_write_delivered.fetch_add(1, std::memory_order_relaxed);
+                g_advanced.page_write_bytes.fetch_add(write_stats.bytes, std::memory_order_relaxed);
+                g_advanced.page_write_views.fetch_add(write_stats.watch_views, std::memory_order_relaxed);
+                g_advanced.page_write_watch_pages.fetch_add(write_stats.watch_pages, std::memory_order_relaxed);
+                g_advanced.pages_transferred.fetch_add(1, std::memory_order_relaxed);
+                g_advanced.pages_bytes.fetch_add(write_stats.bytes, std::memory_order_relaxed);
+                log_once("pages-view-ok",
+                         "a physical-page request was delivered through the page write (destination page list, " +
+                             std::to_string(write_stats.spans) + " span(s) over " +
+                             std::to_string(write_stats.bytes) + " byte(s), " +
+                             std::to_string(write_stats.watch_views) + " armed title mapping(s) written through, " +
+                             std::to_string(write_stats.watch_pages) + " page(s) recorded for the page watch, zlib " +
+                             (zlib ? "on" : "off") + "; source " + size_band(r.SourceSize) + ")");
+            } else {
+                const auto scattered = palmetto::dstorage::transfer_page_list(numbers, count, page_offset, data.size(),
+                                                                             resolve, nullptr, data.data(), true);
+                if (scattered.error != palmetto::dstorage::PageTransferError::ok) return refused_transfer(scattered);
+                g_advanced.pages_transferred.fetch_add(1, std::memory_order_relaxed);
+                g_advanced.pages_bytes.fetch_add(scattered.bytes, std::memory_order_relaxed);
+                log_once("pages-ok", "a physical-page request transferred (destination page list, " +
+                                         std::to_string(scattered.spans) + " span(s) over " +
+                                         std::to_string(scattered.bytes) + " byte(s), zlib " + (zlib ? "on" : "off") +
+                                         "; source " + size_band(r.SourceSize) + ")");
+            }
         } else {
             if (!r.Destination) return refuse(E_INVALIDARG, "a null destination");
             if (!guarded_move(r.Destination, data.data(), data.size()))
