@@ -3029,6 +3029,20 @@ if(TARGET Vulkan::Headers)
       target_compile_options(d3d12_draw_test PRIVATE /W4 /permissive- /utf-8)
       add_test(NAME d3d12_draw COMMAND d3d12_draw_test)
       set_tests_properties(d3d12_draw PROPERTIES SKIP_RETURN_CODE 77)
+      # Bounded independent GPU regression for strict multi-count viewport/scissor replay (P-47). It owns its device,
+      # list, PSO, target and readback and skips (77) without the capability set; validation layer required.
+      add_executable(d3d12_viewport_array_test test/d3d12_viewport_array_test.cpp ${PALMETTO_TEST_VS_FULLSCREEN}
+                     ${PALMETTO_TEST_PS})
+      target_include_directories(d3d12_viewport_array_test PRIVATE test shims src)
+      target_link_libraries(d3d12_viewport_array_test PRIVATE palmetto_d3d12_com Vulkan::Headers user32)
+      target_compile_definitions(d3d12_viewport_array_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+                                 PALMETTO_TEST_VS_FULLSCREEN_SPV="${PALMETTO_TEST_VS_FULLSCREEN}"
+                                 PALMETTO_TEST_PS_SPV="${PALMETTO_TEST_PS}")
+      target_compile_options(d3d12_viewport_array_test PRIVATE /W4 /permissive- /utf-8)
+      add_test(NAME d3d12_viewport_array COMMAND d3d12_viewport_array_test)
+      set_tests_properties(d3d12_viewport_array PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60
+                           LABELS "gpu;vulkan;d3d12"
+                           ENVIRONMENT "PALMETTO_VK_VALIDATION=1;PALMETTO_D3D12X_STRICT_VIEWPORTS=1")
       # Graphics & compute PSO descriptor validation parity against live Windows D3D12 (WARP and HW).
       add_executable(d3d12_pso_validation_test test/d3d12_pso_validation_test.cpp ${PALMETTO_TEST_VS}
                      ${PALMETTO_TEST_PS} ${PALMETTO_TEST_PS_UINT} ${PALMETTO_TEST_VS_FULLSCREEN} ${PALMETTO_TEST_CS})

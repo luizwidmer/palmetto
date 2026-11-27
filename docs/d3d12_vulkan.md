@@ -4266,9 +4266,10 @@ exited with access violation `0xC0000005` in/after the separate synthetic title-
 concurrent title-VA work and does not precede or invalidate the passing array assertion. `viewport_replay_readiness` remains registered under the existing CMake stanza in `port/CMakeLists.txt`. P-47 now has a
 dedicated `d3d12_viewport_array_test` source that owns its device/list/PSO and repeats the count-2 draw/readback without
 the flaky `d3d12_draw_test` fixture; it asserts pixel (8,8) = (0,255,0,255) and zero validation errors. The exact
-`d3d12_viewport_array` CTest stanza has been supplied to the lead, but `port/CMakeLists.txt` is intentionally unchanged,
-so this checkout does not yet register or build the new target. The prior manual GPU PASS above remains the available run
-evidence; it is not a run of the new target. No game data or boot was used.
+`d3d12_viewport_array` is now registered in `port/CMakeLists.txt` and passes locally: the CTest ran at 13:11 on the
+RTX 4090, 1/1 passed in 1.6 s, with the validation layer and `PALMETTO_D3D12X_STRICT_VIEWPORTS=1` set by the test's
+CMake properties. That run is the executed evidence for the dedicated target; the earlier manual PASS through the shared
+fixture remains a separate control. No game data or boot was used.
 
 **Falsifier / limits.** Count > 1 still receives a named refusal if either dynamic command is absent, `multiViewport`
 is not enabled, or the count exceeds `maxViewports`/D3D12's 16-element bound. A validation error or failed pixel in the
