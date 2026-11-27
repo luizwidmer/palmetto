@@ -601,7 +601,34 @@ std::unordered_map<uintptr_t, MappedPage> g_mapped;
 // Alias-aware PAGE_GUARD maintenance is defined below with the watcher. All callers hold g_phys_mutex; the hook takes
 // g_watch_mutex second, preserving the one lock order used by page-list delivery and alias-watch arming.
 void watch_mapping_changed_locked(uintptr_t address);
+bool native_write_watch_before_unmap_locked(uintptr_t address);
+void native_write_watch_mapping_changed_locked(uintptr_t address);
 SRWLOCK g_fault_lock = SRWLOCK_INIT;
+
+// The native write-fault path publishes only fixed-size intervals to its VEH. The handler never takes the tracker
+// mutex, allocates, or waits on the process heap; it retries the mapping SRW lock a finite number of times and fails
+// closed if a remap owns it for too long.
+constexpr std::uintptr_t kNativeWritePage = 0x10000;
+constexpr unsigned kNativeWriteOwners = 8;
+constexpr unsigned kNativeWriteTrips = 16384;
+constexpr unsigned kNativeWriteLockAttempts = 32;
+std::atomic<std::uintptr_t> g_native_watch_begin[kNativeWriteOwners]{};
+std::atomic<std::uintptr_t> g_native_watch_end[kNativeWriteOwners]{};
+std::atomic<unsigned> g_native_watch_published{0};
+std::atomic<std::uintptr_t> g_native_watch_trips[kNativeWriteTrips]{};
+std::atomic<unsigned> g_native_watch_trip_count{0};
+std::atomic<bool> g_native_watch_overflow{false};
+std::atomic<bool> g_native_watch_changed{false};
+std::atomic<bool> g_native_watch_failed{false};
+std::atomic<std::uint64_t> g_native_watch_epoch{0};
+std::atomic<std::uint64_t> g_native_watch_faults{0};
+std::atomic<std::uint64_t> g_native_watch_retries{0};
+std::atomic<std::uint64_t> g_native_watch_lock_refusals{0};
+std::atomic<std::uint64_t> g_native_watch_active_pages{0};
+std::mutex g_native_watch_mutex;
+
+enum class NativeWriteFaultResult : std::uint8_t { not_watched, retried, refused };
+NativeWriteFaultResult native_write_fault_retry(std::uintptr_t accessed);
 
 struct FaultLockExclusive {
     FaultLockExclusive() { AcquireSRWLockExclusive(&g_fault_lock); }
@@ -1045,6 +1072,10 @@ bool unmap_page(uintptr_t address, uint64_t* removed_page = nullptr, bool notify
         const auto it = g_mapped.find(address);
         if (it == g_mapped.end()) return true;
         old_page = it->second.page;
+        if (!native_write_watch_before_unmap_locked(address)) {
+            SetLastError(ERROR_NOT_SUPPORTED);
+            return false;
+        }
         if (!placeholder_api().unmap_view2(GetCurrentProcess(), reinterpret_cast<void*>(address),
                                            MEM_PRESERVE_PLACEHOLDER)) {
             return false;
@@ -1052,7 +1083,10 @@ bool unmap_page(uintptr_t address, uint64_t* removed_page = nullptr, bool notify
         g_mapped.erase(it);
     }
     if (removed_page) *removed_page = old_page;
-    if (notify) watch_mapping_changed_locked(address);
+    if (notify) {
+        watch_mapping_changed_locked(address);
+        native_write_watch_mapping_changed_locked(address);
+    }
     return true;
 }
 
@@ -1063,18 +1097,27 @@ bool map_page(uintptr_t address, uint64_t page, DWORD protect) {
     uint64_t old_page = 0;
     if (!unmap_page(address, &old_page, false)) return false;
     if (page == 0) {
-        if (old_page) watch_mapping_changed_locked(address);
+        if (old_page) {
+            watch_mapping_changed_locked(address);
+            native_write_watch_mapping_changed_locked(address);
+        }
         return true;
     }
     const auto it = g_pages.find(page);
     if (it == g_pages.end()) {
         SetLastError(ERROR_INVALID_PARAMETER);
-        if (old_page) watch_mapping_changed_locked(address);
+        if (old_page) {
+            watch_mapping_changed_locked(address);
+            native_write_watch_mapping_changed_locked(address);
+        }
         return false;
     }
     void* const target = reinterpret_cast<void*>(address);
     if (!isolate_placeholder(target, kPhysicalPageSize)) {
-        if (old_page) watch_mapping_changed_locked(address);
+        if (old_page) {
+            watch_mapping_changed_locked(address);
+            native_write_watch_mapping_changed_locked(address);
+        }
         return false;
     }
     void* view = nullptr;
@@ -1086,10 +1129,14 @@ bool map_page(uintptr_t address, uint64_t page, DWORD protect) {
         if (view) g_mapped[address] = MappedPage{page, it->second.section, it->second.offset};
     }
     if (!view) {
-        if (old_page) watch_mapping_changed_locked(address);
+        if (old_page) {
+            watch_mapping_changed_locked(address);
+            native_write_watch_mapping_changed_locked(address);
+        }
         return false;
     }
     watch_mapping_changed_locked(address);
+    native_write_watch_mapping_changed_locked(address);
     return true;
 }
 
@@ -1132,6 +1179,97 @@ bool access_allowed(DWORD protect, ULONG_PTR access) {
     }
 }
 
+bool native_watch_contains(std::uintptr_t address) {
+    const unsigned count = g_native_watch_published.load(std::memory_order_acquire);
+    for (unsigned i = 0; i < count && i < kNativeWriteOwners; ++i) {
+        if (address >= g_native_watch_begin[i].load(std::memory_order_relaxed) &&
+            address < g_native_watch_end[i].load(std::memory_order_relaxed))
+            return true;
+    }
+    return false;
+}
+
+bool native_view_region_covers_page(const MEMORY_BASIC_INFORMATION& info, std::uintptr_t page) {
+    const std::uintptr_t region_start = reinterpret_cast<std::uintptr_t>(info.BaseAddress);
+    return page >= region_start && info.RegionSize >= kNativeWritePage &&
+           page - region_start <= info.RegionSize - kNativeWritePage;
+}
+
+// Handle only the explicit native-watch interval. The mapping lock is tried, never waited on, in this path; the
+// exception handler cannot take g_native_watch_mutex because an arbitrary faulting thread may already hold it.
+NativeWriteFaultResult native_write_fault_retry(std::uintptr_t accessed) {
+    if (!native_watch_contains(accessed)) return NativeWriteFaultResult::not_watched;
+
+    bool locked = false;
+    for (unsigned attempt = 0; attempt < kNativeWriteLockAttempts; ++attempt) {
+        if (TryAcquireSRWLockShared(&g_fault_lock)) {
+            locked = true;
+            break;
+        }
+        YieldProcessor();
+    }
+    if (!locked) {
+        g_native_watch_lock_refusals.fetch_add(1, std::memory_order_relaxed);
+        g_native_watch_failed.store(true, std::memory_order_relaxed);
+        g_native_watch_changed.store(true, std::memory_order_relaxed);
+        g_native_watch_epoch.fetch_add(1, std::memory_order_relaxed);
+        return NativeWriteFaultResult::refused;
+    }
+
+    NativeWriteFaultResult result = NativeWriteFaultResult::not_watched;
+    // A remap may have invalidated this interval while the handler was trying the shared lock.
+    if (native_watch_contains(accessed)) {
+        const std::uintptr_t page = accessed & ~static_cast<std::uintptr_t>(kNativeWritePage - 1);
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<void*>(accessed), &info, sizeof(info)) != sizeof(info) ||
+            info.State != MEM_COMMIT || info.Type != MEM_MAPPED || !native_view_region_covers_page(info, page) ||
+            info.Protect != PAGE_READONLY) {
+            g_native_watch_failed.store(true, std::memory_order_relaxed);
+            g_native_watch_changed.store(true, std::memory_order_relaxed);
+            g_native_watch_epoch.fetch_add(1, std::memory_order_relaxed);
+            result = NativeWriteFaultResult::refused;
+        } else {
+            DWORD old = 0;
+            if (!VirtualProtect(reinterpret_cast<void*>(page), kNativeWritePage, PAGE_READWRITE, &old)) {
+                g_native_watch_failed.store(true, std::memory_order_relaxed);
+                g_native_watch_changed.store(true, std::memory_order_relaxed);
+                g_native_watch_epoch.fetch_add(1, std::memory_order_relaxed);
+                result = NativeWriteFaultResult::refused;
+            } else if (old == PAGE_READONLY) {
+                const unsigned slot = g_native_watch_trip_count.fetch_add(1, std::memory_order_relaxed);
+                if (slot < kNativeWriteTrips) {
+                    g_native_watch_trips[slot].store(page, std::memory_order_relaxed);
+                } else {
+                    g_native_watch_overflow.store(true, std::memory_order_relaxed);
+                }
+                g_native_watch_faults.fetch_add(1, std::memory_order_relaxed);
+                g_native_watch_retries.fetch_add(1, std::memory_order_relaxed);
+                g_native_watch_changed.store(true, std::memory_order_relaxed);
+                g_native_watch_epoch.fetch_add(1, std::memory_order_relaxed);
+                result = NativeWriteFaultResult::retried;
+            } else if (old == PAGE_READWRITE) {
+                // A second writer can fault on the same page before the first handler returns. Its successful
+                // PAGE_READWRITE transition already owns the one dirty-page record; retry this store without adding a
+                // duplicate trip.
+                g_native_watch_faults.fetch_add(1, std::memory_order_relaxed);
+                g_native_watch_retries.fetch_add(1, std::memory_order_relaxed);
+                result = NativeWriteFaultResult::retried;
+            } else {
+                // Another protection owner changed the view without going through xmem. Restore it and refuse to trust
+                // this watch rather than taking ownership of an unknown protection.
+                DWORD ignored = 0;
+                VirtualProtect(reinterpret_cast<void*>(page), kNativeWritePage, old, &ignored);
+                g_native_watch_failed.store(true, std::memory_order_relaxed);
+                g_native_watch_changed.store(true, std::memory_order_relaxed);
+                g_native_watch_epoch.fetch_add(1, std::memory_order_relaxed);
+                result = NativeWriteFaultResult::refused;
+            }
+        }
+    }
+    ReleaseSRWLockShared(&g_fault_lock);
+    return result;
+}
+
 LONG CALLBACK physical_page_fault(EXCEPTION_POINTERS* info) {
     thread_local bool busy = false;
     const EXCEPTION_RECORD* record = info ? info->ExceptionRecord : nullptr;
@@ -1140,6 +1278,17 @@ LONG CALLBACK physical_page_fault(EXCEPTION_POINTERS* info) {
     }
     busy = true;
     const uintptr_t accessed = static_cast<uintptr_t>(record->ExceptionInformation[1]);
+    if (record->ExceptionInformation[0] == 1) {
+        const NativeWriteFaultResult native = native_write_fault_retry(accessed);
+        if (native == NativeWriteFaultResult::retried) {
+            busy = false;
+            return EXCEPTION_CONTINUE_EXECUTION;  // retry the faulting store against the now-writable view
+        }
+        if (native == NativeWriteFaultResult::refused) {
+            busy = false;
+            return EXCEPTION_CONTINUE_SEARCH;  // named by the watch counters; never guess at an unknown protection
+        }
+    }
     const uintptr_t address = accessed & ~static_cast<uintptr_t>(kPhysicalPageSize - 1);
     DWORD protect = 0;
     PageCommit result;
@@ -1982,6 +2131,150 @@ std::uint32_t deliver_span_through_watch(const std::shared_ptr<Section>& section
                                                       rt::xmem::page_watch_read_trips = &watch_read_trips,
                                                       rt::xmem::page_watch_pages = &watch_pages, true);
 
+// This is a distinct, native AV/write path from the existing one-shot PAGE_GUARD tracker. It is deliberately limited
+// to one committed, PAGE_READWRITE view per physical 64 KiB page: native aliases are refused rather than guessed at.
+// The handler's interval table is fixed-size and lock-free; tracker mutations serialize as g_phys_mutex -> g_fault_lock
+// -> g_native_watch_mutex. A shadow consumer compares the epoch after copying and only skips when poll says unchanged.
+struct NativeWriteIdentity {
+    std::shared_ptr<Section> section;
+    std::uint64_t offset = 0;
+};
+struct NativeWriteOwner {
+    std::uintptr_t start = 0;
+    std::uintptr_t end = 0;
+    bool available = true;
+    bool armed = true;
+    std::vector<NativeWriteIdentity> pages;  // one backing identity for each 64 KiB view in [start, end)
+};
+std::vector<NativeWriteOwner> g_native_write_owners;
+
+bool native_write_identity_equal(const NativeWriteIdentity& a, const NativeWriteIdentity& b) {
+    return a.section == b.section && a.offset == b.offset;
+}
+bool native_write_identity_less(const NativeWriteIdentity& a, const NativeWriteIdentity& b) {
+    if (a.section.get() != b.section.get()) return std::less<const Section*>{}(a.section.get(), b.section.get());
+    return a.offset < b.offset;
+}
+bool native_write_owner_has_identity(const NativeWriteOwner& owner, const NativeWriteIdentity& identity) {
+    return std::any_of(owner.pages.begin(), owner.pages.end(), [&](const auto& page) {
+        return native_write_identity_equal(page, identity);
+    });
+}
+
+void native_write_watch_publish_locked() {
+    unsigned published = 0;
+    std::uint64_t pages = 0;
+    for (const auto& owner : g_native_write_owners) {
+        if (!owner.armed) continue;
+        if (published >= kNativeWriteOwners) break;
+        g_native_watch_begin[published].store(owner.start, std::memory_order_relaxed);
+        g_native_watch_end[published].store(owner.end, std::memory_order_relaxed);
+        pages += owner.pages.size();
+        ++published;
+    }
+    for (unsigned i = published; i < kNativeWriteOwners; ++i) {
+        g_native_watch_begin[i].store(0, std::memory_order_relaxed);
+        g_native_watch_end[i].store(0, std::memory_order_relaxed);
+    }
+    g_native_watch_active_pages.store(pages, std::memory_order_relaxed);
+    g_native_watch_published.store(published, std::memory_order_release);
+}
+
+// g_phys_mutex and g_fault_lock exclusive are held. Restore only views whose Section+offset still belongs to this
+// owner; a remapped address must keep the new window's protection, never inherit the old watcher's PAGE_READWRITE.
+bool native_write_watch_disarm_owner_locked(NativeWriteOwner& owner) {
+    bool restored = true;
+    for (std::size_t i = 0; i < owner.pages.size(); ++i) {
+        const std::uintptr_t address = owner.start + i * kNativeWritePage;
+        const auto mapped = g_mapped.find(address);
+        if (mapped == g_mapped.end() || mapped->second.section != owner.pages[i].section ||
+            mapped->second.offset != owner.pages[i].offset)
+            continue;
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<void*>(address), &info, sizeof(info)) != sizeof(info) ||
+            info.State != MEM_COMMIT || info.Type != MEM_MAPPED || !native_view_region_covers_page(info, address) ||
+            (info.Protect != PAGE_READONLY && info.Protect != PAGE_READWRITE)) {
+            restored = false;
+            continue;
+        }
+        DWORD old = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(address), kNativeWritePage, PAGE_READWRITE, &old)) restored = false;
+    }
+    return restored;
+}
+
+// g_phys_mutex + g_fault_lock exclusive + g_native_watch_mutex are held. Any loss of the address/backing relation
+// makes every shadow consumer fall back to a full compare. If a protection could not be restored, retain its interval
+// so later stores are still consumed by the VEH while poll remains unavailable.
+bool native_write_watch_invalidate_all_locked() {
+    bool all_restored = true;
+    for (auto& owner : g_native_write_owners) {
+        if (!owner.armed) {
+            owner.available = false;
+            continue;
+        }
+        const bool restored = native_write_watch_disarm_owner_locked(owner);
+        all_restored &= restored;
+        owner.available = false;
+        owner.armed = !restored;
+    }
+    g_native_watch_changed.store(true, std::memory_order_relaxed);
+    g_native_watch_epoch.fetch_add(1, std::memory_order_relaxed);
+    if (!all_restored) g_native_watch_failed.store(true, std::memory_order_relaxed);
+    native_write_watch_publish_locked();
+    return all_restored;
+}
+
+// Called with g_phys_mutex and g_fault_lock exclusive before a mapped view is removed. Returning false aborts the
+// remap instead of leaving a protected page with no handler owner.
+bool native_write_watch_before_unmap_locked(std::uintptr_t address) {
+    if (g_native_watch_published.load(std::memory_order_acquire) == 0) return true;
+    const auto mapped = g_mapped.find(address);
+    if (mapped == g_mapped.end()) return true;
+    const NativeWriteIdentity identity{mapped->second.section, mapped->second.offset};
+    std::lock_guard lock(g_native_watch_mutex);
+    bool affected = false;
+    for (const auto& owner : g_native_write_owners) {
+        if (!owner.armed) continue;
+        affected |= address >= owner.start && address < owner.end;
+        affected |= native_write_owner_has_identity(owner, identity);
+    }
+    if (!affected) return true;
+    return native_write_watch_invalidate_all_locked();
+}
+
+// Called under g_phys_mutex after a new map is published. A new alias can bypass the source view's read-only PTE, so
+// detect the shared backing identity, disarm existing source views, and make the next poll unavailable.
+void native_write_watch_mapping_changed_locked(std::uintptr_t address) {
+    if (g_native_watch_published.load(std::memory_order_acquire) == 0) return;
+    const auto mapped = g_mapped.find(address);
+    if (mapped == g_mapped.end()) return;
+    const NativeWriteIdentity identity{mapped->second.section, mapped->second.offset};
+    const FaultLockExclusive fault_lock;
+    std::lock_guard lock(g_native_watch_mutex);
+    bool alias = false;
+    for (const auto& owner : g_native_write_owners) {
+        if (!owner.armed) continue;
+        if (address < owner.start || address >= owner.end) alias |= native_write_owner_has_identity(owner, identity);
+    }
+    if (alias) native_write_watch_invalidate_all_locked();
+}
+
+// XMem page-list delivery writes the shared backing scratch view, not the watched CPU mapping, so it creates no AV.
+// Preserve correctness by advancing the same shadow epoch when a delivered physical page is in an armed owner.
+void native_write_watch_mark_physical_locked(const std::shared_ptr<Section>& section, std::uint64_t offset) {
+    if (g_native_watch_published.load(std::memory_order_acquire) == 0) return;
+    const std::lock_guard lock(g_native_watch_mutex);
+    const NativeWriteIdentity identity{section, offset};
+    for (const auto& owner : g_native_write_owners) {
+        if (owner.armed && owner.available && native_write_owner_has_identity(owner, identity)) {
+            g_native_watch_changed.store(true, std::memory_order_relaxed);
+            g_native_watch_epoch.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
+    }
+}
+
 UINT WINAPI XMemGetWriteWatch(DWORD flags, void* base_address, SIZE_T region_size, void** addresses, ULONG_PTR* count,
                               ULONG* granularity) {
     return GetWriteWatch(flags, base_address, region_size, addresses, count, granularity);
@@ -2250,6 +2543,267 @@ GpuViewPairPlan set_gpu_view_pair_plan(GpuViewPairPlan plan) {
     return plan;
 }
 
+// The switch is parsed only when a caller explicitly requests the native write-fault arm. With it unset, no page is
+// protected and the existing first-touch / PAGE_GUARD behavior is unchanged.
+NativeWriteWatchPlan native_write_watch_plan_from(const char* value) {
+    NativeWriteWatchPlan plan;
+    if (ascii_word_is(value, "on") || ascii_word_is(value, "1") || ascii_word_is(value, "yes") ||
+        ascii_word_is(value, "true"))
+        plan.mode = NativeWriteWatchMode::on;
+    return plan;
+}
+
+NativeWriteWatchPlan& native_write_watch_plan_slot() {
+    static NativeWriteWatchPlan plan = [] {
+        char value[32] = {};
+        const DWORD length = GetEnvironmentVariableA("PALMETTO_XMEM_NATIVE_WRITE_WATCH", value, sizeof value);
+        return native_write_watch_plan_from(length ? value : nullptr);
+    }();
+    return plan;
+}
+
+NativeWriteWatchPlan native_write_watch_plan() { return native_write_watch_plan_slot(); }
+
+// Test seam: replace the process parse in xmem_test; no title boot calls this.
+NativeWriteWatchPlan set_native_write_watch_plan(NativeWriteWatchPlan plan) {
+    NativeWriteWatchPlan old = native_write_watch_plan_slot();
+    native_write_watch_plan_slot() = plan;
+    return old;
+}
+
+const char* native_write_watch_arm_name(NativeWriteWatchArmResult result) {
+    switch (result) {
+    case NativeWriteWatchArmResult::armed: return "armed";
+    case NativeWriteWatchArmResult::disabled: return "disabled";
+    case NativeWriteWatchArmResult::invalid_range: return "invalid-range";
+    case NativeWriteWatchArmResult::too_many_pages: return "too-many-pages";
+    case NativeWriteWatchArmResult::not_xmem_mapped: return "not-xmem-mapped";
+    case NativeWriteWatchArmResult::uncommitted_page: return "uncommitted-page";
+    case NativeWriteWatchArmResult::unsupported_protection: return "unsupported-protection";
+    case NativeWriteWatchArmResult::alias_present: return "alias-present";
+    case NativeWriteWatchArmResult::owner_limit: return "owner-limit";
+    case NativeWriteWatchArmResult::overlap: return "overlap";
+    case NativeWriteWatchArmResult::allocation_failed: return "allocation-failed";
+    case NativeWriteWatchArmResult::protect_failed: return "protect-failed";
+    case NativeWriteWatchArmResult::already_armed: return "already-armed";
+    case NativeWriteWatchArmResult::owner_unavailable: return "owner-unavailable";
+    }
+    return "unknown-refusal";
+}
+
+NativeWriteWatchArmResult page_write_fault_arm(const void* address, std::size_t bytes) {
+    if (!native_write_watch_plan().enabled()) return NativeWriteWatchArmResult::disabled;
+    if (!address || bytes == 0) return NativeWriteWatchArmResult::invalid_range;
+    const std::uintptr_t raw = reinterpret_cast<std::uintptr_t>(address);
+    if (raw > (std::numeric_limits<std::uintptr_t>::max)() - bytes) return NativeWriteWatchArmResult::invalid_range;
+    const std::uintptr_t requested_end = raw + bytes;
+    if (requested_end > (std::numeric_limits<std::uintptr_t>::max)() - (kNativeWritePage - 1))
+        return NativeWriteWatchArmResult::invalid_range;
+    const std::uintptr_t start = raw & ~static_cast<std::uintptr_t>(kNativeWritePage - 1);
+    const std::uintptr_t end = (requested_end + kNativeWritePage - 1) &
+                               ~static_cast<std::uintptr_t>(kNativeWritePage - 1);
+    if (end <= start) return NativeWriteWatchArmResult::invalid_range;
+    const std::size_t page_count = static_cast<std::size_t>((end - start) / kNativeWritePage);
+    if (page_count > kNativeWriteTrips) return NativeWriteWatchArmResult::too_many_pages;
+
+    const std::lock_guard physical_lock(g_phys_mutex);
+    const FaultLockExclusive fault_lock;
+    const std::lock_guard watch_lock(g_native_watch_mutex);
+    for (const auto& owner : g_native_write_owners) {
+        if (start == owner.start && end == owner.end)
+            return owner.available ? NativeWriteWatchArmResult::already_armed
+                                   : NativeWriteWatchArmResult::owner_unavailable;
+        if (start < owner.end && owner.start < end) return NativeWriteWatchArmResult::overlap;
+    }
+    if (g_native_write_owners.size() >= kNativeWriteOwners) return NativeWriteWatchArmResult::owner_limit;
+
+    NativeWriteOwner owner;
+    owner.start = start;
+    owner.end = end;
+    try {
+        owner.pages.reserve(page_count);
+        g_native_write_owners.reserve(kNativeWriteOwners);
+        for (std::size_t i = 0; i < page_count; ++i) {
+            const std::uintptr_t page = start + i * kNativeWritePage;
+            const auto mapped = g_mapped.find(page);
+            if (mapped == g_mapped.end() || !mapped->second.section || !mapped->second.section->scratch)
+                return NativeWriteWatchArmResult::not_xmem_mapped;
+            MEMORY_BASIC_INFORMATION info{};
+            if (VirtualQuery(reinterpret_cast<void*>(page), &info, sizeof(info)) != sizeof(info) ||
+                info.Type != MEM_MAPPED)
+                return NativeWriteWatchArmResult::not_xmem_mapped;
+            if (info.State != MEM_COMMIT) return NativeWriteWatchArmResult::uncommitted_page;
+            if (!native_view_region_covers_page(info, page) || info.Protect != PAGE_READWRITE)
+                return NativeWriteWatchArmResult::unsupported_protection;
+            owner.pages.push_back(NativeWriteIdentity{mapped->second.section, mapped->second.offset});
+        }
+
+        std::vector<NativeWriteIdentity> identities = owner.pages;
+        std::sort(identities.begin(), identities.end(), native_write_identity_less);
+        for (std::size_t i = 1; i < identities.size(); ++i) {
+            if (native_write_identity_equal(identities[i - 1], identities[i]))
+                return NativeWriteWatchArmResult::alias_present;
+        }
+        for (const auto& [mapped_address, mapped] : g_mapped) {
+            if (mapped_address >= start && mapped_address < end) continue;
+            const NativeWriteIdentity identity{mapped.section, mapped.offset};
+            if (std::binary_search(identities.begin(), identities.end(), identity, native_write_identity_less))
+                return NativeWriteWatchArmResult::alias_present;
+        }
+    } catch (const std::bad_alloc&) {
+        return NativeWriteWatchArmResult::allocation_failed;
+    }
+
+    std::size_t protected_pages = 0;
+    for (; protected_pages < page_count; ++protected_pages) {
+        const std::uintptr_t page = start + protected_pages * kNativeWritePage;
+        DWORD old = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(page), kNativeWritePage, PAGE_READONLY, &old) ||
+            old != PAGE_READWRITE) {
+            bool rollback_failed = false;
+            if (old != 0 && old != PAGE_READWRITE) {
+                DWORD ignored = 0;
+                rollback_failed |= !VirtualProtect(reinterpret_cast<void*>(page), kNativeWritePage, old, &ignored);
+            }
+            for (std::size_t rollback = 0; rollback < protected_pages; ++rollback) {
+                DWORD ignored = 0;
+                rollback_failed |= !VirtualProtect(reinterpret_cast<void*>(start + rollback * kNativeWritePage),
+                                                    kNativeWritePage, PAGE_READWRITE, &ignored);
+            }
+            if (rollback_failed) {
+                // A partial arm that could not be rolled back must never leave read-only pages unpublished. Retain an
+                // unavailable owner so any remaining protected pages can still take the safe refusal/retry path and
+                // every consumer is forced to use a full compare until forget succeeds.
+                const bool was_empty = g_native_write_owners.empty();
+                owner.available = false;
+                owner.armed = true;
+                g_native_write_owners.push_back(std::move(owner));  // capacity was reserved above
+                if (was_empty) {
+                    g_native_watch_trip_count.store(0, std::memory_order_relaxed);
+                    g_native_watch_overflow.store(false, std::memory_order_relaxed);
+                    g_native_watch_failed.store(false, std::memory_order_relaxed);
+                    g_native_watch_changed.store(false, std::memory_order_relaxed);
+                }
+                native_write_watch_publish_locked();
+                g_native_watch_failed.store(true, std::memory_order_relaxed);
+                g_native_watch_changed.store(true, std::memory_order_relaxed);
+                g_native_watch_epoch.fetch_add(1, std::memory_order_relaxed);
+            }
+            return NativeWriteWatchArmResult::protect_failed;
+        }
+    }
+
+    const bool was_empty = g_native_write_owners.empty();
+    try {
+        g_native_write_owners.push_back(std::move(owner));
+    } catch (const std::bad_alloc&) {
+        for (std::size_t i = 0; i < page_count; ++i) {
+            DWORD ignored = 0;
+            VirtualProtect(reinterpret_cast<void*>(start + i * kNativeWritePage), kNativeWritePage, PAGE_READWRITE,
+                           &ignored);
+        }
+        return NativeWriteWatchArmResult::allocation_failed;
+    }
+    if (was_empty) {
+        g_native_watch_trip_count.store(0, std::memory_order_relaxed);
+        g_native_watch_overflow.store(false, std::memory_order_relaxed);
+        g_native_watch_failed.store(false, std::memory_order_relaxed);
+        g_native_watch_changed.store(false, std::memory_order_relaxed);
+    }
+    native_write_watch_publish_locked();
+    g_native_watch_changed.store(true, std::memory_order_relaxed);
+    g_native_watch_epoch.fetch_add(1, std::memory_order_relaxed);
+    return NativeWriteWatchArmResult::armed;
+}
+
+void page_write_fault_forget(const void* address) {
+    if (!address) return;
+    const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(address) &
+                                 ~static_cast<std::uintptr_t>(kNativeWritePage - 1);
+    const std::lock_guard physical_lock(g_phys_mutex);
+    const FaultLockExclusive fault_lock;
+    const std::lock_guard watch_lock(g_native_watch_mutex);
+    const auto found = std::find_if(g_native_write_owners.begin(), g_native_write_owners.end(),
+                                    [&](const auto& owner) { return owner.start == start; });
+    if (found == g_native_write_owners.end()) return;
+    if (found->armed && !native_write_watch_disarm_owner_locked(*found)) {
+        found->available = false;
+        g_native_watch_failed.store(true, std::memory_order_relaxed);
+        g_native_watch_changed.store(true, std::memory_order_relaxed);
+        native_write_watch_publish_locked();
+        return;
+    }
+    g_native_write_owners.erase(found);
+    native_write_watch_publish_locked();
+    if (g_native_write_owners.empty()) {
+        g_native_watch_trip_count.store(0, std::memory_order_relaxed);
+        g_native_watch_overflow.store(false, std::memory_order_relaxed);
+        g_native_watch_failed.store(false, std::memory_order_relaxed);
+        g_native_watch_changed.store(false, std::memory_order_relaxed);
+    }
+}
+
+WriteWatchPoll page_write_fault_poll() {
+    const std::lock_guard physical_lock(g_phys_mutex);
+    const FaultLockExclusive fault_lock;
+    const std::lock_guard watch_lock(g_native_watch_mutex);
+    if (g_native_write_owners.empty()) return WriteWatchPoll::unavailable;
+    if (std::any_of(g_native_write_owners.begin(), g_native_write_owners.end(),
+                    [](const auto& owner) { return !owner.available; }))
+        return WriteWatchPoll::unavailable;
+    if (g_native_watch_failed.exchange(false, std::memory_order_relaxed) ||
+        g_native_watch_overflow.exchange(false, std::memory_order_relaxed)) {
+        native_write_watch_invalidate_all_locked();
+        return WriteWatchPoll::unavailable;
+    }
+
+    const unsigned trips = g_native_watch_trip_count.exchange(0, std::memory_order_relaxed);
+    const unsigned count = (std::min)(trips, kNativeWriteTrips);
+    for (unsigned i = 0; i < count; ++i) {
+        const std::uintptr_t page = g_native_watch_trips[i].load(std::memory_order_relaxed);
+        if (!native_watch_contains(page)) continue;
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<void*>(page), &info, sizeof(info)) != sizeof(info) ||
+            info.State != MEM_COMMIT || info.Type != MEM_MAPPED || !native_view_region_covers_page(info, page) ||
+            info.Protect != PAGE_READWRITE) {
+            native_write_watch_invalidate_all_locked();
+            return WriteWatchPoll::unavailable;
+        }
+        DWORD old = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(page), kNativeWritePage, PAGE_READONLY, &old)) {
+            native_write_watch_invalidate_all_locked();
+            return WriteWatchPoll::unavailable;
+        }
+        if (old != PAGE_READWRITE) {
+            DWORD ignored = 0;
+            VirtualProtect(reinterpret_cast<void*>(page), kNativeWritePage, old, &ignored);
+            native_write_watch_invalidate_all_locked();
+            return WriteWatchPoll::unavailable;
+        }
+    }
+    return g_native_watch_changed.exchange(false, std::memory_order_relaxed) ? WriteWatchPoll::changed
+                                                                            : WriteWatchPoll::unchanged;
+}
+
+std::uint64_t page_write_fault_epoch() { return g_native_watch_epoch.load(std::memory_order_relaxed); }
+std::uint64_t page_write_fault_retries() { return g_native_watch_retries.load(std::memory_order_relaxed); }
+std::uint64_t page_write_fault_lock_refusals() { return g_native_watch_lock_refusals.load(std::memory_order_relaxed); }
+std::uint64_t page_write_fault_active_pages() { return g_native_watch_active_pages.load(std::memory_order_relaxed); }
+
+bool page_write_fault_test_lock(bool hold) {
+    static thread_local bool held = false;
+    if (hold) {
+        if (held) return false;
+        AcquireSRWLockExclusive(&g_fault_lock);
+        held = true;
+        return true;
+    }
+    if (!held) return false;
+    held = false;
+    ReleaseSRWLockExclusive(&g_fault_lock);
+    return true;
+}
+
 // Which XMem entry point served `address`, and from which title caller (raw address; the caller resolves it to a
 // module+RVA). False when no recorded XMemVirtualAlloc answer contains it, or when the registry switch is off.
 bool served_range(const void* address, std::uint64_t* caller, std::uint8_t* kind) {
@@ -2381,6 +2935,7 @@ bool write_physical_pages_impl(const rt::xmem::PhysicalPageWrite* spans, std::si
     std::size_t at = 0;
     for (std::size_t i = 0; i < count; ++i) {
         std::memcpy(backing[i] + spans[i].offset, data + at, spans[i].bytes);
+        native_write_watch_mark_physical_locked(backing_sections[i], backing_offsets[i]);
         std::uint32_t recorded = 0;
         result.watch_views +=
             deliver_span_through_watch(backing_sections[i], backing_offsets[i], spans[i].offset, spans[i].bytes,

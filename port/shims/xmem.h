@@ -414,6 +414,59 @@ inline PageWatchCountFn page_watch_write_trips = nullptr;
 inline PageWatchCountFn page_watch_read_trips = nullptr;
 inline PageWatchCountFn page_watch_pages = nullptr;
 
+// ---- Native xmem write-fault watch (opt-in, synthetic readiness only) ---------------------------------------------
+//
+// The first-touch handler above commits an uncommitted section page. It deliberately does not consume a later write
+// fault on a committed PAGE_READONLY page. This separate opt-in arm can protect a bounded, committed xmem range as
+// PAGE_READONLY, retry a user-mode write after changing only its 64 KiB view back to PAGE_READWRITE, and advance a
+// process-wide shadow epoch. It does not intercept kernel writes such as ReadFile, GPU writes, or aliases created after
+// arm: those conditions refuse/invalidate the watch so a caller must do a full compare. No device shadow consumer is
+// wired to this hook yet. The process switch only permits an explicit caller to arm it; it never arms title memory by
+// itself. Unset/off preserves the current path.
+//
+// PALMETTO_XMEM_NATIVE_WRITE_WATCH accepts on/1/yes/true (case-insensitive); every other value is off. The test setter
+// overrides the process parse only in the xmem test seam.
+enum class NativeWriteWatchMode : std::uint8_t { off = 0, on = 1 };
+struct NativeWriteWatchPlan {
+    NativeWriteWatchMode mode = NativeWriteWatchMode::off;
+    bool enabled() const { return mode == NativeWriteWatchMode::on; }
+};
+NativeWriteWatchPlan native_write_watch_plan_from(const char* value);
+NativeWriteWatchPlan native_write_watch_plan();
+NativeWriteWatchPlan set_native_write_watch_plan(NativeWriteWatchPlan plan);
+
+enum class NativeWriteWatchArmResult : std::uint8_t {
+    armed = 0,
+    disabled,
+    invalid_range,
+    too_many_pages,
+    not_xmem_mapped,
+    uncommitted_page,
+    unsupported_protection,
+    alias_present,
+    owner_limit,
+    overlap,
+    allocation_failed,
+    protect_failed,
+    already_armed,
+    owner_unavailable,
+};
+const char* native_write_watch_arm_name(NativeWriteWatchArmResult result);
+NativeWriteWatchArmResult page_write_fault_arm(const void* address, std::size_t bytes);
+void page_write_fault_forget(const void* address);
+// A changed poll means the title bytes no longer match a cached shadow. Overflow, a remap, or a handler refusal is
+// unavailable and requires a full compare. Poll re-protects pages whose write fault was successfully retried.
+WriteWatchPoll page_write_fault_poll();
+// Monotonic write-fault/backing-write invalidation counter. The VEH advances it before a faulting store resumes, so it
+// is not a linearizable snapshot/sequence lock; a concurrent shadow copy still needs synchronization or a periodic full
+// compare.
+std::uint64_t page_write_fault_epoch();
+std::uint64_t page_write_fault_retries();
+std::uint64_t page_write_fault_lock_refusals();
+std::uint64_t page_write_fault_active_pages();
+// Test-only seam: hold/release the mapping/fault SRW lock on the calling thread to prove a fault handler's retry bound.
+bool page_write_fault_test_lock(bool hold);
+
 // The measured console page batch: a batch is 24 bytes {UINT64 destination; UINT32 range count; const PageRange*
 // ranges} and a range is 12 bytes {UINT32 kind, start, count} (our copy of the retail executable's builder stores them
 // at those strides, game+0xf2c709 / game+0xf2c6c4). Kind 0 maps pool pages start, start + 1, ... at the destination

@@ -1152,6 +1152,207 @@ void test_alias_expanding_page_watch(const PhysicalApi& api) {
     check(api.free_pages(1, &overflow_page) == TRUE, "alias watch: free the capacity-test page");
 }
 
+void test_native_write_fault_watch(const PhysicalApi& api) {
+    using rt::xmem::NativeWriteWatchArmResult;
+    using rt::xmem::NativeWriteWatchMode;
+    using rt::xmem::NativeWriteWatchPlan;
+    using rt::xmem::WriteWatchPoll;
+
+    check(!rt::xmem::native_write_watch_plan_from(nullptr).enabled() &&
+              !rt::xmem::native_write_watch_plan_from("").enabled() &&
+              !rt::xmem::native_write_watch_plan_from("0").enabled() &&
+              !rt::xmem::native_write_watch_plan_from("off").enabled() &&
+              !rt::xmem::native_write_watch_plan_from("typo").enabled(),
+          "native write-fault switch: absent, empty, off, zero and unknown values stay off");
+    check(rt::xmem::native_write_watch_plan_from("1").enabled() &&
+              rt::xmem::native_write_watch_plan_from("ON").enabled() &&
+              rt::xmem::native_write_watch_plan_from("yes").enabled() &&
+              rt::xmem::native_write_watch_plan_from("TrUe").enabled(),
+          "native write-fault switch: only the documented opt-in words enable it");
+    check(std::strcmp(rt::xmem::native_write_watch_arm_name(NativeWriteWatchArmResult::alias_present),
+                      "alias-present") == 0 &&
+              std::strcmp(rt::xmem::native_write_watch_arm_name(NativeWriteWatchArmResult::uncommitted_page),
+                          "uncommitted-page") == 0,
+          "native write-fault refusals have stable, named reasons");
+    check(rt::xmem::page_write_fault_poll() == WriteWatchPoll::unavailable,
+          "native write-fault tracker starts unavailable");
+    if (!api.allocate || !api.free_pages || !api.map || !api.virtual_alloc || !rt::xmem::write_physical_pages) return;
+
+    std::uint64_t pages[2]{};
+    std::uint64_t count = 2;
+    const BOOL allocated = api.allocate(0x280, &count, pages);
+    check(allocated == TRUE && count == 2, "native write-fault watch: allocate two synthetic physical pages");
+    if (allocated != TRUE || count != 2) return;
+
+    auto* const source = static_cast<std::uint8_t*>(
+        api.virtual_alloc(nullptr, kPage64k, MEM_RESERVE | kXmem64kPages, 0x28, PAGE_READWRITE));
+    auto* const alias = static_cast<std::uint8_t*>(
+        api.virtual_alloc(nullptr, kPage64k, MEM_RESERVE | kXmem64kPages, 0x28, PAGE_READWRITE));
+    auto* const uncommitted = static_cast<std::uint8_t*>(
+        api.virtual_alloc(nullptr, kPage64k, MEM_RESERVE | kXmem64kPages, 0x28, PAGE_READWRITE));
+    auto cleanup = [&] {
+        rt::xmem::page_write_fault_forget(source);
+        if (source) {
+            api.map(source, 1, nullptr);
+            VirtualFree(source, 0, MEM_RELEASE);
+        }
+        if (alias) {
+            api.map(alias, 1, nullptr);
+            VirtualFree(alias, 0, MEM_RELEASE);
+        }
+        if (uncommitted) {
+            api.map(uncommitted, 1, nullptr);
+            VirtualFree(uncommitted, 0, MEM_RELEASE);
+        }
+        api.free_pages(2, pages);
+    };
+    check(source && alias && uncommitted, "native write-fault watch: reserve three synthetic views");
+    if (!source || !alias || !uncommitted) {
+        cleanup();
+        return;
+    }
+    const bool mapped = api.map(source, 1, pages) == source && api.map(uncommitted, 1, pages + 1) == uncommitted;
+    check(mapped, "native write-fault watch: map one committed candidate and one untouched page");
+    if (!mapped) {
+        cleanup();
+        return;
+    }
+    source[0] = 0x31;  // first-touch commits the complete 64 KiB section page
+
+    const NativeWriteWatchPlan old_plan = rt::xmem::set_native_write_watch_plan({NativeWriteWatchMode::off});
+    const std::vector<std::uint8_t> off_bytes_before(source, source + kPage64k);
+    const std::uint64_t epoch_off = rt::xmem::page_write_fault_epoch();
+    check(rt::xmem::page_write_fault_arm(source, kPage64k) == NativeWriteWatchArmResult::disabled,
+          "native write-fault watch: off switch refuses before changing memory protection");
+    MEMORY_BASIC_INFORMATION info{};
+    VirtualQuery(source, &info, sizeof(info));
+    check(info.Protect == PAGE_READWRITE && rt::xmem::page_write_fault_epoch() == epoch_off &&
+              std::memcmp(off_bytes_before.data(), source, kPage64k) == 0,
+          "native write-fault switch-off leaves the view, bytes and invalidation epoch unchanged");
+    source[4] = 0x32;
+    std::vector<std::uint8_t> off_bytes_expected = off_bytes_before;
+    off_bytes_expected[4] = 0x32;
+    check(std::memcmp(off_bytes_expected.data(), source, kPage64k) == 0,
+          "native write-fault switch-off keeps ordinary stores byte-for-byte writable");
+
+    rt::xmem::set_native_write_watch_plan({NativeWriteWatchMode::on});
+    std::uint32_t local = 0;
+    check(rt::xmem::page_write_fault_arm(&local, sizeof(local)) == NativeWriteWatchArmResult::not_xmem_mapped,
+          "native write-fault watch: ordinary host memory is a named not-xmem refusal");
+    check(rt::xmem::page_write_fault_arm(uncommitted, kPage64k) == NativeWriteWatchArmResult::uncommitted_page,
+          "native write-fault watch: uncommitted section pages are refused by name");
+
+    check(api.map(alias, 1, pages) == alias, "native write-fault watch: make a second view of the same physical page");
+    check(rt::xmem::page_write_fault_arm(source, kPage64k) == NativeWriteWatchArmResult::alias_present,
+          "native write-fault watch: a pre-existing backing alias is refused by name");
+    VirtualQuery(source, &info, sizeof(info));
+    check(info.Protect == PAGE_READWRITE, "a refused alias arm leaves the source protection unchanged");
+    check(api.map(alias, 1, nullptr) == alias, "native write-fault watch: remove the pre-existing alias");
+
+    const auto armed = rt::xmem::page_write_fault_arm(source, kPage64k);
+    check(armed == NativeWriteWatchArmResult::armed, "native write-fault watch: one committed unaliased page arms");
+    if (armed != NativeWriteWatchArmResult::armed) {
+        cleanup();
+        rt::xmem::set_native_write_watch_plan(old_plan);
+        return;
+    }
+    check(rt::xmem::page_write_fault_active_pages() == 1, "native write-fault watch: one xmem page is protected");
+    VirtualQuery(source, &info, sizeof(info));
+    check(info.Protect == PAGE_READONLY, "native write-fault watch: arm uses PAGE_READONLY on the 64 KiB view");
+    check(rt::xmem::page_write_fault_poll() == WriteWatchPoll::changed,
+          "native write-fault watch: a new arm invalidates any prior shadow");
+    std::vector<std::uint8_t> shadow(source, source + kPage64k);
+    const std::uint64_t epoch_before_store = rt::xmem::page_write_fault_epoch();
+    check(source[0] == 0x31, "native write-fault watch: a read of the protected page is permitted");
+    check(rt::xmem::page_write_fault_poll() == WriteWatchPoll::unchanged,
+          "native write-fault watch: a read does not invalidate the shadow");
+
+    const std::uint64_t retries_before_store = rt::xmem::page_write_fault_retries();
+    auto* const words = reinterpret_cast<volatile std::uint32_t*>(source);
+    words[0] = 0x1234abcd;
+    words[1] = 0xfeedcafe;  // the first retry makes the entire 64 KiB view writable
+    check(read_u32(source, 0) == 0x1234abcd && read_u32(source, sizeof(std::uint32_t)) == 0xfeedcafe,
+          "native write-fault watch: the faulting stores retry and land unchanged");
+    check(rt::xmem::page_write_fault_retries() == retries_before_store + 1,
+          "native write-fault watch: repeat stores before poll fault only on first touch");
+    check(rt::xmem::page_write_fault_epoch() > epoch_before_store,
+          "native write-fault watch: a successful fault advances the shadow epoch");
+    check(rt::xmem::page_write_fault_poll() == WriteWatchPoll::changed,
+          "native write-fault watch: the retried write invalidates the cached shadow");
+    check(std::memcmp(shadow.data(), source, kPage64k) != 0,
+          "native write-fault watch: the old shadow is observably stale after the store");
+    std::memcpy(shadow.data(), source, kPage64k);
+    check(std::memcmp(shadow.data(), source, kPage64k) == 0,
+          "native write-fault watch: refreshing the invalidated shadow restores byte equality");
+    VirtualQuery(source, &info, sizeof(info));
+    check(info.Protect == PAGE_READONLY && rt::xmem::page_write_fault_poll() == WriteWatchPoll::unchanged,
+          "native write-fault watch: poll re-protects the page and drains its trip once");
+    const std::uint64_t retries_after_rearm = rt::xmem::page_write_fault_retries();
+    words[2] = 0x0badf00d;
+    check(rt::xmem::page_write_fault_retries() == retries_after_rearm + 1 && read_u32(source, 8) == 0x0badf00d &&
+              rt::xmem::page_write_fault_poll() == WriteWatchPoll::changed,
+          "native write-fault watch: a later poll re-arms and catches the next write epoch");
+
+    const std::uint8_t payload[4] = {0x91, 0x82, 0x73, 0x64};
+    const rt::xmem::PhysicalPageWrite span{pages[0], 0x100, sizeof(payload)};
+    rt::xmem::PhysicalPageWriteStats stats{};
+    std::uint64_t failed_page = 0;
+    const std::uint64_t epoch_before_dma = rt::xmem::page_write_fault_epoch();
+    check(rt::xmem::write_physical_pages(&span, 1, payload, &stats, &failed_page),
+          "native write-fault watch: a physical-page delivery writes the shared backing");
+    check(std::memcmp(source + 0x100, payload, sizeof(payload)) == 0 &&
+              rt::xmem::page_write_fault_epoch() > epoch_before_dma,
+          "native write-fault watch: backing writes invalidate the shadow even without a CPU AV");
+    check(rt::xmem::page_write_fault_poll() == WriteWatchPoll::changed,
+          "native write-fault watch: a DMA/backing write is reported as changed");
+    VirtualQuery(source, &info, sizeof(info));
+    check(info.Protect == PAGE_READONLY, "native write-fault watch: a backing write does not drop the CPU watch");
+
+    check(api.map(alias, 1, pages) == alias, "native write-fault watch: map a new alias after arm");
+    check(rt::xmem::page_write_fault_poll() == WriteWatchPoll::unavailable,
+          "native write-fault watch: a live alias invalidates the watch instead of skipping a shadow");
+    VirtualQuery(source, &info, sizeof(info));
+    check(info.Protect == PAGE_READWRITE,
+          "native write-fault watch: alias invalidation restores the source view's original protection");
+    const std::uint64_t retries_before_alias_store = rt::xmem::page_write_fault_retries();
+    alias[0x200] = 0x55;
+    check(source[0x200] == 0x55 && rt::xmem::page_write_fault_retries() == retries_before_alias_store,
+          "native write-fault watch: the new alias remains writable while the unavailable poll forces full comparison");
+    rt::xmem::page_write_fault_forget(source);
+    check(api.map(alias, 1, nullptr) == alias, "native write-fault watch: remove the late alias");
+
+    const auto rearmed = rt::xmem::page_write_fault_arm(source, kPage64k);
+    check(rearmed == NativeWriteWatchArmResult::armed, "native write-fault watch: the unaliased range can re-arm");
+    if (rearmed == NativeWriteWatchArmResult::armed) {
+        check(rt::xmem::page_write_fault_poll() == WriteWatchPoll::changed,
+              "native write-fault watch: re-arm again invalidates the prior shadow");
+        check(rt::xmem::page_write_fault_poll() == WriteWatchPoll::unchanged,
+              "native write-fault watch: initial invalidation drains once");
+        const std::uint64_t retries_before_lock = rt::xmem::page_write_fault_retries();
+        const std::uint64_t refusals_before_lock = rt::xmem::page_write_fault_lock_refusals();
+        const bool lock_held = rt::xmem::page_write_fault_test_lock(true);
+        const ULONGLONG lock_started = GetTickCount64();
+        const bool faulted = access_faults(reinterpret_cast<volatile std::uint32_t*>(source + 0x300), true);
+        const ULONGLONG lock_elapsed = GetTickCount64() - lock_started;
+        const bool lock_released = rt::xmem::page_write_fault_test_lock(false);
+        check(lock_held && lock_released, "native write-fault watch: the test can hold/release the mapping lock");
+        check(lock_elapsed < 250, "native write-fault watch: lock retry time stays under the explicit bound");
+        check(faulted && rt::xmem::page_write_fault_lock_refusals() == refusals_before_lock + 1,
+              "native write-fault watch: lock contention refuses after the fixed retry bound, not a deadlock");
+        check(rt::xmem::page_write_fault_retries() == retries_before_lock,
+              "native write-fault watch: a lock refusal does not claim the store was retried");
+        check(rt::xmem::page_write_fault_poll() == WriteWatchPoll::unavailable,
+              "native write-fault watch: a refused fault makes the shadow tracker unavailable");
+        VirtualQuery(source, &info, sizeof(info));
+        check(info.Protect == PAGE_READWRITE, "native write-fault watch: unavailable fallback disarms the view");
+    }
+    rt::xmem::page_write_fault_forget(source);
+    check(rt::xmem::page_write_fault_active_pages() == 0,
+          "native write-fault watch: forget removes owners and restores ordinary writability");
+    cleanup();
+    rt::xmem::set_native_write_watch_plan(old_plan);
+}
+
 void test_first_touch_during_remap(const PhysicalApi& api) {
     constexpr uint64_t kSlice = 16;
     constexpr uint64_t kSlices = 256;
@@ -2103,6 +2304,7 @@ int main() {
         test_write_physical_pages(physical);  // docs/peer_port_streaming.md section 13: the page-list destination write
         test_page_list_destination_request(physical);  // section 14: the mapped-and-armed request shape end to end
         test_alias_expanding_page_watch(physical);  // docs/title_memory_model.md: opt-in alias-aware dirty signal
+        test_native_write_fault_watch(physical);  // rank 4: opt-in write AV retry and shadow invalidation
         test_first_touch_during_remap(physical);
         test_placeholders(physical);
         test_gpu_view_pairing_runtime(physical);  // docs/peer_port_movie.md section 11: the pair through the shim
