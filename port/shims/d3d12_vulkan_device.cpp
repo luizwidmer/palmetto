@@ -39,6 +39,7 @@
 #include "../src/vulkan13_features.h"
 #include "../src/pipeline_budget.h"  // docs/memory_growth.md: the live-pipeline cap and its LRU
 #include "../src/deferred_compile.h"  // docs/deferred_compile.md: off-thread compute-pipeline compilation
+#include "../src/device_health.h"  // opt-in, bounded loss attribution; no driver fault-info query
 #include "../src/console_texture.h"  // the console's depth-stencil + unordered-access translation (docs/3d_textures.md)
 
 #include <chrono>
@@ -1274,6 +1275,17 @@ inline bool console_series_s_upscale_targets() {
     return enabled;
 }
 
+// PALMETTO_DEVICE_HEALTH=1 is exact opt-in. With it unset or any other spelling, the diagnostic is inert.
+inline bool device_health_enabled() {
+    static const bool enabled = [] {
+        char text[8] = {};
+        size_t length = 0;
+        if (getenv_s(&length, text, "PALMETTO_DEVICE_HEALTH") != 0 || length <= 1) return false;
+        return palmetto::device_health_enabled_from(text);
+    }();
+    return enabled;
+}
+
 // What a device's children need from it, kept apart from the COM class so children can hold a plain pointer.
 class PipelineState;  // defined below: the live-pipeline budget evicts through it
 class DescriptorHeap;  // defined below; DeviceState keeps the console-addressed shader-visible ones to refresh
@@ -1291,6 +1303,9 @@ struct DeviceState {
         create.pQueueFamilyIndices = families.data();
     }
     std::unique_ptr<palmetto::VulkanContext> context;
+    palmetto::DeviceHealth device_health{device_health_enabled()};
+    palmetto::DeviceHealthBudgetSnapshot device_health_budget_snapshot();
+    void report_device_lost(palmetto::DeviceHealthWorkload attempted = palmetto::DeviceHealthWorkload::unknown);
     VkPhysicalDeviceMemoryProperties memory{};
     // D3D-96: upload-heap buffers prefer DEVICE_LOCAL | HOST_VISIBLE memory, so the GPU reads them from VRAM. Only
     // with Resizable BAR (palmetto::resizable_bar); PALMETTO_UPLOAD_SYSMEM=1 keeps them in system memory to compare.
@@ -3857,6 +3872,82 @@ private:
     bool scan_in_place_ = false;  // a shader-visible heap in the arena: title-written V# bases are rebased in place
     std::vector<std::uint8_t> mirrored_bytes_;  // the console bytes the mirror was last made from (unrebased)
 };
+
+// The prepare and commit callbacks below run on the same queue thread. Keep only that thread's coarse attempted kind
+// until the existing post-submit callback can distinguish an accepted batch from a failed device-lost submit.
+struct PendingDeviceHealthWorkload {
+    const DeviceState* owner = nullptr;
+    palmetto::DeviceHealthWorkload kind = palmetto::DeviceHealthWorkload::unknown;
+};
+thread_local PendingDeviceHealthWorkload pending_device_health_workload;
+
+void remember_device_health_attempt(const DeviceState* owner, palmetto::DeviceHealthWorkload kind) {
+    pending_device_health_workload = {owner, kind};
+}
+
+palmetto::DeviceHealthWorkload take_device_health_attempt(const DeviceState* owner) {
+    if (pending_device_health_workload.owner != owner) return palmetto::DeviceHealthWorkload::unknown;
+    const auto kind = pending_device_health_workload.kind;
+    pending_device_health_workload = {};
+    return kind;
+}
+
+palmetto::DeviceHealthWorkload classify_device_health_workload(
+    std::span<const palmetto::CommandList* const> lists) {
+    palmetto::DeviceHealthWorkloadFlags flags{};
+    for (const palmetto::CommandList* list : lists) {
+        if (!list) continue;
+        for (const auto& command : list->commands()) {
+            flags.has_command = true;
+            if (std::holds_alternative<palmetto::Draw>(command)) flags.graphics = true;
+            else if (std::holds_alternative<palmetto::Dispatch>(command)) flags.compute = true;
+            else if (std::holds_alternative<palmetto::ExecuteIndirect>(command)) flags.indirect = true;
+            else if (std::holds_alternative<palmetto::BuildAccelerationStructure>(command)) flags.ray_build = true;
+            else if (std::holds_alternative<palmetto::CopyBuffer>(command) ||
+                     std::holds_alternative<palmetto::CopyTexture>(command) ||
+                     std::holds_alternative<palmetto::CopyResource>(command) ||
+                     std::holds_alternative<palmetto::ResolveSubresource>(command) ||
+                     std::holds_alternative<palmetto::AtomicCopyBuffer>(command) ||
+                     std::holds_alternative<palmetto::CopyAccelerationStructure>(command))
+                flags.transfer = true;
+        }
+    }
+    return palmetto::device_health_workload_from(flags);
+}
+
+palmetto::DeviceHealthBudgetSnapshot DeviceState::device_health_budget_snapshot() {
+    palmetto::DeviceHealthBudgetSnapshot result{};
+    // Non-blocking cached reads only. A busy bookkeeping lock leaves that field n/a rather than delaying the loss path.
+    {
+        std::unique_lock lock(arena.mutex, std::try_to_lock);
+        if (lock.owns_lock()) {
+            result.arena_live_bytes = static_cast<std::uint64_t>(arena.in_use);
+            result.arena_peak_bytes = static_cast<std::uint64_t>(arena.peak_in_use);
+            result.arena_capacity_bytes = static_cast<std::uint64_t>(arena.size);
+            result.arena_allocations = arena.allocations;
+        }
+    }
+    if (image_mem_trace_enabled()) {
+        std::unique_lock lock(image_census.mutex, std::try_to_lock);
+        if (lock.owns_lock()) {
+            result.image_count = image_census.images;
+            result.image_bytes = image_census.image_bytes;
+        }
+    }
+    {
+        std::unique_lock lock(pipeline_budget_mutex, std::try_to_lock);
+        if (lock.owns_lock()) result.graphics_pipelines_live = pipeline_budget.live();
+    }
+    result.graphics_pipelines_created = graphics_pipelines_created.load(std::memory_order_relaxed);
+    result.graphics_pipeline_cap = static_cast<std::uint64_t>(pipeline_live_cap());
+    result.deferred_pipelines_built = deferred_built_count.load(std::memory_order_relaxed);
+    return result;
+}
+
+void DeviceState::report_device_lost(palmetto::DeviceHealthWorkload attempted) {
+    if (!device_health.enabled()) return;
+    device_health.report_device_lost(device_health_budget_snapshot(), attempted);
+}
 
 // Called by the queue before it records a submission's lists (ReplayFunctions::sync_console_heaps): every
 // shader-visible descriptor heap a title can write itself gets the title VAs it wrote rebased, so nothing a shader
@@ -9216,6 +9307,8 @@ public:
         // PALMETTO_PIPELINE_DEFER_COMPILE is set.
         state_.context->set_prepare_pipelines(
             [this](std::span<const palmetto::CommandList* const> lists) {
+                if (state_.device_health.enabled())
+                    remember_device_health_attempt(&state_, classify_device_health_workload(lists));
                 state_.prepare_deferred_compute_pipelines(lists);
             });
         // Non-blocking submission hold (docs/peer_port_streaming.md): a submission that names an unbuilt deferred
@@ -9485,8 +9578,16 @@ public:
                                           text[0] != '0';
         }
         state_.context->set_bindless_commit([this](bool submitted) {
-            std::lock_guard lock(state_.descriptor_mutex);
-            if (state_.bindless) state_.bindless->table_upload_result(submitted);
+            {
+                std::lock_guard lock(state_.descriptor_mutex);
+                if (state_.bindless) state_.bindless->table_upload_result(submitted);
+            }
+            if (state_.device_health.enabled()) {
+                const auto attempted = take_device_health_attempt(&state_);
+                if (submitted) state_.device_health.note_submitted(attempted);
+                if (state_.context && state_.context->is_device_lost())
+                    state_.report_device_lost(submitted ? palmetto::DeviceHealthWorkload::unknown : attempted);
+            }
         });
         return true;
     }
@@ -9907,6 +10008,9 @@ public:
     palmetto::VulkanContext& context() { return *state_.context; }
     const palmetto::BindlessSet* bindless() const { return state_.bindless.get(); }
     const DeviceState& state() const { return state_; }
+    void report_device_lost(palmetto::DeviceHealthWorkload attempted = palmetto::DeviceHealthWorkload::unknown) {
+        state_.report_device_lost(attempted);
+    }
     IUnknown* holder() { return identity(); }
     bool bind_sampler(const palmetto::gfx10::SamplerWords& words) { return state_.bind_sampler(words); }
     void own(const OwnedRuntime& owned) { owned_ = owned; }
@@ -9966,7 +10070,11 @@ public:
     }
     HRESULT STDMETHODCALLTYPE GetDeviceRemovedReason() override {
         if (removed_.load(std::memory_order_acquire)) return DXGI_ERROR_DEVICE_REMOVED;
-        return (state_.context && state_.context->is_device_lost()) ? DXGI_ERROR_DEVICE_REMOVED : S_OK;
+        if (state_.context && state_.context->is_device_lost()) {
+            state_.report_device_lost();
+            return DXGI_ERROR_DEVICE_REMOVED;
+        }
+        return S_OK;
     }
 
     // Residency and power (D3D-33, docs/d3d12_vulkan.md section 4.1). Vulkan has no residency API: memory from
@@ -13615,10 +13723,17 @@ WindowPresenter::~WindowPresenter() {
 }
 
 namespace {
-HRESULT present_result(VkResult result) {
+HRESULT present_result(VkResult result, IUnknown* device) {
     if (result == VK_SUCCESS) return S_OK;
     std::fprintf(stderr, "[rt] d3d12: present failed (VkResult %d)\n", int(result));
-    if (result == VK_ERROR_DEVICE_LOST) return DXGI_ERROR_DEVICE_REMOVED;
+    if (result == VK_ERROR_DEVICE_LOST) {
+        if (device) {
+            auto* as_device = reinterpret_cast<ID3D12Device*>(device);
+            ID3D12Device* real = rt::d3d12_xs::device_proxy_real_device(as_device);
+            if (auto* d = Device::from<Device>(real ? real : as_device)) d->report_device_lost();
+        }
+        return DXGI_ERROR_DEVICE_REMOVED;
+    }
     if (result == VK_ERROR_FORMAT_NOT_SUPPORTED) return DXGI_ERROR_UNSUPPORTED;
     return E_FAIL;
 }
@@ -13631,7 +13746,8 @@ HRESULT WindowPresenter::present(ID3D12Resource* back_buffer, UINT sync_interval
                                                                        src_rect->bottom}
                                                : palmetto::PresentRect{};
     return present_result(presenter_->present(resource_id(back_buffer), sync_interval > 0, src_rect ? &rect : nullptr,
-                                              tear));
+                                              tear),
+                          device_);
 }
 
 bool WindowPresenter::tear_supported() const { return presenter_->tear_supported(); }
@@ -13639,11 +13755,11 @@ bool WindowPresenter::last_present_tore() const { return presenter_->last_presen
 std::uint64_t WindowPresenter::tear_presents() const { return presenter_->tear_presents(); }
 
 HRESULT WindowPresenter::present_blank(UINT sync_interval) {
-    return present_result(presenter_->present_blank(sync_interval > 0));
+    return present_result(presenter_->present_blank(sync_interval > 0), device_);
 }
 
 HRESULT WindowPresenter::present_planes(const palmetto::PresentPlanes& planes, UINT sync_interval, bool tear) {
-    return present_result(presenter_->present_planes(planes, sync_interval > 0, tear));
+    return present_result(presenter_->present_planes(planes, sync_interval > 0, tear), device_);
 }
 
 bool WindowPresenter::hdr_active() const { return presenter_->hdr_active(); }
