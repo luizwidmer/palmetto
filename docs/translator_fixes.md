@@ -197,3 +197,34 @@ GPL-3.0 project ubiquitarianism/leonida (<https://github.com/ubiquitarianism/leo
 `tests/semantic/test_cs_tg_size.py`, commits `273b3bdf9`, `6ecd922d9` and `56200058e`. No code was copied from that
 project; the upstream project remains the copyright of its contributors and its license continues to apply to its own
 tree. The porting policy is [upstream_port.md](upstream_port.md).
+
+## 12. Unsigned leading-bit count of a lane mask
+
+### Measured class
+
+A fresh run of `python -I tooling/rdna2spirv.py <listings> --out <scratch> --no-asm --wave64-emulate --refusals <scratch>/refusals.json` on the 668-program request union produced this baseline before the rule:
+
+| refusal | programs |
+|---|---:|
+| fall-through into undecodable words | 165 |
+| `ds_append` | 10 |
+| undecodable words (cannot re-anchor) | 8 |
+| `s_flbit_i32_b64` of a lane mask | 4 |
+| `v_cmp` destination | 2 |
+| mask destination | 1 |
+| reachable instruction with normalized encoding | 1 |
+| **total refused** | **191** |
+
+The same scan after the change translated and validated **480 / 668** programs and refused 188: fall-through 165, `ds_append` 11, undecodable words 8, `v_cmp` destination 2, mask destination 1, normalized encoding 1. The measured `s_flbit_i32_b64` lane-mask class is now **0**. Three of its four programs translated; the fourth moved to the already-named `ds_append` refusal, so the net gain is three. All **477** modules that translated before this rule produced byte-identical `.spv` files afterward; the other three output modules are new.
+
+### Rule and semantic fixture
+
+For an operand proven by `lane_masks.py` to be a lane mask, `s_flbit_i32_b64` gathers the wave's 64 bits with the existing `wave_mask()` path and applies the existing unsigned count over the high and low dwords. Each lane receives the same count; zero maps to `0xFFFFFFFF`, and SCC is not written. The normal scalar-pair/immediate path is unchanged. `s_flbit_i32_i64` of a lane mask remains refused: its sign-relative rule is outside this measured class.
+
+The synthetic fixture `tests/semantic/fixtures/disasm/cs_s_flbit64_lane_mask.s` covers single bits at 63, 40, 31 and 0, an empty and full VCC mask passed through an SGPR pair, and full EXEC. `tests/semantic/test_salu_flbit64_lane_mask.py` checks the expected result in all 64 lanes for each of the seven masks (448 lane-result checks). `tests/semantic/test_salu_flbit_64.py` keeps a negative test for the unsupported signed i64 lane-mask form. The standalone CPU semantic tests passed (1 new fixture test and 5 signed/data tests); no GPU arm was run or needed. The full request-union scan above is the corpus-closure evidence; it uses external listings and stores no game data or shader bytes in this repository.
+
+### Full semantic suite and baseline limits
+
+`python -I tooling/scripts/run_semantic_tests.py tests/semantic -j 4` ran 462 files / 6,064 tests; 460 files passed. The two failures were in `test_exec_computed.py` (2 failures) and `test_image_atomics_guard.py` (47 subtest failures). Both reproduce with the pre-slice HEAD `9edd62c44` translator loaded from an external scratch copy (which retains the original lane-mask refusal), so they are pre-existing and unrelated to this rule. Neither test was changed.
+
+This rule was derived from the RDNA2 instruction semantics and this tree's own lane-mask analysis. The rank-5 note in `cleanroom_peers.md` is parity context only; no peer implementation, clone source, or fixture was consulted or copied, so no new `NOTICE.md` entry is needed.
