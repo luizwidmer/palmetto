@@ -1,11 +1,12 @@
 # The peer ports' movie path: Bink 2 decode, the plane textures and the present
 
-**Status: read-only peer audit, documentation only. No boot was run, no code was changed, and every page named here is
-quoted, not re-measured.** The five peer ports were re-cloned and read at the commits in section 1 to answer one
-question: how does a port get a movie from the title's `BinkOpenWithOptions` to a pixel on screen, and which part of
-that is missing in this tree? The answer is narrower than the earlier parity audit expected. Every peer runs the
-title's own Bink 2 DLL, lets the title decode into its own CPU frame buffers, and has no movie trigger, no Bink HLE and
-no fake decoder: the title's own state machine opens, decodes and draws the movie. What the peers do carry on the
+**Status: peer audit (sections 1-7, written as a read-only audit: documentation only, no boot, every page quoted) plus
+two implemented ports (sections 8-9, with their own tests and one light boot each), their attribution (sections 8.7 and
+9.6) and the uncommitted file list (section 10).** The five peer ports were re-cloned and read at the commits in section
+1 to answer one question: how does a port get a movie from the title's `BinkOpenWithOptions` to a pixel on screen, and
+which part of that is missing in this tree? The answer is narrower than the earlier parity audit expected. Every peer
+runs the title's own Bink 2 DLL, lets the title decode into its own CPU frame buffers, and has no movie trigger, no Bink
+HLE and no fake decoder: the title's own state machine opens, decodes and draws the movie. What the peers do carry on the
 graphics side is the part this tree does not: a per-submission refresh of a texture whose bytes the title writes in its
 own memory (XCL's `title_textures`, VIctory's and victory-fork's texture upload path, Five Star's texture refresh
 worker), and a present compositor for a second display plane (VIctory, PercyScarlett, XCL). Our chain reaches the
@@ -14,7 +15,8 @@ per-frame decode `0x2EF0E0` never run because the draw that issues them is never
 in the session-3 loading poll ([decomp_first_ui.md](decomp_first_ui.md) sections 17-18). No peer port makes that draw
 issue; their titles reach the movie because their loading and first-run flow completes. The ranked plan in section 4
 therefore puts the movie-side instruments that can decide the draw question first, and the two real movie-specific
-graphics ports (title-memory plane-texture refresh, extra-plane composition) behind them.
+graphics ports (title-memory plane-texture refresh, extra-plane composition) behind them - and sections 8-9 are those
+two graphics ports, implemented, tested and measured on this tree.
 
 ## 1. What was read and with what
 
@@ -407,6 +409,315 @@ The evidence read for this page, with the licence each repository states and the
   `crates/xcl/src/resolver.rs`; the console-DLL end-to-end test.
 
 The project's attribution rule ([upstream_port.md](upstream_port.md) section 6) puts the same sentence in `NOTICE.md`
-for a slice that ports a mechanism. This page is an audit that ports nothing yet; when an item of section 4 lands, its
-slice repeats this attribution and the lead adds the `NOTICE.md` entry (that file is outside this page's write scope).
-The peers' own copyrights and licences continue to apply to their trees; this repository carries none of their code.
+for a slice that ports a mechanism. This page was an audit that ported nothing; the two ports of sections 8-9 landed
+with their own attribution there, and the lead still owes `NOTICE.md` the two entries (that file is outside this page's
+write scope): the per-submission texture refresh (section 8.7) and the measured second-plane rule (section 9.6). The
+peers' own copyrights and licences continue to apply to their trees; this repository carries none of their code.
+
+## 8. Implemented port 1: the per-submission refresh of a title-written plane texture (section 4 item 4)
+
+**Status: implemented behind opt-in switches, tested GPU-free and on the GPU, and measured on one light boot.** This is
+the rank-4 port of section 4, item 4. It answers the gap section 3.2 (a) named: a texture whose bytes the title writes
+itself is imported once into its stand-in and never refreshed, while a movie rewrites its planes every frame. The code is
+our own, in our files ([plane_refresh.h](../port/src/plane_refresh.h) is the pure half;
+[Resource::import_placed_pages](../port/shims/d3d12_vulkan_device.cpp) and `Resource::refresh_placed_pages` the impure
+one); sections 2.2 item 3 and 5 of this page are the peer evidence it was planned from, and section 8.6 repeats the
+attribution. No peer code was copied and no game data is in this port.
+
+### 8.1 The measured shapes and the gap
+
+Every number below is from existing boot logs outside the repository (the harness's boot directories under
+`D:\leonida-work`, read only for this port; no new boot was needed to establish them). The pattern is the same in each:
+the title-written texture population our layer can import is **small**, the sampled placed population is **large and
+empty in the measured window**, and the import path is **one-shot**.
+
+| what | measured | where |
+|---|---|---|
+| title-placed texture imports that succeed | 5-9 per boot, subresource 0 only: **512 B** into a 64x2 image, **65,024 B** into 127x128, **32,768 B** into 64x64, **57,600 B** into 160x90 (twice), **36,864 B** into 128x72 (three times, "more than one subresource: the rest is not imported yet") | the `boot-teximport*` boots' stderr |
+| sampled placed spans a page watch watched | four spans, **16.0 MiB**, **28.2 MiB**, two more at 16 MiB and 33.2 MiB; all-zero head at the first sample, **no change line afterwards** (the title never wrote them in that window); the import refuses them at its default 16 MiB cap | `firstlight/arm-a` (`PALMETTO_TEXTURE_PAGE_WATCH=1`) |
+| placed textures with the import cap lifted | **25** queued, **every one** "the pages' head is all zero, waiting for the texture-computer fill" for the bounded 512 attempts, so **0** imported | the same boot with `PALMETTO_TEXTURE_IMPORT_MAX=67108864` |
+| the import's own shape | one bounded import per resource: 512 attempts while the fill has not run, a 16 MiB default cap, subresource 0 only, then the resource leaves the pending list for good | [texture_import.md](texture_import.md) section 1, the code above |
+| the guard-page tracker's armed population | descriptor mirrors only (`PALMETTO_CARD_COPY_WATCH`): one range, 608 x 64 KiB views, 38.0 MiB; arming 0.604 ms, a guarded write ~10.3 us, a guarded read ~5.1 us; no texture consumer existed | [card_copies.md](card_copies.md) sections 2.3, 4.2 |
+| a 4K movie plane in the import's row-major mode | **12.4 MB** for an R8 tri-planar plane (3840x2160, 1.5 bytes per pixel) and **33.2 MB** for RGBA8 - i.e. the peers' "~25 MB a presented frame where ~3 MB had changed" population, sized against the import's 16 MiB cap and this port's compare budget | arithmetic on the measured 3840x2160 presented target extent ([upscale_standin.md](upscale_standin.md) section 2.1) |
+
+So the gap is exact: **a title-written texture that changes after its one import keeps the frame that import took**, and
+the population that would exercise it (a 4K movie plane) is at or beyond the import's cap while the population the import
+does take (512 B - 65 KB atlases and defaults) is small enough that comparing all of it every submission is cheap. The
+port therefore has to do two different things well: keep the small tracked textures current for a bounded cost, and be
+ready for the 12.4 MB plane case the moment a draw samples it.
+
+### 8.2 The design
+
+Our own mechanism, composed from parts this tree already owns - the one-shot import, the guard-page write tracker
+([xmem.h](../port/shims/xmem.h), [card_copies.md](card_copies.md)) and the per-submission queue hook that already drains
+the import. The peers' three structures (XCL's per-submit placed-texture upload with a content-hash skip, VIctory's and
+victory-fork's detile-on-change/hash-what-cannot-be-watched, Five Star's page-hash worker) are evidence for the mechanism
+class, not its implementation: this port keeps a CPU **shadow** of the bytes it imported, compares the title's pages
+against it before the submission that could sample them, and re-uploads **only the rows the change touched**.
+
+| switch | effect |
+|---|---|
+| `PALMETTO_PLANE_REFRESH` | unset, `0`, `off` or any unknown value: the previous path exactly - no shadow, no compare, no tracker call, one false branch in the per-submission hook. `hash`: compare every tracked texture's pages against its shadow and re-upload the changed row band (needs no tracker). `watch`: ask the guard-page tracker first and skip the compare when it answers "unchanged"; a tracker that answers "unavailable" falls back to the hash compare. A `watch` that would share the tracker with `PALMETTO_CARD_COPY_WATCH` falls back to `hash` (the mirror gate polls the tracker's one change flag first and suspends every range around its scan, so a texture write would be consumed by it or land in its suspended window) - logged once. |
+| `PALMETTO_PLANE_REFRESH_TRACE` | the counters only, the path unchanged: one `[rt] d3d12: plane refresh: ...` line at the first walk, the 256th and every 4096th. |
+
+- **The shadow is the reference and the narrow upload's source.** The import reads the title's pages once into the
+  shadow, uploads from it, and remembers the subresource's row shape. A refresh compares the pages against the shadow
+  (`changed_byte_range`), copies only the changed byte range into the shadow, maps that range to the copy-unit rows it
+  touches (`changed_rows`) and re-uploads exactly those rows through the existing `WriteToSubresource` path
+  (`cpu_copy`). A change that cannot be narrowed - block-compressed rows (a box's top must be a block multiple), more
+  than one slice, or every row - re-uploads the subresource whole, which is always correct and only costs the copy.
+- **The compare budget is bounded and never starves a texture.** A submission admits tracked textures in round-robin
+  order up to `plane_refresh_compare_budget` = **16 MiB** (the import path's default cap, so one 4K tri-planar plane
+  fits); a texture the budget did not admit is deferred to the next submission, and the round-robin start moves by one
+  each submission, so the deferred texture is first next time. A texture larger than the whole budget is admitted alone
+  when it reaches the front - it is never starved either.
+- **The tracker is reused, never re-implemented.** In `watch` mode the import arms the existing guard-page tracker on
+  the texture's pages (`page_watch_arm`), and each submission's walk polls it once (`page_watch_poll`): "unchanged"
+  skips every compare, "changed" and "unavailable" both fall through to the compare (a write narrows the upload, an
+  unavailable tracker is the hash path). The walk re-arms the pages its own reads tripped (`page_watch_rearm`). The arm
+  is bounded by the measurement: only spans at or below `plane_refresh_watch_max_bytes` = **1 MiB** are watched, because
+  a guarded page costs ~10.3 us per write and a plane a frame rewrites would pay that per written page; a larger texture
+  is compared, which is the peers' "hash what you cannot watch" answer. An arm that fails (an uncommitted page, another
+  owner's guard, the tracker's 8 range slots full) is the documented fallback to the hash compare.
+- **Bounded holding.** A tracked texture keeps the shim's reference for the process's lifetime, which is what makes the
+  walk safe without a lock around a title release; the list is bounded to **16 textures** and **64 MiB** of shadows, and
+  a texture past either bound keeps the one-shot import. This is a documented limit (section 8.5), not a leak a boot
+  grows with: the measured imported population is 5-9 textures / under 0.5 MB.
+- **Default path unchanged.** With the switch unset the port allocates no shadow, arms nothing, counts nothing and does
+  not call the tracker: the import's own bytes and the boot's log lines are the tree's, byte for byte.
+- **Where it runs.** The device already registers one hook the queue calls before it records a submission (the one-shot
+  import); the walk rides the end of that hook, so the refreshed rows are in the stand-in before anything in the
+  submission can sample it.
+
+### 8.3 Tests
+
+`port/test/xmem_test.cpp` (GPU-free) gained `test_plane_refresh_plan`, **51 new checks** (the binary now prints
+`xmem_test: OK (341 checks)`):
+
+| check group | what it proves |
+|---|---|
+| switch parsing | unset/empty/`0`/`off` are off; `hash`, `HASH`, `1`, `watch`+trace parse to the documented plan; an unknown word is off, never a guess |
+| the compare budget | a texture that fits is admitted whole; one that does not fit behind an admitted texture is deferred; an oversized texture is admitted alone and nothing else fits behind it; a zero budget admits nothing |
+| changed byte range | identical spans report no change; one middle byte reports exactly that byte; a later change extends the range; a full rewrite reports the whole span; a null span is not a change |
+| changed rows | byte offsets map to copy rows; a range across rows covers both; a whole-subresource change names every row (the caller re-uploads whole); no row size, no rows, an empty range and a past-the-end offset are refused |
+| the step decision | hash mode always compares; watch mode skips only on the tracker's "unchanged"; "changed" and "unavailable" fall through; a texture the budget did not admit is deferred |
+| the report | one line names the tracked, compared, changed, uploaded, narrow/full, tracker-skip, deferred and unreadable counts; a null destination is a no-op |
+
+`port/test/d3d12_vulkan_device_test.cpp` (GPU) extends the title-placed texture case of the image-memory checks, with
+`PALMETTO_PLANE_REFRESH=hash` set for that run: an 8x8 placed texture is imported from title pages as before, then (a) a
+**one-row rewrite** must appear after the next submission while the other seven rows keep their imported bytes (the narrow
+band is the tested unit), (b) a **whole-texture rewrite** must appear after the next submission (the full re-upload), and
+(c) a submission with **no write** must leave the image at the last rewrite (the skip must not corrupt). The run prints
+the existing summary line and passes.
+
+### 8.4 Boot measurement
+
+One 300 s light boot (this port's budget: one arm, no A/B, because it is readiness behind a switch), the section-12
+content environment of `D:\leonida-work\fsrstable\boot_arm.ps1` plus the class-0xa mitigation
+`PALMETTO_TITLE_CLASS0A_SIZE=1`, the boot slot held by `_setup\boot_lock.ps1`, with the port's switches on:
+`PALMETTO_TEXTURE_IMPORT=1`, `PALMETTO_PLANE_REFRESH=hash`, `PALMETTO_PLANE_REFRESH_TRACE=1`,
+`PALMETTO_PRESENT_PLANE_DUMP=1` and `PALMETTO_PRESENT_PLANE_RULE=measured`. Outputs are outside the repository
+(`D:\leonida-work\fsrstable\boot-plane-port`: `summary.txt`, `stderr.log`, `boot.jsonl`;
+`capture-plane-port/index.txt`).
+
+| measure | value |
+|---|---|
+| run | **ALIVE 300.3 s**, killed by the timeout as usual, **0 exceptions**, **0 device-lost** |
+| state at the stop | init 3, loading 2, **session 3** (unchanged for the last ~228 s): the session-3 wall of section 3.3, so the movie draw was not issued and no frame sampled a plane texture |
+| submissions | 1,024 at 16.3 s, 4,096 at 49.7 s, **8,192 at 279.5 s** (the frame thread parked after it) |
+| presented frames | at least **2,201** and fewer than 10,000 (12 captures, one every 200th, the last frame 2,201); every capture 2564x1421 with mean rgb **0 0 0** - the same honest-black frame the earlier pages measured |
+| the plane dump | 11 sampled calls (1-10 and 1,000), **every one "1 plane(s)"**; plane 0 at each: ResourceCount 1, colour space 0, ScaleFilter 0, Flags 0x0 - **0 two-plane presents** |
+| title-written textures imported | **2** (both 2x2, 64 B, subresource 0), the small-atlas population of section 8.1; the boot also logged **32** "pages' head is all zero" waits and **8** over-cap refusals (29,491,200 B and 33,177,600 B placements) |
+| the refresh counters | the report lines reached walk 4,096: **8,191 tracked texture-submission pairs, 0 watched, 8,191 compared (0.5 MB in all), 0 changed, 8,191 unchanged, 0 uploaded, 0 tracker skips, 0 deferred, 0 unreadable**; the next report was due at walk 8,192 and the boot ended at the title's 8,192nd submission, so it never printed |
+| what it proves | the per-submission walk is live, bounded and cheap: **64 B compared per submission** at this population (0.5 MB over 8,191 walks), **no upload, no deferral, no unreadable page**, and nothing on the tree's default path - the boot's state, presents and captures are the ones the earlier pages measured on the same environment |
+| what it does not prove | the measured population did not change, so **no upload ran on the title's own textures** (the narrow and full upload paths are covered by the GPU test of section 8.3); and no frame sampled a tracked texture, because the draw that would is the session-3 wall |
+
+The counter line to compare a later boot against is the walk line above: a `changed`/`uploaded` pair that is not zero is
+the event that says the title started rewriting a texture our import keeps - the falsifier section 8.5 names.
+
+### 8.5 Limits and the next falsifier
+
+- **The population that would exercise this in a real frame has not run yet.** The movie draw is not issued at this
+  frontier (section 3.3, [decomp_first_ui.md](decomp_first_ui.md) sections 17-18), so no tracked texture a frame samples
+  was refreshed by a frame in the measured window: the mechanism is readiness, measured on the tests above and on the
+  boot's own counters, not on movie pixels.
+- **No sampling-set narrowing.** The walk does not know which of a submission's T#s sample which tracked texture; it
+  refreshes every tracked texture every submission, bounded by the compare budget. At the measured population
+  (5-9 textures, under 0.5 MB) that is cheaper than resolving the submission's descriptors would be; at the 12.4 MB
+  plane case the budget admits one texture a submission and defers the rest, which is the honest cost of not reading
+  the draw's tables here. The next falsifier: a boot where the spent compare time is a visible share of the submission
+  (the `plane refresh` line's compared bytes against the boot's submissions) - then the walk needs the descriptor
+  resolution, not a bigger budget.
+- **The guard-page watch's cost bound is the arm's size, not the write count.** In `watch` mode a frame that rewrites a
+  watched span pays one guard exception per written 4 KiB page (~10.3 us each at the measured rate); the 1 MiB cap
+  bounds that at ~2.6 ms for a fully rewritten span. That is why the default mode for a movie-sized texture is the hash
+  compare, and why `watch` is an experiment for the small population.
+- **A queued write can land between the compare and the submission.** The compare reads the title's pages, then the
+  submission is recorded: a title thread writing in that window is the same race the descriptor mirror has
+  ([page_address_space.md](page_address_space.md) section 5) and the same one the peers' per-submit upload has. It is a
+  one-frame staleness bound, not a correctness claim.
+- **The tracked hold is process-lifetime.** A tracked texture's shim reference is released only when the walk drops it
+  (a shape change or a refused upload); at process end the OS reclaims it. The bounds (16 textures, 64 MiB) are what
+  keep that finite.
+- **Multi-subresource and multi-slice textures are not tracked** (the import already takes subresource 0 only, its
+  order is unmeasured): they keep the one-shot import. The next falsifier is a movie plane described with more than one
+  subresource - then the shadow and the row map need the subresource table, which is [texture_layout.md](texture_layout.md)
+  item 7's measurement.
+- **The measured population is zero-change in the window.** The page watch saw all-zero heads with no change on the
+  sampled placed spans, so the boot's refresh counters are expected to show compares and no uploads; a change line in a
+  later boot is the event that says the title started writing one of these.
+- **The `watch` pre-filter's runtime path has no boot.** The one boot of section 8.4 ran `hash` mode - the mode a GPU
+  test binary without `xmem.cpp` can exercise - so the arming call and the tracker verdict at the per-submission walk
+  are covered by `xmem_test`'s tracker cases and the pure step tests, not by a boot with `watch` on. The next arm that
+  wants the pre-filter should be a second light boot with `PALMETTO_PLANE_REFRESH=watch` (and `PALMETTO_CARD_COPY_WATCH`
+  off, or the port's own guard against sharing the tracker applies), reading the `watched` and `tracker skips` counts.
+
+### 8.6 Cross-check against the peers (reference only, no code copied)
+
+| peer mechanism (section 2.2 item 3) | what this port does | difference |
+|---|---|---|
+| XCL `title_textures`: upload a placed texture at creation and again before the next execute when the CPU wrote any of its pages; a content-hash skip when unchanged; measured ~25 MB a presented frame where ~3 MB had changed | refresh before the submission, narrowed to the changed rows, with the changed byte range found by comparing the shadow | our upload is row-narrowed where theirs re-uploads the texture and relies on the change signal; our compare is the signal when the tracker is unavailable, theirs hashes |
+| VIctory / victory-fork `texture.rs`: detile the whole texture when its memory changed; hash the memory that cannot be watched | the shadow compare is the "cannot be watched" path; the tracker's verdict is the watched path; a changed texture re-uploads only the changed rows | the peers' whole-texture detile is simpler and was measured cheap on their structures; our narrow band is what keeps a 12.4 MB plane's refresh from being a 12.4 MB upload |
+| Five Star texture refresh worker: hash pages on a worker thread, detile only the affected subresources | the compare is on the recording thread (the measured population is small) and the narrowed unit is the row band in the import's row-major layout | no worker thread: the walk's cost at the measured population is bounded by the budget, and a background thread would be the next step only if the falsifier above fires |
+| all three: a title-written texture is current before the submission that samples it | same rule; the stand-in is the imported image and the walk rides the existing per-submission hook | our import keeps a CPU shadow, which the peers' in-place/heap structures do not need - the cost of our copy-and-mirror model ([title_memory_model.md](title_memory_model.md) section 2) |
+
+### 8.7 Attribution
+
+This port was implemented from this project's own measurements and boot logs. The behaviour was cross-checked against
+the public GPL projects named in section 1 at the commits there - **XCL** (`8b957be`, `crates/xcl/src/hle/d3d12x/title_textures.rs`),
+**VIctory** (`63bcca4`, `crates/victory-gpu/src/texture.rs` and `watch.rs`), **victory-fork** (`52ac4ec`, the same texture
+module) and **Five Star Recomp** (`45071d5`, the texture refresh worker and registry) - as evidence for the mechanism
+class. **No code from those projects was copied.** The upstream projects remain the copyright of their contributors and
+their licences continue to apply to their own trees. The `NOTICE.md` row for this port is owed by the lead (that file is
+outside this page's write scope): the licence text of [upstream_port.md](upstream_port.md) section 6, listing the four
+projects, the file paths above and the commits.
+
+## 9. Implemented port 2: the second-plane composition rule (section 4 item 6)
+
+**Status: implemented behind an opt-in switch, tested GPU-free and on the GPU, and measured on one light boot.** This is
+the rank-6 port of section 4, item 6. It answers the gap section 3.2 (b) named: the composition of a second present
+plane exists, but the gate that decides whether the title's second plane is shown is our invented
+`xbox_plane_flag_overlay` bit, whose value no measurement supports, while the peers compose the plane. The port replaces
+that gate, when the switch is on, with a rule stated over the plane fields our present path has measured, and keeps
+refusing the cases no measurement covers. The pure decision is [plane_compose_rule.h](../port/src/plane_compose_rule.h);
+the caller is `XboxPresentation::present_x` in [xbox_present.cpp](../port/shims/xbox_present.cpp). No peer code was
+copied; section 9.6 repeats the attribution.
+
+### 9.1 The measured plane words and the gate's population
+
+Every sampled `PresentX` in every boot log read for this port presents **one plane** and the same words. The existing
+sampled dump ([d3d12_xs_device.cpp](../port/shims/d3d12_xs_device.cpp)) prints them at calls 1, 2, 1,000 and 10,000:
+
+| field | measured value | boots |
+|---|---|---|
+| plane count | **1** at every sample | the `boot-teximport*`, `boot-moviepath-*` and `boot-present-watch` boots' stderr |
+| plane 0 Token | the frame token, rising with the present count | same |
+| plane 0 ResourceCount | **1** | same |
+| plane 0 colour space | **0** (`DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709`, SDR) | same |
+| plane 0 ScaleFilter | **0** (the default) | same |
+| plane 0 Flags | **0x0** | same |
+| plane 0 resource | the **same resource object** at every sampled call (the frame's target is reused) | same |
+
+So in the measured window: **a second plane has never been presented**, and the invented overlay bit has **never been
+set on any plane** - the composition path with two shown planes has population 0. That is exactly why the gate had to be
+replaced by a rule over fields that *are* measured rather than by another guessed bit, and why the port also adds the
+sampled plane-word dump itself (`PALMETTO_PRESENT_PLANE_DUMP`): the next boot that presents a second plane will print
+its words instead of leaving the gate to a hypothesis.
+
+### 9.2 The design
+
+The rule, in order (pure, `palmetto::compose_second_plane`):
+
+1. **One plane** - not requested; the present path is the tree's.
+2. **More than two planes** - refused (the UMD limit, always refused).
+3. **ResourceCount other than 1** - refused as unmeasured: every observed plane had one resource, the console's
+   multi-resource plane has no measured population here, and the composition reads one resource per plane.
+4. **Plane 1 names a placement** (a sane `pDestPlacementBase`, a sub-rectangle of the output) - **compose** it over
+   plane 0. Placement is the field whose meaning this present path already measured for plane 0: it is one of the
+   measured compose triggers for a single plane.
+5. **Plane 1 asks for its own filtering** (point or linear `ScaleFilter`) - **compose** it.
+6. **Anything else** (no placement, the default filter) - **refuse by name**: that is the unmeasured GameDVR-copy shape
+   of the public HDR sample, where showing the second plane would draw the frame twice with an alpha never meant to be
+   blended.
+
+The blend is unchanged and measured: the compose pass composites plane 1 **premultiplied over** plane 0 (the existing
+`One`/`InvSrcAlpha`-equivalent the shader implements and the pixel model checks); the straight-alpha bit still selects
+unassociated alpha and is still documented as a hypothesis in its own constant. The rule is a **decision**, not a new
+composition path: `PresentX` still composes the same `PresentPlanes` it composed for the invented flag.
+
+| switch | effect |
+|---|---|
+| `PALMETTO_PRESENT_PLANE_RULE` | unset, `0` or any value other than `measured`: the previous path exactly - plane 1 is composed only with the invented `xbox_plane_flag_overlay` bit. `measured`: the rule above replaces the flag gate, and the invented flag is ignored. |
+| `PALMETTO_PRESENT_PLANE_DUMP` | diagnostic only: the sampled plane-word dump (first calls, powers of ten to a million, and the first calls carrying a second plane, another colour space/filter, a placement or any flag bit), written to stderr; never changes a present. |
+
+- **Refusals are logged once per kind**, as the present path already logs its unmeasured fields: a composed plane 1 says
+  why it was composed (placement or filter), a refused one says it is the unmeasured no-placement/default-filter shape.
+- **Default path unchanged.** With `PALMETTO_PRESENT_PLANE_RULE` unset, the flag gate and its once-only "GameDVR copy"
+  line are the tree's, byte for byte; the dump is off unless asked for.
+- **Test seam.** The switch is read once per process (like every switch on the present path); a small
+  `XboxPresentation::set_plane_rule_measured(bool)` lets the pixel test compare both gates on one GPU.
+
+### 9.3 Tests
+
+`port/test/xbox_present_test.cpp` (GPU, presents into a window and reads the swapchain back) gained:
+
+| check group | what it proves |
+|---|---|
+| the pure rule (16 checks) | one plane is not requested; three planes refused; ResourceCount 2 refused; no placement + default filter refused; placement composes; point and linear filters compose; an unknown filter is refused (the caller normalises it to the default, so it is never a measured ask); the switch parses only `measured` (case-insensitive), never `0`, `flag` or a longer word; every decision carries a reason |
+| the GPU cases (with the rule on) | plane 1 with a placement and **no invented flag** is composed (its pixels match the same CPU model as the flagged cases above, within 1 level); plane 1 with its own point filter and no placement is composed (exact); plane 1 with neither, **even with the invented flag set**, is not shown - the frame is plane 0 only, exactly; ResourceCount above 1 is still refused before composition; switching the rule off restores the flagged gate |
+
+### 9.4 Boot measurement
+
+The same one 300 s light boot as section 8.4 (one boot, both ports' switches), with `PALMETTO_PRESENT_PLANE_DUMP=1`
+and `PALMETTO_PRESENT_PLANE_RULE=measured`:
+
+| measure | value |
+|---|---|
+| presents sampled by the dump | 11 calls (1-10 and 1,000); **every one "1 plane(s)"** |
+| plane 0's words at every sampled call | ResourceCount **1**, colour space **0** (SDR G22/P709), ScaleFilter **0** (default), Flags **0x0**, and the same resource object at every call |
+| two-plane presents | **0** - the rule's two-plane branch was not entered and the invented overlay flag was not set on any plane in the window |
+| the rule's once-per-kind lines | none printed: neither the "composed" line nor the "refused unmeasured" line has a case at this stage, which is itself the measured statement that the title presents one plane here |
+| what it proves | the dump works (the words above are its output), and the rule costs nothing on the one-plane path: the boot's presents, captures and black frames are the ones the earlier pages measured |
+| what it does not prove | the title's own two-plane descriptor: the rule is ready and GPU-tested (section 9.3), not observed on the title |
+
+The falsifier section 9.5 names is the same line: a `present planes` dump with **2 plane(s)** is the event that gives the
+rule a real case, and its plane-1 words decide whether the refusal or the composition is what this title needs.
+
+### 9.5 Limits and the next falsifier
+
+- **The rule's two-plane branch has no population on this title yet.** The measured window has one plane, so the rule
+  is tested (GPU, synthetic plane words) and ready, not observed on the title's own descriptor. The next falsifier: a
+  boot that reaches the movie window and presents two planes (the dump prints their words). If plane 1 there has no
+  placement and the default filter but the title clearly expects it shown, the rule refuses what the console would
+  show - then the measured answer is the peers' compose-all-planes rule, and the dump's words are the evidence to
+  change it with.
+- **The placement/filter rule is an inference from measured field semantics, not a measured two-plane present.** It is
+  stated that way in the code and here: `pDestPlacementBase` and `ScaleFilter` are what this present path measured as
+  "place and filter this plane", and the unmeasured case is refused rather than guessed.
+- **The flag values remain unmeasured.** `xbox_plane_flag_overlay` and `xbox_plane_flag_straight_alpha` stay our
+  placeholders in the header; the port does not make them measured, it stops the *decision* from resting on one.
+- **Series S.** The console type changes what the title presents (section 3.3 item 4); the one A/B named in section 4
+  item 6 has not been run, so whether the Series S profile presents the overlay plane is still the open question the
+  plane dump is there to answer.
+
+### 9.6 Attribution
+
+This port was implemented from this project's own measurements and boot logs. The behaviour was cross-checked against
+the public GPL projects named in section 1 at the commits there - **VIctory** (`63bcca4`, the host present compositor's
+opaque plane 0 + overlay planes), **PercyScarlett** (`e44c465`, the premultiplied Series S overlay blend in its GPU host
+and queue) and **XCL** (`8b957be`, `crates/xcl/src/hle/d3d12x/present.rs`, the opaque first plane and blended later
+planes) - as evidence that the console's second plane is a real, composed movie surface. **No code from those projects
+was copied.** The upstream projects remain the copyright of their contributors and their licences continue to apply to
+their own trees. The `NOTICE.md` row for this port is owed by the lead (that file is outside this page's write scope),
+listing the three projects, the paths above and the commits, in the form of [upstream_port.md](upstream_port.md)
+section 6.
+
+## 10. Uncommitted files of the two ports
+
+Implementation: [plane_refresh.h](../port/src/plane_refresh.h) (new),
+[plane_compose_rule.h](../port/src/plane_compose_rule.h) (new), [d3d12_vulkan_device.cpp](../port/shims/d3d12_vulkan_device.cpp),
+[xbox_present.cpp](../port/shims/xbox_present.cpp), [xbox_present.h](../port/shims/xbox_present.h).
+Tests: [xmem_test.cpp](../port/test/xmem_test.cpp), [d3d12_vulkan_device_test.cpp](../port/test/d3d12_vulkan_device_test.cpp),
+[xbox_present_test.cpp](../port/test/xbox_present_test.cpp). Docs: this page. Nothing else is touched:
+`port/src/vulkan_backend.h`, the CMake files, `NOTICE.md`, `docs/README.md` and the other docs pages are unchanged by
+this port. No git write was made and no peer code is in the tree.

@@ -4,6 +4,7 @@
 #include "d3d12_trace.h"
 
 #include "../src/vulkan_present.h"
+#include "../src/plane_compose_rule.h"  // docs/peer_port_movie.md: the measured second-plane rule
 
 #include <cerrno>
 #include <chrono>
@@ -61,6 +62,63 @@ void trace_present_pacing(palmetto::FramePacer& pacer, std::uint64_t token) {
                  pacer.present_driven() ? "present-driven" : "grid", pacer.display_cadence_us(),
                  static_cast<unsigned long long>(pacer.flipped_token()),
                  static_cast<unsigned long long>(pacer.present_clock_fallbacks()));
+}
+
+// PALMETTO_PRESENT_PLANE_RULE=measured: the measured second-plane rule (port/src/plane_compose_rule.h) replaces the
+// invented overlay-flag gate. Unset (or any other value) keeps the flag gate, which is the present path of the tree
+// before this port, byte for byte. Read once per process, like every switch on this path.
+bool plane_rule_measured() {
+    static const bool on = [] {
+        char value[24] = {};
+        std::size_t length = 0;
+        return getenv_s(&length, value, "PALMETTO_PRESENT_PLANE_RULE") == 0 && length > 1 &&
+               palmetto::present_plane_rule_measured_from(value);
+    }();
+    return on;
+}
+
+// PALMETTO_PRESENT_PLANE_DUMP=1: the sampled plane-word dump the second-plane rule was measured from
+// (docs/peer_port_movie.md section 8). Diagnostic only: it reads the words the console entry already validated and never
+// changes what is presented. The first calls, the powers of ten to a million, and the first calls that carry anything
+// other than the one plain plane (a second plane, another colour space or filter, a placement, any flag bit) are dumped,
+// so a boot that never presents a second plane says so by the absence of such a line.
+void dump_present_planes(UINT plane_count, const XboxPresentPlaneParameters* planes) {
+    static const bool on = [] {
+        char value[24] = {};
+        std::size_t length = 0;
+        return getenv_s(&length, value, "PALMETTO_PRESENT_PLANE_DUMP") == 0 && length > 1 && value[0] != '0';
+    }();
+    if (!on || !planes) return;
+    static std::atomic<std::uint64_t> calls{0};
+    static std::atomic<unsigned> unusual{0};
+    const std::uint64_t call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    const bool sampled = call <= 2 || call == 1000 || call == 10000 || call == 100000 || call == 1000000;
+    bool interesting = plane_count != 1;
+    for (UINT i = 0; i < plane_count && i < 2; ++i) {
+        const XboxPresentPlaneParameters& p = planes[i];
+        if (p.Flags || p.ColorSpace || p.ScaleFilter || p.pDestPlacementBase || p.pSrcViewRects ||
+            p.ExtendedDescCount || p.ResourceCount != 1 || (i > 0 && p.Token != planes[0].Token))
+            interesting = true;
+    }
+    const bool print = sampled || (interesting && unusual.fetch_add(1, std::memory_order_relaxed) < 8u);
+    if (!print) return;
+    std::fprintf(stderr, "[rt] present planes: call %llu: %u plane(s)%s\n", static_cast<unsigned long long>(call),
+                 plane_count, plane_count > 2 ? " (more than the composed pair; refused)" : "");
+    for (UINT i = 0; i < plane_count && i < 2; ++i) {
+        const XboxPresentPlaneParameters& p = planes[i];
+        const auto* rect = p.pSrcViewRects;
+        const auto* place = p.pDestPlacementBase;
+        std::fprintf(stderr,
+                     "[rt]   plane %u: token 0x%llx resources %u resource0 %p, colour space %d scale filter %d flags "
+                     "0x%x, src rect %s%ld,%ld..%ld,%ld, placement %s%.3f,%.3f..%.3f,%.3f, extended %u\n",
+                     i, static_cast<unsigned long long>(p.Token), p.ResourceCount,
+                     p.ppResources ? static_cast<void*>(p.ppResources[0]) : nullptr, p.ColorSpace, p.ScaleFilter,
+                     p.Flags, rect ? "" : "none", rect ? rect->left : 0L, rect ? rect->top : 0L,
+                     rect ? rect->right : 0L, rect ? rect->bottom : 0L, place ? "" : "none",
+                     static_cast<double>(place ? place->left : 0.0f), static_cast<double>(place ? place->top : 0.0f),
+                     static_cast<double>(place ? place->right : 0.0f),
+                     static_cast<double>(place ? place->bottom : 0.0f), p.ExtendedDescCount);
+    }
 }
 
 }  // namespace
@@ -288,6 +346,8 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
     }
     // Only a token that was never handed out is refused. Null, stale and repeated tokens are presented anyway (what the
     // console does with them is unmeasured, and a title that does it must not freeze); each kind is logged once.
+    // docs/peer_port_movie.md section 8: the sampled plane-word dump (PALMETTO_PRESENT_PLANE_DUMP=1), diagnostic only.
+    dump_present_planes(plane_count, planes);
     FramePacer::TokenIssue issue{};
     std::int32_t checked = pacer_.check_present_token(token, &issue);
     bool bridged = false;
@@ -355,13 +415,47 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
         if (planes[i].ExtendedDescCount)
             log_once(logged_extras_, "a present plane has extended descriptors: ignored");
     const bool hdr0 = is_hdr10(planes[0]);
-    // Plane 1 is composed over plane 0 only when flagged an overlay (hypothesis). Otherwise it is not shown, as before: in
-    // the public HDR sample it is the GameDVR copy of the frame, and blending a plane we cannot tell apart from it risks
-    // drawing the frame twice with an alpha that was never meant to be blended.
-    const bool overlay = plane_count == 2 && (planes[1].Flags & xbox_plane_flag_overlay) != 0;
-    if (plane_count == 2 && !overlay)
-        log_once(logged_planes_, "PresentX with 2 planes and no overlay flag on plane 1: only plane 0 is shown (plane 1 is taken "
-                                 "as the GameDVR copy of the frame)");
+    // The second plane's gate (docs/peer_port_movie.md, item 6). The tree's path is the invented overlay flag: the plane
+    // flag values were never measured, and the public HDR sample's plane 1 is the GameDVR copy of the frame, so without
+    // the flag plane 1 is not shown. With PALMETTO_PRESENT_PLANE_RULE=measured the measured rule of
+    // port/src/plane_compose_rule.h replaces the flag: plane 1 is composed only when its own descriptor places it or asks
+    // for its own filtering (the fields whose meaning this present path already measured for plane 0), and the
+    // no-placement/default-filter case - the unmeasured GameDVR shape - is refused by name.
+    bool overlay = false;
+    if (plane_count == 2) {
+        const int rule_override = plane_rule_override_.load(std::memory_order_relaxed);
+        const bool measured_rule = rule_override < 0 ? plane_rule_measured() : rule_override != 0;
+        if (measured_rule) {
+            palmetto::SecondPlaneWords words;
+            words.plane_count = plane_count;
+            words.resource_count = planes[1].ResourceCount;
+            words.has_placement = placement(planes[1]) != nullptr;
+            words.scale_filter = filter_of(planes[1]);
+            const palmetto::SecondPlanePlan plan = palmetto::compose_second_plane(words);
+            switch (plan.decision) {
+            case palmetto::SecondPlaneDecision::compose:
+                overlay = true;
+                log_once(logged_plane_rule_compose_,
+                         "PresentX with 2 planes: the measured plane rule composes plane 1 over plane 0 (its descriptor "
+                         "places it or asks its own filtering), premultiplied unless the straight-alpha bit is set");
+                break;
+            case palmetto::SecondPlaneDecision::refuse_unmeasured:
+                log_once(logged_plane_rule_unmeasured_,
+                         "PresentX with 2 planes: only plane 0 is shown (the measured plane rule refuses plane 1: no "
+                         "placement and the default filter, the unmeasured GameDVR shape)");
+                break;
+            case palmetto::SecondPlaneDecision::refuse_resource_count:
+            case palmetto::SecondPlaneDecision::refuse_plane_count:
+            case palmetto::SecondPlaneDecision::not_requested:
+                break;  // refused or answered above the rule (ResourceCount and the plane limit are checked earlier)
+            }
+        } else {
+            overlay = (planes[1].Flags & xbox_plane_flag_overlay) != 0;
+            if (!overlay)
+                log_once(logged_planes_, "PresentX with 2 planes and no overlay flag on plane 1: only plane 0 is shown (plane 1 is taken "
+                                         "as the GameDVR copy of the frame)");
+        }
+    }
     const bool compose = hdr0 || placement(planes[0]) || filter_of(planes[0]) != xbox_scale_filter_default || overlay;
 
     if (compose) {

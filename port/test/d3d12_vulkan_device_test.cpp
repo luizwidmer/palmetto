@@ -5131,11 +5131,15 @@ int image_memory_gpu_checks(vktest::Device& d) {
     _putenv_s("PALMETTO_IMAGE_MEM_POOL", "1");
     _putenv_s("PALMETTO_IMAGE_DEFERRED", "1");
     _putenv_s("PALMETTO_TEXTURE_IMPORT", "1");
+    // docs/peer_port_movie.md section 8: the per-submission refresh of a title-written texture. The hash mode needs no
+    // guard-page tracker, so it is the mode this GPU binary (which links no xmem.cpp) can exercise end to end.
+    _putenv_s("PALMETTO_PLANE_REFRESH", "hash");
     struct RestoreEnv {
         ~RestoreEnv() {
             _putenv_s("PALMETTO_IMAGE_MEM_POOL", "");
             _putenv_s("PALMETTO_IMAGE_DEFERRED", "");
             _putenv_s("PALMETTO_TEXTURE_IMPORT", "");
+            _putenv_s("PALMETTO_PLANE_REFRESH", "");
         }
     } restore_env;
     rt::d3d12::VulkanDeviceInfo info{};
@@ -5290,6 +5294,44 @@ int image_memory_gpu_checks(vktest::Device& d) {
     for (UINT y = 0; y < 8; ++y)
         for (UINT x = 0; x < 8; ++x)
             EXPECT(std::memcmp(down + y * 256 + x * 4, pattern(x, y + 1).data(), 4) == 0);
+    // docs/peer_port_movie.md section 8: the texture is tracked after that import, and a rewrite is in the image before
+    // the next submission samples it - narrowed to the rows the rewrite touched. A one-row rewrite first: only row 3
+    // changes, so the refresh re-uploads that row's band and the other rows keep their imported bytes.
+    const auto copy_placed_back = [&] {
+        std::memset(down, 0xcd, 4096);
+        const auto out = footprint(readback.p, placed);
+        const auto src = subresource(placed_texture.p, 0);
+        list->CopyTextureRegion(&out, 0, 0, 0, &src, nullptr);
+        submit();
+    };
+    const auto placed_matches = [&](UINT row_offset) -> bool {
+        for (UINT y = 0; y < 8; ++y)
+            for (UINT x = 0; x < 8; ++x)
+                if (std::memcmp(down + y * 256 + x * 4, pattern(x, y + row_offset).data(), 4) != 0) return false;
+        return true;
+    };
+    for (UINT x = 0; x < 8; ++x) {
+        const auto texel = pattern(x, 3);
+        std::memcpy(static_cast<std::uint8_t*>(pages) + 3 * 32 + x * 4, texel.data(), 4);
+    }
+    copy_placed_back();
+    for (UINT y = 0; y < 8; ++y)
+        for (UINT x = 0; x < 8; ++x) {
+            const auto expected = y == 3 ? pattern(x, 3) : pattern(x, y + 1);
+            EXPECT(std::memcmp(down + y * 256 + x * 4, expected.data(), 4) == 0);
+        }
+    // A whole-texture rewrite: every row changes, the refresh re-uploads the subresource whole and the image is current.
+    for (UINT y = 0; y < 8; ++y)
+        for (UINT x = 0; x < 8; ++x) {
+            const auto texel = pattern(x, y + 2);
+            std::memcpy(static_cast<std::uint8_t*>(pages) + y * 32 + x * 4, texel.data(), 4);
+        }
+    copy_placed_back();
+    EXPECT(placed_matches(2));
+    // A submission with no write: the compare finds nothing, nothing is uploaded, and the image still holds the last
+    // rewrite (the coherence the refresh must not break).
+    copy_placed_back();
+    EXPECT(placed_matches(2));
     placed_texture.reset();
     VirtualFree(pages, 0, MEM_RELEASE);
     std::printf("pooled and deferred image memory on the GPU: %zu small textures shared blocks and round-tripped, a "

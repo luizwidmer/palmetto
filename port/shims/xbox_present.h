@@ -85,7 +85,9 @@ inline constexpr int xbox_scale_filter_point = 1;
 inline constexpr int xbox_scale_filter_linear = 2;
 // Plane 1 is composed over plane 0 as an overlay only with this flag (hypothesis: whether the console blends a second plane
 // at all is unmeasured; the public HDR sample's plane 1 is the GameDVR copy of the frame, not shown, so without the flag
-// plane 1 is not composed, as before).
+// plane 1 is not composed, as before). This is the tree's gate off by default; PALMETTO_PRESENT_PLANE_RULE=measured
+// replaces it with the rule of src/plane_compose_rule.h (docs/peer_port_movie.md, item 6), which composes plane 1 when its
+// own descriptor places it or asks for its own filtering and refuses the unmeasured no-placement case by name.
 inline constexpr UINT xbox_plane_flag_overlay = 1;
 inline constexpr UINT xbox_plane_flag_straight_alpha = 2;  // plane 1's colour is not premultiplied by its alpha
 
@@ -174,8 +176,12 @@ public:
     //             converted to the swapchain's (HDR10 when the surface has it, else HDR10 is tone mapped to SDR). Needs sampled,
     //             single-sample, non-integer sources; others give DXGI_ERROR_UNSUPPORTED.
     //   2 planes: the two share one token. Plane 1 is composed over plane 0 only when xbox_plane_flag_overlay is set on it
-    //             (hypothesis); otherwise it is not shown (the GameDVR copy of the public HDR sample), logged once.
+    //             (hypothesis), unless PALMETTO_PRESENT_PLANE_RULE=measured, which applies src/plane_compose_rule.h: plane 1
+    //             is composed when its descriptor has a sane placement or a non-default ScaleFilter, and the no-placement
+    //             default-filter case (the unmeasured GameDVR shape) is not shown, logged once. Without the flag AND the
+    //             switch the second plane is not shown (the tree's behaviour).
     //             Placement, ScaleFilter and Flags values that are not plausible are ignored and logged once, not refused.
+    //             PALMETTO_PRESENT_PLANE_DUMP=1 adds the sampled plane-word dump the rule was measured from (diagnostic).
     //   More than 2: E_INVALIDARG (the UMD limit, section 4.5).
     //   ResourceCount above 1 on any plane: DXGI_ERROR_UNSUPPORTED (logged once), nothing presented; only resource 0 is read.
     // Token: the one from WaitFrameEventX. Real behaviour for a null, repeated or out-of-order token is unmeasured and a
@@ -208,6 +214,12 @@ public:
     // Peak of HDR10 content in nits, the white point of the tone map onto an SDR output (default 1000; no metadata is read).
     void set_hdr_peak_nits(float nits) { hdr_peak_nits_ = nits > 0.0f ? nits : 1000.0f; }
 
+    // Test hook for the measured second-plane rule (docs/peer_port_movie.md, item 6): the runtime reads
+    // PALMETTO_PRESENT_PLANE_RULE once per process; the pixel test compares the flagged gate and the measured rule on one
+    // GPU by setting this per object. -1 (constructed) follows the environment, 0 keeps the invented flag gate, 1 applies
+    // src/plane_compose_rule.h.
+    void set_plane_rule_measured(bool on) { plane_rule_override_.store(on ? 1 : 0, std::memory_order_relaxed); }
+
     palmetto::FramePacer& pacer() { return pacer_; }
     WindowPresenter& presenter() { return *presenter_; }
     std::uint64_t presents() const { return presents_; }
@@ -229,6 +241,10 @@ private:
     std::atomic<std::uint64_t> externally_issued_token_{0};  // frame-token bridge watermark (highest reported token)
     bool logged_planes_ = false, logged_threshold_ = false, logged_display_ = false, logged_color_space_ = false,
          logged_extras_ = false, logged_resource_count_ = false;
+    // The measured second-plane rule's once-per-kind lines (docs/peer_port_movie.md, item 6).
+    bool logged_plane_rule_compose_ = false, logged_plane_rule_unmeasured_ = false;
+    // -1: follow PALMETTO_PRESENT_PLANE_RULE; 0/1: the test hook set_plane_rule_measured.
+    std::atomic<int> plane_rule_override_{-1};
     std::atomic<float> sdr_white_override_{0.0f};  // > 0: set_sdr_white_nits
     std::atomic<palmetto::PresentPlanes::SdrEotf> sdr_eotf_{palmetto::PresentPlanes::SdrEotf::srgb};
     std::atomic<float> hdr_peak_nits_{1000.0f};

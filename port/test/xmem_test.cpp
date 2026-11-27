@@ -28,6 +28,7 @@
 #include "shims.h"
 #include "startup_trace.h"
 #include "xmem.h"
+#include "plane_refresh.h"  // docs/peer_port_movie.md: the pure half of the per-submission texture refresh
 #include "dstorage_advanced.h"  // the page-list transfer seam the dstorage request path runs (docs/page_resolver.md)
 
 namespace {
@@ -1251,6 +1252,129 @@ void test_layout_plan() {
           "layout plan: one page is a usable prefix");
 }
 
+// docs/peer_port_movie.md, the implemented rank-4 port: the pure half of the per-submission refresh of a title-written
+// texture. The switch text, the bounded compare budget (round-robin and never starving an oversized texture), the
+// changed byte range and the row band it names, the step the walk takes against the guard-page tracker's verdict, and the
+// report's shape. No device and no title pages: the impure half is exercised on the GPU in d3d12_vulkan_device_test.
+void test_plane_refresh_plan() {
+    using namespace palmetto;
+    const auto off = plane_refresh_plan_from(nullptr, nullptr);
+    check(off.mode == PlaneRefreshMode::off && !off.enabled() && !off.arms_tracker(),
+          "plane refresh: unset switches leave the one-shot import (off)");
+    check(!plane_refresh_plan_from("", "").enabled(), "plane refresh: an empty switch is off");
+    check(!plane_refresh_plan_from("0", nullptr).enabled(), "plane refresh: a zero switch is off");
+    check(!plane_refresh_plan_from("off", nullptr).enabled(), "plane refresh: an explicit off is off");
+    check(!plane_refresh_plan_from("on", nullptr).enabled(), "plane refresh: an unknown word is off, never a guess");
+    const auto hash = plane_refresh_plan_from("hash", nullptr);
+    check(hash.mode == PlaneRefreshMode::hash && hash.enabled() && !hash.arms_tracker(),
+          "plane refresh: hash mode compares and needs no tracker");
+    check(plane_refresh_plan_from("HASH", nullptr).mode == PlaneRefreshMode::hash,
+          "plane refresh: the switch words are case-insensitive");
+    check(plane_refresh_plan_from("1", nullptr).mode == PlaneRefreshMode::hash,
+          "plane refresh: a leading digit selects the default (hash) implementation");
+    const auto watch = plane_refresh_plan_from("watch", "1");
+    check(watch.mode == PlaneRefreshMode::watch && watch.arms_tracker() && watch.trace,
+          "plane refresh: watch mode arms the tracker and the trace switch is read");
+
+    // The budget: textures are admitted whole while the remaining budget covers them; an oversized texture is admitted
+    // alone when nothing has been admitted yet, and nothing else fits behind it.
+    {
+        RefreshBudget budget(100);
+        check(budget.take(60) && budget.remaining() == 40, "refresh budget: a texture that fits is admitted whole");
+        check(!budget.take(60), "refresh budget: a texture that does not fit behind an admitted one is deferred");
+        check(budget.take(40), "refresh budget: the rest of the budget admits the next texture");
+    }
+    {
+        RefreshBudget budget(100);
+        check(budget.take(4096) && budget.oversized() && budget.remaining() == 0,
+              "refresh budget: an oversized texture is admitted alone (never starved)");
+        check(!budget.take(1), "refresh budget: after an oversized admission nothing else is admitted this submission");
+    }
+    {
+        RefreshBudget budget(0);
+        check(!budget.take(1), "refresh budget: a zero budget admits nothing (the round-robin moves on)");
+    }
+
+    // The changed byte range: three cases a movie rewrite shows (nothing, one row, every byte).
+    std::uint8_t before[64] = {};
+    std::uint8_t after[64] = {};
+    std::uint64_t first = 99, last = 99;
+    check(!changed_byte_range(before, after, sizeof before, first, last),
+          "changed range: identical spans report no change");
+    std::memcpy(after, before, sizeof before);
+    after[17] = 0x5a;
+    check(changed_byte_range(before, after, sizeof before, first, last) && first == 17 && last == 18,
+          "changed range: one byte in the middle reports exactly that byte");
+    after[63] = 0x11;
+    check(changed_byte_range(before, after, sizeof before, first, last) && first == 17 && last == 64,
+          "changed range: a second byte extends the range to the last byte");
+    std::memset(after, 0xff, sizeof after);
+    check(changed_byte_range(before, after, sizeof before, first, last) && first == 0 && last == 64,
+          "changed range: a full rewrite reports the whole span");
+    check(!changed_byte_range(nullptr, after, 4, first, last), "changed range: a null span is not a change");
+
+    // The row band a changed byte range names: byte offsets map to copy rows, and anything not narrowable is refused.
+    {
+        std::uint32_t top = 99, bottom = 99;
+        check(changed_rows(16, 8, 32, 48, top, bottom) && top == 2 && bottom == 3,
+              "changed rows: bytes 32..48 are exactly row 2 of a 16-byte-row subresource");
+        check(changed_rows(16, 8, 30, 34, top, bottom) && top == 1 && bottom == 3,
+              "changed rows: a range across two rows covers both");
+        check(changed_rows(16, 8, 0, 1, top, bottom) && top == 0 && bottom == 1, "changed rows: the first row");
+        check(changed_rows(16, 8, 127, 128, top, bottom) && top == 7 && bottom == 8, "changed rows: the last row");
+        check(changed_rows(16, 8, 3, 40, top, bottom) && top == 0 && bottom == 3,
+              "changed rows: a range across rows covers every row it touches");
+        check(changed_rows(16, 8, 0, 128, top, bottom) && top == 0 && bottom == 8,
+              "changed rows: a whole-subresource change names every row (the caller re-uploads whole)");
+        check(!changed_rows(0, 8, 0, 1, top, bottom), "changed rows: no row size is not narrowable");
+        check(!changed_rows(16, 0, 0, 1, top, bottom), "changed rows: no rows is not narrowable");
+        check(!changed_rows(16, 8, 5, 5, top, bottom), "changed rows: an empty range is not a change");
+        check(!changed_rows(16, 8, 0, 129, top, bottom), "changed rows: an offset past the subresource is refused");
+    }
+
+    // The step the walk takes: the tracker's "unchanged" is the only skip; "changed" and "unavailable" both compare, and
+    // an unadmitted texture is deferred (the round-robin start moves so it is first next time).
+    check(texture_refresh_step(PlaneRefreshMode::hash, rt::xmem::WriteWatchPoll::unchanged, true) ==
+              TextureRefreshStep::compare,
+          "refresh step: hash mode compares even when no range is armed (the tracker is not asked)");
+    check(texture_refresh_step(PlaneRefreshMode::watch, rt::xmem::WriteWatchPoll::unchanged, true) ==
+              TextureRefreshStep::skip_tracker_unchanged,
+          "refresh step: watch mode skips the compare when the tracker says unchanged");
+    check(texture_refresh_step(PlaneRefreshMode::watch, rt::xmem::WriteWatchPoll::changed, true) ==
+              TextureRefreshStep::compare,
+          "refresh step: a tracker write falls through to the compare (which narrows the upload)");
+    check(texture_refresh_step(PlaneRefreshMode::watch, rt::xmem::WriteWatchPoll::unavailable, true) ==
+              TextureRefreshStep::compare,
+          "refresh step: an unavailable tracker falls back to the hash compare");
+    check(texture_refresh_step(PlaneRefreshMode::hash, rt::xmem::WriteWatchPoll::changed, false) ==
+              TextureRefreshStep::defer_budget,
+          "refresh step: a texture the budget did not admit is deferred");
+
+    // The report names every counter once (a boot's milestone line).
+    PlaneRefreshCounters counters;
+    counters.tracked = 40;
+    counters.watched = 3;
+    counters.compared = 12;
+    counters.compare_bytes = 1 << 20;
+    counters.changed = 5;
+    counters.unchanged = 7;
+    counters.uploaded = 5;
+    counters.upload_bytes = 1 << 19;
+    counters.narrow_uploads = 4;
+    counters.full_uploads = 1;
+    counters.tracker_skips = 28;
+    counters.deferred = 1;
+    counters.unreadable = 2;
+    char report[512] = {};
+    write_plane_refresh_report(counters, report, sizeof report);
+    const std::string text(report);
+    check(text.find("plane refresh:") == 0 && text.find("40 tracked") != std::string::npos &&
+              text.find("3 watched") != std::string::npos && text.find("narrow 4") != std::string::npos &&
+              text.find("deferred 1") != std::string::npos,
+          "refresh report: one line names the tracked, compared, changed, uploaded and fallback counts");
+    write_plane_refresh_report(counters, nullptr, 0);  // no destination: a no-op, never a crash
+}
+
 }  // namespace
 
 int main() {
@@ -1319,6 +1443,7 @@ int main() {
     test_title_virtual_alloc();
     test_page_write_watch();
     test_layout_plan();
+    test_plane_refresh_plan();  // docs/peer_port_movie.md: the pure per-submission refresh rules
 
     if (alloc_default && free_default) test_default_alloc(alloc, free_mem, alloc_default, free_default);
     if (tools_mem) check(tools_mem() == FALSE, "XMemIsToolsMemAvailable returns FALSE (no devkit tools memory)");

@@ -28,6 +28,7 @@
 #include "../src/pipeline_cache.h"
 #include "../src/conservative_raster.h"
 #include "../src/resource_detile.h"
+#include "../src/plane_refresh.h"  // docs/peer_port_movie.md: the per-submission refresh of a title-written texture
 #include "../src/shader_library.h"
 #include "../src/graphics_pso.h"
 #include "../src/spirv_f16_halves.h"
@@ -1679,6 +1680,67 @@ inline std::uint64_t pipeline_hold_budget_ms() {
     // (docs/texture_import.md). Pending entries are drained by the queue hook below; bounded and logged.
     std::mutex placed_texture_mutex;
     std::vector<Resource*> placed_textures_pending;
+    // The per-submission refresh of title-written textures (docs/peer_port_movie.md section 8; port/src/plane_refresh.h
+    // is the pure half). A texture whose pages were imported once into its stand-in is tracked here, with the shim's own
+    // reference kept for the process's lifetime - the list is bounded by the tracker's ranges and the shadow budget, and
+    // that bounded hold is what makes the per-submission walk safe against a title releasing the resource. The walk
+    // compares the title's pages against the imported shadow and re-uploads only the changed row band; with
+    // PALMETTO_PLANE_REFRESH unset the list is never filled and the walk is not entered (the tree's one-shot import).
+    std::mutex placed_refresh_mutex;
+    std::vector<Resource*> placed_refresh;
+    std::uint64_t placed_refresh_shadow_bytes = 0;  // the shadows' bytes: the bound on what the refresh may hold
+    std::size_t placed_refresh_next = 0;            // round-robin start, moved by one each submission
+    palmetto::PlaneRefreshCounters placed_refresh_counters;
+    std::uint64_t placed_refresh_walks = 0;
+    // The switches, parsed once per process: PALMETTO_PLANE_REFRESH=hash|watch and PALMETTO_PLANE_REFRESH_TRACE.
+    palmetto::PlaneRefreshPlan plane_refresh_plan() {
+        static const palmetto::PlaneRefreshPlan plan = [] {
+            char refresh[24] = {};
+            char trace[24] = {};
+            std::size_t refresh_length = 0, trace_length = 0;
+            const errno_t refresh_error = getenv_s(&refresh_length, refresh, "PALMETTO_PLANE_REFRESH");
+            const errno_t trace_error = getenv_s(&trace_length, trace, "PALMETTO_PLANE_REFRESH_TRACE");
+            const palmetto::PlaneRefreshPlan parsed = palmetto::plane_refresh_plan_from(
+                refresh_error == 0 && refresh_length > 1 ? refresh : nullptr,
+                trace_error == 0 && trace_length > 1 ? trace : nullptr);
+            if (refresh_error == 0 && refresh_length > 1 && !parsed.enabled())
+                std::fprintf(stderr,
+                             "[rt] d3d12: PALMETTO_PLANE_REFRESH=%s is not hash or watch: title-written texture pages "
+                             "keep the one-shot import (no per-submission refresh)\n",
+                             refresh);
+            if (!parsed.enabled()) return parsed;
+            // The guard-page tracker has one change flag for every range it arms, and the descriptor-mirror gate
+            // (PALMETTO_CARD_COPY_WATCH) polls it first in a submission and suspends every range around its own scan. A
+            // texture write would therefore be consumed by that poll and missed here, and a write inside its suspended
+            // window would not be recorded at all: with the mirror gate on, watch mode falls back to the hash compare
+            // (which needs no shared signal), and says so.
+            palmetto::PlaneRefreshPlan plan = parsed;
+            char mirror_watch[24] = {};
+            std::size_t mirror_length = 0;
+            if (parsed.mode == palmetto::PlaneRefreshMode::watch &&
+                getenv_s(&mirror_length, mirror_watch, "PALMETTO_CARD_COPY_WATCH") == 0 && mirror_length > 1 &&
+                mirror_watch[0] != '0') {
+                plan.mode = palmetto::PlaneRefreshMode::hash;
+                std::fprintf(stderr,
+                             "[rt] d3d12: PALMETTO_PLANE_REFRESH=watch with PALMETTO_CARD_COPY_WATCH set: the "
+                             "descriptor-mirror gate shares the tracker's single change flag and its suspended window, "
+                             "so the texture refresh uses the hash compare instead\n");
+            }
+            std::fprintf(stderr,
+                         "[rt] d3d12: PALMETTO_PLANE_REFRESH=%s: title-written texture pages are refreshed before "
+                         "the submission that samples them%s\n",
+                         plan.mode == palmetto::PlaneRefreshMode::watch ? "watch" : "hash",
+                         plan.arms_tracker() ? " (the guard-page tracker is the pre-filter)" : "");
+            return plan;
+        }();
+        return plan;
+    }
+    // Unregisters a tracked texture: the walk dropped it (a shadow size that no longer matches, or a refused range) and
+    // the reference the pending list took is released. Defined after Resource, whose shadow size it reads.
+    void untrack_placed_refresh(Resource* resource);
+    // The per-submission walk (defined after Resource: it calls the resource's own refresh). A no-op with the switch off.
+    void refresh_placed_textures();
+
     // Diagnostic (docs/frame_capture.md, the colour path): the resources the title placed through its console creation path,
     // by the title VA they were placed at, so a T# descriptor a shader fetches itself (out of a published block, not a
     // table slot) can be given a layer image from the resource it names. Registered on creation, removed on release.
@@ -4036,7 +4098,17 @@ public:
         }
         // cpu_copy's pack takes a tightly row-major source: row pitch = one row of texels, slice pitch = one slice.
         const void* pages = reinterpret_cast<const void*>(static_cast<std::uintptr_t>(placed_pages_));
-        if (FAILED(cpu_copy(true, 0, nullptr, const_cast<void*>(pages), static_cast<UINT>(r.row_bytes),
+        // The per-submission refresh (docs/peer_port_movie.md section 8): with the switch on, the pages are read once
+        // here into a CPU shadow - the bytes the image gets and the bytes the next submission compares the title's pages
+        // against. With the switch off nothing is allocated and the import below is the tree's, byte for byte.
+        const palmetto::PlaneRefreshPlan refresh = device_.plane_refresh_plan();
+        const bool refreshable = refresh.enabled() && r.slices == 1 && r.row_bytes <= UINT32_MAX;
+        if (refreshable) {
+            placed_shadow_.resize(static_cast<std::size_t>(sub_bytes));
+            std::memcpy(placed_shadow_.data(), pages, static_cast<std::size_t>(sub_bytes));
+        }
+        const void* source = refreshable ? static_cast<const void*>(placed_shadow_.data()) : pages;
+        if (FAILED(cpu_copy(true, 0, nullptr, const_cast<void*>(source), static_cast<UINT>(r.row_bytes),
                             static_cast<UINT>(r.row_bytes * r.rows), true))) {
             placed_skipped_ = true;
             static std::atomic<unsigned> unreadable{0};
@@ -4049,7 +4121,18 @@ public:
             return false;
         }
         placed_imported_ = true;
+        if (refreshable) {
+            placed_row_bytes_ = static_cast<std::uint32_t>(r.row_bytes);
+            placed_rows_ = r.rows;
+            // The tracker is the pre-filter (watch mode) and only for a span whose guard cost the measurement bounds
+            // (port/src/plane_refresh.h): a larger texture keeps the hash compare. An arm that fails (a page not
+            // committed, another owner's guard, the tracker's range slots full) is the documented fallback: hash.
+            if (refresh.arms_tracker() && sub_bytes <= palmetto::plane_refresh_watch_max_bytes &&
+                rt::xmem::page_watch_arm)
+                placed_watch_armed_ = rt::xmem::page_watch_arm(pages, static_cast<std::size_t>(sub_bytes));
+        }
         device_.texture_imports.fetch_add(1, std::memory_order_relaxed);
+
         device_.texture_import_bytes.fetch_add(sub_bytes, std::memory_order_relaxed);
         static std::atomic<unsigned> logged{0};
         if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
@@ -4061,6 +4144,91 @@ public:
                          static_cast<unsigned long long>(sub_bytes), r.box.right, r.box.bottom,
                          subresources > 1 ? " (more than one subresource: the rest is not imported yet)" : "");
         return false;
+    }
+
+    // ---- the per-submission refresh of a title-written texture (docs/peer_port_movie.md section 8) -------------------
+    // The import above is one submission's answer; a title that rewrites its texture (the movie's planes are the
+    // measured case) would keep the first frame. These are the impure half of port/src/plane_refresh.h: the shadow's
+    // size, the one comparison and the narrow re-upload.
+    bool placed_imported() const { return placed_imported_; }
+    std::uint64_t placed_shadow_bytes() const { return placed_shadow_.size(); }
+    bool placed_watch_armed() const { return placed_watch_armed_; }
+    bool placed_refresh_available() const {
+        return placed_imported_ && image_ && placed_pages_ && !placed_shadow_.empty() && placed_row_bytes_ && placed_rows_;
+    }
+    void stop_placed_refresh() { placed_refresh_tracking_ = false; }
+    bool placed_refresh_tracking() const { return placed_refresh_tracking_; }
+    void set_placed_refresh_tracking() { placed_refresh_tracking_ = true; }
+
+    enum class RefreshOutcome : std::uint8_t {
+        unchanged = 0,   // the pages match the shadow: nothing to upload
+        changed = 1,     // the changed row band was re-uploaded
+        unreadable = 2,  // the pages are not committed/readable now: left as they were, retried next submission
+        failed = 3,      // the shape no longer matches the shadow, or the upload refused: the texture stops tracking
+    };
+    struct RefreshResult {
+        RefreshOutcome outcome = RefreshOutcome::failed;
+        std::uint64_t upload_bytes = 0;
+        bool narrow = false;
+    };
+
+    // One submission's refresh: compare the title's pages against the imported shadow, copy the changed bytes into the
+    // shadow and re-upload only the rows they touch (the whole subresource when the change cannot be narrowed: more than
+    // one slice, a block-compressed format, or every row). Reads only the title's memory and writes only the stand-in.
+    // The counters are the device's, updated by the walk: two queues on one device must not race them here.
+    RefreshResult refresh_placed_pages() {
+        RefreshResult result;
+        if (!placed_refresh_available()) return result;
+        Region r{};
+        if (!region(0, nullptr, r) || !r.rows || r.slices != 1) return result;
+        const std::uint64_t sub_bytes = r.row_bytes * r.rows;
+        if (sub_bytes != placed_shadow_.size()) return result;
+        // The pages must be committed and readable. PAGE_GUARD is not a refusal here: in watch mode the tracker's guards
+        // are on these pages, the read trips them, and the walk re-arms them after the compare. PAGE_NOACCESS is.
+        for (std::uint64_t at = placed_pages_; at < placed_pages_ + sub_bytes;) {
+            MEMORY_BASIC_INFORMATION info{};
+            if (VirtualQuery(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(at)), &info, sizeof(info)) !=
+                sizeof(info)) {
+                result.outcome = RefreshOutcome::unreadable;
+                return result;
+            }
+            if (info.State != MEM_COMMIT || (info.Protect & PAGE_NOACCESS) != 0 || !info.RegionSize) {
+                result.outcome = RefreshOutcome::unreadable;
+                return result;
+            }
+            at = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+        }
+        const auto* pages = reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(placed_pages_));
+        std::uint64_t first = 0, last = 0;
+        if (!palmetto::changed_byte_range(placed_shadow_.data(), pages, sub_bytes, first, last)) {
+            result.outcome = RefreshOutcome::unchanged;
+            return result;
+        }
+        std::memcpy(placed_shadow_.data() + first, pages + first, static_cast<std::size_t>(last - first));
+        std::uint32_t top = 0, bottom = 0;
+        // Block-compressed rows are copy units of four texels: a box's top has to be a multiple of the block, which a
+        // byte-derived row is not, so those formats re-upload the subresource whole.
+        const bool narrow =
+            r.block.block == 1 &&
+            palmetto::changed_rows(r.row_bytes, r.rows, first, last, top, bottom) && bottom > top && bottom - top < r.rows;
+        HRESULT hr = E_FAIL;
+        if (narrow) {
+            const D3D12_BOX box{0, static_cast<UINT>(top), 0, r.box.right, static_cast<UINT>(bottom), 1};
+            const std::uint64_t rows = bottom - top;
+            hr = cpu_copy(true, 0, &box, placed_shadow_.data() + std::uint64_t(top) * r.row_bytes,
+                          static_cast<UINT>(r.row_bytes), static_cast<UINT>(r.row_bytes * rows), true);
+            if (SUCCEEDED(hr)) {
+                result.upload_bytes = r.row_bytes * rows;
+                result.narrow = true;
+            }
+        } else {
+            hr = cpu_copy(true, 0, nullptr, placed_shadow_.data(), static_cast<UINT>(r.row_bytes),
+                          static_cast<UINT>(r.row_bytes * r.rows), true);
+            if (SUCCEEDED(hr)) result.upload_bytes = sub_bytes;
+        }
+        if (FAILED(hr)) return result;
+        result.outcome = RefreshOutcome::changed;
+        return result;
     }
 
     // Default-heap buffers are ranges of the GPU address arena: console VA = offset, zeroed through the arena's host
@@ -4986,6 +5154,14 @@ private:
     bool placed_imported_ = false;
     bool placed_skipped_ = false;
     bool placed_wait_logged_ = false;  // docs/texture_source.md: the all-zero-head wait is logged once per texture
+    // The per-submission refresh (docs/peer_port_movie.md section 8, port/src/plane_refresh.h): the bytes the import put
+    // in the image, kept as the shadow the next submission compares the title's pages against; the subresource shape the
+    // narrow re-upload needs; and whether the guard-page tracker was armed on the pages as the pre-filter.
+    std::vector<std::uint8_t> placed_shadow_;
+    std::uint32_t placed_row_bytes_ = 0;
+    std::uint32_t placed_rows_ = 0;
+    bool placed_watch_armed_ = false;
+    bool placed_refresh_tracking_ = false;
 };
 
 // Drains the title-placed textures whose pages are ready to import. Called by the queue before it records a
@@ -5103,16 +5279,142 @@ void DeviceState::import_placed_textures() {
     }
     std::vector<Resource*> retry;
     for (Resource* resource : pending) {
-        if (resource->import_placed_pages())
+        if (resource->import_placed_pages()) {
             retry.push_back(resource);  // keep the shim's reference for the next submission
-        else
-            resource->Release();
+            continue;
+        }
+        // Imported once: with the refresh switch on the resource is tracked and keeps this list's reference for the
+        // walk (bounded by the shadow budget below); otherwise the reference goes as it did before the port.
+        const auto plan = plane_refresh_plan();
+        bool tracked = false;
+        if (plan.enabled() && resource->placed_refresh_available()) {
+            std::lock_guard lock(placed_refresh_mutex);
+            constexpr std::uint64_t kShadowBudget = std::uint64_t(64) << 20;  // the shadows' bytes, this process
+            constexpr std::size_t kMaxTracked = 16;
+            if (placed_refresh.size() < kMaxTracked &&
+                placed_refresh_shadow_bytes + resource->placed_shadow_bytes() <= kShadowBudget) {
+                resource->set_placed_refresh_tracking();
+                placed_refresh.push_back(resource);
+                placed_refresh_shadow_bytes += resource->placed_shadow_bytes();
+                if (resource->placed_watch_armed()) ++placed_refresh_counters.watched;
+                tracked = true;
+            }
+        }
+        if (!tracked) resource->Release();
     }
     if (!retry.empty()) {
         std::lock_guard lock(placed_texture_mutex);
         placed_textures_pending.insert(placed_textures_pending.end(), retry.begin(), retry.end());
     }
+    // docs/peer_port_movie.md section 8: the same hook is the per-submission refresh of the textures tracked above, so
+    // the pages the title rewrote are in their stand-ins before this submission is recorded. A no-op with the switch
+    // off, and with nothing tracked.
+    refresh_placed_textures();
 }
+
+void DeviceState::untrack_placed_refresh(Resource* resource) {
+    bool found = false;
+    {
+        std::lock_guard lock(placed_refresh_mutex);
+        const auto at = std::find(placed_refresh.begin(), placed_refresh.end(), resource);
+        if (at != placed_refresh.end()) {
+            placed_refresh.erase(at);
+            placed_refresh_shadow_bytes -= resource->placed_shadow_bytes();
+            if (resource->placed_watch_armed()) --placed_refresh_counters.watched;
+            resource->stop_placed_refresh();
+            found = true;
+        }
+    }
+    // Released outside the lock: the release may destroy the resource, whose destructor takes other device locks.
+    if (found) resource->Release();  // the reference the pending list took when it queued the import
+}
+
+void DeviceState::refresh_placed_textures() {
+    const auto plan = plane_refresh_plan();
+    if (!plan.enabled()) return;
+    std::vector<Resource*> tracked;
+    {
+        std::lock_guard lock(placed_refresh_mutex);
+        tracked = placed_refresh;
+    }
+    if (tracked.empty()) return;
+    // The tracker's verdict covers every armed range, the descriptor-mirror gate's included: "changed" costs a compare
+    // of every tracked texture, "unchanged" skips all of them, "unavailable" (nothing armed, a range refused, the trip
+    // record overflowed) falls back to the hash compare the peers use for memory they cannot watch.
+    rt::xmem::WriteWatchPoll verdict = rt::xmem::WriteWatchPoll::unavailable;
+    if (plan.arms_tracker() && rt::xmem::page_watch_poll) verdict = rt::xmem::page_watch_poll();
+    palmetto::RefreshBudget budget;
+    std::vector<Resource*> untrack;
+    std::uint64_t walked = 0, compared = 0, compare_bytes = 0, unchanged = 0, changed = 0, unreadable = 0, deferred = 0,
+                 tracker_skips = 0, uploaded = 0, narrow = 0, full = 0;
+    const std::size_t count = tracked.size();
+    for (std::size_t i = 0; i < count; ++i) {
+        Resource* const resource = tracked[(placed_refresh_next + i) % count];
+        ++walked;
+        const std::uint64_t bytes = resource->placed_shadow_bytes();
+        const bool fits = bytes != 0 && budget.take(bytes);
+        switch (palmetto::texture_refresh_step(plan.mode, verdict, fits)) {
+        case palmetto::TextureRefreshStep::skip_tracker_unchanged:
+            ++tracker_skips;
+            continue;
+        case palmetto::TextureRefreshStep::defer_budget:
+            ++deferred;
+            continue;
+        case palmetto::TextureRefreshStep::compare:
+            break;
+        }
+        ++compared;
+        compare_bytes += bytes;
+        const Resource::RefreshResult result = resource->refresh_placed_pages();
+        switch (result.outcome) {
+        case Resource::RefreshOutcome::unchanged:
+            ++unchanged;
+            break;
+        case Resource::RefreshOutcome::changed:
+            ++changed;
+            ++uploaded;
+            if (result.narrow) ++narrow; else ++full;
+            break;
+        case Resource::RefreshOutcome::unreadable:
+            ++unreadable;
+            break;
+        case Resource::RefreshOutcome::failed:
+            ++unreadable;  // the shape no longer matches the import: the texture leaves the walk
+            untrack.push_back(resource);
+            break;
+        }
+    }
+    placed_refresh_next = count ? (placed_refresh_next + 1) % count : 0;
+    // Our own compares read the title's pages, and in watch mode each read trips its guard: re-arm without taking a
+    // change verdict (the change was already consumed by the poll above).
+    if (compared && plan.arms_tracker() && rt::xmem::page_watch_rearm) rt::xmem::page_watch_rearm();
+    for (Resource* const resource : untrack) untrack_placed_refresh(resource);
+    {
+        std::lock_guard lock(placed_refresh_mutex);
+        auto& c = placed_refresh_counters;
+        ++c.submissions;
+        c.tracked += walked;
+        c.compared += compared;
+        c.compare_bytes += compare_bytes;
+        c.changed += changed;
+        c.unchanged += unchanged;
+        c.unreadable += unreadable;
+        c.deferred += deferred;
+        c.tracker_skips += tracker_skips;
+        c.uploaded += uploaded;
+        c.narrow_uploads += narrow;
+        c.full_uploads += full;
+    }
+    ++placed_refresh_walks;
+    if (plan.trace && (placed_refresh_walks == 1 || placed_refresh_walks == 256 || placed_refresh_walks % 4096 == 0)) {
+        char report[512];
+        std::lock_guard lock(placed_refresh_mutex);
+        palmetto::write_plane_refresh_report(placed_refresh_counters, report, sizeof report);
+        std::fprintf(stderr, "[rt] d3d12: %s (walk %llu)\n", report,
+                     static_cast<unsigned long long>(placed_refresh_walks));
+    }
+}
+
 
 // PALMETTO_IMAGE_MEM_POOL=1 (docs/streamed_image_backing.md): the blocks small textures share. The block size follows
 // upstream's measured choice, 64 MiB capped at a sixteenth of a device-local heap, so a 4 GB card's 256 MiB BAR window

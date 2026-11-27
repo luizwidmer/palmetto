@@ -16,6 +16,7 @@
 #include "../shims/d3d12_xs_device.h"
 #include "../shims/d3d12_trace.h"
 #include "../shims/xbox_present.h"
+#include "../src/plane_compose_rule.h"  // docs/peer_port_movie.md: the measured second-plane rule (pure half)
 
 #include <algorithm>
 #include <chrono>
@@ -288,6 +289,47 @@ bool frame_matches(const Frame& frame, const Ref_plane* planes, int count, bool 
 }  // namespace
 
 int main() {
+    {
+        // The measured second-plane rule (docs/peer_port_movie.md, item 6; port/src/plane_compose_rule.h): the pure
+        // decision the present path applies when PALMETTO_PRESENT_PLANE_RULE=measured replaces the invented overlay flag.
+        // The measured plane-word population (existing boots): one plane, ResourceCount 1, colour space 0, ScaleFilter 0,
+        // Flags 0x0 - the invented flag has never been exercised, so the rule is stated over the fields that are measured.
+        using palmetto::compose_second_plane;
+        using palmetto::SecondPlaneDecision;
+        using palmetto::SecondPlaneWords;
+        SecondPlaneWords words;
+        words.plane_count = 1;
+        EXPECT(compose_second_plane(words).decision == SecondPlaneDecision::not_requested);
+        words.plane_count = 3;
+        EXPECT(compose_second_plane(words).decision == SecondPlaneDecision::refuse_plane_count);
+        words.plane_count = 2;
+        words.resource_count = 2;
+        EXPECT(compose_second_plane(words).decision == SecondPlaneDecision::refuse_resource_count);
+        words.resource_count = 1;
+        EXPECT(compose_second_plane(words).decision == SecondPlaneDecision::refuse_unmeasured);
+        words.has_placement = true;
+        const auto placed = compose_second_plane(words);
+        EXPECT(placed.decision == SecondPlaneDecision::compose && placed.reason != nullptr);
+        words.has_placement = false;
+        words.scale_filter = 1;  // point
+        EXPECT(compose_second_plane(words).decision == SecondPlaneDecision::compose);
+        words.scale_filter = 2;  // linear
+        EXPECT(compose_second_plane(words).decision == SecondPlaneDecision::compose);
+        words.scale_filter = 77;  // an unknown filter is normalised to the default by the caller, never a measured ask
+        EXPECT(compose_second_plane(words).decision == SecondPlaneDecision::refuse_unmeasured);
+        words.scale_filter = 0;
+        const auto refused = compose_second_plane(words);
+        EXPECT(refused.decision == SecondPlaneDecision::refuse_unmeasured && refused.reason != nullptr);
+        EXPECT(palmetto::present_plane_rule_measured_from("measured"));
+        EXPECT(palmetto::present_plane_rule_measured_from("MEASURED"));
+        EXPECT(!palmetto::present_plane_rule_measured_from(nullptr));
+        EXPECT(!palmetto::present_plane_rule_measured_from(""));
+        EXPECT(!palmetto::present_plane_rule_measured_from("0"));
+        EXPECT(!palmetto::present_plane_rule_measured_from("flag"));
+        EXPECT(!palmetto::present_plane_rule_measured_from("measured-x"));
+        std::printf("measured plane rule (pure): plane count, resource count, placement, filter, unmeasured refusal: ok\n");
+    }
+
     {
         // The callback's narrow exception must match the sRGB swapchain VUID, including its follow-ons, and nothing else.
         VkDebugUtilsMessengerCallbackDataEXT data{};
@@ -1519,6 +1561,49 @@ int main() {
             EXPECT(present_planes(pair, 2) && composed_ok());
             if (!surface_hdr) EXPECT(frame_matches(frame, &href, 1, false, 203.0, 2));
             std::printf("compose: HDR10 plane 0 + unflagged SDR plane 1 (GameDVR copy) shows plane 0 only: ok\n");
+
+            // D2: the measured second-plane rule (docs/peer_port_movie.md, item 6; port/src/plane_compose_rule.h). With
+            // the rule on, the invented overlay flag no longer decides: plane 1 with a placement, or with its own point
+            // or linear filter, is composed without the flag; the no-placement/default-filter shape is refused even
+            // when the flag is set; ResourceCount above 1 is still refused. The blend is the premultiplied-over the
+            // composition already implements (checked against the same CPU model as the flagged cases above).
+            xbox.set_plane_rule_measured(true);
+            {
+                // Compose 1: a placement and no invented flag.
+                pair[0] = parameters(solid.source, nullptr, xbox_scale_filter_point);
+                pair[1] = parameters(ui.source, &middle_half, xbox_scale_filter_point, 0, 0);
+                EXPECT(present_planes(pair, 2) && composed_ok());
+                Ref_plane rule_refs[2] = {model(solid, nullptr, true), model(ui, &middle_half, true)};
+                EXPECT(frame_matches(frame, rule_refs, 2, false, 203.0, 1));
+                // Compose 2: no placement, its own point filter, no invented flag (scaled to the whole output, exact).
+                pair[0] = parameters(solid.source, nullptr, xbox_scale_filter_point);
+                pair[1] = parameters(quad.source, nullptr, xbox_scale_filter_point, 0, 0);
+                EXPECT(present_planes(pair, 2) && composed_ok());
+                Ref_plane filter_refs[2] = {model(solid, nullptr, true), model(quad, nullptr, true)};
+                EXPECT(frame_matches(frame, filter_refs, 2, false, 203.0, 0));
+                // Refused: no placement and the default filter, with the invented flag set. The plane-0 point filter
+                // still runs the compose pass for plane 0 alone (the measured compose trigger), so the count moves and
+                // the pixels are plane 0's only.
+                pair[0] = parameters(solid.source, nullptr, xbox_scale_filter_point);
+                pair[1] = parameters(second, nullptr, rt::d3d12::xbox_scale_filter_default, 0,
+                                     rt::d3d12::xbox_plane_flag_overlay);
+                EXPECT(present_planes(pair, 2) && composed_ok());
+                Ref_plane plane0_only = model(solid, nullptr, true);
+                EXPECT(frame_matches(frame, &plane0_only, 1, false, 203.0, 0));
+                EXPECT(region_is(frame, 0, 0, width, height, {51, 153, 230}, 0));
+                // ResourceCount above 1 is refused before the rule decides (the plane object's shape, not its display).
+                {
+                    ID3D12Resource* both[2] = {solid.source.resource.p, second.resource.p};
+                    rt::d3d12::XboxPresentPlaneParameters counted{0, 2, both, nullptr, 0};
+                    counted.ScaleFilter = xbox_scale_filter_point;
+                    const std::uint64_t presents_before_rule = xbox.presents();
+                    EXPECT(present_planes(&counted, 1, DXGI_ERROR_UNSUPPORTED));
+                    EXPECT(xbox.presents() == presents_before_rule);
+                }
+                std::printf("compose: measured plane rule: placement composes, filter composes, the unmeasured shape is "
+                            "refused (even flagged), ResourceCount above 1 still refused: ok\n");
+            }
+            xbox.set_plane_rule_measured(false);
 
             // E: a placement that is not a sub-rectangle of the output (empty, inverted, outside, NaN), an unknown filter and
             // extended descriptors are ignored (logged once): the plane is shown over the whole output, point filtered.
