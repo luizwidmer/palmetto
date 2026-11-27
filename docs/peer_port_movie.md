@@ -1,8 +1,9 @@
 # The peer ports' movie path: Bink 2 decode, the plane textures and the present
 
 **Status: peer audit (sections 1-7, written as a read-only audit: documentation only, no boot, every page quoted) plus
-three implemented ports (sections 8-9 and 11, with their own tests and one light boot each), their attribution (sections
-8.7, 9.6 and 11.7) and the uncommitted file lists (sections 10 and 11.8).** The five peer ports were re-cloned and read
+four implemented ports (sections 8-9, 11 and 12, with their own tests and their light boots), their attribution
+(sections 8.7, 9.6, 11.7 and 12.7) and the uncommitted file lists (sections 10, 11.8 and 12.8).** The five peer ports
+were re-cloned and read
 at the commits in section 1 to answer one question: how does a port get a movie from the title's
 `BinkOpenWithOptions` to a pixel on screen, and
 which part of that is missing in this tree? The answer is narrower than the earlier parity audit expected. Every peer
@@ -922,4 +923,243 @@ Implementation: [xmem.h](../port/shims/xmem.h), [xmem.cpp](../port/shims/xmem.cp
 `port/src/console_va_map.h`, `port/src/buffer_va_index.h`, the CMake files, `NOTICE.md`, `docs/README.md` and the other
 docs pages are unchanged by this port (the working tree's other modified files belong to the other in-flight slices).
 No git write was made and no peer code is in the tree.
+
+## 12. Implemented port 4: the XG layout and upload coverage for the movie-plane shapes (section 4 item 7)
+
+**Status: implemented behind an opt-in switch, tested GPU-free, and measured with the census instrument on one light
+A/B pair of boots that stopped at the shared tree's stage-3 fault at 63-65 s (plus one earlier arm).** This is the
+rank-7 port of section 4, item 7. It answers the conditional in section 3.1's "XG plane fill" row: whether the movie's
+three linear planes need a shape the shim refuses. The measured answer has two halves. **The records are already
+covered:** the movie planes are three single-level, single-slice R8 linear textures (one 3840x2160 luma plane and two
+1920x1080 chroma planes), so `XGCreateTextureComputer` accepts all three and the slot-2 record describes them, the
+chroma pair at the linear layout's 2048-byte padded row pitch. **The upload was not:** slot 8 placed the caller's bytes
+flat and used neither the caller's row pitch nor the record's, so the two 1920-wide planes' rows would land at 1920
+bytes instead of the 2048 its own record reports. The port places a served description's one level row by row at the
+layout pitch behind `PALMETTO_XG_MOVIE_PLANES`, names the calls it refuses, and leaves every shape its linear model does
+not lay out on the tree's flat path. The code is our own: [xg_xs.cpp](../port/shims/xg_xs.cpp), the small
+[xg_xs.h](../port/shims/xg_xs.h) switch/test seam, and the slot-2 record and its existing switch are unchanged. No peer
+code was copied and no game data is in this port; section 12.6 repeats the attribution.
+
+### 12.1 The measured coverage and the movie-plane shapes
+
+The coverage half is read from this tree's shim and its tests (docs/texture_layout.md is the earlier measurement of the
+record and of the refused calls). The shapes half is measured elsewhere and only cross-checked here, because the movie
+draw is still not issued: the public reference's movies page measured the launch movie's three rotating plane sets -
+**one 3840x2160 and two 1920x1080 linear R8 planes per set** - into the slot-133 texture uploader, with
+`VS_Bink`/`PS_BinkNoAlpha` binding the three plane descriptors; this tree's own archive index measured exactly one 4K
+stream, the 450-frame publisher stinger ([movies.md](movies.md)), and a 4:2:0 3840x2160 stream's planes are one
+3840x2160 luma plane and two 1920x1080 chroma planes. Our own player fields pin where our chain stops instead: in
+every arm of this port the player state byte read `0x3` with handle 0 and `buffers 0` (the earlier long arm's playing
+state `0x9`, [decomp_first_ui.md](decomp_first_ui.md) sections 17.4 and 18.4, is not reached at this frontier), and
+frame-buffer registration `0x442F760` and the per-frame decode `0x2EF0E0` did not run, so **no movie-plane description
+was created or uploaded in any measured window.** The gap is therefore established by the record/upload arithmetic
+above, not by a title call; section 12.5 states that limit.
+
+| shape the family is asked about | slot-2 record before this port | slot-8 upload before this port | slot-8 upload with this port |
+|---|---|---|---|
+| one-level, one-slice 1D/2D texture, explicit linear layout `0x100`, whole-byte single-plane format (the shape class of every served shape in the measured window) | filled (header + one plane + one mip level) | flat copy of the caller's byte count at the source's offset; the caller's row pitch is not read | the record's rows are placed row by row: source stride = the caller's row pitch, destination stride = the record's padded row pitch, `row_bytes` per row written, the padding left alone |
+| the movie luma plane 3840x2160 R8 | filled: row pitch 3840 B, level size 8,294,400 B | correct by construction: the packed row pitch 3840 B equals the layout pitch | same bytes (the rule is the identity when the two pitches agree) |
+| each movie chroma plane 1920x1080 R8 | filled: row pitch 2,048 B, level size 2,211,840 B | **wrong: a 1,920 B packed source row is written at 1,920 B, 128 B short of every layout row after the first** | rows land at 2,048 B; 2,211,840 B of layout, 128 B of padding per row never written |
+| multi-mip, arrayed, 3-D, MSAA, render-target/depth-stencil, swizzled layout (`0x10a` and the rest), planar/96-bit formats | refused by name (existing, unchanged) | flat copy (the upload loop ignores the create HRESULT; existing, unchanged) | flat copy, byte for byte (the switch does not change a shape its model has no layout for) |
+| slot 10 `GetResourceTiling` (a 64 KiB-tiled resource's list) | n/a | refused by name (existing, unchanged) | refused by name (unchanged) |
+
+The gap in one line: **3 of 3 movie-plane records are covered and 1 of 3 movie-plane uploads is covered**; the
+uncovered pair is the two 1920-wide chroma planes, 2 of the 3 planes in each of the three rotating sets.
+
+The census instrument (section 12.2) measures what the title's upload path actually asks for in a boot. In the
+content-window arm (`boot-xgplan3`, switch off, 64.8 s) it registered **128 distinct description shapes** (the
+instrument's bound) and printed 123 complete shape lines (the rest were lost to interleaved stderr writes): **116
+refused by name at the create** - 54 swizzled layout (`0x10a`, the 64 KiB modes), 42 mip counts, 19 array sizes, 1
+3-D - and **7 served** linear one-level shapes (256x128 R8; three 1x1 four-byte defaults; a 1D 256x1 four-byte image;
+2048x2048 and 1024x1024 one-byte images). At the last printed counter milestone the family had seen **suggest 104,
+create 68, slot-2 2, slot-8 137 copies / 332,156 bytes, slot-10 8**; the copy census attributes **42 of those 137
+copies to served shapes** (26 of the 1D 128x1 one-byte image at a 128 B source row pitch against the record's 256 B
+row, 14 of the 1x1 defaults, one 256x128 R8, one 1D 256x1) and **95 to shapes the model refuses** (arrays and mip
+chains, flat path in both arms). Every served copy is a single-row copy except the 256x128 R8, so the only shape whose
+source row pitch differs from the record's pitch is one row tall: the row-aware rule and the flat copy are the identity
+there, which the A/B confirms byte for byte. The 1920-wide chroma shape is **not** in the window: no measured copy
+places a second row at a pitch different from its source row pitch (the one shape whose source pitch differs is one
+row tall), so the padding placement the port exists for is unexercised on the title.
+
+The later-population arm that reached further before the shared tree's fault (`boot-xgplan1`, 60.7 s) saw a larger
+population - **suggest 112, create 270, slot-2 4, slot-8 146, slot-10 179, 332,340 B** - and is where the census's
+larger bound and the two refusals in section 12.4 come from. The **slot-10 calls are the surprise**: the earlier
+150 s layout page measured 0 in its window, and the content environment reaches **179** `GetResourceTiling` calls,
+which the shim refuses by name because it models no 64 KiB tile list. That is a content-texture gap, not a movie-plane
+shape (a linear R8 plane has no tiles), and it is named as a next slice in section 12.5.
+
+### 12.2 The design
+
+Our own mechanism in the tree's terms: the slot-2 record already says where a linear subresource's rows are, and the
+upload now places the caller's rows at exactly that geometry. One model - `LinearLayout` in
+[xg_xs.cpp](../port/shims/xg_xs.cpp) - decides both the record and the copy, so the two cannot disagree again.
+
+| switch | effect |
+|---|---|
+| `PALMETTO_XG_MOVIE_PLANES` | unset, empty, `0`, `off`, `no` or any unknown word: the tree before this port, byte for byte (the flat copy, its trace, its counters). `on`, `1`, `yes` or `true` (any case): a description the linear model lays out is copied row by row at the record's pitch. Read once, on the first copy. |
+| `PALMETTO_XG_TRACE` | unchanged switch. It now also prints the census: one line per distinct description shape (its words, and the linear model's verdict with the row pitch and level size it would report), a line at each power-of-two copy number of a shape (plane, subresource, the caller's row pitch and byte count, sources after the first, negative sources), and the shape count on the counters line. Trace-only: with the switch unset nothing is counted and nothing is printed. |
+
+- **Rows, not bytes.** The served description names one level of one slice: `row_bytes` = padded width in elements x
+  element bytes (a 4x4 block row for the BC formats the model serves), `rows` = padded height in elements, the
+  destination stride is the record's `pitch_bytes`, the source stride is the caller's row pitch. Only `row_bytes` per
+  row is written; the padding bytes the layout adds are not touched.
+- **The measured shapes stay byte-identical.** The window's copies are 128 rows of 256 B at 256 B, and single rows of
+  4 B, 128 B and 1024 B - the rule and the flat copy write the same bytes for all of them, and the A/B's 18 counter
+  lines are numerically identical (section 12.4).
+- **Shape coverage is unchanged.** A description the linear model refuses (multi-mip, array, 3-D, MSAA, target,
+  swizzled layout, planar/unknown format) keeps the tree's flat path, byte for byte. The switch does not change a
+  shape it has no layout for; the census names those shapes and the two refusals below are the only calls the rule
+  itself declines.
+- **The refusals are named and write nothing.** A served description asked for a plane other than 0, a subresource
+  other than 0, a second source after the first, a source row pitch smaller than a row (or 0), a byte count that does
+  not hold the description's rows, or a destination/source span that is not committed announces the field and the
+  caller once (bounded to the first 8 of each kind) and returns `E_NOTIMPL` without touching a byte. The measured
+  window's two such calls (section 12.4) are a source row pitch half the description's row; the console's own layout
+  models refuse a row pitch smaller than a row as `E_INVALIDARG`, and the title's upload loop does not read slot 8's
+  HRESULT, so a console-shaped library would leave those pages unfilled too.
+- **The instrument is a measurement, not a behaviour.** The census counts only with `PALMETTO_XG_TRACE=1`; the
+  default path's log and bytes are the tree's. The instrument is bounded: 128 shapes, the first 8 of each refusal kind,
+  and a copy line only at powers of two per shape.
+- **Where it runs.** In the same slot-8 entry the family already answers; no allocation, one cached bool branch on the
+  default path. The switch is off until a boot shows a movie plane uploaded through it.
+
+### 12.3 Tests
+
+`port/test/xg_xs_test.cpp` (GPU-free) gained `checks_movie_plane_upload`, **36 new checks** (the binary prints
+`122 checks, 0 failures` in the linear layout, up from 86; the refuse-mode run still prints 16, 0 failures):
+
+| check group | what it proves |
+|---|---|
+| switch parsing (2) | unset, empty, `0`, `off`, `no` and an unknown word are off; `on`, `1`, `ON`, `yes`, `true` are on |
+| the movie-plane records (9) | the two movie-plane descriptions are laid out and slot 2 fills them: 3840x2160 R8 with size 8,294,400 B, a 3840 B row pitch and 3840 padded width; 1920x1080 R8 with size 2,211,840 B, a 2,048 B padded pitch and its real 1920x1080 element extent - the record's own pitch is the number the copy must use |
+| the row-aware copy (4) | every 1920-byte source row lands at the 2,048-byte row pitch (all 1,080 rows compared); the 128 B of padding per row is never written; the copy writes exactly the layout's 2,211,840 B and nothing past it |
+| byte-identical measured shapes (11) | the aligned 3840x2160 luma shape and the window's 256x128 R8 shape produce the same destination bytes with the switch on and off, only the measured bytes are written, and the on/off comparison happens on two computers built from the same description |
+| the named refusals (6) | a plane, a subresource, a second source, a row pitch under a row and a byte count under the description's rows are refused and write nothing |
+| the tree's-path fallback (3) | a two-level description is still refused at the create, keeps the tree's flat copy with the switch on, and that fallback is the tree's byte range |
+| the harness entry (1) | the group ran (the binary's own check line) |
+
+The existing groups are unchanged: the layout record's 26 field checks, the nine create refusals, slot 8's flat
+subresource-offset behaviour, slot 10's refusal and the release/slot-count checks all still pass. The switch's
+environment read and its parser live in [xg_xs.h](../port/shims/xg_xs.h) so the test binary and the runtime share them.
+
+### 12.4 Boot measurement
+
+The shared tree was under the other in-flight slices' edits (this port's working tree carries the other agents'
+`main.cpp`, `xmem` and `dstorage` changes; they are not this port's), so the arms are the honest shared-tree
+measurement: one 150 s light boot budget was intended, the tree stopped earlier on its own stage-3 fault, and three
+arms were run around it. Environment for every arm: `boot_arm.ps1`'s section-12 content environment, `-Light`, the class-0xa
+mitigation `PALMETTO_TITLE_CLASS0A_SIZE=1`, `PALMETTO_XG_TRACE=1`; the boot slot held by `_setup\boot_lock.ps1`, one
+arm at a time. Outputs are outside the repository (`D:\leonida-work\fsrstable\boot-xgplan1`, `-2`, `-3` with their
+`capture-*`/`readback-*` dirs).
+
+| measure | `xgplan1` (switch on, first instrument) | `xgplan2` (switch on, final instrument) | `xgplan3` (switch off, final instrument) |
+|---|---|---|---|
+| run, verdict | STOP **60.7 s**, 1 exception: `0xc0000005` read at `game+0x4d9f636` address `0x169000007d6`; 0 device-lost lines | STOP **63.1 s**, 1 exception: `0xc0000005` write at `game+0x1db3ce6` address `0x9cd15a8e74`; 0 device-lost lines | STOP **64.8 s**, 1 exception: `0xc0000005` read at `game+0x28cf870` address `0x5c`; 1 `[rt] replay: the Vulkan device was lost` line at trace t 67.4 s before it |
+| trace / d3d12 calls | 6,616 events / 138,434 | 6,644 events / 133,916 | 7,180 events / 135,666 |
+| last printed XG counters | suggest 112, create 270, slot-2 4, slot-8 **146** (144 copied), slot-10 **179**, copied **332,340 B**, 32 shapes then + 197 over that instrument's bound | suggest 104, create 68, slot-2 2, slot-8 **137**, slot-10 8, copied **332,156 B**, 21 shapes at that milestone | the same 18 counter lines, numerically identical to `xgplan2` |
+| census | 32 shapes (bound) | 128 shape lines (bound) | 128 shape lines (bound) |
+| the rule's refusals | **2 of 146**: a source row pitch 1024 B for a 2048 B row and 512 B for a 1024 B row (the description words were not printed by that instrument) | none reached (the arm stopped before those calls) | n/a (switch off) |
+| state at the last sample | player state `0x3`, handle 0, `buffers 0` at 60.0 s | player state `0x3`, handle 0, `buffers 0` at 60.0 s | player state `0x3`, handle 0, `buffers 0` at 62.0 s |
+| presenter captures | last frame 1601, every capture 2564x1421, mean rgb **0 0 0** | 9 captures, last frame 1601, every one 2564x1421 mean rgb **0 0 0** | 10 captures, last frame 1801, every one 2564x1421 mean rgb **0 0 0** |
+
+**The A/B verdict is a measured readiness negative with one proved property.** The switch-on and switch-off arms
+produced **numerically identical XG counters at every one of their 18 printed milestones** (suggest, create, slot-2,
+slot-8, slot-10, copied bytes and shapes) and identical state, stop family and black captures: on the population the
+title actually asks for in this window, the movie-plane rule changes no byte and costs no call. The rule ran on the
+served copies (the trace's 42 served copies in `xgplan2`: 41 single-row ones and the 128-row atlas whose source pitch
+equals its layout pitch) and wrote what the flat path wrote. What the
+arm cannot show is the fix: the movie window is upstream of the draw that never issues (player state `0x3`), so the
+1920-wide chroma shape was not requested and the row-aware placement is GPU-free-tested, not boot-proved.
+`xgplan1` is the arm that reached the later population, and its two refusals are the rule's only observed behaviour
+change: a caller passed a source row pitch half the description's row, which the rule names and declines (the
+console-shaped model refuses that argument too, and the title ignores the HRESULT), where the tree's flat path would
+have copied a mis-strided range. The later arms did not reach those two calls; the census now prints the description
+words of any such refusal, so the next arm that reaches them names the shape.
+
+The stop is not this port's: the shared tree's arms in this window stopped on title-side faults at
+`game+0x86f9df`/`0x86f981`/`0x4d9f636` (the other slice's control arms), one pre-hybrid binary on the same host ran
+ALIVE 130.2 s, and the three arms here stopped on three different title sites (the switch-off arm after one host
+device-loss line, the other two without). The two final arms ran the **same binary** (`palmetto.exe` sha256
+`5B13C561...`), so the A/B is one binary with one switch changed; the gate build's binary differs from it only by the
+census's trace-only gating (the trace-off path counts nothing), not by the switch-on path these arms measured. The
+measured XG population and the A/B identity do not depend on where the arm stopped; the movie window does.
+
+### 12.5 Limits and the next falsifier
+
+- **Readiness, not an observed fix.** No movie-plane description was created in any measured window (the draw that
+  would register the frame buffers and create the planes is not issued), so the port's row-aware placement is tested
+  on synthetic subresources and measured for identity on the title's own served shapes, not observed on a movie plane.
+  The next falsifier: a boot in which `0x442F760` (frame-buffer registration) or the decode wrapper `0x2EF0E0` runs.
+  The census then prints the movie plane's own description words and the slot-8 rule line names its rows; if the
+  chroma planes' source row pitch is 1920 B the rule is what makes their pages agree with the record.
+- **The movie-plane shapes are a second-source measurement.** They come from the public reference's measured movies
+  page (three rotating sets of linear R8 planes) and this tree's own archive index (one 4K 450-frame stream, hence
+  one 3840x2160 luma and two 1920x1080 chroma planes at 4:2:0). Our own title has not been measured creating them.
+- **The 256-byte linear row padding is peer/reference evidence, not our own record read.** Every record our title
+  reads in a measured window has a row bank that is already 256-byte aligned (2048, 1024, 256, 128-wide-but-padded
+  cases are the one-row 1D images), so the title has not exercised the padding either. Falsifier: a boot that reads a
+  layout record for a texture whose packed row is not 256-byte aligned and whose CPU code copies at the record's
+  pitch, or a console-library oracle answer for such a description. If the console's linear layout does not pad, the
+  record and the row-aware placement would both be 128 B wrong for the 1920-wide plane and the measured answer would
+  be the packed pitch.
+- **The consumer's stride is a second file.** The per-submission import of section 8 reads a title-placed texture's
+  pages as a tightly row-major footprint (`r.row_bytes * r.rows`, docs/texture_import.md), while the XG record and the
+  slot-8 placement now use the 256-byte padded pitch. For the 1920-wide plane the two disagree by 128 B a row. This
+  port fixes the XG side; the import (section 8's file, not this port's) inherits the same geometry when a sampled
+  movie plane actually runs. Falsifier: a boot whose tracked placed texture imports pages the XG rule wrote at the
+  padded pitch; the import then needs the record's pitch, which is a named next slice.
+- **The two refusals of `xgplan1` are an unmeasured shape.** A source row pitch smaller than the description's row is
+  declined by name (the console-shaped model refuses it), where the tree's flat path copied it. The description words
+  of those two calls are missing from that arm (the earlier instrument did not print them); the current instrument
+  does, and the next arm that reaches the later population names the shape.
+- **The census is bounded and trace-only.** With 128 shapes it filled its bound in the content window, so any further
+  shape is counted but unnamed; the instrument is a diagnostic, not a coverage promise.
+- **Slot 10 is the content window's real coverage gap, and it is not movie.** `GetResourceTiling` is called 179 times
+  in `xgplan1` where the earlier page measured 0, and the shim refuses every call (no 64 KiB tile list is modelled).
+  The failed creates for the 54 swizzled `0x10a` shapes are the same family; neither is on a linear movie plane's
+  path. The next slice is the tiling/64 KiB cover for content textures, not this port.
+- **The switch stays opt-in.** The sentence that would make it the default: a boot in which the movie display job runs
+  and its plane slot-8 calls pass a source row pitch equal to the packed plane width; the rule then writes the
+  record's rows and the import shows the plane. Until then it is off, and its switch-off path is the tree's.
+
+### 12.6 Cross-check against the peers (reference only, no code copied)
+
+The peers were read at the refreshed commits in section 1's table; their code is evidence for the mechanism class and
+none was copied. The XCL and Five Star XG material is on the same retail executable's call sites (the RVAs in
+[texture_layout.md](texture_layout.md) match the XG page of Five Star's docs), which is why it can be cross-checked
+against our own measured call shapes.
+
+| peer mechanism | what this port does | difference |
+|---|---|---|
+| Five Star's XG page and its `Shims/Xg` writers (`ce2b333b`): the layout rules its writers fill, including "linear (mode 0, or a 12-byte element): mips in order from mip 0, rows padded to 256 bytes, mips on 512 bytes"; the same game call sites (`0x344235`, `0x979c75`, `0x16f7141`, `0x5121a5e`, `0x4eccca2`, `0xc4b3ce`) | the same linear row rule in our record, and the upload now places the caller's rows at that pitch instead of by a flat copy | Five Star lays out the whole console tiling (mip tails, 4 KiB/64 KiB modes, depth-stencil second planes); our model keeps the measured linear case only and refuses the rest by name - deliberately, because our backend's textures are row-major and the peers' full model is not needed to make a linear R8 plane's rows right |
+| XCL `crates/xcl/src/hle/xg.rs` (`623d02e`): the layout record written from its GFX10 model, and `copy_into`/`copy_from` copying the linear rows row by row with the caller's row pitch into the layout's pitch | the same row-by-row placement for the served shape, with the geometry taken from the record our own model writes | XCL answers swizzled modes from its model; we refuse them. XCL's `title_textures` upload (the per-submission refresh) is section 8's port, which this one feeds |
+| the public reference's `docs/movies.md` at `273b3bdf9`: the launch movie's three rotating sets of linear R8 planes (one 3840x2160 and two 1920x1080) reaching the slot-133 uploader | the movie-plane shapes this port is sized against, cross-checked with this tree's own archive index (the one 4K 450-frame stream) | the reference reaches the movie window; our tree does not yet. This is a shape measurement, not a code mechanism |
+
+One disagreement is recorded as a measurement: the content window's 54 swizzled shapes all name layout `0x10a`
+(64 KiB mode 10 in the peers' numbering), which confirms the peers' swizzle-mode encoding in our own title's data
+while our shim refuses that mode by name - the refusal is the earlier page's measured linear-only answer, not a new
+gap.
+
+### 12.7 Attribution
+
+This port was implemented from this project's own measurements and boot logs. The behaviour was cross-checked against
+the public GPL projects named in section 1 at the commits there - **XCL** (`623d02e`,
+`crates/xcl/src/hle/xg.rs`, the layout record and the row-by-row linear copy) and **Five Star Recomp** (`ce2b333b`,
+its XG page and `src/FiveStar.Loader/Shims/Xg/`, the measured linear row/pitch and mip rules on the same executable)
+- as evidence for the mechanism class, and the movie-plane shapes against the public GPL-3.0 reference
+`ubiquitarianism/leonida` `docs/movies.md` at `273b3bdf9` (the page [movie_path.md](movie_path.md)
+already cites). **No code from those projects was copied.** The upstream projects remain the copyright of their
+contributors and their licences continue to apply to their own trees (XCL GPL-2.0-only; Five Star and the reference
+GPL-3.0). The `NOTICE.md` row for this port is owed by the lead (that file is outside this page's write scope): the
+licence text of [upstream_port.md](upstream_port.md) section 6, listing XCL and Five Star with the paths and commits
+above.
+
+### 12.8 Uncommitted files of this port
+
+Implementation: [xg_xs.cpp](../port/shims/xg_xs.cpp), [xg_xs.h](../port/shims/xg_xs.h) (new). Tests:
+[xg_xs_test.cpp](../port/test/xg_xs_test.cpp). Docs: this page. Nothing else is touched: the slot-2 record fill, the
+CMake files, `NOTICE.md`, `docs/README.md` and the other docs pages are unchanged by this port (the working tree's
+other modified files - `main.cpp`, `xgameruntime_offline.cpp`, `dstorage*`, `xmem*` - belong to the other in-flight
+slices). No git write was made and no peer code is in the tree.
+
 

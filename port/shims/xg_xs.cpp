@@ -83,6 +83,40 @@
 #include <utility>
 
 #include "shims.h"
+#include "xg_xs.h"
+
+// The movie-plane upload rule's switch (docs/peer_port_movie.md section 12). It is a separate switch from the layout
+// one: the layout answer the tree serves is measured and unchanged, and only the placement of a linear subresource
+// whose row pitch differs from the layout's padded row pitch is behind it. Unset/empty/0/off/no and any unknown word
+// are off; on/1/yes/true (any case) are on. Read once, on the first copy, so the switch is fixed for the process.
+namespace rt::xg_xs {
+
+namespace {
+std::atomic<int> g_movie_plane_upload{-1};  // -1: not read yet; 0 off; 1 on
+}
+
+bool parse_movie_plane_upload(const char* text) {
+    if (!text || !text[0]) return false;
+    return _stricmp(text, "on") == 0 || _stricmp(text, "1") == 0 || _stricmp(text, "yes") == 0 ||
+           _stricmp(text, "true") == 0;
+}
+
+bool movie_plane_upload() {
+    int value = g_movie_plane_upload.load(std::memory_order_relaxed);
+    if (value < 0) {
+        char text[8] = {};
+        const DWORD n = GetEnvironmentVariableA("PALMETTO_XG_MOVIE_PLANES", text, sizeof(text));
+        value = (n > 0 && n < sizeof(text) && parse_movie_plane_upload(text)) ? 1 : 0;
+        g_movie_plane_upload.store(value, std::memory_order_relaxed);
+    }
+    return value != 0;
+}
+
+void set_movie_plane_upload_for_test(bool enabled) {
+    g_movie_plane_upload.store(enabled ? 1 : 0, std::memory_order_relaxed);
+}
+
+}  // namespace rt::xg_xs
 
 namespace {
 
@@ -139,6 +173,155 @@ std::atomic<uint64_t> g_slots[kSlots] = {};
 std::atomic<uint64_t> g_copied_bytes{0};
 std::atomic<uint64_t> g_copies{0};
 
+// Measurement census (docs/peer_port_movie.md section 12). The family's measured call sites hand the shim a
+// 0x38-byte D3D12_RESOURCE_DESC; the census keys the calls on the description words, so one boot reports which
+// resource shapes the title actually asks for, how many creations, records and subresource copies each shape gets,
+// the largest plane / subresource a copy names and the row pitch and byte count the copy passes. It is trace-only:
+// the counters are updated on every call, but nothing is printed unless PALMETTO_XG_TRACE=1, so the default path and
+// its log are the tree's, byte for byte. The shape table is bounded (32 shapes) and append-only; a shape past the
+// bound is counted, not stored.
+constexpr size_t kCensusShapes = 128;
+
+struct DescShape {
+    uint32_t dimension;
+    uint64_t width;
+    uint32_t height;
+    uint16_t array;
+    uint16_t mips;
+    uint32_t format;
+    uint32_t samples;
+    uint32_t layout;
+    uint32_t flags;
+};
+
+DescShape shape_of(const uint8_t* desc) {
+    DescShape shape{};
+    if (!desc) return shape;
+    auto u16 = [desc](size_t at) {
+        uint16_t v = 0;
+        std::memcpy(&v, desc + at, sizeof(v));
+        return v;
+    };
+    auto u32 = [desc](size_t at) {
+        uint32_t v = 0;
+        std::memcpy(&v, desc + at, sizeof(v));
+        return v;
+    };
+    auto u64 = [desc](size_t at) {
+        uint64_t v = 0;
+        std::memcpy(&v, desc + at, sizeof(v));
+        return v;
+    };
+    shape.dimension = u32(0x00);
+    shape.width = u64(0x10);
+    shape.height = u32(0x18);
+    shape.array = u16(0x1c);
+    shape.mips = u16(0x1e);
+    shape.format = u32(0x20);
+    shape.samples = u32(0x24);
+    shape.layout = u32(0x2c);
+    shape.flags = u32(0x30);
+    return shape;
+}
+
+bool same_shape(const DescShape& a, const DescShape& b) {
+    return a.dimension == b.dimension && a.width == b.width && a.height == b.height && a.array == b.array &&
+           a.mips == b.mips && a.format == b.format && a.samples == b.samples && a.layout == b.layout &&
+           a.flags == b.flags;
+}
+
+struct ShapeCounts {
+    DescShape shape;
+    bool used;
+    std::atomic<uint32_t> creates;
+    std::atomic<uint32_t> records;
+    std::atomic<uint32_t> copies;
+    std::atomic<uint32_t> copies_after_first_source;
+    std::atomic<uint32_t> negative_source_offsets;
+    std::atomic<uint32_t> max_plane;
+    std::atomic<uint32_t> max_subresource;
+    std::atomic<uint32_t> min_row_pitch;
+    std::atomic<uint32_t> max_row_pitch;
+    std::atomic<uint32_t> min_bytes;
+    std::atomic<uint32_t> max_bytes;
+    std::atomic<uint64_t> copied_bytes;
+};
+
+ShapeCounts g_shape_counts[kCensusShapes] = {};
+std::atomic<uint32_t> g_shape_count{0};      // shapes stored
+std::atomic<uint32_t> g_shape_overflow{0};   // calls whose shape could not be stored
+std::atomic_flag g_shape_lock = ATOMIC_FLAG_INIT;
+
+struct ShapeSpinLock {
+    explicit ShapeSpinLock(std::atomic_flag& flag) : flag_(flag) {
+        while (flag_.test_and_set(std::memory_order_acquire)) {
+        }
+    }
+    ~ShapeSpinLock() { flag_.clear(std::memory_order_release); }
+    std::atomic_flag& flag_;
+};
+
+ShapeCounts* census_find_or_add(const uint8_t* desc, bool create, bool* inserted = nullptr) {
+    if (inserted) *inserted = false;
+    const DescShape shape = shape_of(desc);
+    {
+        ShapeSpinLock lock(g_shape_lock);
+        for (uint32_t i = 0; i < g_shape_count.load(std::memory_order_relaxed); ++i) {
+            ShapeCounts& entry = g_shape_counts[i];
+            if (entry.used && same_shape(entry.shape, shape)) {
+                if (create) entry.creates.fetch_add(1, std::memory_order_relaxed);
+                return &entry;
+            }
+        }
+        const uint32_t index = g_shape_count.load(std::memory_order_relaxed);
+        if (index >= kCensusShapes) {
+            g_shape_overflow.fetch_add(1, std::memory_order_relaxed);
+            return nullptr;
+        }
+        ShapeCounts& entry = g_shape_counts[index];
+        entry.shape = shape;
+        entry.used = true;
+        entry.creates.store(create ? 1 : 0, std::memory_order_relaxed);
+        entry.records.store(0, std::memory_order_relaxed);
+        entry.copies.store(0, std::memory_order_relaxed);
+        entry.copies_after_first_source.store(0, std::memory_order_relaxed);
+        entry.negative_source_offsets.store(0, std::memory_order_relaxed);
+        entry.max_plane.store(0, std::memory_order_relaxed);
+        entry.max_subresource.store(0, std::memory_order_relaxed);
+        entry.min_row_pitch.store(0xffffffffu, std::memory_order_relaxed);
+        entry.max_row_pitch.store(0, std::memory_order_relaxed);
+        entry.min_bytes.store(0xffffffffu, std::memory_order_relaxed);
+        entry.max_bytes.store(0, std::memory_order_relaxed);
+        entry.copied_bytes.store(0, std::memory_order_relaxed);
+        g_shape_count.store(index + 1, std::memory_order_relaxed);
+        if (inserted) *inserted = true;
+        return &entry;
+    }
+}
+
+void census_note_min(std::atomic<uint32_t>& slot, uint32_t value) {
+    uint32_t current = slot.load(std::memory_order_relaxed);
+    while (value < current && !slot.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
+    }
+}
+
+void census_note_max(std::atomic<uint32_t>& slot, uint32_t value) {
+    uint32_t current = slot.load(std::memory_order_relaxed);
+    while (value > current && !slot.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
+    }
+}
+
+uint32_t census_index_of(const ShapeCounts* entry) {
+    if (!entry) return 0;
+    for (uint32_t i = 0; i < g_shape_count.load(std::memory_order_relaxed); ++i)
+        if (&g_shape_counts[i] == entry) return i;
+    return 0;
+}
+
+// The census line for a shape being stored, with the linear model's verdict (the model is defined below the
+// census, so this print is defined after it too).
+void census_print_shape(uint32_t index, const uint8_t* desc);
+
 // Prints once per entry point; `slot` is the vtable index for a computer method, or -1 for an export.
 void warn_once(std::atomic<bool>& warned, const char* what, int slot, const void* caller) {
     if (warned.exchange(true, std::memory_order_relaxed)) return;
@@ -159,7 +342,7 @@ const char* caller_text(const void* caller) {
 void print_counters(const char* why) {
     std::fprintf(stderr,
                  "[rt] xg_xs counters (%s): suggest %llu, create %llu, slot2 %llu, slot8 %llu, slot10 %llu, "
-                 "slots1 %llu, copied %llu bytes in %llu call(s)\n",
+                 "slots1 %llu, copied %llu bytes in %llu call(s), shapes %u (census: %u over the bound)\n",
                  why, static_cast<unsigned long long>(g_suggest.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(g_create.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(g_slots[2].load(std::memory_order_relaxed)),
@@ -167,7 +350,9 @@ void print_counters(const char* why) {
                  static_cast<unsigned long long>(g_slots[10].load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(g_slots[1].load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(g_copied_bytes.load(std::memory_order_relaxed)),
-                 static_cast<unsigned long long>(g_copies.load(std::memory_order_relaxed)));
+                 static_cast<unsigned long long>(g_copies.load(std::memory_order_relaxed)),
+                 g_shape_count.load(std::memory_order_relaxed),
+                 g_shape_overflow.load(std::memory_order_relaxed));
 }
 
 void note_call(std::atomic<uint64_t>& entry, const char* name) {
@@ -356,6 +541,76 @@ bool linear_layout(const uint8_t* desc, LinearLayout& out, const char** why) {
     return true;
 }
 
+// The census's shape line, with the linear model's verdict on the description (the same model that decides the
+// create and the slot-2 record): one boot then names every shape the title's upload path asks the family about.
+void census_print_shape(uint32_t index, const uint8_t* desc) {
+    const DescShape shape = shape_of(desc);
+    std::fprintf(stderr,
+                 "[rt] xg_xs census shape #%u: dim %u %llux%u array %u mips %u format %u layout 0x%x flags 0x%x "
+                 "samples %u",
+                 index, shape.dimension, static_cast<unsigned long long>(shape.width), shape.height, shape.array,
+                 shape.mips, shape.format, shape.layout, shape.flags, shape.samples);
+    if (layout() != Layout::kLinear) {
+        std::fprintf(stderr, " -> refuse mode (PALMETTO_XG_LAYOUT=refuse)\n");
+        return;
+    }
+    LinearLayout linear{};
+    const char* why = "description (null)";
+    if (linear_layout(desc, linear, &why)) {
+        std::fprintf(stderr,
+                     " -> linear %ux%u, one level: row pitch %u B, level %llu B\n", linear.width, linear.height,
+                     linear.pitch_bytes, static_cast<unsigned long long>(linear.size_bytes));
+    } else {
+        std::fprintf(stderr, " -> refused: %s\n", why);
+    }
+}
+
+// Counts a creation (or a record/copy that finds the shape first) and prints the shape once, on the call that first
+// stores it. Trace-only: with PALMETTO_XG_TRACE unset nothing is counted and nothing is printed, so the default path
+// does no new work and its log is the tree's, byte for byte.
+void census_register(const uint8_t* desc, bool create) {
+    if (!kTrace) return;
+    bool inserted = false;
+    ShapeCounts* entry = census_find_or_add(desc, create, &inserted);
+    if (entry && inserted) census_print_shape(census_index_of(entry), desc);
+}
+
+void census_note_record(const uint8_t* desc) {
+    if (!kTrace) return;
+    ShapeCounts* entry = census_find_or_add(desc, false);
+    if (!entry) return;
+    const uint32_t n = entry->records.fetch_add(1, std::memory_order_relaxed) + 1;
+    if ((n & (n - 1)) != 0) return;
+    std::fprintf(stderr, "[rt] xg_xs census shape #%u record #%u\n", census_index_of(entry), n);
+}
+
+// One copy call: plane, subresource, the caller's row pitch and byte count, and whether the source is not the first
+// source the computer saw (the flat path derives a destination offset from that difference). Printed at each
+// power-of-two copy count of the shape, bounded.
+void census_note_copy(const uint8_t* desc, uint32_t plane, uint32_t subresource, uint32_t row_pitch, uint32_t bytes,
+                      bool after_first_source, bool negative_source) {
+    if (!kTrace) return;
+    ShapeCounts* entry = census_find_or_add(desc, false);
+    if (!entry) return;
+    const uint32_t n = entry->copies.fetch_add(1, std::memory_order_relaxed) + 1;
+    entry->copied_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    census_note_max(entry->max_plane, plane);
+    census_note_max(entry->max_subresource, subresource);
+    census_note_min(entry->min_row_pitch, row_pitch);
+    census_note_max(entry->max_row_pitch, row_pitch);
+    census_note_min(entry->min_bytes, bytes);
+    census_note_max(entry->max_bytes, bytes);
+    if (after_first_source) entry->copies_after_first_source.fetch_add(1, std::memory_order_relaxed);
+    if (negative_source) entry->negative_source_offsets.fetch_add(1, std::memory_order_relaxed);
+    if ((n & (n - 1)) != 0) return;
+    std::fprintf(stderr,
+                 "[rt] xg_xs census shape #%u copy #%u: plane %u subresource %u row pitch %u B subresource bytes %u B, "
+                 "sources after the first %u, negative sources %u\n",
+                 census_index_of(entry), n, plane, subresource, row_pitch, bytes,
+                 entry->copies_after_first_source.load(std::memory_order_relaxed),
+                 entry->negative_source_offsets.load(std::memory_order_relaxed));
+}
+
 // Writes the whole XG_RESOURCE_LAYOUT from a linear description: one plane, one mip level, rows padded to 256 bytes,
 // mip 0 at offset 0, every byte the structure has that is not one of these fields zeroed (no stack bytes survive).
 // Field offsets are the ones the executable reads (see the top of the file and docs/texture_layout.md).
@@ -451,6 +706,107 @@ struct Computer {
     uint8_t desc[kDescBytes];
 };
 
+// What the movie-plane upload rule decided for a slot-8 call.
+enum class UploadAnswer { kNotServed, kDone, kRefused };
+
+// Named refusals of the movie-plane rule, once per kind (bounded: the first 8 of each). An unmeasured shape is named
+// rather than placed, so a later boot can read which shape stopped the upload instead of finding skewed pages.
+void warn_movie_refusal(std::atomic<uint32_t>& seen, const char* what, uint64_t serial, const void* caller) {
+    if (seen.fetch_add(1, std::memory_order_relaxed) >= 8) return;
+    std::fprintf(stderr, "[rt] xg_xs: slot 8 movie-plane rule refused: %s (call #%llu, caller %s)\n", what,
+                 static_cast<unsigned long long>(serial), caller_text(caller));
+}
+
+// The movie-plane upload rule (opt-in, PALMETTO_XG_MOVIE_PLANES; docs/peer_port_movie.md section 12). The linear
+// layout's rows are 256-byte aligned, so a description whose packed row width is not 256-byte aligned gets a row
+// pitch different from its source's; the tree's flat copy places the source's rows at the source's own offsets and
+// would skew them. This places the served description's one level row by row: the caller's row pitch is the source
+// stride, the layout's pitch is the destination stride, and only `row_bytes` of each row is written (the padding the
+// layout adds is left as it was). The measured shapes are unchanged byte for byte because their row pitch already
+// equals the layout's (256x128 R8: 256 B rows; 1x1 RGBA8: one 4 B row).
+//
+// Returns kNotServed when the description is not one the linear model lays out (the caller keeps the tree's flat
+// path, byte for byte), kDone when the copy ran, kRefused when the description is served but the call names
+// something the one-plane, one-level model has no place for (plane, subresource, a second source) or the source /
+// destination cannot hold the rows; a refusal writes nothing.
+UploadAnswer upload_linear_rows(Computer* computer, const LinearLayout& linear, void* destination, uint32_t plane,
+                                uint32_t subresource, const void* source, uint32_t row_pitch, uint32_t bytes,
+                                uint64_t serial, const void* caller) {
+    static std::atomic<uint32_t> refused_plane{0}, refused_source{0}, refused_pitch{0}, refused_range{0};
+    const DescShape shape = shape_of(computer ? computer->desc : nullptr);
+    if (plane != 0 || subresource != 0) {
+        char what[224];
+        std::snprintf(what, sizeof(what),
+                      "plane %u subresource %u of a one-plane, one-level description (dim %u %llux%u format %u array %u "
+                      "mips %u); the rule places subresource 0 of plane 0 only",
+                      plane, subresource, shape.dimension, static_cast<unsigned long long>(shape.width), shape.height,
+                      shape.format, shape.array, shape.mips);
+        warn_movie_refusal(refused_plane, what, serial, caller);
+        return UploadAnswer::kRefused;
+    }
+    const bool had_source = computer->have_source.load(std::memory_order_relaxed);
+    if (had_source && computer->linear_source_base != source) {
+        char what[224];
+        std::snprintf(what, sizeof(what),
+                      "a second linear source for a one-level description (dim %u %llux%u format %u array %u mips %u); "
+                      "the rule places subresource 0 once",
+                      shape.dimension, static_cast<unsigned long long>(shape.width), shape.height, shape.format,
+                      shape.array, shape.mips);
+        warn_movie_refusal(refused_source, what, serial, caller);
+        return UploadAnswer::kRefused;
+    }
+    const uint32_t row_bytes = ((linear.width + linear.side - 1) / linear.side) * linear.element_bytes;
+    const uint32_t rows = (linear.height + linear.side - 1) / linear.side;
+    if (row_pitch == 0 || row_pitch < row_bytes) {
+        char what[224];
+        std::snprintf(what, sizeof(what),
+                      "source row pitch %u B is smaller than the description's %u B row (dim %u %llux%u format %u "
+                      "array %u mips %u, %u B subresource)",
+                      row_pitch, row_bytes, shape.dimension, static_cast<unsigned long long>(shape.width), shape.height,
+                      shape.format, shape.array, shape.mips, bytes);
+        warn_movie_refusal(refused_pitch, what, serial, caller);
+        return UploadAnswer::kRefused;
+    }
+    const uint64_t source_bytes = static_cast<uint64_t>(row_pitch) * (rows - 1) + row_bytes;
+    if (source_bytes > bytes) {
+        char what[224];
+        std::snprintf(what, sizeof(what),
+                      "source byte count %u B does not hold the description's %u rows of %u B (%llu B; dim %u %llux%u "
+                      "format %u array %u mips %u)",
+                      bytes, rows, row_bytes, static_cast<unsigned long long>(source_bytes), shape.dimension,
+                      static_cast<unsigned long long>(shape.width), shape.height, shape.format, shape.array,
+                      shape.mips);
+        warn_movie_refusal(refused_pitch, what, serial, caller);
+        return UploadAnswer::kRefused;
+    }
+    if (!range_ok(destination, linear.size_bytes, true) || !range_ok(source, source_bytes, false)) {
+        char what[224];
+        std::snprintf(what, sizeof(what),
+                      "the destination's layout span or the source's rows are not committed/accessible (dim %u %llux%u "
+                      "format %u, %llu B layout)",
+                      shape.dimension, static_cast<unsigned long long>(shape.width), shape.height, shape.format,
+                      static_cast<unsigned long long>(linear.size_bytes));
+        warn_movie_refusal(refused_range, what, serial, caller);
+        return UploadAnswer::kRefused;
+    }
+    if (!computer->have_source.exchange(true, std::memory_order_relaxed)) computer->linear_source_base = source;
+    uint8_t* const to = static_cast<uint8_t*>(destination);
+    const uint8_t* const from = static_cast<const uint8_t*>(source);
+    for (uint32_t y = 0; y < rows; ++y)
+        std::memcpy(to + static_cast<uint64_t>(y) * linear.pitch_bytes, from + static_cast<uint64_t>(y) * row_pitch,
+                    row_bytes);
+    g_copied_bytes.fetch_add(static_cast<uint64_t>(row_bytes) * rows, std::memory_order_relaxed);
+    g_copies.fetch_add(1, std::memory_order_relaxed);
+    if (kTrace) {
+        std::fprintf(stderr,
+                     "[rt] xg_xs trace: slot 8 movie-plane rows: %u rows of %u B at the layout's %u B pitch (source "
+                     "row pitch %u B)\n",
+                     rows, row_bytes, linear.pitch_bytes, row_pitch);
+    }
+    (void)had_source;
+    return UploadAnswer::kDone;
+}
+
 template <size_t Slot>
 HRESULT __stdcall computer_slot(void*) {
     note_call(g_slots[Slot], "texture computer slot");
@@ -474,6 +830,7 @@ HRESULT __stdcall computer_slot2(void* self, void* out) {
     }
     if (layout() != Layout::kLinear) return kNotImpl;
     auto* computer = static_cast<Computer*>(self);
+    census_note_record(computer ? computer->desc : nullptr);
     if (!out) return E_POINTER;
     LinearLayout linear{};
     const char* why = "computer (/description)";
@@ -533,6 +890,12 @@ HRESULT __stdcall computer_slot8(void* self, void* destination, uint32_t arg2, u
     note_call(g_slots[8], "texture computer slot8");
     const uint64_t n = g_slots[8].load(std::memory_order_relaxed);
     auto* computer = static_cast<Computer*>(self);
+    const bool first_source = computer && !computer->have_source.load(std::memory_order_relaxed);
+    const bool negative_source =
+        !first_source && source && computer &&
+        static_cast<const uint8_t*>(source) < static_cast<const uint8_t*>(computer->linear_source_base);
+    census_note_copy(computer ? computer->desc : nullptr, arg2, subresource, arg5, arg6, !first_source,
+                     negative_source);
     if (kTrace && n <= 8) {
         std::fprintf(stderr,
                      "[rt] xg_xs trace: texture computer slot8 call #%llu dst %p arg2 %u subresource %u src %p "
@@ -542,6 +905,18 @@ HRESULT __stdcall computer_slot8(void* self, void* destination, uint32_t arg2, u
     }
     if (layout() != Layout::kLinear) return kNotImpl;
     if (!computer || !destination || !source) return kNotImpl;
+    // The movie-plane upload rule (opt-in, docs/peer_port_movie.md section 12): a description the linear model lays
+    // out is placed row by row at the layout's padded row pitch. A description it does not lay out keeps the tree's
+    // flat path below, byte for byte, so the switch only changes what its model covers.
+    if (rt::xg_xs::movie_plane_upload()) {
+        LinearLayout linear{};
+        const char* why = "description (null)";
+        if (linear_layout(computer->desc, linear, &why)) {
+            const UploadAnswer answer = upload_linear_rows(computer, linear, destination, arg2, subresource, source,
+                                                           arg5, arg6, n, _ReturnAddress());
+            return answer == UploadAnswer::kDone ? S_OK : kNotImpl;
+        }
+    }
     if (!computer->have_source.exchange(true, std::memory_order_relaxed)) computer->linear_source_base = source;
 
     const uint8_t* source_base = static_cast<const uint8_t*>(computer->linear_source_base);
@@ -632,6 +1007,7 @@ HRESULT __stdcall XGCreateTextureComputer(const void* desc, void** out) {
         if (n <= 2) dump_words("computer desc", desc, kDescBytes);
     }
     if (kDump && n <= 8) dump_words("create desc", desc, desc ? kDescBytes : 0);
+    census_register(static_cast<const uint8_t*>(desc), true);
     if (!out) return E_POINTER;
     *out = take_computer(desc);
     if (layout() == Layout::kLinear) {

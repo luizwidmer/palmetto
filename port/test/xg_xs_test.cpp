@@ -18,8 +18,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include "shims.h"
+#include "xg_xs.h"
 
 namespace {
 
@@ -158,6 +160,165 @@ bool checks_layout_record(void* computer) {
     return true;
 }
 
+// The movie-plane linear upload rule (docs/peer_port_movie.md section 12). The measured movie planes are three
+// single-level, single-slice R8 textures in the linear layout: one 3840x2160 luma plane and two 1920x1080 chroma
+// planes. The rule keeps the layout record as it is (the 256-byte aligned linear row pitch) and places a linear
+// source's rows at that pitch, so a 1920-byte source row lands on a 2048-byte layout row. The checks below pin:
+// the record for both shapes, the row-aware copy and its edges, the measured shapes' byte-identical result on both
+// paths, the switch parsing, and the named refusals that write nothing.
+bool checks_movie_plane_upload() {
+    using rt::xg_xs::parse_movie_plane_upload;
+    using rt::xg_xs::set_movie_plane_upload_for_test;
+    check(!parse_movie_plane_upload(nullptr) && !parse_movie_plane_upload("") && !parse_movie_plane_upload("0") &&
+              !parse_movie_plane_upload("off") && !parse_movie_plane_upload("no") &&
+              !parse_movie_plane_upload("maybe"),
+          "the movie-plane switch is off for unset, empty, 0, off, no and an unknown word");
+    check(parse_movie_plane_upload("on") && parse_movie_plane_upload("1") && parse_movie_plane_upload("ON") &&
+              parse_movie_plane_upload("yes") && parse_movie_plane_upload("true"),
+          "the movie-plane switch is on for on, 1, yes and true (any case)");
+
+    auto create = reinterpret_cast<CreateFn>(rt::shims::find("xg_xs.dll", "XGCreateTextureComputer"));
+    auto slot2_of = [](void* computer) {
+        return reinterpret_cast<Slot2Fn>((*static_cast<void* const* const*>(computer))[2]);
+    };
+    auto slot8_of = [](void* computer) {
+        return reinterpret_cast<Slot8Fn>((*static_cast<void* const* const*>(computer))[8]);
+    };
+
+    // The record for the two measured movie-plane shapes. 3840x2160 R8 has a 3840 B row (already 256-byte
+    // aligned); 1920x1080 R8 has a 1920 B packed row, which the linear layout pads to 2048 B.
+    Desc luma = Desc(3, 3840, 2160, 1, 1, 61, 1, kLinearMode, 0x00300000);
+    Desc chroma = Desc(3, 1920, 1080, 1, 1, 61, 1, kLinearMode, 0x00300000);
+    void* luma_computer = nullptr;
+    void* chroma_computer = nullptr;
+    check(create(luma.bytes, &luma_computer) == S_OK, "the 3840x2160 R8 luma description is laid out");
+    check(create(chroma.bytes, &chroma_computer) == S_OK, "the 1920x1080 R8 chroma description is laid out");
+    if (!luma_computer || !chroma_computer) return false;
+    uint8_t record[kLayoutBytes];
+    std::memset(record, 0xcd, sizeof(record));
+    check(slot2_of(luma_computer)(luma_computer, record) == S_OK, "the luma shape gets a layout record");
+    check(u64(record, 0x00) == 3840ull * 2160 && u32(record, kMip0 + 0x1C) == 3840,
+          "the luma record is 8,294,400 B at a 3840 B row pitch");
+    check(u32(record, kMip0 + 0x18) == 3840 && u32(record, kMip0 + 0x24) == 3840,
+          "the luma record's pitch and padded width are the 3840 aligned pixels");
+    std::memset(record, 0xcd, sizeof(record));
+    check(slot2_of(chroma_computer)(chroma_computer, record) == S_OK, "the chroma shape gets a layout record");
+    check(u64(record, 0x00) == 2048ull * 1080 && u32(record, kMip0 + 0x1C) == 2048,
+          "the chroma record is 2,211,840 B at the linear layout's 2048 B padded row pitch");
+    check(u32(record, kMip0 + 0x18) == 2048 && u32(record, kMip0 + 0x24) == 2048,
+          "the chroma record's pitch and padded width are the 2048 padded elements");
+    check(u32(record, kMip0 + 0x30) == 1920 && u32(record, kMip0 + 0x3C) == 1080,
+          "the chroma record keeps the real 1920x1080 element extent");
+
+    // The row-aware copy of the chroma shape: 1920-byte source rows at the layout's 2048-byte rows.
+    set_movie_plane_upload_for_test(true);
+    const uint32_t src_pitch = 1920;
+    const uint32_t dst_pitch = 2048;
+    const uint32_t rows = 1080;
+    std::vector<uint8_t> chroma_src(static_cast<size_t>(src_pitch) * rows);
+    for (uint32_t y = 0; y < rows; ++y)
+        for (uint32_t x = 0; x < src_pitch; ++x)
+            chroma_src[static_cast<size_t>(y) * src_pitch + x] = static_cast<uint8_t>((y * 7 + x * 13) & 0xff);
+    std::vector<uint8_t> chroma_dst(static_cast<size_t>(dst_pitch) * rows + 32, 0xcd);
+    check(slot8_of(chroma_computer)(chroma_computer, chroma_dst.data(), 0, 0, chroma_src.data(), src_pitch,
+                                    src_pitch * rows) == S_OK,
+          "the switch on places the chroma shape's rows");
+    bool rows_match = true, padding_untouched = true;
+    for (uint32_t y = 0; y < rows; ++y) {
+        if (std::memcmp(chroma_dst.data() + static_cast<size_t>(y) * dst_pitch,
+                        chroma_src.data() + static_cast<size_t>(y) * src_pitch, src_pitch) != 0)
+            rows_match = false;
+        if (chroma_dst[static_cast<size_t>(y) * dst_pitch + src_pitch] != 0xcd) padding_untouched = false;
+    }
+    check(rows_match, "every chroma source row lands at the layout's 2048 B row pitch");
+    check(padding_untouched, "the 128 B the layout pads each row with are not written");
+    check(all_bytes(chroma_dst.data() + static_cast<size_t>(dst_pitch) * rows, 32, 0xcd),
+          "the copy writes exactly the layout's 2,211,840 B");
+
+    // The aligned luma shape is byte-identical on both paths.
+    std::vector<uint8_t> luma_src(static_cast<size_t>(3840) * 2160);
+    for (size_t i = 0; i < luma_src.size(); ++i) luma_src[i] = static_cast<uint8_t>((i * 11) & 0xff);
+    std::vector<uint8_t> luma_on(luma_src.size(), 0xcd);
+    void* luma_on_computer = nullptr;
+    check(create(luma.bytes, &luma_on_computer) == S_OK, "a second luma computer is created");
+    check(slot8_of(luma_on_computer)(luma_on_computer, luma_on.data(), 0, 0, luma_src.data(), 3840, 3840 * 2160) ==
+              S_OK,
+          "the switch on copies the luma shape");
+    check(std::memcmp(luma_on.data(), luma_src.data(), luma_src.size()) == 0,
+          "the luma shape is the source bytes, row pitch 3840 = layout pitch 3840");
+    set_movie_plane_upload_for_test(false);
+    std::vector<uint8_t> luma_off(luma_src.size(), 0xcd);
+    void* luma_off_computer = nullptr;
+    check(create(luma.bytes, &luma_off_computer) == S_OK, "a third luma computer is created");
+    check(slot8_of(luma_off_computer)(luma_off_computer, luma_off.data(), 0, 0, luma_src.data(), 3840, 3840 * 2160) ==
+              S_OK,
+          "the switch off copies the luma shape on the tree's path");
+    check(luma_on == luma_off, "the aligned luma shape is byte-identical with the switch on and off");
+
+    // The measured 256x128 and 1x1 shapes are byte-identical on both paths (the switch only changes shapes whose
+    // packed row pitch differs from the layout's).
+    Desc atlas = atlas_desc();
+    std::vector<uint8_t> atlas_src(0x8000);
+    for (size_t i = 0; i < atlas_src.size(); ++i) atlas_src[i] = static_cast<uint8_t>((i * 5) & 0xff);
+    std::vector<uint8_t> atlas_on(0x8000 + 16, 0xcd), atlas_off(0x8000 + 16, 0xcd);
+    void* atlas_on_computer = nullptr;
+    void* atlas_off_computer = nullptr;
+    check(create(atlas.bytes, &atlas_on_computer) == S_OK && create(atlas.bytes, &atlas_off_computer) == S_OK,
+          "two 256x128 computers are created");
+    set_movie_plane_upload_for_test(true);
+    check(slot8_of(atlas_on_computer)(atlas_on_computer, atlas_on.data(), 0, 0, atlas_src.data(), 0x100, 0x8000) == S_OK,
+          "the switch on copies the measured 256x128 shape");
+    set_movie_plane_upload_for_test(false);
+    check(slot8_of(atlas_off_computer)(atlas_off_computer, atlas_off.data(), 0, 0, atlas_src.data(), 0x100, 0x8000) ==
+              S_OK,
+          "the switch off copies the measured 256x128 shape");
+    check(atlas_on == atlas_off, "the measured 256x128 shape is byte-identical with the switch on and off");
+    check(all_bytes(atlas_on.data() + 0x8000, 16, 0xcd), "the 256x128 copy writes only the measured bytes");
+
+    // The named refusals: a plane, a subresource, a second source, a row pitch under one row and a byte count under
+    // the description's rows are refused by name and write nothing.
+    const Slot8Fn slot8 = slot8_of(chroma_computer);
+    auto fresh_chroma = [&]() {
+        void* c = nullptr;
+        create(chroma.bytes, &c);
+        return c;
+    };
+    set_movie_plane_upload_for_test(true);
+    {
+        std::vector<uint8_t> dst(static_cast<size_t>(dst_pitch) * rows + 32, 0xcd);
+        void* c = fresh_chroma();
+        check(slot8(c, dst.data(), 1, 0, chroma_src.data(), src_pitch, src_pitch * rows) == kNotImpl &&
+                  all_bytes(dst.data(), dst.size(), 0xcd),
+              "a plane other than 0 is refused by name and writes nothing");
+        check(slot8(fresh_chroma(), dst.data(), 0, 1, chroma_src.data(), src_pitch, src_pitch * rows) == kNotImpl,
+              "a subresource other than 0 is refused by name");
+        check(slot8(fresh_chroma(), dst.data(), 0, 0, chroma_src.data(), 1024, src_pitch * rows) == kNotImpl,
+              "a source row pitch smaller than the description's row is refused by name");
+        check(slot8(fresh_chroma(), dst.data(), 0, 0, chroma_src.data(), src_pitch, 1920u * 100u) == kNotImpl,
+              "a source byte count that does not hold the description's rows is refused by name");
+    }
+    {
+        std::vector<uint8_t> dst(static_cast<size_t>(dst_pitch) * rows + 32, 0xcd);
+        void* c = fresh_chroma();
+        check(slot8(c, dst.data(), 0, 0, chroma_src.data(), src_pitch, src_pitch * rows) == S_OK,
+              "the first source is placed");
+        check(slot8(c, dst.data(), 0, 0, chroma_src.data() + 4, src_pitch, src_pitch * rows) == kNotImpl,
+              "a second source for a one-level description is refused by name");
+    }
+
+    // A description the linear model does not lay out keeps the tree's flat path with the switch on: the switch does
+    // not change a shape it has no layout for (its census line names it instead).
+    Desc multi_mip = Desc(3, 256, 128, 1, 2, 61, 1, kLinearMode, 0x00300000);
+    void* multi_computer = nullptr;
+    check(create(multi_mip.bytes, &multi_computer) == kNotImpl, "a two-level description is still refused at the create");
+    std::vector<uint8_t> multi_dst(0x8000 + 16, 0xcd);
+    check(slot8(multi_computer, multi_dst.data(), 0, 0, atlas_src.data(), 0x100, 0x8000) == S_OK,
+          "the switch on keeps the tree's flat copy for a description it does not lay out");
+    check(std::memcmp(multi_dst.data(), atlas_src.data(), 0x8000) == 0, "that fallback is the tree's byte range");
+    set_movie_plane_upload_for_test(false);
+    return true;
+}
+
 bool checks_refusals() {
     auto create = reinterpret_cast<CreateFn>(rt::shims::find("xg_xs.dll", "XGCreateTextureComputer"));
     auto slot2_of = [](void* computer) {
@@ -237,6 +398,7 @@ int main() {
     if (linear) {
         checks_layout_record(computer);
         check(checks_refusals(), "the refusal cases ran");
+        check(checks_movie_plane_upload(), "the movie-plane upload rule cases ran");
     } else {
         check(reinterpret_cast<Slot2Fn>(vtable[2])(computer, record) == kNotImpl,
               "slot 2 refuses by name in refuse mode");
