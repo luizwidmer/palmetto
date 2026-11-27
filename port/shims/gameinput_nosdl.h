@@ -24,8 +24,11 @@
 //                                         first-run reading when a device is present. The default is one neutral pad
 //                                         (no presses); the switch is the fallback.
 //   PALMETTO_KEYBOARD_PAD=1|focus|always  the keyboard/mouse pad, off by default (same meaning as the SDL shim)
-//   PALMETTO_FAKE_INPUT=<seconds>         one scripted pad and a bounded press schedule: confirm then start, about
-//                                         once a second for 30 presses, each held 150 ms. The delay is the first press.
+//   PALMETTO_FAKE_INPUT=<seconds>         the legacy 30-press diagnostic schedule: confirm then start, about once a
+//                                         second, each held 150 ms. The delay is the first press.
+//   PALMETTO_FIRST_RUN_SCRIPT=<seconds>   opt-in A/Menu/A/Menu sequence, each held 250 ms with 250 ms neutral; the
+//                                         decimal delay is relative to the first GameInputCreate, max 300 s. A `screen:`
+//                                         trigger is refused until a presented-frame signature feed is measured.
 //   PALMETTO_GAMEINPUT_THREAD=0           no background poll thread; only the API calls poll (tests)
 //   PALMETTO_INPUT_TRACE=1                bounded call trace: call 1, 10, 100 ... per entry point plus device/press
 //                                         events, with the caller as module+RVA
@@ -282,12 +285,11 @@ private:
 };
 
 // The scripted pad: one extra gamepad the always-built backend presents so a boot has a device to pair, as a console
-// always does. Without PALMETTO_FAKE_INPUT the pad is present and neutral (no presses) - the measured presence the
-// title's first-run read needs (docs/input_backend.md); PALMETTO_PAD_PRESENT=0|off removes it. With
-// PALMETTO_FAKE_INPUT=<seconds> the same pad runs the bounded first-run press schedule: confirm (A) at every even
-// press and start (Menu) at every odd one, about once a second, each held 150 ms, thirty presses (a bounded schedule
-// of about 29 s). The parse rules are the input-gate schedule's (src/fake_input.h): a plain non-negative decimal
-// number of seconds; anything else is refused so a typo never presses anything.
+// always does. Without a script it is present and neutral (no presses) - the measured presence the title's first-run
+// read needs (docs/input_backend.md); PALMETTO_PAD_PRESENT=0|off removes it. PALMETTO_FAKE_INPUT remains its legacy
+// 30-press diagnostic schedule. PALMETTO_FIRST_RUN_SCRIPT=<seconds> instead runs the short four-step A/Menu/A/Menu
+// sequence from src/fake_input.h, with explicit release gaps. Both are backend-epoch relative, bounded and opt-in; a
+// `screen:` trigger is refused because this backend has no measured frame-signature feed.
 class ScriptedPresses {
 public:
     static constexpr uint64_t kBurstUs = palmetto::FakeInputSchedule::kDefaultBurstUs;  // 150 ms
@@ -299,26 +301,41 @@ public:
         if (!delay) return std::nullopt;
         return ScriptedPresses(delay->press_at_us());
     }
+    static std::optional<ScriptedPresses> parse_first_run(const char* text,
+                                                          palmetto::FirstRunScriptRefusal* refusal = nullptr) {
+        const auto script = palmetto::FirstRunInputScript::parse(text, refusal);
+        if (!script) return std::nullopt;
+        return ScriptedPresses(*script);
+    }
     // The default paired pad: a schedule with no presses, so the pad is connected and neutral for the whole boot.
     static ScriptedPresses presence() { return ScriptedPresses(0, 0); }
     explicit ScriptedPresses(uint64_t first_press_us = 0, unsigned presses = kPresses)
         : schedule_(first_press_us, kBurstUs, kIntervalUs, presses) {}
 
-    std::optional<unsigned> press_index_at(uint64_t process_us) const { return schedule_.press_at(process_us); }
-    // The buttons a scripted press holds at `process_us`: confirm on the even presses, start on the odd ones.
+    std::optional<unsigned> press_index_at(uint64_t process_us) const {
+        return first_run_ ? first_run_->step_at(process_us) : schedule_.press_at(process_us);
+    }
+    // Both modes express GameInput button bits. The legacy switch retains its old alternating A/Menu sequence; the
+    // measured-window switch uses its own four-step script and explicit neutral intervals.
     uint32_t buttons_at(uint64_t process_us) const {
+        if (first_run_) return first_run_->buttons_at(process_us);
         const std::optional<unsigned> press = press_index_at(process_us);
         if (!press) return 0;
         return (*press % 2 == 0) ? PadA : PadMenu;
     }
-    bool pressed_at(uint64_t process_us) const { return schedule_.pressed_at(process_us); }
-    bool finished_at(uint64_t process_us) const { return schedule_.finished_at(process_us); }
-    uint64_t ends_at_us() const { return schedule_.ends_at_us(); }
-    uint64_t first_press_us() const { return schedule_.press_at_us(); }
-    unsigned presses() const { return schedule_.presses(); }
+    bool pressed_at(uint64_t process_us) const { return buttons_at(process_us) != 0; }
+    bool finished_at(uint64_t process_us) const {
+        return first_run_ ? first_run_->finished_at(process_us) : schedule_.finished_at(process_us);
+    }
+    uint64_t ends_at_us() const { return first_run_ ? first_run_->ends_at_us() : schedule_.ends_at_us(); }
+    uint64_t first_press_us() const { return first_run_ ? first_run_->first_press_us() : schedule_.press_at_us(); }
+    unsigned presses() const { return first_run_ ? first_run_->presses() : schedule_.presses(); }
+    bool first_run_mode() const { return first_run_.has_value(); }
 
 private:
+    explicit ScriptedPresses(const palmetto::FirstRunInputScript& script) : first_run_(script) {}
     palmetto::FakeInputSchedule schedule_;
+    std::optional<palmetto::FirstRunInputScript> first_run_;
 };
 
 // Which family the player is using, for the runtime's own prompt glyphs: the active-input tracker
@@ -810,7 +827,37 @@ inline void configure_from_env(Backend* b) {
 
     b->scripted.reset();
     const std::string fake = detail::env("PALMETTO_FAKE_INPUT");
-    if (!fake.empty() && fake != "0" && fake != "off") {
+    char first_run_buf[64] = {};
+    const DWORD first_run_length = GetEnvironmentVariableA("PALMETTO_FIRST_RUN_SCRIPT", first_run_buf,
+                                                            static_cast<DWORD>(sizeof first_run_buf));
+    const bool first_run_too_long = first_run_length >= sizeof first_run_buf;
+    const std::string first_run = first_run_length > 0 && !first_run_too_long
+                                      ? std::string(first_run_buf, first_run_length)
+                                      : std::string();
+    const bool fake_requested = !fake.empty() && fake != "0" && fake != "off";
+    const bool fake_configured = !fake.empty() && fake != "off";  // conflict check, including a malformed legacy value
+    const bool first_run_requested = first_run_too_long || (!first_run.empty() && first_run != "off");
+    if (first_run_too_long) {
+        std::fprintf(stderr, "[rt] gameinput: PALMETTO_FIRST_RUN_SCRIPT refused: %s\n",
+                     palmetto::first_run_script_refusal_name(palmetto::FirstRunScriptRefusal::TooLong));
+    } else if (fake_configured && first_run_requested) {
+        std::fprintf(stderr, "[rt] gameinput: PALMETTO_FIRST_RUN_SCRIPT refused: %s; no scripted presses\n",
+                     palmetto::first_run_script_refusal_name(palmetto::FirstRunScriptRefusal::LegacyScheduleConflict));
+    } else if (first_run_requested) {
+        palmetto::FirstRunScriptRefusal refusal = palmetto::FirstRunScriptRefusal::None;
+        b->scripted = ScriptedPresses::parse_first_run(first_run.c_str(), &refusal);
+        if (!b->scripted)
+            std::fprintf(stderr, "[rt] gameinput: PALMETTO_FIRST_RUN_SCRIPT=%s refused: %s\n", first_run.c_str(),
+                         palmetto::first_run_script_refusal_name(refusal));
+        else
+            std::fprintf(stderr,
+                         "[rt] gameinput: first-run script: %u A/Menu steps, %llu ms held, %llu ms interval, "
+                         "first at %.3f s from the GameInput epoch, ending at %.3f s\n",
+                         b->scripted->presses(),
+                         static_cast<unsigned long long>(palmetto::FirstRunInputScript::kHoldUs / 1000),
+                         static_cast<unsigned long long>(palmetto::FirstRunInputScript::kIntervalUs / 1000),
+                         b->scripted->first_press_us() / 1e6, b->scripted->ends_at_us() / 1e6);
+    } else if (fake_requested) {
         b->scripted = ScriptedPresses::parse(fake.c_str());
         if (!b->scripted)
             std::fprintf(stderr,

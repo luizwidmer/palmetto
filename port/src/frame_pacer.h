@@ -51,8 +51,24 @@
 //     The wait's own timeout is honoured first; the error surface is unchanged.
 //   * A frame's lateness (present_timing) is measured against the origin it was due at: the wait's time plus the
 //     observed cadence at the moment it was issued.
+//
+// Per-origin opt-in (set_per_origin_pacing; PALMETTO_PRESENT_PER_ORIGIN in the shim, accepted only with the present-driven
+// clock):
+//   * Each issued token remains a distinct flight until a successful PresentX names that token; flipping a newer token
+//     cannot erase an older token's flight. The per-origin queue is bounded at 64 entries, matching the statistics ring;
+//     overflow drops its oldest entry and is counted/reported.
+//   * The two supported planes may carry different issued tokens. Validation compares each token against its plane's
+//     high-water mark, the commit receives plane_count, and GetFrameStatisticsX reports the last plane that named that
+//     token (one record per token, so the last plane wins when a token is repeated across planes).
+//   * Each plane smooths its own successful-present interval with the same 1/8 weight and declared-period clamp. The
+//     shared origin gate uses the slowest active plane cadence; a four-cadence waiter dead-man still releases a new token
+//     without silently consuming any other origin. Before the first displayed present, waits preserve the old immediate
+//     token behavior.
+//   * The environment option is strict: unset/blank/off spellings leave the legacy single-watermark branch unchanged;
+//     an unknown spelling or an enabled option without PALMETTO_PRESENT_DRIVEN is refused by name.
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -61,6 +77,7 @@
 #include <functional>
 #include <limits>
 #include <mutex>
+#include <string_view>
 
 namespace palmetto {
 
@@ -75,6 +92,30 @@ inline constexpr std::int32_t timeout = std::int32_t(0x80070102);          // HR
 
 inline constexpr std::uint64_t no_deadline = std::numeric_limits<std::uint64_t>::max();
 inline constexpr std::uint32_t infinite_timeout_ms = 0xFFFFFFFFu;  // INFINITE
+
+// PALMETTO_PRESENT_PER_ORIGIN is deliberately stricter than the old boolean switches: a typo must not silently
+// enable a different token-validation and latency model. The caller names the refusal and leaves the option off.
+enum class PresentPerOriginSwitch { off, on, invalid };
+inline PresentPerOriginSwitch parse_present_per_origin_switch(const char* raw) {
+    if (!raw) return PresentPerOriginSwitch::off;
+    std::string_view value(raw);
+    const auto space = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v'; };
+    while (!value.empty() && space(value.front())) value.remove_prefix(1);
+    while (!value.empty() && space(value.back())) value.remove_suffix(1);
+    const auto equals = [&](std::string_view expected) {
+        if (value.size() != expected.size()) return false;
+        for (std::size_t i = 0; i < value.size(); ++i) {
+            char c = value[i];
+            if (c >= 'A' && c <= 'Z') c = char(c + ('a' - 'A'));
+            if (c != expected[i]) return false;
+        }
+        return true;
+    };
+    if (value.empty() || equals("0") || equals("off") || equals("false") || equals("no"))
+        return PresentPerOriginSwitch::off;
+    if (equals("1") || equals("on") || equals("true") || equals("yes")) return PresentPerOriginSwitch::on;
+    return PresentPerOriginSwitch::invalid;
+}
 
 class FrameClock {
 public:
@@ -127,6 +168,7 @@ private:
 
 // Provisional definitions of ours: the real constants and layouts of the console API are unmeasured.
 inline constexpr std::uint32_t frame_event_origin = 0;
+inline constexpr std::uint32_t max_present_planes = 2;  // the presentation service's measured composition limit
 // Statistics types (bit mask). Interval and render entries are never produced here.
 inline constexpr std::uint32_t stat_frame_interval = 0x01;
 inline constexpr std::uint32_t stat_frame_event = 0x02;
@@ -202,7 +244,17 @@ public:
         interval_set_ = true;
         offset_us_ = std::min(offset_us_, period_us - 1);
         last_origin_ = 0;  // origin 0 is the epoch itself, which has passed
-        if (present_driven_) cadence_us_ = period_us_;  // seed only: the observed presents replace it
+        if (present_driven_) {
+            cadence_us_ = period_us_;  // seed only: the observed presents replace it
+            if (per_origin_requested_) {
+                for (std::size_t i = 0; i < plane_origins_.size(); ++i) {
+                    plane_origins_[i].last_present_us = 0;
+                    plane_origins_[i].last_token = plane_last_presented_[i];
+                    plane_origins_[i].present_count = 0;
+                    plane_origins_[i].cadence_us = period_us_;
+                }
+            }
+        }
         cv_.notify_all();
         return pacer_hr::ok;
     }
@@ -273,7 +325,9 @@ public:
             if (!(type_mask & type)) return;
             ++expected;
             if (!record || !present) return;
-            found[n++] = FrameStatistic{type, 0, token, time, type == stat_display ? record->percent_scanned : 0.0f};
+            found[n++] = FrameStatistic{type, per_origin_active_.load(std::memory_order_relaxed) ? record->plane_index : 0u,
+                                         token, time,
+                                         type == stat_display ? record->percent_scanned : 0.0f};
         };
         if (record) {
             add(stat_frame_event, true, record->origin_us);
@@ -313,6 +367,22 @@ public:
         }
         return pacer_hr::ok;
     }
+    // Opt-in per-origin validation. A token is compared with the watermark for its own plane; unlike the legacy helper,
+    // completion of a newer token on another plane does not make this origin stale.
+    std::int32_t check_present_token_for_plane(std::uint64_t token, std::uint32_t plane_index,
+                                               TokenIssue* issue = nullptr) {
+        if (issue) *issue = TokenIssue::none;
+        if (plane_index >= max_present_planes) return pacer_hr::invalid_arg;
+        std::lock_guard guard(mutex_);
+        if (suspended_) return pacer_hr::invalid_state;
+        if (token > issued_) return pacer_hr::invalid_arg;
+        if (issue) {
+            if (token == 0) *issue = TokenIssue::null_token;
+            else if (token == plane_last_presented_[plane_index]) *issue = TokenIssue::repeated;
+            else if (token < plane_last_presented_[plane_index]) *issue = TokenIssue::stale;
+        }
+        return pacer_hr::ok;
+    }
     // How late the frame of `token` is if it is presented now (see the model above). late_us stays 0 when the frame
     // could not be shown at once anyway: unpaced, uncapped, null or unknown token, or earlier frames still waiting
     // for their vblank (a flip cannot overtake them), or the token was already presented or is older than the last
@@ -321,6 +391,26 @@ public:
         std::uint64_t late_us = 0;
         std::uint32_t period_us = 0;   // 0: unpaced
     };
+    // The swapchain has one sync decision for the whole PresentX. Use the greatest lateness among its distinct plane
+    // origins so that a late secondary plane is not hidden by an on-time primary plane.
+    PresentTiming present_timing_for_planes(const std::uint64_t* plane_tokens, std::uint32_t plane_count) {
+        std::lock_guard guard(mutex_);
+        PresentTiming timing;
+        if (!plane_tokens || plane_count == 0 || plane_count > max_present_planes || !interval_set_ || uncapped_)
+            return timing;
+        const std::uint64_t now = clock_.now_us();
+        retire_locked(now);
+        timing.period_us = period_us_;
+        if (!pending_.empty()) return timing;
+        for (std::uint32_t i = 0; i < plane_count; ++i) {
+            const std::uint64_t token = plane_tokens[i];
+            if (!token) continue;
+            for (const Record& r : records_)
+                if (r.token == token && !r.presented && token > plane_last_presented_[i] && now > r.due_us)
+                    timing.late_us = std::max(timing.late_us, now - r.due_us);
+        }
+        return timing;
+    }
     PresentTiming present_timing(std::uint64_t token) {
         std::lock_guard guard(mutex_);
         PresentTiming timing;
@@ -378,6 +468,133 @@ public:
         retire_locked(now);
         cv_.notify_all();
     }
+    // Opt-in commit for independently tokened planes. Each token removes only its own outstanding origin; the public
+    // statistics record remembers the last plane that carried that origin. The legacy single-token commit above stays
+    // the sole path while PALMETTO_PRESENT_PER_ORIGIN is off.
+    void commit_present_tokens_for_planes(const std::uint64_t* plane_tokens, std::uint32_t plane_count,
+                                          PresentSync sync = PresentSync::vblank) {
+        (void)sync;  // present-driven mode records display at the successful host present, as the legacy mode does
+        if (!per_origin_active_.load(std::memory_order_relaxed) || !plane_tokens || plane_count == 0 ||
+            plane_count > max_present_planes)
+            return;
+        std::lock_guard guard(mutex_);
+        const std::uint64_t now = clock_.now_us();
+        retire_locked(now);
+
+        // Unpaced and uncapped presents still fill any available statistics, but do not enter the origin queue or move
+        // the display cadence.
+        if (!interval_set_ || !armed_ || uncapped_ || !present_driven_) {
+            for (std::uint32_t i = 0; i < plane_count; ++i) {
+                const std::uint64_t token = plane_tokens[i];
+                if (token) {
+                    remove_origin_flight_locked(token);
+                    last_presented_ = std::max(last_presented_, token);
+                    plane_last_presented_[i] = std::max(plane_last_presented_[i], token);
+                }
+                for (Record& r : records_)
+                    if (r.token == token) {
+                        r.presented = r.displayed = true;
+                        r.present_us = r.display_us = now;
+                        r.plane_index = i;
+                    }
+            }
+            cv_.notify_all();
+            return;
+        }
+
+        std::array<std::uint64_t, max_present_planes> unique_tokens{};
+        std::array<bool, max_present_planes> newly_flipped{};
+        std::size_t unique_count = 0;
+        bool any_new_origin = false;
+        bool plane_cadence_changed = false;
+        std::uint64_t highest_new_token = flipped_;
+        for (std::uint32_t i = 0; i < plane_count; ++i) {
+            const std::uint64_t token = plane_tokens[i];
+            std::size_t token_slot = unique_count;
+            bool duplicate = false;
+            for (std::size_t j = 0; j < unique_count; ++j)
+                if (unique_tokens[j] == token) {
+                    token_slot = j;
+                    duplicate = true;
+                    break;
+                }
+            bool new_origin = false;
+            if (!duplicate) {
+                unique_tokens[unique_count] = token;
+                if (token) {
+                    const bool queued = remove_origin_flight_locked(token);
+                    bool known = false;
+                    bool not_yet_displayed = false;
+                    for (const Record& r : records_)
+                        if (r.token == token) {
+                            known = true;
+                            not_yet_displayed = not_yet_displayed || !r.displayed;
+                        }
+                    new_origin = queued || not_yet_displayed || (!known && token > last_presented_);
+                    newly_flipped[unique_count] = new_origin;
+                    if (new_origin) {
+                        any_new_origin = true;
+                        highest_new_token = std::max(highest_new_token, token);
+                    }
+                }
+                ++unique_count;
+            } else {
+                new_origin = newly_flipped[token_slot];
+            }
+
+            if (token) {
+                last_presented_ = std::max(last_presented_, token);
+                plane_last_presented_[i] = std::max(plane_last_presented_[i], token);
+                for (Record& r : records_)
+                    if (r.token == token) {
+                        r.presented = true;
+                        r.present_us = now;
+                        r.plane_index = i;  // the final plane that names this origin is the statistic's plane
+                        if (new_origin && !r.displayed) {
+                            r.displayed = true;
+                            r.display_us = now;
+                        }
+                    }
+
+                PlaneOrigin& origin = plane_origins_[i];
+                if (token > origin.last_token) {
+                    if (!origin.cadence_us) origin.cadence_us = cadence_us_ ? cadence_us_ : period_us_;
+                    if (origin.present_count && now > origin.last_present_us && period_us_) {
+                        const std::uint64_t observed = now - origin.last_present_us;
+                        const std::uint64_t low = std::max<std::uint64_t>(period_us_ / 8, 1000u);
+                        const std::uint64_t high = 4ull * period_us_;
+                        if (observed >= low && observed <= high) {
+                            const std::uint64_t smoothed = (std::uint64_t(origin.cadence_us) * 7 + observed) / 8;
+                            origin.cadence_us = std::uint32_t(std::min(smoothed, high));
+                        }
+                    }
+                    origin.last_present_us = now;
+                    origin.last_token = token;
+                    ++origin.present_count;
+                    plane_cadence_changed = true;
+                }
+            }
+        }
+
+        if (plane_cadence_changed) {
+            std::uint32_t slowest_cadence = 0;
+            bool has_plane_cadence = false;
+            for (const PlaneOrigin& origin : plane_origins_)
+                if (origin.present_count) {
+                    slowest_cadence = std::max(slowest_cadence, origin.cadence_us);
+                    has_plane_cadence = true;
+                }
+            cadence_us_ = has_plane_cadence ? slowest_cadence : period_us_;
+        }
+        if (any_new_origin) {
+            if (present_count_ == 0) request_due_us_ = now + cadence_us_;
+            last_present_us_ = now;
+            ++present_count_;
+            flipped_ = std::max(flipped_, highest_new_token);
+        }
+        if (any_new_origin || plane_cadence_changed) cv_.notify_all();
+    }
+
     // A blank present (no planes) carries no token: it is only counted as a frame to show. With no interval set,
     // the origin event not armed or the cap off it is not paced: it shows at once and is not counted.
     void note_untokened_present() {
@@ -403,6 +620,7 @@ public:
         pending_.clear();
         present_count_ = 0;  // the clock's phase goes with the registration, which suspend drops
         request_due_us_ = 0;
+        if (per_origin_requested_) origins_in_flight_.clear();
         cv_.notify_all();
     }
     // ResumeX: presents work again, but the interval and the origin event must be set up again.
@@ -412,6 +630,7 @@ public:
         interval_set_ = armed_ = false;
         present_count_ = 0;
         request_due_us_ = 0;
+        if (per_origin_requested_) origins_in_flight_.clear();
         cv_.notify_all();
     }
 
@@ -419,6 +638,8 @@ public:
     std::uint64_t tokens_issued() const { std::lock_guard guard(mutex_); return issued_; }
     std::uint32_t frames_in_flight() {
         std::lock_guard guard(mutex_);
+        if (per_origin_active_.load(std::memory_order_relaxed))
+            return std::uint32_t(origins_in_flight_.size());
         if (present_driven_) return std::uint32_t(issued_ >= flipped_ ? issued_ - flipped_ : 0);
         retire_locked(clock_.now_us());
         return std::uint32_t(pending_.size());
@@ -444,9 +665,22 @@ public:
         present_count_ = 0;
         request_due_us_ = 0;
         if (on && period_us_) cadence_us_ = period_us_;
+        per_origin_active_.store(per_origin_requested_ && on, std::memory_order_relaxed);
+        if (per_origin_requested_) reset_per_origin_state_locked();
         cv_.notify_all();
     }
     bool present_driven() const { std::lock_guard guard(mutex_); return present_driven_; }
+    // Optional independent origin accounting (`PALMETTO_PRESENT_PER_ORIGIN`): active only with the present-driven
+    // clock. The off path continues through the original single-watermark state machine.
+    void set_per_origin_pacing(bool on) {
+        std::lock_guard guard(mutex_);
+        if (per_origin_requested_ == on) return;
+        per_origin_requested_ = on;
+        per_origin_active_.store(on && present_driven_, std::memory_order_relaxed);
+        reset_per_origin_state_locked();
+        cv_.notify_all();
+    }
+    bool per_origin_pacing() const { return per_origin_active_.load(std::memory_order_relaxed); }
     // The observed display cadence the clock is following, in microseconds (0 before an interval is set). Seeded by
     // SetFrameIntervalX's period and replaced by the presents' own intervals as they are measured.
     std::uint32_t display_cadence_us() const { std::lock_guard guard(mutex_); return cadence_us_; }
@@ -456,6 +690,10 @@ public:
     std::uint64_t present_clock_fallbacks() const {
         std::lock_guard guard(mutex_);
         return present_clock_fallbacks_;
+    }
+    std::uint64_t per_origin_queue_overflows() const {
+        std::lock_guard guard(mutex_);
+        return origin_queue_overflows_;
     }
 
 private:
@@ -468,8 +706,44 @@ private:
         std::uint64_t token = 0, origin_us = 0, present_us = 0, display_us = 0;
         std::uint64_t due_us = 0;  // the frame's deadline: the origin's own vblank (grid), or origin + cadence (present-driven)
         float percent_scanned = 0.0f;
+        std::uint32_t plane_index = 0;
         bool presented = false, displayed = false;
     };
+    struct OriginFlight {
+        std::uint64_t token = 0;  // one outstanding frame origin, not a high-watermark range
+    };
+    struct PlaneOrigin {
+        std::uint64_t last_present_us = 0;
+        std::uint64_t last_token = 0;
+        std::uint64_t present_count = 0;
+        std::uint32_t cadence_us = 0;
+    };
+    static constexpr std::size_t max_origin_flights = 64;  // the statistics retention bound also bounds live origin state
+
+    void reset_per_origin_state_locked() {
+        origins_in_flight_.clear();
+        origin_queue_overflows_ = 0;
+        plane_last_presented_.fill(last_presented_);
+        for (std::size_t i = 0; i < plane_origins_.size(); ++i) {
+            plane_origins_[i] = PlaneOrigin{};
+            plane_origins_[i].last_token = last_presented_;
+            plane_origins_[i].cadence_us = cadence_us_ ? cadence_us_ : period_us_;
+        }
+    }
+    bool remove_origin_flight_locked(std::uint64_t token) {
+        const auto it = std::find_if(origins_in_flight_.begin(), origins_in_flight_.end(),
+                                     [token](const OriginFlight& flight) { return flight.token == token; });
+        if (it == origins_in_flight_.end()) return false;
+        origins_in_flight_.erase(it);
+        return true;
+    }
+    void queue_origin_flight_locked(std::uint64_t token) {
+        if (origins_in_flight_.size() >= max_origin_flights) {
+            origins_in_flight_.pop_front();  // bounded history; a very old origin cannot wedge a long-running boot
+            ++origin_queue_overflows_;
+        }
+        origins_in_flight_.push_back(OriginFlight{token});
+    }
 
     // Frames whose vblank has come are shown.
     void retire_locked(std::uint64_t now) {
@@ -528,11 +802,40 @@ private:
         if (now >= origin) origin += ((now - origin) / cadence_us_) * cadence_us_;
         request_due_us_ = origin + cadence_us_;
         *token = ++issued_;
-        return record_token_locked(*token, origin, origin + cadence_us_);
+        const std::int32_t result = record_token_locked(*token, origin, origin + cadence_us_);
+        if (per_origin_active_.load(std::memory_order_relaxed)) queue_origin_flight_locked(*token);
+        return result;
+    }
+
+    std::int32_t wait_present_per_origin_locked(std::unique_lock<std::mutex>& lock, std::uint64_t start,
+                                               std::uint64_t give_up, std::uint64_t* token) {
+        for (;;) {
+            if (shutdown_ || suspended_ || !interval_set_ || !armed_) return pacer_hr::invalid_state;
+            const std::uint64_t now = clock_.now_us();
+            // The first origin cannot follow a display that does not exist yet; keep the legacy initial-token rule.
+            if (present_count_ == 0) return issue_present_token_locked(now, token);
+            const std::uint64_t budget = std::max<std::uint64_t>(latency_, 1u);
+            if (origins_in_flight_.size() >= budget) {
+                const std::uint64_t dead_man = start + 4ull * std::max<std::uint64_t>(cadence_us_, 1000u);
+                if (now >= dead_man) {
+                    ++present_clock_fallbacks_;
+                    return issue_present_token_locked(now, token);
+                }
+                if (give_up != no_deadline && now >= give_up) return pacer_hr::timeout;
+                clock_.wait(lock, cv_, give_up == no_deadline ? dead_man : std::min(dead_man, give_up));
+                continue;
+            }
+            const std::uint64_t due = request_due_us_ ? request_due_us_ : now;
+            if (now >= due) return issue_present_token_locked(now, token);
+            if (give_up != no_deadline && now >= give_up) return pacer_hr::timeout;
+            clock_.wait(lock, cv_, give_up == no_deadline ? due : std::min(due, give_up));
+        }
     }
 
     std::int32_t wait_present_driven_locked(std::unique_lock<std::mutex>& lock, std::uint64_t start,
                                             std::uint64_t give_up, std::uint64_t* token) {
+        if (per_origin_active_.load(std::memory_order_relaxed))
+            return wait_present_per_origin_locked(lock, start, give_up, token);
         for (;;) {
             if (shutdown_ || suspended_ || !interval_set_ || !armed_) return pacer_hr::invalid_state;
             const std::uint64_t now = clock_.now_us();
@@ -570,6 +873,18 @@ private:
             if (shutdown_ || suspended_ || !interval_set_ || !armed_) return pacer_hr::invalid_state;
             const std::uint64_t now = clock_.now_us();
             if (present_driven_) {
+                if (per_origin_active_.load(std::memory_order_relaxed)) {
+                    // Each token is its own flight: a newer plane flip cannot consume an older unflipped origin.
+                    if (present_count_ == 0 || origins_in_flight_.size() < budget) return pacer_hr::ok;
+                    const std::uint64_t dead_man = start + 4ull * std::max<std::uint64_t>(cadence_us_, 1000u);
+                    if (now >= dead_man) {
+                        ++present_clock_fallbacks_;
+                        return pacer_hr::ok;
+                    }
+                    if (give_up != no_deadline && now >= give_up) return pacer_hr::timeout;
+                    clock_.wait(lock, cv_, give_up == no_deadline ? dead_man : std::min(dead_man, give_up));
+                    continue;
+                }
                 // No displayed frame yet, or an in-flight slot is free: nothing to wait for. A present that flips a
                 // frame notifies the wait (`commit_present_token`), which then finds its slot and returns.
                 if (present_count_ == 0 || (issued_ >= flipped_ && issued_ - flipped_ < budget)) return pacer_hr::ok;
@@ -639,6 +954,8 @@ private:
     bool armed_ = false;
     bool uncapped_ = false;
     bool present_driven_ = false;
+    bool per_origin_requested_ = false;
+    std::atomic<bool> per_origin_active_{false};
     std::uint32_t period_us_ = 0;
     std::uint32_t latency_ = 1;
     std::uint32_t offset_us_ = 0;
@@ -654,8 +971,12 @@ private:
     std::uint64_t issued_ = 0;
     std::uint64_t last_presented_ = 0;
     std::uint64_t immediate_presents_ = 0;
+    std::uint64_t origin_queue_overflows_ = 0;
+    std::array<PlaneOrigin, max_present_planes> plane_origins_{};
+    std::array<std::uint64_t, max_present_planes> plane_last_presented_{};
     std::deque<Pending> pending_;
     std::deque<Record> records_;
+    std::deque<OriginFlight> origins_in_flight_;
 };
 
 }  // namespace palmetto

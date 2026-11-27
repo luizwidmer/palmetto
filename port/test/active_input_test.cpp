@@ -1,7 +1,7 @@
 // ActiveInputTracker (src/active_input.h) on synthetic samples with its own clock: what counts as deliberate input
 // (edges only, thresholds, baselines), the minimum time between changes, several devices of one family, a device that
-// goes and comes back, and a forced family. Also the PALMETTO_FAKE_INPUT schedule (src/fake_input.h): when the shim's
-// synthetic pad holds its A button, and when the schedule is over. No SDL, no controller, no GPU.
+// goes and comes back, and a forced family. Also the PALMETTO_FAKE_INPUT schedule, the bounded first-run script and
+// its 32x18 synthetic screen-signature matcher (src/fake_input.h). No SDL, no controller, no GPU.
 #include "../src/active_input.h"
 #include "../src/fake_input.h"
 
@@ -272,6 +272,83 @@ int test_fake_input_press_windows() {
     return 0;
 }
 
+int test_first_run_script_parse() {
+    FirstRunScriptRefusal refusal = FirstRunScriptRefusal::None;
+    EXPECT(!FirstRunInputScript::parse(nullptr, &refusal));
+    EXPECT(refusal == FirstRunScriptRefusal::Off);
+    EXPECT(!FirstRunInputScript::parse("", &refusal));
+    EXPECT(refusal == FirstRunScriptRefusal::Off);
+
+    const auto immediate = FirstRunInputScript::parse("0", &refusal);
+    EXPECT(immediate.has_value() && immediate->first_press_us() == 0);
+    EXPECT(refusal == FirstRunScriptRefusal::None);
+    const auto measured = FirstRunInputScript::parse("22.5", &refusal);
+    EXPECT(measured.has_value() && measured->first_press_us() == 22'500'000);
+    EXPECT(measured->presses() == 4);
+    EXPECT(FirstRunInputScript::parse("300", &refusal).has_value());
+
+    EXPECT(!FirstRunInputScript::parse("1e3", &refusal));
+    EXPECT(refusal == FirstRunScriptRefusal::InvalidDelay);
+    EXPECT(!FirstRunInputScript::parse("301", &refusal));
+    EXPECT(refusal == FirstRunScriptRefusal::DelayOverLimit);
+    EXPECT(!FirstRunInputScript::parse("screen:logo", &refusal));
+    EXPECT(refusal == FirstRunScriptRefusal::SignatureFeedUnavailable);
+    EXPECT(!FirstRunInputScript::parse("12345678901234567890123456789012", &refusal));
+    EXPECT(refusal == FirstRunScriptRefusal::TooLong);
+    EXPECT(std::string_view(first_run_script_refusal_name(refusal)).find("31-character") != std::string_view::npos);
+    EXPECT(std::string_view(first_run_script_refusal_name(FirstRunScriptRefusal::LegacyScheduleConflict))
+               .find("PALMETTO_FAKE_INPUT") != std::string_view::npos);
+    return 0;
+}
+
+int test_first_run_script_state_machine() {
+    constexpr std::uint64_t sec = 1'000'000;
+    const auto parsed = FirstRunInputScript::parse("2");
+    EXPECT(parsed.has_value());
+    const FirstRunInputScript& script = *parsed;
+    EXPECT(script.buttons_at(2 * sec - 1) == 0);
+    EXPECT(!script.finished_at(2 * sec - 1));
+    EXPECT(script.buttons_at(2 * sec) == FirstRunInputScript::kButtonA);
+    EXPECT(script.step_at(2 * sec) == 0u);
+    EXPECT(script.buttons_at(2 * sec + FirstRunInputScript::kHoldUs - 1) == FirstRunInputScript::kButtonA);
+    EXPECT(script.buttons_at(2 * sec + FirstRunInputScript::kHoldUs) == 0);  // half-open hold, explicit release
+    EXPECT(script.buttons_at(2 * sec + FirstRunInputScript::kIntervalUs) == FirstRunInputScript::kButtonMenu);
+    EXPECT(script.buttons_at(3 * sec) == FirstRunInputScript::kButtonA);
+    EXPECT(script.buttons_at(3'500'000) == FirstRunInputScript::kButtonMenu);
+    EXPECT(script.buttons_at(script.ends_at_us() - 1) == FirstRunInputScript::kButtonMenu);
+    EXPECT(script.buttons_at(script.ends_at_us()) == 0);
+    EXPECT(script.finished_at(script.ends_at_us()));
+    EXPECT(script.buttons_at(script.ends_at_us() + 60 * sec) == 0);
+    return 0;
+}
+
+int test_screen_signature_matcher() {
+    ScreenSignature reference;
+    reference.luma.fill(64);  // synthetic flat pattern; no title pixels
+    auto actual = reference.luma;
+
+    ScreenSignatureMatch match = match_screen_signature(actual.data(), actual.size(), reference, 0);
+    EXPECT(match.matched && match.mean_absolute_error == 0 && match.refusal == ScreenSignatureRefusal::None);
+
+    actual[0] = 76;
+    match = match_screen_signature(actual.data(), actual.size(), reference, 0);
+    EXPECT(!match.matched && match.mean_absolute_error == 0);  // rounded metric does not weaken exact thresholding
+    match = match_screen_signature(actual.data(), actual.size(), reference, 1);
+    EXPECT(match.matched && match.mean_absolute_error == 0);
+
+    actual.fill(76);
+    match = match_screen_signature(actual.data(), actual.size(), reference, 8);
+    EXPECT(!match.matched && match.mean_absolute_error == 12);
+    EXPECT(match_screen_signature(nullptr, actual.size(), reference).refusal == ScreenSignatureRefusal::MissingPixels);
+    EXPECT(match_screen_signature(actual.data(), actual.size() - 1, reference).refusal ==
+           ScreenSignatureRefusal::WrongSampleCount);
+    EXPECT(match_screen_signature(actual.data(), actual.size(), reference, 33).refusal ==
+           ScreenSignatureRefusal::ToleranceTooLoose);
+    EXPECT(std::string_view(screen_signature_refusal_name(ScreenSignatureRefusal::WrongSampleCount))
+               .find("32x18") != std::string_view::npos);
+    return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -289,6 +366,9 @@ int main() {
         {"names", test_names},
         {"fake input parse", test_fake_input_parse},
         {"fake input press windows", test_fake_input_press_windows},
+        {"first-run script parse and refusals", test_first_run_script_parse},
+        {"first-run script held/released state machine", test_first_run_script_state_machine},
+        {"synthetic screen-signature matcher", test_screen_signature_matcher},
     };
     int failures = 0;
     for (const Case& c : cases) {

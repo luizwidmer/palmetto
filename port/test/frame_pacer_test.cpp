@@ -49,6 +49,27 @@ bool setup(FramePacer& pacer, std::uint32_t latency, std::uint32_t offset = 0) {
 }  // namespace
 
 int main() {
+    // The per-origin option is strict: unset/blank/off spellings keep the legacy path, known on spellings opt in, and
+    // an unknown value is a named refusal (the runtime leaves the mode off).
+    {
+        using palmetto::PresentPerOriginSwitch;
+        const char* const off_values[] = {nullptr, "", "   ", "0", "off", "FALSE", " no "};
+        const char* const on_values[] = {"1", "on", "TRUE", " yes "};
+        const char* const refused_values[] = {"2", "auto", "banana", "on 1"};
+        for (const char* off : off_values)
+            EXPECT(palmetto::parse_present_per_origin_switch(off) == PresentPerOriginSwitch::off);
+        for (const char* on : on_values)
+            EXPECT(palmetto::parse_present_per_origin_switch(on) == PresentPerOriginSwitch::on);
+        for (const char* refused : refused_values)
+            EXPECT(palmetto::parse_present_per_origin_switch(refused) == PresentPerOriginSwitch::invalid);
+        ManualFrameClock clock;
+        FramePacer gated(clock);
+        gated.set_per_origin_pacing(true);
+        EXPECT(!gated.per_origin_pacing());  // setting the request alone cannot bypass the present-driven prerequisite
+        gated.set_present_driven(true);
+        EXPECT(gated.per_origin_pacing());
+    }
+
     // Arguments and state errors.
     {
         ManualFrameClock clock;
@@ -732,6 +753,154 @@ int main() {
         EXPECT(pacer.present_driven() && !pacer.registered());
         EXPECT(setup(pacer, 1));
         EXPECT(pacer.wait_frame_event(frame_event_origin, infinite_timeout_ms, 0, &token) == pacer_hr::ok && token == 2);
+    }
+
+    // Measured legacy gap: a flip of token 3 advances the single watermark over outstanding token 2, reducing the
+    // reported flight count from two to zero. This is retained when the new switch is off.
+    {
+        ManualFrameClock clock;
+        FramePacer pacer(clock);
+        pacer.set_present_driven(true);
+        EXPECT(!pacer.per_origin_pacing());
+        EXPECT(setup(pacer, 2));
+        std::uint64_t token1 = 0;
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token1) == pacer_hr::ok && token1 == 1);
+        pacer.commit_present_token(token1, 1);
+        clock.advance_us(period);
+        std::uint64_t token2 = 0, token3 = 0;
+        EXPECT(pacer.wait_frame_event(frame_event_origin, infinite_timeout_ms, 0, &token2) == pacer_hr::ok && token2 == 2);
+        clock.advance_us(period);
+        EXPECT(pacer.wait_frame_event(frame_event_origin, infinite_timeout_ms, 0, &token3) == pacer_hr::ok && token3 == 3);
+        EXPECT(pacer.frames_in_flight() == 2);
+        pacer.commit_present_token(token3, 1);  // legacy high-watermark semantics collapse token 2 as well
+        EXPECT(pacer.flipped_token() == 3 && pacer.frames_in_flight() == 0);
+    }
+
+    // Per-origin mode tracks exact token flights rather than treating a higher flip watermark as completion of every
+    // earlier origin. Plane tokens may differ; each record keeps the last plane that carried it, and cadence samples are
+    // isolated per plane before the slowest active cadence gates the shared origin stream.
+    {
+        ManualFrameClock clock;
+        FramePacer pacer(clock);
+        EXPECT(!pacer.per_origin_pacing());  // switch-off default remains the legacy branch
+        pacer.set_present_driven(true);
+        pacer.set_per_origin_pacing(true);
+        EXPECT(pacer.per_origin_pacing());
+        EXPECT(setup(pacer, 2));
+
+        std::uint64_t token1 = 0;
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token1) == pacer_hr::ok && token1 == 1);
+        pacer.commit_present_tokens_for_planes(&token1, 1);  // plane 0 starts its cadence at t=0
+        EXPECT(pacer.frames_in_flight() == 0 && pacer.display_cadence_us() == period);
+
+        clock.advance_us(period);
+        std::uint64_t token2 = 0;
+        EXPECT(pacer.wait_frame_event(frame_event_origin, infinite_timeout_ms, 0, &token2) == pacer_hr::ok && token2 == 2);
+        clock.advance_us(period);
+        std::uint64_t token3 = 0;
+        EXPECT(pacer.wait_frame_event(frame_event_origin, infinite_timeout_ms, 0, &token3) == pacer_hr::ok && token3 == 3);
+        EXPECT(pacer.frames_in_flight() == 2);
+        pacer.commit_present_tokens_for_planes(&token3, 1);  // flip 3 first; origin 2 must remain in flight
+        EXPECT(pacer.flipped_token() == 3 && pacer.frames_in_flight() == 1);
+        EXPECT(pacer.display_cadence_us() == period + period / 8);  // plane 0 observed 2 * period
+
+        clock.advance_us(period);
+        std::uint64_t token4 = 0;
+        EXPECT(pacer.wait_frame_event(frame_event_origin, infinite_timeout_ms, 0, &token4) == pacer_hr::ok && token4 == 4);
+        const std::uint64_t cross_plane_tokens[2] = {token4, token2};
+        pacer.commit_present_tokens_for_planes(cross_plane_tokens, 2);  // new plane-0 token 4 and late plane-1 token 2
+        EXPECT(pacer.frames_in_flight() == 0 && pacer.flipped_token() == 4);
+        std::uint32_t count = 2;
+        FrameStatistic stats[2];
+        EXPECT(pacer.get_frame_statistics(token2, stat_present | stat_display, &count, stats) == pacer_hr::ok && count == 2 &&
+               stats[0].plane_index == 1 && stats[1].plane_index == 1 && stats[0].time_us == 3 * period &&
+               stats[1].time_us == 3 * period);
+        count = 2;
+        EXPECT(pacer.get_frame_statistics(token4, stat_present | stat_display, &count, stats) == pacer_hr::ok && count == 2 &&
+               stats[0].plane_index == 0 && stats[1].plane_index == 0);
+        FramePacer::TokenIssue issue{};
+        EXPECT(pacer.check_present_token_for_plane(token2, 1, &issue) == pacer_hr::ok &&
+               issue == FramePacer::TokenIssue::repeated);
+        EXPECT(pacer.check_present_token_for_plane(token4, max_present_planes, &issue) == pacer_hr::invalid_arg);
+        EXPECT(pacer.check_present_token_for_plane(token4 + 1, 0, &issue) == pacer_hr::invalid_arg);
+
+        clock.advance_us(period + period / 8);  // the shared origin stream follows its slowest observed cadence
+        std::uint64_t token5 = 0;
+        EXPECT(pacer.wait_frame_event(frame_event_origin, infinite_timeout_ms, 0, &token5) == pacer_hr::ok && token5 == 5);
+        clock.advance_us(3 * period - period / 8);  // plane 1 sees a four-period gap from its own first origin
+        const std::uint64_t token5_on_plane1[2] = {0, token5};
+        pacer.commit_present_tokens_for_planes(token5_on_plane1, 2);
+        EXPECT(pacer.display_cadence_us() == period + 3 * period / 8);  // plane 1's independent 22 ms sample wins
+        count = 2;
+        EXPECT(pacer.get_frame_statistics(token5, stat_present | stat_display, &count, stats) == pacer_hr::ok && count == 2 &&
+               stats[0].plane_index == 1 && stats[1].plane_index == 1);
+    }
+
+    // PresentX's single tear decision considers both plane origins: a late secondary token is not masked by a current
+    // primary token.
+    {
+        ManualFrameClock clock;
+        FramePacer pacer(clock);
+        pacer.set_present_driven(true);
+        pacer.set_per_origin_pacing(true);
+        EXPECT(setup(pacer, 2));
+        std::uint64_t token1 = 0, token2 = 0, token3 = 0;
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token1) == pacer_hr::ok && token1 == 1);
+        pacer.commit_present_tokens_for_planes(&token1, 1);
+        clock.advance_us(period);
+        EXPECT(pacer.wait_frame_event(frame_event_origin, infinite_timeout_ms, 0, &token2) == pacer_hr::ok && token2 == 2);
+        clock.advance_us(period);
+        EXPECT(pacer.wait_frame_event(frame_event_origin, infinite_timeout_ms, 0, &token3) == pacer_hr::ok && token3 == 3);
+        clock.advance_us(period);
+        const std::uint64_t mixed[2] = {token3, token2};
+        const FramePacer::PresentTiming timing = pacer.present_timing_for_planes(mixed, 2);
+        EXPECT(timing.period_us == period && timing.late_us == period);  // token 2 is one interval late, token 3 is due now
+        pacer.commit_present_tokens_for_planes(mixed, 2);
+        EXPECT(pacer.frames_in_flight() == 0);
+    }
+
+    // Dead-man release does not erase unrelated origins: with latency 1, the fallback token can flip out of order but
+    // the held event-2 wait stays held until the older token itself is presented.
+    {
+        ManualFrameClock clock;
+        FramePacer pacer(clock);
+        pacer.set_present_driven(true);
+        pacer.set_per_origin_pacing(true);
+        EXPECT(setup(pacer, 1));
+        std::uint64_t token1 = 0;
+        EXPECT(pacer.wait_frame_event(frame_event_origin, 0, 0, &token1) == pacer_hr::ok && token1 == 1);
+        pacer.commit_present_tokens_for_planes(&token1, 1);
+        clock.advance_us(period);
+        std::uint64_t token2 = 0;
+        EXPECT(pacer.wait_frame_event(frame_event_origin, infinite_timeout_ms, 0, &token2) == pacer_hr::ok && token2 == 2);
+        auto held_origin = wait_async(pacer, infinite_timeout_ms);
+        EXPECT(blocked(held_origin));
+        clock.advance_us(4 * period);  // the waiter dead-man releases a new origin, without forgetting token 2
+        const Result fallback = held_origin.get();
+        EXPECT(fallback.hr == pacer_hr::ok && fallback.token == 3);
+        EXPECT(pacer.present_clock_fallbacks() == 1 && pacer.frames_in_flight() == 2);
+        pacer.commit_present_tokens_for_planes(&fallback.token, 1);  // token 3 flips before token 2
+        EXPECT(pacer.flipped_token() == 3 && pacer.frames_in_flight() == 1);
+        auto held_flip = std::async(std::launch::async, [&pacer] { return pacer.wait_flip(infinite_timeout_ms); });
+        EXPECT(blocked_flip(held_flip));
+        pacer.commit_present_tokens_for_planes(&token2, 1);
+        EXPECT(held_flip.get() == pacer_hr::ok && pacer.frames_in_flight() == 0);
+    }
+
+    // The token queue and statistics ring share a 64-origin retention bound; overflow is counted and evicts the oldest
+    // unresolved origin rather than growing process memory without limit.
+    {
+        ManualFrameClock clock;
+        FramePacer pacer(clock);
+        pacer.set_present_driven(true);
+        pacer.set_per_origin_pacing(true);
+        EXPECT(setup(pacer, 1));
+        for (std::uint64_t expected = 1; expected <= 65; ++expected) {
+            std::uint64_t token = 0;
+            EXPECT(pacer.wait_frame_event(frame_event_origin, infinite_timeout_ms, 0, &token) == pacer_hr::ok &&
+                   token == expected);
+        }
+        EXPECT(pacer.frames_in_flight() == 64 && pacer.per_origin_queue_overflows() == 1);
     }
 
     // Real clock: five 10 ms vblanks take about 50 ms.

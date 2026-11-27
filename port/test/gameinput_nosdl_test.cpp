@@ -1,7 +1,7 @@
 // The always-built no-SDL GameInput backend (port/shims/gameinput_nosdl.h, docs/input_backend.md) without a controller
 // and without game data: the XInput-state to GameInput-pad mapping, the hot-plug poll and device pairing, the reading
-// stream, the keyboard/mouse-as-pad mapping with its own keys and cursor, the scripted first-run press schedule, and
-// the same over the v0 GameInput ABI through GameInputCreate with a fake XInput source.
+// stream, the keyboard/mouse-as-pad mapping with its own keys and cursor, the timed first-run script over the v0
+// GameInput ABI, and the same API exercised with a fake XInput source.
 #include "../shims/gameinput_nosdl.h"
 
 #include <cstdio>
@@ -59,6 +59,7 @@ void clear_sources() {
     g_focused = true;
     SetEnvironmentVariableA("PALMETTO_KEYBOARD_PAD", nullptr);
     SetEnvironmentVariableA("PALMETTO_FAKE_INPUT", nullptr);
+    SetEnvironmentVariableA("PALMETTO_FIRST_RUN_SCRIPT", nullptr);
     // The backend presents one neutral pad by default (docs/decomp_first_ui.md 12); the ABI tests that count devices
     // arm each source explicitly, so the shared reset removes the default pad first.
     SetEnvironmentVariableA("PALMETTO_PAD_PRESENT", "0");
@@ -326,6 +327,19 @@ int test_scripted_schedule() {
     ScriptedPresses immediate(0);
     CHECK(immediate.buttons_at(0) == PadA);
     CHECK(ScriptedPresses::parse("soon") == std::nullopt);
+
+    palmetto::FirstRunScriptRefusal refusal = palmetto::FirstRunScriptRefusal::None;
+    const auto first_run = ScriptedPresses::parse_first_run("0.5", &refusal);
+    CHECK(first_run.has_value() && first_run->first_run_mode() && first_run->presses() == 4);
+    CHECK(refusal == palmetto::FirstRunScriptRefusal::None);
+    CHECK(first_run->buttons_at(499'999) == 0);
+    CHECK(first_run->buttons_at(500'000) == PadA);
+    CHECK(first_run->buttons_at(750'000) == 0);
+    CHECK(first_run->buttons_at(1'000'000) == PadMenu);
+    CHECK(first_run->buttons_at(first_run->ends_at_us()) == 0);
+    CHECK(first_run->finished_at(first_run->ends_at_us()));
+    CHECK(!ScriptedPresses::parse_first_run("screen:logo", &refusal));
+    CHECK(refusal == palmetto::FirstRunScriptRefusal::SignatureFeedUnavailable);
     return 0;
 }
 
@@ -514,7 +528,72 @@ int test_scripted_over_abi() {
     return 0;
 }
 
-// ---- 9. the default paired pad and its fallback (docs/decomp_first_ui.md 12) ---------------------------------------
+// ---- 9. the bounded first-run script through GameInputCreate (GPU-free) ---------------------------------------------
+
+int test_first_run_script_over_abi() {
+    clear_sources();
+    SetEnvironmentVariableA("PALMETTO_FIRST_RUN_SCRIPT", "0.5");
+    detail::reset_for_test();
+    const uint64_t epoch = detail::now_us();
+    detail::state().epoch_us = epoch;
+    detail::poll_at(epoch);  // one paired scripted device, initially neutral
+    const auto poll_script_at = [](uint64_t elapsed_us) {
+        const uint64_t now = detail::now_us();
+        detail::state().epoch_us = now - elapsed_us;
+        detail::poll_at(now);  // use a monotone absolute clock; the ABI poll must not see a future fake timestamp
+    };
+
+    gi::IGameInput* input = nullptr;
+    CHECK(GameInputCreate(&input) == S_OK);
+    CallbackLog log;
+    gi::GameInputCallbackToken token = 0;
+    CHECK(input->RegisterDeviceCallback(nullptr, gi::GameInputKindGamepad, gi::GameInputDeviceAnyStatus,
+                                        gi::GameInputBlockingEnumeration, &log, &on_device, &token) == S_OK);
+    CHECK(log.devices.size() == 1 && log.devices[0] != nullptr);
+
+    gi::IGameInputReading* reading = nullptr;
+    gi::GameInputGamepadState state{};
+    // On failure, record the ABI result alongside the synthetic clock/schedule for expected-versus-actual diagnosis.
+    const auto check_buttons = [&](const char* point, uint32_t expected) {
+        const HRESULT hr = input->GetCurrentReading(gi::GameInputKindGamepad, log.devices[0], &reading);
+        const bool state_ok = hr == S_OK && reading && reading->GetGamepadState(&state);
+        const uint32_t actual = state.buttons;
+        const uint64_t timestamp = reading ? reading->GetTimestamp() : 0;
+        const Backend& b = detail::state();
+        const uint64_t elapsed = b.last_poll_us >= b.epoch_us ? b.last_poll_us - b.epoch_us : 0;
+        const auto step = b.scripted ? b.scripted->press_index_at(elapsed) : std::optional<unsigned>{};
+        const uint32_t scheduled = b.scripted ? b.scripted->buttons_at(elapsed) : 0;
+        const uint32_t pad = b.hub.slot(kScriptedSlot).pad.buttons;
+        if (hr != S_OK || !state_ok || actual != expected)
+            std::fprintf(stderr,
+                         "[first-run ABI] %s: hr=0x%08lx state_ok=%d expected=0x%08x actual=0x%08x "
+                         "reading_ts=%llu epoch=%llu poll=%llu elapsed=%llu step=%d scheduled=0x%08x pad=0x%08x\n",
+                         point, static_cast<unsigned long>(hr), state_ok ? 1 : 0, expected, actual,
+                         static_cast<unsigned long long>(timestamp), static_cast<unsigned long long>(b.epoch_us),
+                         static_cast<unsigned long long>(b.last_poll_us), static_cast<unsigned long long>(elapsed),
+                         step ? static_cast<int>(*step) : -1, scheduled, pad);
+        if (reading) reading->Release();
+        reading = nullptr;
+        return hr == S_OK && state_ok && actual == expected;
+    };
+    CHECK(check_buttons("initial neutral", 0));
+
+    poll_script_at(500'000);  // first held step: A
+    CHECK(check_buttons("A hold", gi::GameInputGamepadA));
+    poll_script_at(750'000);  // explicit release boundary
+    CHECK(check_buttons("release", 0));
+    poll_script_at(1'000'000);  // second held step: Menu
+    CHECK(check_buttons("Menu hold", gi::GameInputGamepadMenu));
+    poll_script_at(2'250'000);  // bounded sequence has ended neutral
+    CHECK(check_buttons("finished neutral", 0));
+
+    CHECK(input->UnregisterCallback(token, 0));
+    input->Release();
+    SetEnvironmentVariableA("PALMETTO_FIRST_RUN_SCRIPT", nullptr);
+    return 0;
+}
+
+// ---- 10. the default paired pad and its fallback (docs/decomp_first_ui.md 12) --------------------------------------
 //
 // A console boot always has a pad; the always-built backend now presents one neutral pad by default, so a title's
 // first-run code that reads a device finds one. PALMETTO_PAD_PRESENT=0 is the fallback (no device, the pre-default
@@ -555,6 +634,20 @@ int test_default_pad_presence() {
     CHECK(input->UnregisterCallback(token, 0));
     SetEnvironmentVariableA("PALMETTO_FAKE_INPUT", nullptr);
 
+    // A live screen trigger is named as unsupported until a presenter supplies measured signatures; refusal is neutral.
+    SetEnvironmentVariableA("PALMETTO_FIRST_RUN_SCRIPT", "screen:logo");
+    detail::reset_for_test();
+    detail::poll_at(2'500);
+    CallbackLog signature_log;
+    CHECK(input->RegisterDeviceCallback(nullptr, gi::GameInputKindGamepad, gi::GameInputDeviceAnyStatus,
+                                        gi::GameInputBlockingEnumeration, &signature_log, &on_device, &token) == S_OK);
+    CHECK(signature_log.devices.size() == 1);
+    CHECK(input->GetCurrentReading(gi::GameInputKindGamepad, signature_log.devices[0], &reading) == S_OK);
+    CHECK(reading->GetGamepadState(&state) && state.buttons == 0);
+    reading->Release();
+    CHECK(input->UnregisterCallback(token, 0));
+    SetEnvironmentVariableA("PALMETTO_FIRST_RUN_SCRIPT", nullptr);
+
     // Fallback: PALMETTO_PAD_PRESENT=0 removes the pad, so the title finds no device and no reading.
     SetEnvironmentVariableA("PALMETTO_PAD_PRESENT", "0");
     detail::reset_for_test();
@@ -583,6 +676,7 @@ int main() {
         {"active input record", test_active_input_feed},
         {"v0 ABI over a fake source", test_abi_over_fake_source},
         {"scripted pad over the ABI", test_scripted_over_abi},
+        {"timed first-run script over the ABI (GPU-free)", test_first_run_script_over_abi},
         {"default pad presence", test_default_pad_presence},
     };
     int failures = 0;

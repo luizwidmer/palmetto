@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <cstdint>
@@ -291,6 +292,8 @@ bool frame_matches(const Frame& frame, const Ref_plane* planes, int count, bool 
 }  // namespace
 
 int main() {
+    // Keep case markers visible if a GPU/driver wait hangs, even when stdout is redirected by the test runner.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     {
         // The measured second-plane rule (docs/peer_port_movie.md, item 6; port/src/plane_compose_rule.h): the pure
         // decision the present path applies when PALMETTO_PRESENT_PLANE_RULE=measured replaces the invented overlay flag.
@@ -927,7 +930,7 @@ int main() {
             rt::d3d12::XboxPresentation driven(std::move(frame_presenter), &frame_clock);
             palmetto::FramePacer& pacer = driven.pacer();
             pacer.set_present_driven(true);
-            EXPECT(pacer.present_driven());
+            EXPECT(pacer.present_driven() && !pacer.per_origin_pacing());
             EXPECT(SUCCEEDED(driven.SetFrameIntervalX(nullptr, period, 1, 0)));
             EXPECT(SUCCEEDED(driven.ScheduleFrameEventX(rt::d3d12::xbox_frame_event_origin, 0, 0)));
             Source driven_source;
@@ -975,6 +978,51 @@ int main() {
             EXPECT(driven.PresentX(1, &driven_p, nullptr) == S_OK);
             EXPECT(driven_flip.get() == S_OK);  // released exactly at that present
             EXPECT(pacer.flipped_token() == 2);
+
+            // Opt-in multi-origin GPU case: two different frame tokens occupy the two PresentX planes. The new path
+            // validates and commits each origin independently, composes both real textures, and reports each token's plane.
+            pacer.set_per_origin_pacing(true);
+            EXPECT(pacer.per_origin_pacing());
+            EXPECT(SUCCEEDED(driven.SetFrameIntervalX(nullptr, period, 2, 0)));
+            Source driven_overlay;
+            EXPECT(make_source(DXGI_FORMAT_R8G8B8A8_UNORM, driven_overlay));
+            const FLOAT driven_base_colour[4] = {0.2f, 0.6f, 0.9f, 1.0f};
+            const FLOAT driven_overlay_colour[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+            EXPECT(fill(driven_source, driven_base_colour) && fill(driven_overlay, driven_overlay_colour));
+            frame_clock.advance_us(period - period / 2);  // the interval is odd, so use its ceiling half to reach 2P
+            std::uint64_t origin3 = 0, origin4 = 0;
+            EXPECT(driven.WaitFrameEventX(rt::d3d12::xbox_frame_event_origin, 0xFFFFFFFFu, 0, &origin3) == S_OK &&
+                   origin3 == 3);
+            frame_clock.advance_us(period);
+            EXPECT(driven.WaitFrameEventX(rt::d3d12::xbox_frame_event_origin, 0xFFFFFFFFu, 0, &origin4) == S_OK &&
+                   origin4 == 4);
+            rt::d3d12::XboxPresentPlaneParameters per_origin_planes[2] = {
+                driven_plane(origin4), {origin3, 1, &driven_overlay.resource.p, nullptr, nullptr, 0}};
+            per_origin_planes[1].Flags = rt::d3d12::xbox_plane_flag_overlay;
+            EXPECT(pacer.frames_in_flight() == 2);
+            EXPECT(driven.PresentX(2, per_origin_planes, nullptr) == S_OK);
+            EXPECT(pacer.frames_in_flight() == 0 && pacer.flipped_token() == origin4);
+            UINT origin_stats_count = 2;
+            palmetto::FrameStatistic origin_stats[2];
+            EXPECT(driven.GetFrameStatisticsX(origin3, palmetto::stat_present | palmetto::stat_display,
+                                               &origin_stats_count, origin_stats) == S_OK &&
+                   origin_stats_count == 2 && origin_stats[0].plane_index == 1 && origin_stats[1].plane_index == 1);
+            origin_stats_count = 2;
+            EXPECT(driven.GetFrameStatisticsX(origin4, palmetto::stat_present | palmetto::stat_display,
+                                               &origin_stats_count, origin_stats) == S_OK &&
+                   origin_stats_count == 2 && origin_stats[0].plane_index == 0 && origin_stats[1].plane_index == 0);
+            const std::uint64_t presents_before_unknown = driven.presents();
+            auto unknown_origin = driven_plane(origin4 + 1);
+            EXPECT(driven.PresentX(1, &unknown_origin, nullptr) == E_INVALIDARG &&
+                   driven.presents() == presents_before_unknown);
+            Frame per_origin_frame;
+            EXPECT(driven.presenter().read_back(per_origin_frame.bytes, &per_origin_frame.extent,
+                                               &per_origin_frame.format) &&
+                   xbox_present_readback_size_matches(per_origin_frame.bytes.size(), per_origin_frame.extent.width,
+                                                     per_origin_frame.extent.height, want_w, want_h) &&
+                   region_is(per_origin_frame, 0, 0, want_w, want_h, Px{0, 255, 0}));
+            std::printf("present-driven/per-origin: mixed plane tokens accepted, independent origins committed, per-token plane "
+                        "statistics and GPU overlay pixels verified: ok\n");
             std::printf("present-driven clock: token 1 at once before any present, the present flips its token, the "
                         "zero-timeout origin poll times out, the event-2 flip wait is released at the present: ok\n");
             DestroyWindow(frame_window);
@@ -1161,7 +1209,8 @@ int main() {
         EXPECT(xbox.presenter().composed_presents() == composed_before);  // plane 1 without the overlay flag: not composed
         EXPECT(grab(frame));
         EXPECT(region_is(frame, 0, 0, width, height, {51, 153, 230}));  // plane 0 only, by the plain blit
-        // Planes with different tokens, or more than two planes, are refused.
+        // Legacy default: different plane tokens remain refused unless PALMETTO_PRESENT_PER_ORIGIN is explicitly enabled.
+        // More than two planes remain refused in both modes.
         EXPECT(next_token(token));
         two[0] = plane_of(rgba, token);
         two[1] = plane_of(second, token + 1);

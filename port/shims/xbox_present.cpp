@@ -48,6 +48,34 @@ bool pacing_trace() {
     return on;
 }
 
+// PALMETTO_PRESENT_PER_ORIGIN has a narrow parser so a typo cannot silently opt a boot into different token semantics.
+bool per_origin_option(bool driven) {
+    char value[32] = {};
+    std::size_t length = 0;
+    const errno_t env = getenv_s(&length, value, "PALMETTO_PRESENT_PER_ORIGIN");
+    if (env == ERANGE) {
+        std::fprintf(stderr,
+                     "[rt] present: PALMETTO_PRESENT_PER_ORIGIN is too long for on/off: per-origin pacing refused\n");
+        return false;
+    }
+    if (env != 0 || length <= 1) return false;
+    switch (palmetto::parse_present_per_origin_switch(value)) {
+        case palmetto::PresentPerOriginSwitch::off: return false;
+        case palmetto::PresentPerOriginSwitch::invalid:
+            std::fprintf(stderr,
+                         "[rt] present: PALMETTO_PRESENT_PER_ORIGIN has an unrecognized value (use on/1 or off/0): legacy pacing kept\n");
+            return false;
+        case palmetto::PresentPerOriginSwitch::on:
+            if (!driven) {
+                std::fprintf(stderr,
+                             "[rt] present: PALMETTO_PRESENT_PER_ORIGIN requires PALMETTO_PRESENT_DRIVEN=1: legacy pacing kept\n");
+                return false;
+            }
+            return true;
+    }
+    return false;
+}
+
 // The present side of PALMETTO_PRESENT_PACING: the token series and the cadence the pacer is following. The first eight
 // presents and then every thirtieth keep a boot's log small; the number is the present count, not the token.
 void trace_present_pacing(palmetto::FramePacer& pacer, std::uint64_t token) {
@@ -57,6 +85,16 @@ void trace_present_pacing(palmetto::FramePacer& pacer, std::uint64_t token) {
     const std::uint64_t n = presents.fetch_add(1, std::memory_order_relaxed) + 1;
     if (n > 8 && n % 30 != 0) return;
     const double at = std::chrono::duration<double>(std::chrono::steady_clock::now() - epoch).count();
+    if (pacer.per_origin_pacing()) {
+        std::fprintf(stderr,
+                     "[rt] present pacing: present %llu at %.3f s token 0x%llx mode present-driven-per-origin cadence %u us "
+                     "flipped 0x%llx fallbacks %llu origins %u queue-overflows %llu\n",
+                     static_cast<unsigned long long>(n), at, static_cast<unsigned long long>(token),
+                     pacer.display_cadence_us(), static_cast<unsigned long long>(pacer.flipped_token()),
+                     static_cast<unsigned long long>(pacer.present_clock_fallbacks()), pacer.frames_in_flight(),
+                     static_cast<unsigned long long>(pacer.per_origin_queue_overflows()));
+        return;
+    }
     std::fprintf(stderr,
                  "[rt] present pacing: present %llu at %.3f s token 0x%llx mode %s cadence %u us flipped 0x%llx "
                  "fallbacks %llu\n",
@@ -387,12 +425,18 @@ struct DeviceFrameClock {
             on = value[0] != '\0' && std::strcmp(value, "0") != 0;
             std::free(value);
         }
+        const bool per_origin = per_origin_option(on);
         if (on) {
             pacer->set_present_driven(true);
+            if (per_origin) pacer->set_per_origin_pacing(true);
             std::fprintf(stderr,
                          "[rt] present: PALMETTO_PRESENT_DRIVEN is set: device slots 78/79/80 are answered by the frame "
                          "pacer, a present marks its token flipped, and a wait held for an in-flight frame is released "
                          "at that present\n");
+            if (per_origin)
+                std::fprintf(stderr,
+                             "[rt] present: PALMETTO_PRESENT_PER_ORIGIN is enabled: each plane's token is tracked and flipped "
+                             "independently\n");
         }
     }
     std::unique_ptr<palmetto::SteadyFrameClock> clock;
@@ -574,20 +618,35 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
         return result;
     }
 
-    // All planes carry the token of one frame.
+    // Legacy mode keeps the measured single-token rule. The opt-in mode treats each plane's token as its own origin.
+    const bool per_origin = pacer_.per_origin_pacing();
     const std::uint64_t token = planes[0].Token;
-    for (UINT i = 0; i < plane_count; ++i) {
-        const XboxPresentPlaneParameters& plane = planes[i];
-        if (plane.Token != token || plane.ResourceCount == 0 || !plane.ppResources || !plane.ppResources[0])
-            return E_INVALIDARG;
-        // Both paths read ppResources[0] only: a plane with several resources would silently lose the others and could show
-        // the wrong frame, so it is refused (before anything is presented) until it is modelled. What the console does
-        // with ResourceCount above 1 (views? stereo?) is unmeasured.
-        if (plane.ResourceCount != 1) {
-            log_once(logged_resource_count_, "PresentX plane with ResourceCount other than 1: not implemented, refused");
-            return DXGI_ERROR_UNSUPPORTED;
+    if (!per_origin) {
+        // Keep the old validation sequence and outcomes intact when PALMETTO_PRESENT_PER_ORIGIN is off.
+        for (UINT i = 0; i < plane_count; ++i) {
+            const XboxPresentPlaneParameters& plane = planes[i];
+            if (plane.Token != token || plane.ResourceCount == 0 || !plane.ppResources || !plane.ppResources[0])
+                return E_INVALIDARG;
+            // Both paths read ppResources[0] only: a plane with several resources would silently lose the others and could show
+            // the wrong frame, so it is refused (before anything is presented) until it is modelled. What the console does
+            // with ResourceCount above 1 (views? stereo?) is unmeasured.
+            if (plane.ResourceCount != 1) {
+                log_once(logged_resource_count_, "PresentX plane with ResourceCount other than 1: not implemented, refused");
+                return DXGI_ERROR_UNSUPPORTED;
+            }
+        }
+    } else {
+        for (UINT i = 0; i < plane_count; ++i) {
+            const XboxPresentPlaneParameters& plane = planes[i];
+            if (plane.ResourceCount == 0 || !plane.ppResources || !plane.ppResources[0]) return E_INVALIDARG;
+            if (plane.ResourceCount != 1) {
+                log_once(logged_resource_count_, "PresentX plane with ResourceCount other than 1: not implemented, refused");
+                return DXGI_ERROR_UNSUPPORTED;
+            }
         }
     }
+    std::uint64_t plane_tokens[palmetto::max_present_planes]{};
+    for (UINT i = 0; i < plane_count; ++i) plane_tokens[i] = planes[i].Token;
     // PALMETTO_PRESENT_GEOMETRY=1: once, the plane words and the geometry the presenter acts on (docs/peer_port_first_ui.md
     // section 15). The swapchain extent is the window client area the swapchain was made for. Nothing is read or printed
     // when the switch is off.
@@ -600,25 +659,44 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
     // docs/peer_port_movie.md section 8: the sampled plane-word dump (PALMETTO_PRESENT_PLANE_DUMP=1), diagnostic only.
     dump_present_planes(plane_count, planes);
     FramePacer::TokenIssue issue{};
-    std::int32_t checked = pacer_.check_present_token(token, &issue);
+    std::int32_t checked = hr::ok;
     bool bridged = false;
-    if (checked == hr::invalid_arg) {
-        // The frame-token bridge (docs/present_wiring.md, the token rule). The runtime's device proxy answers
-        // WaitFrameEventX from its own counter (device slots 78/79/80 are not this class's yet), so the pacer below never
-        // issued the tokens the title presents and would refuse every frame. The device proxy reports each token it hands
-        // out through note_externally_issued_frame_token, and a reported token is accepted here. The override is only for
-        // the pacer's "never handed out" answer: tokens the pacer issued itself take the normal path unchanged, a report
-        // never makes an issued token stale/repeated (or the reverse), and a token past both counters was handed out by
-        // nobody and is still E_INVALIDARG. An externally issued token has no pacer Record, so present_timing below finds
-        // nothing for it (no ImmediateThresholdPercent tear) and GetFrameStatisticsX has no entry for it: the frame is
-        // still committed as a frame to show, at the next vblank. A missed report therefore leaves exactly the old
-        // refusal - the report has to happen before the token reaches the title's PresentX.
-        if (token <= externally_issued_frame_token()) {
-            checked = hr::ok;
-            bridged = true;
+    if (per_origin) {
+        bool have_issue = false;
+        for (UINT i = 0; i < plane_count; ++i) {
+            FramePacer::TokenIssue plane_issue{};
+            checked = pacer_.check_present_token_for_plane(plane_tokens[i], i, &plane_issue);
+            if (checked != hr::ok) {
+                if (checked == hr::invalid_arg)
+                    log_once(logged_per_origin_token_,
+                             "PALMETTO_PRESENT_PER_ORIGIN refused a plane token that the frame pacer never issued");
+                return from_pacer(checked);
+            }
+            if (!have_issue && plane_issue != FramePacer::TokenIssue::none) {
+                issue = plane_issue;
+                have_issue = true;
+            }
         }
+    } else {
+        checked = pacer_.check_present_token(token, &issue);
+        if (checked == hr::invalid_arg) {
+            // The frame-token bridge (docs/present_wiring.md, the token rule). The runtime's device proxy answers
+            // WaitFrameEventX from its own counter (device slots 78/79/80 are not this class's yet), so the pacer below never
+            // issued the tokens the title presents and would refuse every frame. The device proxy reports each token it hands
+            // out through note_externally_issued_frame_token, and a reported token is accepted here. The override is only for
+            // the pacer's "never handed out" answer: tokens the pacer issued itself take the normal path unchanged, a report
+            // never makes an issued token stale/repeated (or the reverse), and a token past both counters was handed out by
+            // nobody and is still E_INVALIDARG. An externally issued token has no pacer Record, so present_timing below finds
+            // nothing for it (no ImmediateThresholdPercent tear) and GetFrameStatisticsX has no entry for it: the frame is
+            // still committed as a frame to show, at the next vblank. A missed report therefore leaves exactly the old
+            // refusal - the report has to happen before the token reaches the title's PresentX.
+            if (token <= externally_issued_frame_token()) {
+                checked = hr::ok;
+                bridged = true;
+            }
+        }
+        if (checked != hr::ok) return from_pacer(checked);
     }
-    if (checked != hr::ok) return from_pacer(checked);
     if (bridged)
         log_once(logged_bridged_token_,
                  "PresentX with a frame token issued by the device proxy, not by the pacer (frame-token bridge): "
@@ -745,14 +823,22 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
         }
         bool tear = false;
         if (wants_tear && sync_interval > 0 && presenter_->tear_supported()) {
-            const FramePacer::PresentTiming timing = pacer_.present_timing(token);
+            const FramePacer::PresentTiming timing =
+                per_origin ? pacer_.present_timing_for_planes(plane_tokens, plane_count) : pacer_.present_timing(token);
             tear = palmetto::decide_present_sync(timing.late_us, timing.period_us, threshold) == palmetto::PresentSync::immediate;
         }
         const HRESULT result = presenter_->present_planes(composed, sync_interval, tear);
         if (FAILED(result)) return pacer_.suspended() ? from_pacer(hr::invalid_state) : result;
-        pacer_.commit_present_token(token, plane_count,
-                                    tear && presenter_->last_present_tore() ? palmetto::PresentSync::immediate
-                                                                            : palmetto::PresentSync::vblank);
+        const palmetto::PresentSync sync =
+            tear && presenter_->last_present_tore() ? palmetto::PresentSync::immediate : palmetto::PresentSync::vblank;
+        if (per_origin) {
+            pacer_.commit_present_tokens_for_planes(plane_tokens, plane_count, sync);
+            if (pacer_.per_origin_queue_overflows())
+                log_once(logged_per_origin_overflow_,
+                         "PALMETTO_PRESENT_PER_ORIGIN reached 64 unresolved origins; the oldest is no longer counted for latency");
+        } else {
+            pacer_.commit_present_token(token, plane_count, sync);
+        }
         ++presents_;
         trace_present_pacing(pacer_, token);
         return S_OK;
@@ -777,14 +863,21 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
     FramePacer::PresentTiming timing;
     bool tear = false;
     if (wants_tear && sync_interval > 0 && presenter_->tear_supported()) {
-        timing = pacer_.present_timing(token);
+        timing = per_origin ? pacer_.present_timing_for_planes(plane_tokens, plane_count) : pacer_.present_timing(token);
         tear = palmetto::decide_present_sync(timing.late_us, timing.period_us, threshold) == palmetto::PresentSync::immediate;
     }
     const HRESULT result = presenter_->present(resource, sync_interval, rect, tear);
     if (FAILED(result)) return pacer_.suspended() ? from_pacer(hr::invalid_state) : result;
-    pacer_.commit_present_token(token, plane_count,
-                                tear && presenter_->last_present_tore() ? palmetto::PresentSync::immediate
-                                                                        : palmetto::PresentSync::vblank);
+    const palmetto::PresentSync sync =
+        tear && presenter_->last_present_tore() ? palmetto::PresentSync::immediate : palmetto::PresentSync::vblank;
+    if (per_origin) {
+        pacer_.commit_present_tokens_for_planes(plane_tokens, plane_count, sync);
+        if (pacer_.per_origin_queue_overflows())
+            log_once(logged_per_origin_overflow_,
+                     "PALMETTO_PRESENT_PER_ORIGIN reached 64 unresolved origins; the oldest is no longer counted for latency");
+    } else {
+        pacer_.commit_present_token(token, plane_count, sync);
+    }
     ++presents_;
     trace_present_pacing(pacer_, token);
     return S_OK;

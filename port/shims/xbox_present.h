@@ -257,7 +257,7 @@ private:
     bool worker_stop_ = false;
     std::thread display_white_thread_;
     bool logged_null_token_ = false, logged_stale_token_ = false, logged_repeated_token_ = false,
-         logged_bridged_token_ = false;
+         logged_bridged_token_ = false, logged_per_origin_token_ = false, logged_per_origin_overflow_ = false;
 };
 #endif  // PALMETTO_XBOX_PRESENT_HOOK_ONLY
 
@@ -363,7 +363,9 @@ using XboxPresentTokenIssuedCall = void(WINAPI*)(std::uint64_t token);
 // frame token flipped (frame_pacer.h, "Present-driven"). The device proxy calls these through the registered record;
 // `enabled` false means the proxy keeps its own immediate-token answer, byte for byte the behaviour without the
 // switch. The wait may block (that is the point: a held wait is released at the present that flips a frame); the
-// proxy falls back to its own token on any failure, so a failure here cannot wedge a boot.
+// proxy falls back to its own token on any failure, so a failure here cannot wedge a boot. The separate, default-off
+// PALMETTO_PRESENT_PER_ORIGIN switch is accepted only with PALMETTO_PRESENT_DRIVEN=1; it permits independent tokens on
+// the at-most-two PresentX planes and records each token's last plane without changing the legacy path when unset.
 using XboxFrameEventEnabledCall = BOOL(WINAPI*)();
 using XboxFrameEventSetIntervalCall = HRESULT(WINAPI*)(std::uint32_t interval_us, std::uint32_t latency,
                                                       std::uint32_t flags);

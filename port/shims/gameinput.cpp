@@ -884,6 +884,7 @@ struct State {
     std::vector<Event> queue;
     GameInputCallbackToken next_token = 1;
     uint64_t last_order = 0;  // Reading::order of the newest reading
+    uint64_t epoch_us = 0;    // backend-initialization clock epoch for opt-in timed input
     int dispatchers = 0;
     HANDLE wait_event = nullptr;  // auto-reset, signalled when a dispatcher has work
     rt::gameinput::Config config;
@@ -1958,12 +1959,12 @@ void update_keyboard_pad() {
 // ---- synthetic input (PALMETTO_FAKE_INPUT) ----------------------------------------------------------------------
 //
 // The loading-gate experiment (docs/input_gate.md): the title is stuck in a loading state, and one hypothesis is that
-// it waits for a button. With PALMETTO_FAKE_INPUT=<seconds> the shim attaches one extra SDL virtual gamepad - the
-// title needs a device to read at all - and holds that pad's A button (the conventional accept/start button) for a
-// short burst after <seconds>, a few times. The schedule is palmetto::FakeInputSchedule (src/fake_input.h).
+// it waits for a button. PALMETTO_FAKE_INPUT=<seconds> is the existing diagnostic schedule; the separate
+// PALMETTO_FIRST_RUN_SCRIPT=<seconds> below is the bounded measured-window script in src/fake_input.h. Both are
+// opt-in, and the signature-trigger form is refused until the presenter provides measured frames.
 //
-// Default OFF: no pad, no timers, nothing changes. The pad stays attached after the last press, so an armed-far-off
-// control run and a press run differ only in the press itself.
+// With both switches unset, this path attaches no synthetic pad, starts no new timer and changes no input snapshot. A
+// scripted pad stays attached neutral after its final press.
 struct FakePad {
     SDL_JoystickID id = 0;
     SDL_Joystick* js = nullptr;
@@ -2053,6 +2054,110 @@ void update_fake_pad() {
     }
 }
 
+// The separate first-run script keeps the legacy PALMETTO_FAKE_INPUT source untouched. Its clock is the SDL backend
+// epoch, captured at the first GameInputCreate/config initialization, rather than the time this virtual pad attaches.
+struct FirstRunPad {
+    SDL_JoystickID id = 0;
+    SDL_Joystick* js = nullptr;
+    bool failed = false;
+    bool finished = false;
+    uint32_t buttons = 0;
+};
+FirstRunPad g_first_run;
+
+std::optional<palmetto::FirstRunInputScript> read_first_run_input_config() {
+    char buf[64];
+    const DWORD n = GetEnvironmentVariableA("PALMETTO_FIRST_RUN_SCRIPT", buf, sizeof buf);
+    if (n == 0) return std::nullopt;
+    if (n >= sizeof buf) {
+        std::fprintf(stderr, "[rt] gameinput: PALMETTO_FIRST_RUN_SCRIPT refused: %s\n",
+                     palmetto::first_run_script_refusal_name(palmetto::FirstRunScriptRefusal::TooLong));
+        return std::nullopt;
+    }
+    const std::string text(buf, n);
+    if (text.empty() || text == "off") return std::nullopt;
+    char legacy[64];
+    const DWORD legacy_n = GetEnvironmentVariableA("PALMETTO_FAKE_INPUT", legacy, sizeof legacy);
+    if (legacy_n > 0 && (legacy_n >= sizeof legacy || std::string(legacy, legacy_n) != "off")) {
+        std::fprintf(stderr, "[rt] gameinput: PALMETTO_FIRST_RUN_SCRIPT refused: %s; no second script pad attached\n",
+                     palmetto::first_run_script_refusal_name(palmetto::FirstRunScriptRefusal::LegacyScheduleConflict));
+        return std::nullopt;
+    }
+    palmetto::FirstRunScriptRefusal refusal = palmetto::FirstRunScriptRefusal::None;
+    const auto script = palmetto::FirstRunInputScript::parse(text.c_str(), &refusal);
+    if (!script) {
+        std::fprintf(stderr, "[rt] gameinput: PALMETTO_FIRST_RUN_SCRIPT=%s refused: %s\n", text.c_str(),
+                     palmetto::first_run_script_refusal_name(refusal));
+        return std::nullopt;
+    }
+    std::fprintf(stderr,
+                 "[rt] gameinput: first-run script: %u A/Menu steps, %llu ms held, %llu ms interval, "
+                 "first at %.3f s from the GameInput epoch, ending at %.3f s\n",
+                 script->presses(), static_cast<unsigned long long>(palmetto::FirstRunInputScript::kHoldUs / 1000),
+                 static_cast<unsigned long long>(palmetto::FirstRunInputScript::kIntervalUs / 1000),
+                 script->first_press_us() / 1e6, script->ends_at_us() / 1e6);
+    return script;
+}
+
+const std::optional<palmetto::FirstRunInputScript>& first_run_input_config() {
+    static const std::optional<palmetto::FirstRunInputScript> script = read_first_run_input_config();
+    return script;
+}
+
+bool attach_first_run_pad() {
+    SDL_VirtualJoystickDesc d;
+    SDL_INIT_INTERFACE(&d);
+    d.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+    d.naxes = SDL_GAMEPAD_AXIS_COUNT;
+    d.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+    d.button_mask = (1u << SDL_GAMEPAD_BUTTON_COUNT) - 1;
+    d.axis_mask = (1u << SDL_GAMEPAD_AXIS_COUNT) - 1;
+    d.name = "Synthetic pad (Palmetto first-run script)";
+    g_first_run.id = SDL_AttachVirtualJoystick(&d);
+    g_first_run.js = g_first_run.id ? SDL_OpenJoystick(g_first_run.id) : nullptr;
+    if (!g_first_run.js) {
+        std::fprintf(stderr, "[rt] gameinput: cannot attach the first-run script pad: %s\n", SDL_GetError());
+        if (g_first_run.id) SDL_DetachVirtualJoystick(g_first_run.id);
+        g_first_run.id = 0;
+        g_first_run.failed = true;
+        return false;
+    }
+    std::fprintf(stderr, "[rt] gameinput: first-run script pad attached (A released)\n");
+    return true;
+}
+
+// Before SDL_UpdateGamepads, so both button edges enter the same reading snapshot. It emits only the fixed, bounded
+// sequence from FirstRunInputScript; without its switch this function attaches no device and changes no pad state.
+void update_first_run_pad() {
+    const auto& script = first_run_input_config();
+    if (!script) return;
+    if (!g_first_run.js && (g_first_run.failed || !attach_first_run_pad())) return;
+    if (g_first_run.finished) return;
+    SDL_SetJoystickVirtualAxis(g_first_run.js, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, -32768);
+    SDL_SetJoystickVirtualAxis(g_first_run.js, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, -32768);
+    const uint64_t now = now_us();
+    const uint64_t epoch = g().epoch_us;
+    const uint64_t elapsed = now >= epoch ? now - epoch : 0;
+    const uint32_t buttons = script->buttons_at(elapsed);
+    if (buttons != g_first_run.buttons) {
+        g_first_run.buttons = buttons;
+        SDL_SetJoystickVirtualButton(g_first_run.js, SDL_GAMEPAD_BUTTON_SOUTH,
+                                     (buttons & palmetto::FirstRunInputScript::kButtonA) != 0);
+        SDL_SetJoystickVirtualButton(g_first_run.js, SDL_GAMEPAD_BUTTON_START,
+                                     (buttons & palmetto::FirstRunInputScript::kButtonMenu) != 0);
+        const auto step = script->step_at(elapsed);
+        if (step)
+            std::fprintf(stderr, "[rt] gameinput: first-run script step %u pressed mask 0x%x at %.3f s\n", *step + 1,
+                         buttons, elapsed / 1e6);
+        else
+            std::fprintf(stderr, "[rt] gameinput: first-run script released at %.3f s\n", elapsed / 1e6);
+    }
+    if (script->finished_at(elapsed)) {
+        g_first_run.finished = true;
+        std::fprintf(stderr, "[rt] gameinput: first-run script finished; the pad stays attached neutral\n");
+    }
+}
+
 bool init_sdl() {
     State& s = g();
     if (s.sdl_ready) return true;
@@ -2085,6 +2190,7 @@ void poll_once() {
     apply_prompt_config();
     update_keyboard_pad();
     update_fake_pad();
+    update_first_run_pad();
     SDL_UpdateGamepads();
     const uint64_t now = now_us();
 
@@ -2181,6 +2287,7 @@ void ensure_started() {
         s.config_read = true;
         s.wait_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     }
+    if (!s.epoch_us) s.epoch_us = now_us();
     if (s.config.background_thread && !s.thread_started) {
         s.thread_started = true;
         std::thread(poll_thread).detach();

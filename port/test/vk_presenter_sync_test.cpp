@@ -350,18 +350,24 @@ int main() {
         // 2b. A Present behind held work shows what that work draws (queue_holds.h). The render waits for a gate with
         //     no submitted Signal, so the queue holds it; the presents are queued behind it instead of blitting the
         //     back buffers as they were. Three presents queue up and keep their order: a blit, a blank one (reads
-        //     nothing) and a composed one (present_planes), whose frame is the last one shown, so a reordering
+        //     nothing) and a composed two-plane origin pair (present_planes), whose frame is the last one shown, so a reordering
         //     would end on the black frame.
         {
             VulkanFence gate(context, 0);
             EXPECT(gate.semaphore() != VK_NULL_HANDLE);
             const VkImage plane_img = d.image(VK_FORMAT_R8G8B8A8_UNORM, 32, 32, 1,
                                               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-            EXPECT(plane_img != VK_NULL_HANDLE);
+            const VkImage second_plane_img = d.image(VK_FORMAT_R8G8B8A8_UNORM, 32, 32, 1,
+                                                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+            EXPECT(plane_img != VK_NULL_HANDLE && second_plane_img != VK_NULL_HANDLE);
             ResourceBinding plane_rb = side_rb;
             plane_rb.image = plane_img;
             plane_rb.sampled = true;
             context.add_resource(2, plane_rb, VK_IMAGE_LAYOUT_UNDEFINED);
+            ResourceBinding second_plane_rb = side_rb;
+            second_plane_rb.image = second_plane_img;
+            second_plane_rb.sampled = true;
+            context.add_resource(4, second_plane_rb, VK_IMAGE_LAYOUT_UNDEFINED);
             CommandList red;
             EXPECT(red.transition({1, 0, d3d12_state::common, d3d12_state::render_target}));
             EXPECT(red.clear_render_target({1, 0, 0, 1}, {0.9f, 0.1f, 0.2f, 1.0f}));
@@ -369,6 +375,9 @@ int main() {
             EXPECT(red.transition({2, 0, d3d12_state::common, d3d12_state::render_target}));
             EXPECT(red.clear_render_target({2, 0, 0, 1}, {0.2f, 0.8f, 0.4f, 1.0f}));
             EXPECT(red.transition({2, 0, d3d12_state::render_target, d3d12_state::pixel_shader_resource}));
+            EXPECT(red.transition({4, 0, d3d12_state::common, d3d12_state::render_target}));
+            EXPECT(red.clear_render_target({4, 0, 0, 1}, {0.1f, 0.4f, 0.9f, 1.0f}));
+            EXPECT(red.transition({4, 0, d3d12_state::render_target, d3d12_state::pixel_shader_resource}));
             EXPECT(red.close());
             const CommandList* ptr = &red;
             queue.wait(gate.semaphore(), 1);
@@ -385,8 +394,9 @@ int main() {
             };
             const std::uint64_t shown = presenter.presented();
             PresentPlanes planes;
-            planes.count = 1;
+            planes.count = 2;
             planes.plane[0].source = 2;
+            planes.plane[1].source = 4;
             EXPECT(presenter.present(1, true) == VK_SUCCESS);            // queued: returns at once
             EXPECT(presenter.present_blank(true) == VK_SUCCESS);         // queued behind the one before it
             EXPECT(presenter.present_planes(planes, true) == VK_SUCCESS);
@@ -395,13 +405,14 @@ int main() {
             EXPECT(gate.signal(1));   // releases the render, then the presents, in order, on this thread
             EXPECT(queue.idle());
             EXPECT(presenter.presented() == shown + 3 && presenter.composed_presents() >= 1);
-            // The composed frame (0.2, 0.8, 0.4 in the plane) is the last one shown; a blank last would be black.
-            EXPECT(capture_matches({51, 204, 102}, 12));
+            // The distinct second plane (0.1, 0.4, 0.9) is opaque and covers plane 0; this composition is last, not black.
+            EXPECT(capture_matches({26, 102, 230}, 12));
             // The blit alone, with nothing held, is the plain path again and shows the red the render drew.
             EXPECT(presenter.present(1, true) == VK_SUCCESS);
             EXPECT(capture_matches({230, 26, 51}, 2));
-            std::printf("presenter sync: three Presents queued behind held work ran in order\n");
+            std::printf("presenter sync: multi-plane Present queued behind held work ran in order\n");
             context.remove_resource(2);
+            context.remove_resource(4);
         }
 
         // 2c. A queue destroyed with held work lets the Presents queued behind it run (the work is dropped).
