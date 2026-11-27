@@ -28,10 +28,10 @@ DIR/library.json gets the header, both pipeline tables (stage -> program name) a
 are named lib_<stage>_<index>. The output is game data and must stay in the user's work folder.
 
 --wanted adds the programs a list of hashes names to the selection, whatever --stages says: LIST.json is
-{"ps": ["<sha256>", ...], "vs": ["<sha256>", ...]}, each hash the SHA-256 of a program's bytes as stored (the
-fspx_code_sha256 key of the index); a key whose value is not a list is a note and is ignored. DIR/wanted.json then
-records how many hashes each stage wanted and got, and the ones the library does not hold. The list is data and stays
-outside the repository.
+{"ps": ["<sha256>", ...], "vs": ["<sha256>", ...], "ms": ["<sha256>", ...]}, each hash the SHA-256 of a
+program's bytes as stored (the fspx_code_sha256 key of the index); a key whose value is not a list is a note and is
+ignored. DIR/wanted.json then records how many hashes each stage wanted and got, and the ones the library does not hold.
+The list is data and stays outside the repository.
 """
 import argparse
 import hashlib
@@ -229,7 +229,7 @@ def carve_digests(folder: str, errors=None) -> dict:
 
 
 def load_wanted(path: str) -> dict:
-    """A wanted list as {stage: set(sha256)}: JSON {"ps": [hash, ...], "vs": [hash, ...]}.
+    """A wanted list as {stage: set(sha256)}: JSON {"ps": [hash, ...], "vs": [hash, ...], "ms": [hash, ...]}.
 
     The stages are the list's own keys, not the library's: a hash listed under a stage the library gives the program
     another stage for is a mismatch the caller reports rather than one to publish. A key whose value is not a list is
@@ -335,7 +335,7 @@ def main(argv=None) -> int:
     ap.add_argument("--carve", help="a tooling/shader_carve.py output folder: name each program's source shader by the "
                                     "digest its resource-layout blob ends with (the container's HASH part), and "
                                     "copy that container to <name>.dxbc for the translator's signature reads")
-    ap.add_argument("--wanted", help="JSON list of SHA-256 hashes ({'ps': [...], 'vs': [...]}): also write the "
+    ap.add_argument("--wanted", help="JSON list of SHA-256 hashes ({'ps': [...], 'vs': [...], 'ms': [...]}): also write the "
                                      "library programs whose bytes have those hashes, whatever --stages selects "
                                      "(the extraction then records the outcome in <out>/wanted.json)")
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2),

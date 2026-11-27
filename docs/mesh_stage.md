@@ -408,3 +408,50 @@ and writes selected programs as `fspx/<name>.code` sidecars ([`shader_library.py
 387–424). In that extraction context, the FSPX code-hash branch is applicable when no FSSM sidecar is present. Thus
 historical FSSM-keyed mesh corpus rows and selected native library MS programs are different populations; §8.5's falsifier
 is the applicable test for a real resolver publication.
+
+## 10. Publisher audit delta: all-refused MS selection
+
+### 10.1. Recount and reason for the empty MS request list
+
+A metadata-only recount of the external library table summary confirms **7,498 unique native MS programs** across
+12,062 slot-2 references (10,726 PS+MS records and 1,336 MS-only records). The current external graphics selection still
+contains 947 PS + 319 VS hashes and **0 MS hashes**; its extraction and translation indexes contain 1,266 PS/VS rows,
+and the runtime FSPX index has 1,896 rows but no MS row. This is not an empty native library. The list is the measured
+slot-57 request union: the sampled boot's 10,241 distinct records were all vertex-family and named no slot 2 (§§2.6,
+8.5), so the union has no measured MS hash to select. No real hash or shader code was copied here.
+
+### 10.2. Selection to resolver key
+
+The opt-in is a non-empty `ms` array in the external `PALMETTO_GRAPHICS_PROGRAMS` JSON; omission or an empty list keeps
+`ps,vs` settings and ownership. `graphics_shaders()` passes that wanted list to `shader_library.py --stages none
+--wanted`; the extractor matches SHA-256 of each native program's code bytes, checks that the library assigns it to `ms`,
+and writes its `lib_ms_*` code sidecar plus an extraction row with `stage: ms`. `rdna2spirv.py` reads that row's stage;
+with no FSSM sidecar, `shader_meta.collect()` hashes the `.code` sidecar as `fspx_code_sha256`. The graphics publisher
+merges that `stage: ms` row and module into the runtime-read FSPX index. Synthetic tests exercise wanted-hash extraction,
+verify the code hash and MS stage become the resolver row, and drive `build_port.py`'s opt-in MS selection into the FSPX
+merge.
+
+### 10.3. Edge found and fixed
+
+`translate()` fails closed when a fresh translation produces zero modules. In the opt-in MS path, the graphics caller now
+requests the translator's per-program refusal report; when it names every extracted program with a non-empty reason, the
+caller removes stale rows/modules for only the selected prefixes and then preserves the original failure. This prevents a
+previously published `lib_ms_*` module from staying resolvable after an all-refused MS attempt. A readable cached empty
+index is also accepted only by the graphics publisher: `merge_library_corpus()` prunes the selected owned prefixes and
+leaves other prefixes untouched, while the reuse check rejects stale rows under those prefixes before deciding the corpus
+is current. The synthetic regression covers both the fresh all-refused failure-and-prune path and a cached empty-index
+reuse; each removes stale MS rows/modules while preserving CS, PS and VS module bytes. Existing PS/VS-only tests still
+assert byte-identical FSPX index and module bytes, including when an older MS row is present.
+
+### 10.4. Validation boundary and exact falsifier
+
+Commands: `python -I tests/test_build_port_graphics_publication.py` (6 tests),
+`python -I tests/test_shader_library.py` (14 tests), and `python -I tests/test_build_port_library_coverage.py` (7 tests); all
+27 passed with synthetic test data only. No shader/game bytes were added, no Palmetto build or title boot was run, and
+this does not claim a real MS module translated or resolved.
+
+**Exact real-resolver falsifier:** a non-empty external `ms` hash must match a measured slot-2 program in the library;
+extraction must report that hash found for `ms`; translation must emit `stage: ms` with the same
+`fspx_code_sha256` and an `.spv`; and the merge must publish both under the runtime-read FSPX index/module directory. A
+non-empty list, an FSSM-only row, or this synthetic test alone does not satisfy the falsifier. Until that measurement is
+made, the real boot still has 0 MS request hashes and 0 MS resolver keys.

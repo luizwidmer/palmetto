@@ -84,9 +84,11 @@ class GraphicsPublicationTests(unittest.TestCase):
             with open(os.path.join(self.fspx, name + ".spv"), "wb") as f:
                 f.write(("published-" + name).encode("ascii"))
 
-    def seed_cached_selection(self, stages):
+    def seed_cached_selection(self, stages, *, refused=()):
         """Create synthetic extraction/translation cache entries so graphics_shaders exercises publication only."""
         names = [self.names[stage] for stage in stages]
+        refused = sorted(refused)
+        translated_stages = [(stage, name) for stage, name in zip(stages, names) if name not in refused]
         os.makedirs(os.path.join(self.extracted, "fspx"), exist_ok=True)
         os.makedirs(os.path.join(self.extracted, "disasm"), exist_ok=True)
         write_json(os.path.join(self.extracted, "index.json"), [{"file": name + ".dxbc"} for name in names])
@@ -114,14 +116,15 @@ class GraphicsPublicationTests(unittest.TestCase):
         os.makedirs(self.staged, exist_ok=True)
         translated = {
             self.names[stage]: {"stage": stage, "fspx_code_sha256": self.hashes[stage]}
-            for stage in stages
+            for stage, name in translated_stages
         }
         write_json(os.path.join(self.staged, "index.json"), translated)
-        for name in names:
+        for _, name in translated_stages:
             with open(os.path.join(self.staged, name + ".spv"), "wb") as f:
                 f.write(("synthetic-spirv-" + name).encode("ascii"))
         settings = build_port.graphics_settings(package, "llvm-test", False, (), self.wanted, stage_text)
-        write_json(os.path.join(self.staged, build_port.GRAPHICS_BUILD_RECORD), {"settings": settings, "refused": []})
+        write_json(os.path.join(self.staged, build_port.GRAPHICS_BUILD_RECORD),
+                   {"settings": settings, "refused": refused})
 
     def run_cached_publisher(self):
         with mock.patch.dict(os.environ, {build_port.GRAPHICS_PROGRAMS_ENV: self.wanted}), \
@@ -190,6 +193,101 @@ class GraphicsPublicationTests(unittest.TestCase):
         self.assertIn(self.names["vs"], published)
         self.assertNotIn(self.names["old_ms"], published)
         self.assertFalse(os.path.exists(os.path.join(self.fspx, self.names["old_ms"] + ".spv")))
+
+    def test_ms_selection_is_passed_to_extractor_and_published(self):
+        self.write_selection(("ms",))
+        self.seed_published(include_ms=True)
+        name = self.names["ms"]
+        code = b"synthetic-ms"
+        captured = {}
+
+        def extract(script, *args):
+            self.assertEqual(script, "shader_library.py")
+            captured["args"] = args
+            self.assertEqual(args[args.index("--stages") + 1], "none")
+            self.assertEqual(args[args.index("--wanted") + 1], self.wanted)
+            os.makedirs(os.path.join(self.extracted, "fspx"), exist_ok=True)
+            os.makedirs(os.path.join(self.extracted, "disasm"), exist_ok=True)
+            write_json(os.path.join(self.extracted, "index.json"), [{"file": name + ".dxbc", "stage": "ms"}])
+            write_json(os.path.join(self.extracted, "wanted.json"), {
+                "wanted": {"ms": 1}, "found": {"ms": 1}, "missing": {"ms": []}, "other_stage": {"ms": []},
+            })
+            with open(os.path.join(self.extracted, "fspx", name + ".code"), "wb") as f:
+                f.write(code)
+            write_json(os.path.join(self.extracted, "fspx", name + ".json"), {})
+            with open(os.path.join(self.extracted, "disasm", name + ".s"), "w", encoding="utf-8",
+                      newline="\n") as f:
+                f.write("synthetic listing\n")
+
+        def translate(_disasm, staged, *_args, **_kwargs):
+            write_json(os.path.join(staged, "index.json"), {
+                name: {"stage": "ms", "fspx_code_sha256": self.hashes["ms"]},
+            })
+            with open(os.path.join(staged, name + ".spv"), "wb") as f:
+                f.write(b"synthetic-ms-spirv")
+
+        with mock.patch.dict(os.environ, {build_port.GRAPHICS_PROGRAMS_ENV: self.wanted}), \
+                mock.patch.object(build_port, "log"), \
+                mock.patch.object(build_port, "py", side_effect=extract) as extract_call, \
+                mock.patch.object(build_port, "translate", side_effect=translate):
+            build_port.graphics_shaders(self.game, self.work, "llvm-test")
+
+        self.assertEqual(extract_call.call_args.args[0], "shader_library.py")
+        self.assertIn("--wanted", captured["args"])
+        self.assertIn("--stages", captured["args"])
+        self.assertEqual(build_port.graphics_requested_stages(self.wanted), "ms")
+        with open(os.path.join(self.fspx, "index.json"), encoding="utf-8") as f:
+            published = json.load(f)
+        self.assertEqual(published[name], {"stage": "ms", "fspx_code_sha256": self.hashes["ms"]})
+        self.assertEqual(read_bytes(os.path.join(self.fspx, name + ".spv")), b"synthetic-ms-spirv")
+        self.assertNotIn(self.names["old_ms"], published)
+        for unselected in (self.names["cs"], self.names["ps"], self.names["vs"]):
+            self.assertIn(unselected, published)
+
+    def test_refused_ms_translation_prunes_stale_prefix_on_fresh_and_cached_runs(self):
+        self.write_selection(("ms",))
+        self.seed_published(include_ms=True)
+        index_path = os.path.join(self.fspx, "index.json")
+
+        def add_stale_selected_ms():
+            with open(index_path, encoding="utf-8") as f:
+                published = json.load(f)
+            published[self.names["ms"]] = {"stage": "ms", "fspx_code_sha256": self.hashes["ms"]}
+            write_json(index_path, published)
+            with open(os.path.join(self.fspx, self.names["ms"] + ".spv"), "wb") as f:
+                f.write(b"stale-selected-ms-module")
+
+        def assert_only_unselected_stages_remain():
+            with open(index_path, encoding="utf-8") as f:
+                published = json.load(f)
+            self.assertEqual(set(published), {self.names["cs"], self.names["ps"], self.names["vs"]})
+            for name in (self.names["cs"], self.names["ps"], self.names["vs"]):
+                self.assertEqual(read_bytes(os.path.join(self.fspx, name + ".spv")),
+                                 ("published-" + name).encode("ascii"))
+            for name in (self.names["ms"], self.names["old_ms"]):
+                self.assertFalse(os.path.exists(os.path.join(self.fspx, name + ".spv")))
+
+        add_stale_selected_ms()
+        self.seed_cached_selection(("ms",), refused=(self.names["ms"],))
+        # Force the first call down the translation path; the synthetic translator refuses the selected program.
+        os.unlink(os.path.join(self.staged, build_port.GRAPHICS_BUILD_RECORD))
+
+        def refuse_all(_disasm, staged, *_args, **_kwargs):
+            write_json(os.path.join(staged, build_port.GRAPHICS_REFUSALS + ".part0.json"), {
+                self.names["ms"]: "synthetic refusal",
+            })
+            raise SystemExit(1)  # translate() keeps its zero-output fail-closed rule
+
+        with mock.patch.object(build_port, "translate", side_effect=refuse_all):
+            with self.assertRaises(SystemExit):
+                self.run_cached_publisher()
+        assert_only_unselected_stages_remain()
+
+        # A cached empty result (e.g. created by an earlier publisher version) must also repair stale selected rows.
+        add_stale_selected_ms()
+        self.seed_cached_selection(("ms",), refused=(self.names["ms"],))
+        self.run_cached_publisher()
+        assert_only_unselected_stages_remain()
 
     def test_empty_ms_list_keeps_default_publication_byte_identical(self):
         # The input order is intentionally non-canonical, but an empty MS list is not opt-in.

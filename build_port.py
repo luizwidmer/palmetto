@@ -1420,6 +1420,14 @@ def refusal_reasons(path: str) -> "dict[str, str]":
     return {name: reason for name, reason in data.items() if isinstance(name, str) and isinstance(reason, str)}
 
 
+def refusal_reasons_with_parts(path: str) -> "dict[str, str]":
+    """The merged refusal report plus any translator shard reports left by an all-refused merge."""
+    reasons = refusal_reasons(path)
+    for part in sorted(glob.glob(path + ".part*.json")):
+        reasons.update(refusal_reasons(part))
+    return reasons
+
+
 def fspx_coverage(unpacked: str, spirv: str) -> "dict | None":
     """What the FSPX step covers: every upscaler program the unpack found, whether its module was translated, why a
     refused one was refused, and a one-line summary; written to <unpacked>/coverage.json and printed. None when the
@@ -1822,14 +1830,18 @@ def library_extraction_ok(extracted: str, settings: str) -> "list[str] | None":
     return library_extraction_complete(extracted)
 
 
-def library_translated(staged: str) -> "dict | None":
-    """The translated entries when the staged translation is complete: its index, and every module beside it."""
+def library_translated(staged: str, *, allow_empty: bool = False) -> "dict | None":
+    """The translated entries when the staged translation is complete: its index, and every module beside it.
+
+    An empty index is valid only for a graphics selection whose every program was refused; compute translations still
+    require at least one entry. The caller opts into that empty shape explicitly.
+    """
     try:
         with open(os.path.join(staged, "index.json"), encoding="utf-8") as f:
             index = json.load(f)
     except (OSError, ValueError):
         return None
-    if not isinstance(index, dict) or not index:
+    if not isinstance(index, dict) or (not index and not allow_empty):
         return None
     if not all(os.path.isfile(os.path.join(staged, name + ".spv")) for name in index):
         return None
@@ -1843,8 +1855,8 @@ def library_translation_reusable(staged: str, settings: str) -> "dict | None":
     return library_translated(staged)
 
 
-def library_merged(staged: str, fspx: str, index: dict) -> bool:
-    """Whether every staged entry and module is published where the runtime reads it (merge_library_corpus)."""
+def library_merged(staged: str, fspx: str, index: dict, owned: tuple = ("lib_",)) -> bool:
+    """Whether the selected entries/modules are published and no stale owned-prefix row remains."""
     try:
         with open(os.path.join(fspx, "index.json"), encoding="utf-8") as f:
             combined = json.load(f)
@@ -1852,7 +1864,10 @@ def library_merged(staged: str, fspx: str, index: dict) -> bool:
         return False
     if not isinstance(combined, dict):
         return False
-    return all(name in combined and os.path.isfile(os.path.join(fspx, name + ".spv")) for name in index)
+    if any(name.startswith(owned) and name not in index for name in combined):
+        return False
+    return all(combined.get(name) == entry and os.path.isfile(os.path.join(fspx, name + ".spv"))
+               for name, entry in index.items())
 
 
 def library_report(extracted: int, translated: int) -> None:
@@ -1937,7 +1952,8 @@ def library_coverage(extracted: str, staged: str, fspx: "str | None" = None) -> 
     return {"summary": summary, "programs": programs}
 
 
-def merge_library_corpus(staged: str, fspx: str, owned: "tuple[str, ...]" = ("lib_",)) -> None:
+def merge_library_corpus(staged: str, fspx: str, owned: "tuple[str, ...]" = ("lib_",), *,
+                         allow_empty: bool = False) -> None:
     """Publish the staged pipeline-library entries and modules where the runtime looks them up.
 
     port/src/shader_library.h's load() reads <work>/shaders/spirv/index.json and the indexes of its fspx/ and bvh/
@@ -1948,9 +1964,12 @@ def merge_library_corpus(staged: str, fspx: str, owned: "tuple[str, ...]" = ("li
     index whenever it translates again; library_shaders() publishes these entries again on that run.
 
     `owned` are the entry-name prefixes this step publishes: an entry with one of them that the staged index no
-    longer names is dropped from the published index, and entries of another step (another prefix) are left alone."""
-    index = library_translated(staged)
-    if not index:
+    longer names is dropped from the published index, and entries of another step (another prefix) are left alone.
+    `allow_empty` accepts a readable empty translation index for graphics selections where every selected program was
+    refused, so stale rows of those selected prefixes can be removed rather than left resolvable.
+    """
+    index = library_translated(staged, allow_empty=allow_empty)
+    if index is None:
         fail(f"shaders: the pipeline library translation in {staged} is incomplete (no index.json, or a module is "
              "missing). Run the shaders stage again")
     os.makedirs(fspx, exist_ok=True)
@@ -2026,7 +2045,7 @@ def library_shaders(game: str, work: str, mc_signature: str, jobs: int = 1, emul
     index = library_translation_reusable(staged, settings)
     names = library_extraction_ok(extracted, extraction_settings)
     if index and names:
-        if not library_merged(staged, fspx, index):
+        if not library_merged(staged, fspx, index, owned=LIBRARY_OWNED):
             log("shaders: the pipeline library programs are translated; publishing them into the shader corpus again")
             merge_library_corpus(staged, fspx, owned=LIBRARY_OWNED)
         library_report(len(names), len(index))
@@ -2080,6 +2099,7 @@ GRAPHICS_STAGES = "ps,vs,ms"  # supported stages; the selected stages are record
 GRAPHICS_DEFAULT_STAGES = "ps,vs"
 GRAPHICS_EXTRACTED_RECORD = "extraction.json"            # written after the extraction, as LIBRARY_EXTRACTED_RECORD
 GRAPHICS_BUILD_RECORD = "pipeline_graphics_build.json"   # written after the published translation
+GRAPHICS_REFUSALS = "refusals.json"                        # per-program refusal reasons, written by rdna2spirv.py
 # The published entry-name prefixes this step owns in the FSPX index. Another step's prefixes are left alone.
 GRAPHICS_OWNED = ("lib_ps_", "lib_vs_", "lib_ms_")
 
@@ -2157,9 +2177,9 @@ def graphics_extraction_ok(extracted: str, settings: str) -> "list[str] | None":
 
 
 def graphics_translated(staged: str) -> "dict | None":
-    """The translated entries, with every module beside them, or None. Empty when the translator refused every
-    program: unlike the compute library and the FSPX set, a partial graphics selection is published on purpose, so an
-    empty one has to be told apart from an unreadable index."""
+    """The translated entries, with every module beside them, or None. A readable empty index can represent a cached
+    all-refused graphics selection; fresh all-refused translation still fails closed in translate(), after the caller
+    uses the refusal report to prune selected prefixes."""
     try:
         with open(os.path.join(staged, "index.json"), encoding="utf-8") as f:
             index = json.load(f)
@@ -2237,14 +2257,15 @@ def graphics_shaders(game: str, work: str, mc_signature: str, jobs: int = 1, emu
     the source containers and disasm/ listings into <work>/shaders/pipeline_graphics, rdna2spirv.py translates them
     into <work>/shaders/spirv/pipeline_graphics, and the entries are published beside the compute library's in the
     FSPX index under fspx_code_sha256 (merge_library_corpus). Unlike the compute library step this one publishes what
-    translated: a program the translator refuses leaves a hole the boot can report, not a failed stage.
+    translated: partial refusals leave holes the boot can report; an all-refused opt-in MS list clears selected stale
+     rows before the zero-output failure is surfaced.
 
     The extraction is kept when the package, the tools, llvm-mc, the selected stages and wanted list match; the
     translation is kept when its record matches and every module of the programs it did not refuse is there."""
     wanted = graphics_programs_path(work)
     if not os.path.isfile(wanted):
         log(f"shaders: no pipeline graphics program list at {wanted} (set {GRAPHICS_PROGRAMS_ENV} to a JSON list of "
-            "ps/vs SHA-256 hashes), so the step does nothing")
+            "ps/vs/ms SHA-256 hashes; MS is opt-in), so the step does nothing")
         return
     arc = os.path.join(game, LIBRARY_ARC)
     if not os.path.isfile(arc):
@@ -2272,9 +2293,9 @@ def graphics_shaders(game: str, work: str, mc_signature: str, jobs: int = 1, emu
     names = graphics_extraction_ok(extracted, extraction_settings)
     index = graphics_translation_reusable(staged, settings, names)
     if index is not None:
-        if index and not library_merged(staged, fspx, index):
+        if not library_merged(staged, fspx, index, owned=owned):
             log("shaders: the pipeline graphics programs are translated; publishing them into the shader corpus again")
-            merge_library_corpus(staged, fspx, owned=owned)
+            merge_library_corpus(staged, fspx, owned=owned, allow_empty=True)
         graphics_report(extracted, names, index, sorted(set(names) - set(index)), stages)
         return
     log("shaders: extracting and translating the wanted pipeline graphics programs")
@@ -2304,14 +2325,34 @@ def graphics_shaders(game: str, work: str, mc_signature: str, jobs: int = 1, emu
         with open(marker, "w", encoding="utf-8", newline="\n") as f:
             f.write(extraction_settings + "\n")
         os.replace(marker, os.path.join(extracted, GRAPHICS_EXTRACTED_RECORD))
-    translate(os.path.join(extracted, "disasm"), staged, jobs, emulate=emulate, fallbacks=fallbacks)
+    refusal_path = os.path.join(staged, GRAPHICS_REFUSALS)
+    try:
+        translate(os.path.join(extracted, "disasm"), staged, jobs, emulate=emulate, fallbacks=fallbacks,
+                  refusals=refusal_path)
+    except SystemExit:
+        # translate() deliberately refuses a zero-output merge. If an explicit MS selection explains that result with
+        # a reason for every extracted program, clear only the selected prefixes before preserving that failure.
+        reasons = refusal_reasons_with_parts(refusal_path)
+        if ("ms" in stages.split(",") and set(reasons) == set(names)
+                and all(reason.strip() for reason in reasons.values())):
+            empty_index = os.path.join(staged, "index.json")
+            tmp_index = empty_index + ".tmp"
+            with open(tmp_index, "w", encoding="utf-8", newline="\n") as f:
+                json.dump({}, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_index, empty_index)
+            merge_library_corpus(staged, fspx, owned=owned, allow_empty=True)
+            log("shaders: every selected pipeline graphics program was refused; stale selected-stage entries removed")
+        raise
     index = graphics_translated(staged)
     if index is None:
         fail(f"shaders: rdna2spirv.py wrote no readable pipeline graphics translation in {staged}. Run the shaders "
              "stage again; the translator's output above names each program it refused")
     refused = sorted(set(names) - set(index))
-    if index:
-        merge_library_corpus(staged, fspx, owned=owned)
+    # An empty graphics index is a complete all-refused result, not a reason to keep a prior selected-stage module
+    # resolvable. Merge it too so only the prefixes selected by this list are pruned; unselected stages stay intact.
+    merge_library_corpus(staged, fspx, owned=owned, allow_empty=True)
     graphics_report(extracted, names, index, refused, stages)
     record = os.path.join(staged, GRAPHICS_BUILD_RECORD) + ".tmp"
     with open(record, "w", encoding="utf-8", newline="\n") as f:

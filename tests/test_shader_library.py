@@ -5,6 +5,7 @@
 Zero game data: every library and archive is built here from synthetic bytes.
 """
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -234,6 +235,53 @@ class Main(unittest.TestCase):
             self.assertEqual(sorted(os.listdir(os.path.join(out, "fspx"))),
                              ["lib_cs_00003.code", "lib_cs_00003.json", "lib_cs_00003.state",
                               "lib_vs_00001.code", "lib_vs_00001.json"])
+
+    def test_wanted_ms_code_hash_extracts_mesh_and_becomes_resolver_metadata(self):
+        """A selected native MS program keeps its code hash and MS stage through the FSPX metadata path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "lib.bin")
+            with open(src, "wb") as f:
+                f.write(sample())
+            name = "lib_ms_00002"
+            code = prog(0x55556666)
+            key = hashlib.sha256(code).hexdigest()
+            wanted = os.path.join(tmp, "graphics_programs.json")
+            with open(wanted, "w", encoding="utf-8", newline="\n") as f:
+                json.dump({"ms": [key]}, f)
+            out = os.path.join(tmp, "out")
+
+            rc, text = self.run_main(src, "--out", out, "--stages", "none", "--wanted", wanted)
+            self.assertEqual(rc, 0, text)
+            with open(os.path.join(out, "index.json"), encoding="utf-8") as f:
+                extracted = json.load(f)
+            self.assertEqual([(entry["file"], entry["stage"]) for entry in extracted],
+                             [(name + ".dxbc", "ms")])
+            with open(os.path.join(out, "fspx", name + ".code"), "rb") as f:
+                self.assertEqual(f.read(), code)
+            with open(os.path.join(out, "wanted.json"), encoding="utf-8") as f:
+                report = json.load(f)
+            self.assertEqual(report["wanted"], {"ms": 1})
+            self.assertEqual(report["found"], {"ms": 1})
+            self.assertEqual(report["missing"], {"ms": []})
+            self.assertEqual(report["other_stage"], {"ms": []})
+
+            import rdna2spirv
+            import shader_meta
+            disasm = os.path.join(out, "disasm", name + ".s")
+            os.makedirs(os.path.dirname(disasm))
+            with open(disasm, "w", encoding="utf-8", newline="\n") as f:
+                f.write("; synthetic mesh listing\n")
+            cached_stages = rdna2spirv._STAGES
+            rdna2spirv._STAGES = None
+            try:
+                self.assertEqual(rdna2spirv.stage_of(name, disasm), "ms")
+            finally:
+                rdna2spirv._STAGES = cached_stages
+            resolver_meta = shader_meta.collect(disasm, name, [[]], [[]])
+            self.assertEqual(resolver_meta.get("fspx_code_sha256"), key)
+            self.assertNotIn("fssm_sha256", resolver_meta)
+            self.assertEqual({"stage": "ms", **resolver_meta}, {"stage": "ms", "fspx_code_sha256": key})
+            self.assertIn("1 of 1 programs found in the library (1/1 ms)", text)
 
     def test_carve_names_sources_and_copies_containers(self):
         with tempfile.TemporaryDirectory() as tmp:
