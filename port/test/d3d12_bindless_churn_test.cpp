@@ -382,6 +382,8 @@ bool run(vktest::Device& d, const std::filesystem::path& library, bool legacy_id
 }  // namespace
 
 int main(int argc, char** argv) {
+    // This stress test measures the current (default) policy explicitly, even when the parent shell asks for legacy mode.
+    _putenv_s("PALMETTO_BINDLESS_DEGRADATION", "1");
     // `--validated` runs under the validation layer with synchronization validation, and skips when it is not there.
     const bool validated = argc > 1 && std::strcmp(argv[1], "--validated") == 0;
     if (validated) _putenv_s("PALMETTO_VK_VALIDATION", "1");
@@ -426,10 +428,13 @@ int main(int argc, char** argv) {
 
     const auto report = [](const char* name, const Result& r) {
         std::printf("%-22s %u frames in %.1f ms (%.2f ms/frame, worst %.2f ms); %llu generations made, %llu "
-                    "vkDeviceWaitIdle for the set, %llu retired not yet freed at the end; %u texels compared, "
-                    "%u wrong\n",
+                    "degraded flushes, %llu spares reused, %llu refused keys, %llu vkDeviceWaitIdle for the set, "
+                    "%llu retired not yet freed at the end; %u texels compared, %u wrong\n",
                     name, frames, r.total_ms, r.total_ms / frames, r.worst_frame_ms,
                     static_cast<unsigned long long>(r.stats.generations_made),
+                    static_cast<unsigned long long>(r.stats.degraded_flushes),
+                    static_cast<unsigned long long>(r.stats.spares_reused),
+                    static_cast<unsigned long long>(r.stats.keys_refused),
                     static_cast<unsigned long long>(r.stats.device_idle_waits),
                     static_cast<unsigned long long>(r.stats.retired_pending), r.compared, r.mismatches);
     };
@@ -444,6 +449,8 @@ int main(int argc, char** argv) {
     MAIN_EXPECT(now.compared == frames * queues * probes * texels);
     MAIN_EXPECT(now.stats.device_idle_waits == 0);
     MAIN_EXPECT(now.stats.generations_made > 0);
+    MAIN_EXPECT(now.stats.degraded_flushes == 0 && now.stats.keys_refused == 0);
+    MAIN_EXPECT(async.stats.degraded_flushes == 0 && async.stats.keys_refused == 0);
     MAIN_EXPECT(legacy.stats.device_idle_waits > 0);
     if (d.validation_errors()) {
         std::fprintf(stderr, "%u validation errors\n", d.validation_errors());

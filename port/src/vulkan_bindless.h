@@ -11,9 +11,10 @@
 //   dimension: 0 = 2D, 1 = 2D array, 2 = 3D, 3 = 1D (the translator's STORE_DIMS); class: 0 = float, 1 = uint, 2 = sint.
 //   bindings 20/21: sampled multisample 2D images / 2D arrays, 256 each (runtime SRVs).
 //   bindings 22/23 and 24/25 are their UINT and SINT equivalents on devices supporting those classes.
-// These are the default counts (BindlessFeatures::counts). size_bindings() sizes the sampled arrays of every
-// dimension, the sampler array and the storage arrays from the device's limits instead; the shaders declare runtime
-// arrays, so any count works for them.
+// These are the default counts (BindlessFeatures::counts). With the current default policy, size_bindings() sizes the
+// sampled arrays of every dimension, the sampler array and the storage arrays from device limits instead; the explicit
+// legacy override keeps the pre-slice counts for 2D-array, 3D and 1D. The shaders declare runtime arrays, so any count
+// works for them.
 //
 // A shader turns a T# or S# into an index through the hash table (descriptor_table.h) and uses that index in
 // whichever binding the instruction calls for: the sampled array of the image's dimension, or one of its storage
@@ -38,8 +39,9 @@
 // flush() takes the command buffer that will use the set: it uploads only the slots that changed, from a mapped
 // staging buffer, and barriers the copy before the draws. The table at creation is empty until that first flush.
 //
-// Degradation: a flush never refuses a submission for want of table memory, because one allocation failure would
-// otherwise throw away a whole command list. Instead:
+// Current degradation policy (enabled by default; PALMETTO_BINDLESS_DEGRADATION=0 restores the pre-slice path): a
+// flush never refuses a submission for want of table memory, because one allocation failure would otherwise throw
+// away a whole command list. Instead:
 //   * a released generation is kept as one spare, and a replacement whose table fits the spare's buffers reuses them
 //     and its descriptor set instead of allocating (spares_reused());
 //   * when a new generation still cannot be made, the last uploaded table and its descriptor set are kept, the
@@ -88,6 +90,20 @@ struct StorageViews {
 namespace bindless {
 inline constexpr std::uint32_t binding_count = 26;
 constexpr std::array<std::uint32_t, binding_count> default_counts();
+
+enum class DegradationOverride : std::uint8_t { keep_current, enable, disable, invalid };
+
+// The override is deliberately exact: absent/empty keeps today's behaviour, "0" restores the pre-slice sizing and
+// failure path, "1" explicitly selects today's behaviour, and any other spelling is reported by the runtime and also
+// keeps today's behaviour.
+constexpr DegradationOverride parse_degradation_override(const char* value) {
+    if (!value || value[0] == '\0') return DegradationOverride::keep_current;
+    if (value[0] == '0' && value[1] == '\0') return DegradationOverride::disable;
+    if (value[0] == '1' && value[1] == '\0') return DegradationOverride::enable;
+    return DegradationOverride::invalid;
+}
+
+constexpr bool degradation_enabled(DegradationOverride value) { return value != DegradationOverride::disable; }
 } // namespace bindless
 
 struct BindlessFeatures {
@@ -98,6 +114,10 @@ struct BindlessFeatures {
         VK_SAMPLE_COUNT_1_BIT, VK_SAMPLE_COUNT_1_BIT, VK_SAMPLE_COUNT_1_BIT};
     // Descriptors in each binding, by binding number: bindless::bindings by default, or what size_bindings() chose.
     std::array<std::uint32_t, bindless::binding_count> counts = bindless::default_counts();
+    // Current sizing, spare reuse, memory-pressure degradation and named table-key refusals. The runtime keeps this
+    // enabled by default; PALMETTO_BINDLESS_DEGRADATION=0 selects the pre-slice sizing/failure behaviour. Last to
+    // preserve the existing aggregate-initializer order for update_after_bind / partially_bound / ms_samples / counts.
+    bool degradation = true;
 };
 
 namespace bindless {
@@ -234,10 +254,11 @@ inline constexpr std::uint32_t growth_headroom = 64;
 // eight render targets) and standalone samplers do not, though they count in an update-after-bind pool.
 //   1. The default counts, or as much of them as the device holds: samplers, then storage, then 2D images.
 //   2. The MS pairs that fit beside them (limit_ms_bindings, which may turn classes off).
-//   3. Growth towards the maximums above, in the same order, within maxPerSetDescriptors, then the 2D-array, 3D and
-//      1D sampled arrays towards theirs, each step keeping its descriptor-type limits and growth_headroom. That set
-//      limit only says what is sure to work (vkGetDescriptorSetLayoutSupport may allow more), so it never shrinks
-//      step 1.
+//   3. Growth towards the maximums above, in the same order, within maxPerSetDescriptors. When features.degradation is
+//      enabled, the 2D-array, 3D and 1D sampled arrays then grow towards theirs, each step keeping its descriptor-type
+//      limits and growth_headroom. That set limit only says what is sure to work (vkGetDescriptorSetLayoutSupport may
+//      allow more), so it never shrinks step 1. With degradation disabled those three arrays keep their pre-slice
+//      default counts.
 // A storage array holds the smaller of the storage count and its dimension's images: add_image never gives a
 // storage view an index past the sampled array. The other bindings keep their default counts.
 // layout_supported, when given, answers vkGetDescriptorSetLayoutSupport for set 0 at the counts in its argument:
@@ -329,15 +350,17 @@ inline bool size_bindings(BindlessFeatures& features, const VkPhysicalDeviceLimi
     grow(samplers, std::max(samplers, std::min(max_samplers, creatable)), growth_headroom, set_limit);
     grow(images, std::max(images, max_2d_images), growth_headroom, set_limit);
     grow(storage, std::max(storage, max_storage_indices), growth_headroom, set_limit);
-    // The other three sampled arrays are separate index spaces and grow last, so a device that can only hold today's
-    // sizes keeps them; their storage arrays follow their counts through apply().
-    grow(counts[sampled_binding(ImageDimension::dim_2d_array)],
-         std::max(counts[sampled_binding(ImageDimension::dim_2d_array)], max_2d_array_images), growth_headroom,
-         set_limit);
-    grow(counts[sampled_binding(ImageDimension::dim_3d)],
-         std::max(counts[sampled_binding(ImageDimension::dim_3d)], max_3d_images), growth_headroom, set_limit);
-    grow(counts[sampled_binding(ImageDimension::dim_1d)],
-         std::max(counts[sampled_binding(ImageDimension::dim_1d)], max_1d_images), growth_headroom, set_limit);
+    // The other three sampled arrays are separate index spaces. Their growth is part of the degradation policy;
+    // when it is disabled, preserve the pre-slice descriptor counts exactly.
+    if (features.degradation) {
+        grow(counts[sampled_binding(ImageDimension::dim_2d_array)],
+             std::max(counts[sampled_binding(ImageDimension::dim_2d_array)], max_2d_array_images), growth_headroom,
+             set_limit);
+        grow(counts[sampled_binding(ImageDimension::dim_3d)],
+             std::max(counts[sampled_binding(ImageDimension::dim_3d)], max_3d_images), growth_headroom, set_limit);
+        grow(counts[sampled_binding(ImageDimension::dim_1d)],
+             std::max(counts[sampled_binding(ImageDimension::dim_1d)], max_1d_images), growth_headroom, set_limit);
+    }
     apply(true);
     return full;
 }
@@ -492,6 +515,7 @@ public:
         try {
             result = table_.insert_or_update(key.data(), index);
         } catch (const std::length_error& error) {
+            if (!features_.degradation) throw;  // pre-slice mode preserves the old exception path
             ++keys_refused_;
             if (keys_refused_ == 1 || keys_refused_ % 4096 == 0)
                 std::fprintf(stderr, "[rt] d3d12: bindless: a T#/S# key the shader's eight probes can never resolve is "
@@ -554,6 +578,7 @@ public:
         last_flush_replaced_ = replaced;
         last_flush_degraded_ = false;
         if (!written) {
+            if (!features_.degradation || !command_buffer) return false;
             // The new generation could not be made. The current set is the one running work reads, so its descriptors
             // are not written in place either: the last uploaded table stays, which still resolves every key it
             // holds, and the pending writes and the table's changes stay queued for the next flush. A key added
@@ -599,7 +624,7 @@ public:
         std::size_t kept = 0;
         for (auto& generation : retired_) {
             if (generation.ticket <= completed) {
-                if (generation.set &&
+                if (features_.degradation && generation.set &&
                     (spares_.empty() || generation.buffers.table.size > spares_.front().buffers.table.size)) {
                     release_spares();  // one spare, the largest released table
                     spares_.push_back(generation);
@@ -924,7 +949,7 @@ private:
             TableBuffers larger;
             VkDescriptorPool pool = VK_NULL_HANDLE;
             VkDescriptorSet set = VK_NULL_HANDLE;
-            if (!spares_.empty() && spares_.back().buffers.table.size >= bytes &&
+            if (features_.degradation && !spares_.empty() && spares_.back().buffers.table.size >= bytes &&
                 spares_.back().buffers.staging.size >= bytes) {
                 // A released generation whose buffers hold this table: its buffers, descriptor set and pool are
                 // reused, so this replacement allocates nothing. Extra buffer bytes are unused (binding 2 names the

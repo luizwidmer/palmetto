@@ -286,13 +286,17 @@ std::uint64_t device_arena_size(ID3D12Device* device);
 // pipeline whose shader declares set-0 bindings is created with and binds. Null without such a set. The set is
 // brought up to date at every ExecuteCommandLists.
 VkDescriptorSet bindless_set(ID3D12Device* device);
-// What the bindless set did without waiting (D3D-314): table generations made because a flush grew the table or
-// changed live entries, the retired ones not freed yet, and vkDeviceWaitIdle calls made for it (always 0 unless
-// PALMETTO_BINDLESS_IDLE_WAIT=1 restores the old wait, to compare frame times). All 0 without a bindless set.
+// What the bindless set did (D3D-314 plus docs/bindless_degradation.md): table generations made because a flush grew
+// the table or changed live entries, the retired ones not freed yet, and vkDeviceWaitIdle calls made for it (always 0
+// unless PALMETTO_BINDLESS_IDLE_WAIT=1 restores the old wait). The remaining counters expose degradation, spare reuse
+// and named key refusals through the internal test/diagnostic snapshot. All 0 without a bindless set.
 struct BindlessStats {
     std::uint64_t generations_made = 0;
     std::uint64_t retired_pending = 0;
     std::uint64_t device_idle_waits = 0;
+    std::uint64_t degraded_flushes = 0;
+    std::uint64_t spares_reused = 0;
+    std::uint64_t keys_refused = 0;
 };
 BindlessStats bindless_stats(ID3D12Device* device);
 VkDescriptorSetLayout bindless_set_layout(ID3D12Device* device);

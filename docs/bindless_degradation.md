@@ -212,3 +212,59 @@ GPL-3.0 project [ubiquitarianism/leonida](https://github.com/ubiquitarianism/leo
 description are quoted in [remaining_mechanisms.md](remaining_mechanisms.md) section 3.2. No code, comment text,
 identifier or table from that project was copied. The upstream project remains the copyright of its contributors and
 its license continues to apply to its own tree.
+
+## 9. Policy override, telemetry and current readiness (2026-11-27)
+
+The implementation already present in this tree remains the default: **unset** `PALMETTO_BINDLESS_DEGRADATION` keeps
+array growth, spare reuse, allocation-failure degradation and named collision refusals enabled. This update does not
+flip that default. The new exact override `PALMETTO_BINDLESS_DEGRADATION=0` selects the pre-slice behavior for a
+controlled comparison; `=1` explicitly selects the current behavior. An empty/unset value keeps current behavior; an
+unrecognized value logs `bindless_degradation_override_invalid` and also keeps current behavior rather than silently
+disabling a working path. This dated appendix supersedes section 3's earlier sentence “There is no new environment
+switch”; the measured behavior from section 5 remains the default. This update closes the legacy-policy and telemetry gap,
+not a missing growth algorithm: the larger counts and the current fallback rules already existed in this tree. Real
+allocation exhaustion is still unmeasured; the new tests use the fake Vulkan device.
+
+With the override set to `0`, only the 2D, sampler and 2D storage counts retain their pre-slice sizing/growth; the
+2D-array, 3D and 1D sampled arrays stay at 1,024/256/256. A replacing flush that cannot allocate still returns false,
+completed generations are destroyed rather than kept as a spare, and a key that exceeds the shader's eight-probe shape
+keeps the pre-slice `std::length_error` path. With the default/current policy, all existing coverage above is unchanged.
+The GPU-free `bindless_sizing_test` pins both policies, including that the default still degrades a failed generation,
+reuses a released spare, and counts a named key refusal, while explicit legacy mode returns the old failure, keeps no
+spare and propagates the collision exception.
+
+The old per-set counters (`degraded_flushes`, `spares_reused`, `keys_refused`) were not visible through
+`rt::d3d12::bindless_stats`. The internal `BindlessStats` snapshot now exports all three alongside the
+generation/retirement counters, and the D3D12 churn test prints them and asserts the normal zero degradation/refusal
+values. The boot-report parser itself is not wired to serialize this snapshot yet.
+
+**Readiness, not a boot claim.** The retained boot census is still 32 image allocations / 279.1 MiB and the recorded
+bindless arms show 0 degraded flushes and 0 refused submissions. That population does not pressure the set, so no new
+runtime arm was run for this update and allocation exhaustion remains latent. The unit test injects allocation and pool
+failures into the fake Vulkan device; it does not prove a real driver survives its own device-memory exhaustion.
+
+**Next falsifier:** when the host/boot lock is free and a boot reaches the streamed image population, compare one default
+run with the explicit legacy override. Read the reported bindless counts plus the newly exported counters and refusal
+lines. The extension is falsified for that measured population if it fails to grow the other sampled dimensions where
+limits allow, reports no degraded/spare/refusal counters under an injected/observed corresponding event, or changes
+submissions at a population that never exhausts those limits. At today's 32-image population, a zero failure counter is
+expected and is not evidence of the failure path.
+
+### Peer evidence and clean-room attribution
+
+The local peer audit records Five Star Recomp `34b4dfed`'s D3D12.X descriptor description as 32-byte descriptor memory
+provided by the title allocator and per-draw tables copied into a linear allocator, and XCL `623d02e` as exposing
+console T#/V#/S# descriptor heaps. Those are evidence of the console heap/table shape, not measurements of this
+Vulkan set's device limits or an allocation-failure policy. The existing clean-room comparison also cites the public
+GPL-3.0 `ubiquitarianism/leonida` `273b3bdf9` bindless implementation as behavioral prior art; this update only adds a
+legacy override and counters in this tree's own policy/API, with no peer code, comments, identifiers or tables copied.
+See [cleanroom_peers.md](cleanroom_peers.md) sections 108–112 and 204–211, and
+[upstream_port.md](upstream_port.md) for the source/evidence rule.
+
+**NOTICE.md draft for lead integration:** “The bindless degradation and descriptor-array sizing policy
+([docs/bindless_degradation.md](bindless_degradation.md)) was cross-checked against public behavioural evidence in
+[ubiquitarianism/leonida](https://github.com/ubiquitarianism/leonida) (GPL-3.0, `273b3bdf9`, Moriz82), [Five Star Recomp](https://github.com/ThatRecompDev/five-star-recomp) (GPL-3.0-or-later, `34b4dfed`, ThatRecompDev) and
+[XCL](https://github.com/xcl-dev/xcl) (GPL-2.0-only, `623d02e`, Prime1997). The peer notes were consulted only for their
+D3D12.X heap/table shapes; the Vulkan limits and allocation-failure behavior were derived from this tree's own code and
+tests. No source, comments, identifiers or tables were copied, and the implementation, override and tests are this
+project's own. Each referenced project remains the copyright of its contributors under its stated licence.”

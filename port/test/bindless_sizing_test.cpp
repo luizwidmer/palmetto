@@ -268,12 +268,14 @@ namespace {
 // partially bound keeps the creation writes to one descriptor per array, which is what the real device does.
 struct ScopedSet {
     BindlessSet set;
-    ScopedSet() : set(reinterpret_cast<PFN_vkGetDeviceProcAddr>(&fake::device_proc),
-                      reinterpret_cast<VkDevice>(std::uintptr_t(0x1)), fake::device_memory(), features()) {}
-    static BindlessFeatures features() {
+    explicit ScopedSet(bool degradation = true)
+        : set(reinterpret_cast<PFN_vkGetDeviceProcAddr>(&fake::device_proc),
+              reinterpret_cast<VkDevice>(std::uintptr_t(0x1)), fake::device_memory(), features(degradation)) {}
+    static BindlessFeatures features(bool degradation = true) {
         BindlessFeatures f;
         f.update_after_bind = true;
         f.partially_bound = true;
+        f.degradation = degradation;
         return f;
     }
 };
@@ -296,6 +298,7 @@ int test_degraded_flush_keeps_submission() {
     EXPECT(set.flush(fake::command_buffer, 1));
     EXPECT(set.last_flush_degraded());  // the submission goes on
     EXPECT(set.degraded_flushes() == 1);
+    EXPECT(set.spares_reused() == 0 && set.keys_refused() == 0);
     EXPECT(set.generations_made() == 0);
     EXPECT(set.set() == before);  // the set running work may read is untouched
     EXPECT(!set.last_flush_replaced());
@@ -342,6 +345,7 @@ int test_spare_avoids_allocation() {
     EXPECT(set.flush(fake::command_buffer, 3));
     EXPECT(!set.last_flush_degraded() && set.last_flush_replaced());
     EXPECT(set.spares_reused() == 1 && set.spare_count() == 0);
+    EXPECT(set.degraded_flushes() == 0 && set.keys_refused() == 0);
     EXPECT(fake::g.allocate_calls == allocate_calls && fake::g.pool_calls == pool_calls);
     EXPECT(set.generations_made() == made + 1);
     EXPECT(set.table().lookup(fake::key(3)) == 0xffff);
@@ -356,7 +360,7 @@ int test_spare_avoids_allocation() {
     fake::g.pool_fail_remaining = 1000;
     EXPECT(set.flush(fake::command_buffer, 4));
     EXPECT(set.last_flush_degraded() && set.degraded_flushes() == degraded + 1);
-    EXPECT(set.spare_count() == 1 && set.spares_reused() == 1);
+    EXPECT(set.spare_count() == 1 && set.spares_reused() == 1 && set.keys_refused() == 0);
     // And a later flush grows the table.
     fake::g.allocate_fail_remaining = fake::g.pool_fail_remaining = 0;
     EXPECT(set.flush(fake::command_buffer, 5));
@@ -379,6 +383,7 @@ int test_unresolvable_key_is_refused() {
     // Refused, counted, no exception, and nothing changed.
     EXPECT(!set.insert_key(keys[8], 9));
     EXPECT(set.keys_refused() == 1);
+    EXPECT(set.degraded_flushes() == 0 && set.spares_reused() == 0);
     EXPECT(set.table().size() == 8 && set.table().lookup(keys[8]) == 0);
     for (std::uint32_t i = 0; i < 8; ++i) EXPECT(set.table().lookup(keys[i]) == i + 1);
     // A flush still uploads the eight resolvable keys.
@@ -388,12 +393,74 @@ int test_unresolvable_key_is_refused() {
     return 0;
 }
 
+// PALMETTO_BINDLESS_DEGRADATION=0 selects the pre-slice policy: default array sizes for
+// non-2D dimensions, failed replacement flushes remain failures, completed generations are destroyed, and the table's
+// original length_error propagates instead of being converted to the new named refusal counter.
+int test_legacy_mode_preserves_preslice_behavior() {
+    fake::g = {};
+    {
+        ScopedSet scoped(false);
+        BindlessSet& set = scoped.set;
+        EXPECT(set.ok());
+        for (std::uint32_t i = 0; i < 200; ++i) EXPECT(set.insert_key(fake::key(i + 1), i + 2));
+        EXPECT(set.flush(fake::command_buffer, 1) && set.generations_made() == 1);
+        EXPECT(set.insert_key(fake::key(3), 5) && set.flush_replaces_table());
+        EXPECT(set.flush(fake::command_buffer, 2) && set.generations_made() == 2);
+        set.release_retired(UINT64_MAX);
+        EXPECT(set.retired_count() == 0 && set.spare_count() == 0);
+
+        // A new allocation failure retains the old submission-refusal behaviour, not degradation.
+        EXPECT(set.insert_key(fake::key(3), 6) && set.flush_replaces_table());
+        const VkDescriptorSet before = set.set();
+        fake::g.allocate_fail_remaining = 1000;
+        fake::g.pool_fail_remaining = 1000;
+        EXPECT(!set.flush(fake::command_buffer, 3));
+        EXPECT(!set.last_flush_degraded() && set.degraded_flushes() == 0);
+        EXPECT(set.spares_reused() == 0 && set.keys_refused() == 0);
+        EXPECT(set.set() == before && set.generations_made() == 2 && set.spare_count() == 0);
+        EXPECT(set.flush_replaces_table());
+        fake::g.allocate_fail_remaining = fake::g.pool_fail_remaining = 0;
+        EXPECT(set.flush(fake::command_buffer, 3));
+        EXPECT(set.generations_made() == 3 && set.spare_count() == 0);
+        set.release_retired(UINT64_MAX);
+        EXPECT(set.spare_count() == 0);
+    }
+
+    fake::g = {};
+    {
+        ScopedSet scoped(false);
+        BindlessSet& set = scoped.set;
+        EXPECT(set.ok());
+        const auto keys = fake::colliding_keys();
+        for (std::uint32_t i = 0; i < 8; ++i) EXPECT(set.insert_key(keys[i], i + 1));
+        bool threw = false;
+        try {
+            set.insert_key(keys[8], 9);
+        } catch (const std::length_error&) {
+            threw = true;
+        }
+        EXPECT(threw && set.keys_refused() == 0);
+        EXPECT(set.table().size() == 8 && set.table().lookup(keys[8]) == 0);
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main() {
     using D = ImageDimension;
     constexpr auto defaults = bindless::default_counts();
     static_assert(defaults[0] == 4096 && defaults[bindless::sampler_binding] == 1024 && defaults[8] == 256);
+    EXPECT(BindlessFeatures{}.degradation);  // the environment switch is an override; unset keeps current behaviour
+    EXPECT(bindless::parse_degradation_override(nullptr) == bindless::DegradationOverride::keep_current);
+    EXPECT(bindless::parse_degradation_override("") == bindless::DegradationOverride::keep_current);
+    EXPECT(bindless::parse_degradation_override("1") == bindless::DegradationOverride::enable);
+    EXPECT(bindless::parse_degradation_override("0") == bindless::DegradationOverride::disable);
+    EXPECT(bindless::parse_degradation_override("true") == bindless::DegradationOverride::invalid);
+    EXPECT(bindless::degradation_enabled(bindless::parse_degradation_override(nullptr)));
+    EXPECT(bindless::degradation_enabled(bindless::parse_degradation_override("1")));
+    EXPECT(!bindless::degradation_enabled(bindless::parse_degradation_override("0")));
+    EXPECT(bindless::degradation_enabled(bindless::parse_degradation_override("true")));
 
     // An RTX 5070 (driver 621.24): 1048576 of each descriptor type, update-after-bind or not, 4000 samplers.
     for (const bool update_after_bind : {true, false}) {
@@ -419,6 +486,25 @@ int main() {
                         "in 2D, %u descriptors\n",
                         count(f, D::dim_2d), count(f, D::dim_2d_array), count(f, D::dim_3d), count(f, D::dim_1d),
                         f.counts[bindless::sampler_binding], storage(f, D::dim_2d), totals(f).all);
+    }
+
+    // Explicit legacy mode keeps the pre-slice array policy: 2D, sampler and storage growth remain as before, while the
+    // 2D-array, 3D and 1D arrays stay at their original 1024/256/256 sizes.
+    {
+        const Device d = uniform(1048576, 1048576);
+        BindlessFeatures f = with_ms(true);
+        f.degradation = false;
+        EXPECT(bindless::size_bindings(f, d.limits, d.v11, d.v12));
+        EXPECT(count(f, D::dim_2d) == bindless::max_2d_images);
+        EXPECT(f.counts[bindless::sampler_binding] == 4000 - bindless::reserved_samplers);
+        EXPECT(storage(f, D::dim_2d) == bindless::max_storage_indices);
+        EXPECT(count(f, D::dim_2d_array) == defaults[bindless::sampled_binding(D::dim_2d_array)]);
+        EXPECT(count(f, D::dim_3d) == defaults[bindless::sampled_binding(D::dim_3d)]);
+        EXPECT(count(f, D::dim_1d) == defaults[bindless::sampled_binding(D::dim_1d)]);
+        EXPECT(storage(f, D::dim_2d_array) == count(f, D::dim_2d_array));
+        EXPECT(storage(f, D::dim_3d) == count(f, D::dim_3d));
+        EXPECT(storage(f, D::dim_1d) == count(f, D::dim_1d));
+        EXPECT(storage_consistent(f));
     }
 
     // At today's sizes exactly (5632 sampled images, 1024 samplers, 3584 storage images): today's set, no MS pairs.
@@ -558,7 +644,8 @@ int main() {
     EXPECT(test_degraded_flush_keeps_submission() == 0);
     EXPECT(test_spare_avoids_allocation() == 0);
     EXPECT(test_unresolvable_key_is_refused() == 0);
-    std::printf("bindless sizing: synthetic limits gave the expected counts; the fake device's failed generations "
-                "degraded and its spare replaced the allocation\n");
+    EXPECT(test_legacy_mode_preserves_preslice_behavior() == 0);
+    std::printf("bindless sizing: default policy kept current counts and degradation; explicit legacy mode kept "
+                "pre-slice counts, failure and collision behavior\n");
     return 0;
 }
