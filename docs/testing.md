@@ -171,17 +171,16 @@ The 36 failures split into these result groups:
   the 17th: it hit the 300-second timeout after queue slots 15 and 14 were refused, then waited for a fence event.
   That log has no explicit `VK_ERROR_DEVICE_LOST`; this timeout is the queue-proxy failure, not evidence of device loss.
 - **Root-signature proxy (1):** `root_sig` failed the same two all-zero-checksum cases already described above.
-- **Synthetic game fixture (9):** `run_tiny_game`, `run_tiny_game_console_paths`, `run_tiny_game_exit_code`,
+- **Synthetic game fixture (9, pre-fix):** `run_tiny_game`, `run_tiny_game_console_paths`, `run_tiny_game_exit_code`,
   `run_tiny_game_fixed`, `run_tiny_game_fixed_exit_code`, `run_tiny_game_tls`, `run_tiny_game_eh`,
-  `run_tiny_game_stack` and `run_tiny_game_dir` all first fail the guest assertion `a file round trip through the CRT
-  works`. This remains root-cause-unresolved and needs owner triage. The guest uses `GetTempPathA` and `fopen` to write,
-  reread and remove a synthetic `palmetto_tiny_game_<pid>.txt`; the guest prints no underlying file error. A timeboxed
-  standalone run from `D:\leonida\port\build` reproduced exit 1 with both the original `TEMP`/`TMP`
-  (`C:\Users\LUIZWI~1\AppData\Local\Temp`) and an alternate (`D:\leonida\port\build\temp_probe_alt`). In both,
-  `GAME:` resolved to `D:\leonida\port\build\fixtures\game\RelWithDebInfo` and the overlay to
+  `run_tiny_game_stack` and `run_tiny_game_dir` failed the guest assertion `a file round trip through the CRT works`.
+  The guest used `GetTempPathA` and CRT file calls on a synthetic `palmetto_tiny_game_<pid>.txt`; a standalone run from
+  `D:\leonida\port\build` reproduced the failure with both the original `TEMP`/`TMP`
+  (`C:\Users\LUIZWI~1\AppData\Local\Temp`) and the build-local `temp_probe_alt`. In both, `GAME:` resolved to
+  `D:\leonida\port\build\fixtures\game\RelWithDebInfo` and the overlay to
   `D:\leonida\port\build\fixtures\game\RelWithDebInfo\overlay`; stderr contained only the loader TLS-remap and
-  offline XGameRuntime messages. The post-fix `run_tiny_game_dir` rerun confirmed its GAME-file probe and absolute
-  paths pass; it now reports the synthetic guest failure rather than mislabeling it as a GAME-path failure.
+  offline XGameRuntime messages. A follow-up confirmed this was a test-fixture byte-count error, not a loader failure;
+  the post-fix checks and measurements are recorded below.
 - **Stale shader-library fixture (1):** `shader_library` failed its old binary's fixed-Huffman zlib fixture check.
   The test-side fixture bytes and expected decompressed length were repaired in `shader_library_test.cpp`; the rebuilt
   target passed.
@@ -218,9 +217,31 @@ The 36 failures split into these result groups:
 
 The C++ changes named above are test-only. The five edited targets (`shader_library`, `d3d12_com`, `d3d12_descriptor`,
 `d3d12_execute_indirect_validation` and `crt_timed_wait`) were rebuilt and rerun after the lead opened a target-only build
-window; all passed. No runtime-code change or full Palmetto build was made. The full CTest inventory above remains the
-pre-fix snapshot; the `check_game_dir.cmake` diagnostic-only update was separately rerun and confirmed to distinguish the
-passing GAME-path probes from the unresolved synthetic guest CRT file-round-trip failure.
+window; all passed. No runtime-code change or full Palmetto build was made. The full CTest inventory above remains a
+pre-fix snapshot; `check_game_dir.cmake` was separately rerun and confirmed the GAME-file probe and absolute paths pass
+independently of the CRT file check.
+
+Follow-up, 2026-11-27 (synthetic CRT file round trip): the fixture wrote `"palmetto"` (8 bytes) but read only 7 with
+`fread`, then compared those seven bytes with the full string. The same assertion failed in the direct-host run, so this
+was a fixture defect, not a loader-specific failure. After correcting the byte count, the direct-host file operation
+reported 8/8 bytes written, 8/8 read and `remove_rc=0`; the program still exits 1 natively because the link-time
+`xgameruntime` stub intentionally returns failing answers.
+
+Under the loader, `GetTempPathA(MAX_PATH)` returned the 37-character host `TEMP`/`TMP` path ending in
+`AppData\Local\Temp\`; the CRT round trip again reported 8/8 written, 8/8 read and `remove_rc=0`. With `TEMP` and
+`TMP` set to the build-local alternate temp directory, `GetTempPathA` returned that directory and the same operations
+passed. Both traced loader runs used `--trace` with `PALMETTO_FILE_TRACE=1` and recorded only `trace_open`, `map` and
+`exit`, with no `file_open` event. The fixture imports `GetTempPathA` from `KERNEL32.dll`, its CRT stdio calls from
+`api-ms-win-crt-stdio-l1-1-0.dll`, and `remove` from `api-ms-win-crt-filesystem-l1-1-0.dll`; none is in
+`file_system.cpp`'s `FILE_API` shim table, so `pe_loader.cpp` resolves them through its host DLL/API-set path. The
+fixture's direct `CreateFileW`/`ReadFile` imports do use the file shim, but the CRT round trip produced no shim trace.
+Both temp paths are host paths rather than `GAME:`/`G:`/`T:` paths, and `file_system` CTest passed, so the evidence
+rules out the shim's console-path mapping, permissions and virtualized-directory handling as the cause.
+
+The fixture-only fix uses `sizeof(contents) - 1` for both `fwrite` and `fread`, checks byte counts and close results,
+checks `remove`, and adds an opt-in `file-diagnostic` argument. Only `tiny_game` and `tiny_game_fixed` were rebuilt; no
+`palmetto` relink or runtime change was made. The nine affected CTests (`run_tiny_game`, console paths, exit code, fixed,
+fixed exit code, TLS, EH, stack and dir) all passed, as did `file_system` (1/1).
 
 Windows, from a "Developer PowerShell for VS 2022" or a plain shell:
 

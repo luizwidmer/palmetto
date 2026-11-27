@@ -1,6 +1,6 @@
 // A stand-in game executable for `palmetto --run`: what a real title does in its first second, run through the
 // loader instead of the Windows one. Test code, not game content. Run as
-//   palmetto --run tiny_game.exe -- hello 42 [tls] [eh] [stack] [game-file] [exit-code] [abort-mode]
+//   palmetto --run tiny_game.exe -- hello 42 [tls] [eh] [stack] [game-file] [exit-code] [abort-mode] [file-diagnostic]
 // It checks its arguments, a static initializer, the heap, a file round trip, a second thread, and the
 // xgameruntime.dll imports (answered by the shim registry: the stub DLL it links against would fail them), then
 // calls exit() with 0 (42 with `exit-code`) when everything held. Two checks are opt-in, by argument (CTest's
@@ -111,21 +111,41 @@ int main(int argc, char** argv) {
     check(v[123456] == 123456, "a 4 MiB heap allocation works");
 
     char tmp[MAX_PATH] = {};
-    GetTempPathA(MAX_PATH, tmp);
-    std::string path = std::string(tmp) + "palmetto_tiny_game_" + std::to_string(GetCurrentProcessId()) + ".txt";
+    const DWORD temp_length = GetTempPathA(MAX_PATH, tmp);
+    const bool temp_ok = temp_length > 0 && temp_length < MAX_PATH && tmp[temp_length] == '\0';
+    if (has_arg(argc, argv, "file-diagnostic"))
+        std::printf("tiny_game: GetTempPathA=%lu chars \"%s\"\n", static_cast<unsigned long>(temp_length), tmp);
+
+    // "palmetto" is eight bytes. Reading only seven made the comparison fail on a native run as well as under the
+    // loader; use the payload size for both CRT operations and check that the temporary file is actually removed.
+    constexpr char contents[] = "palmetto";
+    constexpr size_t contents_size = sizeof(contents) - 1;
+    const std::string path = temp_ok ? std::string(tmp) + "palmetto_tiny_game_" +
+                                           std::to_string(GetCurrentProcessId()) + ".txt"
+                                     : std::string{};
+    size_t written = 0;
+    size_t bytes_read = 0;
+    int remove_result = -1;
     bool file_ok = false;
-    if (FILE* f = std::fopen(path.c_str(), "wb")) {
-        std::fputs("palmetto", f);
-        std::fclose(f);
-        char back[16] = {};
-        if (FILE* r = std::fopen(path.c_str(), "rb")) {
-            std::fread(back, 1, 7, r);
-            std::fclose(r);
-            file_ok = std::strcmp(back, "palmetto") == 0;
+    if (temp_ok) {
+        if (FILE* f = std::fopen(path.c_str(), "wb")) {
+            written = std::fwrite(contents, 1, contents_size, f);
+            const int write_close = std::fclose(f);
+            char back[sizeof(contents)] = {};
+            if (FILE* r = std::fopen(path.c_str(), "rb")) {
+                bytes_read = std::fread(back, 1, contents_size, r);
+                const bool read_error = std::ferror(r) != 0;
+                const int read_close = std::fclose(r);
+                file_ok = written == contents_size && write_close == 0 && bytes_read == contents_size && !read_error &&
+                          read_close == 0 && std::memcmp(back, contents, contents_size) == 0;
+            }
+            remove_result = std::remove(path.c_str());
         }
-        std::remove(path.c_str());
     }
-    check(file_ok, "a file round trip through the CRT works");
+    if (has_arg(argc, argv, "file-diagnostic") || !file_ok || remove_result != 0)
+        std::printf("tiny_game: CRT file path=\"%s\" write=%zu/%zu read=%zu/%zu remove_rc=%d\n", path.c_str(),
+                    written, contents_size, bytes_read, contents_size, remove_result);
+    check(file_ok && remove_result == 0, "a file round trip through the CRT works");
 
     long long sum = 0;
     std::thread worker([&] { for (int i = 1; i <= 1000; ++i) sum += i; });
