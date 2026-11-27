@@ -1,7 +1,8 @@
 # Peer streaming and IO completion: how the peering ports finish async work, and the ranked port plan
 
-**Status: read-only peer audit, 2026-11-26. No code was edited, no boot was run, no CMake/README/NOTICE file was
-touched and no git write was made.** This page is the streaming/async/IO-completion slice of the peer programme:
+**Origin: read-only peer audit, 2026-11-26.** That audit read peer trees/docs only: no peer code or game data was copied,
+and no git write was made for the audit. Sections 10–15 are later measured port follow-ups; each records its own implementation,
+tests and A/B status. This page is the streaming/async/IO-completion slice of the peer programme:
 [cleanroom_peers.md](cleanroom_peers.md) is the broad parity matrix, [upstream_port.md](upstream_port.md) is the
 no-copy policy under which every port here would be written, and [decomp_stage.md](decomp_stage.md) sections 10-15 are
 the measurement this page compares against. The five peer clones were refreshed before this audit; their source and
@@ -1278,4 +1279,127 @@ fixture), `port/test/dstorage_test.cpp` (the request-shape pins), `port/test/fix
 mode) and this section of `docs/peer_port_streaming.md`. No git write was made by this slice; boots, captures and the
 fixture's logs are under `D:\leonida-work\` outside the repository, and no game data is added: page numbers as shapes,
 sizes, counts, status HRESULTs, state words and image means only.
+
+## 15. Measured: bounded submission flights, with the legacy cap when off
+
+**Status: the wait point is measured from Palmetto's queue path; this slice widens only the existing bounded GPU-flight
+window, is opt-in and off by default, and has a synthetic GPU cap test. No title A/B is run here.** This is a conservative
+part of rank 8, not a recording worker or a new queue: CPU command replay and submission still happen on the calling
+thread and every existing fence, hold and presenter order is retained.
+
+### 15.1 The serialization boundary
+
+The title's console queue slot 35 is its `ExecuteCommandLists` entry, with `(count, list-array, frame-token, reserved)`
+([render_loop.md](render_loop.md) section 6). The proxy unwraps the existing list pointers and forwards to the PC queue;
+`VulkanQueue::execute()` replays the lists synchronously on that caller before its `vkQueueSubmit`. During replay the
+queue uses its per-queue state lock, prepares the resources and command buffer, and then calls `vkQueueSubmit` under the
+device-wide `submit_mutex` needed for Vulkan queue external synchronization. That mutex serializes host queue-submit calls
+between queues; it is not a GPU-idle wait. The ordinary GPU work is already asynchronous after submit.
+
+The measured CPU/GPU backpressure point is `wait_for_room()`: when the queue has a full command-buffer pool and none of its
+progress tickets has retired, the calling thread waits for the oldest timeline ticket with `vkWaitSemaphores` in finite
+5-second slices. A timeout loops and waits again. Device loss refuses the submission. The historical per-queue ceiling is
+64 buffers. This code path proves where a title thread can wait; without a title trace it does **not** prove the title
+actually reached the ceiling or that this is its dominant stall.
+
+`PALMETTO_SUBMIT_TRACE=1` is the measurement switch, set before process start. The bounded records separate the console
+slot-35 call (thread id, caller RVA when available, list count, path and elapsed microseconds), total
+`VulkanQueue::execute()` time, the device submit-lock wait from the driver `vkQueueSubmit` duration, queue-room waits
+(outstanding count, pool, bound and wait time), queue Waits whose fence Signal is pending, and debug markers held behind
+wait-before-signal work. Detailed timing/order records cap at 128 per category; an enabled queue also logs its selected bound once at creation, and
+queue teardown adds one aggregate wait summary when that queue waited. With the trace switch off, no diagnostic output is
+emitted by these probes.
+
+### 15.2 The bounded model and switches
+
+All four values are read once, when the first default `VulkanQueue` is created; the settings are shared by direct, compute
+and COPY queues in that process. The opt-in only increases the existing `CommandSlot` pool ceiling. It creates no
+`VkQueue` or worker and does not move a copy command out of a DIRECT/COMPUTE list.
+
+| switch | off/default | opt-in behavior |
+|---|---|---|
+| `PALMETTO_SUBMIT_OVERLAP` | Unset, empty or a value beginning with `0`: every lane keeps the historical 64-buffer bound; the per-lane override variables are ignored. | Set to `1` before queue creation: direct and compute default to 96, and the existing COPY lane defaults to 96. |
+| `PALMETTO_SUBMIT_OVERLAP_DIRECT_BOUND` | Ignored while the main switch is off. | Decimal per-queue limit shared by direct and compute. Default 96; malformed values fall back to 96; values below 64 clamp to 64 and values above 128 clamp to 128. |
+| `PALMETTO_SUBMIT_OVERLAP_COPY_BOUND` | Ignored while the main switch is off. | Decimal limit for an existing `QueueKind::copy` queue, independent of direct/compute. Same default and `[64,128]` clamp. |
+| `PALMETTO_SUBMIT_TRACE` | Unset, empty or a value beginning with `0`: probes emit no submit-flight records. | Set to `1` to gather the bounded timing/order records in 15.1; it does not change queue policy. |
+
+The limit is per `VulkanQueue` object, not a new device-wide allocation budget: 96 is the opt-in default and 128 is the
+hard per-queue maximum. At the selected bound the existing oldest-ticket fallback remains. Timeouts retry rather than
+allocate past a widened cap; device loss returns the existing unsupported result. At a widened bound, another wait error
+refuses the next submission rather than growing that pool; the switch-off 64-bound host-error fallback stays as before.
+
+A COPY limit applies only to a D3D12 COPY queue which already has its own `VulkanQueue`; the existing queue leasing may
+share a Vulkan queue when a distinct one is unavailable. In either case this work never extracts copy commands from a
+DIRECT list. `QueueHolds` still carries Wait-before-Signal batches, signals, and their later queue markers in sequence, and
+the presenter barrier remains untouched. The opt-in changes pool capacity, not the command order or who records/submits.
+
+### 15.3 Test coverage and verification
+
+| target / path | falsifiable check |
+|---|---|
+| `frame_dump_test` | Pure policy cases: unset and `0` keep 64 and ignore overrides; the enabled default is 96; compute follows direct; COPY has its own bound; invalid values fall back; lower/upper clamps hold even for explicit settings. The file also carries the separate kind-7 consumer-readiness cases. |
+| `vk_queue_test` | On a real local Vulkan queue with synthetic resources, direct/compute remain at 64 while the existing COPY queue is configured at 72. A test shim masks timeline progress and injects three timeout results; 288 copy submissions reach the cap without allocating past it and the bytes match. At a full widened pool an injected wait error refuses without another allocation. A COPY Wait-before-Signal then holds its batch and Begin/End markers until the producer Signal is submitted. This is not a title run or a real five-second device stall. |
+| `xs_proxy_mock_test` | The ordinary test sets `PALMETTO_SUBMIT_TRACE=0`; `--submit-trace` isolates the switch-on path before the first slot-35 call. Both paths assert the same PC `ExecuteCommandLists` forwarding, count and untouched caller list array; the trace path emits timing without altering it. |
+
+**Serialized gate and test outcomes:** after luna-memmodel released the shared build window, `_setup/build_gta6rt.cmd`
+returned `PALMETTO_OK`; `_setup/build_tests.cmd` returned `TESTS_BUILT` (11 targets, no compile errors). The separate
+`vk_queue_test` target built under the Visual Studio environment and passed once on the NVIDIA GeForce RTX 4090. Its
+legacy direct backlog was 256 submits / 63 buffers allocated / cap 64 / three injected timeouts. The COPY scenario was
+288 submits at cap 72, three injected timeout slices, correct bytes, a widened-cap wait error refused without pool growth,
+and Wait-before-Signal held the batch and markers until the producer Signal. Across the synthetic test run, bounded trace
+summaries recorded direct bound 64: 196 room waits, 470,280 us total, 2,912 us maximum; COPY bound 72: 89 room waits,
+41,711 us total, 961 us maximum. These are synthetic per-queue room waits, not title data; the first 16 submit-lock waits
+rounded to 0 us at the trace's microsecond resolution. `frame_dump_test` passed; `graphics_pso_test` passed all 363
+checks; `xs_proxy_mock_test` passed in both default and `--submit-trace` modes (the latter emitted two synthetic slot-35
+timing records); and `python -I tests/test_docs_env_vars.py` passed 4/4. Separately, luna-memmodel reports `xmem_test`
+496 checks passed and `buffer_va_index_test` fixed plus 200 randomized tables passed. This was one synthetic GPU test, with
+no device loss in its output; no title boot or title A/B was run.
+
+### 15.4 A/B and the next falsifier
+
+No title A/B was run for this section: the host's stability was not established and the lead explicitly kept title boots off
+this window. There are no before/after title counters, captured frames or title device-loss counts to report. The synthetic
+Vulkan queue test above is the only GPU exercise and is not an A/B.
+
+The next performance falsifier, only on a host cleared for one light title pair, is to capture the same queue/thread sample
+with `PALMETTO_SUBMIT_TRACE=1` first at the default 64 and then with `PALMETTO_SUBMIT_OVERLAP=1` (and the same trace switch).
+If the title has no `room-wait` at 64, or if the slot-35/execute thread is blocked in resource, pipeline or CPU replay work
+instead, this bounded window is not the relevant fix. If the window only moves a wait later without improving the observed
+frame/present progress, reject the performance claim. Stop after two device losses as the task gate specifies.
+
+### 15.5 Limits
+
+- **Not full asynchronous submission.** This patch does not offload command-list validation, resource preparation, command
+  recording or submit calls to a worker. It only gives an existing queue a larger, bounded count of buffers still in GPU
+  flight. The global submit mutex and per-queue CPU serialization remain.
+- **No direct-list copy split.** A shader/transfer copy recorded in a DIRECT list stays there. A separate COPY budget only
+  affects work already submitted through an existing `QueueKind::copy` queue, and it cannot create physical parallelism
+  when the queue is shared.
+- **Per-queue, not per-device memory ceiling.** Each pool is bounded by 128, but total storage can scale with the number of
+  D3D12 queue objects. A device-wide budget/queue-count stress test is not part of this slice.
+- **No title saturation evidence.** Source inspection and synthetic backpressure prove the fallback; a live trace must
+  show the title reaching the 64 bound before this can be called a measured title bottleneck.
+- **No live A/B.** No frame-rate or loading improvement is claimed until the stable-host falsifier above is run.
+
+### 15.6 Cross-check, attribution and uncommitted files
+
+The design is derived from this repository's measured slot-35 call ([render_loop.md](render_loop.md) section 6),
+`VulkanQueue` replay/submit path, and existing `QueueHolds` ordering. Rank 8's peer comparison was used as reference only:
+VIctory (GPL-3.0-or-later, snapshot `63bcca4`, `crates/victory-gpu/src/queue.rs` and `host.rs`), victory-fork
+(GPL-3.0-or-later, `52ac4ec`, `crates/victory-gpu/src/queue2.rs` copy-lane notes), and XCL (GPL-2.0-only, `8b957be`,
+`crates/xcl/src/hle/d3d12x/frame.rs` and `list_x.rs`). PercyScarlett (GPL-2.0-only, `e44c465`,
+`runtime/victory/crates/victory-gpu/src/host.rs`) is the same late-wait runtime snapshot also noted in section 2. No peer
+source, comment text, identifier or table was copied; the bound parser, trace and queue-pool policy are this project's
+own. The upstream projects remain the copyright of their contributors under their respective licences.
+
+**NOTICE.md row for the lead to add:** “The bounded submission-flight window and existing COPY-lane comparison in
+[docs/peer_port_streaming.md](peer_port_streaming.md), section 15, were cross-checked against VIctory (GPL-3.0-or-later,
+`63bcca4`; `crates/victory-gpu/src/queue.rs`, `host.rs`), victory-fork (GPL-3.0-or-later, `52ac4ec`;
+`crates/victory-gpu/src/queue2.rs`), XCL (GPL-2.0-only, `8b957be`; `crates/xcl/src/hle/d3d12x/frame.rs`, `list_x.rs`),
+and PercyScarlett (GPL-2.0-only, `e44c465`; `runtime/victory/crates/victory-gpu/src/host.rs`). No code, comments,
+identifiers or data tables were copied; the implementation is our own.” No `NOTICE.md` edit was made by this task.
+
+Files for this section: `port/src/queue_holds.h`, `port/src/vulkan_backend.h`, `port/shims/d3d12_xs_device.cpp` (slot-35
+trace only; its slot-57 block is luna-mesh's), `port/test/vk_queue_test.cpp`, `port/test/frame_dump_test.cpp`,
+`port/test/xs_proxy_mock_test.cpp` and this section of `docs/peer_port_streaming.md`. No git write or game data was made.
 

@@ -68,6 +68,12 @@ VKAPI_ATTR VkResult VKAPI_CALL stalling_wait_semaphores(VkDevice device, const V
     return real_wait_semaphores(device, info, timeout);
 }
 
+std::atomic<std::uint32_t> injected_wait_errors{0};
+VKAPI_ATTR VkResult VKAPI_CALL failing_wait_semaphores(VkDevice, const VkSemaphoreWaitInfo*, std::uint64_t) {
+    ++injected_wait_errors;
+    return VK_ERROR_OUT_OF_HOST_MEMORY;
+}
+
 const char* flags_text(VkQueueFlags f) {
     static char buf[32];
     std::snprintf(buf, sizeof buf, "%s%s%s", f & VK_QUEUE_GRAPHICS_BIT ? "G" : "", f & VK_QUEUE_COMPUTE_BIT ? "C" : "",
@@ -201,10 +207,18 @@ int main() {
 
     VulkanContext context(d.device_proc, d.device, true);
     EXPECT(context.loaded());
-    VulkanQueue direct(context, d.queue, d.family, Kind::direct);
-    VulkanQueue compute(context, d.compute_queue, d.compute_family, Kind::compute);
-    VulkanQueue copy(context, d.copy_queue, d.copy_family, Kind::copy);
+    SubmissionFlightSettings legacy_flights;
+    SubmissionFlightSettings copy_flights;
+    copy_flights.enabled = true;
+    copy_flights.direct_bound = 80;
+    copy_flights.copy_bound = 72;
+    VulkanQueue direct(context, d.queue, d.family, Kind::direct, legacy_flights);
+    VulkanQueue compute(context, d.compute_queue, d.compute_family, Kind::compute, legacy_flights);
+    VulkanQueue copy(context, d.copy_queue, d.copy_family, Kind::copy, copy_flights);
     EXPECT(direct.ok() && compute.ok() && copy.ok());
+    EXPECT(direct.submission_flight_bound() == VulkanQueue::kMaxQueuedCommandBuffers);
+    EXPECT(compute.submission_flight_bound() == VulkanQueue::kMaxQueuedCommandBuffers);
+    EXPECT(copy.submission_flight_bound() == 72);
 
     // Buffers: an upload source, a GPU-side destination and a readback, all host-visible for the test.
     void *upload_map = nullptr, *mid_map = nullptr, *readback_map = nullptr, *tex_readback_map = nullptr;
@@ -390,6 +404,97 @@ int main() {
         EXPECT(injected_stalls.load() == kStalls);  // the queue did reach the cap and wait
         EXPECT(allocated_command_buffers <= VulkanQueue::kMaxQueuedCommandBuffers);
         EXPECT(static_cast<std::uint8_t*>(dst_map)[kBig - 1] == 0x5A);
+    }
+
+    // 5b. The opt-in COPY lane has its own bounded flight window. Hold its reported progress at zero so the copy queue
+    // can fill exactly to the configured bound; its next submission must wait for the oldest ticket rather than grow
+    // the pool. This is a synthetic GPU stall, not a title boot or a direct-list copy split.
+    {
+        EXPECT(copy.idle());
+        CommandList flight_copy;
+        EXPECT(flight_copy.copy_buffer({mid_id, 0, upload_id, 0, kSize}));
+        EXPECT(flight_copy.close());
+        const CommandList* flight_lists[] = {&flight_copy};
+        const std::uint32_t bound = copy.submission_flight_bound();
+        const std::uint32_t submits = 4 * bound;
+
+        real_allocate_command_buffers = context.vk.vkAllocateCommandBuffers;
+        real_get_semaphore_counter_value = context.vk.vkGetSemaphoreCounterValue;
+        real_wait_semaphores = context.vk.vkWaitSemaphores;
+        context.vk.vkAllocateCommandBuffers = counting_allocate_command_buffers;
+        context.vk.vkGetSemaphoreCounterValue = holding_semaphore_counter;
+        context.vk.vkWaitSemaphores = stalling_wait_semaphores;
+        allocated_command_buffers = 0;
+        injected_stalls.store(0);
+        hold_progress.store(true);
+        for (std::uint32_t i = 0; i < submits; ++i) EXPECT(copy.execute(flight_lists) == ReplayResult::success);
+        hold_progress.store(false);
+        context.vk.vkAllocateCommandBuffers = real_allocate_command_buffers;
+        context.vk.vkGetSemaphoreCounterValue = real_get_semaphore_counter_value;
+        context.vk.vkWaitSemaphores = real_wait_semaphores;
+        EXPECT(injected_stalls.load() == kStalls);
+        EXPECT(allocated_command_buffers <= bound);
+        EXPECT(copy.signal(fence.semaphore(), 12));
+        EXPECT(fence.wait(12, 20'000'000'000ull));
+        EXPECT(copy.idle());
+        auto* copy_dst = static_cast<std::uint8_t*>(mid_map);
+        std::uint32_t copy_bad = 0;
+        for (std::uint32_t i = 0; i < kSize; ++i) copy_bad += copy_dst[i] != 0xbb;
+        EXPECT(copy_bad == 0);
+        std::printf("copy flight: %u submits, cap %u, %u timeout slices, correct bytes\n", submits, bound,
+                    injected_stalls.load());
+    }
+
+    // An opt-in widened queue must not escape its hard bound on a wait error. With the pool full and progress masked,
+    // an injected host error refuses the next submission without allocating a 73rd command buffer; switch-off queues
+    // remain on their historical 64-buffer bound as asserted above.
+    {
+        CommandList error_copy;
+        EXPECT(error_copy.copy_buffer({mid_id, 0, upload_id, 0, kSize}));
+        EXPECT(error_copy.close());
+        const CommandList* error_lists[] = {&error_copy};
+        real_allocate_command_buffers = context.vk.vkAllocateCommandBuffers;
+        real_get_semaphore_counter_value = context.vk.vkGetSemaphoreCounterValue;
+        real_wait_semaphores = context.vk.vkWaitSemaphores;
+        context.vk.vkAllocateCommandBuffers = counting_allocate_command_buffers;
+        context.vk.vkGetSemaphoreCounterValue = holding_semaphore_counter;
+        context.vk.vkWaitSemaphores = failing_wait_semaphores;
+        allocated_command_buffers = 0;
+        injected_wait_errors.store(0);
+        hold_progress.store(true);
+        EXPECT(copy.execute(error_lists) == ReplayResult::unsupported);
+        hold_progress.store(false);
+        context.vk.vkAllocateCommandBuffers = real_allocate_command_buffers;
+        context.vk.vkGetSemaphoreCounterValue = real_get_semaphore_counter_value;
+        context.vk.vkWaitSemaphores = real_wait_semaphores;
+        EXPECT(injected_wait_errors.load() == 1);
+        EXPECT(allocated_command_buffers == 0);
+        EXPECT(copy.signal(fence.semaphore(), 13));
+        EXPECT(fence.wait(13, 20'000'000'000ull));
+        EXPECT(copy.idle());
+        std::puts("copy flight: wait error refused at cap without growing the pool");
+    }
+
+    // A wait-before-signal keeps both the copy flight and its queue markers held in order. The copy lane's larger
+    // flight window does not move a later marker ahead of the fence that makes the batch recordable.
+    {
+        const std::int64_t held_before = context.holds().held_count();
+        copy.wait(fence.semaphore(), 15);
+        CommandList held_copy;
+        EXPECT(held_copy.copy_buffer({mid_id, 0, upload_id, 0, kSize}));
+        EXPECT(held_copy.close());
+        const CommandList* held_lists[] = {&held_copy};
+        EXPECT(copy.execute(held_lists) == ReplayResult::success);
+        EXPECT(context.holds().held_count() == held_before + 1);
+        copy.marker(DebugMarker::Kind::begin, "synthetic-copy-flight");
+        copy.marker(DebugMarker::Kind::end, nullptr);
+        EXPECT(context.holds().held_count() == held_before + 3);
+        EXPECT(direct.signal(fence.semaphore(), 15));
+        EXPECT(context.holds().held_count() == held_before);
+        EXPECT(copy.signal(fence.semaphore(), 16));
+        EXPECT(fence.wait(16, 5'000'000'000ull));
+        EXPECT(copy.idle());
+        std::puts("copy flight: Wait-before-Signal held its batch and markers until the producer signal");
     }
 
     // 6. The non-blocking pipeline hold (docs/peer_port_streaming.md). The deferred-compile hooks are synthetic: a

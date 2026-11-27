@@ -25,6 +25,7 @@
 //     unidentified slot-6 program, an element layout on a mesh record, a vertex-family state, a missing stage/root/
 //     attachment, the bad fixed-function values) are named. The default build() path stays byte-identical.
 //   - MeshStageCounters: the counters the slot-57 wiring keeps for the mesh path and their bounded one-line summary.
+//   - slot57_mesh_mode: exact-value opt-in/default-off gating and distinct graphics-desc versus Device2 stream API labels.
 //   - console_graphics_user_data(): the console user-SGPR placement of a root signature (docs/root_arguments.md):
 //     vertex/pixel base s8 with one dword per descriptor table and two per root view, mesh base s16, and a
 //     signature that would spill refused with its parameter named.
@@ -43,6 +44,7 @@
 // It prints the input and refusal tables so the boundary is visible without reading the header.
 
 #include "../src/graphics_pso.h"
+#include "../shims/slot57_mesh_mode.h"
 #include "../src/pipeline_budget.h"  // docs/memory_growth.md: the live-pipeline cap policy
 #include "test_temp_dir.h"
 
@@ -394,6 +396,7 @@ void test_resolve_native_stage() {
 
     const Bytes ps_code = fspx_code(0x101);
     const Bytes vs_code = fspx_code(0x202);
+    const Bytes ms_code = fspx_code(0x303);
     const Bytes untranslated = fspx_code(0x909);
     const Bytes raw_only = without_prologue(fspx_code(0x404));
     const Bytes payload_code = fspx_code(0x505);
@@ -403,6 +406,7 @@ void test_resolve_native_stage() {
                                      {
                                          {"lib_ps_00001", "ps", hash_of(ps_code)},
                                          {"lib_vs_00002", "vs", hash_of(vs_code)},
+                                         {"lib_ms_00009", "ms", hash_of(ms_code)},
                                          {"lib_ps_00003", "ps", hash_of(raw_only)},
                                          {"lib_ps_00004", "ps", hash_of(payload_code), state_hash_of_0x11()},
                                          {"lib_ps_00005", "ps", hash_of(ambiguous_code), "", 11},
@@ -434,6 +438,20 @@ void test_resolve_native_stage() {
     check(native.program.bytes == ps_code, "resolve: the kind-6 bytes are the program, as create_compute takes them");
     check(!native.raw_key, "resolve: a classified program is not the raw-key path");
     check(why.empty(), "resolve: no refusal message when the entry is found");
+
+    // A library mesh program is published by the same resolver key, with the record slot selecting stage "ms".
+    why.clear();
+    check(pso::resolve_native_stage(ms_code, "ms", library, kFitsAll, &native, &why),
+          "resolve: a library mesh program is a native stage");
+    check(native.entry && native.entry->name == "fspx/lib_ms_00009", "resolve: the ms entry is found by its code hash");
+    check(native.program.bytes == ms_code, "resolve: the MS bytecode is the code-key input");
+    check(why.empty(), "resolve: no refusal message for a published MS key");
+    why.clear();
+    check(pso::resolve_native_stage(ms_code, "ps", library, kFitsAll, &native, &why),
+          "resolve: a mesh program under a different record slot is still classified");
+    check(!native.entry && why.find("stage mismatch") != std::string::npos &&
+              why.find("published for stage ms") != std::string::npos,
+          "resolve: a wrong slot names the published MS stage");
 
     // The record slot gives the stage: the same bytes looked up as the vertex stage are not there.
     why.clear();
@@ -1679,6 +1697,20 @@ void test_build_mesh_stream() {
     check(counters.records_with_mesh_stage == 1 && counters.streams_built == 1 && counters.refusals == 1 &&
               summary.size() <= 120 && summary.find("records 1") != std::string::npos,
           "mesh stream: MeshStageCounters counts and its summary is bounded");
+
+    // Slot-57 mode is a strict opt-in: an unset/other value or a non-mesh record stays on the old graphics-desc path.
+    check(!rt::d3d12_xs::slot57_mesh_stream_opt_in(false, "1"),
+          "mesh mode: a PS/VS-only record ignores the stream switch");
+    check(!rt::d3d12_xs::slot57_mesh_stream_opt_in(true, nullptr), "mesh mode: unset keeps the stream path off");
+    check(!rt::d3d12_xs::slot57_mesh_stream_opt_in(true, "0"), "mesh mode: zero keeps the stream path off");
+    check(!rt::d3d12_xs::slot57_mesh_stream_opt_in(true, "true"), "mesh mode: only exact value 1 opts in");
+    check(rt::d3d12_xs::slot57_mesh_stream_opt_in(true, "1"), "mesh mode: exact value 1 opts in for MS");
+    check(std::string(rt::d3d12_xs::slot57_create_api_label(rt::d3d12_xs::Slot57CreateApi::GraphicsDescription)) ==
+              "PC CreateGraphicsPipelineState",
+          "mesh mode: default path retains the graphics-description API label");
+    check(std::string(rt::d3d12_xs::slot57_create_api_label(rt::d3d12_xs::Slot57CreateApi::MeshStream)) ==
+              "PC ID3D12Device2::CreatePipelineState",
+          "mesh mode: stream path reports the Device2 pipeline-state API label");
 
     // ---- Refusals, each by name; the output stream is untouched on a refusal.
     {

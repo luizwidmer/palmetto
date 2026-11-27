@@ -3338,11 +3338,12 @@ class VulkanQueue : private QueueHolds<VkSemaphore>::Holder {
 public:
     enum class QueueKind : std::uint8_t { direct, compute, copy };
 
-    // The most command buffers a queue holds at once. At that many, a caller that outruns the GPU waits for the oldest
-    // submitted one to finish (before taking any context lock, see wait_for_room) instead of allocating without bound. The
-    // cap holds while the GPU is slow too: a wait that times out is retried, in kQueuedWaitNs slices so a device lost
-    // meanwhile ends it, and a device lost makes execute() submit nothing.
-    static constexpr std::size_t kMaxQueuedCommandBuffers = 64;
+    // The switch-off command-buffer ceiling is byte-for-byte the historical fixed window. When opted in, the pure
+    // settings in queue_holds.h can widen that window independently for direct/compute and the existing COPY lane, but
+    // never beyond kMaximumSubmissionFlightBound. At the selected bound wait_for_room() still waits for the oldest GPU
+    // ticket in finite slices; a device loss makes execute() submit nothing.
+    static constexpr std::size_t kMaxQueuedCommandBuffers = SubmissionFlightSettings::kLegacyBound;
+    static constexpr std::size_t kMaximumSubmissionFlightBound = SubmissionFlightSettings::kMaximumBound;
     static constexpr std::uint64_t kQueuedWaitNs = 5'000'000'000;
 
     static constexpr VkPipelineStageFlags2 queue_supported_stages(QueueKind kind) noexcept {
@@ -3359,8 +3360,22 @@ public:
         }
     }
 
-    VulkanQueue(VulkanContext& context, VkQueue queue, std::uint32_t family, QueueKind kind = QueueKind::direct)
-        : context_(context), queue_(queue), kind_(kind), family_(family) {
+    static constexpr SubmissionLane submission_lane(QueueKind kind) noexcept {
+        switch (kind) {
+        case QueueKind::copy: return SubmissionLane::copy;
+        case QueueKind::compute: return SubmissionLane::compute;
+        case QueueKind::direct:
+        default: return SubmissionLane::direct;
+        }
+    }
+
+    VulkanQueue(VulkanContext& context, VkQueue queue, std::uint32_t family, QueueKind kind = QueueKind::direct,
+                SubmissionFlightSettings flight_settings = default_submission_flight_settings())
+        : context_(context), queue_(queue), kind_(kind), family_(family),
+          flight_bound_(flight_settings.bound(submission_lane(kind))) {
+        if (flight_settings.enabled && submission_trace_enabled())
+            std::fprintf(stderr, "[rt] submit-flight: enabled lane=%s bound=%u hard-cap=%zu\n", queue_kind_name(kind_),
+                         flight_bound_, kMaximumSubmissionFlightBound);
         auto& vk = context.vk;
         VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -3395,6 +3410,14 @@ public:
                 context_.mark_device_lost();
             }
         }
+        if (submission_trace_enabled() && room_wait_count_)
+            std::fprintf(stderr,
+                         "[rt] submit-flight: summary lane=%s bound=%u submissions=%llu room_waits=%llu "
+                         "wait_us=%llu max_wait_us=%llu pool=%zu\n",
+                         queue_kind_name(kind_), flight_bound_, static_cast<unsigned long long>(submitted_),
+                         static_cast<unsigned long long>(room_wait_count_),
+                         static_cast<unsigned long long>(room_wait_total_us_),
+                         static_cast<unsigned long long>(room_wait_max_us_), buffers_.size());
         if (progress_) {
             std::lock_guard lock(context_.tracker_mutex_);
             if (context_.depth24_) context_.depth24_->forget(progress_);  // its scratch is idle now
@@ -3422,6 +3445,7 @@ public:
     VulkanQueue& operator=(const VulkanQueue&) = delete;
 
     bool ok() const { return ok_; }
+    std::uint32_t submission_flight_bound() const { return flight_bound_; }
 
     // Entries kept between executions. Execute only uses the first lists.size(); a larger count is retained storage,
     // not work the next submission will replay (vk_queue_test checks both halves of that contract).
@@ -3581,8 +3605,23 @@ public:
             drain_pins(retired);
         }
         retired.clear();
+        const double execution_us = (timeline::seconds() - started) * 1e6;
         timeline::line("exec return n=%u result=%d held=%d us=%.0f", static_cast<unsigned>(lists.size()),
-                       static_cast<int>(result), held ? 1 : 0, (timeline::seconds() - started) * 1e6);
+                       static_cast<int>(result), held ? 1 : 0, execution_us);
+        if (submission_trace_enabled()) {
+            static std::atomic<std::uint64_t> calls{0};
+            static std::atomic<std::uint64_t> reports{0};
+            const std::uint64_t call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (call <= 16 || execution_us >= 1000.0) {
+                const std::uint64_t report = reports.fetch_add(1, std::memory_order_relaxed);
+                if (report < 128)
+                    std::fprintf(stderr,
+                                 "[rt] submit-flight: execute lane=%s tid=%llu call=%llu lists=%zu held=%d result=%d us=%.0f\n",
+                                 queue_kind_name(kind_), static_cast<unsigned long long>(submission_thread_id()),
+                                 static_cast<unsigned long long>(call), lists.size(), held ? 1 : 0,
+                                 static_cast<int>(result), execution_us);
+            }
+        }
         // The pacing knobs (see SubmissionPace; docs/vertex_buffer_va.md section 12). Off by default: with none set
         // this block is two atomic-free loads and changes no call.
         if (!held && result == ReplayResult::success) {
@@ -3609,11 +3648,13 @@ public:
     // held) keeps the fence object alive until it has been submitted, as D3D12 does.
     bool signal(VkSemaphore fence, std::uint64_t value, const PinFn& pin = {}) {
         bool ok = true;
+        bool held = false;
         std::vector<std::shared_ptr<void>> retired;
         timeline::line("queue signal entry v=%llu", static_cast<unsigned long long>(value));
         {
             std::lock_guard state(state_mutex_);
             if (must_hold()) {
+                held = true;
                 Deferred op;
                 op.kind = Deferred::Kind::signal;
                 op.fence = fence;
@@ -3627,6 +3668,14 @@ public:
         }
         retired.clear();
         timeline::line("queue signal return v=%llu ok=%d", static_cast<unsigned long long>(value), ok ? 1 : 0);
+        if (submission_trace_enabled()) {
+            static std::atomic<std::uint64_t> reports{0};
+            if (reports.fetch_add(1, std::memory_order_relaxed) < 128)
+                std::fprintf(stderr,
+                             "[rt] submit-flight: queue-signal lane=%s tid=%llu value=%llu deferred=%d ok=%d\n",
+                             queue_kind_name(kind_), static_cast<unsigned long long>(submission_thread_id()),
+                             static_cast<unsigned long long>(value), held ? 1 : 0, ok ? 1 : 0);
+        }
         context_.holds().pump_ready();  // this Signal, or the hold above, may have made a held batch ready
         return ok;
     }
@@ -3637,12 +3686,22 @@ public:
     void wait(VkSemaphore fence, std::uint64_t value, const PinFn& pin = {}) {
         std::vector<std::shared_ptr<void>> retired;  // fences whose submission has completed: released unlocked
         timeline::line("queue wait v=%llu", static_cast<unsigned long long>(value));
+        const bool trace = submission_trace_enabled();
+        const bool pending_signal = trace && context_.holds().pending(fence, value);
         {
             std::lock_guard state(state_mutex_);
             waits_.push_back(fence);
             wait_values_.push_back(value);
             if (pin) wait_pins_.push_back(pin());
             drain_pins(retired);
+        }
+        if (trace) {
+            static std::atomic<std::uint64_t> reports{0};
+            if (reports.fetch_add(1, std::memory_order_relaxed) < 128)
+                std::fprintf(stderr,
+                             "[rt] submit-flight: queue-wait lane=%s tid=%llu value=%llu pending-signal=%d\n",
+                             queue_kind_name(kind_), static_cast<unsigned long long>(submission_thread_id()),
+                             static_cast<unsigned long long>(value), pending_signal ? 1 : 0);
         }
     }
 
@@ -3664,7 +3723,16 @@ public:
             op.kind = Deferred::Kind::marker;
             op.marker_kind = kind;
             op.label = label ? label : "";
+            const std::size_t label_bytes = op.label.size();
             hold(std::move(op));
+            if (submission_trace_enabled()) {
+                static std::atomic<std::uint64_t> reports{0};
+                if (reports.fetch_add(1, std::memory_order_relaxed) < 128)
+                    std::fprintf(stderr,
+                                 "[rt] submit-flight: marker-held lane=%s tid=%llu kind=%u label-bytes=%zu\n",
+                                 queue_kind_name(kind_), static_cast<unsigned long long>(submission_thread_id()),
+                                 static_cast<unsigned>(kind), label_bytes);
+            }
             return;
         }
         marker_now(kind, label);
@@ -3676,6 +3744,29 @@ public:
     }
 
 private:
+    static bool submission_trace_enabled() {
+        static const bool enabled =
+            SubmissionFlightSettings::switch_on(std::getenv("PALMETTO_SUBMIT_TRACE"));
+        return enabled;
+    }
+
+    static const char* queue_kind_name(QueueKind kind) noexcept {
+        switch (kind) {
+        case QueueKind::compute: return "compute";
+        case QueueKind::copy: return "copy";
+        case QueueKind::direct:
+        default: return "direct";
+        }
+    }
+
+    static std::uint64_t submission_thread_id() noexcept {
+#if defined(_WIN32)
+        return static_cast<std::uint64_t>(GetCurrentThreadId());
+#else
+        return static_cast<std::uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+#endif
+    }
+
     // Completed stages, reused by later ARRAY_OF_POINTERS builds. Only execute_now() touches the pool, and it holds
     // state_mutex_ (including the deferred/held release paths), so no extra lock is needed.
     std::vector<KhrInstanceStage> khr_stage_pool_;
@@ -5787,11 +5878,34 @@ private:
     bool wait_for_room() {
         for (;;) {
             if (context_.is_device_lost()) return false;
-            if (buffers_.size() < kMaxQueuedCommandBuffers) return true;
+            if (buffers_.size() < flight_bound_) return true;
             const auto done = completed();
-            for (const auto& slot : buffers_)
+            std::size_t outstanding = 0;
+            for (const auto& slot : buffers_) {
                 if (slot.ticket <= done) return true;
-            switch (wait_oldest_submitted()) {
+                ++outstanding;
+            }
+            const bool trace = submission_trace_enabled();
+            const auto wait_started = trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            const VkResult waited = wait_oldest_submitted();
+            if (trace) {
+                const auto wait_us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                                   std::chrono::steady_clock::now() - wait_started)
+                                                                   .count());
+                ++room_wait_count_;
+                room_wait_total_us_ += wait_us;
+                room_wait_max_us_ = std::max(room_wait_max_us_, wait_us);
+                static std::atomic<std::uint64_t> reports{0};
+                const std::uint64_t report = reports.fetch_add(1, std::memory_order_relaxed);
+                if (report < 128)
+                    std::fprintf(stderr,
+                                 "[rt] submit-flight: room-wait lane=%s tid=%llu outstanding=%zu pool=%zu bound=%u "
+                                 "result=%d wait_us=%llu\n",
+                                 queue_kind_name(kind_), static_cast<unsigned long long>(submission_thread_id()),
+                                 outstanding, buffers_.size(), flight_bound_, static_cast<int>(waited),
+                                 static_cast<unsigned long long>(wait_us));
+            }
+            switch (waited) {
             case VK_SUCCESS:
                 return true;
             case VK_TIMEOUT:
@@ -5800,7 +5914,10 @@ private:
                 context_.mark_device_lost();
                 return false;
             default:
-                return true;  // nothing submitted to wait for (or a host error): no wait can make room, allocate
+                // With the opt-in flight bound, an error or a pool containing only unfinished/unsubmitted slots must not
+                // allocate past the selected cap. Keep the legacy allocate-on-host-error fallback exactly when the
+                // switch is off (bound 64) so ordinary behavior is unchanged.
+                return flight_bound_ == kMaxQueuedCommandBuffers;
             }
         }
     }
@@ -5875,9 +5992,18 @@ private:
             values = sparse_values;
         }
         const std::vector<VkPipelineStageFlags> stages(semaphores.size(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        const bool trace = submission_trace_enabled();
+        const auto submit_lock_started = trace ? std::chrono::steady_clock::now() :
+                                                   std::chrono::steady_clock::time_point{};
+        std::uint64_t submit_lock_wait_us = 0;
+        std::uint64_t driver_submit_us = 0;
         VkResult res = VK_SUCCESS;
         {
-            std::lock_guard lock(context_.submit_mutex());
+            std::unique_lock lock(context_.submit_mutex());
+            if (trace)
+                submit_lock_wait_us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                                    std::chrono::steady_clock::now() - submit_lock_started)
+                                                                    .count());
             VkSemaphore signals[2]{progress_, VK_NULL_HANDLE};
             std::uint64_t signal_values[2]{ticket, 0};
             std::uint32_t signal_count = 1;
@@ -5904,10 +6030,33 @@ private:
             submit.pCommandBuffers = &command_buffer;
             submit.signalSemaphoreCount = signal_count;
             submit.pSignalSemaphores = signals;
+            const auto driver_started = trace ? std::chrono::steady_clock::now() :
+                                                std::chrono::steady_clock::time_point{};
             res = context_.vk.vkQueueSubmit(queue_, 1, &submit, VK_NULL_HANDLE);
+            if (trace)
+                driver_submit_us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                                  std::chrono::steady_clock::now() - driver_started)
+                                                                  .count());
             if (res == VK_SUCCESS) {
                 context_.record_submit_locked(progress_, ticket);
                 if (signals_fence) context_.holds().signaled(fence, value);
+            }
+        }
+        if (trace) {
+            static std::atomic<std::uint64_t> calls{0};
+            static std::atomic<std::uint64_t> reports{0};
+            const std::uint64_t call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (call <= 16 || submit_lock_wait_us >= 1000 || driver_submit_us >= 1000) {
+                const std::uint64_t report = reports.fetch_add(1, std::memory_order_relaxed);
+                if (report < 128)
+                    std::fprintf(stderr,
+                                 "[rt] submit-flight: vkQueueSubmit lane=%s tid=%llu call=%llu ticket=%llu command=%d "
+                                 "waits=%zu lock_us=%llu driver_us=%llu result=%d\n",
+                                 queue_kind_name(kind_), static_cast<unsigned long long>(submission_thread_id()),
+                                 static_cast<unsigned long long>(call), static_cast<unsigned long long>(ticket),
+                                 command_buffer ? 1 : 0, semaphores.size(),
+                                 static_cast<unsigned long long>(submit_lock_wait_us),
+                                 static_cast<unsigned long long>(driver_submit_us), static_cast<int>(res));
             }
         }
         if (res == VK_ERROR_DEVICE_LOST) {
@@ -5934,6 +6083,10 @@ private:
     VkQueue queue_;
     QueueKind kind_ = QueueKind::direct;
     std::uint32_t family_;
+    std::uint32_t flight_bound_ = kMaxQueuedCommandBuffers;
+    std::uint64_t room_wait_count_ = 0;
+    std::uint64_t room_wait_total_us_ = 0;
+    std::uint64_t room_wait_max_us_ = 0;
     VkCommandPool pool_ = VK_NULL_HANDLE;
     VkSemaphore progress_ = VK_NULL_HANDLE;  // our own timeline: which command buffers are done
     std::uint64_t submitted_ = 0;

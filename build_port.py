@@ -2073,13 +2073,15 @@ def library_shaders(game: str, work: str, mc_signature: str, jobs: int = 1, emul
 
 GRAPHICS_PROGRAMS_ENV = "PALMETTO_GRAPHICS_PROGRAMS"
 # The wanted graphics program list is data, not repository content: a file named by PALMETTO_GRAPHICS_PROGRAMS, or
-# <work>/graphics_programs.json when that is not set. A build without one does not run the step at all.
+# <work>/graphics_programs.json when that is not set. A build without one does not run the step at all. Mesh entries are
+# opt-in: the per-run list must contain an explicit non-empty "ms" hash list; the existing PS/VS list remains default.
 GRAPHICS_PROGRAMS_FILE = "graphics_programs.json"
-GRAPHICS_STAGES = "ps,vs"
+GRAPHICS_STAGES = "ps,vs,ms"  # supported stages; the selected stages are recorded per wanted list below
+GRAPHICS_DEFAULT_STAGES = "ps,vs"
 GRAPHICS_EXTRACTED_RECORD = "extraction.json"            # written after the extraction, as LIBRARY_EXTRACTED_RECORD
 GRAPHICS_BUILD_RECORD = "pipeline_graphics_build.json"   # written after the published translation
 # The published entry-name prefixes this step owns in the FSPX index. Another step's prefixes are left alone.
-GRAPHICS_OWNED = ("lib_ps_", "lib_vs_")
+GRAPHICS_OWNED = ("lib_ps_", "lib_vs_", "lib_ms_")
 
 
 def graphics_programs_path(work: str) -> str:
@@ -2088,19 +2090,44 @@ def graphics_programs_path(work: str) -> str:
     return os.path.abspath(named) if named else os.path.join(work, GRAPHICS_PROGRAMS_FILE)
 
 
-def graphics_extraction_settings(package: str, mc_signature: str, wanted: str) -> str:
-    """What <work>/shaders/pipeline_graphics depends on: the package, the extracting tools, llvm-mc and the exact
-    wanted list the selection read (a changed list extracts its programs again)."""
+def graphics_requested_stages(wanted: str) -> str:
+    """The non-empty PS/VS/MS stages selected by the external wanted list, in stable order.
+
+    MS publication is opt-in by selection: without a non-empty "ms" list the old PS/VS settings and output ownership
+    are preserved. Malformed input is left for shader_library.py to reject with its schema-specific error.
+    """
+    try:
+        with open(wanted, encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return GRAPHICS_DEFAULT_STAGES
+    if not isinstance(data, dict):
+        return GRAPHICS_DEFAULT_STAGES
+    selected = {stage for stage in GRAPHICS_STAGES.split(",")
+                if isinstance(data.get(stage), list) and data[stage]}
+    return ",".join(stage for stage in GRAPHICS_STAGES.split(",") if stage in selected) or GRAPHICS_DEFAULT_STAGES
+
+
+def graphics_owned_for(stages: str) -> tuple[str, ...]:
+    """Only prune the program-name prefixes selected by this build; an unrequested MS entry is left untouched."""
+    selected = set(stages.split(","))
+    return tuple(prefix for stage, prefix in zip(GRAPHICS_STAGES.split(","), GRAPHICS_OWNED) if stage in selected)
+
+
+def graphics_extraction_settings(package: str, mc_signature: str, wanted: str,
+                                 stages: str = GRAPHICS_DEFAULT_STAGES) -> str:
+    """What <work>/shaders/pipeline_graphics depends on: the package, extracting tools, llvm-mc, selected stages and
+    the exact wanted list (a changed list extracts its programs again)."""
     return json.dumps({"package": package, "tools": sources_digest(TOOLS, LIBRARY_TOOLS), "llvm_mc": mc_signature,
-                       "stages": GRAPHICS_STAGES, "wanted": file_sha256(wanted)}, sort_keys=True)
+                       "stages": stages, "wanted": file_sha256(wanted)}, sort_keys=True)
 
 
 def graphics_settings(package: str, mc_signature: str, emulate: bool, fallbacks: "tuple[str, ...]",
-                      wanted: str) -> str:
-    """What the wanted graphics programs' modules depend on, as library_settings, plus the wanted list."""
+                      wanted: str, stages: str = GRAPHICS_DEFAULT_STAGES) -> str:
+    """What the wanted graphics programs' modules depend on, as library_settings, plus the selected stages and list."""
     return json.dumps({"package": package, "tools": sources_digest(TOOLS, LIBRARY_TOOLS),
                        "translator": translation_sources_digest(), "llvm_mc": mc_signature,
-                       "wave64_emulate": bool(emulate), "fallbacks": list(fallbacks), "stages": GRAPHICS_STAGES,
+                       "wave64_emulate": bool(emulate), "fallbacks": list(fallbacks), "stages": stages,
                        "wanted": file_sha256(wanted)}, sort_keys=True)
 
 
@@ -2179,7 +2206,8 @@ def graphics_wanted_counts(extracted: str) -> "tuple[int, int, int, int]":
         return 0, 0, 0, 0
 
 
-def graphics_report(extracted: str, names: list, index: dict, refused: list) -> None:
+def graphics_report(extracted: str, names: list, index: dict, refused: list,
+                    stages: str = GRAPHICS_DEFAULT_STAGES) -> None:
     """One line for the wanted list and one for the translation, printed on every run also when reused: a hash the
     library does not hold, and a program the translator refuses, are never dropped quietly."""
     total, found, gone, elsewhere = graphics_wanted_counts(extracted)
@@ -2188,7 +2216,7 @@ def graphics_report(extracted: str, names: list, index: dict, refused: list) -> 
         log(f"shaders: {gone} wanted hashes name no library program's bytes and {elsewhere} name a program of another "
             "stage, so they cannot be published")
     log(f"shaders: {len(index)} of {len(names)} pipeline graphics programs translated and published "
-        f"({GRAPHICS_STAGES.replace(',', '/')})")
+        f"({stages.replace(',', '/')})")
     if refused:
         shown = ", ".join(refused[:8]) + (f" ... ({len(refused)} in all)" if len(refused) > 8 else "")
         log(f"shaders: NOT translated: {shown}. The translator named the instruction each one stops at above")
@@ -2200,18 +2228,19 @@ def graphics_shaders(game: str, work: str, mc_signature: str, jobs: int = 1, emu
 
     A retail boot at the slot-57 stop deserializes 9,943 graphics pipeline records that reference 1,266 distinct
     native programs (947 PS, 319 VS). Each is identified by the SHA-256 of its bytes as passed, the same
-    fspx_code_sha256 key the index carries and create_compute resolves compute programs with. The list of those 1,266
-    hashes is data and stays outside the repository (PALMETTO_GRAPHICS_PROGRAMS, else <work>/graphics_programs.json).
-    Without it this step does nothing, so a fresh build behaves exactly as before.
+    fspx_code_sha256 key the index carries and create_compute resolves compute programs with. The list is data and stays
+    outside the repository (PALMETTO_GRAPHICS_PROGRAMS, else <work>/graphics_programs.json). The measured library also
+    has 7,498 MS programs; they are selected only when that external list explicitly includes a non-empty "ms" hash
+    list. With the current PS/VS-only list, the step's selected stages and publication are unchanged.
 
     tooling/shader_library.py selects the library programs whose bytes have those hashes, writes their fspx/ sidecars,
     the source containers and disasm/ listings into <work>/shaders/pipeline_graphics, rdna2spirv.py translates them
     into <work>/shaders/spirv/pipeline_graphics, and the entries are published beside the compute library's in the
-    FSPX index (merge_library_corpus). Unlike the compute library step this one publishes what translated: a graphics
-    program the translator refuses leaves a hole the boot can report, not a failed stage.
+    FSPX index under fspx_code_sha256 (merge_library_corpus). Unlike the compute library step this one publishes what
+    translated: a program the translator refuses leaves a hole the boot can report, not a failed stage.
 
-    The extraction is kept when the package, the tools, llvm-mc and the wanted list match; the translation is kept
-    when its record matches and every module of the programs it did not refuse is there."""
+    The extraction is kept when the package, the tools, llvm-mc, the selected stages and wanted list match; the
+    translation is kept when its record matches and every module of the programs it did not refuse is there."""
     wanted = graphics_programs_path(work)
     if not os.path.isfile(wanted):
         log(f"shaders: no pipeline graphics program list at {wanted} (set {GRAPHICS_PROGRAMS_ENV} to a JSON list of "
@@ -2232,8 +2261,10 @@ def graphics_shaders(game: str, work: str, mc_signature: str, jobs: int = 1, emu
              "programs are not published over an incomplete corpus. Run the shaders stage again to finish the "
              "corpus translation first.")
     package = file_sha256(arc)
-    extraction_settings = graphics_extraction_settings(package, mc_signature, wanted)
-    settings = graphics_settings(package, mc_signature, emulate, fallbacks, wanted)
+    stages = graphics_requested_stages(wanted)
+    extraction_settings = graphics_extraction_settings(package, mc_signature, wanted, stages)
+    settings = graphics_settings(package, mc_signature, emulate, fallbacks, wanted, stages)
+    owned = graphics_owned_for(stages)
     extracted = os.path.join(work, "shaders", "pipeline_graphics")
     staged = os.path.join(work, "shaders", "spirv", "pipeline_graphics")
     fspx = os.path.join(work, "shaders", "spirv", "fspx")
@@ -2243,8 +2274,8 @@ def graphics_shaders(game: str, work: str, mc_signature: str, jobs: int = 1, emu
     if index is not None:
         if index and not library_merged(staged, fspx, index):
             log("shaders: the pipeline graphics programs are translated; publishing them into the shader corpus again")
-            merge_library_corpus(staged, fspx, owned=GRAPHICS_OWNED)
-        graphics_report(extracted, names, index, sorted(set(names) - set(index)))
+            merge_library_corpus(staged, fspx, owned=owned)
+        graphics_report(extracted, names, index, sorted(set(names) - set(index)), stages)
         return
     log("shaders: extracting and translating the wanted pipeline graphics programs")
     drop(os.path.join(staged, "index.json"), os.path.join(staged, GRAPHICS_BUILD_RECORD))
@@ -2280,8 +2311,8 @@ def graphics_shaders(game: str, work: str, mc_signature: str, jobs: int = 1, emu
              "stage again; the translator's output above names each program it refused")
     refused = sorted(set(names) - set(index))
     if index:
-        merge_library_corpus(staged, fspx, owned=GRAPHICS_OWNED)
-    graphics_report(extracted, names, index, refused)
+        merge_library_corpus(staged, fspx, owned=owned)
+    graphics_report(extracted, names, index, refused, stages)
     record = os.path.join(staged, GRAPHICS_BUILD_RECORD) + ".tmp"
     with open(record, "w", encoding="utf-8", newline="\n") as f:
         json.dump({"settings": settings, "refused": refused}, f)

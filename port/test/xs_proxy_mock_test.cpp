@@ -3620,6 +3620,7 @@ int check_memory_wait_split() {
 int main(int argc, char** argv) {
     no_dialogs();
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    if (_putenv_s("PALMETTO_SUBMIT_TRACE", "0") != 0) return 2;
     // Console fence slot 12's watcher (docs/fence_slot12.md): the GPU-free stand-in for the Vulkan layer, which
     // registers its fence dispatcher here in the runtime. It has to be in place before the fence checks call slot 12.
     ::palmetto_register_fence_value_watcher(
@@ -3627,6 +3628,10 @@ int main(int argc, char** argv) {
     if (argc == 2) {
         if (std::strcmp(argv[1], "--env-slots") == 0) return run_env_slots(true);
         if (std::strcmp(argv[1], "--env-slots-invalid") == 0) return run_env_slots(false);
+        if (std::strcmp(argv[1], "--submit-trace") == 0) {
+            if (_putenv_s("PALMETTO_SUBMIT_TRACE", "1") != 0) return 2;
+            return check_queue_console_slots();
+        }
         return run_fault_mode(argv[1]);
     }
     if (argc != 1) return 2;

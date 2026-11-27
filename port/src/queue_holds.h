@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -9,6 +10,68 @@
 #include <vector>
 
 namespace palmetto {
+
+// A bounded flight window for the Vulkan command buffers that have not retired yet. The ordinary queue has always
+// submitted asynchronously, but its fixed 64-buffer ceiling can make the title thread wait for the oldest GPU ticket.
+// Opt-in widening allows a small amount of extra CPU/card overlap without changing queue order or creating another
+// Vulkan queue. COPY work is still a separate lane only when the device already gave that D3D12 COPY queue its own
+// VulkanQueue; the independent copy bound never moves commands out of a DIRECT/COMPUTE list. At the bound the existing
+// wait-for-oldest path remains the fallback. When disabled, every lane uses the original bound exactly.
+enum class SubmissionLane : std::uint8_t { direct, compute, copy };
+
+struct SubmissionFlightSettings {
+    static constexpr std::uint32_t kLegacyBound = 64;
+    static constexpr std::uint32_t kEnabledDefaultBound = 96;
+    static constexpr std::uint32_t kMaximumBound = 128;
+
+    bool enabled = false;
+    std::uint32_t direct_bound = kLegacyBound;
+    std::uint32_t copy_bound = kLegacyBound;
+
+    static bool switch_on(const char* value) noexcept { return value && *value && *value != '0'; }
+
+    static std::uint32_t parse_bound(const char* value, std::uint32_t fallback) noexcept {
+        if (!value || !*value) return fallback;
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(value, &end, 10);
+        if (end == value || *end != '\0') return fallback;
+        if (parsed < kLegacyBound) return kLegacyBound;
+        if (parsed > kMaximumBound) return kMaximumBound;
+        return static_cast<std::uint32_t>(parsed);
+    }
+
+    static SubmissionFlightSettings parse(const char* enabled_value, const char* direct_value,
+                                          const char* copy_value) noexcept {
+        SubmissionFlightSettings settings;
+        if (!switch_on(enabled_value)) return settings;
+        settings.enabled = true;
+        settings.direct_bound = parse_bound(direct_value, kEnabledDefaultBound);
+        settings.copy_bound = parse_bound(copy_value, kEnabledDefaultBound);
+        return settings;
+    }
+
+    static SubmissionFlightSettings from_environment() noexcept {
+        const char* enabled_value = std::getenv("PALMETTO_SUBMIT_OVERLAP");
+        if (!switch_on(enabled_value)) return {};
+        return parse(enabled_value, std::getenv("PALMETTO_SUBMIT_OVERLAP_DIRECT_BOUND"),
+                     std::getenv("PALMETTO_SUBMIT_OVERLAP_COPY_BOUND"));
+    }
+
+    std::uint32_t bound(SubmissionLane lane) const noexcept {
+        if (!enabled) return kLegacyBound;
+        const std::uint32_t selected = lane == SubmissionLane::copy ? copy_bound : direct_bound;
+        if (selected < kLegacyBound) return kLegacyBound;
+        if (selected > kMaximumBound) return kMaximumBound;
+        return selected;
+    }
+};
+
+// All queue objects in one process share the same startup policy; environment changes after the first queue is built do
+// not leave direct, compute and COPY queues with mixed caps.
+inline const SubmissionFlightSettings& default_submission_flight_settings() noexcept {
+    static const SubmissionFlightSettings settings = SubmissionFlightSettings::from_environment();
+    return settings;
+}
 
 // Cross-queue Wait-before-Signal (docs section 4.4, "Wait before Signal across queues").
 //
@@ -153,7 +216,8 @@ public:
 
     // Held operations over all queues, for the cheap "is there anything to do" test.
     void held_changed(std::int64_t delta) { held_.fetch_add(delta, std::memory_order_acq_rel); }
-    bool any_held() const { return held_.load(std::memory_order_acquire) > 0; }
+    std::int64_t held_count() const { return held_.load(std::memory_order_acquire); }
+    bool any_held() const { return held_count() > 0; }
 
     // Releases every held operation that has become ready, in dependency order: a release can submit a Signal
     // that makes another queue's front ready, so passes repeat until one finds nothing new. Then the callbacks

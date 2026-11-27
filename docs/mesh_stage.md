@@ -293,3 +293,57 @@ the commits [cleanroom_peers.md](cleanroom_peers.md) records. No code from any o
 upstream projects remain the copyright of their contributors and their licences continue to apply to their own trees.
 The NOTICE.md row for this slice is the lead's to add when the slice is committed, per [upstream_port.md](upstream_port.md)
 section 3.
+
+## 8. MS publication gap and opt-in slot-57 stream wiring
+
+### 8.1. Resolver-key gap rechecked
+
+The work-folder shader indexes were counted from metadata only; no shader bytes were printed, saved, or added to the repository
+or this page:
+
+* `shaders/spirv/index.json`: 26,501 entries, including 9,282 `ms` rows. Those translated MS entries are FSSM-keyed and do
+  not carry `fspx_code_sha256`, so they are not the key `resolve_native_stage()` uses for native slot-57 programs.
+* The runtime-read `shaders/spirv/fspx/index.json`: 1,896 entries (630 CS, 947 PS, 319 VS, **0 MS**). There are no MS rows
+  published under the resolver's program key.
+* `shaders/spirv/pipeline_graphics/index.json`: 1,266 PS/VS entries (947 PS, 319 VS), **0 MS**. The current external
+  `PALMETTO_GRAPHICS_PROGRAMS` selection has PS/VS lists and no `ms` list.
+* The library measurement still contains 7,498 distinct MS programs. The blocker is therefore not an empty library; it is
+  that the current selected/translated corpus has no MS `fspx_code_sha256` rows.
+
+**Blocking measurement and falsifier.** The current selection/corpus has **0 MS resolver keys**. This slice emitted no real
+MS module. The falsifier is a non-empty `ms` hash list in the external `PALMETTO_GRAPHICS_PROGRAMS` selection that matches
+programs in the library and produces `stage: ms` rows with `fspx_code_sha256` in `fspx/index.json`; only then can a
+slot-57 mesh stage resolve through the measured key path. The existing translated FSSM-keyed MS entries are not a substitute.
+
+### 8.2. Build-time opt-in selection
+
+`build_port.py` now recognizes `ms` as a supported graphics stage, but the publication step is opt-in by selection: only a
+non-empty `ms` list in the external `PALMETTO_GRAPHICS_PROGRAMS` file selects mesh programs. The publisher merges the
+translated entries into `fspx/index.json` using the library program's `fspx_code_sha256`, and prunes only the selected
+stage prefixes. Without an `ms` list, selection and recorded settings remain `ps,vs`, and only the PS/VS prefixes are
+owned; an unselected MS prefix is not pruned. A synthetic fixture test verifies both sides: an explicit MS row reaches the
+FSPX index with its `ms` stage and code key, while the PS/VS-only path leaves index/module bytes unchanged and preserves
+an existing MS row. The fixtures contain synthetic data only. The current corpus had no MS selection, so this slice
+intentionally published nothing real.
+
+### 8.3. Runtime opt-in and refusals
+
+`PALMETTO_MESH_STREAM=1` is the strict runtime opt-in; unset, `0`, or any other value leaves the existing path in place. Only
+a decoded record naming slot 2 uses `build_mesh_stream()` and `ID3D12Device2::CreatePipelineState`. Non-mesh records and
+switch-off calls continue through the prior `build()` / `CreateGraphicsPipelineState` path. The mesh refusal guard is also
+switch-gated: a readable slot-2 record that fails with the switch on keeps its named refusal and does not fall through to
+the generic VS+PS stand-in; unrelated records keep the existing stand-in behavior. Stream PSOs are not entered in the
+vertex-desc tracker, so slot-55 derived mesh PSOs remain an explicit unsupported case rather than being rebuilt as vertex
+pipelines.
+
+When the switch is on, `MeshStageCounters` counts decoded MS records, built streams, and builder refusals; stream-device
+HRESULTs are reported under the separate `PC ID3D12Device2::CreatePipelineState` label. The existing
+`PC CreateGraphicsPipelineState` label remains unchanged, and the mesh counter/result lines are omitted unless an opted-in
+mesh record reaches the histogram. The GPU-free tests pin the exact switch values and both labels.
+
+### 8.4. Validation boundary
+
+The synthetic publisher and existing shader-library Python tests pass. The C++/`TESTS_BUILT` gate is recorded after the
+shared build window; no slot-57 boot arm was run for this slice because the current selection/corpus has no MS resolver key
+or measured mesh record to exercise. This is readiness evidence only: it makes no mesh-picture or device-stability claim.
+The attribution and NOTICE ownership in section 7 remain unchanged; the lead adds the NOTICE row at commit.

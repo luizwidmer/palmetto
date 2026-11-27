@@ -23,6 +23,7 @@
 // for a trace that disagrees. The frame-event calls answer from a per-device token counter: there is no vblank source
 // behind the device before a presenter exists, so WaitFrameEventX returns at once with a fresh non-zero token.
 #include "d3d12_xs_device.h"
+#include "slot57_mesh_mode.h"
 #include "d3d12_trace.h"
 #include "startup_trace.h"  // rt::startup_trace::detail::crash_image_base: the mapped title's base for the slot-127 hook
 #include "xmem.h"  // rt::xmem::copy_page_mappings_fn, the mapping primitive of queue slot 31
@@ -4813,10 +4814,19 @@ std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_
         // "clock calibration pair" written through a2 - was wrong and overwrote the title's own list pointers with two
         // QPC words, which is why the frame loop never submitted anything.
         note_child_slot<K>(Slot);
+        static const bool submit_trace = [] {
+            const char* value = std::getenv("PALMETTO_SUBMIT_TRACE");
+            return value && *value && *value != '0';
+        }();
+        const auto trace_started = submit_trace ? std::chrono::steady_clock::now() :
+                                                  std::chrono::steady_clock::time_point{};
+        const std::uintptr_t trace_caller = submit_trace ? reinterpret_cast<std::uintptr_t>(_ReturnAddress()) : 0;
+        const std::uint64_t trace_thread = submit_trace ? GetCurrentThreadId() : 0;
         // The cross-list memory wait (docs/peer_port_streaming.md section 11): a batch that names a list split at an
         // unmet wait becomes several submissions with the queue's Wait before the segment after the wait. A batch with
         // no split list keeps exactly the previous single forwarding call.
-        if (!memwait::submit_batch(self, a2, a1)) {
+        const bool memory_wait_handled = memwait::submit_batch(self, a2, a1);
+        if (!memory_wait_handled) {
             UnwrappedArray lists;
             if (!lists.fill(a2, a1)) return hr_to_u64(E_OUTOFMEMORY);
             const std::uint64_t array = lists.data() ? lists.data() : a2;
@@ -4829,6 +4839,34 @@ std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_
                              "[rt] d3d12_xs: queue slot 35 submitted %llu command list(s) from %p (frame token 0x%llx)\n",
                              static_cast<unsigned long long>(a1), reinterpret_cast<void*>(array),
                              static_cast<unsigned long long>(a3));
+        }
+        if (submit_trace) {
+            const std::uint64_t elapsed_us = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - trace_started)
+                    .count());
+            const std::uintptr_t image_base =
+                reinterpret_cast<std::uintptr_t>(rt::startup_trace::detail::crash_image_base());
+            const std::uintptr_t image_end = image_base + rt::startup_trace::detail::crash_image_size();
+            const bool has_rva = image_base && image_end >= image_base && trace_caller >= image_base &&
+                                 trace_caller < image_end;
+            char caller_rva[32] = "unknown";
+            if (has_rva)
+                std::snprintf(caller_rva, sizeof(caller_rva), "0x%llx",
+                              static_cast<unsigned long long>(trace_caller - image_base));
+            static std::atomic<std::uint64_t> trace_calls{0};
+            static std::atomic<std::uint64_t> trace_reports{0};
+            const std::uint64_t call = trace_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (call <= 16 || elapsed_us >= 1000) {
+                const std::uint64_t report = trace_reports.fetch_add(1, std::memory_order_relaxed);
+                if (report < 128)
+                    std::fprintf(stderr,
+                                 "[rt] submit-flight: console-slot35 tid=%llu caller_rva=%s call=%llu lists=%llu "
+                                 "path=%s us=%llu\n",
+                                 static_cast<unsigned long long>(trace_thread), caller_rva,
+                                 static_cast<unsigned long long>(call), static_cast<unsigned long long>(a1),
+                                 memory_wait_handled ? "memory-wait" : "single-submit",
+                                 static_cast<unsigned long long>(elapsed_us));
+            }
         }
         d3d12_trace::record(child_trace_name<K>(Slot));
         return hr_to_u64(S_OK);
@@ -6872,6 +6910,9 @@ struct Slot57Stats {
     std::uint64_t pso_created = 0;  // ...and answered S_OK
     std::map<std::uint32_t, std::uint64_t> results;  // CreateGraphicsPipelineState HRESULTs (S_OK is 0)
     std::set<std::uint32_t> results_logged;
+    rt::graphics_pso::MeshStageCounters mesh_stage;
+    std::map<std::uint32_t, std::uint64_t> mesh_stream_results;  // ID3D12Device2::CreatePipelineState HRESULTs
+    std::set<std::uint32_t> mesh_stream_results_logged;
     std::map<std::string, std::uint64_t> shapes;
     // The input-layout blobs the boot carries, by size and by the word the committed decoder reads as the element
     // count at +0x4C: this is what names the next decode when blobs do not decode (a size/count pair plus the
@@ -6899,7 +6940,7 @@ Slot57Stats& slot57_stats() {
 struct Slot57Call {
     std::uint64_t digest = 0;
     std::string shape;
-    std::string reason;      // `why` field that refused it; empty when it reached the PC device
+    std::string reason;      // `why` field or mesh-device API that refused it; empty when it reached the PC device
     std::string why;         // the builder's full refusal, for the first-occurrence line
     bool decoded = false;
     bool layout_decoded = false;
@@ -6918,8 +6959,13 @@ struct Slot57Call {
     std::string state_reason;        // the fixed-function refusal's field ("state.fixed_function")
     std::string state_why;           // its full sentence, for the first-occurrence line
     Slot57Root root = Slot57Root::kNull;
-    bool reached_create = false;
+    bool reached_create = false;  // CreateGraphicsPipelineState, the vertex-family description path
     HRESULT result = E_FAIL;
+    bool mesh_stream_opted = false;
+    bool mesh_stream_built = false;
+    bool mesh_stream_refused = false;
+    bool mesh_stream_reached_create = false;
+    HRESULT mesh_stream_result = E_FAIL;
 };
 
 void print_slot57_summary_locked(Slot57Stats& stats) {
@@ -6929,7 +6975,9 @@ void print_slot57_summary_locked(Slot57Stats& stats) {
     for (const auto& entry : stats.reasons) reasons.emplace_back(entry.first, &entry.second);
     std::sort(reasons.begin(), reasons.end(),
               [](const auto& a, const auto& b) { return a.second->calls > b.second->calls; });
-    const std::uint64_t refused_before_call = stats.calls - stats.built;
+    std::uint64_t mesh_stream_calls = 0;
+    for (const auto& entry : stats.mesh_stream_results) mesh_stream_calls += entry.second;
+    const std::uint64_t refused_before_call = stats.calls - stats.built - mesh_stream_calls;
     std::fprintf(stderr,
                  "[rt] d3d12_xs: slot 57 histogram #%u at %llu call(s), %zu distinct record(s): decoded %llu, "
                  "decode-refused %llu, built %llu, PSOs created %llu, refused before the call %llu\n",
@@ -6989,8 +7037,30 @@ void print_slot57_summary_locked(Slot57Stats& stats) {
                  static_cast<unsigned long long>(untracked),
                  static_cast<unsigned long long>(stats.roots[static_cast<int>(Slot57Root::kNull)]),
                  static_cast<unsigned long long>(stats.stage_bytes_unreadable));
+    if (stats.mesh_stage.records_with_mesh_stage) {
+        const std::string mesh_summary = stats.mesh_stage.summary();
+        std::fprintf(stderr, "[rt] d3d12_xs: slot 57   %s\n", mesh_summary.c_str());
+        const char* mesh_api = slot57_create_api_label(Slot57CreateApi::MeshStream);
+        if (stats.mesh_stream_results.empty()) {
+            std::fprintf(stderr, "[rt] d3d12_xs: slot 57   %s results: none reached\n", mesh_api);
+        } else {
+            std::string mesh_results;
+            for (const auto& entry : stats.mesh_stream_results) {
+                if (!mesh_results.empty()) mesh_results += ", ";
+                if (entry.first == 0)
+                    mesh_results += "S_OK " + std::to_string(entry.second);
+                else {
+                    char code[16] = {};
+                    std::snprintf(code, sizeof(code), "0x%08lx", static_cast<unsigned long>(entry.first));
+                    mesh_results += std::string(code) + " " + std::to_string(entry.second);
+                }
+            }
+            std::fprintf(stderr, "[rt] d3d12_xs: slot 57   %s results: %s\n", mesh_api, mesh_results.c_str());
+        }
+    }
+    const char* graphics_api = slot57_create_api_label(Slot57CreateApi::GraphicsDescription);
     if (stats.results.empty()) {
-        std::fprintf(stderr, "[rt] d3d12_xs: slot 57   PC CreateGraphicsPipelineState results: none reached\n");
+        std::fprintf(stderr, "[rt] d3d12_xs: slot 57   %s results: none reached\n", graphics_api);
         return;
     }
     std::string results;
@@ -7004,7 +7074,7 @@ void print_slot57_summary_locked(Slot57Stats& stats) {
             results += std::string(code) + " " + std::to_string(entry.second);
         }
     }
-    std::fprintf(stderr, "[rt] d3d12_xs: slot 57   PC CreateGraphicsPipelineState results: %s\n", results.c_str());
+    std::fprintf(stderr, "[rt] d3d12_xs: slot 57   %s results: %s\n", graphics_api, results.c_str());
 }
 
 // Counts one call, logs the first occurrence of a reason / a result, and prints the interval summary.
@@ -7012,9 +7082,11 @@ void note_slot57(Slot57Call& call) {
     Slot57Stats& stats = slot57_stats();
     // PALMETTO_PIPELINE_TIMELINE: the conversion traffic as counters, independent of the histogram's lock.
     g_pl_slot57_calls.fetch_add(1, std::memory_order_relaxed);
-    if (call.reached_create) {
+    const bool pc_create_reached = call.reached_create || call.mesh_stream_reached_create;
+    const HRESULT pc_create_result = call.mesh_stream_reached_create ? call.mesh_stream_result : call.result;
+    if (pc_create_reached) {
         g_pl_slot57_converted.fetch_add(1, std::memory_order_relaxed);
-        if (SUCCEEDED(call.result)) {
+        if (SUCCEEDED(pc_create_result)) {
             g_pl_graphics_created.fetch_add(1, std::memory_order_relaxed);
             pipeline_timeline_note_event();
         }
@@ -7023,6 +7095,11 @@ void note_slot57(Slot57Call& call) {
     }
     const std::lock_guard lock(stats.mutex);
     ++stats.calls;
+    if (call.mesh_stream_opted) {
+        stats.mesh_stage.note_record();
+        if (call.mesh_stream_built) stats.mesh_stage.note_built();
+        if (call.mesh_stream_refused) stats.mesh_stage.note_refused();
+    }
     if (call.digest) stats.records.insert(call.digest);
     if (!call.shape.empty()) ++stats.shapes[call.shape];
     ++stats.roots[static_cast<int>(call.root)];
@@ -7120,6 +7197,23 @@ void note_slot57(Slot57Call& call) {
                          call.shape.c_str(), slot57_root_name(call.root), call.stages.c_str());
         }
     }
+    if (call.mesh_stream_reached_create) {
+        const std::uint32_t result = static_cast<std::uint32_t>(call.mesh_stream_result);
+        ++stats.mesh_stream_results[result];
+        if (stats.mesh_stream_results_logged.insert(result).second) {
+            char code[16] = {};
+            if (result == 0)
+                std::snprintf(code, sizeof(code), "S_OK");
+            else
+                std::snprintf(code, sizeof(code), "0x%08lx", static_cast<unsigned long>(result));
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: slot 57 %s returned %s on a mesh stream (record %016llx shape %s, root "
+                         "signature %s, stages [%s])\n",
+                         slot57_create_api_label(Slot57CreateApi::MeshStream), code,
+                         static_cast<unsigned long long>(call.digest), call.shape.c_str(), slot57_root_name(call.root),
+                         call.stages.c_str());
+        }
+    }
     if (stats.calls % kSlot57SummaryInterval == 0) print_slot57_summary_locked(stats);
 }
 
@@ -7142,6 +7236,18 @@ Slot57Root classify_slot57_root(void* root, ID3D12RootSignature** pc_root_signat
         }
     }
     return Slot57Root::kUntracked;
+}
+
+// PALMETTO_MESH_STREAM=1 opts a slot-57 mesh record into the pipeline-state-stream path. Strict equality to "1" keeps
+// typos and other values off; the default path does not query the PC stream interface or change the graphics-PSO call.
+bool slot57_mesh_stream_enabled(bool has_mesh_stage) {
+    if (!has_mesh_stage) return false;
+    static const bool configured = [] {
+        char value[8] = {};
+        GetEnvironmentVariableA("PALMETTO_MESH_STREAM", value, sizeof(value));
+        return slot57_mesh_stream_opt_in(true, value);
+    }();
+    return slot57_mesh_stream_opt_in(has_mesh_stage, configured ? "1" : "0");
 }
 
 // One slot-57 call: decode, fill the caller's inputs, build, and forward the description. Returns the HRESULT the
@@ -7182,6 +7288,7 @@ HRESULT convert_slot57_record(DeviceProxy* self, const void* desc, const IID* ri
     }
     call.decoded = true;
     call.shape = slot57_shape(record);
+    call.mesh_stream_opted = slot57_mesh_stream_enabled(rt::graphics_record::has_mesh_stage(record));
     call.state_bytes = record.state.size;
     call.layout_bytes = record.input_layout.size;
     for (std::size_t i = 0; i < record.stage_count; ++i) {
@@ -7260,8 +7367,53 @@ HRESULT convert_slot57_record(DeviceProxy* self, const void* desc, const IID* ri
     for (std::size_t i = 0; i < record.stage_count; ++i)
         inputs.stages[record.stages[i].slot] = {record.stages[i].program.data, record.stages[i].program.size};
 
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC pc{};
     std::string why;
+    if (call.mesh_stream_opted) {
+        rt::graphics_pso::MeshPipelineStream mesh_stream;
+        if (!rt::graphics_pso::build_mesh_stream(record, inputs, &mesh_stream, &why)) {
+            call.mesh_stream_refused = true;
+            call.reason = slot57_reason_field(why);
+            call.why = why;
+            note_slot57(call);
+            return slot57_refusal_hresult(why);
+        }
+        call.mesh_stream_built = true;
+
+        ID3D12Device2* device2 = nullptr;
+        const HRESULT queried = self->real->QueryInterface(__uuidof(ID3D12Device2),
+                                                           reinterpret_cast<void**>(&device2));
+        if (FAILED(queried) || !device2) {
+            call.reason = "mesh.device2";
+            call.why = "the PC device does not expose ID3D12Device2::CreatePipelineState for the measured mesh stream";
+            call.result = FAILED(queried) ? queried : E_NOINTERFACE;
+            note_slot57(call);
+            return call.result;
+        }
+
+        const D3D12_PIPELINE_STATE_STREAM_DESC stream_desc = mesh_stream.desc();
+        static std::atomic<bool> mesh_stream_logged{false};
+        if (!mesh_stream_logged.exchange(true, std::memory_order_relaxed))
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: slot 57 mesh-stream opt-in (PALMETTO_MESH_STREAM=1): %s; forwarding via "
+                         "%s; no mesh-derived description is tracked\n",
+                         mesh_stream.describe().c_str(), slot57_create_api_label(Slot57CreateApi::MeshStream));
+
+        call.mesh_stream_result = device2->CreatePipelineState(&stream_desc, *riid, out);
+        device2->Release();
+        call.mesh_stream_reached_create = true;
+        if (call.mesh_stream_result != S_OK) {
+            char code[16] = {};
+            std::snprintf(code, sizeof(code), "0x%08lx", static_cast<unsigned long>(call.mesh_stream_result));
+            call.reason = "mesh.CreatePipelineState";
+            call.why = std::string(slot57_create_api_label(Slot57CreateApi::MeshStream)) + " returned " + code;
+        }
+        // The slot-55 tracker stores only D3D12_GRAPHICS_PIPELINE_STATE_DESC; a stream PSO is deliberately not put in
+        // that table, so a later derived-mesh request is refused rather than rebuilt as a vertex pipeline.
+        note_slot57(call);
+        return call.mesh_stream_result;
+    }
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pc{};
     if (!rt::graphics_pso::build(record, inputs, &pc, &why)) {
         call.reason = slot57_reason_field(why);
         call.why = why;
@@ -7274,7 +7426,7 @@ HRESULT convert_slot57_record(DeviceProxy* self, const void* desc, const IID* ri
     //    (docs/graphics_pso.md section 2), so an unresolvable program is its E_INVALIDARG/E_NOTIMPL, not ours.
     call.reached_create = true;
     call.result = self->real->CreateGraphicsPipelineState(&pc, *riid, out);
-    // The description of every graphics pipeline this device creates is remembered, so console slot 55
+    // The description of every vertex-family graphics pipeline this device creates is remembered, so console slot 55
     // (CreateDerivedPipelineStateX) can rebuild it with its patched fixed-function parts.
     if (SUCCEEDED(call.result) && out && *out)
         track_graphics_pipeline_state(static_cast<ID3D12PipelineState*>(*out), pc);
@@ -7530,11 +7682,32 @@ HRESULT proxy_create_graphics_pipeline_probe(DeviceProxy* self, const void* desc
     // PSO exactly as the probe answered before. Which field refuses, counted over the boot, is the measurement.
     const HRESULT converted = convert_slot57_record(self, desc, riid, out);
     if (converted == S_OK) return S_OK;
+    // A mesh-stream refusal must stay named: a VS+PS stand-in would drop the geometry the mesh record asks for.
+    // Inspect only the readable slot-2 pair, and only under the opt-in; all switch-off / non-mesh stand-in behavior is
+    // the existing path below.
+    bool mesh_stream_refused = false;
+    constexpr std::size_t mesh_pair = rt::graphics_record::kStagePairOffset +
+                                      rt::graphics_record::kStagePairStride * rt::graphics_record::kStageSlotMs;
+    if (slot57_mesh_stream_enabled(true) && desc && readable_range(desc, mesh_pair + 2 * sizeof(std::uint64_t))) {
+        const auto* bytes = static_cast<const std::uint8_t*>(desc);
+        std::uint64_t address = 0, size = 0;
+        std::memcpy(&address, bytes + mesh_pair, sizeof(address));
+        std::memcpy(&size, bytes + mesh_pair + sizeof(address), sizeof(size));
+        mesh_stream_refused = address != 0 || size != 0;
+    }
+    if (mesh_stream_refused) {
+        static std::atomic<bool> mesh_standin_suppressed{false};
+        if (!mesh_standin_suppressed.exchange(true, std::memory_order_relaxed))
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: slot 57 mesh-stream refusal retained; no VS+PS stand-in after "
+                         "PALMETTO_MESH_STREAM=1\n");
+    }
     // With PALMETTO_STANDIN_PIPELINES on, the Vulkan device hands the title a real graphics pipeline built from this
     // project's own VS+PS pair instead (d3d12_vulkan_device.cpp, create_standin_graphics_pipeline), so a boot measures
     // whether the refusal is what the title is waiting for without changing what the default boot answers. Diagnostic
     // only: the stand-in's draws do not do the record's work.
-    if (const auto create_standin = rt::d3d12::graphics_standin_slot()) {
+    const auto create_standin = mesh_stream_refused ? nullptr : rt::d3d12::graphics_standin_slot();
+    if (create_standin) {
         // The record's stage count (the measured slots are 0 PS, 1 VS, 2 MS: docs/graphics_record.md section 1),
         // reported on the stand-in lines so a reader can tell the shape that was stood in for.
         unsigned stage_count = 0;
