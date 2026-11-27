@@ -409,6 +409,16 @@ bool enabled() {
     return on;
 }
 
+// The strict direct-heap path is an explicit opt-in because no measured boot has bound a directly indexed signature.
+// With the switch absent, command recording continues through the pre-existing user_data() path verbatim.
+bool strict_direct_heaps_enabled() {
+    static const bool on = [] {
+        char value[8] = {};
+        return GetEnvironmentVariableA("PALMETTO_DIRECT_HEAP_STRICT", value, sizeof(value)) == 1 && value[0] == '1';
+    }();
+    return on;
+}
+
 struct Tally {
     std::mutex mutex;
     std::map<std::string, unsigned> shapes;       // distinct signature shape -> times a list bound it
@@ -943,11 +953,21 @@ public:
         if (viewport_arrays_may_affect_draw(x && y && z) &&
             !viewport_array_path_supported("ID3D12GraphicsCommandList6::DispatchMesh"))
             return check(false);
-        if (!(viewport_.width > 0) || !(viewport_.height > 0)) return;  // as record_draw: nothing is rasterized
+        if (!viewport_array_has_rasterizing_viewport()) return;  // as record_draw: nothing is rasterized
+        if (graphics_.layout->flags & rt::rootsig::kDirectHeapFlags) {
+            const rt::rootsig::DirectHeapFeedDecision admission =
+                rt::rootsig::direct_heap_mesh_feed_decision(root_pack::strict_direct_heaps_enabled(),
+                                                            graphics_.direct_heaps);
+            if (admission.action == rt::rootsig::DirectHeapFeedAction::Refuse) {
+                note_strict_direct_heap_refusal(false, admission.refusal);
+                return check(false);
+            }
+        }
         trace_root_data("mesh draw");
         palmetto::Draw draw{graphics_pipeline_, graphics_.data, draw_views(), depth_, {}, 0, viewport_,
                            scissor_, blend_factor_, front_stencil_ref_, back_stencil_ref_, false, x, y, z, 0, 0};
         draw.mesh = true;
+        draw.viewport_scissor_arrays = viewport_array_snapshot();
         check(list_.draw(std::move(draw)));
     }
 
@@ -1283,7 +1303,7 @@ public:
             return check(false);
         if ((kind == palmetto::IndirectKind::draw || kind == palmetto::IndirectKind::draw_indexed) &&
             max_command_count && viewport_arrays_may_affect_draw(true) &&
-            !viewport_array_path_supported("ID3D12GraphicsCommandList::ExecuteIndirect"))
+            !viewport_array_path_supported("ID3D12GraphicsCommandList::ExecuteIndirect", false))
             return check(false);
         const auto arg_desc = argument_buffer->GetDesc();
         if (arg_desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || argument_buffer_offset % 4 != 0)
@@ -1320,7 +1340,24 @@ public:
         if (kind == palmetto::IndirectKind::dispatch && max_command_count) {  // the pipeline and root arguments a Dispatch would record
             if (!compute_pipeline_ || !compute_.layout) return check(false);
             cmd.pipeline = compute_pipeline_;
-            cmd.user_data = compute_.data;
+            if ((compute_.layout->flags & rt::rootsig::kDirectHeapFlags) &&
+                root_pack::strict_direct_heaps_enabled()) {
+                std::array<std::uint32_t, rt::rootsig::kMaxUserSgprs> data{};
+                if (!command_user_data(compute_, true, data)) return check(false);
+                cmd.user_data = data;
+            } else {
+                cmd.user_data = compute_.data;  // preserve the existing indirect-dispatch path when strict is off
+            }
+        }
+        if ((kind == palmetto::IndirectKind::draw || kind == palmetto::IndirectKind::draw_indexed) && max_command_count &&
+            graphics_.layout && (graphics_.layout->flags & rt::rootsig::kDirectHeapFlags)) {
+            const rt::rootsig::DirectHeapFeedDecision admission =
+                rt::rootsig::direct_heap_indirect_draw_decision(root_pack::strict_direct_heaps_enabled(),
+                                                                graphics_.direct_heaps);
+            if (admission.action == rt::rootsig::DirectHeapFeedAction::Refuse) {
+                note_strict_direct_heap_refusal(false, admission.refusal);
+                return check(false);
+            }
         }
         check(list_.execute_indirect(cmd));
     }
@@ -2091,6 +2128,84 @@ private:
         return data;
     }
 
+    // Strict direct-heap admission is intentionally separate from user_data(): with the opt-in off, that established
+    // function above remains the exact call path. With strict mode on, collect all required bases before changing any
+    // dword, and fail the command instead of recording root arguments without a usable heap base.
+    bool strict_direct_heap_user_data(RootState& state, bool compute,
+                                      std::array<std::uint32_t, rt::rootsig::kMaxUserSgprs>& data,
+                                      std::string& refusal) {
+        data = state.data;
+        if (!state.layout) return true;
+        const bool resource = (state.layout->flags & rt::rootsig::kFlagCbvSrvUavHeapDirectlyIndexed) != 0;
+        const bool sampler = (state.layout->flags & rt::rootsig::kFlagSamplerHeapDirectlyIndexed) != 0;
+        if (!resource && !sampler) return true;
+
+        const rt::rootsig::DirectHeapFeedDecision plan =
+            rt::rootsig::direct_heap_feed_decision(true, state.direct_heaps, true, true);
+        if (plan.action != rt::rootsig::DirectHeapFeedAction::Feed) {
+            refusal = plan.refusal.empty() ? "direct_heap_signature_plan_refused" : plan.refusal;
+            return false;
+        }
+
+        std::uint32_t resource_value = 0;
+        std::uint32_t sampler_value = 0;
+        const bool resource_ready = !resource ||
+                                   heap_base_dword(compute, cbv_srv_uav_base_, resource_value, "CBV/SRV/UAV heap");
+        const bool sampler_ready = !sampler || heap_base_dword(compute, sampler_base_, sampler_value, "sampler heap");
+        const rt::rootsig::DirectHeapFeedDecision admission =
+            rt::rootsig::direct_heap_feed_decision(true, state.direct_heaps, resource_ready, sampler_ready);
+        if (admission.action != rt::rootsig::DirectHeapFeedAction::Feed) {
+            refusal = admission.refusal.empty() ? "direct_heap_base_unavailable" : admission.refusal;
+            return false;
+        }
+
+        // Commit both values only after the all-or-nothing admission succeeds.
+        if (resource) data[state.direct_heaps.resource_sgpr] = resource_value;
+        if (sampler) data[state.direct_heaps.sampler_sgpr] = sampler_value;
+        static std::atomic<bool> graphics_logged{false};
+        static std::atomic<bool> compute_logged{false};
+        std::atomic<bool>& logged = compute ? compute_logged : graphics_logged;
+        if (!logged.exchange(true, std::memory_order_relaxed)) {
+            std::fprintf(stderr,
+                         "[rt] d3d12: %s strict direct heaps: resource heap 0x%08x at s%d, sampler heap 0x%08x at s%d, "
+                         "after %u explicit dwords from s%u\n",
+                         compute ? "compute" : "graphics", resource ? resource_value : 0,
+                         resource ? int(state.direct_heaps.resource_sgpr) : -1, sampler ? sampler_value : 0,
+                         sampler ? int(state.direct_heaps.sampler_sgpr) : -1, state.direct_heaps.arguments_end -
+                         (compute ? rt::rootsig::stage_base(rt::rootsig::Stage::Compute)
+                                  : state.layout->console_base),
+                         compute ? 4u : state.layout->console_base);
+        }
+        return true;
+    }
+
+    static void note_strict_direct_heap_refusal(bool compute, const std::string& refusal) {
+        static std::mutex mutex;
+        static std::set<std::string> printed;
+        const std::string key = std::string(compute ? "compute: " : "graphics: ") + refusal;
+        const std::lock_guard lock(mutex);
+        if (printed.size() >= 8 || !printed.insert(key).second) return;
+        std::fprintf(stderr,
+                     "[rt] d3d12: strict direct-heap command refused: %s; no draw/dispatch was recorded "
+                     "(PALMETTO_DIRECT_HEAP_STRICT=1)\n",
+                     key.c_str());
+    }
+
+    bool command_user_data(RootState& state, bool compute,
+                           std::array<std::uint32_t, rt::rootsig::kMaxUserSgprs>& data) {
+        // This branch is byte-for-byte equivalent in its user-data result to the pre-existing default path. Only a
+        // directly indexed signature with the explicit switch set takes the strict all-or-nothing admission above.
+        if (!state.layout || !(state.layout->flags & rt::rootsig::kDirectHeapFlags) ||
+            !root_pack::strict_direct_heaps_enabled()) {
+            data = user_data(state, compute);
+            return true;
+        }
+        std::string refusal;
+        if (strict_direct_heap_user_data(state, compute, data, refusal)) return true;
+        note_strict_direct_heap_refusal(compute, refusal);
+        return false;
+    }
+
     // One line each way for the console-layout feed (docs/root_arguments.md): the first value it placed (with the
     // title VA and the arena-relative form the shader adds heap_base to) and the first value it had to leave zero
     // because the title VA was not in a registered range or its arena form would not fit the slot's one dword.
@@ -2357,7 +2472,9 @@ private:
             else
                 root_pack::note_plain_command(true);
         }
-        check(list_.dispatch({compute_pipeline_, user_data(compute_, true), x, y, z}));
+        std::array<std::uint32_t, rt::rootsig::kMaxUserSgprs> data{};
+        if (!command_user_data(compute_, true, data)) return check(false);
+        check(list_.dispatch({compute_pipeline_, data, x, y, z}));
     }
 
     // The views block a draw records. Rebuilt only when the render targets or the bound vertex buffers change.
@@ -2382,12 +2499,46 @@ private:
         return true;
     }
 
-    bool viewport_array_path_supported(const char* method) {
+    bool viewport_array_has_rasterizing_viewport() const {
+        if (palmetto::viewport_replay_readiness::strict_enabled()) {
+            for (std::uint32_t i = 0; i < viewport_scissor_arrays_.viewport_count; ++i) {
+                const auto& v = viewport_scissor_arrays_.viewports[i];
+                if (v.width > 0 && v.height > 0) return true;
+            }
+            return false;
+        }
+        return viewport_.width > 0 && viewport_.height > 0;
+    }
+
+    bool viewport_array_path_supported(const char* method, bool allow_counted_replay = true) {
+        palmetto::viewport_replay_readiness::ReplayCapability capability{};
+        const bool multi_count = viewport_scissor_arrays_.viewport_count > 1 ||
+                                viewport_scissor_arrays_.scissor_count > 1;
+        const auto* info = multi_count ? vulkan_device_info(reinterpret_cast<ID3D12Device*>(attached_device())) : nullptr;
+        if (allow_counted_replay && multi_count && info) {
+            capability.multi_viewport = info->features.multiViewport == VK_TRUE;
+            capability.dynamic_viewport_scissor_with_count = info->dynamic_viewport_scissor_with_count;
+            capability.max_viewport_count = info->max_viewport_count;
+        }
         const auto assessment = palmetto::viewport_replay_readiness::assess(
-            viewport_scissor_arrays_.viewport_count, viewport_scissor_arrays_.scissor_count, true);
-        if (assessment.disposition != palmetto::viewport_replay_readiness::Disposition::refuse) return true;
-        note_viewport_refusal(method, assessment.refusal);
-        return false;
+            viewport_scissor_arrays_.viewport_count, viewport_scissor_arrays_.scissor_count, true, capability);
+        if (assessment.disposition == palmetto::viewport_replay_readiness::Disposition::refuse) {
+            note_viewport_refusal(method, assessment.refusal);
+            return false;
+        }
+        return true;
+    }
+
+    std::shared_ptr<const palmetto::ViewportScissorArrays> viewport_array_snapshot() const {
+        if (!palmetto::viewport_replay_readiness::strict_enabled() ||
+            (viewport_scissor_arrays_.viewport_count <= 1 && viewport_scissor_arrays_.scissor_count <= 1))
+            return {};
+        auto snapshot = std::make_shared<palmetto::ViewportScissorArrays>();
+        snapshot->viewports = viewport_scissor_arrays_.viewports;
+        snapshot->scissors = viewport_scissor_arrays_.scissors;
+        snapshot->viewport_count = viewport_scissor_arrays_.viewport_count;
+        snapshot->scissor_count = viewport_scissor_arrays_.scissor_count;
+        return snapshot;
     }
 
     // A draw needs a graphics pipeline, a graphics root signature and a topology.
@@ -2405,12 +2556,16 @@ private:
                 root_pack::note_plain_command(false);
         }
         trace_root_data("draw");
-        // No viewport (never set, or unbound with RSSetViewports(0)) or an empty one: D3D12 rasterizes nothing,
-        // and Vulkan forbids a 0x0 viewport, so the draw is not recorded.
-        if (!(viewport_.width > 0) || !(viewport_.height > 0)) return;
-        palmetto::Draw draw{graphics_pipeline_, user_data(graphics_, false), draw_views(), depth_, index_, topology_,
+        // No viewport (never set, or unbound with RSSetViewports(0)) or no non-empty viewport: D3D12 rasterizes
+        // nothing, and Vulkan forbids a 0x0 viewport, so the draw is not recorded. With count > 1, any later element may
+        // be the one producing raster output.
+        if (!viewport_array_has_rasterizing_viewport()) return;
+        std::array<std::uint32_t, rt::rootsig::kMaxUserSgprs> data{};
+        if (!command_user_data(graphics_, false, data)) return check(false);
+        palmetto::Draw draw{graphics_pipeline_, data, draw_views(), depth_, index_, topology_,
                            viewport_, scissor_, blend_factor_, front_stencil_ref_, back_stencil_ref_, indexed, count,
                            instances, first, base_vertex, first_instance};
+        draw.viewport_scissor_arrays = viewport_array_snapshot();
         check(list_.draw(std::move(draw)));
     }
 };

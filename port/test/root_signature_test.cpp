@@ -618,6 +618,86 @@ int main() {
               "direct heaps: a computed layout with a spill refuses the heap base by name");
     }
 
+    // Strict direct-heap admission is additive: switch-off leaves the existing direct-feed path untouched; opt-in accepts
+    // only a complete, all-or-nothing heap-base feed and names every unsupported case.
+    {
+        DirectHeapSlots plan;
+        plan.ok = true;
+        plan.pc_flags = kFlagCbvSrvUavHeapDirectlyIndexed | kFlagSamplerHeapDirectlyIndexed;
+        plan.arguments_end = 10;
+        plan.resource_sgpr = 10;
+        plan.sampler_sgpr = 11;
+        plan.heap_dwords = 2;
+
+        const DirectHeapFeedDecision legacy = direct_heap_feed_decision(false, plan, false, false);
+        check(legacy.action == DirectHeapFeedAction::Legacy && legacy.refusal.empty(),
+              "strict direct heaps off preserves the existing user-data path");
+        const DirectHeapFeedDecision accepted = direct_heap_feed_decision(true, plan, true, true);
+        check(accepted.action == DirectHeapFeedAction::Feed && accepted.refusal.empty(),
+              "strict direct heaps admits a complete resource-plus-sampler feed");
+        const DirectHeapFeedDecision no_resource = direct_heap_feed_decision(true, plan, false, true);
+        check(no_resource.action == DirectHeapFeedAction::Refuse &&
+                  no_resource.refusal == "direct_heap_resource_base_unavailable",
+              "strict direct heaps refuses an unavailable resource base by name");
+        const DirectHeapFeedDecision no_sampler = direct_heap_feed_decision(true, plan, true, false);
+        check(no_sampler.action == DirectHeapFeedAction::Refuse &&
+                  no_sampler.refusal == "direct_heap_sampler_base_unavailable",
+              "strict direct heaps refuses an unavailable sampler base by name");
+
+        DirectHeapSlots bad = plan;
+        bad.ok = false;
+        bad.error = "test planner refusal";
+        const DirectHeapFeedDecision bad_plan = direct_heap_feed_decision(true, bad, true, true);
+        check(bad_plan.action == DirectHeapFeedAction::Refuse &&
+                  bad_plan.refusal.find("direct_heap_signature_plan_refused: test planner refusal") == 0,
+              "strict direct heaps refuses a failed signature plan by name");
+        bad = plan;
+        bad.resource_sgpr = kNoSgpr;
+        const DirectHeapFeedDecision missing_resource_slot = direct_heap_feed_decision(true, bad, true, true);
+        check(missing_resource_slot.action == DirectHeapFeedAction::Refuse &&
+                  missing_resource_slot.refusal == "direct_heap_resource_slot_unplaced",
+              "strict direct heaps refuses an unplaced resource slot by name");
+        bad = plan;
+        bad.sampler_sgpr = kMaxUserSgprs;
+        const DirectHeapFeedDecision missing_sampler_slot = direct_heap_feed_decision(true, bad, true, true);
+        check(missing_sampler_slot.action == DirectHeapFeedAction::Refuse &&
+                  missing_sampler_slot.refusal == "direct_heap_sampler_slot_unplaced",
+              "strict direct heaps refuses an unplaced sampler slot by name");
+        bad = plan;
+        bad.resource_sgpr = 12;
+        const DirectHeapFeedDecision mismatched_plan = direct_heap_feed_decision(true, bad, true, true);
+        check(mismatched_plan.action == DirectHeapFeedAction::Refuse &&
+                  mismatched_plan.refusal == "direct_heap_signature_plan_inconsistent",
+              "strict direct heaps refuses a slot inconsistent with the planned tail");
+
+        DirectHeapSlots ordinary;
+        ordinary.ok = false;
+        ordinary.pc_flags = kFlagAllowInputAssemblerLayout;
+        const DirectHeapFeedDecision no_flags = direct_heap_feed_decision(true, ordinary, false, false);
+        check(no_flags.action == DirectHeapFeedAction::Legacy && no_flags.refusal.empty(),
+              "strict direct heaps leaves signatures without heap flags on the legacy path");
+        const DirectHeapFeedDecision bad_off = direct_heap_feed_decision(false, bad, false, false);
+        check(bad_off.action == DirectHeapFeedAction::Legacy && bad_off.refusal.empty(),
+              "strict switch-off does not turn an unsupported plan into a new refusal");
+        const DirectHeapFeedDecision mesh_strict = direct_heap_mesh_feed_decision(true, plan);
+        check(mesh_strict.action == DirectHeapFeedAction::Refuse &&
+                  mesh_strict.refusal == "direct_heap_mesh_stage_offset_unsupported",
+              "strict direct heaps refuse an unmodelled mesh-stage offset by name");
+        const DirectHeapFeedDecision mesh_off = direct_heap_mesh_feed_decision(false, plan);
+        check(mesh_off.action == DirectHeapFeedAction::Legacy && mesh_off.refusal.empty(),
+              "strict switch-off leaves the existing mesh path untouched");
+        const DirectHeapFeedDecision indirect_strict = direct_heap_indirect_draw_decision(true, plan);
+        check(indirect_strict.action == DirectHeapFeedAction::Refuse &&
+                  indirect_strict.refusal == "direct_heap_indirect_draw_not_admitted",
+              "strict direct heaps refuse flagged graphics indirect draws by name");
+        const DirectHeapFeedDecision indirect_off = direct_heap_indirect_draw_decision(false, plan);
+        check(indirect_off.action == DirectHeapFeedAction::Legacy && indirect_off.refusal.empty(),
+              "strict switch-off leaves graphics indirect draws on the legacy path");
+        const DirectHeapFeedDecision indirect_plain = direct_heap_indirect_draw_decision(true, ordinary);
+        check(indirect_plain.action == DirectHeapFeedAction::Legacy && indirect_plain.refusal.empty(),
+              "strict direct heaps leave non-direct graphics indirect draws unchanged");
+    }
+
     if (g_failures != 0) std::printf("%d FAILURES\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

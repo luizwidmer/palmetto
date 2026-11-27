@@ -6,12 +6,12 @@
 #include <cstdint>
 #include <cstdlib>
 
-// CPU-only, bounded storage and fail-closed preflight for D3D12 viewport/scissor arrays. The live COM shim uses this
-// state only when its exact opt-in switch is set; the current Vulkan pipeline path still has a count of one.
+// CPU-only, bounded storage and capability-aware preflight for D3D12 viewport/scissor arrays. The live COM shim uses
+// this state only when its exact opt-in switch is set; multi-count draws require their own enabled Vulkan pipeline path.
 namespace palmetto::viewport_replay_readiness {
 
 inline constexpr char kStrictSwitch[] = "PALMETTO_D3D12X_STRICT_VIEWPORTS";
-inline constexpr std::uint32_t kD3D12ViewportScissorLimit = 16;
+inline constexpr std::uint32_t kD3D12ViewportScissorLimit = d3d12_viewport_scissor_array_limit;
 
 enum class Refusal : std::uint8_t {
     none,
@@ -19,17 +19,27 @@ enum class Refusal : std::uint8_t {
     scissor_count_exceeds_limit,
     multiple_viewports_not_supported,
     multiple_scissors_not_supported,
+    viewport_count_exceeds_vulkan_limit,
+    scissor_count_exceeds_vulkan_limit,
 };
 
 enum class Disposition : std::uint8_t {
     legacy_unchanged,  // strict switch is off; the caller retains its existing behavior
-    ready,             // strict mode: at most one viewport and one scissor rectangle
+    ready,             // strict mode: single-count path or a supported multi-count path
     refuse,
 };
 
 struct Assessment {
     Disposition disposition = Disposition::legacy_unchanged;
     Refusal refusal = Refusal::none;
+};
+
+// Only a logical device that actually enabled these capabilities may accept a multi-element draw. The caller reports
+// the enabled device feature, the EDS with-count command availability, and VkPhysicalDeviceLimits::maxViewports.
+struct ReplayCapability {
+    bool multi_viewport = false;
+    bool dynamic_viewport_scissor_with_count = false;
+    std::uint32_t max_viewport_count = 1;
 };
 
 // This switch is deliberately exact: only the single byte "1" opts in. Empty, unset, "0" and other spellings
@@ -75,16 +85,30 @@ struct Arrays {
 };
 
 // Counts only; no input pointer is inspected. Zero counts are valid existing D3D12 states (no viewport means no draw;
-// no scissor rectangles clips all fragments). More than one of either array is not replayed exactly yet.
-constexpr Assessment assess(std::uint32_t viewport_count, std::uint32_t scissor_count, bool strict) noexcept {
+// no scissor rectangles clips all fragments). The compatibility overload remains fail-closed; the capability overload
+// admits count > 1 only when both EDS with-count states and multiViewport are enabled and maxViewports covers them.
+constexpr Assessment assess(std::uint32_t viewport_count, std::uint32_t scissor_count, bool strict,
+                            ReplayCapability capability) noexcept {
     if (!strict) return {Disposition::legacy_unchanged, Refusal::none};
     if (viewport_count > kD3D12ViewportScissorLimit)
         return {Disposition::refuse, Refusal::viewport_count_exceeds_limit};
     if (scissor_count > kD3D12ViewportScissorLimit)
         return {Disposition::refuse, Refusal::scissor_count_exceeds_limit};
-    if (viewport_count > 1) return {Disposition::refuse, Refusal::multiple_viewports_not_supported};
-    if (scissor_count > 1) return {Disposition::refuse, Refusal::multiple_scissors_not_supported};
+    if (viewport_count > 1 || scissor_count > 1) {
+        if (!capability.dynamic_viewport_scissor_with_count || !capability.multi_viewport) {
+            if (viewport_count > 1) return {Disposition::refuse, Refusal::multiple_viewports_not_supported};
+            return {Disposition::refuse, Refusal::multiple_scissors_not_supported};
+        }
+        if (viewport_count > capability.max_viewport_count)
+            return {Disposition::refuse, Refusal::viewport_count_exceeds_vulkan_limit};
+        if (scissor_count > capability.max_viewport_count)
+            return {Disposition::refuse, Refusal::scissor_count_exceeds_vulkan_limit};
+    }
     return {Disposition::ready, Refusal::none};
+}
+
+constexpr Assessment assess(std::uint32_t viewport_count, std::uint32_t scissor_count, bool strict) noexcept {
+    return assess(viewport_count, scissor_count, strict, ReplayCapability{});
 }
 
 constexpr const char* refusal_name(Refusal refusal) noexcept {
@@ -94,6 +118,8 @@ constexpr const char* refusal_name(Refusal refusal) noexcept {
     case Refusal::scissor_count_exceeds_limit: return "scissor_count_exceeds_d3d12_limit";
     case Refusal::multiple_viewports_not_supported: return "multiple_viewports_require_dynamic_viewport_count";
     case Refusal::multiple_scissors_not_supported: return "multiple_scissors_require_dynamic_scissor_count";
+    case Refusal::viewport_count_exceeds_vulkan_limit: return "viewport_count_exceeds_vulkan_max_viewport_count";
+    case Refusal::scissor_count_exceeds_vulkan_limit: return "scissor_count_exceeds_vulkan_max_viewport_count";
     }
     return "unknown_viewport_replay_refusal";
 }

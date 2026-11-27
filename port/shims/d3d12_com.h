@@ -70,6 +70,24 @@ std::shared_ptr<const palmetto::TileHeapAllocation> tile_heap(ID3D12Heap* heap, 
                                                            bool image, std::uint32_t memory_types);
 bool is_sparse_image(ID3D12Resource* resource);
 
+// Test-only replacement for the outside-arena title-VA window callbacks. It feeds the same VulkanContext submission
+// registration, buffer_at resolver and page-pull hooks, but lets a synthetic GPU test own the VkBuffer backing when the
+// driver cannot place a real BDA window above the arena. Production callers leave this empty; it does not change their
+// allocator or alias policy.
+struct TitleVaWindowTestHooks {
+    using Allocator = std::function<bool(std::uint64_t va, std::uint64_t bytes, VkBuffer& buffer, VkDeviceSize& offset,
+                                         const char*& why)>;
+    using Resolver = std::function<bool(std::uint64_t va, std::uint64_t bytes, VkBuffer& buffer,
+                                        VkDeviceSize& offset)>;
+    using Pull = std::function<void(std::uint64_t va, std::uint64_t bytes)>;
+
+    Allocator allocate;
+    Resolver resolve;
+    Pull pull;
+    bool empty() const { return !allocate && !resolve && !pull; }
+    bool complete() const { return allocate && resolve && pull; }
+};
+
 // The Vulkan objects a D3D12 device runs on. Vulkan 1.3 with dynamicRendering, synchronization2, timelineSemaphore
 // and (when separate_depth_stencil_layouts is set) separateDepthStencilLayouts enabled.
 struct VulkanDeviceInfo {
@@ -176,8 +194,14 @@ struct VulkanDeviceInfo {
     // D3D12_MESH_SHADER_TIER_1; without it mesh PSOs are refused and the tier is NOT_SUPPORTED.
     bool mesh_shader = false;
     // The core features enabled on `device`. Graphics PSOs that need independentBlend, fillModeNonSolid,
-    // depthBiasClamp or dualSrcBlend are refused unless it is set here.
+    // depthBiasClamp or dualSrcBlend are refused unless it is set here; multiViewport must also be true for strict
+    // multi-element viewport/scissor replay.
     VkPhysicalDeviceFeatures features{};
+    // EDS viewport/scissor-with-count commands are enabled on `device` (Vulkan 1.3 core or VK_EXT_extended_dynamic_state)
+    // and maxViewports from VkPhysicalDeviceProperties::limits. Standalone creation populates these only when the strict
+    // viewport opt-in is on; caller-owned devices must report what they actually enabled.
+    bool dynamic_viewport_scissor_with_count = false;
+    std::uint32_t max_viewport_count = 1;
     // Vulkan 1.2 shaderOutputLayer / shaderOutputViewportIndex enabled on `device`: a translated vertex shader that
     // writes the layer or viewport declares ShaderLayer / ShaderViewportIndex (the index's `features`).
     bool shader_output_layer = false;
@@ -193,6 +217,10 @@ struct VulkanDeviceInfo {
     // minImportedHostPointerAlignment): OpenExistingHeapFromAddress backs a heap with the caller's own committed
     // memory. Zero: existing heaps stay unsupported.
     VkDeviceSize host_pointer_alignment = 0;
+    // Test seam only: when all callbacks are supplied and PALMETTO_TITLE_VA_WINDOWS=1, they replace the production
+    // BDA-window allocator/resolver and raw-page pull while retaining VulkanContext's registration/replay path.
+    // Leave empty outside focused synthetic GPU tests.
+    TitleVaWindowTestHooks title_va_window_test_hooks;
 };
 
 // A Vulkan-backed ID3D12Device (PC ABI, up to ID3D12Device11) on caller-owned Vulkan objects, which must outlive

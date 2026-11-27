@@ -392,6 +392,17 @@ struct Viewport {
     float max_depth;
 };
 
+inline constexpr std::uint32_t d3d12_viewport_scissor_array_limit = 16;
+
+// A strict-mode draw's immutable snapshot of the dynamic arrays it consumes. Stored out of line so the default scalar
+// path and every single-element draw retain their existing command payload; a list only allocates this for count > 1.
+struct ViewportScissorArrays {
+    std::array<Viewport, d3d12_viewport_scissor_array_limit> viewports{};
+    std::array<Rect, d3d12_viewport_scissor_array_limit> scissors{};
+    std::uint32_t viewport_count = 0;
+    std::uint32_t scissor_count = 0;
+};
+
 // D3D12_VERTEX_BUFFER_VIEW / D3D12_INDEX_BUFFER_VIEW: console VAs, resolved to buffers at replay.
 struct VertexBufferView {
     std::uint64_t va;
@@ -428,8 +439,8 @@ struct Draw {
     TargetView depth{};
     IndexBufferView index{};
     std::uint32_t topology = 0;  // D3D_PRIMITIVE_TOPOLOGY
-    Viewport viewport{};       // the first; more viewports are not modelled yet
-    Rect scissor{};            // the first; D3D12 always scissors
+    Viewport viewport{};       // first element/scalar compatibility state; strict multi-count snapshots are below
+    Rect scissor{};            // first element/scalar compatibility state; D3D12 always scissors
     std::array<float, 4> blend_factor{1, 1, 1, 1};
     std::uint32_t stencil_front = 0;
     std::uint32_t stencil_back = 0;
@@ -440,6 +451,7 @@ struct Draw {
     std::int32_t base_vertex = 0;
     std::uint32_t first_instance = 0;
     bool mesh = false;
+    std::shared_ptr<const ViewportScissorArrays> viewport_scissor_arrays{};  // strict-mode draws with count > 1
 };
 
 // D3D12_TEXTURE_DATA_PITCH_ALIGNMENT and D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT.

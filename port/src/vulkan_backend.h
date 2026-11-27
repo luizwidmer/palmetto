@@ -208,6 +208,7 @@ struct VulkanDeviceFunctions {
     X(vkCreateComputePipelines) X(vkDestroyPipeline) X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets)            \
     X(vkCmdPushConstants) X(vkCmdDispatch)                                                                     \
     X(vkCmdBindVertexBuffers2) X(vkCmdBindIndexBuffer) X(vkCmdSetViewport) X(vkCmdSetScissor)                  \
+    X(vkCmdSetViewportWithCount) X(vkCmdSetScissorWithCount)                                                    \
     X(vkCmdSetPrimitiveTopology) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdSetStencilReference)                          \
     X(vkCmdSetBlendConstants) X(vkCmdDraw)                                                                              \
     X(vkCmdDrawIndexed) X(vkCreateGraphicsPipelines) X(vkQueueBindSparse) X(vkGetImageSparseMemoryRequirements)   \
@@ -1089,7 +1090,9 @@ public:
     // ray_tracing: VK_KHR_acceleration_structure + VK_KHR_ray_query are enabled on `device`.
     // xdxr: acceleration-structure builds write XDXR BVH4 records (xdxr_build.h) instead; needs bufferDeviceAddress.
     VulkanContext(PFN_vkGetDeviceProcAddr get, VkDevice device, bool separate_depth_stencil_layouts,
-                  bool conditional_rendering = false, bool ray_tracing = false, bool xdxr = false)
+                  bool conditional_rendering = false, bool ray_tracing = false, bool xdxr = false,
+                  bool viewport_scissor_with_count_opt_in = false, bool multi_viewport = false,
+                  std::uint32_t max_viewport_count = 1)
         : device_(device), tracker_(separate_depth_stencil_layouts), ray_tracing_(ray_tracing) {
         // docs/card_copies.md: the per-submission title-memory mirror's switches, read once per process. With every one
         // unset the context behaves exactly as before this slice (no clock read, no tracker call, no skip).
@@ -1164,6 +1167,15 @@ public:
         replay_.bind_index_buffer = vk.vkCmdBindIndexBuffer;
         replay_.set_viewport = vk.vkCmdSetViewport;
         replay_.set_scissor = vk.vkCmdSetScissor;
+        replay_.multi_viewport_enabled = multi_viewport;
+        replay_.max_viewport_count = max_viewport_count;
+        viewport_scissor_count_enabled_ = viewport_scissor_with_count_opt_in && multi_viewport &&
+                                          max_viewport_count > 1 && vk.vkCmdSetViewportWithCount &&
+                                          vk.vkCmdSetScissorWithCount;
+        if (viewport_scissor_count_enabled_) {
+            replay_.set_viewport_with_count = vk.vkCmdSetViewportWithCount;
+            replay_.set_scissor_with_count = vk.vkCmdSetScissorWithCount;
+        }
         replay_.set_primitive_topology = vk.vkCmdSetPrimitiveTopology;
         replay_.set_primitive_restart_enable = vk.vkCmdSetPrimitiveRestartEnable;
         replay_.set_stencil_reference = vk.vkCmdSetStencilReference;
@@ -1443,6 +1455,7 @@ public:
     VulkanContext& operator=(const VulkanContext&) = delete;
 
     bool loaded() const { return loaded_; }
+    bool viewport_scissor_count_enabled() const { return viewport_scissor_count_enabled_; }
     void configure_predication(PFN_vkGetDeviceProcAddr get, const VkPhysicalDeviceMemoryProperties& memory,
                                VkDeviceSize max_range, std::uint32_t family) {
         std::unique_lock lock(resource_mutex_);
@@ -3197,6 +3210,7 @@ private:
 
     VkDevice device_;
     bool loaded_ = false;
+    bool viewport_scissor_count_enabled_ = false;
     bool ray_tracing_ = false;
     std::unique_ptr<XdxrBuilder> xdxr_;   // set: acceleration structures are XDXR BVH4 records
     std::atomic<bool> device_lost_{false};

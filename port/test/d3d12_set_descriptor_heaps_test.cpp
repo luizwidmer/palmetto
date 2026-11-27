@@ -328,6 +328,12 @@ bool check_tracking_lifetime_and_direct_indexing(DeviceHeaps& ours) {
     CHECK(rt::d3d12::bound_descriptor_heap_bases(list.p, got_cbv, got_smp));
     CHECK(got_cbv == 0 && got_smp == 0);
 
+    // Pin the strict path's per-list base inputs after Reset and across heap-order permutations.
+    ID3D12DescriptorHeap* both_direct[2] = {ours.smp1.p, ours.cbv1.p};
+    list->SetDescriptorHeaps(2, both_direct);
+    CHECK(rt::d3d12::bound_descriptor_heap_bases(list.p, got_cbv, got_smp));
+    CHECK(got_cbv == cbv1_va && got_smp == smp1_va);
+
     // Direct heap indexing root-signature flags are preserved on RootArgumentLayout.
     D3D12_ROOT_PARAMETER p{};
     p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -343,6 +349,8 @@ bool check_tracking_lifetime_and_direct_indexing(DeviceHeaps& ours) {
     CHECK(SUCCEEDED(ours.device->CreateRootSignature(0, blob.data(), blob.size(), IID_PPV_ARGS(&root.p))));
     const rt::d3d12::RootArgumentLayout* layout = rt::d3d12::root_signature_layout(root.p);
     CHECK(layout && (layout->flags & di_flags) == di_flags);
+    list->SetGraphicsRootSignature(root.p);
+    CHECK(SUCCEEDED(list->Close()));
 
     CHECK(!rt::d3d12::bound_descriptor_heap_bases(nullptr, got_cbv, got_smp));
     return true;

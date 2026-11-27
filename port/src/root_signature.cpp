@@ -191,6 +191,83 @@ DirectHeapSlots direct_heap_slots(const StagePackResult& layout, uint32_t flags)
     return direct_heap_slots(flags, layout.spill_dwords != 0 ? kNoSgpr : layout.end_sgpr, layout.spill_dwords != 0);
 }
 
+DirectHeapFeedDecision direct_heap_feed_decision(bool strict_enabled, const DirectHeapSlots& plan,
+                                                  bool resource_base_available, bool sampler_base_available) {
+    DirectHeapFeedDecision out;
+    if (!strict_enabled) return out;  // exact legacy path; callers do not preflight or alter existing user data
+
+    const bool resource = (plan.pc_flags & kFlagCbvSrvUavHeapDirectlyIndexed) != 0;
+    const bool sampler = (plan.pc_flags & kFlagSamplerHeapDirectlyIndexed) != 0;
+    if (!resource && !sampler) return out;  // ordinary root signatures never enter the strict direct-heap path
+
+    if (!plan.ok) {
+        out.action = DirectHeapFeedAction::Refuse;
+        out.refusal = "direct_heap_signature_plan_refused";
+        if (!plan.error.empty()) out.refusal += ": " + plan.error;
+        return out;
+    }
+    if (resource && plan.resource_sgpr >= kMaxUserSgprs) {
+        out.action = DirectHeapFeedAction::Refuse;
+        out.refusal = "direct_heap_resource_slot_unplaced";
+        return out;
+    }
+    if (sampler && plan.sampler_sgpr >= kMaxUserSgprs) {
+        out.action = DirectHeapFeedAction::Refuse;
+        out.refusal = "direct_heap_sampler_slot_unplaced";
+        return out;
+    }
+    const uint32_t expected_heap_dwords = static_cast<uint32_t>(resource) + static_cast<uint32_t>(sampler);
+    if (plan.arguments_end >= kMaxUserSgprs || plan.heap_dwords != expected_heap_dwords) {
+        out.action = DirectHeapFeedAction::Refuse;
+        out.refusal = "direct_heap_signature_plan_inconsistent";
+        return out;
+    }
+    uint32_t next = plan.arguments_end;
+    if (resource && plan.resource_sgpr != next++) {
+        out.action = DirectHeapFeedAction::Refuse;
+        out.refusal = "direct_heap_signature_plan_inconsistent";
+        return out;
+    }
+    if (sampler && plan.sampler_sgpr != next++) {
+        out.action = DirectHeapFeedAction::Refuse;
+        out.refusal = "direct_heap_signature_plan_inconsistent";
+        return out;
+    }
+    if (next > kMaxUserSgprs) {
+        out.action = DirectHeapFeedAction::Refuse;
+        out.refusal = "direct_heap_signature_plan_inconsistent";
+        return out;
+    }
+    if (resource && !resource_base_available) {
+        out.action = DirectHeapFeedAction::Refuse;
+        out.refusal = "direct_heap_resource_base_unavailable";
+        return out;
+    }
+    if (sampler && !sampler_base_available) {
+        out.action = DirectHeapFeedAction::Refuse;
+        out.refusal = "direct_heap_sampler_base_unavailable";
+        return out;
+    }
+    out.action = DirectHeapFeedAction::Feed;
+    return out;
+}
+
+DirectHeapFeedDecision direct_heap_mesh_feed_decision(bool strict_enabled, const DirectHeapSlots& plan) {
+    DirectHeapFeedDecision out;
+    if (!strict_enabled || !(plan.pc_flags & kDirectHeapFlags)) return out;
+    out.action = DirectHeapFeedAction::Refuse;
+    out.refusal = "direct_heap_mesh_stage_offset_unsupported";
+    return out;
+}
+
+DirectHeapFeedDecision direct_heap_indirect_draw_decision(bool strict_enabled, const DirectHeapSlots& plan) {
+    DirectHeapFeedDecision out;
+    if (!strict_enabled || !(plan.pc_flags & kDirectHeapFlags)) return out;
+    out.action = DirectHeapFeedAction::Refuse;
+    out.refusal = "direct_heap_indirect_draw_not_admitted";
+    return out;
+}
+
 namespace {
 
 void put_u32(std::vector<uint8_t>& out, uint32_t v) {

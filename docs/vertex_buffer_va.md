@@ -2896,7 +2896,7 @@ the measured title-buffer window model, not a claim that the peers share one imp
 
 ## 24. Outside-arena title-VA window device adapter
 
-**Status: implemented behind `PALMETTO_TITLE_VA_WINDOWS`; portable and replay-lookup units pass; no GPU arm was made.**
+**Status: implemented behind `PALMETTO_TITLE_VA_WINDOWS`; portable/replay-lookup units pass; the synthetic GPU case is now in the existing draw test, with its run pending.**
 This extends section 23's tested policy into the Vulkan device path. The public runtime switch is strict: unset/false keeps the prior
 external-host import path; an explicit true value selects the window adapter; malformed text logs `invalid_switch` and refuses
 new raw spans. The off branch installs no window allocator/resolver, creates no window Vulkan objects, and keeps the existing
@@ -2937,11 +2937,19 @@ also returns the same BDA delta rather than staging a second arena copy.
 The existing pull hooks reverse-map a patched V# base to its title span and copy those pages into the window before reads.
 If the source becomes uncommitted/unreadable, a pull exceeds the alias, or the alias cannot be installed, the adapter logs a
 stable refusal and marks the console VA map incomplete, keeping draws refused instead of using stale/unrebased bytes.
-`WriteBufferImmediate` ranges that overlap a window are refused as `write_buffer_immediate_unsupported`: the measured class
-is read-only vertex/index streaming, and GPU-to-title writeback is not implemented. Arbitrary shader UAV writes through a V#
-are not introspected and are unsupported (not silently claimed to sync back); only the known immediate-write path has a
-named runtime refusal today. `PALMETTO_PAGE_PULL=0` continues to suppress recurring page copies as it does for arena-backed
-spans.
+**Writeback boundary.** The replay scans each `WriteBufferImmediate` destination as a four-byte write in the current
+submission. If that address overlaps a windowed title-VA span, the command lookup refuses it as
+`write_buffer_immediate_unsupported`; when more than the bounded write-range table can be recorded, a window lookup fails
+closed as `write_range_cap`. The registration pass also refuses a new window request overlapping one of those writes, so
+it does not create a backing under a write it cannot honor. These names cover the explicit immediate-write command only.
+
+Arbitrary shader UAV stores through a V# are different: the layer does not inspect translated shader instructions or
+infer from a V# whether the shader will read or write it, and it does not reject a window-backed V# merely because a
+shader may store through it. If such a shader writes, it writes the Vulkan window backing; there is no GPU-to-title copy,
+write-watch, per-window dirty tracking, or readback into the original raw title VA. The title's CPU view may therefore
+remain stale, and a later CPU-to-GPU page pull can overwrite shader-written backing bytes. Shader-UAV writeback is
+unsupported and unmeasured; do not treat the window as coherent with the title's original pages after a GPU store.
+`PALMETTO_PAGE_PULL=0` suppresses the CPU-to-GPU refreshes and does not enable writeback.
 
 Bounds are fixed and checked twice: no more than 32 windows/aliases, 4 MiB per window, and 32 MiB total logical window bytes;
 the device separately caps actual Vulkan allocation bytes at 32 MiB. Only host-coherent memory is accepted, so the upload
@@ -2953,18 +2961,48 @@ refusals include `no_arena_geometry`, `buffer_device_address_unavailable`, `titl
 
 ### 24.3 Verification and limits
 
-`port/test/buffer_va_index_test.cpp` retains the switch and policy-boundary cases and adds a synthetic replay composition:
+`port/test/buffer_va_index_test.cpp` retains the CPU switch and policy-boundary cases and its synthetic replay composition:
 raw title VA -> `ConsoleVaMap` -> `BufferVaIndex` -> exact `heap_base + console VA` BDA, plus a V# patch that preserves its
-format/stride bits. This is CPU-only and uses synthetic addresses; it does not claim a Vulkan allocation, page-read, GPU fetch,
-or title-boot result. The target GPU test/one light boot was not run: the shared boot-lock policy was not free while
-`palmetto.exe` was active. No game bytes, shader bytes, package paths or extracted tables were used.
+format/stride bits. The synthetic GPU arm is in the existing `d3d12_draw_test` CTest target in
+`port/test/d3d12_draw_test.cpp` (the CMake stanza at `port/CMakeLists.txt` lines 2901–2911 is reused; no CMake edit). It
+passes a committed `VirtualAlloc` byte pattern as a raw vertex-buffer VA, with no D3D12 resource behind it. An explicit
+test-only `VulkanDeviceInfo::title_va_window_test_hooks` supplies a separate coherent Vulkan `VkBuffer`, raw-VA resolver,
+and source-page pull callback; these hooks bypass only the production `create_title_va_window` BDA allocator/resolver and
+copy, while the same `VulkanContext` submission registration, `buffer_at` replay lookup, D3D12 draw and GPU readback run.
+The shader echoes all four vertex-color bytes to an integer render target. After first registration, the test changes the
+source page and submits again; the second readback must equal the changed pattern, and the hook verifies a second pull into
+the same mapped backing. A view one byte beyond that synthetic window and an overlapping `WriteBufferImmediate` must stay
+unresolved with `alias_view_out_of_bounds` and `write_buffer_immediate_unsupported`. This test covers direct vertex-view
+resolution only: it does not test the production BDA placement/`TitleVaAliasTable` path, `ConsoleVaMap` root/table/V#
+rebasing, or arbitrary shader UAV writeback.
 
-**Falsifier for the device claim:** when the host and boot lock are free, run a one-window synthetic GPU check with a local
-committed byte-pattern page and the opt-in switch. It must show (a) `buffer_at(raw_va, n)` returning the allocated window and
-exact offset, (b) `heap_base + rebased_va == vkGetBufferDeviceAddress(buffer) + offset` for root/table/V# values, and (c) a
-GPU readback after the page-pull hook equals the synthetic source pattern, while switch-off leaves the prior path/output
-unchanged. A below-base/overlap/over-budget/unreadable/out-of-bounds input must refuse by name and submit no bad address.
-Any mismatch, stale GPU readback, unexplained device loss, or switch-off delta falsifies this adapter as measured here.
+A separate non-injected run on the NVIDIA GeForce RTX 4090, with `d.request_buffer_device_address=true`, reached the
+production allocator but refused its candidate window as `window_below_heap_base`; `buffer_at` then remained unresolved
+and no invalid draw was submitted. The earlier run omitted that Vulkan test-device feature, so it is not relied upon. The
+corrected run confirms one named host refusal, not a successful production window: the numeric candidate BDA/arena pair,
+production BDA ordering on other drivers, and successful root/table/V# aliasing remain unmeasured. No game bytes, game
+shaders, package paths, extracted tables, or title boot were used.
+
+**Synthetic-arm falsifier:** the first draw must log window registration, the hook must allocate one backing and resolve
+both valid draws, both readbacks must match their respective source bytes, and the second draw must invoke the pull hook;
+the two negative controls must return `unresolved_resource` with their exact names and submit no bad address. Missing
+registration/resolution/pull, stale or mismatched GPU bytes, a successful bad-view/write submission, or device loss falsifies
+this measured replay arm. Absence of host-coherent memory for the test buffer is an explicit skip, not a pass.
+
+**Production-adapter falsifier (not yet satisfied):** with test hooks empty, record the candidate window BDA and arena
+base/extent. For a candidate below the base, the production path must refuse as `window_below_heap_base` and leave the
+submission unresolved; acceptance/submission with that invalid delta falsifies the guard. With a candidate BDA above
+`heap_base + arena_size` and a representable 48-bit delta, the ordinary adapter must register the window, pull the changed
+source bytes, and produce the same GPU readback; refusal or mismatched bytes falsifies the successful production path.
+The present host has shown the below-base refusal but not the successful case or numeric-address trace.
+
+**Shader-UAV falsifier (not yet run):** allocate a separate synthetic raw title page and window, expose its V# as a UAV,
+then have a controlled shader store a distinct sentinel and wait for completion without any intervening CPU-to-GPU pull.
+If the layer refuses that shader write by a named rule or the original raw title VA itself reads back with the sentinel,
+then the documented claim that shader UAV writes are not refused/tracked/copied back is false. If the GPU-visible window
+changes but the original title VA does not, the unsupported writeback limit is confirmed; a subsequent page pull overwriting
+the window's sentinel is also consistent with the current one-way-copy design. This shader-writeback arm is not covered by
+the synthetic GPU test above.
 
 ### 24.4 Attribution and NOTICE draft
 

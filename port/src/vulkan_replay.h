@@ -31,6 +31,7 @@
 // A list that needs a missing function fails with ReplayResult::unsupported before anything is written.
 
 #include "command_list.h"
+#include "viewport_replay_readiness.h"
 #include "depth24.h"
 #include "gfx10_descriptors.h"
 #include "uav_clear.h"
@@ -822,6 +823,9 @@ struct GraphicsPipeline {
     // and stencil. Null when it cannot be built.
     static constexpr std::uint32_t unbound_depth = 1u << 8;
     std::function<VkPipeline(std::uint32_t unbound)> variant;
+    // The same recipe with VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT / SCISSOR_WITH_COUNT, built only for strict-mode
+    // multi-element draws. The default pipeline and the single-element variant above remain count-1 pipelines.
+    std::function<VkPipeline(std::uint32_t unbound)> viewport_scissor_count_variant;
     // Diagnostic (docs/frame_capture.md): the same pipeline with a substituted pixel shader (the frame dump's
     // constant-output PS control). The shim builds it from the same recipe, so the vertex stage, input layout and
     // fixed-function state are the title's; cull_none overrides only the substituted variant's cull mode, so a culling
@@ -1260,6 +1264,11 @@ struct ReplayFunctions {
     PFN_vkCmdBindIndexBuffer bind_index_buffer = nullptr;
     PFN_vkCmdSetViewport set_viewport = nullptr;
     PFN_vkCmdSetScissor set_scissor = nullptr;
+    // Opt-in multi-element arrays: both EDS with-count commands and multiViewport are required.
+    PFN_vkCmdSetViewportWithCount set_viewport_with_count = nullptr;
+    PFN_vkCmdSetScissorWithCount set_scissor_with_count = nullptr;
+    bool multi_viewport_enabled = false;
+    std::uint32_t max_viewport_count = 1;
     PFN_vkCmdSetPrimitiveTopology set_primitive_topology = nullptr;
     PFN_vkCmdSetPrimitiveRestartEnable set_primitive_restart_enable = nullptr;
     PFN_vkCmdSetStencilReference set_stencil_reference = nullptr;
@@ -2342,9 +2351,8 @@ struct Prepared {
 };
 
 inline constexpr std::size_t max_render_targets = 8;  // D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT
-// The graphics-pipeline builder currently fixes both state counts at one. Strict COM recording rejects any draw that
-// would consume more than one viewport/scissor; keep these exact count-1 updates in draw order until the pipeline path
-// uses VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT / VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT and enables multiViewport.
+// The legacy pipeline remains count-1 for the default and strict single-element paths; strict multi-element draws use
+// the separate with-count pipeline variant and commands.
 inline constexpr std::uint32_t fixed_pipeline_viewport_count = 1;
 inline constexpr std::uint32_t fixed_pipeline_scissor_count = 1;
 
@@ -2369,6 +2377,11 @@ struct PreparedDraw {
     VkDeviceSize index_offset = 0;
     VkIndexType index_type = VK_INDEX_TYPE_UINT16;
     VkExtent2D area{};
+    bool uses_viewport_scissor_with_count = false;
+    std::uint32_t viewport_count = 0;
+    std::uint32_t scissor_count = 0;
+    std::array<VkViewport, d3d12_viewport_scissor_array_limit> viewports{};
+    std::array<VkRect2D, d3d12_viewport_scissor_array_limit> scissors{};
     std::uint32_t layers = 1;  // the fewest layers any bound attachment view has
     // Diagnostic (docs/vertex_path.md): the arena-relative address of the driver-block V# the geometry fix filled for
     // this draw's vertex stream; 0 when the fix is off. Emit puts it in the s0/s1 user-data pair.
@@ -2396,6 +2409,11 @@ struct PreparedDraw {
         index_offset = 0;
         index_type = VK_INDEX_TYPE_UINT16;
         area = {};
+        uses_viewport_scissor_with_count = false;
+        viewport_count = 0;
+        scissor_count = 0;
+        viewports.fill({});
+        scissors.fill({});
         layers = 1;
         driver_block = 0;
         console_user_data.fill(0);
@@ -3425,6 +3443,30 @@ inline void draw_va_pulls(const ReplayFunctions& vk, const Draw& draw, const Gra
     }
 }
 
+inline VkViewport to_vulkan_viewport(const Viewport& viewport) {
+    // Translated vertex shaders write D3D clip coordinates (y up); a negative-height viewport keeps the image upright,
+    // and winding as D3D12 sees it.
+    return {viewport.x, viewport.y + viewport.height, viewport.width, -viewport.height,
+            viewport.min_depth, viewport.max_depth};
+}
+
+inline VkRect2D to_vulkan_scissor(const Rect& scissor) {
+    const std::int32_t left = std::max(0, scissor.left);
+    const std::int32_t top = std::max(0, scissor.top);
+    return {{left, top},
+            {std::uint32_t(std::max(0, scissor.right - left)),
+             std::uint32_t(std::max(0, scissor.bottom - top))}};
+}
+
+inline void note_viewport_count_refusal(viewport_replay_readiness::Refusal refusal) {
+    static std::mutex mutex;
+    static std::set<std::string> printed;
+    const char* name = viewport_replay_readiness::refusal_name(refusal);
+    const std::lock_guard lock(mutex);
+    if (printed.size() >= 8 || !printed.insert(name).second) return;
+    std::fprintf(stderr, "[rt] replay: PALMETTO_D3D12X_STRICT_VIEWPORTS=1 refused draw: %s\n", name);
+}
+
 // Resolves a draw's pipeline, attachments and buffers. Attachment views take the pipeline's formats, so a
 // typeless texture is viewed as the format the pipeline renders.
 template<typename Resolve>
@@ -3458,6 +3500,38 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
     if (draw.mesh && !vk.draw_mesh_tasks) return ReplayResult::unsupported;
     if (pipeline->bindless_set && !vk.bind_descriptor_sets) return ReplayResult::unsupported;
     if (pipeline->color_formats.size() > max_render_targets) return ReplayResult::unsupported;
+    const ViewportScissorArrays* arrays = draw.viewport_scissor_arrays.get();
+    const bool multi_count = arrays && (arrays->viewport_count > 1 || arrays->scissor_count > 1);
+    if (arrays) {
+        const viewport_replay_readiness::ReplayCapability capability{
+            vk.multi_viewport_enabled,
+            vk.set_viewport_with_count && vk.set_scissor_with_count,
+            vk.max_viewport_count};
+        const auto assessment = viewport_replay_readiness::assess(
+            arrays->viewport_count, arrays->scissor_count, true, capability);
+        if (assessment.disposition == viewport_replay_readiness::Disposition::refuse) {
+            note_viewport_count_refusal(assessment.refusal);
+            return ReplayResult::unsupported;
+        }
+        if (multi_count && !arrays->viewport_count) return ReplayResult::invalid_draw;
+        if (multi_count && !pipeline->viewport_scissor_count_variant) return ReplayResult::unsupported;
+        if (multi_count) {
+            p.uses_viewport_scissor_with_count = true;
+            p.viewport_count = arrays->viewport_count;
+            p.scissor_count = arrays->scissor_count ? arrays->scissor_count : arrays->viewport_count;
+            for (std::uint32_t i = 0; i < arrays->viewport_count; ++i)
+                p.viewports[i] = to_vulkan_viewport(arrays->viewports[i]);
+            if (arrays->scissor_count) {
+                for (std::uint32_t i = 0; i < arrays->scissor_count; ++i)
+                    p.scissors[i] = to_vulkan_scissor(arrays->scissors[i]);
+            } else {
+                // D3D12's zero scissor count clips all fragments. Vulkan's with-count command needs a non-zero count;
+                // synthesize an empty rectangle for every viewport index so all shader-selected viewports stay clipped.
+                for (std::uint32_t i = 0; i < p.scissor_count; ++i)
+                    p.scissors[i] = to_vulkan_scissor(Rect{});
+            }
+        }
+    }
     p.graphics = pipeline;
     p.pipeline = pipeline->pipeline;
     p.area = {UINT32_MAX, UINT32_MAX};
@@ -3505,8 +3579,17 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
         shrink(a.binding, draw.depth, a.range);
     }
     if (p.area.width == UINT32_MAX) {  // no attachment: the viewport bounds the rendering
-        p.area = {std::uint32_t(std::max(0.0f, draw.viewport.x + draw.viewport.width)),
-                  std::uint32_t(std::max(0.0f, draw.viewport.y + draw.viewport.height))};
+        if (p.uses_viewport_scissor_with_count) {
+            float right = 0.0f, bottom = 0.0f;
+            for (std::uint32_t i = 0; i < p.viewport_count; ++i) {
+                right = (std::max)(right, arrays->viewports[i].x + arrays->viewports[i].width);
+                bottom = (std::max)(bottom, arrays->viewports[i].y + arrays->viewports[i].height);
+            }
+            p.area = {std::uint32_t(std::max(0.0f, right)), std::uint32_t(std::max(0.0f, bottom))};
+        } else {
+            p.area = {std::uint32_t(std::max(0.0f, draw.viewport.x + draw.viewport.width)),
+                      std::uint32_t(std::max(0.0f, draw.viewport.y + draw.viewport.height))};
+        }
     }
     p.layers = layers == UINT32_MAX ? 1 : std::max(1u, layers);
 
@@ -4282,7 +4365,10 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
     for (std::size_t slot = 0; slot < p.colors.size(); ++slot)
         if (pipeline->color_formats[slot] != VK_FORMAT_UNDEFINED && !p.colors[slot].id) unbound |= 1u << slot;
     if (pipeline->depth_format != VK_FORMAT_UNDEFINED && !p.depth.id) unbound |= GraphicsPipeline::unbound_depth;
-    if (unbound) {
+    if (p.uses_viewport_scissor_with_count) {
+        p.pipeline = pipeline->viewport_scissor_count_variant(unbound);
+        if (!p.pipeline) return ReplayResult::unsupported;
+    } else if (unbound) {
         p.pipeline = pipeline->variant ? pipeline->variant(unbound) : VK_NULL_HANDLE;
         if (!p.pipeline) return ReplayResult::unsupported;
     }
@@ -4297,7 +4383,8 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
     if (frame_dump::content_cull_variant_enabled()) {
         const bool content_window = vk.title_import_capture && vk.title_import_capture();
         const frame_dump::ContentCullVariant selection = frame_dump::content_cull_variant_selection(
-            true, content_window, pipeline->mesh, unbound != 0, pipeline->with_cull != nullptr);
+            true, content_window, pipeline->mesh, unbound != 0,
+            !p.uses_viewport_scissor_with_count && pipeline->with_cull != nullptr);
         switch (selection) {
             case frame_dump::ContentCullVariant::apply: {
                 const VkPipeline cull_variant = pipeline->with_cull(frame_dump::content_cull_variant_cull_mode,
@@ -7218,19 +7305,18 @@ inline void emit(const PreparedList& prepared, VkCommandBuffer command_buffer, c
                                         &set0, 0, nullptr);
             }
             vk.push_constants(command_buffer, graphics.layout, graphics.push_stages, 0, sizeof(data), &data);
-            // This IR path still has one value of each state (the graphics pipeline is count-1). Strict COM recording
-            // refuses a draw that would consume an array count >1 before it can reach here. State is replayed immediately
-            // before each draw, preserving the command list's ordering for the supported single-element case.
-            // Translated vertex shaders write D3D clip coordinates (y up); a negative-height viewport keeps the
-            // image upright, and winding as D3D12 sees it.
-            const Viewport& v = draw->viewport;
-            const VkViewport viewport{v.x, v.y + v.height, v.width, -v.height, v.min_depth, v.max_depth};
-            vk.set_viewport(command_buffer, 0, detail::fixed_pipeline_viewport_count, &viewport);
-            const Rect& s = draw->scissor;
-            const VkRect2D scissor{{std::max(0, s.left), std::max(0, s.top)},
-                                   {std::uint32_t(std::max(0, s.right - std::max(0, s.left))),
-                                    std::uint32_t(std::max(0, s.bottom - std::max(0, s.top)))}};
-            vk.set_scissor(command_buffer, 0, detail::fixed_pipeline_scissor_count, &scissor);
+            // State is replayed immediately before each draw, preserving the command list's ordering. The default and
+            // strict single-element paths keep their original count-1 calls; only a captured multi-element draw uses
+            // the with-count dynamic states and its per-draw array snapshot.
+            if (d.uses_viewport_scissor_with_count) {
+                vk.set_viewport_with_count(command_buffer, d.viewport_count, d.viewports.data());
+                vk.set_scissor_with_count(command_buffer, d.scissor_count, d.scissors.data());
+            } else {
+                const VkViewport viewport = detail::to_vulkan_viewport(draw->viewport);
+                vk.set_viewport(command_buffer, 0, detail::fixed_pipeline_viewport_count, &viewport);
+                const VkRect2D scissor = detail::to_vulkan_scissor(draw->scissor);
+                vk.set_scissor(command_buffer, 0, detail::fixed_pipeline_scissor_count, &scissor);
+            }
             // A mesh pipeline has no input assembly: its topology comes from the shader, and neither the topology
             // nor primitive restart is dynamic state there (VUID-VkGraphicsPipelineCreateInfo-pDynamicStates-07065).
             if (!draw->mesh) {

@@ -117,6 +117,33 @@ int multiple_scissors_case() {
     return 0;
 }
 
+int multi_count_capability_case() {
+    using namespace palmetto::viewport_replay_readiness;
+    const ReplayCapability ready{true, true, 16};
+    CHECK(assess(2, 2, true, ready).disposition == Disposition::ready);
+    CHECK(assess(16, 16, true, ready).disposition == Disposition::ready);
+    CHECK(assess(1, 1, true, {}).disposition == Disposition::ready);  // strict single-count path needs no new feature
+
+    const ReplayCapability no_multi_viewport{false, true, 16};
+    const Assessment missing_feature = assess(2, 2, true, no_multi_viewport);
+    CHECK(missing_feature.refusal == Refusal::multiple_viewports_not_supported);
+    CHECK(std::string(refusal_name(missing_feature.refusal)) == "multiple_viewports_require_dynamic_viewport_count");
+    const ReplayCapability no_dynamic_count{true, false, 16};
+    CHECK(assess(2, 1, true, no_dynamic_count).refusal == Refusal::multiple_viewports_not_supported);
+    CHECK(assess(1, 2, true, no_dynamic_count).refusal == Refusal::multiple_scissors_not_supported);
+
+    const ReplayCapability limited{true, true, 2};
+    const Assessment viewport_too_many = assess(3, 1, true, limited);
+    CHECK(viewport_too_many.refusal == Refusal::viewport_count_exceeds_vulkan_limit);
+    CHECK(std::string(refusal_name(viewport_too_many.refusal)) ==
+          "viewport_count_exceeds_vulkan_max_viewport_count");
+    const Assessment scissor_too_many = assess(1, 3, true, limited);
+    CHECK(scissor_too_many.refusal == Refusal::scissor_count_exceeds_vulkan_limit);
+    CHECK(std::string(refusal_name(scissor_too_many.refusal)) ==
+          "scissor_count_exceeds_vulkan_max_viewport_count");
+    return 0;
+}
+
 int viewport_count_limit_case() {
     using namespace palmetto::viewport_replay_readiness;
     const Assessment too_many = assess(17, 1, true);
@@ -214,6 +241,7 @@ int main() {
         {"zero and single-element counts are ready", zero_and_single_element_counts_case},
         {"multiple viewports return a named refusal", multiple_viewports_case},
         {"multiple scissors return a named refusal", multiple_scissors_case},
+        {"multi-count capability and maxViewports are enforced", multi_count_capability_case},
         {"viewport count over the API limit is refused", viewport_count_limit_case},
         {"scissor count over the API limit is refused", scissor_count_limit_case},
         {"all viewport and scissor array elements are copied", capture_all_array_elements_case},

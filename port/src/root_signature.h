@@ -241,6 +241,28 @@ struct DirectHeapSlots {
 // The same over a stage packing: a refused layout or a spilled one is refused with its reason.
 [[nodiscard]] DirectHeapSlots direct_heap_slots(const StagePackResult& layout, uint32_t flags);
 
+// Admission policy for the optional strict command-recording path. `Legacy` means the caller must preserve its existing
+// behavior verbatim (the default); `Feed` means every flagged heap base is ready to append atomically; `Refuse` names a
+// signature/heap shape that strict mode must not record with stale or partial user data. The booleans mean that the
+// required base was already resolved and encoded into one dword, not merely that a heap object was bound.
+enum class DirectHeapFeedAction : uint32_t { Legacy = 0, Feed = 1, Refuse = 2 };
+
+struct DirectHeapFeedDecision {
+    DirectHeapFeedAction action = DirectHeapFeedAction::Legacy;
+    std::string refusal;
+};
+
+[[nodiscard]] DirectHeapFeedDecision direct_heap_feed_decision(bool strict_enabled, const DirectHeapSlots& plan,
+                                                               bool resource_base_available,
+                                                               bool sampler_base_available);
+// The mesh-stage heap offset is not measured or placed by this layer. Strict mode refuses such a command by name rather
+// than reusing the graphics-stage s8 plan for a mesh stage whose user data starts at s16.
+[[nodiscard]] DirectHeapFeedDecision direct_heap_mesh_feed_decision(bool strict_enabled, const DirectHeapSlots& plan);
+// Graphics ExecuteIndirect has no user-data payload in this replay model; strict mode refuses flagged calls rather than
+// assuming a prior draw's heap bases are still current.
+[[nodiscard]] DirectHeapFeedDecision direct_heap_indirect_draw_decision(bool strict_enabled,
+                                                                       const DirectHeapSlots& plan);
+
 // D3D12 cost of one parameter against the 64-dword limit.
 [[nodiscard]] constexpr uint32_t param_cost(ParamType type, uint32_t num_values) noexcept {    switch (type) {
         case ParamType::Constants:

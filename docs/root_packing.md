@@ -215,3 +215,64 @@ GPL-3.0 project ubiquitarianism/leonida (<https://github.com/ubiquitarianism/leo
 commits `7c2252609`, `5fdd6abbc`, `b8563e949`, `00fc23b9a`, `273b3bdf9`, `5115f0887`, `3ee0037fd` and `a330747f2`.
 No code from that project was copied. The upstream project remains the copyright of its contributors and its license
 continues to apply to its own tree. `NOTICE.md` is the lead's to update; this page carries the same attribution.
+
+## 10. Strict direct-heap command admission (clean-room follow-up)
+
+### Measured gap
+
+The existing bounded boot measurement remains the deciding observation: 8,194 root binds, 8,192 draws, 0 dispatches,
+and no command with either directly-indexed flag. The bound signatures are still only the unflagged root-view shape
+(`flags=0`) and the descriptor-table shape (`flags=0x1`). The current code already models the appended heap-base dwords
+and `user_data()` feeds them when a flagged signature and representable heap base are present. Its fallback is the gap:
+when that plan or base is unavailable it logs a bounded note, leaves the previous root-argument block unchanged, and still
+records the command. No title trace proves that an unchanged block is safe for a shader that expects a direct heap base.
+
+The CPU evidence is separate from a GPU proof: `root_signature_test` checks packing and the direct-heap slots;
+`d3d12_set_descriptor_heaps_test` verifies bound-heap lifetime/reset handling and preservation of both direct-index flags.
+Neither test reads a heap-base dword from a shader. The created compute signature that would spill is still never bound; its
+`s[0:1]` spill array, the serializer's RTS0 flag-restore half, and a mesh-stage heap offset remain unsupported.
+
+### Opt-in policy
+
+`PALMETTO_DIRECT_HEAP_STRICT=1` opts into a fail-closed admission path in `port/shims/d3d12_com.cpp`. For a directly
+indexed non-mesh graphics draw or compute dispatch (including indirect compute dispatch), it validates the
+already-computed signature plan and resolves every required resource/sampler heap base to the one-dword console encoding
+**before writing either dword**. If all required bases are ready, it records the same values at the same planned slots. If
+not, the whole draw/dispatch is skipped and one bounded, named reason is logged
+(`direct_heap_signature_plan_refused`, `direct_heap_signature_plan_inconsistent`,
+`direct_heap_resource_slot_unplaced`, `direct_heap_sampler_slot_unplaced`,
+`direct_heap_resource_base_unavailable`, or `direct_heap_sampler_base_unavailable`). There is no partial heap feed.
+
+A flagged `DispatchMesh` is refused in strict mode as `direct_heap_mesh_stage_offset_unsupported`; its heap base belongs
+to the mesh s16 layout, which this path does not model. The implementation never reuses the graphics s8 plan as a guess.
+In strict mode, a flagged graphics `ExecuteIndirect` is refused as `direct_heap_indirect_draw_not_admitted`, because its
+replay record has no user-data payload for a strict base feed. Compute `ExecuteIndirect` carries user data and uses the
+same all-or-nothing admission as direct `Dispatch`.
+
+With the switch absent (the default), regular graphics draws and compute dispatches use the existing `user_data()`
+function verbatim; compute `ExecuteIndirect` keeps its prior raw `compute_.data` snapshot, and `DispatchMesh` plus graphics
+`ExecuteIndirect` retain their existing paths. Non-direct signatures also take the legacy path when strict mode is enabled.
+This preserves the measured default path byte-for-byte. The opt-in does not claim that a direct-indexed shader has been
+observed or that missing serializer/spill/mesh work is implemented.
+
+### Tests and falsifier
+
+The portable `root_signature_test` now reports **96 PASS assertions** (the 81-check count in section 7 predates this
+follow-up) and exercises legacy/off admission, complete two-heap acceptance, each missing-base refusal, bad plans,
+unplaced slots, non-direct signatures, and strict-on/off mesh and indirect-draw decisions. The descriptor-heap unit test
+additionally confirms that both per-list bases survive heap binding after Reset together with a root signature carrying both
+direct-index flags. No live title arm was run: the existing boot population has no directly-indexed commands, so another
+arm would repeat the same latent path; the lead confirmed it is unnecessary. The next falsifier is a synthetic,
+hand-written shader test with a root signature carrying the resource and sampler direct-index flags: bind both heaps,
+have the shader read the planned base dwords and fetch a known descriptor, then compare the output/readback against a CPU
+reference. Run with strict mode enabled and missing/unrepresentable-base controls (which must refuse before recording);
+also verify that switch-off retains the legacy output. Include a compute `ExecuteIndirect` case; flagged graphics
+`ExecuteIndirect` should refuse by name in strict mode. A passing CPU plan or a log line alone does not close that falsifier.
+
+### Clean-room note for the report
+
+The peer notes `Five Star Recomp` at `34b4dfed` and `XCL` at `623d02e` were evidence only. This strict admission policy is
+implemented from this repository's measured trace gap and local `DirectHeapSlots` model; no peer code or non-trivial text
+was copied. For the report's proposed NOTICE attribution, name the peer projects and their pinned notes, state that they
+were consulted as documentation, and make no claim that their implementation was incorporated; keep the existing
+`ubiquitarianism/leonida` code-reference attribution above for the earlier parity model.

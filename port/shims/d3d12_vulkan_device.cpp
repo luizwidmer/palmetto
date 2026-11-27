@@ -6435,6 +6435,8 @@ public:
         for (const auto& [pair, built] : cull_variants_)
             if (built) vk.vkDestroyPipeline(dev, built, nullptr);
         for (const auto& [unbound, built] : variants_) vk.vkDestroyPipeline(dev, built, nullptr);
+        for (const auto& [unbound, built] : viewport_scissor_count_variants_)
+            if (built) vk.vkDestroyPipeline(dev, built, nullptr);
         if (!shared_graphics_) {
             if (graphics_.pipeline) vk.vkDestroyPipeline(dev, graphics_.pipeline, nullptr);
             if (graphics_.layout) vk.vkDestroyPipelineLayout(dev, graphics_.layout, nullptr);
@@ -6517,6 +6519,8 @@ public:
         std::copy(std::begin(shared->console_parameter), std::end(shared->console_parameter),
                   std::begin(graphics_.console_parameter));
         graphics_.variant = [this](std::uint32_t unbound) { return variant(unbound); };
+        graphics_.viewport_scissor_count_variant =
+            [this](std::uint32_t unbound) { return variant_with_viewport_scissor_count(unbound); };
         graphics_.with_ps = [this](VkShaderModule ps, bool cull_none) { return variant_with_ps(ps, cull_none); };
         // Diagnostic (docs/vertex_buffer_va.md section 22): the same recipe with only its cull pair replaced, keyed by
         // (cull mode, front face) in its own cache. Only read by the env-gated content-window rule.
@@ -7435,6 +7439,8 @@ public:
             pipeline_profile_created(true, profile_started, label);
         }
         graphics_.variant = [this](std::uint32_t unbound) { return variant(unbound); };
+        graphics_.viewport_scissor_count_variant =
+            [this](std::uint32_t unbound) { return variant_with_viewport_scissor_count(unbound); };
         // Diagnostic (docs/frame_capture.md): the frame dump's PS-only control, the same recipe with another pixel
         // shader. Only read by the env-gated diagnostic; nothing on the normal draw path calls it.
         graphics_.with_ps = [this](VkShaderModule ps, bool cull_none) { return variant_with_ps(ps, cull_none); };
@@ -7787,15 +7793,24 @@ private:
         bool front_ccw = false;
     };
     VkPipeline build(std::uint32_t unbound, VkShaderModule substitute_ps = VK_NULL_HANDLE,
-                     bool cull_none = false, CullOverride cull_override = {}) const {
+                     bool cull_none = false, CullOverride cull_override = {},
+                     bool viewport_scissor_with_count = false) const {
         // The stride state is last: a pipeline without vertex bindings (a full-screen pass that builds its vertices
         // from SV_VertexID) leaves it out, since no vkCmdBindVertexBuffers2 would ever set it
-        // (VUID-vkCmdDraw-pStrides-04913).
+        // (VUID-vkCmdDraw-pStrides-04913). The opt-in counted variant replaces only VIEWPORT/SCISSOR; all other
+        // dynamic state and the default pipeline's create-info order remain unchanged.
         static constexpr VkDynamicState dynamic_states[] = {
             VK_DYNAMIC_STATE_VIEWPORT,          VK_DYNAMIC_STATE_SCISSOR,
             VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY, VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE,
             VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_BLEND_CONSTANTS,
             VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE};
+        static constexpr VkDynamicState dynamic_states_with_count[] = {
+            VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT, VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT,
+            VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY, VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE,
+            VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_BLEND_CONSTANTS,
+            VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE};
+        if (viewport_scissor_with_count && !device_.info.dynamic_viewport_scissor_with_count)
+            return VK_NULL_HANDLE;
         const GraphicsRecipe& r = recipe_;
         // Diagnostic only: the recipe's stages with the fragment module swapped and its required-subgroup-size chain
         // dropped (the substituted shader declares none). Empty when the recipe has no fragment stage.
@@ -7840,8 +7855,8 @@ private:
         vertex_input.vertexAttributeDescriptionCount = std::uint32_t(r.attributes.size());
         vertex_input.pVertexAttributeDescriptions = r.attributes.data();
         VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-        viewport.viewportCount = 1;
-        viewport.scissorCount = 1;
+        viewport.viewportCount = viewport_scissor_with_count ? 0 : 1;
+        viewport.scissorCount = viewport_scissor_with_count ? 0 : 1;
         VkPipelineMultisampleStateCreateInfo multisample = r.multisample;
         VkPipelineRasterizationStateCreateInfo raster = r.raster;
         if (cull_none) raster.cullMode = VK_CULL_MODE_NONE;  // diagnostic only: the substituted variant's cull axis
@@ -7868,13 +7883,24 @@ private:
         static constexpr VkDynamicState mesh_dynamic_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
                                                                  VK_DYNAMIC_STATE_STENCIL_REFERENCE,
                                                                  VK_DYNAMIC_STATE_BLEND_CONSTANTS};
+        static constexpr VkDynamicState mesh_dynamic_states_with_count[] = {
+            VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT, VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT,
+            VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_BLEND_CONSTANTS};
         VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
         if (r.mesh) {
-            dynamic.dynamicStateCount = std::uint32_t(std::size(mesh_dynamic_states));
-            dynamic.pDynamicStates = mesh_dynamic_states;
+            const VkDynamicState* states = viewport_scissor_with_count ? mesh_dynamic_states_with_count
+                                                                       : mesh_dynamic_states;
+            dynamic.dynamicStateCount = viewport_scissor_with_count
+                                            ? std::uint32_t(std::size(mesh_dynamic_states_with_count))
+                                            : std::uint32_t(std::size(mesh_dynamic_states));
+            dynamic.pDynamicStates = states;
         } else {
-            dynamic.dynamicStateCount = std::uint32_t(std::size(dynamic_states)) - (r.bindings.empty() ? 1 : 0);
-            dynamic.pDynamicStates = dynamic_states;
+            const VkDynamicState* states = viewport_scissor_with_count ? dynamic_states_with_count : dynamic_states;
+            const std::uint32_t state_count = viewport_scissor_with_count
+                                                  ? std::uint32_t(std::size(dynamic_states_with_count))
+                                                  : std::uint32_t(std::size(dynamic_states));
+            dynamic.dynamicStateCount = state_count - (r.bindings.empty() ? 1 : 0);
+            dynamic.pDynamicStates = states;
         }
 
         VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &rendering};
@@ -7938,6 +7964,20 @@ private:
         return pipeline;
     }
 
+    // Built only for strict-mode multi-element viewport/scissor draws. The default pipeline and its one-count variants
+    // keep their original create info; the counted variant uses the EDS with-count dynamic states and zero static counts.
+    VkPipeline variant_with_viewport_scissor_count(std::uint32_t unbound) {
+        std::lock_guard lock(variants_mutex_);
+        if (const auto it = viewport_scissor_count_variants_.find(unbound);
+            it != viewport_scissor_count_variants_.end())
+            return it->second;
+        const VkPipeline pipeline = build(unbound, VK_NULL_HANDLE, false, {}, true);
+        if (!pipeline)
+            log_once("a viewport/scissor-with-count pipeline variant could not be built; slots", int(unbound));
+        viewport_scissor_count_variants_.emplace(unbound, pipeline);
+        return pipeline;
+    }
+
     // Diagnostic (docs/frame_capture.md): the same pipeline with `ps` as its pixel shader, built once per cull mode and
     // kept until the PSO is released, like variant(). The frame dump's PS-only control is its only caller.
     VkPipeline variant_with_ps(VkShaderModule ps, bool cull_none) {
@@ -7981,6 +8021,7 @@ private:
     GraphicsRecipe recipe_;
     std::mutex variants_mutex_;
     std::map<std::uint32_t, VkPipeline> variants_;
+    std::map<std::uint32_t, VkPipeline> viewport_scissor_count_variants_;
     std::map<std::uint32_t, VkPipeline> ps_variants_;  // docs/frame_capture.md, the PS-only control by cull mode
     // docs/vertex_buffer_va.md section 22: the cull-only content-window variant by (cull mode, front face); a null value
     // is a cached failed build.
@@ -9263,11 +9304,20 @@ public:
             }
         }
 
-        state_.context = std::make_unique<palmetto::VulkanContext>(get_device, info.device,
-                                                                  info.separate_depth_stencil_layouts,
-                                                                  info.conditional_rendering, info.ray_tracing,
-                                                                  info.xdxr_acceleration_structures &&
-                                                                      info.buffer_device_address);
+        const bool strict_viewport_arrays = palmetto::viewport_replay_readiness::strict_enabled();
+        const bool dynamic_viewport_scissor_with_count = info.dynamic_viewport_scissor_with_count;
+        state_.context = std::make_unique<palmetto::VulkanContext>(
+            get_device, info.device, info.separate_depth_stencil_layouts, info.conditional_rendering, info.ray_tracing,
+            info.xdxr_acceleration_structures && info.buffer_device_address,
+            strict_viewport_arrays && dynamic_viewport_scissor_with_count, info.features.multiViewport,
+            info.max_viewport_count);
+        state_.info.dynamic_viewport_scissor_with_count = state_.context->viewport_scissor_count_enabled();
+        if (strict_viewport_arrays)
+            std::fprintf(stderr,
+                         "[rt] d3d12: strict viewport arrays capability: multiViewport %d, maxViewports %u, EDS with-count state %d, callable commands %d\n",
+                         int(state_.info.features.multiViewport), state_.info.max_viewport_count,
+                         int(dynamic_viewport_scissor_with_count),
+                         int(state_.info.dynamic_viewport_scissor_with_count));
         if (info.physical && state_.format_properties) {
             state_.context->set_color_attachment_format(
                 [physical = info.physical, get_props = state_.format_properties](VkFormat format) {
@@ -9293,11 +9343,34 @@ public:
         // be mirrored, and refuses draws if it cannot.
         if (state_.context->loaded())
             state_.context->set_console_heap_sync([this] { state_.sync_console_heaps(); });
+        const auto& window_test_hooks = state_.info.title_va_window_test_hooks;
+        const bool use_window_test_hooks = state_.title_va_windows_mode == palmetto::TitleVaWindowsSwitch::on &&
+                                           window_test_hooks.complete();
+        if (state_.title_va_windows_mode == palmetto::TitleVaWindowsSwitch::on && !window_test_hooks.empty() &&
+            !window_test_hooks.complete())
+            std::fprintf(stderr, "[rt] d3d12: incomplete title-VA window test hooks ignored\n");
+        if (use_window_test_hooks)
+            std::fprintf(stderr, "[rt] d3d12: synthetic title-VA GPU-test hooks active; production BDA allocator bypassed\n");
+        const auto window_test_resolve = use_window_test_hooks ? window_test_hooks.resolve
+                                                                : rt::d3d12::TitleVaWindowTestHooks::Resolver{};
+        const auto window_test_pull = use_window_test_hooks ? window_test_hooks.pull
+                                                             : rt::d3d12::TitleVaWindowTestHooks::Pull{};
         // The title's page content (docs/page_content.md): the replay pulls the bytes behind a title VA, the data a
         // descriptor table's V#s name, and a copy's source range, into the arena stand-ins before a submission reads
-        // them.
+        // them. A complete test hook substitutes only pulls that resolve to its synthetic window; every other range
+        // keeps the production pull path.
         state_.context->set_console_page_pull(
-            [this](std::uint64_t va, std::uint64_t bytes) { console_pull_pages(va, bytes); },
+            [this, use_window_test_hooks, window_test_resolve, window_test_pull](std::uint64_t va, std::uint64_t bytes) {
+                if (use_window_test_hooks) {
+                    VkBuffer test_buffer = VK_NULL_HANDLE;
+                    VkDeviceSize test_offset = 0;
+                    if (window_test_resolve(va, bytes, test_buffer, test_offset)) {
+                        window_test_pull(va, bytes);
+                        return;
+                    }
+                }
+                console_pull_pages(va, bytes);
+            },
             [this](std::uint64_t table_va, std::uint32_t max_descriptors) {
                 console_pull_table(table_va, max_descriptors);
             },
@@ -9305,15 +9378,20 @@ public:
         // Title pages a command names directly (docs/vertex_buffer_va.md): off preserves the existing host-pointer
         // import path. The explicit window opt-in allocates a bounded coherent BDA copy, registers its raw title alias,
         // and resolves command views through that device backing. Malformed switch text refuses by the stable name.
+        // A complete test hook replaces only those three device callbacks; production call sites leave it empty.
         if (state_.title_va_windows_mode == palmetto::TitleVaWindowsSwitch::on) {
-            state_.context->set_title_va_window_allocator(
-                [this](std::uint64_t va, std::uint64_t bytes, VkBuffer& buffer, VkDeviceSize& offset, const char*& why) {
-                    return create_title_va_window(va, bytes, buffer, offset, why);
-                });
-            state_.context->set_title_va_window_buffer_resolver(
-                [this](std::uint64_t va, std::uint64_t bytes, VkBuffer& buffer, VkDeviceSize& offset) {
-                    return title_va_window_buffer_at(va, bytes, buffer, offset);
-                });
+            if (use_window_test_hooks) {
+                state_.context->set_title_va_window_allocator(window_test_hooks.allocate);
+                state_.context->set_title_va_window_buffer_resolver(window_test_hooks.resolve);
+            } else {
+                state_.context->set_title_va_window_allocator(
+                    [this](std::uint64_t va, std::uint64_t bytes, VkBuffer& buffer, VkDeviceSize& offset,
+                           const char*& why) { return create_title_va_window(va, bytes, buffer, offset, why); });
+                state_.context->set_title_va_window_buffer_resolver(
+                    [this](std::uint64_t va, std::uint64_t bytes, VkBuffer& buffer, VkDeviceSize& offset) {
+                        return title_va_window_buffer_at(va, bytes, buffer, offset);
+                    });
+            }
         } else if (state_.title_va_windows_mode == palmetto::TitleVaWindowsSwitch::invalid) {
             state_.context->set_title_page_importer(
                 [](std::uint64_t, std::uint64_t, VkBuffer& buffer, VkDeviceSize& offset, const char*& why) {
@@ -14527,6 +14605,14 @@ HRESULT create_vulkan_device_standalone(REFIID riid, void** out, QueueTestSettin
                              "extensions; %s\n",
                      v13.extended_dynamic_state ? "extended dynamic state through VK_EXT_extended_dynamic_state(2)"
                                                 : "no extended dynamic state, so no graphics pipelines");
+    const bool strict_viewport_arrays = palmetto::viewport_replay_readiness::strict_enabled();
+    info.max_viewport_count = chosen.limits.maxViewports;
+    info.dynamic_viewport_scissor_with_count = strict_viewport_arrays && v13.extended_dynamic_state;
+    if (strict_viewport_arrays)
+        std::fprintf(stderr,
+                     "[rt] d3d12: viewport capability query: multiViewport supported %d, maxViewports %u, EDS with-count %s\n",
+                     int(chosen_features.multiViewport), info.max_viewport_count,
+                     info.dynamic_viewport_scissor_with_count ? "enabled" : "unavailable");
 
     // VK_EXT_conditional_rendering for SetPredication, VK_KHR_swapchain for DXGI presentation, and optional
     // VK_KHR_acceleration_structure + VK_KHR_ray_query for hardware BVH builds (BLAS + TLAS).
@@ -14714,6 +14800,11 @@ HRESULT create_vulkan_device_standalone(REFIID riid, void** out, QueueTestSettin
     enable.samplerAnisotropy = info.sampler_anisotropy;
     enable.occlusionQueryPrecise = chosen_features.occlusionQueryPrecise;  // exact D3D12 occlusion counts
     enable.pipelineStatisticsQuery = chosen_features.pipelineStatisticsQuery;
+    // multiViewport is a feature-enable bit, not just a physical-device capability. Keep it disabled on the legacy
+    // path; the strict opt-in enables it only when the feature and maxViewports can support an actual array draw.
+    enable.multiViewport = (strict_viewport_arrays && chosen_features.multiViewport && info.max_viewport_count > 1)
+                               ? VK_TRUE
+                               : VK_FALSE;
     info.occlusion_query_precise = chosen_features.occlusionQueryPrecise == VK_TRUE;
     info.pipeline_statistics_query = chosen_features.pipelineStatisticsQuery == VK_TRUE;
     if (!chosen_bc) std::fprintf(stderr, "[rt] d3d12: the GPU has no BC texture support\n");

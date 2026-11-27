@@ -182,41 +182,19 @@ The command-list surface maps to the IR as follows:
 | `BeginRenderPass` / `EndRenderPass` | rendering scope |
 | `ExecuteBundle` | play the bundle's state calls and draws on this list, copy its state-free commands in order |
 
-**Measured C-06 step: bounded array capture and named count-1 refusal (not full replay).** The exact opt-in
-`PALMETTO_D3D12X_STRICT_VIEWPORTS=1` now makes `GraphicsCommandList` copy every `RSSetViewports` and
-`RSSetScissorRects` element into fixed per-list state, bounded by D3D12's public limit of 16. The count is checked
-before reading; the missing `RSSetScissorRects` count bound is now enforced as well. An ordinary unset/other switch
-value keeps the existing element-0 compatibility path and stub for multi-element calls. With strict mode on, 0/1 arrays
-still use the same `Draw` fields and count-1 replay. A draw, mesh draw, or `ExecuteIndirect` draw that could consume a
-multi-element array is refused before recording with `multiple_viewports_require_dynamic_viewport_count` or
-`multiple_scissors_require_dynamic_scissor_count`; over-limit arrays are named
-`viewport_count_exceeds_d3d12_limit` / `scissor_count_exceeds_d3d12_limit`. The capture does not silently discard a
-trailing element and pretend that the result is complete.
+**C-06 implementation:** the exact opt-in `PALMETTO_D3D12X_STRICT_VIEWPORTS=1` captures bounded viewport/scissor
+arrays and has a separate Vulkan dynamic-with-count pipeline when the logical device actually enabled EDS
+viewport/scissor-with-count, `multiViewport`, and enough `maxViewports`. The default/off and single-element paths remain
+scalar/count-1. The synthetic GPU draw passed with validation and the production test override has been removed; the
+capability-based opt-in path is enabled. Missing device support and over-limit counts keep their named refusals;
+`ExecuteIndirect` multi-count draws remain unsupported. The full design, test results, limits, falsifier and peer credit
+are recorded in the final C-06 implementation note at the end of this document.
 
-The count-1 refusal is deliberate: `GraphicsPipeline` still creates one Vulkan viewport and scissor, and the `Draw` IR
-carries one scalar value of each. The replay emits those two state values immediately before each supported draw, so the
-single-element path remains in the original command order. `port/src/viewport_replay_readiness.h` now owns the fixed
-array copy and strict preflight; `port/test/viewport_replay_readiness_test.cpp` covers exact switch parsing, switch-off
-compatibility, named count/limit refusals, copying all elements, independent updates and invalid-input atomicity in nine
-CPU-only cases. The existing `viewport_replay_readiness` target in `port/CMakeLists.txt` builds and registers the test; no CMake edit was needed.
-
-The boot trace in [page_content.md](page_content.md#4-where-the-frame-is-now-blocked-the-draws-own-target-reads-back-black)
+The prior boot trace in [page_content.md](page_content.md#4-where-the-frame-is-now-blocked-the-draws-own-target-reads-back-black)
 observed the retained first viewport as 3840x2160 at the origin (depth 0..1), and [frame_capture.md](frame_capture.md#3-the-measured-frame)
 recorded two draws whose retained viewport/scissor cover the target. Those measurements do not establish the original
 array counts, do not show that every title call uses one element, and were not used as evidence for any array contents.
 No game data was read for this code change.
-
-**Next falsifier for full support (P-32 continuation):** plumb `VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT` and
-`VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT` (or their enabled EXT forms), query/enable the device's `multiViewport` feature and
-`maxViewportCount`, and load `vkCmdSetViewportWithCount` / `vkCmdSetScissorWithCount`. Then verify with a synthetic GPU
-draw that uses two distinct viewport and scissor entries in draw order, plus an unsupported-device refusal. The strict
-path must refuse by name when dynamic count or the required Vulkan capability is absent. Until this test passes,
-strict-mode multi-element draws are safely refused, not replayed.
-
-Peer evidence was checked only for context: Five Star Recomp `34b4dfed`, VIctory `63bcca4` and XCL `623d02e` (pins
-indexed in [cleanroom_peers.md](cleanroom_peers.md)) provide no viewport-array semantics used by this slice. The storage,
-classifier, and refusal behavior above were independently implemented from this tree's code and the D3D12 API bound; no
-peer code or identifiers were copied.
 
 The IR is the place to add the trace, validation and "unsupported call" reporting. It also lets the layer replay a
 frame deterministically from a capture, which is valuable for comparing against the game.
@@ -2155,7 +2133,7 @@ The trace will enumerate them.
 | `ID3D12Device` … `ID3D12Device11` | one `Device` object with the public chain plus measured Xbox overrides | The shipped BVH builder names Device11; slots 1/15/18/19/27/38 matched desktop in prior art, slot 62 is called as `CreateComputePipelineState`, slot 76 is Xbox texture creation, and heap slots 9/10 return in RAX. Unknown Xbox IIDs/slots are logged and refused. |
 | `ID3D12CommandQueue` | one leased `VkQueue` per live queue: direct queues on the graphics family, compute queues on an async-compute family and copy queues on a transfer-only (DMA) family when the GPU has them (`src/queue_families.h`), else graphics-family leases | Distinct Vulkan queues allow cross-queue waits and signals to make progress. With more than one family in use, buffers, images, the arena and staging are created `VK_SHARING_MODE_CONCURRENT` over those families, so no ownership transfers are needed. Barriers on copy and compute queues are narrowed to the stages their family has; render-target and depth clears are refused there (as in D3D12), and the D24/RGB96 copy conversions and bindless flushes stay off a transfer-only queue. Tested by `vk_queue_test`. `PresentX`, `SuspendX`, `ResumeX` are Xbox queue methods, not in the public vtable; public GDKX samples present only through them (§4.5). Call shapes known, slots **Open**. |
 | `ID3D12CommandAllocator` | IR arena + `VkCommandPool` | Reset only when the previous submission's fence is complete. |
-| `ID3D12GraphicsCommandList` … `8` | `CommandList` with IR | Replay at `ExecuteCommandLists`; bundles inlined. Supports render passes, mesh dispatch, enhanced barriers; records GCL8 front/back stencil references and applies them as separate FRONT/BACK dynamic references at draw replay. Strict C-06 mode copies viewport/scissor arrays up to 16 per list, but refuses a draw consuming count>1 until Vulkan dynamic counts are wired (C-06 note above). `Draw` views are inlined and moved into the command stream (D3D-289), eliminating per-draw heap allocations. |
+| `ID3D12GraphicsCommandList` … `8` | `CommandList` with IR | Replay at `ExecuteCommandLists`; bundles inlined. Supports render passes, mesh dispatch, enhanced barriers; records GCL8 front/back stencil references and applies them as separate FRONT/BACK dynamic references at draw replay. Strict C-06 mode copies viewport/scissor arrays up to 16 per list and replays count>1 through the separate Vulkan dynamic-with-count PSO when `multiViewport`, EDS with-count, callable commands and `maxViewports` permit; otherwise it keeps a named refusal (C-06 note below). `Draw` views are inlined and moved into the command stream (D3D-289), eliminating per-draw heap allocations. |
 | `ID3D12RootSignature` | `RootSignature` + `VkPipelineLayout` | Deserialize the blob with the host `D3D12CreateVersionedRootSignatureDeserializer` when possible; clear the measured `0x03000000` flag byte on a copy first; fall back to a local parser. Build the user-SGPR map and static samplers. |
 | `ID3D12PipelineState` | `VkPipeline` + a `PipelineInfo` | Shader hash → SPIR-V + index entry; PSO state → Vulkan state; dynamic state where possible. The BVH builder's compute PSOs arrive at device slot 62 with a plain `D3D12_COMPUTE_PIPELINE_STATE_DESC`. |
 | `ID3D12DescriptorHeap` | `DescriptorHeap` (shadow + optional arena range) | CBV/SRV/UAV and sampler heaps can be shader-visible; RTV/DSV are host-only. Start handles use the measured RAX return at heap slots 9/10. Increments are layer-chosen (32/32) pending the console value. |
@@ -4251,26 +4229,52 @@ The public Xbox graphics index retrieved for this document lists interfaces up t
 This is why the layer targets the Windows SDK's newer public chain rather than assuming the Xbox public index is
 complete.
 
-## C-06 implementation note: bounded viewport/scissor arrays
+## C-06 implementation note: strict viewport/scissor array replay
 
-`PALMETTO_D3D12X_STRICT_VIEWPORTS=1` now copies the complete `RSSetViewports` and `RSSetScissorRects` inputs into
-fixed-size state owned by each `GraphicsCommandList`; the public D3D12 maximum of 16 is checked before any element is
-read, including the previously unbounded scissor count. The first element continues to populate the existing scalar
-fields. With the switch unset or not exactly `1`, valid calls keep the element-0 behavior and the existing multi-element
-stub. Strict 0/1 states use the same scalar `Draw` IR and count-1 Vulkan calls in the same order.
+**Design.** `PALMETTO_D3D12X_STRICT_VIEWPORTS=1` is still an exact opt-in. `RSSetViewports` and `RSSetScissorRects`
+copy all supplied elements into fixed per-command-list state, checking D3D12's 16-element bound before reading any
+pointer; the first element continues to fill the legacy scalar fields. Off/default and strict single-count draws retain
+the original scalar `Draw` payload use, count-1 pipeline, and `vkCmdSetViewport` / `vkCmdSetScissor` calls. A strict
+multi-count draw snapshots arrays into a shared immutable `Draw` extension and `PreparedDraw` converts every entry with
+the same D3D-to-Vulkan Y flip and scissor clipping as the scalar path.
 
-The current pipeline builder sets one viewport and scissor. Therefore a strict-mode direct draw, mesh draw, or indirect
-draw with possible work and either count greater than one is refused during recording, before it reaches replay, with
-`multiple_viewports_require_dynamic_viewport_count` or `multiple_scissors_require_dynamic_scissor_count`; counts over
-16 are refused with the corresponding `*_count_exceeds_d3d12_limit` name. This bounded step does not claim multi-element
-GPU replay. The nine CPU-only cases in `port/test/viewport_replay_readiness_test.cpp` cover switch parsing, legacy
-classification, all-element capture, independent state updates, clearing, invalid/null input, and both count limits.
-The existing `viewport_replay_readiness` CMake target builds and registers this test; no `CMakeLists.txt` change was
-made. No GPU run or game boot was used for this partial step.
+**Device and pipeline gate.** A multi-count draw is admitted only if the enabled logical device reports `multiViewport`,
+EDS viewport/scissor-with-count is enabled, both `vkCmdSetViewportWithCount` and `vkCmdSetScissorWithCount` resolve, and
+both counts are within `maxViewports` as well as D3D12's bound. Standalone device creation queries
+`VkPhysicalDeviceFeatures2` and `VkPhysicalDeviceProperties::limits.maxViewports`; it enables `multiViewport` only under
+the strict opt-in and when the selected device supports more than one. The Vulkan 1.3 / enabled
+`VK_EXT_extended_dynamic_state` feature path supplies the dynamic states. Caller-owned devices must report the features
+and limit they actually enabled through `VulkanDeviceInfo`; unsupported/missing capability returns the existing named
+`multiple_viewports_require_dynamic_viewport_count` / `multiple_scissors_require_dynamic_scissor_count` refusal, while
+a Vulkan maximum overrun returns `*_count_exceeds_vulkan_max_viewport_count`.
 
-**Falsifier / P-32 continuation:** add and enable Vulkan's dynamic viewport/scissor-with-count states and the device's
-`multiViewport` feature, query its maximum viewport count, load the matching core/EXT commands, and test two distinct
-viewport/scissor pairs in a synthetic GPU draw. A device without the required feature must produce a named refusal; a
-validation-clean two-pair draw in command order is required before removing the current strict-mode refusal. Peer
-snapshots Five Star Recomp `34b4dfed`, VIctory `63bcca4` and XCL `623d02e` were checked only as evidence/credit context;
-no peer implementation or viewport semantics were copied.
+The shim lazily builds a separate PSO variant for counted draws, keyed by the unbound attachment mask. Only this variant
+uses `VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT` / `VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT` and a zero static viewport/scissor
+count; base pipelines and count-1 variants keep their original create info. Replay emits the captured count/state arrays
+immediately before each draw. A zero scissor count maps to zero-area scissors for every captured viewport (no fragments);
+zero viewports produce no recorded raster draw. Multi-count `ExecuteIndirect` remains refused; other root-layout-specific indirect/mesh limits
+remain independently enforced.
+
+**Validation and tests.** The pure readiness test compiled and passed all 10 named cases, including capability/max-count
+gating, exact-switch, bounded-copy, input-atomicity and named-refusal coverage. The GPU case in the existing
+`d3d12_draw_test` target submitted two distinct viewport/scissor entries on an NVIDIA RTX 4090 with
+`PALMETTO_VK_VALIDATION=1`; enabled `multiViewport=1`, `maxViewports=16`, EDS with-count state and both commands were
+reported. Its explicit readback passed: pixel (8,8) = (0,255,0,255), and the fixture's validation-error count was zero.
+The temporary production refusal and test-only bypass were therefore removed; strict multi-count replay now relies only
+on the enabled-device capability checks. The fixture does not write `ViewportIndex`, so it validates with-count pipeline
+and commands and rasterization through element 0, not per-index routing. The whole `d3d12_draw_test` process later
+exited with access violation `0xC0000005` in/after the separate synthetic title-VA arm; that path is owned by the
+concurrent title-VA work and does not precede or invalidate the passing array assertion. `viewport_replay_readiness`
+remains registered under the existing CMake stanza in `port/CMakeLists.txt`, and `d3d12_draw_test` remains the existing
+GPU target; no CMake edit was made. No game data or boot was used.
+
+**Falsifier / limits.** Count > 1 still receives a named refusal if either dynamic command is absent, `multiViewport`
+is not enabled, or the count exceeds `maxViewports`/D3D12's 16-element bound. A validation error or failed pixel in the
+counted-draw case falsifies the replay path; neither occurred in the recorded run. Multi-count `ExecuteIndirect` remains
+refused, other root-layout-specific indirect/mesh limits remain independently enforced, and per-viewport-index routing
+has not yet been exercised by this shader fixture.
+
+**Peer credit.** Five Star Recomp `34b4dfed`, VIctory `63bcca4` and XCL `623d02e` (indexed in
+[cleanroom_peers.md](cleanroom_peers.md)) were consulted only for evidence context. No peer code, behavior, or identifiers
+were copied into this design; the capture, capability gate, PSO variant, and replay are based on this tree's D3D12/Vulkan
+interfaces.
