@@ -25,29 +25,28 @@ that landed our implementation, and whether the port was measured on a boot or i
 | Physical-page completion delivery | `peer_port_streaming.md` section 13 | `fdfacfdf2` | measured: zero physical-page destinations at this population, latent negative |
 | Measured display answers and UI page probe | `peer_port_first_ui.md` section 14 | `ef46566d1` | measured: UI layer runs, page flow does not; display answers console-correct |
 | Aliased page watch and backing-identity delivery | `title_memory_model.md` section 10 | `3323f7834` | measured CPU: aliases tracked across remap, fanout by Section+offset; no boot evidence |
-| Overlapped submission counters and bounds | `peer_port_streaming.md` section 15 | `5798bb070` | measured GPU: queues and holds on the card; no title A/B |
-| MS-capable mesh publication | `mesh_stage.md` section 8 | `5798bb070` | measured: build-pipeline omission closed; 0 MS resolver keys in the current corpus |
+| Overlapped submission counters and bounds | `peer_port_streaming.md` sections 15-16 | `5798bb070` | P-31 A/B: no queue-room waits at bound 64/96; both on arms lost the device, off arm reached 130 s; safety signal, not a causal result; P-30 not run |
+| MS-capable mesh publication | `mesh_stage.md` section 8 | `5798bb070` | historical publication-readiness result; superseded by row 42's native-key publisher and all-refused prune; real MS selection/resolver population remains 0 |
 | DPI-aware window fit plan | `peer_port_first_ui.md` section 16 | `f2d6736a2` | measured planner; opt-in, no title arm yet |
 | BVH route plan wired into RT slots | `bvh_route.md` | `a19ce9aab` | measured GPU: route arm on update/postbuild/copy, 0/1000 ray diffs; helper rehydration unwired |
 | Kind-7 upscaler consumer plan | `fsr_route.md` section 9 | `0148cbfeb` | readiness: shapes measured, no FFX dispatch/consumer observation yet |
-| Viewport/scissor array capture and named refusals | `d3d12_vulkan.md` | `dfe2337ef` | measured: bounded capture, count>1 refused until pipeline dynamic states land |
-| Title-VA windows on the device | `vertex_buffer_va.md` section 24 | `75e9991a2` | measured: raw-VA resolve/window unit evidence; GPU falsifier named |
-| Bindless degradation override and telemetry | `bindless_degradation.md` section 9 | `33f20f0c2` | measured: default unchanged, legacy mode pinned; real exhaustion unmeasured |
-| Native write-fault watch and shadow invalidation | `title_memory_model.md` section 12 | `805b42ed4` | measured: 545 xmem checks, synthetic fault stress; no title consumer yet |
+| Viewport/scissor array capture and named refusals | `d3d12_vulkan.md` | `dfe2337ef` | historical readiness: bounded capture and count>1 refusal before dynamic-state replay; superseded by row 39 |
+| Title-VA windows on the device | `vertex_buffer_va.md` section 24 | `75e9991a2` | historical unit/readiness baseline; superseded by row 41's synthetic GPU pull test and P-45 production alias admission; earlier qualitative `window_below_heap_base` report had no numeric trace; current pixel acceptance is blocked by the slot-14 Signal proxy refusal |
+| Bindless degradation override and telemetry | `bindless_degradation.md` sections 9 and 11 | `33f20f0c2` | default unchanged and legacy mode pinned; current sizing baseline 32 images / 279.1 MiB, with real exhaustion unmeasured; Task-228 P-44 did not run after the two-loss stop; Task-236 P-44 ran 62.3 s then logged a Vulkan loss/title AV; `degraded_flushes`/`spares_reused`/`keys_refused` snapshot absent (unavailable, not zero) |
+| Native write-fault watch and shadow invalidation | `title_memory_model.md` sections 12-13 | `805b42ed4` | 545 xmem checks and synthetic fault stress; no title consumer; P-43 was the second device-loss event in the series, counters unavailable (not zero) |
 | Synthetic audio decoder contract | `audio_decode.md` | `cd47ec306` | 18 Rust FFI contract tests; codec-header validation unproven |
 | 120 Hz and kind-7 arms | `window.md` / `fsr_route.md` | `5746b8123` | measured negatives: no enumeration trace; no post-map FSPX consumer |
-| Multi-count viewport/scissor replay | `d3d12_vulkan.md` | `6351f6846` | GPU PASS pixel (8,8)=0,255,0,255, 0 validation errors; capability-gated |
-| Strict direct-heap admission | `root_packing.md` section 10 | `6351f6846` | measured: no direct-index population; synthetic falsifier named |
-| Title-VA window test seam | `vertex_buffer_va.md` section 24 | `6351f6846` | synthetic raw-VA resolve/pull readback; production BDA ordering unmeasured |
-| Native-library MS publication | `mesh_stage.md` | `3eebb1bae` | synthetic end-to-end; real MS resolver keys still 0 |
-| Audio submit pointer roles | `audio_decode.md` | `9d00b09d7` | resolved RCX/RDX/R8 via read-only disassembly; no live submit |
-| Plain SGPR move in a gap | `translator_fixes.md` section 14 | `13f423532` | 12 gaps recovered, 0 full-program closure, prior bytes identical |
+| Multi-count viewport/scissor replay | `d3d12_vulkan.md` C-06 | `6351f6846` | P-32/P-41 direct counted draw GPU PASS: multiViewport=1, maxViewports=16, readback (8,8)=0,255,0,255, 0 validation errors; 10 readiness cases pass. Multi-count `ExecuteIndirect` plus array state is refused as `indirect_multi_count_viewport_state_not_captured` (no replay graphics snapshot; five measured title sites cap `MaxCommandCount` at 1). P-47 test source exists but is not CMake-registered/built |
+| Strict direct-heap admission | `root_packing.md` section 10 | `6351f6846` | fail-closed opt-in; 96 CPU assertions and `root_signature` / `root_signature_oracle` pass; final `d3d12_compute` CTest passes 1/1 after shim-safe queue/fence fix, strict and legacy cases 64/64; missing-base controls refuse `E_INVALIDARG`; no title direct-index commands (synthetic proof only) |
+| Title-VA window test seam | `vertex_buffer_va.md` section 24 | `6351f6846` | synthetic GPU readbacks `21 43 65 87` then `9a bc de f0`; corrected P-45 256 MiB run placed candidate 0x90000 above arena end, registered production alias, pulled 5 times / 5.6 MiB and submitted `ExecuteCommandLists`. The test then failed at Xbox Signal slot 14 before CPU pixel/readback acceptance; earlier `window_below_heap_base` was a separate qualitative case. P-48 Title-VA CTest deferred |
+| Native-library MS publication | `mesh_stage.md` sections 8-10 | `3eebb1bae` | synthetic native-key publication and all-refused prune pass; 0 selected/resolver MS keys against 7,498 library programs, no real module or boot |
+| Audio submit pointer roles | `audio_decode.md` sections 11-12 | `9d00b09d7` | static disassembly resolves RCX=context, RDX=0x20 descriptor, R8=command-id out; 136 synthetic checks pass; Task-236 P-34 ran 90.3 s ALIVE/no loss but had no submit hit (350 contexts, five 5,600-dword scans all zero; decoder DLL missing) |
+| Translator decode-gap rules | `translator_fixes.md` sections 14-15 | `13f423532` (smov) | narrow `s_mov_b32` and exact `s_waitcnt lgkmcnt(0)` recover 12 + 30 words; 0 full-program closures, 491 prior modules byte-identical |
 | Presenter attestation, fit rule and synthetic non-black control | `peer_port_first_ui.md` section 15 | `779ce8be0` | measured: synthetic bands reach the capture exactly; presenter is not the black cause |
 | Movie draw-path probes | `peer_port_movie.md` section 13 | `2e9915cbb` | measured: draw path never issued (all six sites zero); downstream of the session-3 poll |
 | Pull-request CI guarantees | board D-03 | `2bb13be8b` | measured: docs-only and runtime-path gaps closed and registered |
 
-Every port is opt-in and off by default, keeps the switch-off path byte-identical, has unit/GPU tests and credits the peer
-evidence with URLs and commits in its page and in `NOTICE.md`. No peer source, comment, identifier or data table is copied.
+Each slice's page records its own switch/capability gate, tests, and measured limits; not every row is a new opt-in toggle or evidence of live title behavior. Peer evidence is credited with URLs and commits in its page and `NOTICE.md`. No peer source, comment, identifier or data table is copied.
 
 ## Rules of the programme
 
@@ -128,13 +127,18 @@ review. Nothing here is a game file or an extracted asset.
 | OpenScarlett (Community Edition) | <https://github.com/OpenCommunityEdition/OpenScarlett>, AGPL-3.0-or-later | README only (no clone) | — |
 | TuxBox | <https://github.com/brcly/TuxBox>, Apache-2.0 | README only (no clone) | — |
 
-**Latest snapshots.** The five local clones are Five Star Recomp `34b4dfed` (2026-11-27), VIctory `63bcca4`
-(2026-11-26), PercyScarlett `e44c465` (2026-11-25), victory-fork `9a9091d` (2026-11-27), and XCL `623d02e`
-(2026-11-27). The Five Star range contains four commits; `docs/loader.md` and `docs/running.md` changed, while the
-README and wiki Status page did not. The docs add NVIDIA shader-table safety and a keep-awake failure warning, not a
-new boot-stage result. The latest victory-fork README now reports its ray-tracing builder running
-and shadows/light appearing after a scene streams in, but at 0.2–3 fps; this supersedes its old “nothing is lit by it
-yet” snapshot. These are peer-reported claims, not measurements of Palmetto.
+**Read-only local snapshots (2026-11-27).** All five peer worktrees are clean and their local `main` refs match the recorded
+`origin/main` tracking refs; no fetch, checkout or other Git write was made. These are verified local pins, not a claim that
+remote tips were refreshed: Five Star Recomp `34b4dfed` (2026-11-27), VIctory `63bcca4` (2026-11-26), PercyScarlett
+`e44c465` (2026-11-25), victory-fork `9a9091d` (2026-11-27), and XCL `623d02e` (2026-11-27). The Five Star
+`ce2b333b..34b4dfed` range contains four commits; only `docs/loader.md` and `docs/running.md` changed, and this local clone
+has no commit after `34b4dfed`. Those docs add NVIDIA's 512-MiB shader-table guard, the Developer Mode refusal behavior and
+an RTX 5090 keep-awake warning; the README still contradicts itself, while its 27-Nov wiki says the world boots to a lit
+scene at 200–400 ms per frame. XCL's current README adds `XCL_PREPARE=0` to start before shader preparation and compile on
+use. VIctory's current README still reports the prologue at about 1 fps, without RT shadows/indirect light, and warns of
+prior GPU hangs. The latest victory-fork README reports RT shadows/light after streaming with the builder, but only 0.2–3
+fps while it runs; PercyScarlett's current README remains at 2–3 fps in the opening scene. These are peer-reported claims,
+not measurements of Palmetto.
 
 The tracker itself is <https://vuyp.github.io/gta6-pc-race/>; its readings are quoted below where they add a stage
 number. The full evidence table, with every row's URL, commit, functional decoding and caveat, is kept outside the
@@ -159,9 +163,10 @@ BVH/ray tracing, and streamed page mapping/copies.
 | XCL | "starts in ~4 s ... shows its menus and goes on past the first one to its settings" | start to menus in seconds, stable | the loader protocol is served at the import-thunk level and the PC's own `xgameruntime` supplies task queues, async, networking and dialogs; the console D3D12.X object model is replayed on desktop D3D12 | first frame, draws and presents are reached (17,674-27,935 draws per 150 s, 0 refused submissions); the picture is black by design at this stage — [page_address_space.md](page_address_space.md), [colour_path.md](colour_path.md) | the same runtime files as the row above; the picture half is the content/state step, not a loader gap | M, no |
 | PercyScarlett (tracker stage) | tracker: "reaches the opening scene ... lit and textured, at about 2 to 3 frames a second" | in-world state reached | its runtime is the VIctory/victory-fork loader and services (the mechanism rows for those projects below), plus a Series S display fix | behind: no stage-3 transition measured | — | —, no |
 
-Five Star's root README still contradicts itself ("GTA VI does not run yet" and "does not get past its first screens
-yet" against its table and narrative); its current wiki status, updated 27-Nov, claims the game boots to the world and
-shows a lit scene. Treat both as that tree's self-reported status, not a specification. The tracker snapshot downloaded
+Five Star's root README still contradicts itself: its status says "GTA VI does not run yet" and its run section says the
+game does not get past its first screens, while the table/narrative says story mode and the world run. The 27-Nov wiki Status
+also opens "GTA VI does not run yet" before saying "Boots to the world" and describing a lit pre-post scene. Treat both as
+that tree's self-reported status, not a specification. The tracker snapshot downloaded
 on 25-Nov reads Five Star at stage 4 ("first frames ... the picture still black"); the tracker counts similar forks as
 separate projects, so that dated stage is the tracker's reading, not the current peer status or our measurement.
 
