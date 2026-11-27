@@ -11,6 +11,11 @@
 // refusal. The measured boot sends no command and programmes no context, so this is latent; with the switch off (the
 // default) none of it runs and the behaviour above is unchanged.
 //
+// EFFECT CONTRACT (docs/audio_shims.md). PALMETTO_AUDIO_EFFECTS=1 enables a lifecycle witness and named refusals for
+// XDsp activation/submission. The measured boot never activates or submits the DSP; a non-null description is kept
+// opaque and no page or command is read. The switch does not make reverb audible, and switch-off keeps the existing
+// trace and output bytes unchanged.
+//
 // WHY THESE IMPORTS MATTER (docs/audio_shims.md section 1). The executable imports ten functions from these two DLLs
 // (five each). Before this shim they bound to the unimplemented thunk, which returns 0 and writes no out parameter, so
 // the title's XApu/XDsp objects never existed. Its 130 s baseline boot reaches exactly three of the ten (XApuConnect,
@@ -92,6 +97,7 @@
 #include "shims.h"
 #include "audio_decode.h"
 #include "startup_trace.h"
+#include "xapu_effects.h"
 
 namespace {
 
@@ -156,6 +162,8 @@ struct XDspConnection {
     uint32_t aggregate_impulse_response_seconds = 0;
     uint32_t maximum_stream_count = 0;
     uint32_t maximum_channel_count = 0;
+    // Tracks only the call lifecycle when PALMETTO_AUDIO_EFFECTS is enabled. The descriptor and DSP pages remain opaque.
+    rt::xapu_effects::EffectContractTracker effect_contract;
 };
 
 LiveHandles<XApuClient> g_xapu_handles;
@@ -211,6 +219,38 @@ std::string quote_hex(uint32_t value) {
 // lines are informational; nothing depends on them.
 void note_once(std::atomic<bool>& flag, const char* text) {
     if (!flag.exchange(true, std::memory_order_relaxed)) std::fprintf(stderr, "[rt] audio: %s\n", text);
+}
+
+bool audio_effects_switch_on() {
+    char value[8] = {};
+    const DWORD length = GetEnvironmentVariableA(rt::xapu_effects::kSwitchName, value, sizeof value);
+    return length > 0 && length < sizeof value && value[0] != '\0' && value[0] != '0';
+}
+
+void trace_effect_event(const char* api, const char* event, const char* code, const char* state) {
+    if (!rt::startup_trace::enabled()) return;
+    std::string fields = "\"switch\":" + rt::startup_trace::quote(rt::xapu_effects::kSwitchName) +
+                         ",\"api\":" + rt::startup_trace::quote(api) +
+                         ",\"event\":" + rt::startup_trace::quote(event);
+    if (code) fields += ",\"code\":" + rt::startup_trace::quote(code);
+    if (state) fields += ",\"state\":" + rt::startup_trace::quote(state);
+    rt::startup_trace::event("audio_effect", fields);
+}
+
+void note_effect_refusal(const char* api, const char* code) {
+    static std::atomic<bool> noted_descriptor{false};
+    static std::atomic<bool> noted_kind{false};
+    std::atomic<bool>* noted = std::strcmp(code, rt::xapu_effects::kEffectDescriptorUnmeasured) == 0
+                                   ? &noted_descriptor
+                                   : &noted_kind;
+    if (!noted->exchange(true, std::memory_order_relaxed)) {
+        std::fprintf(stderr, "[rt] audio effects: %s refused: %s\n", api, code);
+    }
+    trace_effect_event(api, "refused", code, nullptr);
+}
+
+void note_effect_lifecycle(const char* api, rt::xapu_effects::LifecycleState state) {
+    trace_effect_event(api, "lifecycle", nullptr, rt::xapu_effects::lifecycle_state_name(state));
 }
 
 std::string hex32(uint32_t value) {
@@ -379,13 +419,18 @@ HRESULT __stdcall XDspConnectWithMaximumStreamLimit(void* base_buffer, uint32_t 
 //
 // Measured: 4 arguments, and the title's wrapper swaps the third and fourth before the call, so this function cannot
 // rely on which output is which; both are written when non-null. The outputs are this connection's zeroed status and
-// stream blocks, which the title reads (status dwords at +4 and +0xC) and hands to XDspSubmitCommand.
+// stream blocks, which the title reads (status dwords at +4 and +0xC) and hands to XDspSubmitCommand. With
+// PALMETTO_AUDIO_EFFECTS=1 the opaque description is not inspected; activation is reported as
+// effect_descriptor_unmeasured, while the same zeroed output blocks and S_OK answer are preserved.
 
 HRESULT __stdcall XDspActivate(void* handle, const void* description, void** output_a, void** output_b) {
     trace_audio("chad.dll", "XDspActivate", "", _ReturnAddress());
-    (void)description;
     auto* connection = static_cast<XDspConnection*>(handle);
     if (!connection || !g_chad_handles.contains(connection)) return E_INVALIDARG;
+    if (audio_effects_switch_on()) {
+        const char* effect_refusal = connection->effect_contract.observe_activation(description);
+        note_effect_refusal("XDspActivate", effect_refusal);
+    }
     if (output_a) *output_a = connection->status;
     if (output_b) *output_b = connection->stream;
     static std::atomic<bool> noted{false};
@@ -408,6 +453,10 @@ HRESULT __stdcall XDspDeactivate(void* handle, uint64_t arg1, uint64_t arg2, uin
     (void)arg3;
     auto* connection = static_cast<XDspConnection*>(handle);
     if (!connection || !g_chad_handles.contains(connection)) return E_INVALIDARG;
+    if (audio_effects_switch_on()) {
+        connection->effect_contract.observe_deactivation();
+        note_effect_lifecycle("XDspDeactivate", connection->effect_contract.state());
+    }
     return S_OK;
 }
 
@@ -420,6 +469,10 @@ HRESULT __stdcall XDspDisconnect(void* handle) {
     trace_audio("chad.dll", "XDspDisconnect", "", _ReturnAddress());
     auto* connection = static_cast<XDspConnection*>(handle);
     if (!connection || !g_chad_handles.remove(connection)) return E_INVALIDARG;
+    if (audio_effects_switch_on()) {
+        connection->effect_contract.observe_disconnect();
+        note_effect_lifecycle("XDspDisconnect", connection->effect_contract.state());
+    }
     delete connection;
     return S_OK;
 }
@@ -429,13 +482,17 @@ HRESULT __stdcall XDspDisconnect(void* handle) {
 // Measured at game+0x4E5B20D through a wrapper that swaps its first two arguments; the third is the id the title
 // zeroes before the call. The title then waits until the status dword at +0xC is 0 and the one at +4 equals the id.
 // This connection's status is zeroed and the id is left as the title wrote it, which is that state, so the wait
-// completes immediately. Nothing is read or written here.
+// completes immediately. Nothing is read or written here. PALMETTO_AUDIO_EFFECTS=1 adds the named
+// effect_kind_unimplemented refusal but still does not inspect either pointer or change the caller's id.
 
 HRESULT __stdcall XDspSubmitCommand(void* arg_a, void* arg_b, uint32_t* command_id) {
     trace_audio("chad.dll", "XDspSubmitCommand", "", _ReturnAddress());
     (void)arg_a;
     (void)arg_b;
     (void)command_id;
+    if (audio_effects_switch_on()) {
+        note_effect_refusal("XDspSubmitCommand", rt::xapu_effects::EffectContractTracker::refuse_submission());
+    }
     static std::atomic<bool> noted{false};
     note_once(noted, "chad command accepted and dropped: no audio DSP hardware on PC");
     if (rt::audio_decode::switch_on()) {

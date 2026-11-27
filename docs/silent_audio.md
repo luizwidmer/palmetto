@@ -78,13 +78,16 @@ On the first enumerator the title creates (at +22.34 s), the host's own path for
 | `IsAudioObjectFormatSupported` (mono, 48 kHz, float) | `S_OK` | `S_OK` | `S_OK` |
 | `GetMaxFrameCount` (same format) | `S_OK`, 480 frames | `S_OK`, 480 frames | `S_OK`, 480 frames |
 | `Activate(IID_IAudioClient)` | `S_OK` | `S_OK` | `S_OK` |
-| `GetMixFormat` | extensible, 8 ch, 48 kHz, 32-bit | same | same |
+| `GetMixFormat` | tag 65534 (`WAVEFORMATEXTENSIBLE`), 8 ch, 48 kHz, 32-bit; subtype GUID not recorded | same | same |
 | `GetDevicePeriod` | default 10 ms, minimum 3 ms | same | same |
 
-So this host has an active default render endpoint for every role, an `ISpatialAudioClient` on each of them, the full
-static-object layout (`0xFFFFE`), no dynamic objects (ordinary endpoint, no spatial-sound format enabled) and the
-48 kHz float 8-channel shared-mode mix format the console title expects. There is no `0x80070490`, no null sink and no
-error path at the host boundary.
+So this host has an active default render endpoint for every role, an `ISpatialAudioClient` on each of them and the full
+static-object layout (`0xFFFFE`), with no dynamic objects (ordinary endpoint, no spatial-sound format enabled). The
+retained `GetMixFormat` trace records `WAVEFORMATEXTENSIBLE` tag 65534, 8 channels, 48 kHz and 32 bits, but not the
+subtype GUID; it does not establish whether the shared mix is float or integer PCM. Separately, the title's own
+spatial pre-mix request is `WAVE_FORMAT_PCM` (tag 3), mono, 48 kHz, 32-bit and succeeds (section 5); the read-only probe's
+mono-float spatial-format check is a distinct query, not evidence about the shared-mix subtype. There is no
+`0x80070490`, no null sink and no error path at the host boundary.
 
 ## 5. The title's own path
 
@@ -98,10 +101,10 @@ The title's own calls, through the same wrappers, around +22.36 s to +22.38 s:
 | `IMMDeviceEnumerator::GetDefaultAudioEndpoint(eRender, eConsole)` | `S_OK`, 1.15 ms |
 | `IMMDevice::GetId` | `S_OK`, a 55-character endpoint id |
 | `IMMDevice::Activate(IID_IAudioClient)` | `S_OK` |
-| `IAudioClient::GetMixFormat` | `S_OK`, 8 ch, 48 kHz, 32-bit |
+| `IAudioClient::GetMixFormat` | `S_OK`, WAVEFORMATEXTENSIBLE tag 65534, 8 ch, 48 kHz, 32-bit; subtype GUID not recorded |
 | `IMMDevice::Activate(IID_ISpatialAudioClient)` | `S_OK` |
 | `ISpatialAudioClient::GetSupportedAudioObjectFormatEnumerator` | `S_OK` |
-| `ISpatialAudioClient::IsAudioObjectFormatSupported` (PCM, mono, 48 kHz, 32-bit) | `S_OK` |
+| `ISpatialAudioClient::IsAudioObjectFormatSupported` (WAVE_FORMAT_PCM tag 3, mono, 48 kHz, 32-bit) | `S_OK` |
 | `ISpatialAudioClient::ActivateSpatialAudioStream(IID_ISpatialAudioObjectRenderStream)` | `S_OK`, 5.19 ms |
 | `ISpatialAudioClient::GetStaticObjectPosition` (front left, front right) | `S_OK`, `S_OK` |
 | `ISpatialAudioObjectRenderStream::Start` | `S_OK` |
@@ -147,9 +150,10 @@ the same answers measured in section 5, which is the contract the title has alre
 
 ## 8. Limits
 
-- Measured on one Windows 11 host with real, active render endpoints and a working 48 kHz float 8-channel shared-mode
-  mix format. A host whose default endpoint is absent, disabled or proprietary may answer differently; this page does
-  not generalise to such a host.
+- Measured on one Windows 11 host with real, active render endpoints. The captured shared-mix answer was
+  WAVEFORMATEXTENSIBLE tag 65534, 8 channels, 48 kHz, 32-bit; the retained trace omitted its subtype GUID, so this page
+  makes no float-versus-PCM claim about that mix. A host whose default endpoint is absent, disabled or proprietary may
+  answer differently; this page does not generalise to such a host.
 - Nothing audible was produced, claimed or checked: the title's stream was started and driven, but the host's own
   endpoint was not monitored and the stream's samples were not inspected.
 - The probe was deliberately read-only. It did not `Initialize` or `Start` an audio client; the title's own

@@ -1,6 +1,7 @@
 # The console audio shims: `xapu.dll` and `chad.dll`
 
-**Status: measured, implemented, tested, and measured again.** Two console DLLs that the retail title imports are now
+**Status: base shim measured, implemented, tested, and measured again; effect-contract addendum is source/test readiness
+only and has not been built or run.** Two console DLLs that the retail title imports are now
 served by [`port/shims/xapu_chad.cpp`](../port/shims/xapu_chad.cpp): the Audio Processing Unit command queue
 (`xapu.dll`, five exports) and the audio DSP command queue (`chad.dll`, five exports). The shims are the honest PC
 answer - a handle, a zeroed shared buffer, a zeroed status block and a success for every command, which is then dropped
@@ -244,9 +245,10 @@ asserts the caller and the event count, so this cannot regress silently.
 
 ## 7. Tests
 
-`xapu_chad_test` (`port/test/xapu_chad_test.cpp`, target added in `port/CMakeLists.txt`, registered with ctest as
-`xapu_chad`, `add_test`): **65 checks, 0 failures**. It resolves all ten exports through `rt::shims::find`, so
-it exercises the installed tables, and covers:
+`xapu_chad_test` (`port/test/xapu_chad_test.cpp`, already defined in `port/CMakeLists.txt` and registered with ctest as
+`xapu_chad`): the previously recorded baseline was **65 checks, 0 failures**. The new effect/format checks are now called
+from `main()`, but have not been built or run in this integration-gated slice; no post-change pass count is claimed. The
+target resolves all ten exports through `rt::shims::find`, so it exercises the installed tables, and covers:
 
 - the measured `XApuConnect` shape: the 24-byte input block is left untouched, the output pair is
   `{non-null, 0x104000}`, the buffer is zeroed and writable end to end; null-argument refusals;
@@ -259,7 +261,11 @@ it exercises the installed tables, and covers:
   disconnect, stale/null refusals, 32 cycles;
 - the trace: opening the startup trace and driving the calls produces exactly 12 `audio` events (7 xapu + 5 chad),
   each with its `dll` and `caller`, with the enqueue events carrying the measured command types and the incrementing
-  dropped-command counter (1, then 2).
+  dropped-command counter (1, then 2);
+- the new pure endpoint helper cases: exact spatial PCM32 acceptance, the observed shared-mix shape with its subtype
+  deliberately refused, and named refusals for unmeasured tags, rates, channels, depths, encodings and endpoint kinds;
+- the effect-contract model and opt-in path: lifecycle transitions/refusals, invalid opaque descriptor/page pointers,
+  preserved status/stream/id bytes, named trace events when enabled, and no `audio_effect` event when disabled.
 
 ## 8. Attribution
 
@@ -269,3 +275,82 @@ cross-checked against the public GPL-3.0 project [ubiquitarianism/leonida](https
 at commits `e6515ea41`, `b95401617`, `28f013c2f`, `eaeee26b3` by Jadiac and `273b3bdf9` by Moriz82). No code from that
 project was copied; the full notice is in [NOTICE.md](../NOTICE.md). The upstream project remains the copyright of its
 contributors under GPL-3.0.
+
+## 9. Endpoint and effect/reverb contract: measured gap, no reverb implementation
+
+This is a readiness addendum to the earlier A/B result, not a change to its measured boot. It does not add an audio
+renderer or make an effect audible.
+
+### 9.1 What our boot and static sites establish
+
+The 130.3 s boot in section 5 of [audio_decode.md](audio_decode.md) creates `AcpHal`, connects it, submits one `cmd=2`
+configuration, then connects XApu and XDsp and repeatedly polls `XApuGetResultCount`. That boot records 19,094 polls and
+zero `XApuEnqueueCommand`, `XApuDequeueResult`, `XDspActivate`, `XDspSubmitCommand`, `XDspDeactivate`, `XApuDisconnect`
+or `XDspDisconnect` calls. The call-site survey in section 2 above
+establishes the static activation/submit call shapes, but not the `XDspActivate` descriptor layout, an effect kind, any
+send-page layout, or a send's sample rate/channel/encoding. There is no title effect descriptor or DSP send to measure
+in this boot, so it cannot establish reverb behavior.
+
+The separate host-output measurement in [silent_audio.md](silent_audio.md) captured `IAudioClient::GetMixFormat` as
+`WAVEFORMATEXTENSIBLE` tag 65534, 8 channels, 48 kHz and 32 bits; its retained record does not include the subtype
+GUID. The host mix therefore remains subtype-unmeasured: no float32 or integer-PCM claim is made. The title's spatial
+pre-mix query is separately measured as `WAVE_FORMAT_PCM` tag 3, mono, 48 kHz, 32-bit, and succeeds. These observations
+are not interchangeable.
+
+### 9.2 Peer cross-checks are not our contract
+
+- VIctory's README at [63bcca4](https://github.com/Marvisak/VIctory/blob/63bcca4/README.md) reports menu/video/loading
+  sound and XMA/Opus decoding, while listing “Reverb is silent” and Opus results as unverified against the title.
+- PercyScarlett's README at [e44c465](https://github.com/rpatty-dev/PercyScarlett/blob/e44c465/README.md) names audio
+  hardware among its platform services; the referenced README and prologue guide do not supply a title-specific XDsp
+  descriptor/send-format contract.
+- Five Star Recomp's [`docs/audio-runtime.md` at 34b4dfed](https://github.com/ThatRecompDev/five-star-recomp/blob/34b4dfed/docs/audio-runtime.md)
+  documents an XDsp convolution path and a separate kind-2 path. Its own notes call the impulse-response float layout an
+  inference, leave the response format unresolved, and say kind 2 is unknown.
+
+Those peer reports are useful leads, not substitutes for this executable's evidence. Our measured boot and static
+call-site boundary win for Palmetto: until this title supplies a descriptor and a send, its effect kind and format stay
+unmeasured. No peer code was copied; peer claims are paraphrased or quoted briefly with their source cited.
+
+### 9.3 Opt-in contract witness and endpoint helper
+
+Set `PALMETTO_AUDIO_EFFECTS=1` to enable the diagnostic effect-contract witness; it is off by default. Unset/empty,
+a value beginning with `0`, or a value too long for the 8-byte environment buffer keeps the old no-op path; any other
+short non-empty value also enables it, so use `0` to disable. The switch does not query or reconfigure WASAPI, render
+samples, or implement reverb. When enabled, the per-connection tracker records only the observed call lifecycle.
+`XDspActivate` emits the named refusal `effect_descriptor_unmeasured` and never dereferences the opaque descriptor;
+`XDspSubmitCommand` emits `effect_kind_unimplemented` and never reads its page pointers or changes the caller's id/status
+bytes. Both retain the
+existing `S_OK` no-op ABI answer; “refusal” means that effect processing is not implemented, not that the exported call
+fails. Activation/deactivation/disconnect lifecycle events are diagnostic observations, not proof that a DSP effect ran.
+
+The pure helper in `port/shims/xapu_effects.h` is currently a testable contract boundary, not wired into the WASAPI/COM
+path. It recognizes the host mix's tag/channels/rate/bits tuple but returns `endpoint_format_unmeasured`, because the
+subtype GUID was not recorded; it refuses both float and PCM guesses. It accepts only the separately measured spatial
+pre-mix PCM tag-3 mono 48 kHz/32-bit request. Other rates, channel counts, bit depths, tags, encodings and endpoint kinds
+are named refusals, not resampling or channel mapping.
+
+### 9.4 Tests, readiness, limits and falsifier
+
+The new pure format/tracker tests and runtime switch checks are wired into the existing `xapu_chad_test` executable; the
+target and its CTest registration already exist in `port/CMakeLists.txt`, so no CMake stanza is needed. They cover the
+subtype refusal, exact spatial PCM match, lifecycle and named refusals, opaque invalid descriptor/page pointers, unchanged
+status/stream/id bytes, and switch-on/off trace behavior. They have **not** been built or run against these changes in this slice: the integration gate forbids a build/relink, so
+there is no post-change test output to report. After integration clears, run:
+
+```text
+cmake --build port/build --target xapu_chad_test
+ctest --test-dir port/build --output-on-failure -R "^xapu_chad$"
+```
+
+No new boot/arm was made for the same reason; this is source/test readiness only, backed by the earlier measured boot
+above. No game data or audio bytes were read or added. The falsifier for this conservative boundary is a measured title
+`XDspActivate` descriptor together with a measured `XDspSubmitCommand` send (including their size, effect kind, input/output
+page formats, and lifecycle). That evidence would justify a new contract and synthetic tests; a peer's implementation or
+an unobserved static call site would not.
+
+**NOTICE draft row (not applied in this slice):** VIctory (GPL-3.0-or-later; README, commit 63bcca4; Marvisak and
+contributors), PercyScarlett (GPL-2.0-only; README and `docs/PROLOGUE.md`, commit e44c465; rpatty-dev), and Five Star
+Recomp (GPL-3.0-or-later; `docs/audio-runtime.md`, commit 34b4dfed; ThatRecompDev) — audio-effect parity evidence
+consulted only; no peer source copied. `NOTICE.md` is outside this slice's write scope; integrate this draft with any
+parallel notice update.
