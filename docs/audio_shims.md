@@ -350,7 +350,7 @@ page formats, and lifecycle). That evidence would justify a new contract and syn
 an unobserved static call site would not.
 
 **NOTICE draft row (not applied in this slice):** VIctory (GPL-3.0-or-later; README, commit 63bcca4; Marvisak and
-contributors), PercyScarlett (GPL-2.0-only; README and `docs/PROLOGUE.md`, commit e44c465; rpatty-dev), and Five Star
-Recomp (GPL-3.0-or-later; `docs/audio-runtime.md`, commit 34b4dfed; ThatRecompDev) — audio-effect parity evidence
+contributors), PercyScarlett (GPL-2.0-only; README and its prologue documentation, commit e44c465; rpatty-dev), and Five Star
+Recomp (GPL-3.0-or-later; its audio-runtime documentation, commit 34b4dfed; ThatRecompDev) — audio-effect parity evidence
 consulted only; no peer source copied. `NOTICE.md` is outside this slice's write scope; integrate this draft with any
 parallel notice update.

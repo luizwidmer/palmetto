@@ -1,4 +1,4 @@
-﻿# Notice
+# Notice
 
 Palmetto is an independent, clean-room interoperability project. It ships **no game content**: no executable, no
 archives, no extracted files, no shaders, no textures, no audio, no keys, and no instructions for obtaining any of them.
@@ -154,3 +154,20 @@ against XCL (`623d02e`) and Five Star Recomp (`ce2b333b`). The kind-7 upscaler r
 ([docs/fsr_route.md](docs/fsr_route.md), section 9) was cross-checked against XCL (`623d02e`) and PercyScarlett
 (`e44c465`). All are read as evidence of behaviour only; the implementations are our own, no source, comment, identifier or
 data table is copied, and the upstream projects remain the copyright of their contributors under their own licences.
+
+### Implemented peer ports (second batch)
+
+The measured console slot-70 per-frame matrix publication and the existing fence-slot-12 completed-value cell
+([docs/device_slot70.md](docs/device_slot70.md), [docs/fence_slot12.md](docs/fence_slot12.md)) were cross-checked against
+public descriptions in Five Star Recomp (GPL-3.0-or-later, `34b4dfed`, ThatRecompDev), XCL (GPL-2.0-only, `623d02e`,
+Prime1997) and VIctory (GPL-3.0-or-later, `63bcca4`, Marvis). Five Star's
+`src/FiveStar.Loader/Shims/D3D12X/XboxAddressDescriptors.cs`,
+`src/FiveStar.Loader/Shims/D3D12X/Resources/AddressShaderViews.cs` and
+`src/FiveStar.Loader/Shims/D3D12X/FenceValueMirror.cs` describe its generic address-view and completed-value mirror paths;
+its slot-70 record is not the
+per-frame matrix shape measured here. XCL's `crates/xcl/src/hle/d3d12x/fence_x.rs` and
+`crates/xcl/tests/d3d12_resource_and_sync.rs` explicitly describe and test a fence-slot-12 completed-value cell, with an
+event/thread mirror unlike this tree's watcher-backed proxy cell. VIctory's `crates/victory-gpu/src/fence.rs` was reviewed
+as a contrasting atomic fence-value model; it does not establish this title's slot numbering. The target call shape,
+record validation and encoding remain derived from this repository's own measurements. No source, comments, identifiers or
+tables from these projects were copied; each upstream remains the copyright of its contributors under its own licence.
