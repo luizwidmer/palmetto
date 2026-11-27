@@ -4945,6 +4945,57 @@ class Gen:
             return v
         return self.lds_access(addr, byte_off, f)
 
+    def lds_append(self, a, mods):
+        """RDNA2 DS_APPEND on LDS: one atomic add per wave, by the first active lane, of popcount(EXEC); broadcast the
+        prior counter value to every active lane. LDS uses the instruction's aligned byte offset directly; GDS uses
+        a different address space and is not modelled here."""
+        if "gds" in mods:
+            raise Unsupported("ds_append GDS")
+        offset_mods = [m for m in mods if m.startswith("offset:")]
+        if len(offset_mods) > 1 or any(m not in ("gds",) and not m.startswith("offset:") for m in mods):
+            raise Unsupported("ds_append modifiers")
+        off = self.mod_int(mods, "offset", 0)
+        if not 0 <= off <= 0xFFFF or off & 3:
+            raise Unsupported("ds_append offset")
+        if len(a) != 1 or a[0]["k"] != "vgpr" or a[0].get("n", 1) != 1:
+            raise Unsupported("ds_append destination")
+
+        lo, hi = self.wave_mask({"k": "special", "t": "exec"})
+        lo_count, hi_count, count = self.tmp(), self.tmp(), self.tmp()
+        self.emit(f"{lo_count} = OpBitCount %uint {lo}")
+        self.emit(f"{hi_count} = OpBitCount %uint {hi}")
+        self.emit(f"{count} = OpIAdd %uint {lo_count} {hi_count}")
+
+        lo_nonzero, hi_nonzero, any_active = self.tmp(), self.tmp(), self.tmp()
+        lo_first, hi_first, hi_first64, first_raw, first = (self.tmp() for _ in range(5))
+        self.emit(f"{lo_nonzero} = OpINotEqual %bool {lo} {self.cu(0)}")
+        self.emit(f"{hi_nonzero} = OpINotEqual %bool {hi} {self.cu(0)}")
+        self.emit(f"{lo_first} = OpExtInst %uint %glsl FindILsb {lo}")
+        self.emit(f"{hi_first} = OpExtInst %uint %glsl FindILsb {hi}")
+        self.emit(f"{hi_first64} = OpIAdd %uint {hi_first} {self.cu(32)}")
+        self.emit(f"{first_raw} = OpSelect %uint {lo_nonzero} {lo_first} {hi_first64}")
+        self.emit(f"{any_active} = OpLogicalOr %bool {lo_nonzero} {hi_nonzero}")
+        self.emit(f"{first} = OpSelect %uint {any_active} {first_raw} {self.cu(0)}")
+        lane, is_first, is_leader = self.wave_lane(), self.tmp(), self.tmp()
+        self.emit(f"{is_first} = OpIEqual %bool {lane} {first}")
+        self.emit(f"{is_leader} = OpLogicalAnd %bool {any_active} {is_first}")
+
+        entry = self.current_label_placeholder()
+        do, end = self.tmp() + "_append_leader", self.tmp() + "_append_end"
+        self.emit(f"OpSelectionMerge {end} None")
+        self.emit(f"OpBranchConditional {is_leader} {do} {end}")
+        self.emit(f"{do} = OpLabel")
+        old = self.lds_atomic(self.cu(0), off,
+                              f"OpAtomicIAdd %uint {{p}} {self.cu(2)} {self.cu(0)} {count}")
+        old_lane = self.current_label_placeholder()
+        self.emit(f"OpBranch {end}")
+        self.emit(f"{end} = OpLabel")
+        local_old = self.tmp()
+        self.emit(f"{local_old} = OpPhi %uint {old} {old_lane} {self.cu(0)} {entry}")
+        result = self.tmp()
+        self.g_shuffle(result, local_old, first)
+        self.dst(a[0], result, eager=not self.emulate)
+
     def lds_op(self, op, a, mods):
         """LDS (GFX10 DS encoding). Addresses are bytes. offset:N is bytes; read2/write2 offset0/offset1 count
         data-size units (x64 for st64). Writes and atomics run only in active lanes; results land in VGPRs through
@@ -4952,6 +5003,9 @@ class Gen:
         if self.stage not in ("cs", "ms"):
             raise Unsupported(op + " outside compute")
         self.uses_lds = True
+        if op == "ds_append":
+            self.lds_append(a, mods)
+            return
         rtn = "_rtn_" in op
         name = op if op == "ds_wrxchg_rtn_b32" else op.replace("_rtn_", "_")
         act = self.active_b()

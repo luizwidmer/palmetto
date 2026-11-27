@@ -1,6 +1,6 @@
 # Translator fixes measured against the compute request union
 
-**Status: measured, uncommitted slice.** Three translator fixes and the loop guard, implemented from this tree's own
+**Status: measured, uncommitted slice.** Four translator fixes and the loop guard, implemented from this tree's own
 analysis of the corpus, with the measured effect on the title's later compute-pipeline request union (the 668
 programs `corpus2/cov` asks for; [compute_slot67.md](compute_slot67.md)) and on the two corpora that already
 translated completely. The gap analysis that ranked them is `translator_gap_plan.md` in the work folder; this page
@@ -228,3 +228,29 @@ The synthetic fixture `tests/semantic/fixtures/disasm/cs_s_flbit64_lane_mask.s` 
 `python -I tooling/scripts/run_semantic_tests.py tests/semantic -j 4` ran 462 files / 6,064 tests; 460 files passed. The two failures were in `test_exec_computed.py` (2 failures) and `test_image_atomics_guard.py` (47 subtest failures). Both reproduce with the pre-slice HEAD `9edd62c44` translator loaded from an external scratch copy (which retains the original lane-mask refusal), so they are pre-existing and unrelated to this rule. Neither test was changed.
 
 This rule was derived from the RDNA2 instruction semantics and this tree's own lane-mask analysis. The rank-5 note in `cleanroom_peers.md` is parity context only; no peer implementation, clone source, or fixture was consulted or copied, so no new `NOTICE.md` entry is needed.
+
+## 13. LDS DS_APPEND in the compute request union
+
+### Measured class
+
+A fresh `python -I tooling/rdna2spirv.py <listings> --out <scratch> --no-asm --wave64-emulate --refusals <scratch>/refusals.json` scan of the 668-program request union had 480 translated and 188 refused. `ds_append` was the named refusal for 11 programs; an aggregate inspection counted 38 occurrences across those 11, all with an aligned `offset:` and no `gds` or other modifier. No program names or instruction bytes are recorded here.
+
+| refusal before the rule | programs |
+|---|---:|
+| `ds_append` | 11 |
+| fall-through into undecodable words | 165 |
+| undecodable words (cannot re-anchor) | 8 |
+| `v_cmp` destination | 2 |
+| mask destination | 1 |
+| reachable instruction with normalized encoding | 1 |
+| **total refused** | **188** |
+
+### Rule and semantic fixture
+
+RDNA2 `ds_append` on LDS adds the count of EXEC-active lanes in the wave to the dword at the aligned instruction byte offset and returns the pre-operation counter to every active lane ([AMD RDNA2 machine-readable ISA, DS_APPEND](https://raw.githubusercontent.com/ROCm/rocm-systems/1b50d9a20e7dd31006c8252bd674e188c26a4880/shared/machine-readable-isa/isa/amdgpu_isa_rdna2.xml)). The translator elects the first active lane to issue one Workgroup `OpAtomicIAdd` by `popcount(EXEC)`, then broadcasts its old value; inactive lanes keep `vdst`. The LDS address uses `offset` directly (not `M0`); GDS, unknown modifiers, misaligned/out-of-field offsets and non-scalar VGPR destinations remain refused. The existing LDS allocation-bound path handles offsets outside the workgroup allocation.
+
+The synthetic [wave32 fixture](../tests/semantic/fixtures/disasm/cs_w32_ds_append.s) and [wave64 fixture](../tests/semantic/fixtures/disasm/cs_w64_ds_append.s), run by the [DS_APPEND semantic test](../tests/semantic/test_ds_append.py), check partial EXEC (13/32 lanes with two wave32 waves sharing LDS; 40/64 lanes in native and emulated wave64), one returned value per active wave, unchanged inactive destinations, and the final counter. The negative cases keep GDS, misaligned offset and non-scalar destination forms refused. This is standard-library CPU interpretation only; no GPU was used.
+
+The same union scan after the rule translated and validated **491 / 668** programs and refused 177: fall-through 165, undecodable words 8, `v_cmp` destination 2, mask destination 1, and normalized encoding 1; `ds_append` is now **0**. All **480** modules that translated before the rule are byte-identical afterward; 11 newly translating modules account for the net gain. The scan outputs were kept outside the repository and only these aggregate counts are recorded.
+
+This clean-room rule uses the ISA and this tree's measured forms; rank-5 peer notes were evidence for which class to measure, not an implementation or fixture source. No new `NOTICE.md` entry is needed.
