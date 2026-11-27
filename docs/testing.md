@@ -124,29 +124,56 @@ Four repairs in the same pass are worth knowing while reading a red full build:
   `int3_skip_test` and `startup_trace_test` open a startup trace and compile `src/crash_unwind.cpp`. Both groups failed
   to link (`LNK2019`) before that, so their tests had never run.
 
-## Full local CTest inventory (2026-11-27)
+## Full local CTest inventory (2026-11-27, after recent slices)
 
-The configured Windows `port/build` tree listed 304 registered tests with `ctest -N` (CTest 4.4.5,
-`RelWithDebInfo`). This was a serial run against the existing binaries; there was no build or relink:
+The configured Windows `port/build` tree listed 309 registered tests (CTest 4.4.5, `RelWithDebInfo`). Existing
+binaries were run serially; there was no build or relink. No `PALMETTO_*` game/package variables were set, no real
+game was booted, and the `run_tiny_game*` family uses only its synthetic fixture. The inherited malformed
+`GIT_CONFIG_*` environment was cleared for the test processes only.
+
+The initial sweep used the five previously documented exclusions:
 
 ```powershell
-ctest --test-dir port/build -C RelWithDebInfo --output-on-failure --timeout 300 `
+ctest --test-dir port/build -C RelWithDebInfo --output-on-failure --timeout 300 -j 1 `
   -E '^(d3d12_fence_timing|vk_queue|d3d12_xdxr_rt|d3d12_xdxr_rt_check|xbox_present)$'
 ```
 
-The selection contained 299 targets after the five exclusions. `gameinput` was CTest-disabled, leaving 298
-executions. The run finished non-zero after 612.99 seconds: 251 passed, 11 skipped and 36 failed; CTest printed
-`88% tests passed, 36 tests failed out of 298`. The failures below are from pre-existing binaries, not from a rebuilt
-tree. No game-data environment variables were set and no real game was booted; package-dependent targets skipped, and
-the `tiny_game` runs use only the synthetic fixture.
+It stopped at test #176, `d3d12_vulkan_device`: the child remained running without progress, so the lead terminated
+both the child and CTest before a result or final summary was written. That target was not counted as a failure and was
+excluded from the remainder. The previous inventory had a similar stall after queue slots 15 and 14 were refused while
+waiting on a fence event; this attempt produced no fresh `VK_ERROR_DEVICE_LOST` evidence. The remaining tests used a
+120-second per-test limit and six exclusions; after a 17-test range stopped on its first ordinary failure, the final
+111 targets were run one at a time. All 111 completed without timeout or device-loss output.
 
-The five exclusions are intentional, not additional failures:
+For each of those final 111 names, the serial bounded invocation was:
 
-- `d3d12_fence_timing` is the documented pre-existing `0xC0000005` crash above.
-- `vk_queue`, `d3d12_xdxr_rt` and `d3d12_xdxr_rt_check` were withheld as a precaution against the host's intermittent
-  device-loss risk during a long serial GPU run, not because they failed here. Separate recent evidence was
-  `vk_queue_test: OK` on the RTX 4090 and `d3d12_xdxr_rt_test` exit 0; `_check` is its GPU verifier.
-- `xbox_present` was not run because it hung in the current round-14 gate; its owner is fixing the per-origin hang.
+```powershell
+ctest --test-dir port/build -C RelWithDebInfo --output-on-failure --timeout 120 -j 1 `
+  -R '^<one-remaining-test-name>$' `
+  -E '^(d3d12_fence_timing|vk_queue|d3d12_xdxr_rt|d3d12_xdxr_rt_check|xbox_present|d3d12_vulkan_device)$'
+```
+
+| Inventory measure | Count |
+| --- | ---: |
+| Registered in `port/build` | 309 |
+| Excluded from this inventory | 6 |
+| Selected after exclusions | 303 |
+| Disabled (`gameinput`) | 1 |
+| Executed | 302 |
+| Passed | 270 |
+| Skipped | 11 |
+| Failed | 21 |
+
+The exact exclusions are intentional and are not counted as failures:
+
+| Target | Exclusion reason |
+| --- | --- |
+| `d3d12_fence_timing` | Documented pre-existing `0xC0000005` fence-test crash. |
+| `vk_queue` | Withheld for the host's documented intermittent device-loss risk during serial GPU testing. |
+| `d3d12_xdxr_rt` | GPU-heavy ray-tracing target; withheld under the same device-loss policy. |
+| `d3d12_xdxr_rt_check` | GPU verifier paired with the excluded ray-tracing target. |
+| `xbox_present` | Previously hung in the per-origin present gate; not retried in this inventory. |
+| `d3d12_vulkan_device` | Stalled at #176 in this run and was externally terminated before CTest emitted a result. |
 
 `gameinput` is disabled in this build because it was configured without SDL3; `gameinput_nosdl` exercises the
 always-built backend. Eleven selected targets returned CTest's configured skip code:
@@ -158,90 +185,37 @@ always-built backend. Eleven selected targets returned CTest's configured skip c
 | `bink_abi` | No package/index. |
 | `bink_audio` | No package/audio movie. |
 | `fsr_dispatch`, `bvh_builder` | No package. |
-| `vk_sync_validation` | `PALMETTO_VK_VALIDATION` is unset; the self-test explicitly skips when validation was not requested. |
+| `vk_sync_validation` | `PALMETTO_VK_VALIDATION` is unset; the self-test skips when validation was not requested. |
 | `d3d12_rgb9e5_rtv` | RTX 4090 reported RGB9E5 render targets unavailable. |
 | `d3d12_first_light` | `PALMETTO_FIRST_LIGHT_DIR` is unset. |
 
-The 36 failures split into these result groups:
+The 21 failures split into these groups:
 
-- **Queue-proxy `Signal`/`Wait` slot mapping (17 targets):** `device_proxy`, `device_proxy_trace`, `d3d12_debug_markers`,
-  `queue_proxy`, `allocator_proxy`, `d3d12_present`, `d3d12_f16_halves`, `d3d12_compute`, `d3d12_fspx_compute`,
-  `d3d12_draw`, `d3d12_msaa_draw`, `d3d12_geometry`, `d3d12_depth24_draw`, `d3d12_mesh`, `run_tiny_frame` and
-  `run_tiny_frame_queue_test_settings` report the documented console queue slot-14 refusal. `d3d12_vulkan_device` is
-  the 17th: it hit the 300-second timeout after queue slots 15 and 14 were refused, then waited for a fence event.
-  That log has no explicit `VK_ERROR_DEVICE_LOST`; this timeout is the queue-proxy failure, not evidence of device loss.
-- **Root-signature proxy (1):** `root_sig` failed the same two all-zero-checksum cases already described above.
-- **Synthetic game fixture (9, pre-fix):** `run_tiny_game`, `run_tiny_game_console_paths`, `run_tiny_game_exit_code`,
-  `run_tiny_game_fixed`, `run_tiny_game_fixed_exit_code`, `run_tiny_game_tls`, `run_tiny_game_eh`,
-  `run_tiny_game_stack` and `run_tiny_game_dir` failed the guest assertion `a file round trip through the CRT works`.
-  The guest used `GetTempPathA` and CRT file calls on a synthetic `palmetto_tiny_game_<pid>.txt`; a standalone run from
-  `D:\leonida\port\build` reproduced the failure with both the original `TEMP`/`TMP`
-  (`C:\Users\LUIZWI~1\AppData\Local\Temp`) and the build-local `temp_probe_alt`. In both, `GAME:` resolved to the
-  fixtures' `RelWithDebInfo` directory (with the overlay as its child directory); stderr contained only the loader
-  TLS-remap and
-  offline XGameRuntime messages. A follow-up confirmed this was a test-fixture byte-count error, not a loader failure;
-  the post-fix checks and measurements are recorded below.
-- **Stale shader-library fixture (1):** `shader_library` failed its old binary's fixed-Huffman zlib fixture check.
-  The test-side fixture bytes and expected decompressed length were repaired in `shader_library_test.cpp`; the rebuilt
-  target passed.
-- **Stale D3D12 `Close` expectation (1):** `d3d12_com` failed the old `Close() == E_INVALIDARG` expectation after a
-  depth clear with value `2.0f`. WARP accepts the clear and returns `S_OK`; the test-only expectation was corrected in
-  `d3d12_com_test.cpp`; the rebuilt target passed.
-- **A8 render-target expectation (1):** `d3d12_descriptor` expected A8 to have no render-target support, while the
-  implementation now advertises A8 render targets when R8 color attachment is usable. The test-only expectation was
-  updated to cross-check the reported bit against resource creation/allocation while retaining the depth/UAV refusals.
-  The rebuilt target passed. Raw-byte inspection uses the wrapped PC heap's host CPU handle while API calls retain Xbox
-  handles. On this host the proxy-created non-shader-visible DSV heap had an unbacked console VA (`0x200000000`), so
-  the test creates it through the inner PC device; `CreateDepthStencilView` still goes through the proxy. The five
-  fence signals use the real queue and fence to bypass the measured console-proxy refusal; `ExecuteCommandLists`
-  remains on the proxy.
-- **ExecuteIndirect layer/reference divergence (5 rows):** live WARP and the RTX 4090 accept five cases that the
-  current layer rejects: `arg_offset=260` with `max_command_count == 0`, aligned `U64MAX-3` with
-  `max_command_count == 0`, two exact-fit draw payloads with trailing stride padding beyond the buffer, and one exact-fit
-  dispatch payload. The layer accepts the exact-at-width `max=0` no-op at offset 256. The test now asserts the measured
-  layer and reference results separately and labels the five known divergences instead of failing parity; all other
-  invalid-bound cases remain checked. The rebuilt target passed all 49 cases with live WARP and RTX 4090 and zero Vulkan
-  validation errors. The underlying layer/reference discrepancy remains unresolved.
-- **Depth-resolve refusal (1):** `d3d12_depth_resolve` returned `E_INVALIDARG` from `Close()` for eight refused
-  resolves but still changed the destination; first error: `refused D24S8 depth AVERAGE rect 1: Close 0x80070057,
-  destination changed`. The separately reported NVIDIA host quirks were informational. This remains a runtime behavior
-  for owner triage; no runtime change was made.
-- **Bindless console-heap address precondition (3):** `d3d12_set0_compute`, `d3d12_bindless_churn` and
-  `d3d12_bindless_churn_validated` failed the test's `< 2^32` GPU-handle precondition; their logs show unbacked console
-  heaps at `0x400000000` / `0x100000000`. This is the same shared-worktree console-heap-addressing gate described in
-  [bindless_degradation.md](bindless_degradation.md#7-tests), not a bindless-table failure.
-- **Spurious timed-wait wake (1):** `crt_timed_wait` failed only the assertion that a single no-predicate
-  `wait_for(200 ms)` must return `timeout` (it returned at 199 ms without a notification). The standard permits a
-  spurious `no_timeout`; `crt_timed_wait_test.cpp` now retries `wait_until` against the same absolute deadline while
-  keeping the duration and lock checks. The rebuilt target passed.
+| Failure group | Failing targets | Current observed cause |
+| --- | --- | --- |
+| Queue slot 14 before `Signal` (15) | `device_proxy`, `device_proxy_trace`, `d3d12_debug_markers`, `queue_proxy`, `allocator_proxy`, `d3d12_present`, `d3d12_f16_halves`, `d3d12_compute`, `d3d12_fspx_compute`, `d3d12_msaa_draw`, `d3d12_geometry`, `d3d12_depth24_draw`, `d3d12_mesh`, `run_tiny_frame`, `run_tiny_frame_queue_test_settings` | Each test reaches console queue slot 14, which refuses the PC `Signal` call as a console-only method before `Signal`; the proxy cannot signal its fence. |
+| `d3d12_draw` known-flaky fixture | `d3d12_draw` | The oversized resource/heap refusals were followed by a non-shader-visible console descriptor heap reported as unbacked; the process segfaulted before the viewport draw. |
+| Root-signature zero checksum | `root_sig` | The same two assertions failed: rewriting an all-zero-checksum Xbox blob and deserializing it after clearing the high flag byte. |
+| Depth-resolve refusal | `d3d12_depth_resolve` | Eight refused resolves returned `E_INVALIDARG` from `Close()` but still changed the destination; first error was `D24S8 depth AVERAGE rect 1`. The NVIDIA host quirks were informational. |
+| Bindless handle precondition (3) | `d3d12_set0_compute`, `d3d12_bindless_churn`, `d3d12_bindless_churn_validated` | The tests' `< 2^32` GPU-handle assertion fails for unbacked console descriptor heaps above the 32-bit handle window; this is the shared console-heap-addressing gate in [bindless_degradation.md](bindless_degradation.md#7-tests), not a bindless-table failure. |
 
-The C++ changes named above are test-only. The five edited targets (`shader_library`, `d3d12_com`, `d3d12_descriptor`,
-`d3d12_execute_indirect_validation` and `crt_timed_wait`) were rebuilt and rerun after the lead opened a target-only build
-window; all passed. No runtime-code change or full Palmetto build was made. The full CTest inventory above remains a
-pre-fix snapshot; `check_game_dir.cmake` was separately rerun and confirmed the GAME-file probe and absolute paths pass
-independently of the CRT file check.
+The recently repaired tests are now passing against the existing binaries: `shader_library`, `d3d12_com`,
+`d3d12_descriptor`, `d3d12_execute_indirect_validation` (49 cases, with its five known layer/reference divergences
+reported separately), `crt_timed_wait`, `file_system`, `xmem`, `buffer_va_index` and `d3d12_xmem_placed`. Also passing
+are `root_signature`, `root_signature_oracle`, `d3d12_console_descriptor_heap`, `d3d12_set_descriptor_heaps`,
+`viewport_replay_readiness`, and all ten `run_tiny_game*` tests, including the abort-exit-code and directory-path checks.
+`run_tiny_game_dir` confirms the `check_game_dir` path probe; the synthetic file round-trip fixture's 8-byte write/read
+count correction is effective. No stale path or test expectation was changed during this inventory.
 
-Follow-up, 2026-11-27 (synthetic CRT file round trip): the fixture wrote `"palmetto"` (8 bytes) but read only 7 with
-`fread`, then compared those seven bytes with the full string. The same assertion failed in the direct-host run, so this
-was a fixture defect, not a loader-specific failure. After correcting the byte count, the direct-host file operation
-reported 8/8 bytes written, 8/8 read and `remove_rc=0`; the program still exits 1 natively because the link-time
-`xgameruntime` stub intentionally returns failing answers.
+The pure `viewport_replay_readiness` target passed. The separate focused GPU run had already read back the expected green
+pixel for the two-viewport case with zero Vulkan validation errors; this CTest's `d3d12_draw` process crashed earlier in
+its allocation/descriptor-heap path and did not reach that viewport draw. The standalone result is recorded separately
+in [d3d12_vulkan.md](d3d12_vulkan.md); the earlier post-draw title-VA crash remains a separate known limit.
 
-Under the loader, `GetTempPathA(MAX_PATH)` returned the 37-character host `TEMP`/`TMP` path ending in
-`AppData\Local\Temp\`; the CRT round trip again reported 8/8 written, 8/8 read and `remove_rc=0`. With `TEMP` and
-`TMP` set to the build-local alternate temp directory, `GetTempPathA` returned that directory and the same operations
-passed. Both traced loader runs used `--trace` with `PALMETTO_FILE_TRACE=1` and recorded only `trace_open`, `map` and
-`exit`, with no `file_open` event. The fixture imports `GetTempPathA` from `KERNEL32.dll`, its CRT stdio calls from
-`api-ms-win-crt-stdio-l1-1-0.dll`, and `remove` from `api-ms-win-crt-filesystem-l1-1-0.dll`; none is in
-`file_system.cpp`'s `FILE_API` shim table, so `pe_loader.cpp` resolves them through its host DLL/API-set path. The
-fixture's direct `CreateFileW`/`ReadFile` imports do use the file shim, but the CRT round trip produced no shim trace.
-Both temp paths are host paths rather than `GAME:`/`G:`/`T:` paths, and `file_system` CTest passed, so the evidence
-rules out the shim's console-path mapping, permissions and virtualized-directory handling as the cause.
+No source or runtime code was changed for this inventory, and no build was run. The failures above are recorded for
+follow-up rather than hidden by disabling tests or changing runtime behavior.
 
-The fixture-only fix uses `sizeof(contents) - 1` for both `fwrite` and `fread`, checks byte counts and close results,
-checks `remove`, and adds an opt-in `file-diagnostic` argument. Only `tiny_game` and `tiny_game_fixed` were rebuilt; no
-`palmetto` relink or runtime change was made. The nine affected CTests (`run_tiny_game`, console paths, exit code, fixed,
-fixed exit code, TLS, EH, stack and dir) all passed, as did `file_system` (1/1).
+## Build, artifact, and single-test notes
 
 Windows, from a "Developer PowerShell for VS 2022" or a plain shell:
 
