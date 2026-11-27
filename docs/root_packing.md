@@ -59,8 +59,8 @@ consumer.
 
 Two separate mechanisms share the user-data block, and both are properties of the signature, not of the draw:
 
-1. **Directly indexed heaps.** A signature with `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` (`0x100`) and/or
-   `SAMPLER_HEAP_DIRECTLY_INDEXED` (`0x200`) gets the base of each bound heap appended to the user data after the
+1. **Directly indexed heaps.** A signature with `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` (`0x400`) and/or
+   `SAMPLER_HEAP_DIRECTLY_INDEXED` (`0x800`) gets the base of each bound heap appended to the user data after the
    explicit root arguments, in order: the CBV/SRV/UAV heap's one 32-bit dword, then the sampler heap's. The descriptor
    stride is compiled into the shader; no dword carries it. The public D3D12 model (`ResourceDescriptorHeap[i]` is the
    descriptor at heap base + `i` × the heap increment) and the reference implementation agree on this placement; the
@@ -105,7 +105,7 @@ The heap-base dword is only meaningful when the explicit arguments are inline: a
    for a signature that carries the flags).
 4. **The measured flag state, restored.** `RootArgumentLayout::flags` already comes from the parsed RTS0 blob rather
    than from any masked descriptor; this slice reads the flag state from there (`layout->flags`) for both the heap
-   placement and the measurement, and its test proves an RTS0 payload carrying `0x03000000 | 0x100 | 0x200` keeps every
+   placement and the measurement, and its test proves an RTS0 payload carrying `0x03000000 | 0x400 | 0x800` keeps every
    bit through the parse and selects the measured packing. The serializer-side restore (a host `d3d12.dll` that refuses
    the heap-directly bits) is not in this slice; see the limits.
 
@@ -180,15 +180,16 @@ and does not claim one.
 
 ## 8. Limits and next falsifiers
 
-1. **The RTS0 flag-restore half is not carried.** The serializer wrapper (`port/shims/d3d12_xs.cpp`,
-   `port/shims/d3d12_xs_rootsig.*`) forwards a description with the Xbox high byte cleared and does not retry without
-   the heap-directly bits, so a host `d3d12.dll` that refuses `0x100`/`0x200` (measured on Windows 10) would fail the
-   serialization before the signature reaches this layer, and a description's flag state would be lost. Those files are
-   outside this slice's scope; the measured boot never exercises the case (no signature carries the flags, and the
-   serializer log shows no refusal). Named next slice: add the retry-and-restore there, with synthetic serialize tests.
+1. **The RTS0 Xbox-type-byte restore half is not carried.** The serializer wrapper (`port/shims/d3d12_xs.cpp`,
+   `port/shims/d3d12_xs_rootsig.*`) clears the Xbox high byte and does not restore it from a serialized signature. The
+   public PC heap-direct flags are `0x400`/`0x800`; the earlier Windows 10 note about a refusal of `0x100`/`0x200` was
+   testing the SDK's DENY_AMPLIFICATION/DENY_MESH bits, not the heap-direct flags. The current Windows oracle accepts the
+   real heap-direct bits, and the synthetic CTest reaches root parsing with them. The measured boot still has no signature
+   carrying those flags. Restoring the Xbox high byte remains a separate serializer limitation; the old refusal is not
+   evidence that the host serializer rejects `0x400`/`0x800`.
 2. **The heap feed is latent.** No measured title signature sets either heap flag, so no boot exercises the dword; the
    placement is a model with unit tests, not a measured title behaviour. The falsifier that would close it: a content-pass
-   boot whose signature carries `0x100`/`0x200` and whose shader indexes the heap. What would confirm it: the bounded
+   boot whose signature carries `0x400`/`0x800` and whose shader indexes the heap. What would confirm it: the bounded
    "direct heaps" line naming the slot, plus the drawing pass reading a descriptor through the heap index.
 3. **The heap base's encoding is our table encoding.** A console descriptor table slot is a one-dword arena-relative VA
    pinned from the frame's modules ([root_arguments.md](root_arguments.md) section 5b); the heap base is fed the same
@@ -257,17 +258,44 @@ observed or that missing serializer/spill/mesh work is implemented.
 
 ### Tests and falsifier
 
-The portable `root_signature_test` now reports **96 PASS assertions** (the 81-check count in section 7 predates this
+The portable `root_signature_test` reports **96 PASS assertions** (the 81-check count in section 7 predates this
 follow-up) and exercises legacy/off admission, complete two-heap acceptance, each missing-base refusal, bad plans,
 unplaced slots, non-direct signatures, and strict-on/off mesh and indirect-draw decisions. The descriptor-heap unit test
 additionally confirms that both per-list bases survive heap binding after Reset together with a root signature carrying both
-direct-index flags. No live title arm was run: the existing boot population has no directly-indexed commands, so another
-arm would repeat the same latent path; the lead confirmed it is unnecessary. The next falsifier is a synthetic,
-hand-written shader test with a root signature carrying the resource and sampler direct-index flags: bind both heaps,
-have the shader read the planned base dwords and fetch a known descriptor, then compare the output/readback against a CPU
-reference. Run with strict mode enabled and missing/unrepresentable-base controls (which must refuse before recording);
-also verify that switch-off retains the legacy output. Include a compute `ExecuteIndirect` case; flagged graphics
-`ExecuteIndirect` should refuse by name in strict mode. A passing CPU plan or a log line alone does not close that falsifier.
+direct-index flags. No live title arm was run: the measured boot population still has no directly-indexed commands.
+
+The synthetic GPU falsifier is now implemented as an isolated, process-separated section of `d3d12_compute_test` using the
+existing CMake target/stanza (no CMake edit). Its version-1.1 root signature has both direct-index flags, one explicit
+constant at compute s4, and a root UAV at s5:s6; the planned resource and sampler heap bases therefore land at s7 and s8.
+A hand-written branch in `test/glsl/cs_user_data.comp` reads both dwords, indexes descriptor 1 in each heap, loads a
+known word through the raw V#, and returns the four S# dwords. The readback checks all 64 invocations against the CPU's
+rebased base values, known buffer word, and bytes from the exact sampler descriptor.
+
+The strict subprocess tests a complete two-heap dispatch, then no heaps and resource-only binding. Both missing-base cases
+must make `Close()` return `E_INVALIDARG`, are not submitted, and the parent asserts the emitted named refusals
+`direct_heap_resource_base_unavailable` and `direct_heap_sampler_base_unavailable`. A separate subprocess removes the
+strict environment switch, verifies the same complete output through the legacy path, then binds only the resource heap
+and confirms the legacy dispatch still records and returns zero appended bases plus invocation markers without dereferencing
+a missing descriptor. It skips with code 77 when no suitable Vulkan device or buffer-device-address support is available.
+The first CTest attempt exposed a flag-mask setup bug before any heap allocation or dispatch: RTS0 preserves the SDK's
+`0x400`/`0x800` direct-index bits, while the model had used `0x100`/`0x200` (the SDK's DENY_AMPLIFICATION/DENY_MESH bits).
+The direct-heap and deny-stage masks now match the Windows SDK; the portable test uses `0x1000` for its unknown-bit case,
+and the Windows oracle checks that serialized SDK bits choose the expected slots. That initial attempt initialized the Vulkan device but failed at the
+`parse_rts0` mask assertion before heap allocation or any direct-heap command. After correcting the masks, `root_signature`
+and `root_signature_oracle` passed, and the final `d3d12_compute` CTest passed 1/1 on an NVIDIA GeForce RTX 4090. The
+strict child read back all 64 invocations with resource base `0x00010100` at s7, sampler base `0x00010200` at s8, known
+SRV value `0x5a17c0de`, and the four S# dwords. Both missing-base controls were refused at `Close()` with `E_INVALIDARG`
+and the named resource/sampler-unavailable diagnostics. The separate switch-off child matched 64/64 legacy outputs and
+confirmed the missing-sampler legacy dispatch retained zero bases plus invocation markers. Runtime increments were 32
+bytes for both heap types, so descriptor 1 is indexed at base + 32 in each; the synthetic console-addressed heaps were
+backed by committed, 64-KiB-aligned memory and mirrored into the GPU arena. The test keeps execution on the Xbox queue
+proxy and signals through its real PC queue/fence, because Xbox reserves queue slot 14 for a console method.
+
+Limit: this bounded compute proof reads synthetic raw V#/S# bytes and does not validate the title shader translator's
+source-level `ResourceDescriptorHeap` lowering, a texture sample, graphics, mesh, or compute `ExecuteIndirect`. Those
+paths retain their separate documented limitations; a passing base/descriptor shader test does not claim title use or close
+the indirect cases. The existing `d3d12_compute_test` CMake target is the required stanza; `port/CMakeLists.txt` remains
+untouched.
 
 ### Clean-room note for the report
 

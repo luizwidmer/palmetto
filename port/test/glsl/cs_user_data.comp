@@ -37,6 +37,37 @@ Words at(uvec2 va) {
 
 void main() {
     const uint i = gl_GlobalInvocationID.x;
+    if (pc.s[4] == 0xD1EC7EADu) {
+        // Direct-heap GPU falsifier: s7/s8 are the resource/sampler heap-base dwords appended after the explicit
+        // constants (s4) and root UAV (s5:s6). Index descriptor 1 in each heap, load a raw V#'s known data, and
+        // return both base values and all four S# dwords so the host can compare them with the exact heap contents.
+        Words resource_slot = at(uvec2(pc.s[7] + 32u, 0u));
+        Words sampler_slot = at(uvec2(pc.s[8] + 32u, 0u));
+        Words source = at(uvec2(resource_slot.w[0], resource_slot.w[1] & 0xFFFFu));
+        Words direct_result = at(uvec2(pc.s[5], pc.s[6]));
+        const uint offset = i * 8u;
+        direct_result.w[offset + 0u] = pc.s[7];
+        direct_result.w[offset + 1u] = pc.s[8];
+        direct_result.w[offset + 2u] = source.w[0];
+        for (uint word = 0u; word < 4u; ++word) direct_result.w[offset + 3u + word] = sampler_slot.w[word];
+        direct_result.w[offset + 7u] = i;
+        return;
+    }
+    if (pc.s[4] == 0xD1EC7EAEu) {
+        // Legacy no-base control: deliberately do not dereference either heap; record the user-data values the old
+        // path left in place and a per-invocation marker. Strict mode must refuse this dispatch, switch-off must run it.
+        Words direct_result = at(uvec2(pc.s[5], pc.s[6]));
+        const uint offset = i * 8u;
+        direct_result.w[offset + 0u] = pc.s[7];
+        direct_result.w[offset + 1u] = pc.s[8];
+        direct_result.w[offset + 2u] = i;
+        direct_result.w[offset + 3u] = i;
+        direct_result.w[offset + 4u] = i;
+        direct_result.w[offset + 5u] = i;
+        direct_result.w[offset + 6u] = i;
+        direct_result.w[offset + 7u] = i;
+        return;
+    }
     Words table = at(uvec2(pc.s[8], 0u));
     Words result = at(uvec2(pc.s[6], pc.s[7]));
     if (pc.s[5] == 0u) {

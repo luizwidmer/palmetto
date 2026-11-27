@@ -351,6 +351,11 @@ int main() {
         D3D12_ROOT_SIGNATURE_FLAG_ALLOW_STREAM_OUTPUT |
         D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
         D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED;
+    const uint32_t sdk_direct_heap_flags = static_cast<uint32_t>(
+        D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+        D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED);
+    check_named(rt::rootsig::kDirectHeapFlags == sdk_direct_heap_flags, "1.1 with every root-signature flag",
+                "the direct-index masks match the public D3D12 SDK bits (0x400/0x800)");
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC flagged11{};
     flagged11.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     flagged11.Desc_1_1 = {0, nullptr, 0, nullptr, static_cast<D3D12_ROOT_SIGNATURE_FLAGS>(every_pc_flag)};
@@ -361,6 +366,11 @@ int main() {
             parse_checked(out.blob, "1.1 with every root-signature flag", got)) {
             check_named(got.flags == every_pc_flag, "1.1 with every root-signature flag",
                         "the whole PC flag word round-trips (heap-direct bits included)");
+            const auto compute_pack = rt::rootsig::pack_stage(got, rt::rootsig::Stage::Compute);
+            const auto heap_plan = rt::rootsig::direct_heap_slots(compute_pack, got.flags);
+            check_named(heap_plan.ok && heap_plan.resource_sgpr == 4 && heap_plan.sampler_sgpr == 5,
+                        "1.1 with every root-signature flag",
+                        "the serialized SDK direct-index bits select resource/sampler bases after s4");
             const std::vector<uint8_t> bytes = encode_canonical(got);
             const DecodeResult again = decode_canonical(bytes.data(), bytes.size());
             check_named(again.ok && again.sig.flags == every_pc_flag, "1.1 with every root-signature flag",

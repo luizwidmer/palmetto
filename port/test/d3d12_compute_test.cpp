@@ -6,8 +6,10 @@
 //     biased console VA;
 //   - root constants, a root UAV and a descriptor table set on the command list, two dispatches that each keep the
 //     arguments they were recorded with, and the results copied to a readback buffer.
-// The shader (test/glsl/cs_user_data.comp) is written to the translator's push-constant and address contract.
-// No game data. Set PALMETTO_VK_VALIDATION=1 to run under VK_LAYER_KHRONOS_validation.
+// The shader (test/glsl/cs_user_data.comp) is written to the translator's push-constant and address contract. A
+// separate child-process arm also proves that strict direct-heap base dwords and synthetic V#/S# descriptor bytes reach
+// a shader without inheriting this larger fixture's command-list state. No game data. Set PALMETTO_VK_VALIDATION=1 to
+// run under VK_LAYER_KHRONOS_validation.
 #include "shader_fixture_path.h"
 #include "test_temp_dir.h"
 #include "vk_test_device.h"
@@ -18,12 +20,17 @@
 #include "../src/shader_library.h"
 #include "../shims/d3d12_xs_device.h"
 
+#include <windows.h>
 #include <dxgi1_4.h>
 
+#include <array>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <string>
 #include <vector>
 
 #ifndef PALMETTO_TEST_CS_SPV
@@ -254,9 +261,462 @@ std::vector<std::vector<HRESULT>> host_cached_pso_cases(const std::vector<std::u
     return out;
 }
 
+constexpr std::uint32_t kDirectHeapFetchMode = 0xD1EC7EADu;
+constexpr std::uint32_t kDirectHeapLegacyNoBaseMode = 0xD1EC7EAEu;
+constexpr std::uint32_t kDirectHeapKnownValue = 0x5A17C0DEu;
+constexpr std::uint32_t kDirectHeapDecoyValue = 0xA11CE00Du;
+constexpr std::uint32_t kDirectHeapInvocations = 64;
+constexpr std::uint32_t kDirectHeapWordsPerInvocation = 8;
+constexpr UINT kDirectHeapOutputBytes = kDirectHeapInvocations * kDirectHeapWordsPerInvocation * 4u;
+
+int run_direct_heap_dispatch(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Fence* fence,
+                             ID3D12RootSignature* root, ID3D12PipelineState* pso,
+                             ID3D12Resource* source_upload, ID3D12Resource* source,
+                             ID3D12DescriptorHeap* resource_heap, ID3D12DescriptorHeap* sampler_heap,
+                             bool bind_resource, bool bind_sampler, bool initialize_source,
+                             std::uint32_t mode, bool expect_refusal, UINT64& fence_value,
+                             std::uint32_t expected_resource_base, std::uint32_t expected_sampler_base,
+                             const std::array<std::uint32_t, 4>& expected_sampler_words) {
+    const D3D12_HEAP_PROPERTIES default_heap{D3D12_HEAP_TYPE_DEFAULT};
+    const D3D12_HEAP_PROPERTIES readback_heap{D3D12_HEAP_TYPE_READBACK};
+    Ref<ID3D12Resource> output, readback;
+    const auto output_desc = buffer_desc(kDirectHeapOutputBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    const auto readback_desc = buffer_desc(kDirectHeapOutputBytes, D3D12_RESOURCE_FLAG_NONE);
+    EXPECT(SUCCEEDED(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &output_desc,
+                                                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                      IID_PPV_ARGS(&output.p))));
+    EXPECT(SUCCEEDED(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &readback_desc,
+                                                      D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                      IID_PPV_ARGS(&readback.p))));
+    const D3D12_GPU_VIRTUAL_ADDRESS output_va = output->GetGPUVirtualAddress();
+    EXPECT(output_va >= 0x10000 && output_va < (1ull << 32));
+
+    Ref<ID3D12CommandAllocator> allocator;
+    Ref<ID3D12GraphicsCommandList> list;
+    EXPECT(SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator.p))));
+    EXPECT(SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, pso,
+                                               IID_PPV_ARGS(&list.p))));
+    if (initialize_source) {
+        list->CopyBufferRegion(source, 0, source_upload, 0, 2 * sizeof(std::uint32_t));
+        const auto ready = transition(source, D3D12_RESOURCE_STATE_COPY_DEST,
+                                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        list->ResourceBarrier(1, &ready);
+    }
+    ID3D12DescriptorHeap* heaps[2]{};
+    UINT heap_count = 0;
+    if (bind_resource) heaps[heap_count++] = resource_heap;
+    if (bind_sampler) heaps[heap_count++] = sampler_heap;
+    if (heap_count) list->SetDescriptorHeaps(heap_count, heaps);
+    list->SetComputeRootSignature(root);
+    list->SetPipelineState(pso);
+    list->SetComputeRoot32BitConstant(0, mode, 0);
+    list->SetComputeRootUnorderedAccessView(1, output_va);
+    list->Dispatch(1, 1, 1);
+
+    if (expect_refusal) {
+        const HRESULT close = list->Close();
+        if (close != E_INVALIDARG) {
+            std::fprintf(stderr, "direct-heap missing-base control: Close returned 0x%08lx, expected E_INVALIDARG\n",
+                         static_cast<unsigned long>(close));
+            return 1;
+        }
+        std::printf("direct-heap strict missing-base control: command list refused with E_INVALIDARG\n");
+        return 0;  // The invalid list is deliberately never submitted.
+    }
+    const auto to_copy = transition(output.p, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+    list->ResourceBarrier(1, &to_copy);
+    list->CopyBufferRegion(readback.p, 0, output.p, 0, kDirectHeapOutputBytes);
+    const HRESULT close = list->Close();
+    if (close != S_OK) {
+        std::fprintf(stderr, "direct-heap shader control: Close returned 0x%08lx, expected S_OK\n",
+                     static_cast<unsigned long>(close));
+        return 1;
+    }
+    ID3D12CommandList* lists[] = {list.p};
+    queue->ExecuteCommandLists(1, lists);
+    EXPECT(rt::d3d12::last_execute_result(queue) == palmetto::ReplayResult::success);
+    // Keep execution on the Xbox queue proxy, but use the real PC queue/fence for Signal: Xbox reserves queue slot 14,
+    // and the PC Signal method at that same slot is intentionally refused by the proxy.
+    ID3D12CommandQueue* signal_queue = rt::d3d12_xs::queue_proxy_real_queue(queue);
+    ID3D12Fence* signal_fence = rt::d3d12_xs::fence_proxy_real_fence(fence);
+    EXPECT(signal_queue && signal_fence);
+    EXPECT(SUCCEEDED(signal_queue->Signal(signal_fence, ++fence_value)));
+    EXPECT(SUCCEEDED(fence->SetEventOnCompletion(fence_value, nullptr)));
+    void* mapped = nullptr;
+    const D3D12_RANGE read_range{0, kDirectHeapOutputBytes};
+    EXPECT(SUCCEEDED(readback->Map(0, &read_range, &mapped)));
+    std::array<std::uint32_t, kDirectHeapInvocations * kDirectHeapWordsPerInvocation> observed{};
+    std::memcpy(observed.data(), mapped, kDirectHeapOutputBytes);
+    const D3D12_RANGE no_write{0, 0};
+    readback->Unmap(0, &no_write);
+    for (std::uint32_t invocation = 0; invocation < kDirectHeapInvocations; ++invocation) {
+        const std::size_t offset = invocation * kDirectHeapWordsPerInvocation;
+        const std::uint32_t expected[8] = {
+            mode == kDirectHeapFetchMode ? expected_resource_base : 0u,
+            mode == kDirectHeapFetchMode ? expected_sampler_base : 0u,
+            mode == kDirectHeapFetchMode ? kDirectHeapKnownValue : invocation,
+            mode == kDirectHeapFetchMode ? expected_sampler_words[0] : invocation,
+            mode == kDirectHeapFetchMode ? expected_sampler_words[1] : invocation,
+            mode == kDirectHeapFetchMode ? expected_sampler_words[2] : invocation,
+            mode == kDirectHeapFetchMode ? expected_sampler_words[3] : invocation,
+            invocation};
+        for (std::size_t word = 0; word < 8; ++word) {
+            if (observed[offset + word] != expected[word]) {
+                std::fprintf(stderr,
+                             "direct-heap %s output[%u][%zu]: got 0x%08x, expected 0x%08x\n",
+                             mode == kDirectHeapFetchMode ? "fetch" : "legacy no-base", invocation, word,
+                             observed[offset + word], expected[word]);
+                return 1;
+            }
+        }
+    }
+    if (mode == kDirectHeapFetchMode)
+        std::printf("direct-heap %s complete: 64/64 invocations matched resource base 0x%08x, sampler base 0x%08x, "
+                    "known SRV value 0x%08x, and four S# dwords\n",
+                    "shader", expected_resource_base, expected_sampler_base,
+                    kDirectHeapKnownValue);
+    else
+        std::printf("direct-heap legacy missing sampler base: Dispatch recorded; 64/64 outputs retained zero bases and "
+                    "invocation markers\n");
+    return 0;
+}
+
+bool launch_direct_heap_child(const char* arm, const std::filesystem::path& log_path, DWORD& exit_code) {
+    SECURITY_ATTRIBUTES security{};
+    security.nLength = static_cast<DWORD>(sizeof(security));
+    security.bInheritHandle = TRUE;
+    HANDLE log = CreateFileW(log_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &security,
+                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (log == INVALID_HANDLE_VALUE) {
+        std::fprintf(stderr, "cannot create direct-heap test log: %lu\n", GetLastError());
+        return false;
+    }
+    HANDLE input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &security,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (input == INVALID_HANDLE_VALUE) input = GetStdHandle(STD_INPUT_HANDLE);
+
+    std::array<char, 32768> executable{};
+    const DWORD length = GetModuleFileNameA(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+    if (!length || length >= executable.size()) {
+        std::fprintf(stderr, "cannot resolve direct-heap test executable path\n");
+        if (input && input != INVALID_HANDLE_VALUE && input != GetStdHandle(STD_INPUT_HANDLE)) CloseHandle(input);
+        CloseHandle(log);
+        return false;
+    }
+    const std::string exe(executable.data(), length);
+    std::string command = "\"" + exe + "\" --direct-heap-arm " + arm;
+    STARTUPINFOA startup{};
+    startup.cb = static_cast<DWORD>(sizeof(startup));
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = input;
+    startup.hStdOutput = log;
+    startup.hStdError = log;
+    PROCESS_INFORMATION process{};
+    const BOOL created = CreateProcessA(exe.c_str(), command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+                                        nullptr, nullptr, &startup, &process);
+    const DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
+    if (input && input != INVALID_HANDLE_VALUE && input != GetStdHandle(STD_INPUT_HANDLE)) CloseHandle(input);
+    CloseHandle(log);
+    if (!created) {
+        std::fprintf(stderr, "cannot launch direct-heap %s arm: %lu\n", arm, create_error);
+        return false;
+    }
+    const DWORD wait = WaitForSingleObject(process.hProcess, 90000);
+    if (wait != WAIT_OBJECT_0) {
+        std::fprintf(stderr, "direct-heap %s arm exceeded 90 seconds or wait failed (0x%08lx)\n", arm,
+                     static_cast<unsigned long>(wait));
+        TerminateProcess(process.hProcess, 1);
+        WaitForSingleObject(process.hProcess, 5000);
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        return false;
+    }
+    const BOOL got_code = GetExitCodeProcess(process.hProcess, &exit_code);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return got_code != FALSE;
+}
+
+int run_direct_heap_arms() {
+    testfiles::ScratchDir scratch("palmetto_direct_heap_arms");
+    for (const char* arm : {"strict", "legacy"}) {
+        const auto log_path = scratch.path() / (std::string(arm) + ".log");
+        DWORD exit_code = 1;
+        if (!launch_direct_heap_child(arm, log_path, exit_code)) return 1;
+        std::ifstream log_file(log_path, std::ios::binary);
+        if (!log_file) {
+            std::fprintf(stderr, "cannot read direct-heap %s arm log\n", arm);
+            return 1;
+        }
+        const std::string log((std::istreambuf_iterator<char>(log_file)), std::istreambuf_iterator<char>());
+        std::printf("--- direct-heap %s process ---\n", arm);
+        if (!log.empty()) std::fwrite(log.data(), 1, log.size(), stdout);
+        if (log.empty() || log.back() != '\n') std::fputc('\n', stdout);
+        if (exit_code == 77) return 77;
+        if (exit_code != 0) {
+            std::fprintf(stderr, "direct-heap %s arm exited %lu\n", arm, exit_code);
+            return 1;
+        }
+        if (std::strcmp(arm, "strict") == 0) {
+            if (log.find("direct-heap shader complete:") == std::string::npos ||
+                log.find("direct_heap_resource_base_unavailable") == std::string::npos ||
+                log.find("direct_heap_sampler_base_unavailable") == std::string::npos) {
+                std::fprintf(stderr, "strict direct-heap shader/refusal evidence is incomplete\n");
+                return 1;
+            }
+        } else if (log.find("direct-heap shader complete:") == std::string::npos ||
+                   log.find("direct-heap legacy arm:") == std::string::npos ||
+                   log.find("direct-heap legacy missing sampler base: Dispatch recorded") == std::string::npos ||
+                   log.find("strict direct-heap command refused:") != std::string::npos) {
+            std::fprintf(stderr, "switch-off legacy direct-heap evidence is incomplete\n");
+            return 1;
+        }
+    }
+    std::printf("direct-heap GPU arms: strict complete + both missing-base refusals; switch-off complete + legacy no-base dispatch\n");
+    return 0;
+}
+
+int run_direct_heap_arm(bool strict) {
+    if (_putenv_s("PALMETTO_DIRECT_HEAP_STRICT", strict ? "1" : "") != 0) {
+        std::fprintf(stderr, "cannot set direct-heap strict mode for child process\n");
+        return 1;
+    }
+    if (_putenv_s("PALMETTO_TITLE_VA", "1") != 0) {
+        std::fprintf(stderr, "cannot enable synthetic title-VA rebasing for direct-heap test\n");
+        return 1;
+    }
+    vktest::Device d;
+    d.request_buffer_device_address = true;
+    const auto device_status = d.initialize();
+    if (device_status == vktest::DeviceStatus::unavailable) {
+        std::fprintf(stderr, "SKIP: no usable Vulkan 1.3 device for direct-heap shader test\n");
+        return 77;
+    }
+    EXPECT(device_status == vktest::DeviceStatus::ready);
+    if (!d.buffer_device_address) {
+        std::fprintf(stderr, "SKIP: Vulkan bufferDeviceAddress is unavailable for direct-heap shader test\n");
+        return 77;
+    }
+
+    // Each arm is its own process and device: strict mode is cached on first use, and no state from the later broad
+    // compute fixture or another CTest case can affect this bounded two-heap probe.
+    std::vector<std::uint8_t> fssm = {'F', 'S', 'S', 'M'};
+    put32(fssm, 0xD1EC7EAFu);
+    put32(fssm, 0xbf810000u);
+    const auto container = shader_container(fssm);
+    const testfiles::ScratchDir scratch("palmetto_direct_heap_probe");
+    const auto& library = scratch.path();
+    EXPECT(testfiles::copy_file(vktest::shader_fixture_path(PALMETTO_TEST_CS_SPV), library / "direct_heap_probe.spv"));
+    {
+        std::ofstream index(library / "index.json", std::ios::binary);
+        EXPECT(bool(index));
+        index << "{\"direct_heap_probe\": {\"stage\": \"cs\", \"fssm_sha256\": \""
+              << palmetto::sha256_hex(fssm)
+              << "\", \"bindings\": [], \"push_constant_bytes\": 144, \"local_size\": [64, 1, 1], "
+                 "\"uses_code_base\": true, \"wave64\": false}}";
+        index.close();
+        EXPECT(bool(index));
+    }
+
+    rt::d3d12::VulkanDeviceInfo info{};
+    info.get_instance_proc = d.instance_proc;
+    info.instance = d.instance;
+    info.physical = d.physical;
+    info.device = d.device;
+    info.queue = d.queue;
+    info.queue_family = d.family;
+    info.buffer_device_address = d.buffer_device_address;
+    info.features = d.enabled;
+    info.subgroup = d.subgroup;
+    info.shader_dir = library.string();
+    ID3D12Device* inner = nullptr;
+    EXPECT(SUCCEEDED(rt::d3d12::create_vulkan_device(info, IID_PPV_ARGS(&inner))));
+    Ref<ID3D12Device> device;
+    EXPECT(SUCCEEDED(rt::d3d12_xs::create_device_proxy(inner, __uuidof(ID3D12Device),
+                                                       reinterpret_cast<void**>(&device.p))));
+    rt::d3d12::set_device_outer(inner, device.p);
+
+    D3D12_ROOT_PARAMETER1 params[2]{};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[0].Constants = {0, 0, 1};
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    params[1].Descriptor = {0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_NONE};
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_desc{};
+    root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    root_desc.Desc_1_1 = {2, params, 0, nullptr,
+                          D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+                              D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED};
+    const auto root_blob = serialize(root_desc);
+    EXPECT(!root_blob.empty());
+    const auto parsed = rt::rootsig::parse_rts0(root_blob.data(), root_blob.size());
+    EXPECT(parsed.ok && (parsed.sig.flags & rt::rootsig::kDirectHeapFlags) == rt::rootsig::kDirectHeapFlags);
+    Ref<ID3D12RootSignature> root;
+    EXPECT(SUCCEEDED(device->CreateRootSignature(0, root_blob.data(), root_blob.size(), IID_PPV_ARGS(&root.p))));
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pso_desc{};
+    pso_desc.pRootSignature = root.p;
+    pso_desc.CS = {container.data(), container.size()};
+    const IID pso_iid = __uuidof(ID3D12PipelineState);
+    Ref<ID3D12PipelineState> pso;
+    EXPECT(SUCCEEDED(reinterpret_cast<XboxComputePipelineFn>(slot(device.p, 62))(
+        device.p, &pso_desc, 0, 0, &pso_iid, reinterpret_cast<void**>(&pso.p))));
+
+    const D3D12_HEAP_PROPERTIES default_heap{D3D12_HEAP_TYPE_DEFAULT};
+    const D3D12_HEAP_PROPERTIES upload_heap{D3D12_HEAP_TYPE_UPLOAD};
+    Ref<ID3D12Resource> source_upload, source;
+    const auto source_desc = buffer_desc(2 * sizeof(std::uint32_t), D3D12_RESOURCE_FLAG_NONE);
+    EXPECT(SUCCEEDED(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &source_desc,
+                                                       D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                       IID_PPV_ARGS(&source_upload.p))));
+    EXPECT(SUCCEEDED(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &source_desc,
+                                                       D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                       IID_PPV_ARGS(&source.p))));
+    const D3D12_RANGE no_read{0, 0};
+    void* source_mapped = nullptr;
+    EXPECT(SUCCEEDED(source_upload->Map(0, &no_read, &source_mapped)));
+    const std::uint32_t source_words[2] = {kDirectHeapDecoyValue, kDirectHeapKnownValue};
+    std::memcpy(source_mapped, source_words, sizeof(source_words));
+    source_upload->Unmap(0, nullptr);
+    const D3D12_GPU_VIRTUAL_ADDRESS source_va = source->GetGPUVirtualAddress();
+    EXPECT(source_va >= 0x10000 && source_va < (1ull << 32));
+
+    // The Xbox proxy probes two trailing qwords on CreateDescriptorHeap for its extended console-address
+    // description. Supply each synthetic heap with an explicit title VA and committed CPU backing, so the proxy takes
+    // the intended console-heap path and the replay layer can mirror descriptors into the GPU arena.
+    struct CommittedConsoleHeapBacking {
+        void* address = ::VirtualAlloc(nullptr, 64u * 1024u, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        ~CommittedConsoleHeapBacking() {
+            if (address) ::VirtualFree(address, 0, MEM_RELEASE);
+        }
+    } resource_backing, sampler_backing;
+    EXPECT(resource_backing.address && sampler_backing.address);
+    const auto console_heap_address = [](const CommittedConsoleHeapBacking& backing) {
+        return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(backing.address));
+    };
+    const std::uint64_t resource_console_address = console_heap_address(resource_backing);
+    const std::uint64_t sampler_console_address = console_heap_address(sampler_backing);
+    EXPECT((resource_console_address & 0xFFFFu) == 0 && (sampler_console_address & 0xFFFFu) == 0);
+    struct DescriptorHeapDescWithConsoleTail {
+        D3D12_DESCRIPTOR_HEAP_DESC pc{};
+        std::uint64_t console_address = 0;
+        std::uint64_t console_size = 0;
+    };
+    const DescriptorHeapDescWithConsoleTail resource_heap_desc{
+        {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 2, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0},
+        resource_console_address, 2ull * 32ull};
+    const DescriptorHeapDescWithConsoleTail sampler_heap_desc{
+        {D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 2, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0},
+        sampler_console_address, 2ull * 32ull};
+    Ref<ID3D12DescriptorHeap> resource_heap, sampler_heap;
+    EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&resource_heap_desc.pc, IID_PPV_ARGS(&resource_heap.p))));
+    EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&sampler_heap_desc.pc, IID_PPV_ARGS(&sampler_heap.p))));
+    const std::uint64_t resource_cpu = reinterpret_cast<XboxHeapHandleFn>(slot(resource_heap.p, 9))(resource_heap.p);
+    const std::uint64_t resource_gpu = reinterpret_cast<XboxHeapHandleFn>(slot(resource_heap.p, 10))(resource_heap.p);
+    const std::uint64_t sampler_cpu = reinterpret_cast<XboxHeapHandleFn>(slot(sampler_heap.p, 9))(sampler_heap.p);
+    const std::uint64_t sampler_gpu = reinterpret_cast<XboxHeapHandleFn>(slot(sampler_heap.p, 10))(sampler_heap.p);
+    EXPECT(resource_cpu && resource_gpu && sampler_cpu && sampler_gpu);
+    const UINT resource_increment = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const UINT sampler_increment = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    EXPECT(resource_increment == 32 && sampler_increment == 32);
+
+    const auto resource_cpu_slot = [&](UINT index) {
+        return D3D12_CPU_DESCRIPTOR_HANDLE{static_cast<SIZE_T>(resource_cpu + std::uint64_t(index) * resource_increment)};
+    };
+    const auto sampler_cpu_slot = [&](UINT index) {
+        return D3D12_CPU_DESCRIPTOR_HANDLE{static_cast<SIZE_T>(sampler_cpu + std::uint64_t(index) * sampler_increment)};
+    };
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = DXGI_FORMAT_R32_TYPELESS;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Buffer = {0, 2, 0, D3D12_BUFFER_SRV_FLAG_RAW};
+    device->CreateShaderResourceView(source.p, &srv, resource_cpu_slot(0));
+    srv.Buffer = {1, 1, 0, D3D12_BUFFER_SRV_FLAG_RAW};
+    device->CreateShaderResourceView(source.p, &srv, resource_cpu_slot(1));
+    palmetto::gfx10::BufferWords raw_srv{};
+    std::memcpy(raw_srv.data(), reinterpret_cast<const void*>(resource_cpu_slot(1).ptr), sizeof(raw_srv));
+    palmetto::gfx10::Buffer decoded_srv{};
+    EXPECT(palmetto::gfx10::decode(raw_srv, decoded_srv) && decoded_srv.address == source_va + sizeof(std::uint32_t));
+    EXPECT(decoded_srv.num_records == 4 && decoded_srv.oob_select == palmetto::gfx10::OobSelect::raw);
+
+    D3D12_SAMPLER_DESC decoy_sampler{};
+    decoy_sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    decoy_sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    decoy_sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    decoy_sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    decoy_sampler.MaxAnisotropy = 1;
+    decoy_sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    decoy_sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    D3D12_SAMPLER_DESC known_sampler = decoy_sampler;
+    known_sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    known_sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    known_sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    known_sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    device->CreateSampler(&decoy_sampler, sampler_cpu_slot(0));
+    device->CreateSampler(&known_sampler, sampler_cpu_slot(1));
+    std::array<std::uint32_t, 4> sampler_decoy_words{}, sampler_words{};
+    std::memcpy(sampler_decoy_words.data(), reinterpret_cast<const void*>(sampler_cpu_slot(0).ptr),
+                sizeof(sampler_decoy_words));
+    std::memcpy(sampler_words.data(), reinterpret_cast<const void*>(sampler_cpu_slot(1).ptr), sizeof(sampler_words));
+    EXPECT(sampler_words != sampler_decoy_words);
+
+    std::uint64_t resource_base = 0, sampler_base = 0;
+    EXPECT(rt::d3d12::rebase_console_va(device.p, resource_gpu, resource_base, true));
+    EXPECT(rt::d3d12::rebase_console_va(device.p, sampler_gpu, sampler_base, true));
+    EXPECT(resource_base <= 0xFFFFFFFFu - resource_increment && sampler_base <= 0xFFFFFFFFu - sampler_increment);
+
+    D3D12_COMMAND_QUEUE_DESC queue_desc{};
+    Ref<ID3D12CommandQueue> queue;
+    Ref<ID3D12Fence> fence;
+    EXPECT(SUCCEEDED(device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue.p))));
+    EXPECT(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.p))));
+    UINT64 fence_value = 0;
+    if (strict) {
+        EXPECT(run_direct_heap_dispatch(device.p, queue.p, fence.p, root.p, pso.p, source_upload.p, source.p,
+                                        resource_heap.p, sampler_heap.p, true, true, true, kDirectHeapFetchMode, false,
+                                        fence_value, static_cast<std::uint32_t>(resource_base),
+                                        static_cast<std::uint32_t>(sampler_base), sampler_words) == 0);
+        EXPECT(run_direct_heap_dispatch(device.p, queue.p, fence.p, root.p, pso.p, source_upload.p, source.p,
+                                        resource_heap.p, sampler_heap.p, false, false, false, kDirectHeapFetchMode, true,
+                                        fence_value, static_cast<std::uint32_t>(resource_base),
+                                        static_cast<std::uint32_t>(sampler_base), sampler_words) == 0);
+        EXPECT(run_direct_heap_dispatch(device.p, queue.p, fence.p, root.p, pso.p, source_upload.p, source.p,
+                                        resource_heap.p, sampler_heap.p, true, false, false, kDirectHeapFetchMode, true,
+                                        fence_value, static_cast<std::uint32_t>(resource_base),
+                                        static_cast<std::uint32_t>(sampler_base), sampler_words) == 0);
+    } else {
+        EXPECT(run_direct_heap_dispatch(device.p, queue.p, fence.p, root.p, pso.p, source_upload.p, source.p,
+                                        resource_heap.p, sampler_heap.p, true, true, true, kDirectHeapFetchMode, false,
+                                        fence_value, static_cast<std::uint32_t>(resource_base),
+                                        static_cast<std::uint32_t>(sampler_base), sampler_words) == 0);
+        EXPECT(run_direct_heap_dispatch(device.p, queue.p, fence.p, root.p, pso.p, source_upload.p, source.p,
+                                        resource_heap.p, sampler_heap.p, true, false, false,
+                                        kDirectHeapLegacyNoBaseMode, false, fence_value,
+                                        static_cast<std::uint32_t>(resource_base),
+                                        static_cast<std::uint32_t>(sampler_base), sampler_words) == 0);
+    }
+    EXPECT(d.validation_errors() == 0);
+    std::printf("direct-heap %s arm: complete resource/sampler base + descriptor 1 reached shader\n",
+                strict ? "strict" : "legacy");
+    return 0;
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 3 && std::strcmp(argv[1], "--direct-heap-arm") == 0) {
+        if (std::strcmp(argv[2], "strict") == 0) return run_direct_heap_arm(true);
+        if (std::strcmp(argv[2], "legacy") == 0) return run_direct_heap_arm(false);
+        std::fprintf(stderr, "unknown direct-heap child arm: %s\n", argv[2]);
+        return 1;
+    }
+    if (argc != 1) {
+        std::fprintf(stderr, "unexpected d3d12_compute_test arguments\n");
+        return 1;
+    }
+    const int direct_heap_status = run_direct_heap_arms();
+    if (direct_heap_status != 0) return direct_heap_status;
     vktest::Device d;
     const auto device_status = d.initialize();
     if (device_status == vktest::DeviceStatus::unavailable) {
@@ -558,6 +1018,11 @@ int main() {
         EXPECT(SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, nullptr,
                                                    IID_PPV_ARGS(&list.p))));
         EXPECT(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.p))));
+        // Keep execution on the Xbox queue proxy, but use the real PC queue/fence for Signal: Xbox reserves queue slot
+        // 14, and the PC Signal method at that same slot is intentionally refused by the proxy.
+        ID3D12CommandQueue* signal_queue = rt::d3d12_xs::queue_proxy_real_queue(queue.p);
+        ID3D12Fence* signal_fence = rt::d3d12_xs::fence_proxy_real_fence(fence.p);
+        EXPECT(signal_queue && signal_fence);
 
         // Misuse is reported by Close: a dispatch without a pipeline, a root view set on a constants parameter.
         list->Dispatch(1, 1, 1);
@@ -623,7 +1088,7 @@ int main() {
         ID3D12CommandList* lists[] = {list.p};
         queue->ExecuteCommandLists(1, lists);
         EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
-        EXPECT(SUCCEEDED(queue->Signal(fence.p, 1)));
+        EXPECT(SUCCEEDED(signal_queue->Signal(signal_fence, 1)));
         EXPECT(SUCCEEDED(fence->SetEventOnCompletion(1, nullptr)));
 
         void* results = nullptr;
@@ -742,7 +1207,7 @@ int main() {
             EXPECT(list->Close() == S_OK);
             queue->ExecuteCommandLists(1, lists);
             EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
-            EXPECT(SUCCEEDED(queue->Signal(fence.p, 2)));
+            EXPECT(SUCCEEDED(signal_queue->Signal(signal_fence, 2)));
             EXPECT(SUCCEEDED(fence->SetEventOnCompletion(2, nullptr)));
 
             void* cb_res = nullptr;
@@ -925,7 +1390,7 @@ int main() {
             EXPECT(list->Close() == S_OK);
             queue->ExecuteCommandLists(1, lists);
             EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
-            EXPECT(SUCCEEDED(queue->Signal(fence.p, 3)));
+            EXPECT(SUCCEEDED(signal_queue->Signal(signal_fence, 3)));
             EXPECT(SUCCEEDED(fence->SetEventOnCompletion(3, nullptr)));
 
             void* srv_res = nullptr;

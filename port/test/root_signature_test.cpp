@@ -524,6 +524,9 @@ int main() {
         using rt::rootsig::kFlagMaskXboxTypeBits;
         using rt::rootsig::kFlagSamplerHeapDirectlyIndexed;
 
+        check(kFlagCbvSrvUavHeapDirectlyIndexed == 0x400u && kFlagSamplerHeapDirectlyIndexed == 0x800u,
+              "direct heaps: public D3D12 direct-index flags use 0x400 and 0x800");
+
         // The measured frame's two signatures: a table-only one (flags 0x1) and a root-view one (flags 0). In the
         // console layout a table takes one dword and a root view two, so the argument ends the heap bases follow are
         // s9 and s10.
@@ -586,7 +589,7 @@ int main() {
               "direct heaps: the parsed flag state selects the measured packing");
 
         // Named refusals: unknown PC flag bits, an unplaced or spilled layout, and no room before s32.
-        const auto unknown = direct_heap_slots(table_px, kFlagCbvSrvUavHeapDirectlyIndexed | 0x400u);
+        const auto unknown = direct_heap_slots(table_px, kFlagCbvSrvUavHeapDirectlyIndexed | 0x1000u);
         check(!unknown.ok && unknown.error.find("outside the modelled D3D12 set") != std::string::npos,
               "direct heaps: an unmodelled PC flag bit is refused by name");
         const auto unplaced = direct_heap_slots(kFlagCbvSrvUavHeapDirectlyIndexed, kNoSgpr, false);

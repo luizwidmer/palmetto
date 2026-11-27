@@ -200,7 +200,7 @@ struct StagePackResult {
 // flag, so the placement is a pure model with named refusals, fed by the bind points only when a signature carries the
 // flags.
 //
-// Flag values are the public D3D12 D3D12_ROOT_SIGNATURE_FLAGS bits. The Xbox build also sets type bits in the high byte
+// Flag values are the public D3D12_ROOT_SIGNATURE_FLAGS bits. The Xbox build also sets type bits in the high byte
 // (measured 0x03000000, docs/d3d12_vulkan.md section 3.5); their meaning is unknown and they never select a packing, so
 // they are recorded on the result instead of being refused.
 constexpr uint32_t kFlagAllowInputAssemblerLayout = 0x1;
@@ -209,10 +209,11 @@ constexpr uint32_t kFlagDenyHullShaderRootAccess = 0x4;
 constexpr uint32_t kFlagDenyDomainShaderRootAccess = 0x8;
 constexpr uint32_t kFlagDenyGeometryShaderRootAccess = 0x10;
 constexpr uint32_t kFlagDenyPixelShaderRootAccess = 0x20;
-constexpr uint32_t kFlagDenyAmplificationShaderRootAccess = 0x40;
-constexpr uint32_t kFlagDenyMeshShaderRootAccess = 0x80;
-constexpr uint32_t kFlagCbvSrvUavHeapDirectlyIndexed = 0x100;
-constexpr uint32_t kFlagSamplerHeapDirectlyIndexed = 0x200;
+constexpr uint32_t kFlagAllowStreamOutput = 0x40;
+constexpr uint32_t kFlagDenyAmplificationShaderRootAccess = 0x100;
+constexpr uint32_t kFlagDenyMeshShaderRootAccess = 0x200;
+constexpr uint32_t kFlagCbvSrvUavHeapDirectlyIndexed = 0x400;
+constexpr uint32_t kFlagSamplerHeapDirectlyIndexed = 0x800;
 constexpr uint32_t kFlagMaskPcMeaning = 0xFFFF;           // the D3D12 flags field
 constexpr uint32_t kFlagMaskXboxTypeBits = 0xFF000000;    // the Xbox type byte (meaning unknown)
 

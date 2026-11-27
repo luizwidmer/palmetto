@@ -117,8 +117,8 @@ DirectHeapSlots direct_heap_slots(uint32_t flags, uint32_t arguments_end, bool s
     constexpr uint32_t kKnownPcFlags = kFlagAllowInputAssemblerLayout | kFlagDenyVertexShaderRootAccess |
                                        kFlagDenyHullShaderRootAccess | kFlagDenyDomainShaderRootAccess |
                                        kFlagDenyGeometryShaderRootAccess | kFlagDenyPixelShaderRootAccess |
-                                       kFlagDenyAmplificationShaderRootAccess | kFlagDenyMeshShaderRootAccess |
-                                       kDirectHeapFlags;
+                                       kFlagAllowStreamOutput | kFlagDenyAmplificationShaderRootAccess |
+                                       kFlagDenyMeshShaderRootAccess | kDirectHeapFlags;
     if (const uint32_t unknown = out.pc_flags & ~kKnownPcFlags) {
         char text[128] = {};
         std::snprintf(text, sizeof(text),
