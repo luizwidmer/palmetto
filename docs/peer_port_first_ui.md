@@ -640,4 +640,206 @@ unreachable). No code, comment text, identifier or table from those projects was
 constants, the rule, the thunk, the parsers and the tests are ours, derived from the call sites and boots above. The
 peers remain the copyright of their contributors and their licences continue to apply to their own trees.
 
+## 14. The implemented port: the measured display answers, the UI page/resource probe, and what the probe found (P4, P6)
 
+**Status: implemented, tested and measured with two light arms (one 69 s arm that lost the host device, one clean
+300 s arm that reached and held stage 3); no presented pixel changed, and the UI question is answered.** The display capability answers the peers serve are now this tree's defaults: the HDR answer
+follows the host desktop through DXGI (the five-star mechanism) instead of a switch, the display timeout deferral is
+served with a Windows display-required power request (every peer that implements it does), and the switches that force
+either side are kept and refused by name when misspelled. The UI page/resource probe answered the audit's P4 question
+with a positive and a negative: the title's resource-type dispatcher resolves the handler for **RBF0**-typed resources
+**131 times in the 69 s arm and 141 times in the clean arm, all of them before the stage-3 entry** (so the
+resource-type/page-data layer *does* run), while the three front-end page owners probed beside it - profile-name text
+entry, the profile card and the first-run flow state machine - have **0 hits in both arms**, and every presenter capture
+is still mean rgb `0.00 0.00 0.00`. The producer the peers show is therefore above the page-data layer: the title loads
+and identifies its RBF0 page data, and the first-run page/screen flow that would draw it never runs. The first arm
+stopped on the host's first Vulkan device loss at 69.2 s (before stage 3); the second was clean for its full 300 s and
+held stage 3 for the last 230 s, and the stop rule (two losses) was therefore never reached. Both arms are in 14.4.
+
+### 14.1 What was measured before the port
+
+The display surface is one thunk and two wrappers; the page layer is a registered type dispatcher. All RVAs are the
+retail image's (preferred base `0x140000000`); no game data is quoted.
+
+| measurement | value and where |
+|---|---|
+| the title's display import surface | `tooling/gdk_runtime_calls.py` finds exactly **one** `XDisplayImpl` thunk in the executable, referenced once: `XDisplayTryEnableHdrMode` (class `03f0fe74-…`, interface `35f07670-…`, slot 4). The title cannot ask the runtime any other display capability: IXDisplayImpl's methods are the docs' unknown slot 3 and this slot 4 only |
+| the two callers | `game+0x2481D68` (inside `game+0x2481CA0..0x2481E73`) and `game+0x5A38971` (inside `game+0x5A38910..0x5A38B1B`); `game+0x2481CA0` is called once from `game+0x247AB19`, `game+0x5A38910` once from `game+0x5A388A6` |
+| the preference and info shape | disassembled `game+0x2481CA0`: `mov ecx,0; mov edx,0; call XDisplayTryEnableHdrMode` - preference **PreferHdr** (0) and a **null** info pointer. `game+0x5A38910`: the same preference and a **non-null** info block in its own stack; on result 0x1 it copies the three floats to its display settings (`+0x274`, `+0x27C`) and sets the enabled byte (`+0x280`), on 0x2 it takes the disable path |
+| the display-mode answer the title consumes | the same wrapper `game+0x2481CA0` then enumerates a mode list through an indirect display call (a `0x20`-byte record per mode: width +0x0, height +0x4, DXGI_RATIONAL refresh +0x8, format +0x10, scanline order +0x14, scaling +0x18 - the console mode-record shape PercyScarlett's layer answers) and compares each record's refresh numerator with `0x78` (120). It stores the byte `1` at `image+0x760E660` when a 120 Hz mode is offered and the qword DXGI_RATIONAL `{120,1}` or `{60,1}` at `image+0xA9438D4` |
+| the mode-list source in this tree | the title's DXGI calls are this tree's proxy (`port/shims/dxgi_com.cpp`), whose `GetDisplayModeList`/`GetDisplayModeList1` answer the host's `EnumDisplaySettingsW` modes plus the current mode (`collect_modes`). The peers differ here: PercyScarlett answers **one** console mode (4K by default, `VICTORY_DISPLAY_MODE` overrides it, 60 Hz progressive) and its own comment names this exact consumer ("the title looks for a 120 Hz one to allow 120 Hz frame intervals"); five-star answers the host's modes |
+| the consumed display words (pre-port logs) | not sampled before this slice; section 14.4's state-trace line now reads them: high-refresh flag and refresh rational |
+| display capability queries in prior arms | four `QueryApiImpl XDisplayImpl` requests at +2.23/+2.82/+23.31/+25.73 s in `boot-long1` (and +1.07/+1.67/+16.28/+18.46 s in `boot-input1`); the old shim logged its one HDR answer once ("HDR disabled (SDR output)") and the title continued. No arm has a `XLauncherImpl slot 4`/`slot 5` line: the display timeout deferral was **never called** in the measured windows |
+| the deferral wrappers | `game+0x23541D0` (`XDisplayAcquireTimeoutDeferral` wrapper: calls `game+0x55DEC88` at `game+0x2354221` and keeps the handle at its display object's `+0x4A8`) and `game+0x2354240` (`XDisplayCloseTimeoutDeferralHandle`: calls `game+0x55DECF8` at `game+0x235425A` and clears the field); both are address-taken in one display object's vtable (`.rdata` VA64 at `0xA1B2D58`/`0xA1B2D80`), never called in the measured windows |
+| the host display this port was measured on | the same DXGI enumeration the shim uses, run against the host: `\\.\DISPLAY1` colour space 0 (SDR, G22/P709), 8 bits per colour, min 0.5 / max 270 / max-full-frame 270 nits. So the auto answer on this machine is Disabled - the pre-slice answer - and the boot is a parity arm for HDR by construction |
+| the RBF0 magic test (static) | the only `.text` site that compares a dword with `"RBF0"` (little-endian `0x30464252`) is `game+0x135A290`: `cmp ecx,0x30464252; sete al; ret` (10 bytes, inside no larger compare ladder). A fixed scan finds **no** `E8`/`E9` rel32 branch, no 8-byte VA and no 32-bit RVA data reference to it - it is reached through a register call, and the probe in 14.4 names the caller |
+| the RBF0 dispatcher (static) | `.pdata` gives the caller of `game+0x135A290` as the 142-byte function `game+0x135A200..0x135A28E`: it walks an array of matcher entries (`count` at `+0x20`, array at `+0x18`, each entry a callback at `+0x10` with an optional context at `+0x8`), calls each with the 32-bit identifier, and returns the first matcher's index or `0xFFFFFFFF`. The RBF0 predicate is one registered matcher; the identifier reaches it in `ecx` (`0x30464252` in every measured hit), so the title asks this dispatcher to resolve the handler for an RBF0-typed resource |
+| front-end page owners (prior arms) | profile-name text entry `0x2234A40` and profile card `0x3DAF310` had 0 hits in the two arms of `decomp_first_ui.md` section 17.6; the first-run flow state machine `0x22364A0` (entered from `0xB1AE2F`, `0x27D25E8`, `0x27D4E93`) and the 2D batch path (`0x517A290` with 82 direct call sites, rectangle/fill `0x3A1B860`, transform copy `0x58C8950`, submit `0x2AACF0`) were not probed |
+
+Three readings made the design decisions:
+
+1. **The HDR answer is a host answer, not a policy.** A console answers what its output can do; five-star reports the
+   Windows desktop's own HDR10 state and luminance through `IDXGIOutput6::GetDesc1`, and the VIctory family answers
+   Disabled only because its swap chain cannot present HDR, with its own note to report the host's luminance once it can.
+   This tree's presenter already composes and presents HDR10 planes (`port/shims/xbox_present.cpp`, exercised by its
+   pixel tests), so the host answer is the honest one here. On this SDR host it equals the pre-slice answer, which is
+   what makes the arm a parity measurement.
+2. **The deferral is a console answer too.** The title asks the system to keep the display on for as long as a deferral
+   is open; five-star, VIctory and PercyScarlett all map it to a Windows `PowerCreateRequest`/`PowerSetRequest` display
+   requirement. Refusing it with `E_FAIL` was the stand-in, not a console behaviour.
+3. **The UI question is one probe set, not a rewrite.** The audit's falsifier is "no UI page or batch ask exists in the
+   window". The probe therefore instruments both sides of that sentence in one boot: the page-data gate (the RBF0 magic
+   matcher) and the page owners that would consume a loaded page, with the same bounded int3 machinery the movie probes
+   use, and reads the display state the title consumed from its own words instead of another hook.
+
+### 14.2 What was implemented
+
+| change | what it is |
+|---|---|
+| `port/shims/xgameruntime_offline.cpp`, the HDR answer | per call, the switch is read (no cached value): `auto`/unset/empty = the host answer; `1`/`on`/`true`/`yes` = Enabled with the documented 0.01/1000/1000 nits; `0`/`off`/`false`/`no` = Disabled; anything else is refused by name once and auto applies. The host answer loads the real `dxgi.dll` by name (`CreateDXGIFactory1` through `GetProcAddress`, no build-file or link change), takes the first adapter with an output and its output 0, and reads `IDXGIOutput6::GetDesc1`: Enabled with the measured min/max/max-full-frame luminance when the colour space is `DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020` (HDR10), else Disabled; no output answering is Disabled. The info pointer stays optional, the output is zeroed when Disabled, and every call is logged (first 8, then every 16th) with the preference, whether the caller passed an info pointer, and the answer's source |
+| `port/shims/xgameruntime_offline.cpp`, the display timeout deferral | `XDisplayAcquireTimeoutDeferral` creates one `PowerCreateRequest` with a display-required simple reason per deferral, sets `PowerSetRequest(PowerRequestDisplayRequired)`, and hands the request out as the handle after recording it in a file-local table; `XDisplayCloseTimeoutDeferralHandle` clears and closes only a handle in that table (null, double close and a foreign handle do nothing). A Windows failure is returned as `HRESULT_FROM_WIN32(GetLastError())` with a null handle; a null output pointer is `E_INVALIDARG`. `PALMETTO_DISPLAY_DEFERRAL=0`/`off`/`false`/`no` restores the pre-slice `E_FAIL`; a value that is neither side is refused by name once and the console answer applies |
+| `port/shims/xgameruntime_offline.cpp`, test hooks | the answer counters, the switch parser, a synthetic-host setter and the open-deferral count, so the unit test is deterministic on any machine and never depends on the host display |
+| `port/src/main.cpp`, the display state line | the existing `PALMETTO_STATE_TRACE` sampler gains one line: the high-refresh flag byte at `image+0x760E660` and the chosen DXGI_RATIONAL refresh at `image+0xA9438D4` (numerator/denominator). No hook, no write: it reads the words the title's own display service stored |
+| `port/src/main.cpp`, the UI probe | `PALMETTO_UI_PROBE=pages` installs four one-shot int3 entry probes through the existing poke machinery: profile-name text entry `0x2234A40`, profile card `0x3DAF310`, the first-run flow state machine `0x22364A0`, and the RBF0 magic matcher `0x135A290` (with a byte-shape check of `cmp ecx,0x30464252` before poking: if the bytes are not the measured compare the probe refuses the site by name and installs the other three). `=draw` is the next arm's set: batch build `0x517A290`, rectangle/fill `0x3A1B860`, transform copy `0x58C8950`, submit `0x2AACF0`. Unknown groups are refused by name. Both switches are off by default; the default path installs no probe and reads no extra word |
+
+No build file, CMake list, presenter, DXGI proxy, README or NOTICE file changed. The default answer of every other class
+in the file is untouched.
+
+### 14.3 Tests
+
+`port/test/xgameruntime_offline_test.cpp` gains the section-14 block; the target prints **116 checks, 0 failures** in
+both ctest variants (`xgameruntime_offline` with no switch, and `xgameruntime_offline_hdr` with `PALMETTO_HDR=1`). The
+block covers:
+
+- **The HDR switch parser**: unset/empty/`auto`/padded ` AUTO ` = auto; `1`/`on`/`TRUE`/` yes ` = forced on;
+  `0`/`off`/`false`/` NO ` = forced off; `2`/`banana` = refused by value.
+- **The answer rule against a synthetic host**: auto on an SDR host = Disabled with the info cleared; auto on an HDR10
+  host = Enabled with the host's 0.5/270/260 nits; auto with no host output = Disabled; the host is probed once per
+  answer; `PALMETTO_HDR=1` = Enabled with 0.01/1000/1000 nits and the host not asked; `PALMETTO_HDR=0` on an HDR10 host
+  = Disabled; `auto` spelled out = the host answer; a refused value applies auto; the counters count the calls and the
+  Enabled answers; the info pointer is optional.
+- **The display timeout deferral**: two deferrals are two requests; the open count follows them; close clears and a
+  double close, a null close and a foreign handle change nothing; a null output pointer is `E_INVALIDARG`; the
+  `PALMETTO_DISPLAY_DEFERRAL=0`/`off` fallback restores `E_FAIL` with a null handle and leaves nothing open; an unknown
+  switch value is refused by name and the console answer applies.
+
+### 14.4 The arms
+
+Two boots under the shared lock, the boot template's content environment (section-12/17 environment: deferred compile,
+2 s state trace, alloc watch, stage-3 pump, presenter captures every 200 frames to 12), the mitigation
+`PALMETTO_TITLE_CLASS0A_SIZE=1` and `PALMETTO_UI_PROBE=pages`; `-Light`. Arm A ran to a 180 s limit, arm B to a 300 s
+limit. The binaries are two gate builds from the same tree: A `5B13C561086BD0DD…`, B `5B35ADCFC0DD0758…` (SHA-256 first
+16); the only object that changed between them is the concurrent XG-upload slice's `port/shims/xg_xs.cpp` (its object
+was rebuilt at 06:52:56, after arm A), while this slice's two runtime objects were already final before both links, so
+the two arms ran the same display answers and the same probe set. The host display is SDR (14.1).
+
+| measurement | arm A: `boot-portui1` | arm B: `boot-portui2` |
+|---|---|---|
+| limit / verdict | 180 s limit; STOP `game+0x6D90A2` reading `0x4f747d2c654`, exit `0xC0000005`, 1 exception, wall 69.2 s | 300 s limit; **ALIVE 300.2 s**, killed by the harness timeout, 0 exceptions |
+| device loss | **1**, `[rt] replay: the Vulkan device was lost` at timeline t=67,495.87 ms (state-trace clock ~66 s), before the stop | **0** |
+| stage/session words | init 2 from 22.0 s, loading 1 from 22.0 s, session 0 -> 1 at 64.0 s, loading 1 -> 2 at 66.0 s; stage 3 **not reached**; machine 2/2; boot-media gate 2; platform gate 0x101; media semaphores 0x714/0x71c | init 2 at 20.0 s, loading 1 at 20.0 s, loading 1 -> 2 and session 0 -> 1 at 64.0 s, **init 2 -> 3, session 1 -> 3 and machine pending 2 -> 3 at 68.0 s**, held to the 298.0 s sample; loading 2; platform gate 0x101; boot-media gate 2; media semaphores 0x714/0x71c; the stage-3 pump samples stage 3 at 66.6 s with the heartbeat advancing (1,232 advances, 26 since stage 3, last 0.1 s before the +2 s sample) |
+| display queries (the shim's per-call lines) | 4 calls, all preference 0: one with an info block (the `game+0x5A38910` wrapper) in the first seconds, three with a null info pointer (the `game+0x2481CA0` wrapper) at about 2.8 s, 20-22 s and 24-26 s; every answer **Disabled (auto: host desktop SDR)** | identical: 4 calls, same shapes and the same order, every answer **Disabled (auto: host desktop SDR)** |
+| display answer the title consumed | high-refresh flag **0x0**, refresh **60/1** from the 4.0 s sample to the last sample | high-refresh flag **0x0**, refresh **60/1** from the 4.0 s sample to the 298.0 s sample |
+| display timeout deferrals | **0** calls (no `XLauncherImpl slot 4/5` line) | **0** calls |
+| UI probe installed | 4 sites poked (`0x2234A40`, `0x3DAF310`, `0x22364A0`, `0x135A290`); `PALMETTO_UI_PROBE=pages: 4 front-end page-owner probe(s)` | the same 4 sites and the same line |
+| UI probe hits | text entry **0**, profile card **0**, first-run flow state machine **0**, RBF0 magic matcher **131**, every hit with `ecx` = `0x30464252` and return address `game+0x135A247` (inside the dispatcher `game+0x135A200`); distribution 1 in the first seconds, 22 in the 20-30 s window, 108 in the 60-67 s window | text entry **0**, profile card **0**, first-run flow state machine **0**, RBF0 magic matcher **141**, same `ecx`/return address; distribution 1 in the first seconds, 22 in the 20-40 s window, 118 in the 60-68 s window |
+| RBF0 hits after stage 3 | not applicable (stage 3 not reached) | **0** from the stage-3 entry (line 251,920 of 1,299,391) to the 300 s kill; the last hit is line 251,448, before the entry |
+| front-end manager | created, ready 1, running 1 from the 40.0 s sample, all seven service holders live with their measured vtables (`…654D830` … `…654D350`) to the last sample | created, ready 1, running 1 from the 40.0 s sample, the same seven services and vtables to the 298.0 s sample |
+| movie chain | slot 0 bound by the 66.0 s sample (entity non-null, active 1, armed 1, media-id `0x540714f3`); player state 0x3, probe 1, open 1, **buffers 0** | slot 0 bound; from stage 3 to 298.0 s player state **0x9**, non-null Bink handle, open 1, probe 0, error 0, **buffers 0** |
+| presenter captures | 12 (frames 1-2201), 2564x1421, every one mean rgb `0.00 0.00 0.00` | 12 (frames 1-2201), 2564x1421, every one mean rgb `0.00 0.00 0.00` |
+| content readbacks | none armed in this arm (`PALMETTO_READBACK_FULL` off; the template's centre readback wrote no PPM) | four 128x128 centre readbacks: draws 4800 and 4802 mean `0 0 0`, peak 0 (`0/16,384` non-black); draws 4801 and 4803 mean 119, peak 204 - the layer's own write-control colour `51 102 204` (`16,384/16,384` non-black), not title content |
+| pipeline creation at the last sample | at 60.1 s: 54,905 graphics and 4,825 compute programs created by the proxy, 2 graphics and 321 compute driver pipelines | at 295.1 s: 55,055 graphics and 4,825 compute proxy programs, 4 graphics and 362 compute driver pipelines - no UI batch program is separately nameable, and the count barely moves after the load window |
+| D3D12 calls / trace events | 146,903 calls, 8,083 trace events | 1,111,478 calls, 51,920 trace events |
+
+The second arm is the one that answers the stage-3 question: the **clean 300 s arm** reached stage 3 at 68.0 s and
+held it to the 298.0 s sample (`init 3`, `loading 2`, `session 3`, machine current/next 3/3) with **0 exceptions and 0
+device losses**, and in that arm the RBF0 dispatcher's 141 hits all precede the stage-3 entry: after stage 3 the same
+probe records **0 hits for the next 230 s**, the three page owners stay at 0 hits, the movie player holds state `0x9`
+with `buffers 0`, the front-end manager stays ready and running, every one of the 12 presenter captures is mean rgb
+`0.00 0.00 0.00`, and the four 128x128 centre readbacks read `0 0 0` on the two render-target draws and the layer's own
+write-control colour `51 102 204` on the two control draws.
+
+The verdict, from both arms: **the page/resource layer runs in the load window and the page flow does not.** The title
+asks its resource dispatcher for the RBF0 handler 131/141 times, in three clusters that line up with the boot's own
+resource steps (one in the first seconds, 22 in the 20-40 s working-set step, and 108-118 in the loading 1 -> 2 step
+that ends at stage 3) - so RBF0-typed resources are being matched to their handler before stage 3, not missing. The
+parse itself is one step below this measurement (the dispatcher returns the handler index; the handler entry is the
+next probe), and the hits are the strongest reach signal a page-data probe can show without naming a resource id. The
+three page owners beside it never run in either arm, the front-end manager renders throughout, the movie slot binds,
+and the presented frame stays black. The audit's P4 sentence is therefore answered the other way round from the plan's
+expectation: the UI resource/page layer is *not* the missing producer; the missing producer is the first-run
+page/screen flow above it (the same state-step conclusion sections 6 and 12 reached by other routes).
+
+### 14.5 Verdict, limits and the next falsifier
+
+- **The HDR answer is a parity change on this host and a real answer on an HDR one.** On the SDR host the auto answer
+  equals the pre-slice Disabled answer; the arm cannot show what the title does with Enabled. A clean HDR desktop would
+  be the measurement: the same boot on an HDR10 output should show the Enabled answer with the output's luminance and
+  the title's plane/frame path taking its HDR branch (the presenter's HDR10 path is already tested, so the falsifier is
+  a capture or a plane colour-space change, not a crash).
+- **The display-mode answer is measured, not changed.** The consumer is the title's 120 Hz check, and this tree's
+  answer comes from `port/shims/dxgi_com.cpp` (host modes). The two peer answers differ (PercyScarlett/VIctory: one
+  console mode at 60 Hz; five-star: host modes). On this 60 Hz host all three produce `{60,1}`; on a 120 Hz host ours
+  would produce `{120,1}` while PercyScarlett's fixed answer keeps 60. The next falsifier is a boot on a 120 Hz output
+  comparing the consumed refresh word and the title's frame interval. Changing that answer means `dxgi_com.cpp`, outside
+  this slice's file scope; the state-trace line is the measurement it needs.
+- **The deferral answer is installed and unexercised.** The title never calls it in the measured windows, so the port is
+  parity by construction; a boot in which the title acquires one (a menu or a load that wants the screen on) is the
+  falsifier that would exercise the handle lifecycle in the title, not only in the unit test.
+- **Two arms, one loss and one clean long window.** The 69 s arm lost the host device once (the first of the session's
+  two-loss rule, which was not reached because the second arm was clean); the 300 s arm held stage 3 for 230 s with no
+  exception and no loss. The RBF0/post-stage-3 negative is therefore measured in a clean window, and the page owners'
+  zero is measured twice. The pre-stage-3 second-count difference between the arms (131 vs 141 hits, 108 vs 118 in the
+  load burst) is the arms' own timing, not a switch effect: both ran the same binary and the same probe set.
+- **The probe names a layer, not a schema.** All 131 dispatcher hits pass the RBF0 magic, but the RBF0 corpus carries UI
+  framework/data schemas *and* movie-subtitle and tuning/config schemas, so the count measures "RBF0-typed resources are
+  being identified", not "UI pages specifically". A probe that names the loaded resource ids would be game data and is
+  not made; the page owners' zero hits is what separates page data from page flow.
+- **The int3 probes are entry-only and the same machinery the movie probes use.** A hit costs an exception and a
+  single-step; 131 hits in 69 s is far below the rate that distorts a boot, and the three quiet sites cost nothing. An
+  interior branch is not separated, and a function reached through a computed pointer still fires (that is how the RBF0
+  matcher was found after the static scan missed its address-taken form).
+
+### 14.6 Files, gates and the index row
+
+- **Files changed by this slice**: `port/src/main.cpp` (the display constants and state-trace line, the
+  `PALMETTO_UI_PROBE` groups and their shape check), `port/shims/xgameruntime_offline.cpp` (the HDR answer, the deferral
+  answer, the test hooks and the header comment), `port/test/xgameruntime_offline_test.cpp` (the section-14 block) and
+  this section of `docs/peer_port_first_ui.md`. No CMake, presenter, DXGI proxy, README or NOTICE file changed.
+- **Gates on this tree**: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints
+  `TESTS_BUILT`, the 16-target GPU-free gate subset passes 16 of 16 (including `xgameruntime_offline` and
+  `xgameruntime_offline_hdr`), `xgameruntime_offline_test` prints **116 checks, 0 failures** in both variants, and all
+  12 `tests/test_docs_*.py` files pass (run with the session's broken `GIT_CONFIG_*` variables cleared, per the rule the
+  earlier sections record). This section names `PALMETTO_UI_PROBE` and `PALMETTO_DISPLAY_DEFERRAL` (the two new
+  variables) as whole words, so the environment-variable check passes, and it keeps `PALMETTO_HDR`'s meaning.
+- **Stale neighbour rows**: [runtime_imports.md](runtime_imports.md) still describes `XDisplayTryEnableHdrMode` as
+  "answers Disabled, because the host output is SDR" and the deferral as failing with `E_FAIL`. That page is outside
+  this slice's write scope; the lead should refresh those two bullets when refreshing the peer pages.
+- **Index row**: [docs/README.md](README.md) already carries this page's row; the lead may extend its description with
+  "display answers and UI page probe (sections 14)". The [NOTICE.md](../NOTICE.md) row needed is 14.7's attribution,
+  appended to the existing "Implemented peer ports (reference only)" paragraph.
+- **Evidence (outside the repository)**: `D:\leonida-work\fsrstable\boot-portui1` and `boot-portui2` (stderr, stdout,
+  summary, boot trace, meta with the exact environment), `capture-portui1`/`capture-portui2` (12 presenter PPMs +
+  `index.txt` each) and `readback-portui2` (4 centre PPMs); the static display decompiles under
+  `D:\leonida-work\decomp\out-uidisplay`, `out-uidisplay-dis` and the RBF0 dispatcher under `out-uirbf0fn`; the host
+  display probe (`hosthdr.cpp`) and the arm analysis scripts under `D:\leonida-work\uiprobe`. RVAs, counts, times,
+  register values and image means only; no game data and no peer code.
+- **No git write**: the lead commits the four uncommitted files.
+
+### 14.7 Attribution
+
+This slice was implemented from this project's own measurements (the two display wrappers and their disassembly, the
+consumed display words, the resource dispatcher and its matcher, the arms in 14.4 and the unit-test host override). The
+behaviour was cross-checked against the public projects named in section 11, read as evidence only, at the refreshed
+clones: Five Star Recomp's `src/FiveStar.Loader/Shims/Gdk/DisplayService.cs`, `HdrDisplay.cs`, `DisplayProbe.cs` and
+`XDisplayShim.cs` at `ce2b333b` (the HDR answer reports the Windows desktop's HDR10 state and luminance from
+`IDXGIOutput6::GetDesc1`, and the display timeout deferral holds a `PowerCreateRequest` display requirement); VIctory's
+`crates/victory-hle/src/modules/display.rs` at `63bcca43` and PercyScarlett's
+`PercyPort/crates/percyport-hle/src/modules/display.rs` at `e44c465e` (Disabled while the presentation is SDR, with the
+note to report the host luminance once HDR can be presented; deferrals as power requests), and PercyScarlett's
+`runtime/victory/crates/victory-gpu/src/dxgi.rs` at `e44c465e` (the single 4K/configured 60 Hz progressive mode record
+whose consumer is the title's 120 Hz check); XCL's `crates/xcl/src/hle/xgameruntime/gdk_table.rs` at `623d02e4` (the
+`XDisplayTryEnableHdrMode` class/interface/slot entry). No code, comment text, identifier or table from those projects
+was copied: the answer rule, the DXGI probe, the power-request table, the probes and the tests are ours, derived from
+the call sites, the runtime arms and the unit tests above. The peers remain the copyright of their contributors and
+their licences continue to apply to their own trees.

@@ -14,7 +14,11 @@
 //                       (profile cards, pickers, text entry, web authentication, invites) fails before starting.
 //   XGameStreamingImpl  the game is never streamed: initialising succeeds, IsStreaming is false, there are no
 //                       clients, the connection-state registration hands out a token that never fires.
-//   XDisplayImpl        XDisplayTryEnableHdrMode: Disabled (the host output is SDR), Enabled with PALMETTO_HDR=1.
+//   XDisplayImpl        XDisplayTryEnableHdrMode: by default the host desktop's own answer, measured from the primary
+//                       DXGI output: Enabled with the output's luminance when the desktop runs HDR10, Disabled when it
+//                       does not (or when no output answers). PALMETTO_HDR=1 forces Enabled with the documented
+//                       defaults, =0/off/false/no forces Disabled (the pre-slice answer); any other value is refused by
+//                       name and auto applies. See docs/peer_port_first_ui.md section 14.
 //   XUserDeviceImpl     every device belongs to the offline user; associations and audio endpoints never change, so
 //                       their change registrations are kept until unregistered and never called back; the user has
 //                       no audio endpoint of its own; finding a controller shows no UI (as on desktop).
@@ -24,11 +28,18 @@
 //                       below and docs/first_run_path.md). PALMETTO_SILENT_SPEECH=0 refuses the create with E_FAIL
 //                       and a null handle, the answer this tree measured before the default change (the opt-out kept
 //                       for the fallback and the tests). Speech-to-text display calls fail (E_FAIL).
-//   XLauncherImpl       XLaunchUri and the display timeout deferral calls fail (E_FAIL); nothing is launched.
+//   XLauncherImpl       XLaunchUri fails (E_FAIL): nothing is launched. The two display timeout deferral calls are
+//                       served with a Windows "display required" power request, the console behaviour the peers
+//                       implement; PALMETTO_DISPLAY_DEFERRAL=0/off/false/no restores the pre-slice E_FAIL answer.
 //
 // Slots whose signature the public pages don't give answer with a value that is safe whichever way the caller reads
 // it: see `client_not_connected` (XGameStreaming) and `offline_failure`.
 #include <windows.h>
+
+// The host display's HDR state is read through the real dxgi.dll, loaded at run time: the runtime links no DXGI import
+// (the guest's DXGI calls are this tree's own proxy, port/shims/dxgi_com.cpp) and no build file changes for this slice.
+// Only the COM interfaces and the DXGI_OUTPUT_DESC1 fields are used; CreateDXGIFactory1 is resolved by name.
+#include <dxgi1_6.h>
 
 #include <intrin.h>
 
@@ -403,26 +414,209 @@ struct XDisplayHdrModeInfo {
     float maxFullFrameToneMapLuminance;
 };
 
-bool hdr_requested() {
-    static const bool on = [] {
-        char value[4] = {};
-        size_t length = 0;
-        return getenv_s(&length, value, "PALMETTO_HDR") == 0 && length == 2 && value[0] == '1';
+// ---- The measured display answer (docs/peer_port_first_ui.md section 14) ----
+//
+// Measurement: the retail title calls only IXDisplayImpl slot 4 (one XDisplayImpl thunk in the image), from two
+// wrappers, and the answer is consumed: image+0x5A38910 reads the three XDisplayHdrModeInfo floats into its display
+// settings and sets its HDR-enabled word when the result is Enabled, while image+0x2481CA0 asks with a null info
+// pointer. Our pre-slice answer was always Disabled unless a switch forced Enabled; the peers answer from the host:
+// five-star's display service reports what the Windows desktop runs (DXGI_OUTPUT_DESC1's colour space and luminance,
+// Enabled when it is HDR10), and the VIctory family answers Disabled only because its swap chain is SDR and says it
+// would report the host's luminance once it can present HDR. This tree's presenter can compose and present HDR10
+// planes (port/shims/xbox_present.cpp and its pixel tests), so the host answer is the honest one here.
+//
+// The answer rule, per call (no cached environment read, so a test can exercise every spelling):
+//   * PALMETTO_HDR unset, empty or "auto": the host desktop's own answer. The primary output is read through the real
+//     dxgi.dll: Enabled with its measured min/max/max-full-frame luminance when its colour space is HDR10 (PQ,
+//     Rec.2020), Disabled when it is SDR; Disabled when no output answers (the pre-slice answer is the safe fallback).
+//   * PALMETTO_HDR=1/on/true/yes: Enabled with the documented default luminances 0.01 / 1000 / 1000 nits (this is the
+//     pre-slice forcing switch, kept so an HDR arm does not depend on the desktop).
+//   * PALMETTO_HDR=0/off/false/no: Disabled, whatever the host runs (the pre-slice default).
+//   * any other value: refused by name once, auto applies (a typo never silently forces either answer).
+// The info pointer is optional. Every call is logged (first 8, then every 16th) with the preference, whether the caller
+// passed an info pointer, and the answer's source, so an arm shows every display query the title makes.
+
+enum class HdrSwitch { Auto = 0, ForcedOn = 1, ForcedOff = 2, RefusedByValue = 3 };
+
+// Reads an environment variable into a bounded buffer through the Win32 environment (the same per-call read the speech
+// switch uses, so a test's SetEnvironmentVariableA is seen). A value longer than the buffer is truncated, which can
+// never be one of the accepted spellings, so the parser below refuses it by name.
+bool environment_string(const char* name, char* out, std::size_t capacity) {
+    if (out == nullptr || capacity == 0) return false;
+    out[0] = '\0';
+    const DWORD length = GetEnvironmentVariableA(name, out, static_cast<DWORD>(capacity));
+    if (length == 0) return false;
+    if (length >= capacity) out[capacity - 1] = '\0';
+    return true;
+}
+
+// The three measured spellings plus auto, with the blank-trimmed value the project's other switches accept.
+bool trimmed_equals_ignore_case(const char* value, const char* lower_word) {
+    while (*value == ' ' || *value == '\t') ++value;
+    std::size_t length = std::strlen(value);
+    while (length && (value[length - 1] == ' ' || value[length - 1] == '\t')) --length;
+    bool equal = true;
+    std::size_t i = 0;
+    for (; i < length && lower_word[i]; ++i) {
+        char c = value[i];
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (c != lower_word[i]) equal = false;
+    }
+    return equal && i == length && lower_word[i] == '\0';
+}
+
+HdrSwitch parse_hdr_switch(const char* value) {
+    if (value == nullptr || *value == '\0') return HdrSwitch::Auto;
+    if (trimmed_equals_ignore_case(value, "auto")) return HdrSwitch::Auto;
+    if (trimmed_equals_ignore_case(value, "1") || trimmed_equals_ignore_case(value, "on") ||
+        trimmed_equals_ignore_case(value, "true") || trimmed_equals_ignore_case(value, "yes"))
+        return HdrSwitch::ForcedOn;
+    if (trimmed_equals_ignore_case(value, "0") || trimmed_equals_ignore_case(value, "off") ||
+        trimmed_equals_ignore_case(value, "false") || trimmed_equals_ignore_case(value, "no"))
+        return HdrSwitch::ForcedOff;
+    return HdrSwitch::RefusedByValue;
+}
+
+std::atomic<long> g_hdr_calls{0};
+std::atomic<long> g_hdr_enabled_answers{0};
+std::atomic<long> g_host_hdr_probes{0};
+
+// The host display state. `available` is false when the real dxgi.dll could not be loaded or no output answered.
+struct HostDisplayHdr {
+    bool available = false;
+    bool hdr10 = false;
+    float min_luminance = 0.0f;
+    float max_luminance = 0.0f;
+    float max_full_frame_luminance = 0.0f;
+};
+
+// A test-only override of the host probe: mode -1 = probe the host, 0 = available SDR, 1 = available HDR10. The runtime
+// never writes it; the unit test does, so the answer rule is exercised without depending on the machine's display.
+std::atomic<int> g_test_host_mode{-1};
+std::atomic<float> g_test_host_min{0.0f};
+std::atomic<float> g_test_host_max{0.0f};
+std::atomic<float> g_test_host_full{0.0f};
+
+using CreateDxgiFactory1Fn = HRESULT(WINAPI*)(REFIID, void**);
+
+CreateDxgiFactory1Fn create_dxgi_factory1() {
+    static const CreateDxgiFactory1Fn resolved = [] {
+        HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
+        if (dxgi == nullptr) return static_cast<CreateDxgiFactory1Fn>(nullptr);
+        return reinterpret_cast<CreateDxgiFactory1Fn>(GetProcAddress(dxgi, "CreateDXGIFactory1"));
     }();
-    return on;
+    return resolved;
+}
+
+// The primary output's HDR state through the host DXGI: the first adapter with an output, its output 0, its
+// DXGI_OUTPUT_DESC1. The same source and fields five-star's display service reads. The window has no say here: the
+// colour space of the desktop's output is what a console's XDisplayTryEnableHdrMode answer describes.
+HostDisplayHdr probe_host_display_hdr() {
+    HostDisplayHdr state;
+    const CreateDxgiFactory1Fn create = create_dxgi_factory1();
+    if (create == nullptr) return state;
+    IDXGIFactory1* factory = nullptr;
+    if (FAILED(create(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))) || factory == nullptr) return state;
+    for (UINT adapter_index = 0; !state.available; ++adapter_index) {
+        IDXGIAdapter1* adapter = nullptr;
+        if (factory->EnumAdapters1(adapter_index, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+        if (adapter == nullptr) continue;
+        for (UINT output_index = 0; !state.available; ++output_index) {
+            IDXGIOutput* output = nullptr;
+            if (adapter->EnumOutputs(output_index, &output) == DXGI_ERROR_NOT_FOUND) break;
+            if (output == nullptr) continue;
+            IDXGIOutput6* output6 = nullptr;
+            if (SUCCEEDED(output->QueryInterface(__uuidof(IDXGIOutput6), reinterpret_cast<void**>(&output6))) &&
+                output6 != nullptr) {
+                DXGI_OUTPUT_DESC1 desc{};
+                if (SUCCEEDED(output6->GetDesc1(&desc))) {
+                    state.available = true;
+                    state.hdr10 = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+                    state.min_luminance = desc.MinLuminance;
+                    state.max_luminance = desc.MaxLuminance;
+                    state.max_full_frame_luminance = desc.MaxFullFrameLuminance;
+                }
+                output6->Release();
+            }
+            output->Release();
+        }
+        adapter->Release();
+    }
+    factory->Release();
+    return state;
+}
+
+HostDisplayHdr host_display_hdr() {
+    ++g_host_hdr_probes;
+    HostDisplayHdr state;
+    const int override_mode = g_test_host_mode.load(std::memory_order_relaxed);
+    if (override_mode >= 0) {
+        if (override_mode == 2) return state;   // the test's "no output answered" case
+        state.available = true;
+        state.hdr10 = override_mode == 1;
+        state.min_luminance = g_test_host_min.load(std::memory_order_relaxed);
+        state.max_luminance = g_test_host_max.load(std::memory_order_relaxed);
+        state.max_full_frame_luminance = g_test_host_full.load(std::memory_order_relaxed);
+        return state;
+    }
+    return probe_host_display_hdr();
+}
+
+// What the info block is filled with when Enabled: the host's measured luminance range, or the documented defaults when
+// the caller forced HDR on (the pre-slice forcing switch's values).
+XDisplayHdrModeInfo enabled_hdr_info(const HostDisplayHdr& host) {
+    if (host.available && host.hdr10) return {host.min_luminance, host.max_luminance, host.max_full_frame_luminance};
+    return {0.01f, 1000.0f, 1000.0f};
 }
 
 // 4: XDisplayHdrModeResult XDisplayTryEnableHdrMode(XDisplayHdrModePreference preference, XDisplayHdrModeInfo* info)
-// The host swapchain is SDR, so HDR stays off unless PALMETTO_HDR=1; then it is "enabled" with the documented
-// defaults (0.01 / 1000 / 1000 nits).
-uint32_t STDMETHODCALLTYPE display_try_enable_hdr(void*, XDisplayHdrModePreference, XDisplayHdrModeInfo* info) {
-    const bool on = hdr_requested();
-    if (info) *info = on ? XDisplayHdrModeInfo{0.01f, 1000.0f, 1000.0f} : XDisplayHdrModeInfo{};
-    static std::atomic<bool> s_logged{false};
-    if (!s_logged.exchange(true))
-        std::fprintf(stderr, "[rt] xgameruntime: XDisplayTryEnableHdrMode: HDR %s\n",
-                     on ? "enabled (PALMETTO_HDR=1)" : "disabled (SDR output; PALMETTO_HDR=1 asks for HDR)");
-    return static_cast<uint32_t>(on ? XDisplayHdrModeResult::Enabled : XDisplayHdrModeResult::Disabled);
+uint32_t STDMETHODCALLTYPE display_try_enable_hdr(void*, XDisplayHdrModePreference preference, XDisplayHdrModeInfo* info) {
+    char value[16] = {};
+    const bool have_value = environment_string("PALMETTO_HDR", value, sizeof value);
+    const HdrSwitch mode = parse_hdr_switch(have_value ? value : nullptr);
+    const long call = g_hdr_calls.fetch_add(1) + 1;
+    static std::atomic<bool> s_refused_logged{false};
+    const bool log_this_call = call <= 8 || call % 16 == 0;
+    if (mode == HdrSwitch::RefusedByValue && !s_refused_logged.exchange(true))
+        std::fprintf(stderr,
+                     "[rt] xgameruntime: PALMETTO_HDR value \"%s\" is not auto, 1/on/true/yes or 0/off/false/no; the "
+                     "host's answer (auto) applies\n",
+                     value);
+    HostDisplayHdr host;
+    bool enabled = false;
+    const char* source = "";
+    if (mode == HdrSwitch::ForcedOn) {
+        enabled = true;
+        source = "forced by PALMETTO_HDR";
+    } else if (mode == HdrSwitch::ForcedOff) {
+        enabled = false;
+        source = "forced off by PALMETTO_HDR";
+    } else {
+        host = host_display_hdr();
+        enabled = host.available && host.hdr10;
+        source = !host.available      ? "auto: no host output answered"
+                 : host.hdr10         ? "auto: host desktop HDR10"
+                                      : "auto: host desktop SDR";
+    }
+    if (info != nullptr) *info = enabled ? enabled_hdr_info(host) : XDisplayHdrModeInfo{};
+    if (enabled) ++g_hdr_enabled_answers;
+    if (log_this_call) {
+        if (enabled) {
+            const XDisplayHdrModeInfo shown = enabled_hdr_info(host);
+            std::fprintf(stderr,
+                         "[rt] xgameruntime: XDisplayTryEnableHdrMode call %ld (preference %u, info %s): Enabled "
+                         "(%.4f/%.3f/%.3f nits; %s)\n",
+                         call, static_cast<unsigned>(preference), info != nullptr ? "given" : "null",
+                         shown.minToneMapLuminance, shown.maxToneMapLuminance, shown.maxFullFrameToneMapLuminance,
+                         source);
+        } else {
+            std::fprintf(stderr,
+                         "[rt] xgameruntime: XDisplayTryEnableHdrMode call %ld (preference %u, info %s): Disabled "
+                         "(%s)\n",
+                         call, static_cast<unsigned>(preference), info != nullptr ? "given" : "null", source);
+        }
+    }
+    return static_cast<uint32_t>(enabled ? XDisplayHdrModeResult::Enabled : XDisplayHdrModeResult::Disabled);
 }
 
 template <int Slot> HRESULT STDMETHODCALLTYPE display_unknown(void* self) { return unknown_slot<kDisplayName, Slot>(self); }
@@ -937,11 +1131,92 @@ constexpr char kLauncherName[] = "XLauncherImpl";
 constexpr GUID kLauncherClass = {0x1b339674, 0x328d, 0x4283, {0xa2, 0x00, 0x31, 0x71, 0xf1, 0x8d, 0x36, 0x39}};
 
 // 3: HRESULT XLaunchUri(XUserHandle user, const char* uri): nothing is launched; E_FAIL.
-// 4: HRESULT XDisplayAcquireTimeoutDeferral(XDisplayTimeoutDeferralHandle* handle): none is handed out.
-// 5: XDisplayCloseTimeoutDeferralHandle(handle): no handle exists; E_FAIL, which a void caller ignores.
-HRESULT STDMETHODCALLTYPE launcher_acquire_deferral(void* self, void** handle) {
-    if (handle) *handle = nullptr;
-    return offline_failure<kLauncherName, 4>(self);
+// 4: HRESULT XDisplayAcquireTimeoutDeferral(XDisplayTimeoutDeferralHandle* handle)
+// 5: XDisplayCloseTimeoutDeferralHandle(handle)
+//
+// The display timeout deferral is a console answer, not a UI the offline runtime lacks: the title asks the system to
+// keep the display on while it is doing something the player is watching, and every measured peer that serves it maps
+// it to a Windows power request (five-star's DisplayService, VIctory's and PercyScarlett's display modules). Doing the
+// same is the console-faithful answer: one PowerCreateRequest with a display-required reason per deferral, set on
+// acquire and cleared on close, the handle kept in this file's table so a close only clears a request this runtime
+// handed out. Failure of the Windows call is returned as its own error (HRESULT_FROM_WIN32(GetLastError())) and the
+// handle is null; a null handle argument is E_INVALIDARG; closing null or an unknown handle does nothing.
+//
+// The measured boot calls neither slot (the port's display probe arms show no call in the windows), so the switch is
+// for a caller that wants the pre-slice refusal: PALMETTO_DISPLAY_DEFERRAL=0/off/false/no restores E_FAIL for both
+// slots. Any other value enables the console answer; a value that is neither an off spelling nor on/1/true/yes is
+// refused by name once and the console answer applies.
+constinit SRWLOCK g_deferral_lock = SRWLOCK_INIT;
+std::vector<HANDLE> g_deferrals;   // guarded by g_deferral_lock
+
+bool display_deferral_switch_off() {
+    char value[8] = {};
+    if (!environment_string("PALMETTO_DISPLAY_DEFERRAL", value, sizeof value)) return false;
+    const bool off = trimmed_equals_ignore_case(value, "0") || trimmed_equals_ignore_case(value, "off") ||
+                     trimmed_equals_ignore_case(value, "false") || trimmed_equals_ignore_case(value, "no");
+    if (off) return true;
+    static std::atomic<bool> s_refused_logged{false};
+    const bool on = trimmed_equals_ignore_case(value, "1") || trimmed_equals_ignore_case(value, "on") ||
+                    trimmed_equals_ignore_case(value, "true") || trimmed_equals_ignore_case(value, "yes");
+    if (!on && !s_refused_logged.exchange(true))
+        std::fprintf(stderr,
+                     "[rt] xgameruntime: PALMETTO_DISPLAY_DEFERRAL value \"%s\" is not 0/off/false/no or "
+                     "1/on/true/yes; the console answer (deferral served) applies\n",
+                     value);
+    return false;
+}
+
+HRESULT STDMETHODCALLTYPE launcher_acquire_deferral(void*, void** handle) {
+    if (handle == nullptr) return E_INVALIDARG;
+    *handle = nullptr;
+    if (display_deferral_switch_off()) return offline_failure<kLauncherName, 4>(nullptr);
+    REASON_CONTEXT reason{};
+    reason.Version = POWER_REQUEST_CONTEXT_VERSION;
+    reason.Flags = POWER_REQUEST_CONTEXT_SIMPLE_STRING;
+    reason.Reason.SimpleReasonString = const_cast<LPWSTR>(L"XDisplayAcquireTimeoutDeferral");
+    HANDLE request = PowerCreateRequest(&reason);
+    if (request == INVALID_HANDLE_VALUE) {
+        const HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
+        std::fprintf(stderr, "[rt] xgameruntime: XDisplayAcquireTimeoutDeferral: PowerCreateRequest failed (0x%08lx)\n",
+                     static_cast<unsigned long>(hr));
+        return hr;
+    }
+    if (!PowerSetRequest(request, PowerRequestDisplayRequired)) {
+        const HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
+        CloseHandle(request);
+        std::fprintf(stderr, "[rt] xgameruntime: XDisplayAcquireTimeoutDeferral: PowerSetRequest failed (0x%08lx)\n",
+                     static_cast<unsigned long>(hr));
+        return hr;
+    }
+    AcquireSRWLockExclusive(&g_deferral_lock);
+    try {
+        g_deferrals.push_back(request);
+    } catch (...) {   // out of memory: the request is not handed out
+        ReleaseSRWLockExclusive(&g_deferral_lock);
+        PowerClearRequest(request, PowerRequestDisplayRequired);
+        CloseHandle(request);
+        return E_OUTOFMEMORY;
+    }
+    ReleaseSRWLockExclusive(&g_deferral_lock);
+    *handle = request;
+    return S_OK;
+}
+
+void STDMETHODCALLTYPE launcher_close_deferral(void*, void* handle) {
+    if (handle == nullptr) return;
+    bool owned = false;
+    AcquireSRWLockExclusive(&g_deferral_lock);
+    for (auto it = g_deferrals.begin(); it != g_deferrals.end(); ++it) {
+        if (*it == static_cast<HANDLE>(handle)) {
+            g_deferrals.erase(it);
+            owned = true;
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_deferral_lock);
+    if (!owned) return;   // not a request this runtime handed out: nothing to clear, nothing to close
+    PowerClearRequest(static_cast<HANDLE>(handle), PowerRequestDisplayRequired);
+    CloseHandle(static_cast<HANDLE>(handle));
 }
 
 HRESULT STDMETHODCALLTYPE launcher_query_interface(void*, REFIID iid, void** out);
@@ -949,7 +1224,7 @@ const void* const kLauncherVtable[] = {
     FN(launcher_query_interface), FN(object_add_ref), FN(object_release),   // 0-2 IUnknown
     FN((offline_failure<kLauncherName, 3>)),   // 3 XLaunchUri
     FN(launcher_acquire_deferral),             // 4 XDisplayAcquireTimeoutDeferral
-    FN((offline_failure<kLauncherName, 5>)),   // 5 XDisplayCloseTimeoutDeferralHandle
+    FN(launcher_close_deferral),               // 5 XDisplayCloseTimeoutDeferralHandle
 };
 static_assert(std::size(kLauncherVtable) == 6, "IUnknown + IXLauncherImpl's 3 methods");
 ClassObject g_launcher_object{kLauncherVtable};
@@ -1008,6 +1283,42 @@ long xgameruntime_offline_device_registrations(uint32_t kind) {
     for (const auto& registration : g_device_registrations)
         if (static_cast<uint32_t>(registration.kind) == kind) ++n;
     ReleaseSRWLockShared(&g_device_lock);
+    return n;
+}
+
+// ---- The display answer's test hooks (docs/peer_port_first_ui.md section 14's tests) --------------------------------
+//
+// The HDR answer depends on the host desktop, which a unit test must not read: the test sets the host state it wants
+// here. These are process-local setters used only by the test target; the runtime never calls them.
+
+// How many XDisplayTryEnableHdrMode calls the shim answered, and how many of them were Enabled. The port's arm reads
+// the same two counters through its log lines; the test uses these.
+long xgameruntime_offline_hdr_calls() { return g_hdr_calls.load(); }
+long xgameruntime_offline_hdr_enabled_answers() { return g_hdr_enabled_answers.load(); }
+
+// The switch parser's decision as the test sees it: 0 auto, 1 forced on, 2 forced off, 3 refused by value.
+int xgameruntime_offline_parse_hdr_switch(const char* value) { return static_cast<int>(parse_hdr_switch(value)); }
+
+// Sets the host display the answer rule sees: mode -1 probes the host, 0 is an available SDR output, 1 is an available
+// HDR10 output with the given luminance range, 2 is "no output answered".
+void xgameruntime_offline_set_host_hdr_for_tests(int mode, float min_luminance, float max_luminance,
+                                                 float max_full_frame_luminance) {
+    g_test_host_min.store(min_luminance, std::memory_order_relaxed);
+    g_test_host_max.store(max_luminance, std::memory_order_relaxed);
+    g_test_host_full.store(max_full_frame_luminance, std::memory_order_relaxed);
+    g_test_host_mode.store(mode < 0 ? -1 : (mode > 2 ? 2 : mode), std::memory_order_relaxed);
+}
+
+void xgameruntime_offline_clear_host_hdr_for_tests() { g_test_host_mode.store(-1, std::memory_order_relaxed); }
+
+long xgameruntime_offline_host_hdr_probes() { return g_host_hdr_probes.load(); }
+
+// How many display timeout deferrals are open (a request this runtime created and has not closed yet).
+long xgameruntime_offline_display_deferrals_open() {
+    long n = 0;
+    AcquireSRWLockShared(&g_deferral_lock);
+    n = static_cast<long>(g_deferrals.size());
+    ReleaseSRWLockShared(&g_deferral_lock);
     return n;
 }
 

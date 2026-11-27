@@ -1,7 +1,9 @@
 // XGameEventImpl, XGameUiImpl, XGameStreamingImpl, XDisplayImpl, XUserDeviceImpl, XAccessibilityImpl and XLauncherImpl
 // through QueryApiImpl, called the way xgameruntime.lib's thunks
 // call them: QueryApiImpl with the class id (or an interface id), one vtable slot with `this` first. Slots follow
-// xgameruntime-docs' layout; arguments follow the public GDK reference. No game data; nothing online.
+// xgameruntime-docs' layout; arguments follow the public GDK reference. The display block also checks the HDR answer rule
+// (host state in, Enabled/Disabled + luminance out, forcing switches) and the display timeout deferral against a
+// synthetic host, both from docs/peer_port_first_ui.md section 14. No game data; nothing online.
 #include <windows.h>
 
 #include <cstddef>
@@ -20,6 +22,14 @@ namespace rt::shims {
 long xgameruntime_offline_game_events();
 long xgameruntime_user_open_handles();
 long xgameruntime_offline_device_registrations(uint32_t kind);
+long xgameruntime_offline_hdr_calls();
+long xgameruntime_offline_hdr_enabled_answers();
+int xgameruntime_offline_parse_hdr_switch(const char* value);
+void xgameruntime_offline_set_host_hdr_for_tests(int mode, float min_luminance, float max_luminance,
+                                                 float max_full_frame_luminance);
+void xgameruntime_offline_clear_host_hdr_for_tests();
+long xgameruntime_offline_host_hdr_probes();
+long xgameruntime_offline_display_deferrals_open();
 }
 
 namespace {
@@ -86,6 +96,7 @@ using HighContrast = HRESULT(STDMETHODCALLTYPE*)(void*, uint32_t*);
 using SetEnabled = HRESULT(STDMETHODCALLTYPE*)(void*, bool);
 using LaunchUri = HRESULT(STDMETHODCALLTYPE*)(void*, void*, const char*);
 using AcquireDeferral = HRESULT(STDMETHODCALLTYPE*)(void*, void**);
+using CloseDeferral = void(STDMETHODCALLTYPE*)(void*, void*);
 
 // XSpeechSynthesizerVoiceInformation (XSpeechSynthesizer.h): the mirror of the struct the title's callback reads.
 struct VoiceInformation {
@@ -260,19 +271,81 @@ int main() {
     check(FAILED(at<NoArgs>(streaming, 10)(streaming)) && !at<Bool>(streaming, 21)(streaming),
           "a per-client call fails as an HRESULT and reads false as a bool");
 
-    // ---- XDisplay ----
+    // ---- XDisplay: the HDR answer follows the host desktop, with forcing switches (docs/peer_port_first_ui.md 14) ----
     void* display = nullptr;
     check(query(&kDisplayClass, kDisplayClass, &display) == S_OK && display, "XDisplayImpl for its class id");
     if (!display) return 1;
-    float info[3] = {1, 2, 3};
-    const uint32_t hdr = at<TryHdr>(display, 4)(display, 0, info);
-    char hdr_env[4] = {};
+    // The ctest variant xgameruntime_offline_hdr runs this same binary with PALMETTO_HDR=1: the first call must then
+    // answer Enabled with the documented defaults. The default arm has no switch, and a synthetic SDR host is set
+    // first so both cases are deterministic on any machine.
+    rt::shims::xgameruntime_offline_set_host_hdr_for_tests(0, 0.0f, 0.0f, 0.0f);
+    char hdr_env[8] = {};
     size_t hdr_len = 0;
-    const bool want_hdr = getenv_s(&hdr_len, hdr_env, "PALMETTO_HDR") == 0 && std::strcmp(hdr_env, "1") == 0;
-    check(want_hdr ? hdr == 1 && info[1] == 1000.0f : hdr == 2 && info[0] == 0 && info[1] == 0 && info[2] == 0,
-          want_hdr ? "PALMETTO_HDR=1: HDR is enabled with the documented defaults"
-                   : "XDisplayTryEnableHdrMode: Disabled (SDR output), the info cleared");
-    check(at<TryHdr>(display, 4)(display, 1, nullptr) == hdr, "the info pointer is optional");
+    const bool hdr_variant = getenv_s(&hdr_len, hdr_env, "PALMETTO_HDR") == 0 && std::strcmp(hdr_env, "1") == 0;
+    float variant_info[3] = {0.0f, 0.0f, 0.0f};
+    const uint32_t variant_answer = at<TryHdr>(display, 4)(display, 0, variant_info);
+    check(hdr_variant ? variant_answer == 1 && variant_info[1] == 1000.0f
+                      : variant_answer == 2 && variant_info[1] == 0.0f,
+          hdr_variant ? "xgameruntime_offline_hdr: PALMETTO_HDR=1 answers Enabled with the documented defaults"
+                      : "default arm: an SDR host answers Disabled, the info cleared");
+    // The switch parser, before any call: auto/on/off spellings and a refused value.
+    check(rt::shims::xgameruntime_offline_parse_hdr_switch(nullptr) == 0 &&
+              rt::shims::xgameruntime_offline_parse_hdr_switch("") == 0 &&
+              rt::shims::xgameruntime_offline_parse_hdr_switch("auto") == 0 &&
+              rt::shims::xgameruntime_offline_parse_hdr_switch(" AUTO ") == 0,
+          "PALMETTO_HDR parser: unset, empty, auto and a padded AUTO are auto");
+    check(rt::shims::xgameruntime_offline_parse_hdr_switch("1") == 1 &&
+              rt::shims::xgameruntime_offline_parse_hdr_switch("on") == 1 &&
+              rt::shims::xgameruntime_offline_parse_hdr_switch("TRUE") == 1 &&
+              rt::shims::xgameruntime_offline_parse_hdr_switch(" yes ") == 1,
+          "PALMETTO_HDR parser: 1, on, TRUE and yes force the enabled answer");
+    check(rt::shims::xgameruntime_offline_parse_hdr_switch("0") == 2 &&
+              rt::shims::xgameruntime_offline_parse_hdr_switch("off") == 2 &&
+              rt::shims::xgameruntime_offline_parse_hdr_switch("false") == 2 &&
+              rt::shims::xgameruntime_offline_parse_hdr_switch(" NO ") == 2,
+          "PALMETTO_HDR parser: 0, off, false and NO force the disabled answer");
+    check(rt::shims::xgameruntime_offline_parse_hdr_switch("2") == 3 &&
+              rt::shims::xgameruntime_offline_parse_hdr_switch("banana") == 3,
+          "PALMETTO_HDR parser: any other value is refused by value");
+    // The answer rule against a synthetic host, so the check is deterministic on any machine.
+    float info[3] = {1, 2, 3};
+    rt::shims::xgameruntime_offline_set_host_hdr_for_tests(0, 0.0f, 0.0f, 0.0f);
+    check(SetEnvironmentVariableA("PALMETTO_HDR", nullptr) != 0, "the HDR switch starts unset (auto)");
+    const long hdr_calls_before = rt::shims::xgameruntime_offline_hdr_calls();
+    const long hdr_enabled_before = rt::shims::xgameruntime_offline_hdr_enabled_answers();
+    check(at<TryHdr>(display, 4)(display, 0, info) == 2 && info[0] == 0 && info[1] == 0 && info[2] == 0,
+          "auto on an SDR host: Disabled, the info cleared");
+    rt::shims::xgameruntime_offline_set_host_hdr_for_tests(1, 0.5f, 270.0f, 260.0f);
+    info[0] = info[1] = info[2] = 0;
+    check(at<TryHdr>(display, 4)(display, 0, info) == 1 && info[0] == 0.5f && info[1] == 270.0f && info[2] == 260.0f,
+          "auto on an HDR10 host: Enabled with the host's measured min/max/max-full-frame luminance");
+    rt::shims::xgameruntime_offline_set_host_hdr_for_tests(2, 0.0f, 0.0f, 0.0f);
+    info[0] = info[1] = info[2] = 7;
+    check(at<TryHdr>(display, 4)(display, 0, info) == 2 && info[0] == 0 && info[1] == 0 && info[2] == 0,
+          "auto with no host output answering: Disabled, the safe pre-slice fallback");
+    check(rt::shims::xgameruntime_offline_host_hdr_probes() >= 3, "auto probes the host state on each answer");
+    // Forced on: the documented luminances, whatever the host runs.
+    rt::shims::xgameruntime_offline_set_host_hdr_for_tests(0, 0.0f, 0.0f, 0.0f);
+    check(SetEnvironmentVariableA("PALMETTO_HDR", "1") != 0, "PALMETTO_HDR=1 is set");
+    info[0] = info[1] = info[2] = 0;
+    check(at<TryHdr>(display, 4)(display, 0, info) == 1 && info[0] == 0.01f && info[1] == 1000.0f && info[2] == 1000.0f,
+          "PALMETTO_HDR=1: Enabled with the documented 0.01/1000/1000 nits, the host not asked");
+    // Forced off: the pre-slice default, whatever the host runs.
+    rt::shims::xgameruntime_offline_set_host_hdr_for_tests(1, 0.5f, 270.0f, 260.0f);
+    check(SetEnvironmentVariableA("PALMETTO_HDR", "0") != 0, "PALMETTO_HDR=0 is set");
+    info[0] = info[1] = info[2] = 9;
+    check(at<TryHdr>(display, 4)(display, 0, info) == 2 && info[0] == 0 && info[1] == 0 && info[2] == 0,
+          "PALMETTO_HDR=0 on an HDR10 host: Disabled, the info cleared");
+    // Auto spelled out, and a refused value falling back to auto.
+    check(SetEnvironmentVariableA("PALMETTO_HDR", "auto") != 0, "PALMETTO_HDR=auto is set");
+    check(at<TryHdr>(display, 4)(display, 0, nullptr) == 1, "PALMETTO_HDR=auto on an HDR10 host: Enabled (info optional)");
+    check(SetEnvironmentVariableA("PALMETTO_HDR", "banana") != 0, "PALMETTO_HDR=banana is set");
+    check(at<TryHdr>(display, 4)(display, 0, nullptr) == 1, "a refused value applies auto rather than forcing a side");
+    check(SetEnvironmentVariableA("PALMETTO_HDR", nullptr) != 0, "the HDR switch is cleared");
+    check(rt::shims::xgameruntime_offline_hdr_calls() == hdr_calls_before + 7 &&
+              rt::shims::xgameruntime_offline_hdr_enabled_answers() == hdr_enabled_before + 4,
+          "the answer counters counted seven calls and four enabled answers");
+    rt::shims::xgameruntime_offline_clear_host_hdr_for_tests();
 
     // ---- XUserDevice ----
     void* device = nullptr;
@@ -405,12 +478,55 @@ int main() {
     void* launcher = nullptr;
     check(query(&kLauncherClass, kLauncherClass, &launcher) == S_OK && launcher, "XLauncherImpl for its class id");
     if (!launcher) return 1;
-    void* deferral = reinterpret_cast<void*>(1);
     check(at<LaunchUri>(launcher, 3)(launcher, nullptr, "https://example.com") == E_FAIL,
           "XLaunchUri is not available offline");
-    check(at<AcquireDeferral>(launcher, 4)(launcher, &deferral) == E_FAIL && deferral == nullptr &&
-              at<NoArgs>(launcher, 5)(launcher) == E_FAIL,
-          "the display timeout deferral is not available offline");
+    // The display timeout deferral is the console answer by default: a Windows display-required power request per
+    // deferral, in this file's table, cleared by its close. It is not a UI the offline runtime lacks.
+    check(SetEnvironmentVariableA("PALMETTO_DISPLAY_DEFERRAL", nullptr) != 0, "the deferral switch starts unset");
+    void* first = reinterpret_cast<void*>(1);
+    void* second = reinterpret_cast<void*>(1);
+    check(rt::shims::xgameruntime_offline_display_deferrals_open() == 0, "no display deferral is open yet");
+    check(at<AcquireDeferral>(launcher, 4)(launcher, &first) == S_OK && first != nullptr,
+          "default: XDisplayAcquireTimeoutDeferral hands out a handle");
+    check(at<AcquireDeferral>(launcher, 4)(launcher, &second) == S_OK && second != nullptr && second != first,
+          "default: a second deferral is its own request");
+    check(rt::shims::xgameruntime_offline_display_deferrals_open() == 2, "default: two deferrals are open");
+    at<CloseDeferral>(launcher, 5)(launcher, nullptr);
+    at<CloseDeferral>(launcher, 5)(launcher, nullptr);
+    check(rt::shims::xgameruntime_offline_display_deferrals_open() == 2,
+          "default: a close with no handle changes nothing");
+    at<CloseDeferral>(launcher, 5)(launcher, first);
+    check(rt::shims::xgameruntime_offline_display_deferrals_open() == 1,
+          "default: closing a handed-out handle clears its request");
+    at<CloseDeferral>(launcher, 5)(launcher, first);
+    check(rt::shims::xgameruntime_offline_display_deferrals_open() == 1, "default: a double close changes nothing");
+    at<CloseDeferral>(launcher, 5)(launcher, reinterpret_cast<void*>(1));
+    check(rt::shims::xgameruntime_offline_display_deferrals_open() == 1,
+          "default: closing a handle this runtime never handed out changes nothing");
+    at<CloseDeferral>(launcher, 5)(launcher, second);
+    check(rt::shims::xgameruntime_offline_display_deferrals_open() == 0, "default: the second handle closes too");
+    void* refused = reinterpret_cast<void*>(1);
+    check(at<AcquireDeferral>(launcher, 4)(launcher, nullptr) == E_INVALIDARG,
+          "default: acquire with a null output pointer is E_INVALIDARG");
+    check(at<AcquireDeferral>(launcher, 4)(launcher, &refused) == S_OK && refused != nullptr,
+          "default: the refusals did not consume the deferral path");
+    at<CloseDeferral>(launcher, 5)(launcher, refused);
+    // The switch restores the pre-slice refusal for both slots.
+    check(SetEnvironmentVariableA("PALMETTO_DISPLAY_DEFERRAL", "0") != 0, "PALMETTO_DISPLAY_DEFERRAL=0 is set");
+    refused = reinterpret_cast<void*>(1);
+    check(at<AcquireDeferral>(launcher, 4)(launcher, &refused) == E_FAIL && refused == nullptr,
+          "switch off: XDisplayAcquireTimeoutDeferral is the pre-slice E_FAIL with a null handle");
+    check(rt::shims::xgameruntime_offline_display_deferrals_open() == 0, "switch off: nothing is left open");
+    check(SetEnvironmentVariableA("PALMETTO_DISPLAY_DEFERRAL", "off") != 0, "the switch also accepts off");
+    refused = reinterpret_cast<void*>(1);
+    check(at<AcquireDeferral>(launcher, 4)(launcher, &refused) == E_FAIL && refused == nullptr,
+          "switch off: off refuses the acquire as 0 does");
+    check(SetEnvironmentVariableA("PALMETTO_DISPLAY_DEFERRAL", "maybe") != 0, "an unknown switch value is set");
+    refused = reinterpret_cast<void*>(1);
+    check(at<AcquireDeferral>(launcher, 4)(launcher, &refused) == S_OK && refused != nullptr,
+          "an unknown switch value is refused by name and the console answer applies");
+    at<CloseDeferral>(launcher, 5)(launcher, refused);
+    check(SetEnvironmentVariableA("PALMETTO_DISPLAY_DEFERRAL", nullptr) != 0, "the deferral switch is cleared");
     GUID other = kLauncherClass;
     other.Data1 ^= 1;
     void* none = reinterpret_cast<void*>(1);

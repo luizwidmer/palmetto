@@ -3964,6 +3964,15 @@ constexpr std::uint32_t kTitleFrontEndContextRva = 0x98C0EA0;   // qword: the co
 constexpr std::uint32_t kTitleFrontEndRunningRva = 0x7453DB8;   // byte: 1 while the front-end frame tick runs
 constexpr std::uint32_t kTitleFrontEndService0Offset = 0x60;    // the seven service getters return manager+0x60..+0x90
 constexpr unsigned kTitleFrontEndServiceCount = 7;              // +0x60, +0x68, +0x70, +0x78, +0x80, +0x88, +0x90
+// The display service (docs/peer_port_first_ui.md section 14). The title has one XDisplayImpl thunk
+// (XDisplayTryEnableHdrMode) and two wrappers call it. image+0x2481CA0 calls it with preference PreferHdr and a null
+// info pointer, then enumerates 0x20-byte DXGI_MODE_DESC1-shaped display-mode records, compares each record's refresh
+// numerator (+8) with 0x78 (120 Hz), sets image+0x760E660 to 1 when one is offered, and stores the chosen
+// DXGI_RATIONAL refresh {120,1} or {60,1} at image+0xA9438D4. image+0x5A38910 calls it with preference PreferHdr and
+// an info block, and stores the three returned luminance floats into its display settings when the answer is Enabled.
+// Sampling the two globals says what display answer the title consumed, without an int3 on either wrapper.
+constexpr std::uint32_t kTitleDisplayHighRefreshFlagRva = 0x760E660;  // byte: 1 when a 120 Hz mode was offered
+constexpr std::uint32_t kTitleDisplayRefreshRva = 0xA9438D4;          // qword: DXGI_RATIONAL {numerator, denominator}
 
 // RVAs of the state machine's own entry points: a thread whose RIP or stack names one of these is holding the machine.
 constexpr std::uint32_t kTitleStateOwners[] = {
@@ -5710,6 +5719,14 @@ void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_siz
             const std::uint32_t fe_ready = title_read_u32(image_base, kTitleFrontEndReadyRva, ok_fe_ready);
             const std::uint64_t fe_context = title_read_u64(image_base, kTitleFrontEndContextRva, ok_fe_context);
             const std::uint32_t fe_running = title_read_u32(image_base, kTitleFrontEndRunningRva, ok_fe_running);
+            // The display service's consumed answer (docs/peer_port_first_ui.md section 14): the high-refresh flag and
+            // the refresh rational the display-mode enumeration chose. Sampled beside the state words so an arm says
+            // what the title's display query answered without a probe on the wrapper.
+            bool ok_display_flag = false, ok_display_refresh = false;
+            const std::uint32_t display_high_refresh =
+                title_read_u32(image_base, kTitleDisplayHighRefreshFlagRva, ok_display_flag);
+            const std::uint64_t display_refresh =
+                title_read_u64(image_base, kTitleDisplayRefreshRva, ok_display_refresh);
             std::uint64_t fe_service[kTitleFrontEndServiceCount] = {};
             std::uint64_t fe_service_vtable[kTitleFrontEndServiceCount] = {};
             for (unsigned i = 0; i < kTitleFrontEndServiceCount; ++i) {
@@ -5819,6 +5836,13 @@ void start_title_state_trace(std::uintptr_t image_base, std::uintptr_t image_siz
                              static_cast<unsigned long long>(fe_service[i]),
                              static_cast<unsigned long long>(fe_service_vtable[i]));
             std::fputc('\n', stderr);
+            // The display service's consumed answer: the 120 Hz flag and the chosen DXGI_RATIONAL refresh (numerator in
+            // the low dword, denominator in the high dword).
+            std::fprintf(stderr,
+                         "[rt] state trace at %.1f s: display high-refresh flag %s0x%x refresh %s%u/%u\n", at,
+                         ok_display_flag ? "" : "?", display_high_refresh & 0xFF,
+                         ok_display_refresh ? "" : "?", static_cast<unsigned>(display_refresh & 0xFFFFFFFFu),
+                         static_cast<unsigned>(display_refresh >> 32));
             const bool census_now = censuses < 12 || (sample % 10 == 0 && censuses < 24);
             if (census_now) {
                 state_trace_census(image_base, image_size, at);
@@ -9097,6 +9121,44 @@ int wmain(int argc, wchar_t** argv) {
             } else {
                 std::printf("[rt] PALMETTO_MOVIE_PROBE: unknown group (use player, player2, trigger or frontend); no "
                             "probe installed\n");
+            }
+        }
+        // PALMETTO_UI_PROBE=<group>: bounded opt-in int3 entry probes on the front-end UI resource/draw path (P4 of
+        // docs/peer_port_first_ui.md section 7; the measurement is section 14). The audit asks whether the title asks
+        // for its front-end UI at all: the peers' first visible pixels are the title's own 2D UI draws, and this tree's
+        // front-end manager renders while no presented UI frame appears. "draw" is the engine's 2D batch path the UI's
+        // own draws would use (the measured UI path of docs/decomp_first_ui.md section 6): batch entry builder
+        // 0x517A290, rectangle/fill 0x3A1B860, transform matrix copy 0x58C8950 and the batch submit 0x2AACF0. "pages"
+        // is the front-end page owners: profile-name text entry 0x2234A40, profile card 0x3DAF310, the first-run flow
+        // state machine 0x22364A0, and 0x135A290 - the only site in the image that tests the RBF0 stream magic ("RBF0"
+        // as a little-endian dword), i.e. the gate the UI page-data reader would pass through. Same one-shot machinery
+        // and logging as PALMETTO_POKE_LOG (the first hit prints the registers and the title stack): a hit is the reach
+        // signal that the static negatives say cannot exist, and a quiet probe is the P4 falsifier's negative.
+        constexpr std::uint32_t kUiDrawProbeSites[] = {0x517A290, 0x3A1B860, 0x58C8950, 0x2AACF0};
+        constexpr std::uint32_t kUiPageProbeSites[] = {0x2234A40, 0x3DAF310, 0x22364A0, 0x135A290};
+        if (const DWORD size = GetEnvironmentVariableW(L"PALMETTO_UI_PROBE", nullptr, 0); size > 1) {
+            std::wstring value(size, L'\0');
+            const DWORD n = GetEnvironmentVariableW(L"PALMETTO_UI_PROBE", value.data(), size);
+            if (n > 0 && n < size) value.resize(n);
+            if (value == L"draw") {
+                std::printf("[rt] PALMETTO_UI_PROBE=draw: %u 2D batch/draw probe(s)\n",
+                            poke_log_sites(kUiDrawProbeSites, 4));
+            } else if (value == L"pages") {
+                // The RBF0 magic test is only a page gate if the bytes are the measured compare: cmp ecx, "RBF0".
+                // Refuse by name rather than probe an instruction whose meaning was not measured.
+                constexpr std::uint8_t kRbf0MagicGate[] = {0x81, 0xF9, 0x52, 0x42, 0x46, 0x30};
+                if (std::memcmp(main_module.base + kUiPageProbeSites[3], kRbf0MagicGate, sizeof kRbf0MagicGate) != 0) {
+                    std::printf("[rt] PALMETTO_UI_PROBE=pages: image+0x%x is not the measured RBF0 magic test; the "
+                                "page gate is not probed, the other three page owners are\n",
+                                kUiPageProbeSites[3]);
+                    std::printf("[rt] PALMETTO_UI_PROBE=pages: %u front-end page-owner probe(s)\n",
+                                poke_log_sites(kUiPageProbeSites, 3));
+                } else {
+                    std::printf("[rt] PALMETTO_UI_PROBE=pages: %u front-end page-owner probe(s)\n",
+                                poke_log_sites(kUiPageProbeSites, 4));
+                }
+            } else {
+                std::printf("[rt] PALMETTO_UI_PROBE: unknown group (use draw or pages); no probe installed\n");
             }
         }
         // PALMETTO_BACK_IMAGES=1 commits zeroed memory over the console image-address range, which starts at 4 GiB. Our
