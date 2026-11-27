@@ -125,3 +125,35 @@ constexpr const char* refusal_name(Refusal refusal) noexcept {
 }
 
 } // namespace palmetto::viewport_replay_readiness
+
+// Strict multi-count ExecuteIndirect draws with viewport/scissor arrays are not replay-ready yet. Unlike a direct Draw,
+// the current ExecuteIndirect record has no snapshot of the graphics state or arrays that the indirect draw consumes.
+// This pure gate is called only in strict mode; switch-off keeps the pre-existing command path untouched.
+namespace palmetto::indirect_viewport_replay_readiness {
+
+enum class Refusal : std::uint8_t { none, multi_count_state_not_captured };
+enum class Disposition : std::uint8_t { legacy_unchanged, ready, refuse };
+
+struct Assessment {
+    Disposition disposition = Disposition::legacy_unchanged;
+    Refusal refusal = Refusal::none;
+};
+
+constexpr Assessment assess(std::uint32_t max_command_count, std::uint32_t viewport_count,
+                            std::uint32_t scissor_count, bool strict) noexcept {
+    if (!strict) return {Disposition::legacy_unchanged, Refusal::none};
+    if (max_command_count > 1 && (viewport_count > 1 || scissor_count > 1))
+        return {Disposition::refuse, Refusal::multi_count_state_not_captured};
+    return {Disposition::ready, Refusal::none};
+}
+
+constexpr const char* refusal_name(Refusal refusal) noexcept {
+    switch (refusal) {
+    case Refusal::none: return "none";
+    case Refusal::multi_count_state_not_captured:
+        return "indirect_multi_count_viewport_state_not_captured";
+    }
+    return "unknown_indirect_viewport_replay_refusal";
+}
+
+} // namespace palmetto::indirect_viewport_replay_readiness

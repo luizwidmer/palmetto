@@ -1,9 +1,11 @@
 // Replay with vkCmdClearColorImage / vkCmdClearDepthStencilImage unset: a list that needs one of them, as a
 // whole-view clear or as the implicit zero-clear of a never-used (UNDEFINED) image, is refused as unsupported
-// instead of calling a null pointer (#634 finding by @bobcatchris). No Vulkan loader, GPU, shaders or game data.
+// instead of calling a null pointer (#634 finding by @bobcatchris). Also pins the strict multi-count ExecuteIndirect
+// viewport-state readiness gate and its unchanged off-path record. No Vulkan loader, GPU, shaders or game data.
 #include "../src/vulkan_replay.h"
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 namespace {
 unsigned clears = 0, attachment_clears = 0;
@@ -54,10 +56,54 @@ palmetto::ReplayResult run(const palmetto::CommandList& list, const palmetto::Re
     clears = attachment_clears = 0;
     return palmetto::replay(list, VK_NULL_HANDLE, [&](auto) { return &binding; }, vk, tracker);
 }
+void indirect_viewport_readiness() {
+    namespace r = palmetto::indirect_viewport_replay_readiness;
+    using r::Disposition;
+
+    const auto off = r::assess(2, 2, 2, false);
+    expect(off.disposition == Disposition::legacy_unchanged && off.refusal == r::Refusal::none,
+           "strict switch off leaves multi-count indirect viewport behavior unchanged");
+
+    const auto refused = r::assess(2, 2, 2, true);
+    expect(refused.disposition == Disposition::refuse &&
+               std::strcmp(r::refusal_name(refused.refusal),
+                           "indirect_multi_count_viewport_state_not_captured") == 0,
+           "strict multi-count indirect draw with arrays has its exact named refusal");
+    const auto scissor_refused = r::assess(3, 1, 2, true);
+    expect(scissor_refused.disposition == Disposition::refuse &&
+               scissor_refused.refusal == r::Refusal::multi_count_state_not_captured,
+           "a multi-count indirect draw with multiple scissors is refused too");
+    expect(r::assess(2, 1, 1, true).disposition == Disposition::ready,
+           "multi-count indirect with scalar viewport/scissor state is outside this refusal");
+    expect(r::assess(0, 2, 2, true).disposition == Disposition::ready,
+           "zero-command ExecuteIndirect needs no captured graphics state");
+
+    palmetto::ExecuteIndirect command{};
+    command.kind = palmetto::IndirectKind::draw_indexed;
+    command.stride = 24;
+    command.max_count = 2;
+    command.argument_buffer = 41;
+    command.argument_offset = 32;
+    command.count_buffer = 42;
+    command.count_offset = 12;
+
+    palmetto::CommandList legacy;
+    expect(legacy.execute_indirect(command) && legacy.close(),
+           "switch-off command-list recording accepts the existing indirect payload");
+    const auto commands = legacy.commands();
+    const auto* captured = commands.size() == 1 ? std::get_if<palmetto::ExecuteIndirect>(&commands.front()) : nullptr;
+    expect(captured && captured->kind == command.kind && captured->stride == command.stride &&
+               captured->max_count == command.max_count && captured->argument_buffer == command.argument_buffer &&
+               captured->argument_offset == command.argument_offset && captured->count_buffer == command.count_buffer &&
+               captured->count_offset == command.count_offset,
+           "switch-off record preserves the complete multi-count indexed indirect tuple");
+
+}
 } // namespace
 
 int main() {
     using palmetto::ReplayResult;
+    indirect_viewport_readiness();
     const auto color = image(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
     const auto depth = image(VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_DEPTH_BIT);
     const palmetto::Rect rect{1, 1, 3, 3};
@@ -111,6 +157,6 @@ int main() {
            "not_zeroed image: no zero-clear needed");
 
     if (failures) return 1;
-    std::printf("replay_clear_gate_test: whole-view and implicit zero-clears refused without their function\n");
+    std::printf("replay_clear_gate_test: clear gates and strict multi-count indirect viewport readiness passed\n");
     return 0;
 }

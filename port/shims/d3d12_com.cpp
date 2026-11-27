@@ -117,6 +117,15 @@ void note_viewport_refusal(const char* method, palmetto::viewport_replay_readine
     d3d12_trace::record(method, "unsupported");
 }
 
+void note_indirect_viewport_refusal(
+    const char* method, palmetto::indirect_viewport_replay_readiness::Refusal refusal) {
+    char text[256] = {};
+    std::snprintf(text, sizeof(text), "PALMETTO_D3D12X_STRICT_VIEWPORTS=1 refused %s: %s", method,
+                  palmetto::indirect_viewport_replay_readiness::refusal_name(refusal));
+    note_once(text);
+    d3d12_trace::record(method, "unsupported");
+}
+
 void note_bvh_route_refusal(const char* operation, palmetto::xdxr::route::Refusal refusal) {
     char text[256] = {};
     std::snprintf(text, sizeof(text), "PALMETTO_BVH_ROUTE=own refused %s: %s", operation,
@@ -1302,9 +1311,19 @@ public:
         if (!command_signature_info(signature, kind, stride) || !argument_buffer)
             return check(false);
         if ((kind == palmetto::IndirectKind::draw || kind == palmetto::IndirectKind::draw_indexed) &&
-            max_command_count && viewport_arrays_may_affect_draw(true) &&
-            !viewport_array_path_supported("ID3D12GraphicsCommandList::ExecuteIndirect", false))
-            return check(false);
+            max_command_count && viewport_arrays_may_affect_draw(true)) {
+            const auto indirect_viewport = palmetto::indirect_viewport_replay_readiness::assess(
+                max_command_count, viewport_scissor_arrays_.viewport_count,
+                viewport_scissor_arrays_.scissor_count, true);
+            if (indirect_viewport.disposition ==
+                palmetto::indirect_viewport_replay_readiness::Disposition::refuse) {
+                note_indirect_viewport_refusal("ID3D12GraphicsCommandList::ExecuteIndirect",
+                                               indirect_viewport.refusal);
+                return check(false);
+            }
+            if (!viewport_array_path_supported("ID3D12GraphicsCommandList::ExecuteIndirect", false))
+                return check(false);
+        }
         const auto arg_desc = argument_buffer->GetDesc();
         if (arg_desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || argument_buffer_offset % 4 != 0)
             return check(false);

@@ -3467,6 +3467,7 @@ inline void note_viewport_count_refusal(viewport_replay_readiness::Refusal refus
     std::fprintf(stderr, "[rt] replay: PALMETTO_D3D12X_STRICT_VIEWPORTS=1 refused draw: %s\n", name);
 }
 
+
 // Resolves a draw's pipeline, attachments and buffers. Attachment views take the pipeline's formats, so a
 // typeless texture is viewed as the format the pipeline renders.
 template<typename Resolve>
