@@ -1,6 +1,6 @@
 # Translator fixes measured against the compute request union
 
-**Status: measured, uncommitted slice.** Four translator fixes and the loop guard, implemented from this tree's own
+**Status: measured, uncommitted slice.** Five translator fixes and the loop guard, implemented from this tree's own
 analysis of the corpus, with the measured effect on the title's later compute-pipeline request union (the 668
 programs `corpus2/cov` asks for; [compute_slot67.md](compute_slot67.md)) and on the two corpora that already
 translated completely. The gap analysis that ranked them is `translator_gap_plan.md` in the work folder; this page
@@ -254,3 +254,30 @@ The synthetic [wave32 fixture](../tests/semantic/fixtures/disasm/cs_w32_ds_appen
 The same union scan after the rule translated and validated **491 / 668** programs and refused 177: fall-through 165, undecodable words 8, `v_cmp` destination 2, mask destination 1, and normalized encoding 1; `ds_append` is now **0**. All **480** modules that translated before the rule are byte-identical afterward; 11 newly translating modules account for the net gain. The scan outputs were kept outside the repository and only these aggregate counts are recorded.
 
 This clean-room rule uses the ISA and this tree's measured forms; rank-5 peer notes were evidence for which class to measure, not an implementation or fixture source. No new `NOTICE.md` entry is needed.
+
+## 14. One plain SGPR move in an undecodable gap
+
+### Measured sub-class
+
+The current-tree baseline scan of the 668-program request union translated and validated 491 programs and refused 177. Within the 165 `fall-through into undecodable words` refusals, an aggregate-only pass decoded the first reachable gap with this tree's RDNA2 decoder and found exactly 12 gaps containing one valid 4-byte SOP1 `s_mov_b32` from an ordinary single-dword SGPR to another ordinary single-dword SGPR, without modifiers. No program names or native instruction bytes are recorded.
+
+| refusal before this rule | programs |
+|---|---:|
+| fall-through into undecodable words | 165 |
+| undecodable words (cannot re-anchor) | 8 |
+| `v_cmp` destination | 2 |
+| mask destination | 1 |
+| reachable instruction with normalized encoding | 1 |
+| **total refused** | **177** |
+
+### Narrow rule and semantic fixture
+
+At a reachable fall-through only, `reachable_code()` may ask the gap callback to inspect a 4-byte word when the next listed instruction starts exactly four bytes later. `scalar_smov_gap_word()` accepts only a complete one-instruction decode of `s_mov_b32`, with no modifiers and two ordinary one-dword SGPR operands; the callback repairs at most one such word per translation. This reuses the existing SALU move semantics. Branch targets into data, special-register and inline-immediate moves, literal/wider instructions, and all other gaps remain refused.
+
+The synthetic [fixture](../tests/semantic/fixtures/disasm/ps_smov_sgpr_gap.s) and [CPU semantic test](../tests/semantic/test_smov_sgpr_gap.py) verify that a hidden `s_mov_b32 s4, s5` moves the input word to the exported pixel value. VCC_LO and inline-immediate source variants remain refused. No GPU, game program, or game bytes are used.
+
+### Closure and byte-identity check
+
+The final `python -I tooling/rdna2spirv.py <listings> --out <scratch> --no-asm --wave64-emulate --refusals <scratch>/refusals.json` scan again translated and validated **491 / 668** programs and refused 177: fall-through 165, cannot re-anchor 8, `v_cmp` destination 2, mask destination 1, and normalized encoding 1. The rule restored the 12 measured words, but each affected program still reaches a later unsupported gap, so the net full-module closure is **0 programs**. All **491** modules that translated before this rule are byte-identical afterward (491/491; 0 changed, none missing, none added). Scan outputs and the refusal manifest remain outside the repository; only aggregate counts are recorded.
+
+The rule and fixture use this tree's RDNA2 decoder and semantics; peer notes were evidence-only, and no peer implementation or fixture was copied. No new `NOTICE.md` entry is needed.

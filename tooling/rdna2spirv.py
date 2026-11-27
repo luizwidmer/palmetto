@@ -16546,14 +16546,16 @@ def fold_far_branches(insns):
     return out
 
 
-def reachable_code(insns, code_end=None):
+def reachable_code(insns, code_end=None, recover_gap=None):
     """Instructions reachable from the first one, following fall-through and branch targets. Fall-through stops
     after s_endpgm, s_branch and s_setpc_b64. Raises Unsupported if a branch target isn't an instruction start, or if
-    an instruction falls through into words that are not an instruction (undecodable words before later code)."""
+    an instruction falls through into words that are not an instruction (undecodable words before later code). An
+    optional gap callback may recover one exact instruction only at a reachable fall-through boundary."""
     by_pc = {i["pc"]: k for k, i in enumerate(insns)}
     # the code ends at the declared end of its range (the listing header), or else after the last printed instruction
     code_end = max([i["pc"] + len(i["enc"]) // 2 for i in insns] + [code_end or 0])
     seen, work = set(), [0]
+    added_gap_word = False
     while work:
         k = work.pop()
         while k is not None and k < len(insns) and k not in seen:
@@ -16576,7 +16578,19 @@ def reachable_code(insns, code_end=None):
             if k is None and nxt < code_end:
                 # The next words are ones llvm-mc could not decode (re-anchoring skipped them) and this instruction
                 # runs into them: ending the path here would drop every later store and export without a word.
-                raise Unsupported("fall-through into undecodable words")
+                # The measured scalar-move exception is considered only at a live fall-through with a listed
+                # instruction immediately after the 4-byte gap. It cannot repair a branch into data or a wider gap.
+                word = recover_gap(nxt) if recover_gap and nxt + 4 in by_pc else None
+                if (word is not None and word.get("pc") == nxt and len(word.get("enc", "")) == 8 and
+                        nxt + 4 in by_pc):
+                    k = len(insns)
+                    insns.append(word)
+                    by_pc[nxt] = k
+                    added_gap_word = True
+                if k is None:
+                    raise Unsupported("fall-through into undecodable words")
+    if added_gap_word:
+        return sorted((insns[k] for k in seen), key=lambda ins: ins["pc"])
     return [insns[k] for k in sorted(seen)]
 
 
@@ -17370,6 +17384,30 @@ def console_dot4_word(blob, pc):
     return ins
 
 
+def scalar_smov_gap_word(blob, pc):
+    """Decode the measured 4-byte SOP1 `s_mov_b32 sD, sS` gap; leave all other skipped words alone.
+
+    Only an ordinary 32-bit SGPR-to-SGPR move is safe to restore here. In particular, special registers, literals,
+    64-bit moves, and every other opcode remain for reachable_code() to refuse. The raw word and the full instruction
+    width must agree, so this does not treat half of a wider instruction as a scalar move.
+    """
+    raw = blob[pc:pc + 4]
+    if len(raw) != 4:
+        return None
+    import rdna2_decode     # on demand: only a listing with a skipped word reaches this path
+    decoded = rdna2_decode.decode_bytes(raw, mcpu="gfx1030", code_start=pc)
+    if decoded["invalid"] or len(decoded["insns"]) != 1:
+        return None
+    ins = decoded["insns"][0]
+    if (ins["op"] != "s_mov_b32" or len(ins["enc"]) != 8 or bytes.fromhex(ins["enc"]) != raw or
+            ins["mods"] or len(ins["args"]) != 2):
+        return None
+    dst, src = ins["args"]
+    if any(a.get("k") != "sgpr" or a.get("n") != 1 or a.get("neg") or a.get("abs") for a in (dst, src)):
+        return None
+    return ins
+
+
 def check_printed_encodings(path, info):
     """A listing without undecodable words is translated from LLVM's text, which shows the instruction LLVM decoded,
     not the bytes it read. Where those bytes sit next to the listing (fssm/ or fspx/), each instruction's printed
@@ -17527,8 +17565,8 @@ def translate(path):
             pos = at + len(enc)
         # The console's v_dot4_i32_i8 words llvm-mc could not decode are in the listing as the instruction it
         # decoded instead: re-anchoring put the line for the word's second half at +4 from the skipped word.
-        # Rebuild the whole word from the blob and drop that line (docs/fspx.md measured the shape). A skipped
-        # word of any other kind is left alone, so reachable_code still refuses a path that falls into it.
+        # Rebuild the whole word from the blob and drop that line (docs/fspx.md measured the shape). Other gaps are
+        # restored only by scalar_smov_gap_word's single measured plain-SGPR form; reachable_code refuses the rest.
         kept, prev_end = [], info["code_start"]
         for ins in insns:
             if ins["pc"] - prev_end == 4:
@@ -17542,7 +17580,16 @@ def translate(path):
             prev_end = ins["pc"] + len(ins["enc"]) // 2
         insns = kept
         insns = fold_far_branches(insns)
-        insns = reachable_code(insns, info.get("code_end"))
+        recovered_smov = [False]
+
+        def recover_smov_gap(pc):
+            if recovered_smov[0]:
+                return None
+            word = scalar_smov_gap_word(blob, pc)
+            if word is not None:
+                recovered_smov[0] = True
+            return word
+        insns = reachable_code(insns, info.get("code_end"), recover_smov_gap)
         if any(i.get("normalized") for i in insns):
             raise Unsupported("reachable instruction with normalized encoding")
     else:
