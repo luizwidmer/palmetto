@@ -385,3 +385,26 @@ entry: request MS 0, selected translation MS 0, FSPX MS keys 0.
 Commands: `python -I tests/test_build_port_graphics_publication.py` and
 `python -I tests/test_shader_library.py`. These are GPU-free synthetic tests; no title boot or runtime build/relink was
 run for this Python-only slice.
+
+## 9. Source trace: why translated MS rows are FSSM-only
+
+The counts and operational resolver falsifier remain in [section 8.5](#85-selection-counts-and-a-synthetic-publication-falsifier);
+this section traces the metadata key choice without repeating that recount.
+
+`rdna2spirv.py` resolves a translated shader name to sibling `fssm/<name>.fssm` and `fspx/<name>.code` sidecars in
+[`native_paths()`](../tooling/rdna2spirv.py) (lines 17251–17264). The key functions in
+[`shader_meta.py`](../tooling/shader_meta.py) (lines 684–705) hash the FSSM sidecar as `fssm_sha256`; its FSPX code
+helper returns `None` whenever the same FSSM sidecar exists, and hashes `fspx/<name>.code` only when the FSSM is absent
+and that code sidecar exists. Then [`collect()`](../tooling/shader_meta.py) (lines 720–732) gives FSSM precedence: if
+the FSSM digest exists it writes `fssm_sha256`; only the `else` branch can write `fspx_code_sha256` (and, optionally,
+`fspx_state_sha256`). This branch explains why the 9,282 translated MS rows counted in §8.5 carry FSSM keys but no
+resolver code key; it is not a key lost by the later index merge.
+
+The collected fields are attached to `g.build_meta` by [`rdna2spirv.py`](../tooling/rdna2spirv.py) (lines 17911–17912)
+and merged into emitted metadata by [`shader_meta()`](../tooling/rdna2spirv.py) (lines 18791–18792). The native
+pipeline-library path is separate: the library maps slot 2 to `ms`, selects programs by SHA-256 of their raw code bytes,
+and writes selected programs as `fspx/<name>.code` sidecars ([`shader_library.py`](../tooling/shader_library.py), line 55;
+[`wanted_matches()`](../tooling/shader_library.py), lines 258–279; [extraction](../tooling/shader_library.py), lines
+387–424). In that extraction context, the FSPX code-hash branch is applicable when no FSSM sidecar is present. Thus
+historical FSSM-keyed mesh corpus rows and selected native library MS programs are different populations; §8.5's falsifier
+is the applicable test for a real resolver publication.
