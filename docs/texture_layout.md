@@ -172,12 +172,13 @@ row-major committed images:
 - `XGSuggestSwizzleMode` returns `S_OK` and writes **`0x100`**, the explicit linear layout the title's own
   description helper writes (`0x2C = 0x100 | mode`, mode 0 = linear). A console swizzle mode would make the title
   upload console-tiled bytes the GPU reads wrongly.
-- `XGCreateTextureComputer` returns `S_OK` **only for a description whose whole layout can be written honestly**: a
-  one-level, one-slice 1D/2D texture, `SampleDesc.Count == 1`, no `ALLOW_RENDER_TARGET` / `ALLOW_DEPTH_STENCIL`
-  flag, a format with a whole-byte single-plane element (8/16/32/64/128-bit and the BCn formats), and the layout
-  field `0x100`. It always stores a computer in `*out`, because two measured callers use it without checking the
-  HRESULT; the two checking callers (the layout cache) take their failure path on the named refusal, which is what
-  keeps an unwritten record out of that cache.
+- `XGCreateTextureComputer` returns `S_OK` **only for a description whose whole layout can be written honestly**: by
+  default a one-level, one-slice 1D/2D texture, `SampleDesc.Count == 1`, no `ALLOW_RENDER_TARGET` /
+  `ALLOW_DEPTH_STENCIL` flag, a format with a whole-byte single-plane element (8/16/32/64/128-bit and the BCn
+  formats), and the layout field `0x100`. The separately default-off `PALMETTO_XG_LINEAR_ARRAYS` switch is the narrow
+  exception for the measured 1x1 format-28 arrays of 2, 6 or 12 slices (section 8). It always stores a computer in
+  `*out`, because two measured callers use it without checking the HRESULT; the two checking callers (the layout cache)
+  take their failure path on the named refusal, which is what keeps an unwritten record out of that cache.
 - Slot 2 (`GetResourceLayout`) fills the whole **0x1B40** record from the description the computer was created with:
   header size / alignment / mip count / plane count / dimension, one plane (usage 1 colour, size, slice size,
   alignment, bytes per element, no mip tail) and its one mip level (size, offset 0, slice size, pitch in pixels and
@@ -185,20 +186,23 @@ row-major committed images:
   are padded to 256 bytes (the linear rule this runtime serves) and every byte of the record that is not one of
   those fields is zeroed, so no stack bytes survive. A description that cannot be laid out refuses by name and
   writes nothing.
-- Slot 8 (`CopyIntoSubresource`) is unchanged from the measured linear answer: it copies the linear subresource at
-  the offset its row-major source names, capped to what a resource of the recorded description can hold, both
-  ranges checked committed and accessible. The upload path measured below is unchanged by the record fill.
-- Everything else is refused by name: a buffer / 3D description, more than one mip level, more than one array
-  slice, MSAA, a render-target or depth-stencil resource (its CMASK / HTILE metadata plane is not modelled), a
-  planar or unknown format, and any layout field other than the explicit linear `0x100`. Slot 10 always refuses
-  (section 2.2).
+- Slot 8 (`CopyIntoSubresource`) is unchanged from the measured linear answer by default: it copies the linear
+  subresource at the offset its row-major source names, capped to what a resource of the recorded description can
+  hold, both ranges checked committed and accessible. With `PALMETTO_XG_LINEAR_ARRAYS=1`, only the section-8 array
+  shapes write their four-byte texel at the corresponding 256-byte slice offset; every other shape retains the prior
+  flat path. The upload path measured below is unchanged by the record fill.
+- At create and slot 2, everything else is refused by name: a buffer / 3D description, more than one mip level, any
+  unmeasured array slice count/shape, MSAA, a render-target or depth-stencil resource (its CMASK / HTILE metadata plane
+  is not modelled), a planar or unknown format, and any layout field other than the explicit linear `0x100`. Unmodelled
+  slot-8 shapes still use the prior flat fallback. Slot 10 always refuses (section 2.2).
 
 **`PALMETTO_XG_LAYOUT=refuse`** is the previous shim, bit for bit (the A/B baseline): both exports `E_NOTIMPL`, the
 mode field untouched, the computer still stored, every slot returns `E_NOTIMPL` and writes nothing.
 
 Implementation: `port/shims/xg_xs.cpp`. The record offsets, the exact fill (guard bytes past 0x1B40 untouched, all
 unwritten fields zeroed), the two measured descriptions, the linear pitch/size arithmetic and the named refusals are
-pinned by `port/test/xg_xs_test.cpp` (122 checks in the default mode, 16 in refuse mode).
+pinned by `port/test/xg_xs_test.cpp` (364 checks in the default mode, 33 in refuse mode; section 8 adds 242 array,
+switch and census assertions).
 
 ## 4. The A/B: the linear layout as the default
 
@@ -302,6 +306,93 @@ record (header, plane, mip) to the trace, so one boot shows the shapes above. Th
 (`[rt] xg_xs counters (...)`) and the slot-8 arguments are what the tables read; `PALMETTO_XG_TRACE=1` alone gives
 the first calls without the record dump.
 
-Tests: `cmake --build port\\build --target xg_xs_test` then `port\\build\\xg_xs_test.exe` (122 checks, 0 failures;
-`PALMETTO_XG_LAYOUT=refuse` runs the same binary with 16 checks, 0 failures). The other test targets and the palmetto
-build gate are unchanged.
+Tests: `cmake --build port\\build --target xg_xs_test` then `port\\build\\xg_xs_test.exe` (364 checks, 0 failures;
+`PALMETTO_XG_LAYOUT=refuse` runs the same binary with 33 checks, 0 failures). The other test targets and the palmetto
+build gate are unchanged; this slice does not build or relink `palmetto`.
+
+## 8. Narrow opt-in: the measured explicit-linear array class
+
+**Status: implemented behind a separate opt-in and covered by GPU-free tests; not booted or linked into `palmetto` in
+this slice.** The shape census proves these arrays reached the title's copy path and the old shim refused their
+`XGCreateTextureComputer` call at the array-size gate. It does not include a slot-2 layout read for these descriptors,
+so the array slice arithmetic below is a deliberately narrow row-major model, not a measured retail `GetResourceLayout`
+answer. Keep the switch off unless the lead clears integration.
+
+### 8.1 Raw-log census and the previous accounting
+
+The shape-only reaggregation of `D:\leonida-work\fsrstable\boot-xgplan3\stderr.log` uses the 128 distinct descriptor
+prefixes (shape IDs 0–127), not only complete newline-delimited `-> verdict` strings. No package bytes or texture data
+are used or copied into the repository.
+
+| Census cut / first refusal class | Earlier page, 123 complete lines | Raw-log reaggregation, 128 shapes |
+|---|---:|---:|
+| Explicit-linear single-slice, one-level shapes | 7 | 8 |
+| Non-linear layout field (not `0x100`) | 54 | 56 |
+| More than one mip | 42 | 43 |
+| More than one array slice | 19 | 20 |
+| 3D dimension | 1 | 1 |
+| **Total shapes** | **123** | **128** |
+| **First-gate refusals** | **116** | **120** |
+
+The raw census's 120 refusals are therefore 56 layout, 43 mip, 20 array and 1 3D; plus 8 explicit-linear singles
+makes 128. The earlier [movie-port page](peer_port_movie.md) §12.1's 116 = 54 + 42 + 19 + 1 and 7 served counted
+only 123 complete lines.
+
+**Accounting discrepancy.** Five descriptor entries were absent or misjoined in that earlier newline-based aggregation.
+Shape `#11` (`dim 3`, 128x72, array 1, mip count 7, format 41, layout `0x100`) had its `mip count` refusal suffix
+joined after shape `#12` (`dim 2`, 128x1, array 1, mip 1, format 65, layout `0x100`). The earlier scrape therefore
+counted the `#12` prefix as a mip refusal and missed the `#11` prefix; the raw fields separate them into one mip refusal
+and one explicit-linear single. The remaining four prefixes are `#30` and `#45` (two layout refusals), `#61` (one mip
+refusal) and `#93` (one array-first refusal; it also has multiple mips and a non-linear layout). Net change versus the
+earlier counts: **+2 layout, +1 mip, +1 array, +1 explicit-linear single, 3D unchanged**. This is an accounting repair
+from interleaved stderr writes, not five newly observed texture classes.
+
+### 8.2 Shape and layout rule
+
+The three newly served descriptions are exactly the measured one-pixel RGBA8 array class:
+
+| Dimension | Width × height | Array slices | Mips | Format | Layout | Samples | Flags | Measured slot-8 row pitch / subresource bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `TEXTURE2D` (`3`) | 1 × 1 | 2 | 1 | `28` (`R8G8B8A8_UNORM`) | `0x100` | 1 | `0x300000` (no RT/DS bits) | 4 B / 4 B |
+| `TEXTURE2D` (`3`) | 1 × 1 | 6 | 1 | `28` (`R8G8B8A8_UNORM`) | `0x100` | 1 | `0x300000` (no RT/DS bits) | 4 B / 4 B |
+| `TEXTURE2D` (`3`) | 1 × 1 | 12 | 1 | `28` (`R8G8B8A8_UNORM`) | `0x100` | 1 | `0x300000` (no RT/DS bits) | 4 B / 4 B |
+
+`PALMETTO_XG_LINEAR_ARRAYS` is a separate opt-in, read once. Unset, empty, `0`, `off`, `no` and any unknown value are
+off; `on`, `1`, `yes` and `true` are on, case-insensitively. With it on, only the exact descriptor tuple above passes
+create/layout validation; all other dimensions, extents, formats, sample counts, layouts, resource metadata flags,
+mip counts and array counts still refuse at the named gate. The slot-2 record is `N * 0x100` bytes total, one colour
+plane, one mip, `0x100` base alignment, `0x100` bytes per slice, a 1x1 texel extent and a 256-byte row pitch. Unused
+record bytes remain zero, and writes past the 0x1B40-byte record are guarded as before.
+
+Slot 8 handles plane 0 and subresources `[0, N)`: each measured source subresource contains one four-byte texel, which
+lands at `subresource * 0x100`; the remainder of each padded 256-byte slice is left untouched. A nonzero plane,
+out-of-range subresource, too-short pitch or byte count, inaccessible range, null pointer or duplicate subresource is
+refused without writing. The shape whitelist is independent of the movie row-copy switch. With
+`PALMETTO_XG_LINEAR_ARRAYS` unset/off, create and slot 2 retain their previous array refusal and slot 8 retains its prior
+flat packed-copy result byte-for-byte. With the switch on, unmeasured arrays still fall through to that old flat copy;
+they are not promoted just because the census called them arrays.
+
+### 8.3 Exact falsifier and tests
+
+The exact falsifier is a repeat trace of this same content window (or an authoritative XG layout answer) showing any
+member of the claimed class with a descriptor other than `(dim 3, 1x1, array 2/6/12, mip 1, format 28, layout 0x100,
+sample 1, flags 0x300000)`, a slot-8 call other than `(plane 0, subresource 0..N-1, row pitch 4 B, subresource bytes
+4 B)`, or an array layout whose slice size is not `0x100` / whose slice offsets are not `i * 0x100`. Any one of those
+observations falsifies the array layout model; keep the opt-in off and remove or revise this rule rather than expanding
+the whitelist. A missing array call in a later boot alone is not a falsifier; it is an unobserved window.
+
+The reused `xg_xs_test` target checks all three accepted counts and record shapes, exact format/layout/extent/mip/sample/
+flag refusals, slot-8 argument/range/duplicate edges, switch parsing, census parsing and classification, pool reuse,
+and the switch-off byte-parity result. Run under the x64 MSVC environment (PowerShell):
+
+```powershell
+cmake --build port\\build --target xg_xs_test --config RelWithDebInfo
+$env:PALMETTO_XG_LAYOUT = 'linear'; .\\port\\build\\xg_xs_test.exe
+$env:PALMETTO_XG_LAYOUT = 'refuse'; .\\port\\build\\xg_xs_test.exe
+python -I tests\\test_docs_env_vars.py        # verifies PALMETTO_XG_LINEAR_ARRAYS is documented
+```
+
+Result for this slice: 364 checks / 0 failures in linear mode and 33 / 0 in refuse mode. The new switch is documented;
+the full environment-documentation gate still reports one unrelated pre-existing missing entry in the current tree. No
+`palmetto` build/relink or git write was done; only the shape-only trace metadata was read, and no package assets or
+texture payload bytes were added to the repository.

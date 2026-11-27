@@ -52,11 +52,13 @@
 //   layout the title's own description helper writes for a known texture; XGCreateTextureComputer returns S_OK for a
 //   description whose layout can be answered (a one-level, one-slice 1D/2D texture that names layout 0x100, no
 //   render-target/depth-stencil flags, a format with an element the linear rule covers) and stores its description;
-//   slot 2 fills the whole 0x1B40 record with that description's linear layout (rows padded to 256 bytes, one plane,
+//   PALMETTO_XG_LINEAR_ARRAYS is the separate, default-off exception for only the measured format-28 1x1 array sizes
+//   2, 6 and 12. Slot 2 fills the whole 0x1B40 record with the applicable layout (rows padded to 256 bytes, one plane,
 //   record bytes that are not a field zeroed - no stack bytes survive); slot 8 copies a linear subresource at the
-//   offset its row-major source names. Anything the runtime cannot represent is refused with the field named: a
-//   buffer / 3D / multi-level / arrayed description, MSAA, a render-target or depth-stencil resource (its CMASK /
-//   HTILE metadata plane), an unsupported or planar format, or a layout field other than the explicit linear 0x100.
+//   offset its row-major source names, or the measured array texel at its 256-byte slice offset under that opt-in.
+//   Anything the runtime cannot represent is refused with the field named: a buffer / 3D / multi-level / unmeasured
+//   array description, MSAA, a render-target or depth-stencil resource (its CMASK / HTILE metadata plane), an
+//   unsupported or planar format, or a layout field other than the explicit linear 0x100.
 //   Refusing at the create is what keeps the layout cache from consuming the record at all: its callers check that
 //   HRESULT, and slot 2 refuses too should one reach it anyway.
 // - PALMETTO_XG_LAYOUT=refuse: bit-identical to the previous shim. Both exports refuse with E_NOTIMPL,
@@ -92,7 +94,8 @@
 namespace rt::xg_xs {
 
 namespace {
-std::atomic<int> g_movie_plane_upload{-1};  // -1: not read yet; 0 off; 1 on
+std::atomic<int> g_movie_plane_upload{-1};       // -1: not read yet; 0 off; 1 on
+std::atomic<int> g_linear_array_coverage{-1};    // -1: not read yet; 0 off; 1 on
 }
 
 bool parse_movie_plane_upload(const char* text) {
@@ -114,6 +117,63 @@ bool movie_plane_upload() {
 
 void set_movie_plane_upload_for_test(bool enabled) {
     g_movie_plane_upload.store(enabled ? 1 : 0, std::memory_order_relaxed);
+}
+
+bool parse_linear_array_coverage(const char* text) {
+    if (!text || !text[0]) return false;
+    return _stricmp(text, "on") == 0 || _stricmp(text, "1") == 0 || _stricmp(text, "yes") == 0 ||
+           _stricmp(text, "true") == 0;
+}
+
+bool linear_array_coverage() {
+    int value = g_linear_array_coverage.load(std::memory_order_relaxed);
+    if (value < 0) {
+        char text[8] = {};
+        const DWORD n = GetEnvironmentVariableA("PALMETTO_XG_LINEAR_ARRAYS", text, sizeof(text));
+        value = (n > 0 && n < sizeof(text) && parse_linear_array_coverage(text)) ? 1 : 0;
+        g_linear_array_coverage.store(value, std::memory_order_relaxed);
+    }
+    return value != 0;
+}
+
+void set_linear_array_coverage_for_test(bool enabled) {
+    g_linear_array_coverage.store(enabled ? 1 : 0, std::memory_order_relaxed);
+}
+
+bool parse_census_shape_line(const char* text, CensusShape* out) {
+    if (!text || !out) return false;
+    unsigned int index = 0, dimension = 0, height = 0, array_size = 0, mip_levels = 0, format = 0;
+    unsigned int layout = 0, flags = 0, samples = 0;
+    unsigned long long width = 0;
+    const int fields = std::sscanf(text,
+                                   "[rt] xg_xs census shape #%u: dim %u %llux%u array %u mips %u format %u "
+                                   "layout 0x%x flags 0x%x samples %u",
+                                   &index, &dimension, &width, &height, &array_size, &mip_levels, &format, &layout,
+                                   &flags, &samples);
+    if (fields != 10) return false;
+    out->index = index;
+    out->dimension = dimension;
+    out->width = width;
+    out->height = height;
+    out->array_size = array_size;
+    out->mip_levels = mip_levels;
+    out->format = format;
+    out->layout = layout;
+    out->flags = flags;
+    out->samples = samples;
+    return true;
+}
+
+CensusClass census_class(const CensusShape& shape) {
+    if (shape.dimension == 4) return CensusClass::kThreeDimensional;
+    if (shape.dimension != 2 && shape.dimension != 3) return CensusClass::kOther;
+    if (shape.dimension == 2 && shape.height != 1) return CensusClass::kOther;
+    if (shape.array_size != 1) return CensusClass::kArray;
+    if (shape.mip_levels != 1) return CensusClass::kMipChain;
+    if (shape.samples != 1) return CensusClass::kOther;
+    if (shape.layout != 0x100) return CensusClass::kNonLinear;
+    if ((shape.flags & 0x3) != 0) return CensusClass::kOther;
+    return CensusClass::kLinearCandidate;
 }
 
 }  // namespace rt::xg_xs
@@ -541,6 +601,108 @@ bool linear_layout(const uint8_t* desc, LinearLayout& out, const char** why) {
     return true;
 }
 
+// The three measured explicit-linear array descriptors are all 2D 1x1 RGBA8, one mip, one sample, and array
+// sizes 2, 6 or 12. Each one-pixel slice uses the same 256-byte row footprint already written for a single 1x1
+// linear RGBA8 texture; no console swizzle, mip-chain, or multi-plane rule is inferred here.
+struct LinearArrayLayout {
+    uint32_t array_size;
+    uint32_t dimension;
+    uint32_t width;
+    uint32_t height;
+    uint32_t element_bytes;
+    uint32_t pitch_pixels;
+    uint32_t pitch_bytes;
+    uint64_t slice_size_bytes;
+    uint64_t size_bytes;
+};
+
+bool measured_linear_array_layout(const uint8_t* desc, LinearArrayLayout& out, const char** why) {
+    if (!desc) {
+        *why = "description (null)";
+        return false;
+    }
+    const uint32_t dimension = read32(desc, 0x00);
+    const uint64_t width = read64(desc, 0x10);
+    const uint32_t height = read32(desc, 0x18);
+    const uint32_t array_size = read16(desc, 0x1C);
+    const uint32_t mip_levels = read16(desc, 0x1E);
+    const uint32_t format = read32(desc, 0x20);
+    const uint32_t samples = read32(desc, 0x24);
+    const uint32_t layout_field = read32(desc, 0x2C);
+    const uint32_t flags = read32(desc, 0x30);
+    if (dimension != 3) {
+        *why = "dimension (the measured array class is TEXTURE2D)";
+        return false;
+    }
+    if (width != 1 || height != 1) {
+        *why = "extent (only measured 1x1 array images are covered)";
+        return false;
+    }
+    if (array_size != 2 && array_size != 6 && array_size != 12) {
+        *why = "array size (only the measured 2, 6 and 12-slice class is covered)";
+        return false;
+    }
+    if (mip_levels != 1) {
+        *why = "mip count (the measured array class has one level)";
+        return false;
+    }
+    if (format != 28) {
+        *why = "format (the measured array class is format 28, RGBA8_UNORM)";
+        return false;
+    }
+    if (samples != 1) {
+        *why = "sample count (the measured array class is single-sample)";
+        return false;
+    }
+    if (layout_field != kLinearLayoutField) {
+        *why = "layout field (the measured array class names explicit linear 0x100)";
+        return false;
+    }
+    if ((flags & 0x3) != 0) {
+        *why = "resource flags (the measured array class has no render/depth metadata plane)";
+        return false;
+    }
+
+    uint32_t element_bytes = 0, side = 1;
+    if (!format_element(format, element_bytes, side) || element_bytes != 4 || side != 1) {
+        *why = "format (no supported whole-byte single-plane array element)";
+        return false;
+    }
+    constexpr uint32_t kPitchBytes = 0x100;
+    const uint64_t slice_size = kPitchBytes;  // one 1x1 level occupies one padded 256-byte row block
+    out.array_size = array_size;
+    out.dimension = dimension;
+    out.width = 1;
+    out.height = 1;
+    out.element_bytes = element_bytes;
+    out.pitch_pixels = kPitchBytes / element_bytes;
+    out.pitch_bytes = kPitchBytes;
+    out.slice_size_bytes = slice_size;
+    out.size_bytes = slice_size * array_size;
+    return true;
+}
+
+// Resolve either the existing one-slice linear record or, only under its separate opt-in, the measured 1x1 RGBA8
+// array class. When that opt-in sees an unmeasured array shape, preserve its specific refusal reason instead of
+// accidentally treating the flat fallback as an array layout.
+enum class LayoutKind { kSingle, kMeasuredArray };
+
+bool linear_layout_for_desc(const uint8_t* desc, LinearLayout& single, LinearArrayLayout& array, LayoutKind& kind,
+                            const char** why) {
+    if (desc && read16(desc, 0x1C) > 1 && rt::xg_xs::linear_array_coverage()) {
+        if (measured_linear_array_layout(desc, array, why)) {
+            kind = LayoutKind::kMeasuredArray;
+            return true;
+        }
+        return false;
+    }
+    if (linear_layout(desc, single, why)) {
+        kind = LayoutKind::kSingle;
+        return true;
+    }
+    return false;
+}
+
 // The census's shape line, with the linear model's verdict on the description (the same model that decides the
 // create and the slot-2 record): one boot then names every shape the title's upload path asks the family about.
 void census_print_shape(uint32_t index, const uint8_t* desc) {
@@ -555,11 +717,20 @@ void census_print_shape(uint32_t index, const uint8_t* desc) {
         return;
     }
     LinearLayout linear{};
+    LinearArrayLayout array{};
+    LayoutKind kind = LayoutKind::kSingle;
     const char* why = "description (null)";
-    if (linear_layout(desc, linear, &why)) {
-        std::fprintf(stderr,
-                     " -> linear %ux%u, one level: row pitch %u B, level %llu B\n", linear.width, linear.height,
-                     linear.pitch_bytes, static_cast<unsigned long long>(linear.size_bytes));
+    if (linear_layout_for_desc(desc, linear, array, kind, &why)) {
+        if (kind == LayoutKind::kMeasuredArray) {
+            std::fprintf(stderr,
+                         " -> linear array %u x 1x1: row pitch %u B, slice %llu B, resource %llu B\n",
+                         array.array_size, array.pitch_bytes, static_cast<unsigned long long>(array.slice_size_bytes),
+                         static_cast<unsigned long long>(array.size_bytes));
+        } else {
+            std::fprintf(stderr,
+                         " -> linear %ux%u, one level: row pitch %u B, level %llu B\n", linear.width, linear.height,
+                         linear.pitch_bytes, static_cast<unsigned long long>(linear.size_bytes));
+        }
     } else {
         std::fprintf(stderr, " -> refused: %s\n", why);
     }
@@ -650,6 +821,44 @@ void fill_linear_layout(const LinearLayout& linear, void* out) {
     write32(record, mip + 0x60, 1);                      // block depth
 }
 
+// Fills the XG record for the measured explicit-linear array class. The record carries total resource bytes in the
+// header/plane and a 256-byte per-array-slice footprint in the slice fields; the shape is exactly one 1x1 RGBA8 mip.
+void fill_linear_array_layout(const LinearArrayLayout& array, void* out) {
+    uint8_t* const record = static_cast<uint8_t*>(out);
+    std::memset(record, 0, kLayoutBytes);
+    write64(record, 0x00, array.size_bytes);                  // SizeBytes: all measured array slices
+    write64(record, 0x08, 0x100);                             // BaseAlignmentBytes: one 256-byte linear block
+    write32(record, 0x10, 1);                                 // MipLevels
+    write32(record, 0x14, 1);                                 // PlaneCount
+    write32(record, 0x1B38, array.dimension);                 // Dimension: TEXTURE2D
+    const size_t plane = kLayoutHeaderBytes;
+    write32(record, plane + 0x00, 1);                         // usage: colour
+    write64(record, plane + 0x08, array.size_bytes);          // plane size: all array slices
+    write64(record, plane + 0x10, array.slice_size_bytes);    // one array-slice footprint
+    write64(record, plane + 0x20, 0x100);                     // plane base alignment
+    write32(record, plane + 0x28, array.element_bytes);       // bytes per element
+    write32(record, plane + 0x2C, 1);                         // first mip in the tail: none
+    write32(record, plane + 0x30, 0);                         // mips in the tail
+    const size_t mip = plane + 0x38;
+    write64(record, mip + 0x00, array.slice_size_bytes);      // mip-0 bytes for one array slice
+    write64(record, mip + 0x08, 0);                          // mip-0 offset within the plane
+    write64(record, mip + 0x10, array.slice_size_bytes);      // one slice's mip-0 footprint
+    write32(record, mip + 0x18, array.pitch_pixels);         // padded pitch in pixels
+    write32(record, mip + 0x1C, array.pitch_bytes);          // padded pitch in bytes
+    write32(record, mip + 0x20, 0x100);                      // level alignment
+    write32(record, mip + 0x24, array.pitch_pixels);         // padded width in elements
+    write32(record, mip + 0x28, 1);                          // padded height in elements
+    write32(record, mip + 0x2C, array.array_size);           // padded array slices
+    write32(record, mip + 0x30, 1);                          // width in elements
+    write32(record, mip + 0x34, 1);                          // height in elements
+    write32(record, mip + 0x38, array.width);                // width in pixels
+    write32(record, mip + 0x3C, array.height);               // height in pixels
+    write32(record, mip + 0x40, array.array_size);           // array slices at mip 0
+    write32(record, mip + 0x44, 1);                          // samples
+    write32(record, mip + 0x48, 0);                          // swizzle mode: linear
+    write32(record, mip + 0x60, 1);                          // block depth
+}
+
 // One bounded dump of a filled record: header, plane and the levels, so a boot shows the same offsets the tests and
 // docs pin. Only the first 8 slot-2 calls dump.
 void dump_layout_record(const uint8_t* record, const char* caller) {
@@ -702,6 +911,7 @@ struct Computer {
     const void* const* vtable;
     const void* linear_source_base;
     std::atomic<bool> have_source;
+    std::atomic<uint64_t> array_subresources_copied;
     std::atomic<bool> warned;
     uint8_t desc[kDescBytes];
 };
@@ -714,6 +924,12 @@ enum class UploadAnswer { kNotServed, kDone, kRefused };
 void warn_movie_refusal(std::atomic<uint32_t>& seen, const char* what, uint64_t serial, const void* caller) {
     if (seen.fetch_add(1, std::memory_order_relaxed) >= 8) return;
     std::fprintf(stderr, "[rt] xg_xs: slot 8 movie-plane rule refused: %s (call #%llu, caller %s)\n", what,
+                 static_cast<unsigned long long>(serial), caller_text(caller));
+}
+
+void warn_linear_array_refusal(std::atomic<uint32_t>& seen, const char* what, uint64_t serial, const void* caller) {
+    if (seen.fetch_add(1, std::memory_order_relaxed) >= 8) return;
+    std::fprintf(stderr, "[rt] xg_xs: slot 8 linear-array rule refused: %s (call #%llu, caller %s)\n", what,
                  static_cast<unsigned long long>(serial), caller_text(caller));
 }
 
@@ -807,6 +1023,74 @@ UploadAnswer upload_linear_rows(Computer* computer, const LinearLayout& linear, 
     return UploadAnswer::kDone;
 }
 
+// The measured linear-array slice rule is deliberately narrow: the three census shapes are 1x1 RGBA8, one mip,
+// and 2/6/12 array elements. Each subresource is one 4-byte source texel placed at its 256-byte linear slice slot;
+// no swizzled or multi-mip data is reinterpreted. A slice can be written once per computer.
+UploadAnswer upload_linear_array(Computer* computer, const LinearArrayLayout& array, void* destination, uint32_t plane,
+                                 uint32_t subresource, const void* source, uint32_t row_pitch, uint32_t bytes,
+                                 uint64_t serial, const void* caller) {
+    static std::atomic<uint32_t> refused_plane{0}, refused_subresource{0}, refused_duplicate{0};
+    static std::atomic<uint32_t> refused_pitch{0}, refused_range{0};
+    if (plane != 0) {
+        char what[192];
+        std::snprintf(what, sizeof(what), "plane %u (the measured RGBA8 array has plane 0 only)", plane);
+        warn_linear_array_refusal(refused_plane, what, serial, caller);
+        return UploadAnswer::kRefused;
+    }
+    if (subresource >= array.array_size) {
+        char what[192];
+        std::snprintf(what, sizeof(what), "subresource %u is outside the measured %u-slice array", subresource,
+                      array.array_size);
+        warn_linear_array_refusal(refused_subresource, what, serial, caller);
+        return UploadAnswer::kRefused;
+    }
+    if (row_pitch < array.element_bytes || bytes < array.element_bytes) {
+        char what[224];
+        std::snprintf(what, sizeof(what), "source row pitch %u B / byte count %u B cannot hold the measured %u B 1x1 row",
+                      row_pitch, bytes, array.element_bytes);
+        warn_linear_array_refusal(refused_pitch, what, serial, caller);
+        return UploadAnswer::kRefused;
+    }
+    const uint64_t offset = static_cast<uint64_t>(subresource) * array.slice_size_bytes;
+    const uintptr_t destination_address = reinterpret_cast<uintptr_t>(destination);
+    if (offset > array.size_bytes || array.element_bytes > array.size_bytes - offset ||
+        offset > static_cast<uint64_t>(UINTPTR_MAX - destination_address)) {
+        warn_linear_array_refusal(refused_range, "destination slice offset is outside the measured linear array",
+                                  serial, caller);
+        return UploadAnswer::kRefused;
+    }
+    void* const destination_slice = reinterpret_cast<void*>(destination_address + static_cast<uintptr_t>(offset));
+    if (!range_ok(destination_slice, array.element_bytes, true) || !range_ok(source, array.element_bytes, false)) {
+        warn_linear_array_refusal(refused_range, "the 4-byte source row or destination slice is not committed/accessible",
+                                  serial, caller);
+        return UploadAnswer::kRefused;
+    }
+
+    const uint64_t mask = uint64_t{1} << subresource;
+    const uint64_t previous = computer->array_subresources_copied.fetch_or(mask, std::memory_order_relaxed);
+    if ((previous & mask) != 0) {
+        char what[192];
+        std::snprintf(what, sizeof(what), "subresource %u was already copied for this computer", subresource);
+        warn_linear_array_refusal(refused_duplicate, what, serial, caller);
+        return UploadAnswer::kRefused;
+    }
+    if (previous == 0) {
+        computer->linear_source_base = source;  // trace baseline only; destination offsets use the subresource index
+        computer->have_source.store(true, std::memory_order_relaxed);
+    }
+    std::memcpy(destination_slice, source, array.element_bytes);
+    g_copied_bytes.fetch_add(array.element_bytes, std::memory_order_relaxed);
+    g_copies.fetch_add(1, std::memory_order_relaxed);
+    if (kTrace) {
+        std::fprintf(stderr,
+                     "[rt] xg_xs trace: slot 8 linear-array slice %u/%u writes %u B at resource offset 0x%llx "
+                     "(slice pitch %u B)\n",
+                     subresource, array.array_size, array.element_bytes, static_cast<unsigned long long>(offset),
+                     array.pitch_bytes);
+    }
+    return UploadAnswer::kDone;
+}
+
 template <size_t Slot>
 HRESULT __stdcall computer_slot(void*) {
     note_call(g_slots[Slot], "texture computer slot");
@@ -833,8 +1117,10 @@ HRESULT __stdcall computer_slot2(void* self, void* out) {
     census_note_record(computer ? computer->desc : nullptr);
     if (!out) return E_POINTER;
     LinearLayout linear{};
+    LinearArrayLayout array{};
+    LayoutKind kind = LayoutKind::kSingle;
     const char* why = "computer (/description)";
-    if (!computer || !linear_layout(computer->desc, linear, &why)) {
+    if (!computer || !linear_layout_for_desc(computer->desc, linear, array, kind, &why)) {
         static std::atomic<uint32_t> refused{0};
         warn_refusal(refused.fetch_add(1, std::memory_order_relaxed) + 1, "GetResourceLayout", why,
                      _ReturnAddress());
@@ -850,7 +1136,8 @@ HRESULT __stdcall computer_slot2(void* self, void* out) {
         }
         return kNotImpl;
     }
-    fill_linear_layout(linear, out);
+    if (kind == LayoutKind::kMeasuredArray) fill_linear_array_layout(array, out);
+    else fill_linear_layout(linear, out);
     if (kDump && n <= 8) dump_layout_record(static_cast<const uint8_t*>(out), caller_text(_ReturnAddress()));
     return S_OK;
 }
@@ -914,6 +1201,20 @@ HRESULT __stdcall computer_slot8(void* self, void* destination, uint32_t arg2, u
         if (linear_layout(computer->desc, linear, &why)) {
             const UploadAnswer answer = upload_linear_rows(computer, linear, destination, arg2, subresource, source,
                                                            arg5, arg6, n, _ReturnAddress());
+            return answer == UploadAnswer::kDone ? S_OK : kNotImpl;
+        }
+    }
+    // The opt-in only handles the measured one-pixel RGBA8 arrays. Other arrays keep the tree's flat path, including
+    // when the switch is on; they are not promoted from the census class alone.
+    if (read16(computer->desc, 0x1C) > 1 && rt::xg_xs::linear_array_coverage()) {
+        LinearLayout linear{};
+        LinearArrayLayout array{};
+        LayoutKind kind = LayoutKind::kSingle;
+        const char* why = "description (null)";
+        if (linear_layout_for_desc(computer->desc, linear, array, kind, &why) &&
+            kind == LayoutKind::kMeasuredArray) {
+            const UploadAnswer answer = upload_linear_array(computer, array, destination, arg2, subresource, source,
+                                                            arg5, arg6, n, _ReturnAddress());
             return answer == UploadAnswer::kDone ? S_OK : kNotImpl;
         }
     }
@@ -992,6 +1293,7 @@ Computer* take_computer(const void* desc) {
     computer->vtable = kVtable.data();
     computer->linear_source_base = nullptr;
     computer->have_source.store(false, std::memory_order_relaxed);
+    computer->array_subresources_copied.store(0, std::memory_order_relaxed);
     computer->warned.store(false, std::memory_order_relaxed);
     std::memset(computer->desc, 0, sizeof(computer->desc));
     if (desc) std::memcpy(computer->desc, desc, kDescBytes);
@@ -1012,12 +1314,20 @@ HRESULT __stdcall XGCreateTextureComputer(const void* desc, void** out) {
     *out = take_computer(desc);
     if (layout() == Layout::kLinear) {
         LinearLayout linear{};
+        LinearArrayLayout array{};
+        LayoutKind kind = LayoutKind::kSingle;
         const char* why = "description (null)";
-        if (linear_layout(static_cast<const uint8_t*>(desc), linear, &why)) {
+        if (linear_layout_for_desc(static_cast<const uint8_t*>(desc), linear, array, kind, &why)) {
             if (kTrace) {
-                std::fprintf(stderr,
-                             "[rt] xg_xs: XGCreateTextureComputer: linear layout %ux%u, one level (S_OK)\n",
-                             linear.width, linear.height);
+                if (kind == LayoutKind::kMeasuredArray) {
+                    std::fprintf(stderr,
+                                 "[rt] xg_xs: XGCreateTextureComputer: measured linear array %u x 1x1 (S_OK)\n",
+                                 array.array_size);
+                } else {
+                    std::fprintf(stderr,
+                                 "[rt] xg_xs: XGCreateTextureComputer: linear layout %ux%u, one level (S_OK)\n",
+                                 linear.width, linear.height);
+                }
             }
             return S_OK;
         }

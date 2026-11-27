@@ -319,6 +319,313 @@ bool checks_movie_plane_upload() {
     return true;
 }
 
+Desc array_desc(uint16_t array_size, uint64_t width = 1, uint32_t height = 1, uint16_t mip_levels = 1,
+                uint32_t format = 28, uint32_t samples = 1, uint32_t layout = kLinearMode,
+                uint32_t flags = 0x00300000, uint32_t dimension = 3) {
+    return Desc(dimension, width, height, array_size, mip_levels, format, samples, layout, flags);
+}
+
+bool checks_census_shape_helpers() {
+    using rt::xg_xs::CensusClass;
+    using rt::xg_xs::CensusShape;
+    using rt::xg_xs::census_class;
+    using rt::xg_xs::parse_census_shape_line;
+    using rt::xg_xs::parse_linear_array_coverage;
+
+    check(!parse_linear_array_coverage(nullptr) && !parse_linear_array_coverage("") &&
+              !parse_linear_array_coverage("0") && !parse_linear_array_coverage("off") &&
+              !parse_linear_array_coverage("NO") && !parse_linear_array_coverage("unknown"),
+          "the linear-array switch parser defaults off for unset, empty, 0, off, no and unknown values");
+    check(parse_linear_array_coverage("on") && parse_linear_array_coverage("1") &&
+              parse_linear_array_coverage("YES") && parse_linear_array_coverage("TrUe"),
+          "the linear-array switch parser accepts on, 1, yes and true case-insensitively");
+
+    const char* line = "[rt] xg_xs census shape #7: dim 3 1x1 array 2 mips 1 format 28 layout 0x100 "
+                       "flags 0x300000 samples 1 -> linear array 2 x 1x1";
+    CensusShape shape{};
+    check(parse_census_shape_line(line, &shape), "the census parser accepts a bounded synthetic array shape line");
+    check(shape.index == 7 && shape.dimension == 3 && shape.width == 1 && shape.height == 1 &&
+              shape.array_size == 2 && shape.mip_levels == 1 && shape.format == 28 && shape.layout == 0x100 &&
+              shape.flags == 0x300000 && shape.samples == 1,
+          "the census parser retains all description words before an interleaved suffix");
+    check(census_class(shape) == CensusClass::kArray, "the census classifier identifies an array as the first gate");
+    CensusShape single = shape;
+    single.array_size = 1;
+    check(census_class(single) == CensusClass::kLinearCandidate,
+          "the census classifier keeps an explicit-linear one-slice shape as a candidate");
+    single.mip_levels = 2;
+    check(census_class(single) == CensusClass::kMipChain, "the census classifier names a multi-mip shape");
+    single.mip_levels = 1;
+    single.layout = 0x10a;
+    check(census_class(single) == CensusClass::kNonLinear, "the census classifier names a non-linear layout");
+    single.dimension = 4;
+    check(census_class(single) == CensusClass::kThreeDimensional, "the census classifier names a 3D shape first");
+    single.dimension = 1;
+    check(census_class(single) == CensusClass::kOther, "the census classifier leaves other dimensions unclassified");
+    check(!parse_census_shape_line(nullptr, &shape) && !parse_census_shape_line(line, nullptr) &&
+              !parse_census_shape_line("[rt] xg_xs census shape #7: malformed", &shape),
+          "the census parser refuses null pointers and incomplete synthetic lines");
+    return true;
+}
+
+bool checks_linear_array_environment_read_once() {
+    using rt::xg_xs::linear_array_coverage;
+    using rt::xg_xs::set_linear_array_coverage_for_test;
+    check(SetEnvironmentVariableA("PALMETTO_XG_LINEAR_ARRAYS", "on") != 0,
+          "the array switch test sets a synthetic process environment value");
+    check(linear_array_coverage(), "the array switch reads its environment value on first use");
+    check(SetEnvironmentVariableA("PALMETTO_XG_LINEAR_ARRAYS", "off") != 0,
+          "the array switch test changes the synthetic process environment value");
+    check(linear_array_coverage(), "the array switch remains fixed after its first environment read");
+    SetEnvironmentVariableA("PALMETTO_XG_LINEAR_ARRAYS", nullptr);
+    set_linear_array_coverage_for_test(false);
+    return true;
+}
+
+bool check_array_record(void* computer, uint32_t array_size) {
+    auto slot2 = reinterpret_cast<Slot2Fn>((*static_cast<void* const* const*>(computer))[2]);
+    uint8_t record[kLayoutBytes + 0x20];
+    std::memset(record, 0xcd, sizeof(record));
+    check(slot2(computer, record) == S_OK, "slot 2 fills the measured array's layout record");
+    check(u64(record, 0x00) == static_cast<uint64_t>(array_size) * 0x100 && u64(record, 0x08) == 0x100,
+          "array record size is N 256-byte slices with 256-byte base alignment");
+    check(u32(record, 0x10) == 1 && u32(record, 0x14) == 1 && u32(record, 0x1B38) == 3,
+          "array record has one mip, one colour plane and TEXTURE2D dimension");
+    check(u64(record, kPlane0 + 0x08) == static_cast<uint64_t>(array_size) * 0x100 &&
+              u64(record, kPlane0 + 0x10) == 0x100 && u64(record, kPlane0 + 0x20) == 0x100 &&
+              u32(record, kPlane0 + 0x28) == 4,
+          "array plane size is N slices, with one 256-byte slice and a four-byte element");
+    check(u64(record, kMip0) == 0x100 && u64(record, kMip0 + 0x08) == 0 && u64(record, kMip0 + 0x10) == 0x100 &&
+              u32(record, kMip0 + 0x18) == 64 && u32(record, kMip0 + 0x1C) == 0x100,
+          "array mip 0 is one 1x1 RGBA8 slice at a 64-element / 256-byte pitch");
+    check(u32(record, kMip0 + 0x24) == 64 && u32(record, kMip0 + 0x28) == 1 &&
+              u32(record, kMip0 + 0x2C) == array_size && u32(record, kMip0 + 0x30) == 1 &&
+              u32(record, kMip0 + 0x34) == 1 && u32(record, kMip0 + 0x40) == array_size &&
+              u32(record, kMip0 + 0x44) == 1 && u32(record, kMip0 + 0x48) == 0,
+          "array mip 0 keeps the 1x1 texel extent, N slices, one sample and linear mode");
+    check(all_bytes(record + kMip0 + kMipStride, kPlane0 + 0x6C8 - (kMip0 + kMipStride), 0) &&
+              all_bytes(record + kPlane0 + 0x6C8, 0x1B38 - (kPlane0 + 0x6C8), 0),
+          "array record zeroes unused mips and planes");
+    check(all_bytes(record + kLayoutBytes, 0x20, 0xcd), "array record does not write past 0x1B40 bytes");
+    return true;
+}
+
+bool checks_linear_array_coverage() {
+    using rt::xg_xs::set_linear_array_coverage_for_test;
+    using rt::xg_xs::set_movie_plane_upload_for_test;
+    set_movie_plane_upload_for_test(false);
+    set_linear_array_coverage_for_test(true);
+
+    auto create = reinterpret_cast<CreateFn>(rt::shims::find("xg_xs.dll", "XGCreateTextureComputer"));
+    auto slot8_of = [](void* computer) {
+        return reinterpret_cast<Slot8Fn>((*static_cast<void* const* const*>(computer))[8]);
+    };
+    const uint16_t measured_sizes[] = {2, 6, 12};
+    for (uint16_t array_size : measured_sizes) {
+        Desc desc = array_desc(array_size);
+        void* computer = nullptr;
+        check(create(desc.bytes, &computer) == S_OK, "the measured format-28 1x1 array shape is accepted opt-in");
+        check(computer != nullptr, "the measured array shape gets a texture computer");
+        if (!computer) continue;
+        check_array_record(computer, array_size);
+
+        std::vector<uint8_t> source(static_cast<size_t>(array_size) * 4);
+        for (size_t i = 0; i < source.size(); ++i) source[i] = static_cast<uint8_t>((i * 37 + array_size * 11) & 0xff);
+        std::vector<uint8_t> destination(static_cast<size_t>(array_size) * 0x100 + 16, 0xcd);
+        for (uint32_t subresource = 0; subresource < array_size; ++subresource) {
+            check(slot8_of(computer)(computer, destination.data(), 0, subresource,
+                                     source.data() + static_cast<size_t>(subresource) * 4, 4, 4) == S_OK,
+                  "slot 8 copies one measured RGBA8 array subresource");
+        }
+        bool contents_match = true, slice_padding_untouched = true;
+        for (uint32_t subresource = 0; subresource < array_size; ++subresource) {
+            const size_t dst_at = static_cast<size_t>(subresource) * 0x100;
+            const size_t src_at = static_cast<size_t>(subresource) * 4;
+            if (std::memcmp(destination.data() + dst_at, source.data() + src_at, 4) != 0) contents_match = false;
+            if (!all_bytes(destination.data() + dst_at + 4, 0xfc, 0xcd)) slice_padding_untouched = false;
+        }
+        check(contents_match, "each array subresource lands at its 0x100-byte slice offset");
+        check(slice_padding_untouched, "array copies write only the four texel bytes of each slice");
+        check(all_bytes(destination.data() + static_cast<size_t>(array_size) * 0x100, 16, 0xcd),
+              "array copies leave the resource guard bytes untouched");
+    }
+
+    // The single-slice path remains the existing general linear model while the array opt-in is on.
+    Desc single = white_desc();
+    void* single_computer = nullptr;
+    check(create(single.bytes, &single_computer) == S_OK,
+          "enabling measured-array coverage does not reject the existing one-slice 1x1 shape");
+    if (single_computer) {
+        uint8_t record[kLayoutBytes];
+        std::memset(record, 0xcd, sizeof(record));
+        auto slot2 = reinterpret_cast<Slot2Fn>((*static_cast<void* const* const*>(single_computer))[2]);
+        check(slot2(single_computer, record) == S_OK && u64(record, 0x00) == 0x100 &&
+                  u64(record, kPlane0 + 0x10) == 0x100,
+              "a single 1x1 format-28 texture still gets the ordinary linear record");
+    }
+
+    // Only the exact measured descriptor class is accepted; each nearby shape remains refused by name and slot 2
+    // leaves a sentinel record untouched.
+    struct RefusalCase {
+        Desc desc;
+        const char* name;
+    };
+    const RefusalCase refusals[] = {
+        {array_desc(3), "an unmeasured three-slice count"},
+        {array_desc(2, 2), "a non-1-pixel width"},
+        {array_desc(2, 1, 2), "a non-1-pixel height"},
+        {array_desc(2, 1, 1, 2), "a multi-mip array"},
+        {array_desc(2, 1, 1, 1, 29), "the distinct RGBA8 sRGB format 29"},
+        {array_desc(2, 1, 1, 1, 61), "a different supported format"},
+        {array_desc(2, 1, 1, 1, 28, 4), "a multisampled array"},
+        {array_desc(2, 1, 1, 1, 28, 1, 0), "a layout selected by the library"},
+        {array_desc(2, 1, 1, 1, 28, 1, 0x10a), "an explicit swizzled layout"},
+        {array_desc(2, 1, 1, 1, 28, 1, kLinearMode, 0x00300001), "a render-target array"},
+        {array_desc(2, 1, 1, 1, 28, 1, kLinearMode, 0x00300002), "a depth-stencil array"},
+        {array_desc(2, 1, 1, 1, 28, 1, kLinearMode, 0x00300000, 2), "a 1D array description"},
+        {array_desc(2, 1, 1, 1, 28, 1, kLinearMode, 0x00300000, 4), "a 3D description"},
+        {array_desc(2, 0), "a zero-width array"},
+        {array_desc(0), "a zero-array-count description"},
+    };
+    for (const RefusalCase& refusal : refusals) {
+        void* computer = nullptr;
+        check(create(refusal.desc.bytes, &computer) == kNotImpl, refusal.name);
+        if (!computer) {
+            check(false, "a refused array description still returns the measured non-null computer contract");
+            continue;
+        }
+        uint8_t record[kLayoutBytes];
+        std::memset(record, 0x5a, sizeof(record));
+        auto slot2 = reinterpret_cast<Slot2Fn>((*static_cast<void* const* const*>(computer))[2]);
+        check(slot2(computer, record) == kNotImpl, "slot 2 refuses the same unmeasured array description");
+        check(all_bytes(record, sizeof(record), 0x5a), "a refused array record writes nothing");
+    }
+
+    // Slot-8 argument edges on a supported computer: plane, range, pitch and source-size refusals are no-write.
+    Desc edge_desc = array_desc(2);
+    void* edge_computer = nullptr;
+    check(create(edge_desc.bytes, &edge_computer) == S_OK && edge_computer != nullptr,
+          "a fresh measured two-slice computer is available for edge refusals");
+    if (edge_computer) {
+        auto slot8 = slot8_of(edge_computer);
+        uint8_t source[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+        std::vector<uint8_t> destination(2 * 0x100 + 8, 0xcd);
+        check(slot8(edge_computer, destination.data(), 1, 0, source, 4, 4) == kNotImpl,
+              "a nonzero plane is refused by the measured array upload");
+        check(slot8(edge_computer, destination.data(), 0, 2, source, 4, 4) == kNotImpl,
+              "a subresource at the array-size boundary is refused");
+        check(slot8(edge_computer, destination.data(), 0, 0, source, 3, 4) == kNotImpl,
+              "a row pitch shorter than the four-byte texel is refused");
+        check(slot8(edge_computer, destination.data(), 0, 0, source, 4, 3) == kNotImpl,
+              "a byte count shorter than the four-byte texel is refused");
+        check(slot8(edge_computer, destination.data(), 0, 0, source, 0, 0) == kNotImpl,
+              "an empty source row is refused");
+        check(slot8(edge_computer, nullptr, 0, 0, source, 4, 4) == kNotImpl &&
+                  slot8(edge_computer, destination.data(), 0, 0, nullptr, 4, 4) == kNotImpl,
+              "null source and destination pointers are refused");
+        check(all_bytes(destination.data(), destination.size(), 0xcd),
+              "every rejected array-copy edge leaves the destination untouched");
+
+        // A padded source row is safe for this one-texel subresource; only the texel is read and written.
+        check(slot8(edge_computer, destination.data(), 0, 0, source, 8, 8) == S_OK,
+              "a source row with safe trailing padding still copies the one measured texel");
+        check(std::memcmp(destination.data(), source, 4) == 0 && all_bytes(destination.data() + 4, 0xfc, 0xcd),
+              "a padded source row still writes exactly four destination bytes");
+        const std::vector<uint8_t> after_first = destination;
+        check(slot8(edge_computer, destination.data(), 0, 0, source, 4, 4) == kNotImpl,
+              "a duplicate subresource is refused for the same computer");
+        check(destination == after_first, "a refused duplicate does not rewrite any array bytes");
+    }
+
+    // A destination subresource that crosses into a guard page is refused before the copy.
+    SYSTEM_INFO system_info{};
+    GetSystemInfo(&system_info);
+    const size_t page_size = system_info.dwPageSize;
+    void* guarded = VirtualAlloc(nullptr, page_size * 2, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    check(guarded != nullptr, "the range-edge test reserves synthetic committed pages");
+    if (guarded) {
+        auto* bytes = static_cast<uint8_t*>(guarded);
+        std::memset(bytes, 0xcd, page_size);
+        DWORD old_protect = 0;
+        const bool guard_set = VirtualProtect(bytes + page_size, page_size, PAGE_NOACCESS, &old_protect) != 0;
+        check(guard_set, "the range-edge test protects the following synthetic page");
+        if (guard_set && edge_computer) {
+            auto slot8 = slot8_of(edge_computer);
+            const void* source = "RGBA";
+            check(slot8(edge_computer, bytes + page_size - 128, 0, 1, source, 4, 4) == kNotImpl,
+                  "a destination slice landing in a no-access page is refused");
+            check(all_bytes(bytes, page_size, 0xcd), "a range refusal does not modify the committed page");
+        }
+        VirtualFree(guarded, 0, MEM_RELEASE);
+    }
+
+    set_linear_array_coverage_for_test(false);
+    return true;
+}
+
+bool checks_array_switch_off_is_unchanged() {
+    using rt::xg_xs::set_linear_array_coverage_for_test;
+    set_linear_array_coverage_for_test(false);
+    auto create = reinterpret_cast<CreateFn>(rt::shims::find("xg_xs.dll", "XGCreateTextureComputer"));
+    const uint16_t measured_sizes[] = {2, 6, 12};
+    for (uint16_t array_size : measured_sizes) {
+        Desc desc = array_desc(array_size);
+        void* computer = nullptr;
+        check(create(desc.bytes, &computer) == kNotImpl,
+              "the opt-out keeps the previous one-slice create refusal for arrays");
+        check(computer != nullptr, "the opt-out retains the prior non-null computer contract");
+        if (!computer) continue;
+        auto slot2 = reinterpret_cast<Slot2Fn>((*static_cast<void* const* const*>(computer))[2]);
+        uint8_t record[kLayoutBytes];
+        std::memset(record, 0x5a, sizeof(record));
+        check(slot2(computer, record) == kNotImpl && all_bytes(record, sizeof(record), 0x5a),
+              "the opt-out keeps the previous slot-2 refusal and does not write the record");
+
+        auto slot8 = reinterpret_cast<Slot8Fn>((*static_cast<void* const* const*>(computer))[8]);
+        std::vector<uint8_t> source(static_cast<size_t>(array_size) * 4);
+        for (size_t i = 0; i < source.size(); ++i) source[i] = static_cast<uint8_t>((i * 19 + array_size) & 0xff);
+        std::vector<uint8_t> destination(static_cast<size_t>(array_size) * 0x100 + 16, 0xcd);
+        for (uint32_t subresource = 0; subresource < array_size; ++subresource) {
+            check(slot8(computer, destination.data(), 0, subresource,
+                        source.data() + static_cast<size_t>(subresource) * 4, 4, 4) == S_OK,
+                  "the opt-out retains the previous flat slot-8 copy for an array");
+        }
+        std::vector<uint8_t> expected(destination.size(), 0xcd);
+        std::memcpy(expected.data(), source.data(), source.size());
+        check(destination == expected,
+              "the opt-out array bytes are identical to the previous packed flat-copy result");
+    }
+    return true;
+}
+
+bool checks_linear_array_computer_reuse() {
+    using rt::xg_xs::set_linear_array_coverage_for_test;
+    set_linear_array_coverage_for_test(true);
+    auto create = reinterpret_cast<CreateFn>(rt::shims::find("xg_xs.dll", "XGCreateTextureComputer"));
+    Desc desc = array_desc(2);
+    void* first = nullptr;
+    check(create(desc.bytes, &first) == S_OK && first != nullptr,
+          "a measured array computer is prepared for the static-pool reuse test");
+    if (!first) return true;
+    auto slot8 = reinterpret_cast<Slot8Fn>((*static_cast<void* const* const*>(first))[8]);
+    uint8_t source[4] = {0x91, 0x82, 0x73, 0x64};
+    uint8_t destination[2 * 0x100];
+    std::memset(destination, 0xcd, sizeof(destination));
+    check(slot8(first, destination, 0, 0, source, 4, 4) == S_OK,
+          "the first array subresource copy is recorded before pool reuse");
+
+    void* last = nullptr;
+    for (size_t i = 0; i < 64; ++i) {
+        last = nullptr;
+        check(create(desc.bytes, &last) == S_OK && last != nullptr,
+              "a synthetic creation cycles the fixed computer pool safely");
+    }
+    check(last == first, "64 creations wrap to the same fixed computer slot");
+    check(slot8(first, destination, 0, 0, source, 4, 4) == S_OK,
+          "reusing a computer clears its per-array duplicate mask");
+    return true;
+}
+
 bool checks_refusals() {
     auto create = reinterpret_cast<CreateFn>(rt::shims::find("xg_xs.dll", "XGCreateTextureComputer"));
     auto slot2_of = [](void* computer) {
@@ -372,6 +679,8 @@ int main() {
     check(suggest != nullptr, "XGSuggestSwizzleMode is registered");
     check(rt::shims::owns_dll("xg_xs.dll"), "the registry owns xg_xs.dll");
     if (!create || !suggest) return 1;
+    check(checks_census_shape_helpers(), "the census and array-switch parser cases ran");
+    check(checks_linear_array_environment_read_once(), "the linear-array environment gate cases ran");
 
     Desc atlas = atlas_desc();
     uint32_t mode = 0x1234;
@@ -399,6 +708,8 @@ int main() {
         checks_layout_record(computer);
         check(checks_refusals(), "the refusal cases ran");
         check(checks_movie_plane_upload(), "the movie-plane upload rule cases ran");
+        check(checks_linear_array_coverage(), "the measured linear-array coverage cases ran");
+        check(checks_array_switch_off_is_unchanged(), "the array switch-off byte-parity cases ran");
     } else {
         check(reinterpret_cast<Slot2Fn>(vtable[2])(computer, record) == kNotImpl,
               "slot 2 refuses by name in refuse mode");
@@ -443,6 +754,7 @@ int main() {
     release(computer);
     check(reinterpret_cast<Slot2Fn>(vtable[2])(computer, record) == (linear ? S_OK : kNotImpl),
           "the computer stays usable after more Releases than it was handed out");
+    if (linear) check(checks_linear_array_computer_reuse(), "the linear-array computer-pool reuse cases ran");
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
