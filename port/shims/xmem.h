@@ -56,6 +56,241 @@ XmemLayoutPlan layout_plan_from(const char* layout, const char* caller);
 // The process's plan, parsed once. One relaxed load per XMemVirtualAlloc call when no switch is set.
 const XmemLayoutPlan& layout_plan();
 
+// ---- The GPU-view reservation pair (docs/peer_port_movie.md, the implemented rank-5 port) ------------------------
+//
+// MEASURED in this title (docs/peer_port_movie.md section 11.1): XMemVirtualAlloc reserves the same span of 64 KiB
+// pages twice, back to back - a CPU-readable PAGE_READWRITE window first (caller game+0x1e1d00f, 0x600000000 bytes,
+// attribute word 0x21) and a PAGE_GRAPHICS_NOACCESS | PAGE_NOACCESS window of the same size immediately after it
+// (caller game+0x1e1d03e, attribute word 0x3), contiguous with it in the measured boot. On the console the second is a
+// GPU-only view of the first's physical pages; this shim maps the title's pages into the first only, so a placed
+// resource whose console VA falls in the second has its bytes at the same offset in the first. The peers that name the
+// same arrangement are XCL's `kernelx::mirrors` (the reservation pair, its GPU-view test and `source`) and Five Star's
+// `XMemReservation.CpuView` ("the CPU reservation of the same size made just before it") - read as evidence for the
+// mechanism, never as a code source.
+//
+// The pure half is here and unit-tested by port/test/xmem_test.cpp: the switch text, the measured pair rule, the
+// bounded record of the reservations and pairs, and the translation of a GPU-view VA to its CPU-view address. The
+// impure half is in port/shims/xmem.cpp (record at each reserve-only 64 KiB window; answer the resolve hook) and the
+// consumer is the title-placed texture import in port/shims/d3d12_vulkan_device.cpp (its pages are read through the
+// answer, and the per-submission refresh compares the same view). The default is OFF: with PALMETTO_GPU_VIEW_PAIR
+// unset nothing is recorded, the hook answers "unavailable", and the import reads the console placement VA exactly as
+// before this port.
+enum class GpuViewPairMode : std::uint8_t {
+    off = 0,
+    on = 1,
+};
+
+struct GpuViewPairPlan {
+    GpuViewPairMode mode = GpuViewPairMode::off;
+    bool trace = false;  // PALMETTO_GPU_VIEW_PAIR_TRACE: the record/resolve lines, the path unchanged
+    bool enabled() const { return mode == GpuViewPairMode::on; }
+};
+
+// The pure parse. `pair` accepts `on`/`1`/`yes`/`true` (case-insensitive) as the switch's on value; unset, empty, `0`,
+// `off` and any unknown word are off, never a guess. `trace` is any value other than unset/empty/`0`.
+GpuViewPairPlan gpu_view_pair_plan_from(const char* pair, const char* trace);
+
+// One reservation the title made: a reserve-only 64 KiB-page window, with its CPU protection after the console
+// graphics bits are dropped (port/shims/xmem.cpp's host_protect).
+struct GpuViewReservation {
+    std::uint64_t base = 0;
+    std::uint64_t size = 0;
+    std::uint32_t protect = 0;
+};
+
+inline constexpr std::uint32_t gpu_view_protect_noaccess = 0x01;   // PAGE_NOACCESS
+inline constexpr std::uint32_t gpu_view_protect_readonly = 0x02;   // PAGE_READONLY
+inline constexpr std::uint32_t gpu_view_protect_readwrite = 0x04;  // PAGE_READWRITE
+inline constexpr std::uint64_t gpu_view_page_bytes = 0x10000;      // the console's 64 KiB page
+
+// The two shapes the measured pair is made of. A reservation with any other protection is not recorded: a committed
+// allocation is CPU-addressable in this shim and needs no pairing, and an execute/guard protection is not the pair.
+inline bool gpu_view_shaped(const GpuViewReservation& reservation) {
+    return reservation.base && reservation.size &&
+           reservation.base % gpu_view_page_bytes == 0 && reservation.size % gpu_view_page_bytes == 0;
+}
+
+inline bool gpu_view_is_gpu_only(const GpuViewReservation& reservation) {
+    return gpu_view_shaped(reservation) && (reservation.protect & 0xffu) == gpu_view_protect_noaccess;
+}
+
+inline bool gpu_view_is_cpu_readable(const GpuViewReservation& reservation) {
+    const std::uint32_t cpu = reservation.protect & 0xffu;
+    return gpu_view_shaped(reservation) &&
+           (cpu == gpu_view_protect_readonly || cpu == gpu_view_protect_readwrite);
+}
+
+// The measured pair rule: a CPU-readable reservation made just before a GPU-only reservation of the same size, with
+// the two ranges contiguous (`cpu.base + cpu.size == gpu.base` - the measured boot's arrangement, and what says the
+// two were reserved as one span on the console). False for anything else; the caller records the GPU-only reservation
+// as unpaired so the resolve names the refusal instead of reading a window that holds no pages.
+inline bool gpu_view_pair_rule(const GpuViewReservation& cpu, const GpuViewReservation& gpu) {
+    return gpu_view_is_cpu_readable(cpu) && gpu_view_is_gpu_only(gpu) && cpu.size == gpu.size &&
+           cpu.base <= UINT64_MAX - cpu.size && cpu.base + cpu.size == gpu.base;
+}
+
+// Translate a console VA inside the GPU-view reservation to the same offset in the paired CPU reservation. `bytes`
+// must fit inside the reservation: a texture that reaches past its end cannot be read through the pair (the caller
+// refuses it by name).
+inline bool gpu_view_translate(std::uint64_t gpu_va, std::uint64_t bytes, const GpuViewReservation& gpu,
+                               const GpuViewReservation& cpu, std::uint64_t& cpu_va) {
+    if (!bytes || gpu_va < gpu.base) return false;
+    const std::uint64_t offset = gpu_va - gpu.base;
+    if (offset >= gpu.size || bytes > gpu.size - offset) return false;
+    cpu_va = cpu.base + offset;
+    return true;
+}
+
+// What the resolve hook answers for one request.
+enum class GpuViewResolve : std::uint8_t {
+    // No pairing is on, or the VA is not in a GPU-view reservation this table knows: the caller keeps its pre-port
+    // source (the console placement VA), so the default path is byte-identical.
+    unavailable = 0,
+    // The VA is inside a paired GPU-view reservation and `cpu_va` holds the same offset in its CPU view.
+    paired = 1,
+    // The VA is inside a GPU-view reservation with no usable pair. Reading it would read a window with no pages (or
+    // with pages mapped nowhere), so the caller refuses by name rather than importing what is there.
+    gpu_only = 2,
+};
+
+// The bounded record. Sized to the measured population (one pair in every boot read) with room for a re-created
+// span: eight CPU-view candidates, eight pairs and eight unpaired GPU-view reservations, newest candidates kept. The
+// record is append-only for the process's lifetime because the shim never sees the title's VirtualFree of these
+// windows; that is why it is bounded (docs/peer_port_movie.md section 11.5 names it a limit).
+class GpuViewPairTable {
+public:
+    static constexpr std::size_t max_views = 8;
+    static constexpr std::size_t max_pairs = 8;
+    static constexpr std::size_t max_gpu_only = 8;
+
+    enum class Recorded : std::uint8_t {
+        ignored = 0,   // not the shape of the pair (a committed allocation, an execute protection, ...)
+        cpu_view = 1,  // a CPU-readable reservation: a candidate for the GPU view made just after it
+        paired = 2,    // a GPU-only reservation paired with a candidate: the mechanism is now armed for its VAs
+        gpu_only = 3,  // a GPU-only reservation with no pair: its VAs resolve to `gpu_only` (a named refusal)
+        refused = 4,   // a pair or an entry a bound dropped: the caller logs it once
+    };
+
+    struct Pair {
+        GpuViewReservation cpu;
+        GpuViewReservation gpu;
+    };
+
+    // Record one reservation, in creation order. A duplicate CPU-readable reservation is `ignored` (a window is
+    // recorded once per XMemVirtualAlloc answer).
+    Recorded record(const GpuViewReservation& reservation) {
+        if (gpu_view_is_cpu_readable(reservation)) {
+            for (std::size_t i = 0; i < view_count_; ++i) {
+                if (views_[i].base == reservation.base && views_[i].size == reservation.size) return Recorded::ignored;
+            }
+            if (view_count_ == max_views) {  // keep the newest: the pair is made together, so the newest candidates matter
+                for (std::size_t i = 1; i < max_views; ++i) {
+                    views_[i - 1] = views_[i];
+                    claimed_[i - 1] = claimed_[i];
+                }
+                --view_count_;
+                ++refused_;
+            }
+            views_[view_count_] = reservation;
+            claimed_[view_count_] = false;
+            ++view_count_;
+            return Recorded::cpu_view;
+        }
+        if (!gpu_view_is_gpu_only(reservation)) return Recorded::ignored;
+        // Newest first: the measured pair is the two reservations made together.
+        for (std::size_t i = view_count_; i-- > 0;) {
+            if (claimed_[i] || !gpu_view_pair_rule(views_[i], reservation)) continue;
+            if (pair_count_ == max_pairs) {
+                ++refused_;
+                return Recorded::refused;
+            }
+            claimed_[i] = true;
+            pairs_[pair_count_].cpu = views_[i];
+            pairs_[pair_count_].gpu = reservation;
+            ++pair_count_;
+            return Recorded::paired;
+        }
+        if (gpu_only_count_ == max_gpu_only) {
+            ++refused_;
+            return Recorded::refused;
+        }
+        gpu_only_[gpu_only_count_++] = reservation;
+        return Recorded::gpu_only;
+    }
+
+    // The CPU-view address behind `gpu_va` when it is inside a pair, or the answer that the VA is inside an unpaired
+    // GPU-view reservation. A request inside a pair's GPU window that does not fit the window is `gpu_only` too: the
+    // caller must refuse it, not fall back to reading the window itself. The resolve is a scan of at most eight pairs
+    // and eight unpaired ranges.
+    GpuViewResolve resolve(std::uint64_t gpu_va, std::uint64_t bytes, std::uint64_t& cpu_va) const {
+        if (!gpu_va) return GpuViewResolve::unavailable;
+        for (std::size_t i = 0; i < pair_count_; ++i) {
+            const GpuViewReservation& gpu = pairs_[i].gpu;
+            if (gpu_va < gpu.base || gpu_va - gpu.base >= gpu.size) continue;
+            // Inside this pair's GPU window: either the whole request translates, or it cannot be read through the pair.
+            if (gpu_view_translate(gpu_va, bytes, gpu, pairs_[i].cpu, cpu_va)) return GpuViewResolve::paired;
+            return GpuViewResolve::gpu_only;
+        }
+        for (std::size_t i = 0; i < gpu_only_count_; ++i) {
+            if (gpu_va >= gpu_only_[i].base && gpu_va - gpu_only_[i].base < gpu_only_[i].size)
+                return GpuViewResolve::gpu_only;
+        }
+        return GpuViewResolve::unavailable;
+    }
+
+    // Whether [va, va + bytes) is inside the CPU half of a pair: the boot's measure of the pages the title maps into the
+    // view the GPU samples (port/shims/xmem.cpp counts them; docs/peer_port_movie.md section 11.4).
+    bool is_pair_cpu_span(std::uint64_t va, std::uint64_t bytes) const {
+        for (std::size_t i = 0; i < pair_count_; ++i) {
+            const GpuViewReservation& cpu = pairs_[i].cpu;
+            if (va < cpu.base || !bytes) continue;
+            const std::uint64_t offset = va - cpu.base;
+            if (offset < cpu.size && bytes <= cpu.size - offset) return true;
+        }
+        return false;
+    }
+
+    std::size_t pairs() const { return pair_count_; }
+    std::size_t gpu_only_ranges() const { return gpu_only_count_; }
+    std::size_t refused() const { return refused_; }
+    const Pair& pair(std::size_t index) const { return pairs_[index]; }
+
+    void clear() {
+        for (std::size_t i = 0; i < max_views; ++i) {
+            views_[i] = GpuViewReservation{};
+            claimed_[i] = false;
+        }
+        for (std::size_t i = 0; i < max_pairs; ++i) pairs_[i] = Pair{};
+        for (std::size_t i = 0; i < max_gpu_only; ++i) gpu_only_[i] = GpuViewReservation{};
+        view_count_ = pair_count_ = gpu_only_count_ = refused_ = 0;
+    }
+
+private:
+    GpuViewReservation views_[max_views]{};
+    bool claimed_[max_views]{};
+    std::size_t view_count_ = 0;
+    Pair pairs_[max_pairs]{};
+    std::size_t pair_count_ = 0;
+    GpuViewReservation gpu_only_[max_gpu_only]{};
+    std::size_t gpu_only_count_ = 0;
+    std::size_t refused_ = 0;
+};
+
+// The runtime's hooks, filled in by port/shims/xmem.cpp; a GPU-free binary that links no xmem keeps them null and the
+// layer's placed-texture import reads the console placement VA exactly as it did before this port. `cpu_va` is
+// written only for `paired`.
+using GpuViewResolveFn = GpuViewResolve (*)(std::uint64_t gpu_va, std::uint64_t bytes, std::uint64_t* cpu_va);
+using GpuViewCountFn = std::uint64_t (*)();
+inline GpuViewResolveFn gpu_view_resolve = nullptr;
+inline GpuViewCountFn gpu_view_pairs = nullptr;             // pairs recorded
+inline GpuViewCountFn gpu_view_resolved = nullptr;          // resolved requests (a placed texture read through the pair)
+inline GpuViewCountFn gpu_view_refused = nullptr;           // requests inside an unpaired GPU-view reservation
+inline GpuViewCountFn gpu_view_cpu_map_pages = nullptr;     // 64 KiB pages the title mapped into a paired CPU view
+
+// Test seam (port/test/xmem_test.cpp): overrides the environment parse for the rest of the process and returns the plan
+// now in effect. The production path never calls it; xmem.cpp implements it.
+GpuViewPairPlan set_gpu_view_pair_plan(GpuViewPairPlan plan);
+
 // Console queue slot 31 (CopyPageMappingsBatchX, port/shims/d3d12_xs_device.cpp): the command-object proxy is also
 // compiled into GPU-free test binaries that link no xmem, so the mapping primitive is a hook this file's
 // implementation fills in and a test can replace. Each call gives `pages` 64 KiB destination pages a second view of

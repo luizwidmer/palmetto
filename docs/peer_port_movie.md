@@ -1,9 +1,10 @@
 # The peer ports' movie path: Bink 2 decode, the plane textures and the present
 
 **Status: peer audit (sections 1-7, written as a read-only audit: documentation only, no boot, every page quoted) plus
-two implemented ports (sections 8-9, with their own tests and one light boot each), their attribution (sections 8.7 and
-9.6) and the uncommitted file list (section 10).** The five peer ports were re-cloned and read at the commits in section
-1 to answer one question: how does a port get a movie from the title's `BinkOpenWithOptions` to a pixel on screen, and
+three implemented ports (sections 8-9 and 11, with their own tests and one light boot each), their attribution (sections
+8.7, 9.6 and 11.7) and the uncommitted file lists (sections 10 and 11.8).** The five peer ports were re-cloned and read
+at the commits in section 1 to answer one question: how does a port get a movie from the title's
+`BinkOpenWithOptions` to a pixel on screen, and
 which part of that is missing in this tree? The answer is narrower than the earlier parity audit expected. Every peer
 runs the title's own Bink 2 DLL, lets the title decode into its own CPU frame buffers, and has no movie trigger, no Bink
 HLE and no fake decoder: the title's own state machine opens, decodes and draws the movie. What the peers do carry on the
@@ -721,3 +722,204 @@ Tests: [xmem_test.cpp](../port/test/xmem_test.cpp), [d3d12_vulkan_device_test.cp
 [xbox_present_test.cpp](../port/test/xbox_present_test.cpp). Docs: this page. Nothing else is touched:
 `port/src/vulkan_backend.h`, the CMake files, `NOTICE.md`, `docs/README.md` and the other docs pages are unchanged by
 this port. No git write was made and no peer code is in the tree.
+
+## 11. Implemented port 3: the GPU-view reservation pair for placed texture VAs (section 4 item 5)
+
+**Status: implemented behind an opt-in switch, tested GPU-free and on the GPU, and measured on one light boot that
+stopped at the title's stage-3 frontier at 60.4 s.** This is the rank-5 port of section 4, item 5. It answers the gap
+section 4 item 5 names: the title reserves the same page span twice, a CPU-readable
+reservation and a `PAGE_GRAPHICS_NOACCESS` one, and places GPU resources by the second while its CPU writes the first.
+This tree mapped only the first; a placed resource whose console VA is in the second has no pages at that VA on the
+host. The port records the pair (our own rule, stated over the measured reservations), resolves a placed texture's
+console VA through it before the import reads anything, and keeps that resolved source for the per-submission refresh of
+section 8. The pair was recorded in the measured boot with exactly the measured shape; **no placed texture resolved
+through it** in the window the boot ran, because the title placed all 64 sampled creations in its committed heap and the
+arm stopped before the movie window. That is a measured readiness result, not a fix observed on a title resource, and
+section 11.4/11.5 say so. The code is our own: the pure rule and bounded table are in the section 11.2 files below, the
+recording and the resolve hook in [xmem.cpp](../port/shims/xmem.cpp), the consumer in the placed-texture import and
+refresh of [d3d12_vulkan_device.cpp](../port/shims/d3d12_vulkan_device.cpp). No peer code was copied and no game data is
+in this port; section 11.6 repeats the attribution.
+
+### 11.1 The measured shapes and the gap
+
+The pair is measured (existing boot logs outside the repository, read only for this port; no new boot to establish it).
+A 60 s boot with `PALMETTO_XMEM_LAYOUT=log` prints the two reservations; the light arm that carried this port's switches
+(section 11.4) prints the same pair again, and the port's own record line names it:
+
+| what | measured | where |
+|---|---|---|
+| CPU half of the pair | a reserve-only 64 KiB-page window of **0x600000000 B** (24 GiB), host `PAGE_READWRITE` (console protect `0x4`), attribute word `0x21`, title caller `game+0x1e1d00f` | `boot-xmemlayout1` and `boot-gpuview2` stderr, the `xmem layout` line |
+| GPU view of the pair | the same size, host `PAGE_NOACCESS` (`PAGE_GRAPHICS_NOACCESS` \| `PAGE_NOACCESS`, console protect `0x801`), attribute word `0x3`, title caller `game+0x1e1d03e` (0x2f after the CPU caller) | same |
+| the two ranges | **contiguous**: CPU base + size == GPU-view base in both boots (`0x1e1bc2a0000 + 0x600000000 = 0x1e7bc2a0000` in the port's boot) | same |
+| presence | both allocations appear in **every** boot read: the 300 s rank-4 boot's attribute census records two `XMemVirtualAlloc` answers of 25,769,803,776 B with attribute words `0x21` and `0x3` from the same two callers | `boot-plane-port` `boot.jsonl`, events 13-14 |
+| pages behind it, measured window | **0** pages mapped into the pair's CPU half by 60 s: the title's page pool (**99,776** 64 KiB pages, 6.54 GB) is mapped into a separate CPU-readable placeholder, and the boot's first page-mapping batch names that pool | `boot-gpuview2` stderr: `xmem layout` for the 0x185c00000-B placeholder, the slot-31 first-call line |
+| placed texture population, same window | **64** creation lines (the log's own bound; the separate 60 s layout boot has 30, all of them inside the committed 2 MiB-page heap), **0** in either half of the pair, 64 inside the committed heap (`0x283`-attribute large pages, 0x89800000 B served) | both boots' `placed texture: address` lines |
+| a placed buffer | the measured 182,452,224 B slot-133 placement is inside a mapped physical-page window (the address is one of the five window starts the same boot records), not in the pair | `boot-xmemlayout1` stderr |
+| imports in the window | **0** imported: 32 all-zero-head waits, 24 give-ups after the bounded 512 attempts, 5 refusals at the 16 MiB cap; the rank-4 300 s boot imported 2 small (64 B, 2x2) textures and none of its 4K planes | `boot-gpuview2` and `boot-plane-port` stderr |
+
+The gap is exact, and it is a host-side one: **the GPU-view window holds no pages on this host**. The title maps the
+physical pages into the CPU reservation only (the measured pair is the peers' arrangement, section 11.6), so a placed
+resource whose console VA is inside the GPU view reads a window with nothing committed in it, while its bytes sit at
+the same offset in the CPU half. The one-shot import reads the console placement VA once per texture
+([texture_import.md](texture_import.md)) and the section-8 refresh compares that same address, so both would read the
+empty window for such a texture. At this frontier that texture has not been observed: every sampled placement is in
+committed CPU-addressable heap, the movie draw is not issued (section 3.3) and the GPU view's population is 0. The port
+is therefore the mechanism the movie planes would need (the peers document the video planes placed in that second
+reservation), built and bounded now, measured for the population it does have.
+
+### 11.2 The design
+
+Our own mechanism in the tree's own terms. The pure half is [xmem.h](../port/shims/xmem.h) (`GpuViewPairTable`, the
+rule, the translation, the switch); [xmem.cpp](../port/shims/xmem.cpp) records each reserve-only 64 KiB-page window as
+XMemVirtualAlloc makes it and fills the resolve hook; the device resolves a placed texture's console VA through the hook
+before the import's commit/content gate and keeps the answer as its source.
+
+| switch | effect |
+|---|---|
+| `PALMETTO_GPU_VIEW_PAIR` | unset, empty, `0`, `off` or any unknown word: the tree before this port - nothing is recorded, the hook answers "unavailable", the import reads the console placement VA and the refresh compares it, byte for byte. `on`, `1`, `yes` or `true` (case-insensitive): record the pair and resolve placed-texture VAs through it. |
+| `PALMETTO_GPU_VIEW_PAIR_TRACE` | more of the mechanism's evidence: the CPU candidates and the first pages mapped into a paired CPU view. The pair's record line, the device's resolve/refusal lines and the counters print with the switch on either way, bounded; the path is unchanged. |
+
+- **The rule is stated over the measured reservations, and refuses what the measurement does not cover.** A GPU-view
+  reservation pairs with the CPU-readable reservation recorded just before it when the two have the same size and are
+  **contiguous** (`cpu.base + cpu.size == gpu.base`, exactly the measured arrangement). The peers pair by "the CPU
+  reservation made just before it" and the measured boot's pair is also contiguous; this port keeps the narrower
+  measured rule, so a same-size pair that later appears non-contiguous is recorded as unpaired and named by the refusal
+  rather than translated on a guess (section 11.5 names that as the next falsifier).
+- **The table is bounded and append-only.** Eight CPU candidates (newest kept), eight pairs and eight unpaired GPU-view
+  reservations. The shim never sees the title's `VirtualFree` of these windows, so a record lives for the process's
+  lifetime; the bounds, not a free-list, are what keep that finite. A reservation past a bound is counted and logged
+  once, and the caller keeps the pre-port path.
+- **One resolution per texture, used by the import and the refresh.** The import resolves the console VA before its
+  first read, keeps the CPU address in `placed_source_pages_`, and every later attempt, the content gate, the shadow
+  compare and the page watch use it. This is the "one-shot vs paired" difference: the refresh of section 8 compares the
+  paired view, so a title rewriting the CPU half stays current in the image without a second resolution.
+- **Page pull on first sample.** A resolution can succeed while the CPU half's pages are not committed yet (the title
+  maps them lazily). The import's existing committed/readable gate makes it wait and retry on the next submission
+  (bounded to 512 attempts), so the first sample after the pages appear imports them; the alternative, reading the
+  uncommitted CPU address, would fault and is never done.
+- **Refusals are named, not guessed.** A request inside a GPU view that is unpaired, or that crosses the pair's end
+  (the whole subresource must fit the reservation), resolves to `gpu_only`: the import leaves the committed stand-in,
+  logs the refusal once (bounded) and never reads the window. The import's own size cap still runs first, so pairing
+  does not lift the 16 MiB bound of section 8's population.
+- **Default path unchanged.** With `PALMETTO_GPU_VIEW_PAIR` unset no table entry is made, no mapping is counted, the
+  hook answers "unavailable" and the import/refresh read the console VA; the boot's logs are the tree's. The resolve
+  hook is null in binaries that link no xmem (the GPU test replaces it with a stub, section 11.3).
+- **Where it runs.** Recording rides the two reserve-only window paths of `XMemVirtualAlloc` under the physical-page
+  table's mutex; resolution is a hook call on the recording thread that drains the placed textures; the pairing counters
+  reach the boot's report on the section-8 refresh milestone line (`GPU-view pairing: ...`).
+
+### 11.3 Tests
+
+`port/test/xmem_test.cpp` (GPU-free) gained `test_gpu_view_pairing_table` and `test_gpu_view_pairing_runtime` - **60 new
+checks** (the binary now prints `xmem_test: OK (401 checks)`, from 341):
+
+| check group | what it proves |
+|---|---|
+| switch parsing (11) | unset/empty/`0`/`off`/an unknown word are off; `on`, `1`, `ON`, `yes`, `true` are on; a longer word is not; the trace switch is separate and `0` is off |
+| the reservation shapes, the pair rule and the translation (16) | only the two measured protections are recorded; the four conditions (same size, CPU side readable, GPU side `PAGE_NOACCESS`, contiguous) pair, and each one refused on its own; a wrapping CPU range is refused; the translation is the same offset and never past the reservation's end |
+| the bounded table (17) | the measured sequence pairs and resolves to the CPU view; the answer is persistent; a request crossing the end and a VA in an unpaired view are the named refusal; a VA outside every view keeps the caller's source; the newer of two candidates pairs; pairs, unpaired ranges and candidates are bounded and a past-bound record is refused; `clear` forgets everything; the CPU-half span test the boot's page count uses |
+| the runtime pair through the shim (16) | with the switch off the same two windows are made and a GPU-view VA is **not** resolved and nothing is recorded; with it on the CPU window followed by the GPU view is recorded as a pair, a physical page mapped into the CPU half is read through the resolved GPU-view VA (the title's bytes, not the window's), a past-end request is the refusal, the counters move, turning the switch off makes the recorded pair inert and turning it on again answers from it (process lifetime), and a lone GPU-only window with no same-size CPU candidate resolves to the refusal |
+
+`port/test/d3d12_vulkan_device_test.cpp` (GPU) extends the image-memory case with the pairing path, using the test's own
+resolve stub (the binary links no xmem.cpp): a placed texture at a VA the stub maps to a CPU sibling is imported from the
+**sibling** (whose texels are the expected pixels while the GPU-view buffer holds a different colour), the per-submission
+refresh follows a rewrite of the sibling, and a texture at a VA the stub answers `gpu_only` for is **not** filled from
+the window. The earlier placed-texture checks still exercise the pre-port path (the stub answers "unavailable" for their
+addresses). The run (`PALMETTO_IMAGE_MEM_ONLY=1`) exits 0 and prints `pooled and deferred image memory on the GPU: 21
+small textures shared blocks and round-tripped, a title-placed texture was backed at its first submission and imported
+its pages`.
+
+### 11.4 Boot measurement
+
+One 300 s light arm (`boot_arm.ps1` content environment, `-Light`, the class-0xa mitigation `PALMETTO_TITLE_CLASS0A_SIZE=1`,
+the boot slot held by `_setup\boot_lock.ps1`) with the port's switches: `PALMETTO_TEXTURE_IMPORT=1`,
+`PALMETTO_PLANE_REFRESH=hash`, `PALMETTO_PLANE_REFRESH_TRACE=1`, `PALMETTO_GPU_VIEW_PAIR=on`,
+`PALMETTO_GPU_VIEW_PAIR_TRACE=1` and `PALMETTO_XMEM_LAYOUT=log` for the reservation bases. Outputs are outside the
+repository (`D:\leonida-work\fsrstable\boot-gpuview2`: `summary.txt`, `stderr.log`, `boot.jsonl`, and
+`capture-gpuview2/index.txt`). A first arm was discarded before this one: its extra-environment list was passed as one
+comma-joined string, so only the first entry reached the process (the pairing switches and the class-0xa mitigation never
+did); it ran with the pairing off and stopped in the class-0xa family at 62.5 s, and is not part of this measurement.
+
+| measure | value |
+|---|---|
+| run | **STOP 60.4 s**, one exception: `0xc0000005` execute at `0x0` at trace t 59.1 s; **0 device-lost lines**; 1,549 `PresentX` ok and 2 failed (the failures at the stop) |
+| the pair, recorded | **1 pair**: `GPU-view reservation 0x1e7bc2a0000 (0x600000000 bytes, PAGE_NOACCESS at caller game+0x1e1d03e) is the view of the CPU reservation 0x1e1bc2a0000 (0x600000000 bytes)` - the measured shape, recorded by the port's own rule |
+| candidates recorded | 7 CPU-readable reservations: the 24 GiB CPU half, the five physical-page windows the title reserves, and the 0x185c00000-B page-pool placeholder |
+| placed textures | **64** creation lines in the window (the log's bound; the 60 s layout boot has 30): **0** inside either half of the pair, **64** inside the committed 2 MiB-page heap (`0x1ee05800000`, 0x89800000 B served) |
+| the pairing's answers | **0** placed VAs resolved through the pair, **0** refused (a GPU view with no pair), **0** CPU-half pages mapped: the pair had no population in this window |
+| imports | **0** imported: 32 all-zero-head waits, 24 give-ups after 512 attempts, 5 refusals at the 16 MiB cap - the rank-4 population and answers, unchanged |
+| stage and state | the stopped arm had run the stage-3 content draws (51,786 graphics PSOs created, submissions 1/16/256/1024 at 0.0/3.7/7.2/15.9 s); the last state trace at 58 s reads movie player state `0x3`, handle 0, `buffers 0` - **the movie window (state `0x9`, 118 s+) was not reached** |
+| captures | 8 presenter captures (frames 1-1401), each 2564x1421 with mean rgb **0 0 0** - the honest-black frame the earlier pages measured |
+| the stop | a title-side null execution at `0x0`, not a device loss and not a layer refusal; the discarded pairing-off arm stopped at 62.5 s on the documented `game+0x13360a3` read, and this arm's stop is a different title-side null execution |
+
+**The verdict is a measured readiness negative.** The mechanism is live and bounded: it recorded the title's measured
+pair, named its candidates, resolved no placed texture (0 resolved, 0 refused: every attempt got the pre-port answer)
+and left the boot's present/import population exactly as the rank-4 boot measured it. What it could not show is the
+fix: no placed texture of this window is in the GPU view, and the arm stopped before the movie window where the peers
+place the video planes there. The counters that would show the fix are the ones the next arm reads: a `resolved` count
+above 0 and a `GPU-view reservation ... resolves through` line, or a `changed`/`uploaded` pair on a texture resolved
+through the pair.
+
+### 11.5 Limits and the next falsifier
+
+- **The movie window was not reached.** The arm stopped at 60.4 s on the title's own null execution (the documented
+  stage-3 stop family), before state `0x9`; the pair's population where the peers document the video planes is
+  **unmeasured** here. The next arm: a 300 s light boot on a settled tree with the same switches, reading the pairing
+  line and the `resolved`/`refused`/CPU-half-page counters.
+- **The title's page pool is not in the pair.** In the measured window the 99,776-page pool the page-mapping call names
+  is mapped into a separate CPU-readable placeholder, and 0 pages are mapped into the pair's CPU half. Whether a later
+  streaming phase maps into that half is unmeasured; the `gpu_view_cpu_map_pages` counter and its first-window line are
+  the instrument (they printed no line in this arm).
+- **The rule is the narrow measured one.** A same-size CPU/GPU reservation pair that is not contiguous is recorded as
+  unpaired and named by the resolve refusal; if a later boot shows that shape while the title clearly places resources
+  there, the measured answer is the peers' order-only rule and the boot's line is the evidence to change it with.
+- **The table is append-only and bounded** (8 candidates, 8 pairs, 8 unpaired views), because the shim never sees the
+  title's `VirtualFree` of these windows; a re-created span within the process lifetime is a record, not a translation
+  of freed address space.
+- **A texture larger than its reservation** is refused before any read (the request must fit the pair); the import's
+  own 16 MiB cap still runs first, so pairing does not change the population section 8 sizes.
+- **Buffers are not covered.** The measured slot-133 placed buffer is in a mapped physical-page window; the placed-buffer
+  path keeps its own import/refusal and a buffer placed in the GPU view would still be refused (its next falsifier).
+- **The GPU test's stub** proves the device path (resolve, import from the sibling, refresh through it, refusal) on
+  synthetic addresses; only the boot can prove the title's own addresses.
+- **The port's default is off** and stays off until a boot shows a placed resource in the pair; the sentence that would
+  make it the default is "the movie planes are placed in the GPU-view reservation and the imported image matches them",
+  which is a pixel claim this arm cannot make.
+
+### 11.6 Cross-check against the peers (reference only, no code copied)
+
+The peers were read at the refreshed commits in section 1's table (Five Star `ce2b333b`, PercyScarlett `e44c465`,
+VIctory `63bcca4`, victory-fork `9a9091d`, XCL `623d02e`); their code is evidence for the mechanism class, and none was
+copied.
+
+| peer mechanism | what this port does | difference |
+|---|---|---|
+| XCL `kernelx::mirrors` (`623d02e`): a 24 GB reservation of 64 KiB pages made twice, `PAGE_READWRITE` then `PAGE_NOACCESS` \| `PAGE_GRAPHICS_NOACCESS`, physical pages mapped only into the first, resources placed at the same offset in the second, `source()` naming the CPU view behind a GPU-view address | the same measured arrangement recorded by our own table; the texture import and its refresh read and compare the CPU address at the same offset | their title-texture path reads and watches through `source` for any title-written texture; ours resolves only a placed texture's console VA, in the import/refresh the section-8 port built. Their pair rule also takes the most recent same-size CPU view without requiring contiguity; ours keeps the measured contiguity and refuses the rest by name |
+| Five Star `XMemReservation.CpuView` (`ce2b333b`): "the CPU reservation of the same size made just before it", with the GPU reading its pages at the same offset | the same rule, with the measured contiguity added and the table bounded | their reservation objects own the split/coalesce machinery; ours only records the pair and never maps the GPU view, which their host must |
+| VIctory `63bcca4`, victory-fork `9a9091d`, PercyScarlett `e44c465`: the inherited runtime's title-texture path (section 2.2 item 3) and the overlay plane | nothing of their texture path is re-used here; the per-submission refresh they carry is section 8's port, which this one feeds | the fork's `inplace` heap is a different mechanism (title pages opened as a heap), not a pair |
+
+One agreement is worth recording as a measurement rather than a class: XCL's written figure is a 24 GB pair, Five
+Star's is a 6 GiB streaming range; **this title's measured pair is 24 GiB** (`0x600000000` B), which is XCL's figure and
+not Five Star's.
+
+### 11.7 Attribution
+
+This port was implemented from this project's own measurements and boot logs. The behaviour was cross-checked against
+the public GPL projects named in section 1 at the commits there - **XCL** (`623d02e`,
+`crates/xcl/src/hle/kernelx.rs`, the `mirrors` module) and **Five Star Recomp** (`ce2b333b`,
+`src/FiveStar.Loader/Shims/XMemReservation.cs`, `CpuView`) - as evidence for the mechanism class, with
+**VIctory** (`63bcca4`), **victory-fork** (`9a9091d`) and **PercyScarlett** (`e44c465`) read for the inherited texture
+path the refresh of section 8 already credits. **No code from those projects was copied.** The upstream projects remain
+the copyright of their contributors and their licences continue to apply to their own trees. The `NOTICE.md` row for
+this port is owed by the lead (that file is outside this page's write scope): the licence text of
+[upstream_port.md](upstream_port.md) section 6, listing the two projects named here with the paths and commits.
+
+### 11.8 Uncommitted files of this port
+
+Implementation: [xmem.h](../port/shims/xmem.h), [xmem.cpp](../port/shims/xmem.cpp),
+[d3d12_vulkan_device.cpp](../port/shims/d3d12_vulkan_device.cpp). Tests: [xmem_test.cpp](../port/test/xmem_test.cpp),
+[d3d12_vulkan_device_test.cpp](../port/test/d3d12_vulkan_device_test.cpp). Docs: this page. Nothing else is touched:
+`port/src/console_va_map.h`, `port/src/buffer_va_index.h`, the CMake files, `NOTICE.md`, `docs/README.md` and the other
+docs pages are unchanged by this port (the working tree's other modified files belong to the other in-flight slices).
+No git write was made and no peer code is in the tree.
+

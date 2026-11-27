@@ -3928,6 +3928,10 @@ public:
     // The title VA a placed texture was placed at (device slot 133), or 0 for an ordinary committed resource
     // (docs/frame_capture.md, the texture-source mapping chain).
     std::uint64_t placed_pages() const { return placed_pages_; }
+    // Where a title-placed texture's bytes are read on this host: the console placement VA itself, or the paired CPU
+    // reservation's address at the same offset when the texture was placed in a GPU-view window
+    // (docs/peer_port_movie.md section 11; 0 for a resource that was not resolved through a pair).
+    std::uint64_t placed_read_pages() const { return placed_source_pages_ ? placed_source_pages_ : placed_pages_; }
     // The bytes of subresource 0's tightly row-major footprint, or 0 for a resource that is not a title-placed texture
     // (docs/texture_source.md: the page-writer watch watches exactly the span the import would read).
     std::uint64_t placed_subresource_bytes() const {
@@ -4063,9 +4067,46 @@ public:
                              static_cast<unsigned long long>(placed_pages_), kMaxAttempts);
             return false;
         }
+        // docs/peer_port_movie.md section 11: a texture the title placed inside its GPU-view reservation has no pages in
+        // that window on this host - the title maps them into the CPU reservation the GPU view is paired with, and the
+        // shim's resolve hook names the same offset there. That address is kept for every later attempt and for the
+        // per-submission refresh, so the import and the refresh read one source. With the pairing switch off the hook
+        // answers "unavailable" and the source is the console placement VA, the path before this port, byte for byte.
+        std::uint64_t read_address = placed_pages_;
+        if (rt::xmem::gpu_view_resolve) {
+            std::uint64_t cpu = 0;
+            const rt::xmem::GpuViewResolve answer = rt::xmem::gpu_view_resolve(placed_pages_, sub_bytes, &cpu);
+            if (answer == rt::xmem::GpuViewResolve::gpu_only) {
+                // The VA is inside a GPU-view reservation with no pair: reading that window would read memory no title
+                // page is mapped at. Refuse by name (bounded) rather than import what is there.
+                placed_skipped_ = true;
+                static std::atomic<unsigned> refused{0};
+                if (refused.fetch_add(1, std::memory_order_relaxed) < 8)
+                    std::fprintf(stderr,
+                                 "[rt] d3d12: placed texture import: resource 0x%llx at console VA 0x%llx is in a "
+                                 "GPU-view reservation with no paired CPU reservation; left as the committed stand-in "
+                                 "(the window holds no title pages on this host)\n",
+                                 static_cast<unsigned long long>(id()),
+                                 static_cast<unsigned long long>(placed_pages_));
+                return false;
+            }
+            if (answer == rt::xmem::GpuViewResolve::paired) {
+                placed_source_pages_ = cpu;
+                read_address = cpu;
+                static std::atomic<unsigned> resolved{0};
+                if (resolved.fetch_add(1, std::memory_order_relaxed) < 8)
+                    std::fprintf(stderr,
+                                 "[rt] d3d12: placed texture import: resource 0x%llx at console VA 0x%llx resolves "
+                                 "through the paired CPU reservation at 0x%llx (subresource 0, %llu B)\n",
+                                 static_cast<unsigned long long>(id()),
+                                 static_cast<unsigned long long>(placed_pages_),
+                                 static_cast<unsigned long long>(cpu),
+                                 static_cast<unsigned long long>(sub_bytes));
+            }
+        }
         // The pages must be committed and readable: an unfilled texture's pages can still be uncommitted, and reading
         // them would fault inside the copy.
-        for (std::uint64_t at = placed_pages_; at < placed_pages_ + sub_bytes;) {
+        for (std::uint64_t at = read_address; at < read_address + sub_bytes;) {
             MEMORY_BASIC_INFORMATION info{};
             if (VirtualQuery(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(at)), &info, sizeof(info)) !=
                 sizeof(info))
@@ -4078,7 +4119,7 @@ public:
         // copies are an atlas and white 1x1 defaults). An all-zero head means the fill has not run yet, so wait for a
         // later submission instead of importing zeros.
         {
-            const auto* head = reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(placed_pages_));
+            const auto* head = reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(read_address));
             const std::uint64_t look = std::min<std::uint64_t>(sub_bytes, 4096);
             bool any = false;
             for (std::uint64_t i = 0; i < look && !any; ++i) any = head[i] != 0;
@@ -4097,7 +4138,7 @@ public:
             }
         }
         // cpu_copy's pack takes a tightly row-major source: row pitch = one row of texels, slice pitch = one slice.
-        const void* pages = reinterpret_cast<const void*>(static_cast<std::uintptr_t>(placed_pages_));
+        const void* pages = reinterpret_cast<const void*>(static_cast<std::uintptr_t>(read_address));
         // The per-submission refresh (docs/peer_port_movie.md section 8): with the switch on, the pages are read once
         // here into a CPU shadow - the bytes the image gets and the bytes the next submission compares the title's pages
         // against. With the switch off nothing is allocated and the import below is the tree's, byte for byte.
@@ -4184,8 +4225,11 @@ public:
         const std::uint64_t sub_bytes = r.row_bytes * r.rows;
         if (sub_bytes != placed_shadow_.size()) return result;
         // The pages must be committed and readable. PAGE_GUARD is not a refusal here: in watch mode the tracker's guards
-        // are on these pages, the read trips them, and the walk re-arms them after the compare. PAGE_NOACCESS is.
-        for (std::uint64_t at = placed_pages_; at < placed_pages_ + sub_bytes;) {
+        // are on these pages, the read trips them, and the walk re-arms them after the compare. PAGE_NOACCESS is. The
+        // address is the one the import resolved (the paired CPU reservation for a texture placed in a GPU view), so the
+        // refresh compares the same bytes the import took (docs/peer_port_movie.md section 11).
+        const std::uint64_t read_address = placed_read_pages();
+        for (std::uint64_t at = read_address; at < read_address + sub_bytes;) {
             MEMORY_BASIC_INFORMATION info{};
             if (VirtualQuery(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(at)), &info, sizeof(info)) !=
                 sizeof(info)) {
@@ -4198,7 +4242,7 @@ public:
             }
             at = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
         }
-        const auto* pages = reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(placed_pages_));
+        const auto* pages = reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(read_address));
         std::uint64_t first = 0, last = 0;
         if (!palmetto::changed_byte_range(placed_shadow_.data(), pages, sub_bytes, first, last)) {
             result.outcome = RefreshOutcome::unchanged;
@@ -5145,8 +5189,12 @@ private:
     // first, and the range must not go to another allocation while this buffer lives.
     std::shared_ptr<const palmetto::TileHeapAllocation> heap_range_;
     // The title's pages of a title-placed texture (device slot 133, PALMETTO_TEXTURE_IMPORT): imported once into the
-    // committed image before the first submission that can sample it (docs/texture_import.md).
+    // committed image before the first submission that can sample it (docs/texture_import.md). `placed_pages_` is the
+    // console placement VA the title asked for; `placed_source_pages_` is where the bytes are read from on this host -
+    // 0 when the console VA itself is the source (the path before this port), or the same offset in the CPU
+    // reservation paired with the GPU-view window the texture was placed in (docs/peer_port_movie.md section 11).
     std::uint64_t placed_pages_ = 0;
+    std::uint64_t placed_source_pages_ = 0;
     // The console VA a title-placed texture answers from GetGPUVirtualAddress: the placement address the title asked
     // for (docs/3d_textures.md). 0 for every other resource.
     std::uint64_t console_placed_va_ = 0;
@@ -5255,7 +5303,7 @@ void DeviceState::bind_fetched_textures(std::uint64_t table_title_va) {
             if (image_entries.find(palmetto::make_tsharp_key(image_words.data())) != image_entries.end()) continue;
             if (!placed->image()) continue;
             if (!bind_image(image_words, image, placed->image(), placed->format(), placed->aspects(), false, false,
-                            placed->uint_backed(), placed->id(), placed->placed_pages(),
+                            placed->uint_backed(), placed->id(), placed->placed_read_pages(),
                             placed->placed_subresource_bytes()))
                 continue;
             ++bound;
@@ -5412,6 +5460,20 @@ void DeviceState::refresh_placed_textures() {
         palmetto::write_plane_refresh_report(placed_refresh_counters, report, sizeof report);
         std::fprintf(stderr, "[rt] d3d12: %s (walk %llu)\n", report,
                      static_cast<unsigned long long>(placed_refresh_walks));
+        // docs/peer_port_movie.md section 11.4: the GPU-view pair's own counters, at the same milestone. Null hooks
+        // mean this binary links no xmem (a GPU test): nothing printed.
+        if (rt::xmem::gpu_view_pairs && rt::xmem::gpu_view_resolved && rt::xmem::gpu_view_refused &&
+            rt::xmem::gpu_view_cpu_map_pages) {
+            std::fprintf(stderr,
+                         "[rt] d3d12: GPU-view pairing: %llu pair(s) recorded | %llu placed-texture VA(s) resolved "
+                         "through the pair, %llu refused (a GPU view with no pair) | %llu CPU-view page(s) mapped "
+                         "(walk %llu)\n",
+                         static_cast<unsigned long long>(rt::xmem::gpu_view_pairs()),
+                         static_cast<unsigned long long>(rt::xmem::gpu_view_resolved()),
+                         static_cast<unsigned long long>(rt::xmem::gpu_view_refused()),
+                         static_cast<unsigned long long>(rt::xmem::gpu_view_cpu_map_pages()),
+                         static_cast<unsigned long long>(placed_refresh_walks));
+        }
     }
 }
 
@@ -12889,7 +12951,7 @@ private:
         const palmetto::gfx10::ImageWords words = palmetto::gfx10::encode(image);
         const bool registered = state_.bind_image(words, image, resource.image(), resource.format(),
                                                   resource.aspects(), storage, resource.has_view_format_list(),
-                                                  resource.uint_backed(), resource.id(), resource.placed_pages(),
+                                                  resource.uint_backed(), resource.id(), resource.placed_read_pages(),
                                                   resource.placed_subresource_bytes());
         if (registered && resource.sparse_image()) state_.context->note_shader_image(resource.id());
         if (palmetto::gfx10::multisampled(image.type) && !registered) return;

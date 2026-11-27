@@ -663,6 +663,165 @@ PVOID reserve_placeholder(void* address, SIZE_T size, SIZE_T alignment) {
                                             PAGE_NOACCESS, parameter_count ? &parameter : nullptr, parameter_count);
 }
 
+// ---- PALMETTO_GPU_VIEW_PAIR: the title's CPU-readable reservation and its GPU-view alias (docs/peer_port_movie.md,
+// the implemented rank-5 port; xmem.h states the measured pair, the rule and the table) ---------------------------
+//
+// The title's reserve-only 64 KiB-page windows pass through XMemVirtualAlloc, which already records them as physical-page
+// windows (record_window below). This half of the port records the ones that are the measured pair - a CPU-readable
+// window and, immediately after it, a PAGE_NOACCESS window of the same size and contiguous with it - and answers the
+// resolve hook the layer's placed-texture import asks: the CPU address at the same offset for a console VA inside the
+// GPU-view window. Recording and resolving share g_phys_mutex with the window table, which is what makes the answer
+// safe for the import thread; the pair is made at ~1 s of the boot, long before the first placed texture is imported.
+// Off by default: the plan is parsed once (the first call logs it), and with it off nothing is recorded, the hook
+// answers "unavailable" and the import reads the console placement VA exactly as before this port.
+rt::xmem::GpuViewPairTable g_gpu_view_pairs;
+std::atomic<std::uint64_t> g_gpu_view_resolved{0};
+std::atomic<std::uint64_t> g_gpu_view_refused{0};
+std::atomic<std::uint64_t> g_gpu_view_cpu_map_pages{0};
+
+bool ascii_word_is(const char* text, const char* word) {
+    if (!text || !word) return false;
+    for (; *word; ++text, ++word) {
+        char left = *text, right = *word;
+        if (left >= 'A' && left <= 'Z') left = char(left - 'A' + 'a');
+        if (left != right) return false;
+    }
+    return *text == '\0';
+}
+
+// The process's plan, parsed once (the style of layout_plan / the device's refresh plan). `on`, `1`, `yes` and `true`
+// (case-insensitive) turn the pairing on; unset, empty, `0`, `off` and any unknown word leave it off, never a guess.
+rt::xmem::GpuViewPairPlan& gpu_view_plan_slot() {
+    static rt::xmem::GpuViewPairPlan plan = [] {
+        char pair[24] = {};
+        char trace[24] = {};
+        std::size_t pair_length = 0, trace_length = 0;
+        const errno_t pair_error = getenv_s(&pair_length, pair, "PALMETTO_GPU_VIEW_PAIR");
+        const errno_t trace_error = getenv_s(&trace_length, trace, "PALMETTO_GPU_VIEW_PAIR_TRACE");
+        const bool pair_set = pair_error == 0 && pair_length > 1;
+        rt::xmem::GpuViewPairPlan parsed = rt::xmem::gpu_view_pair_plan_from(pair_set ? pair : nullptr,
+                                                                            trace_error == 0 && trace_length > 1 ? trace
+                                                                                                                 : nullptr);
+        if (parsed.enabled()) {
+            std::fprintf(stderr,
+                         "[rt] xmem: PALMETTO_GPU_VIEW_PAIR=on: the title's CPU-readable and PAGE_NOACCESS 64 KiB-page "
+                         "reservations are paired, and a placed resource's console VA inside the GPU view resolves to "
+                         "the same offset in the CPU view%s\n",
+                         parsed.trace ? " (trace lines on)" : "");
+        } else if (pair_set) {
+            std::fprintf(stderr,
+                         "[rt] xmem: PALMETTO_GPU_VIEW_PAIR=%s is not on: no reservation is recorded and placed "
+                         "textures keep reading their console placement VA\n",
+                         pair);
+        }
+        return parsed;
+    }();
+    return plan;
+}
+
+std::uint64_t gpu_view_pairs_count() { return g_gpu_view_pairs.pairs(); }
+std::uint64_t gpu_view_resolved_count() { return g_gpu_view_resolved.load(std::memory_order_relaxed); }
+std::uint64_t gpu_view_refused_count() { return g_gpu_view_refused.load(std::memory_order_relaxed); }
+std::uint64_t gpu_view_cpu_map_page_count() { return g_gpu_view_cpu_map_pages.load(std::memory_order_relaxed); }
+
+// The resolve hook (xmem.h). Called by the placed-texture import in d3d12_vulkan_device.cpp, on the recording thread,
+// with the texture's console placement VA and the bytes it wants to read. "unavailable" (off, or a VA outside every
+// recorded GPU view) is the pre-port answer: the caller keeps reading the console VA.
+rt::xmem::GpuViewResolve resolve_gpu_view(std::uint64_t gpu_va, std::uint64_t bytes, std::uint64_t* cpu_va) {
+    if (!gpu_view_plan_slot().enabled() || !cpu_va) return rt::xmem::GpuViewResolve::unavailable;
+    std::uint64_t cpu = 0;
+    rt::xmem::GpuViewResolve answer = rt::xmem::GpuViewResolve::unavailable;
+    {
+        const std::lock_guard lock(g_phys_mutex);
+        answer = g_gpu_view_pairs.resolve(gpu_va, bytes, cpu);
+        if (answer == rt::xmem::GpuViewResolve::paired) g_gpu_view_resolved.fetch_add(1, std::memory_order_relaxed);
+        if (answer == rt::xmem::GpuViewResolve::gpu_only) g_gpu_view_refused.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (answer == rt::xmem::GpuViewResolve::paired) *cpu_va = cpu;
+    return answer;
+}
+
+// With g_phys_mutex held: record one reserve-only 64 KiB-page window as a pair candidate or a GPU view, and print the
+// measured evidence once per event (bounded to the table's eight entries). `caller` is the title caller of the
+// XMemVirtualAlloc answer, resolved by the startup trace's module lookup when the trace is open.
+void record_gpu_view_reservation_locked(const void* base, SIZE_T size, DWORD host_prot, const void* caller) {
+    if (!gpu_view_plan_slot().enabled()) return;
+    const rt::xmem::GpuViewReservation reservation{reinterpret_cast<std::uint64_t>(base),
+                                                   static_cast<std::uint64_t>(size), host_prot};
+    const rt::xmem::GpuViewPairTable::Recorded recorded = g_gpu_view_pairs.record(reservation);
+    if (recorded == rt::xmem::GpuViewPairTable::Recorded::ignored) return;
+    const std::string where = rt::startup_trace::where(reinterpret_cast<std::uint64_t>(caller));
+    switch (recorded) {
+        case rt::xmem::GpuViewPairTable::Recorded::paired: {
+            const auto& pair = g_gpu_view_pairs.pair(g_gpu_view_pairs.pairs() - 1);
+            std::fprintf(stderr,
+                         "[rt] xmem: GPU-view reservation 0x%llx (0x%llx bytes, PAGE_NOACCESS at caller %s) is the "
+                         "view of the CPU reservation 0x%llx (0x%llx bytes); a placed resource in the first reads the "
+                         "same offset in the second\n",
+                         static_cast<unsigned long long>(pair.gpu.base),
+                         static_cast<unsigned long long>(pair.gpu.size), where.c_str(),
+                         static_cast<unsigned long long>(pair.cpu.base),
+                         static_cast<unsigned long long>(pair.cpu.size));
+            break;
+        }
+        case rt::xmem::GpuViewPairTable::Recorded::gpu_only:
+            std::fprintf(stderr,
+                         "[rt] xmem: GPU-view reservation 0x%llx (0x%llx bytes, PAGE_NOACCESS at caller %s) has no "
+                         "paired CPU reservation: a placed resource there is refused, not read\n",
+                         static_cast<unsigned long long>(reservation.base),
+                         static_cast<unsigned long long>(reservation.size), where.c_str());
+            break;
+        case rt::xmem::GpuViewPairTable::Recorded::refused:
+            std::fprintf(stderr,
+                         "[rt] xmem: GPU-view pairing: a reservation past the table's bound was not recorded "
+                         "(0x%llx, 0x%llx bytes)\n",
+                         static_cast<unsigned long long>(reservation.base),
+                         static_cast<unsigned long long>(reservation.size));
+            break;
+        case rt::xmem::GpuViewPairTable::Recorded::cpu_view:
+            if (gpu_view_plan_slot().trace)
+                std::fprintf(stderr,
+                             "[rt] xmem: GPU-view pairing: CPU-readable reservation candidate 0x%llx (0x%llx bytes, "
+                             "caller %s)\n",
+                             static_cast<unsigned long long>(reservation.base),
+                             static_cast<unsigned long long>(reservation.size), where.c_str());
+            break;
+        case rt::xmem::GpuViewPairTable::Recorded::ignored:
+            break;
+    }
+}
+
+// With g_phys_mutex held: count the 64 KiB pages the title maps into the CPU half of a recorded pair - the pages behind
+// the GPU view the shader samples. This is the boot's measure of whether the pairing has a population at all; the
+// first few mapping windows are named when the trace switch is on (docs/peer_port_movie.md section 11.4).
+void note_gpu_view_cpu_mapping_locked(uintptr_t address, std::uint64_t pages) {
+    if (!gpu_view_plan_slot().enabled() || !pages) return;
+    if (!g_gpu_view_pairs.is_pair_cpu_span(address, pages * kPhysicalPageSize)) return;
+    g_gpu_view_cpu_map_pages.fetch_add(pages, std::memory_order_relaxed);
+    static std::atomic<unsigned> lines{0};
+    if (!gpu_view_plan_slot().trace || lines.fetch_add(1, std::memory_order_relaxed) >= 8) return;
+    std::uint64_t offset = 0;
+    for (std::size_t i = 0; i < g_gpu_view_pairs.pairs(); ++i) {
+        const auto& cpu = g_gpu_view_pairs.pair(i).cpu;
+        if (address >= cpu.base && address - cpu.base < cpu.size) {
+            offset = address - cpu.base;
+            break;
+        }
+    }
+    std::fprintf(stderr,
+                 "[rt] xmem: GPU-view pair: %llu page(s) mapped into the CPU view at offset 0x%llx (the first is "
+                 "0x%llx)\n",
+                 static_cast<unsigned long long>(pages), static_cast<unsigned long long>(offset),
+                 static_cast<unsigned long long>(address));
+}
+
+// The hooks xmem.h declares, filled in for the process (the page-watch hooks below have the same shape). A GPU-free
+// binary that links no xmem keeps them null.
+[[maybe_unused]] const bool g_gpu_view_hooks_installed =
+    (rt::xmem::gpu_view_resolve = &resolve_gpu_view, rt::xmem::gpu_view_pairs = &gpu_view_pairs_count,
+     rt::xmem::gpu_view_resolved = &gpu_view_resolved_count, rt::xmem::gpu_view_refused = &gpu_view_refused_count,
+     rt::xmem::gpu_view_cpu_map_pages = &gpu_view_cpu_map_page_count, true);
+
 // PVOID XMemVirtualAlloc(address, size, allocationType, attributes, protect). All 23 calls of the measured title pass a
 // nonzero attribute word; its bits are not decoded and nothing on the host depends on them, so it is accepted and only
 // recorded (xmem_attributes). Its types cover committed 2 MiB and 64 KiB pages, reserve-only 64 KiB windows for physical pages, one
@@ -802,6 +961,7 @@ void* WINAPI XMemVirtualAlloc(void* address, SIZE_T size, DWORD allocation_type,
         if (window) {
             // A reserve-only replacement stays a placeholder: the physical pages are mapped into it.
             record_window(address, size, host_prot);
+            record_gpu_view_reservation_locked(address, size, host_prot, caller);
             layout_log_placement("window", 0, base_granularity, base_granularity, address);
             return served_virtual(address, size, caller);
         }
@@ -819,6 +979,7 @@ void* WINAPI XMemVirtualAlloc(void* address, SIZE_T size, DWORD allocation_type,
         if (answer && window) {
             const std::lock_guard lock(g_phys_mutex);
             record_window(answer, size, host_prot);
+            record_gpu_view_reservation_locked(answer, size, host_prot, caller);
         }
         layout_log_placement("placeholder", front, alignment, base_granularity, answer);
         return served_virtual(answer, size, caller);
@@ -1116,6 +1277,7 @@ void* WINAPI XMemMapPhysicalPages(void* address, uint64_t page_count, const uint
         g_mem_trace.map_calls.fetch_add(1, std::memory_order_relaxed);
         g_mem_trace.map_pages.fetch_add(page_count, std::memory_order_relaxed);
     }
+    note_gpu_view_cpu_mapping_locked(start, page_count);
     for (uint64_t i = 0; i < page_count; ++i) {
         if (!map_page(start + i * kPhysicalPageSize, page_array[i], protect)) return nullptr;
     }
@@ -1196,6 +1358,7 @@ bool copy_page_mappings(void* destination, const void* source, std::uint64_t pag
         if (it != g_mapped.end()) found[static_cast<size_t>(i)] = it->second.page;
     }
     const DWORD protect = view_protect(*window);
+    note_gpu_view_cpu_mapping_locked(to, pages);
     for (uint64_t i = 0; i < pages; ++i) {
         if (!map_page(to + i * kPhysicalPageSize, found[static_cast<size_t>(i)], protect)) return false;
     }
@@ -1697,6 +1860,27 @@ const XmemLayoutPlan& layout_plan() {
         const DWORD caller_length = GetEnvironmentVariableA("PALMETTO_XMEM_LAYOUT_CALLER", caller, sizeof caller);
         return layout_plan_from(layout_length ? layout : nullptr, caller_length ? caller : nullptr);
     }();
+    return plan;
+}
+
+// The GPU-view pairing switch, parsed the same way (docs/peer_port_movie.md section 11.2). Pure, so the xmem test
+// checks every form without a boot; the runtime's plan slot above adds the once-per-process logging.
+GpuViewPairPlan gpu_view_pair_plan_from(const char* pair, const char* trace) {
+    GpuViewPairPlan plan;
+    if (pair && *pair) {
+        if (ascii_word_is(pair, "on") || ascii_word_is(pair, "1") || ascii_word_is(pair, "yes") ||
+            ascii_word_is(pair, "true")) {
+            plan.mode = GpuViewPairMode::on;
+        }
+        // Anything else is off: a typo must not arm a path the measurement did not choose.
+    }
+    plan.trace = trace && *trace && !(trace[0] == '0' && trace[1] == '\0');
+    return plan;
+}
+
+// Test seam (xmem_test): replaces the parse for the rest of the process. Nothing in a boot calls it.
+GpuViewPairPlan set_gpu_view_pair_plan(GpuViewPairPlan plan) {
+    gpu_view_plan_slot() = plan;
     return plan;
 }
 

@@ -13,6 +13,7 @@
 #include "../shims/d3d12_com.h"
 #include "../shims/d3d12_feature_compat.h"
 #include "../shims/d3d12_xs_device.h"
+#include "../shims/xmem.h"  // docs/peer_port_movie.md section 11: the GPU-view pairing resolve hook the test stubs
 #include "d3d12_copy_compare.h"  // D3D-46: copies compared with the host runtime
 #include "d3d12_depth24_compare.h"  // D24 clears compared with the host runtime
 #include "../src/vulkan_memory.h"  // D3D-96: resizable_bar
@@ -5122,6 +5123,28 @@ int image_memory_checks() {
     return 0;
 }
 
+// docs/peer_port_movie.md section 11: the GPU-view pairing resolve hook, supplied by the test because this binary links
+// no xmem.cpp. It names a fixed CPU buffer as the CPU view of a fixed fake GPU-view VA, and a second fake VA as a
+// GPU-view reservation with no pair (the shim's named refusal). A GPU-view VA is otherwise "unavailable": the import
+// keeps its pre-port source, which is what the earlier placed-texture checks exercise.
+namespace {
+std::uint64_t g_pair_gpu_va = 0;
+std::uint64_t g_pair_cpu_va = 0;
+std::uint64_t g_pair_unpaired_va = 0;
+
+rt::xmem::GpuViewResolve pair_resolve_stub(std::uint64_t gpu_va, std::uint64_t bytes, std::uint64_t* cpu_va) {
+    constexpr std::uint64_t kWindow = 64 * 1024;
+    if (g_pair_gpu_va && gpu_va >= g_pair_gpu_va && gpu_va - g_pair_gpu_va < kWindow &&
+        bytes <= kWindow - (gpu_va - g_pair_gpu_va)) {
+        if (cpu_va) *cpu_va = g_pair_cpu_va + (gpu_va - g_pair_gpu_va);
+        return rt::xmem::GpuViewResolve::paired;
+    }
+    if (g_pair_unpaired_va && gpu_va >= g_pair_unpaired_va && gpu_va - g_pair_unpaired_va < kWindow)
+        return rt::xmem::GpuViewResolve::gpu_only;
+    return rt::xmem::GpuViewResolve::unavailable;
+}
+}  // namespace
+
 // Pooled and deferred image memory on a GPU (docs/streamed_image_backing.md): a device created with
 // PALMETTO_IMAGE_MEM_POOL and PALMETTO_IMAGE_DEFERRED on still creates, views, copies and reads back small sampled
 // textures correctly; and a title-placed texture created without memory is backed at its first submission, then takes
@@ -5332,6 +5355,82 @@ int image_memory_gpu_checks(vktest::Device& d) {
     // rewrite (the coherence the refresh must not break).
     copy_placed_back();
     EXPECT(placed_matches(2));
+    // docs/peer_port_movie.md section 11: a placed texture whose console VA is inside the title's GPU-view reservation
+    // reads its pages through the paired CPU reservation. The GPU-view address is a committed buffer holding 0xEE, so a
+    // reader of the window (the pre-port path) gives a wrong pixel rather than a fault; the CPU sibling holds the texels.
+    auto* sibling = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, 64 * 1024, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    auto* gpu_window =
+        static_cast<std::uint8_t*>(VirtualAlloc(nullptr, 64 * 1024, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    auto* unpaired = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, 64 * 1024, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    EXPECT(sibling != nullptr && gpu_window != nullptr && unpaired != nullptr);
+    if (sibling && gpu_window && unpaired) {
+        std::memset(gpu_window, 0xee, 64 * 1024);
+        std::memset(unpaired, 0xee, 64 * 1024);
+        g_pair_gpu_va = reinterpret_cast<std::uint64_t>(gpu_window);
+        g_pair_cpu_va = reinterpret_cast<std::uint64_t>(sibling);
+        g_pair_unpaired_va = reinterpret_cast<std::uint64_t>(unpaired);
+        rt::xmem::gpu_view_resolve = &pair_resolve_stub;
+        for (UINT y = 0; y < 8; ++y)
+            for (UINT x = 0; x < 8; ++x) {
+                const auto texel = pattern(x, y + 4);
+                std::memcpy(sibling + y * 32 + x * 4, texel.data(), 4);
+            }
+        Ref<ID3D12Resource> paired_texture;
+        EXPECT(SUCCEEDED(rt::d3d12::create_buffer_at_host_address(device.p, gpu_window, placed_desc, 0xFFFFFFFFu,
+                                                                  __uuidof(ID3D12Resource),
+                                                                  reinterpret_cast<void**>(&paired_texture.p))));
+        const auto copy_paired_back = [&] {
+            std::memset(down, 0xcd, 4096);
+            const auto out = footprint(readback.p, placed);
+            const auto src = subresource(paired_texture.p, 0);
+            list->CopyTextureRegion(&out, 0, 0, 0, &src, nullptr);
+            submit();
+        };
+        copy_paired_back();
+        for (UINT y = 0; y < 8; ++y)
+            for (UINT x = 0; x < 8; ++x)
+                EXPECT(std::memcmp(down + y * 256 + x * 4, pattern(x, y + 4).data(), 4) == 0);
+        // The refresh compares the same paired view: rewriting the CPU sibling (not the GPU-view window) is in the image
+        // before the next submission samples it.
+        for (UINT y = 0; y < 8; ++y)
+            for (UINT x = 0; x < 8; ++x) {
+                const auto texel = pattern(x, y + 5);
+                std::memcpy(sibling + y * 32 + x * 4, texel.data(), 4);
+            }
+        copy_paired_back();
+        for (UINT y = 0; y < 8; ++y)
+            for (UINT x = 0; x < 8; ++x)
+                EXPECT(std::memcmp(down + y * 256 + x * 4, pattern(x, y + 5).data(), 4) == 0);
+        paired_texture.reset();
+        // A texture at a VA the hook answers "gpu_only" for is refused: the stand-in is not filled from the window.
+        Ref<ID3D12Resource> refused_texture;
+        EXPECT(SUCCEEDED(rt::d3d12::create_buffer_at_host_address(device.p, unpaired, placed_desc, 0xFFFFFFFFu,
+                                                                  __uuidof(ID3D12Resource),
+                                                                  reinterpret_cast<void**>(&refused_texture.p))));
+        std::memset(down, 0xcd, 4096);
+        {
+            const auto out = footprint(readback.p, placed);
+            const auto src = subresource(refused_texture.p, 0);
+            list->CopyTextureRegion(&out, 0, 0, 0, &src, nullptr);
+        }
+        submit();
+        submit();  // the import is refused at the first attempt and the texture leaves the pending list
+        std::memset(down, 0xcd, 4096);
+        {
+            const auto out = footprint(readback.p, placed);
+            const auto src = subresource(refused_texture.p, 0);
+            list->CopyTextureRegion(&out, 0, 0, 0, &src, nullptr);
+        }
+        submit();
+        for (UINT y = 0; y < 8; ++y)
+            for (UINT x = 0; x < 8; ++x) EXPECT(down[y * 256 + x * 4] != 0xee);
+        refused_texture.reset();
+        rt::xmem::gpu_view_resolve = nullptr;
+        g_pair_gpu_va = g_pair_cpu_va = g_pair_unpaired_va = 0;
+        VirtualFree(unpaired, 0, MEM_RELEASE);
+        VirtualFree(gpu_window, 0, MEM_RELEASE);
+        VirtualFree(sibling, 0, MEM_RELEASE);
+    }
     placed_texture.reset();
     VirtualFree(pages, 0, MEM_RELEASE);
     std::printf("pooled and deferred image memory on the GPU: %zu small textures shared blocks and round-tripped, a "

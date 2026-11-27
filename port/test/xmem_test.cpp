@@ -1252,6 +1252,266 @@ void test_layout_plan() {
           "layout plan: one page is a usable prefix");
 }
 
+// docs/peer_port_movie.md, the implemented rank-5 port: the pure half of the GPU-view reservation pairing. The switch
+// text, the measured pair rule (the CPU reservation made just before, the same size, contiguous), the translation of a
+// GPU-view VA to the CPU view at the same offset, the bounded table and its refusals, and the resolve answers the
+// placed-texture import has to tell apart. No OS allocation here; the runtime half is the next function.
+void test_gpu_view_pairing_table() {
+    using namespace rt::xmem;
+    // The switch: only the documented words turn it on; anything else is the default path, never a guess.
+    check(!gpu_view_pair_plan_from(nullptr, nullptr).enabled(), "gpu-view pairing: unset switches leave the default path");
+    check(!gpu_view_pair_plan_from("", "").enabled(), "gpu-view pairing: an empty switch is off");
+    check(!gpu_view_pair_plan_from("0", nullptr).enabled(), "gpu-view pairing: a zero switch is off");
+    check(!gpu_view_pair_plan_from("off", nullptr).enabled(), "gpu-view pairing: an explicit off is off");
+    check(!gpu_view_pair_plan_from("watch", nullptr).enabled(),
+          "gpu-view pairing: an unknown word is off (the refresh switch's words do not arm this one)");
+    check(gpu_view_pair_plan_from("on", nullptr).enabled(), "gpu-view pairing: on enables the pairing");
+    check(gpu_view_pair_plan_from("1", nullptr).enabled(), "gpu-view pairing: 1 enables the pairing");
+    check(gpu_view_pair_plan_from("ON", nullptr).enabled(), "gpu-view pairing: the word is case-insensitive");
+    check(gpu_view_pair_plan_from("yes", nullptr).enabled() && gpu_view_pair_plan_from("true", nullptr).enabled(),
+          "gpu-view pairing: yes and true enable the pairing");
+    check(!gpu_view_pair_plan_from("on1", nullptr).enabled(), "gpu-view pairing: a longer word is not on");
+    check(gpu_view_pair_plan_from("on", "1").trace && !gpu_view_pair_plan_from("on", "0").trace &&
+              !gpu_view_pair_plan_from("on", nullptr).trace,
+          "gpu-view pairing: the trace switch is read separately and 0 is off");
+
+    // The reservation shapes: a physical-page window is 64 KiB aligned and whole pages, and only the two measured
+    // protections are recorded.
+    const GpuViewReservation cpu{0x10000000000ull, 0x20000, gpu_view_protect_readwrite};
+    const GpuViewReservation gpu{0x10000020000ull, 0x20000, gpu_view_protect_noaccess};
+    check(gpu_view_is_cpu_readable(cpu), "gpu-view reservation: PAGE_READWRITE is the CPU side");
+    check(gpu_view_is_gpu_only(gpu), "gpu-view reservation: PAGE_NOACCESS is the GPU view side");
+    check(!gpu_view_is_gpu_only(cpu) && !gpu_view_is_cpu_readable(gpu),
+          "gpu-view reservation: the two sides are not interchangeable");
+    check(gpu_view_is_cpu_readable(GpuViewReservation{cpu.base, cpu.size, gpu_view_protect_readonly}),
+          "gpu-view reservation: PAGE_READONLY is read-only but CPU-readable");
+    check(!gpu_view_shaped(GpuViewReservation{0, cpu.size, cpu.protect}) &&
+              !gpu_view_shaped(GpuViewReservation{cpu.base, 0, cpu.protect}) &&
+              !gpu_view_shaped(GpuViewReservation{cpu.base + 1, cpu.size, cpu.protect}) &&
+              !gpu_view_shaped(GpuViewReservation{cpu.base, cpu.size + 1, cpu.protect}),
+          "gpu-view reservation: a null or unaligned window is not one of the pair's shapes");
+    check(!gpu_view_is_cpu_readable(GpuViewReservation{cpu.base, cpu.size, 0x40}) &&
+              !gpu_view_is_gpu_only(GpuViewReservation{gpu.base, gpu.size, 0x40}),
+          "gpu-view reservation: an execute protection is neither side");
+
+    // The pair rule: the four measured conditions, each one refused on its own.
+    check(gpu_view_pair_rule(cpu, gpu), "gpu-view pair rule: a same-size contiguous CPU window then GPU view pairs");
+    check(!gpu_view_pair_rule(cpu, GpuViewReservation{gpu.base, gpu.size - 0x10000, gpu.protect}),
+          "gpu-view pair rule: a different size does not pair");
+    check(!gpu_view_pair_rule(cpu, GpuViewReservation{gpu.base + 0x10000, gpu.size, gpu.protect}),
+          "gpu-view pair rule: a non-contiguous pair does not pair");
+    check(!gpu_view_pair_rule(gpu, gpu) && !gpu_view_pair_rule(cpu, cpu),
+          "gpu-view pair rule: the order and the two protections matter (a CPU window is never the GPU side)");
+    const GpuViewReservation huge{0xffffffffffff0000ull, 0x20000, gpu_view_protect_readwrite};
+    check(!gpu_view_pair_rule(huge, GpuViewReservation{0, 0x20000, gpu_view_protect_noaccess}),
+          "gpu-view pair rule: a CPU window that would wrap the address space is refused");
+
+    // The translation: the same offset, and never past the reservation.
+    std::uint64_t translated = 0;
+    check(gpu_view_translate(gpu.base + 0x1234, 0x100, gpu, cpu, translated) && translated == cpu.base + 0x1234,
+          "gpu-view translation: an offset inside the GPU view reads the same offset in the CPU view");
+    check(gpu_view_translate(gpu.base, gpu.size, gpu, cpu, translated) && translated == cpu.base,
+          "gpu-view translation: a whole reservation translates");
+    check(!gpu_view_translate(gpu.base, gpu.size + 0x10000, gpu, cpu, translated),
+          "gpu-view translation: a request past the reservation's end is refused");
+    check(!gpu_view_translate(gpu.base + gpu.size, 1, gpu, cpu, translated),
+          "gpu-view translation: an offset at the end is refused");
+    check(!gpu_view_translate(gpu.base - 1, 1, gpu, cpu, translated) &&
+              !gpu_view_translate(gpu.base, 0, gpu, cpu, translated),
+          "gpu-view translation: an address before the view and a zero-byte request are refused");
+
+    // The bounded table: record the measured sequence, translate through the pair, and tell the three answers apart.
+    {
+        GpuViewPairTable table;
+        check(table.record(cpu) == GpuViewPairTable::Recorded::cpu_view,
+              "gpu-view table: a CPU-readable reservation is a candidate");
+        check(table.record(gpu) == GpuViewPairTable::Recorded::paired && table.pairs() == 1,
+              "gpu-view table: the GPU view made just after it pairs");
+        check(table.resolve(gpu.base + 0x40, 0x20, translated) == GpuViewResolve::paired &&
+                  translated == cpu.base + 0x40,
+              "gpu-view table: a VA in the pair resolves to the CPU view at its offset");
+        check(table.resolve(gpu.base + 0x40, 0x20, translated) == GpuViewResolve::paired,
+              "gpu-view table: the answer is persistent - a second resolve names the same view (the import and the "
+              "refresh read one source)");
+        check(table.resolve(gpu.base + gpu.size - 1, 2, translated) == GpuViewResolve::gpu_only,
+              "gpu-view table: a request that crosses the GPU view's end is a named refusal");
+        check(table.resolve(gpu.base + gpu.size, 1, translated) == GpuViewResolve::unavailable &&
+                  table.resolve(cpu.base, 1, translated) == GpuViewResolve::unavailable,
+              "gpu-view table: a VA outside every GPU view keeps the caller's pre-port source");
+        check(table.resolve(0, 1, translated) == GpuViewResolve::unavailable,
+              "gpu-view table: a null VA is not resolved");
+        check(table.is_pair_cpu_span(cpu.base, cpu.size) && !table.is_pair_cpu_span(cpu.base, cpu.size + 1) &&
+                  !table.is_pair_cpu_span(cpu.base - 1, 1),
+              "gpu-view table: the CPU half of the pair is what the title's page mappings are counted against");
+    }
+    // A GPU-only reservation with no candidate before it (or with a different size) is recorded as unpaired, and its
+    // VAs resolve to the named refusal instead of being read.
+    {
+        GpuViewPairTable table;
+        const GpuViewReservation lone{0x20000000000ull, 0x20000, gpu_view_protect_noaccess};
+        check(table.record(lone) == GpuViewPairTable::Recorded::gpu_only && table.gpu_only_ranges() == 1,
+              "gpu-view table: a GPU-only window with no CPU candidate is recorded as unpaired");
+        check(table.resolve(lone.base + 0x100, 0x10, translated) == GpuViewResolve::gpu_only,
+              "gpu-view table: a VA in an unpaired GPU view is refused by name");
+        const GpuViewReservation small_cpu{0x30000000000ull, 0x10000, gpu_view_protect_readwrite};
+        const GpuViewReservation big_gpu{small_cpu.base + small_cpu.size, 0x20000, gpu_view_protect_noaccess};
+        check(table.record(small_cpu) == GpuViewPairTable::Recorded::cpu_view &&
+                  table.record(big_gpu) == GpuViewPairTable::Recorded::gpu_only,
+              "gpu-view table: a size mismatch is not a pair");
+        check(table.resolve(big_gpu.base + 0x10, 0x10, translated) == GpuViewResolve::gpu_only,
+              "gpu-view table: the mismatched window's VAs are the refusal too");
+    }
+    // Two candidates of the same size: the newer one pairs (the two reservations are made together).
+    {
+        GpuViewPairTable table;
+        const GpuViewReservation first{0x40000000000ull, 0x20000, gpu_view_protect_readwrite};
+        const GpuViewReservation second{0x40000040000ull, 0x20000, gpu_view_protect_readwrite};
+        const GpuViewReservation view{second.base + second.size, second.size, gpu_view_protect_noaccess};
+        table.record(first);
+        table.record(second);
+        check(table.record(view) == GpuViewPairTable::Recorded::paired && table.pairs() == 1 &&
+                  table.pair(0).cpu.base == second.base,
+              "gpu-view table: the version made just before the GPU view pairs, not an older one");
+    }
+    // The bounds: a bounded table refuses past its size instead of growing, and keeps the newest candidates.
+    {
+        GpuViewPairTable table;
+        std::size_t refused = 0;
+        for (std::size_t i = 0; i < GpuViewPairTable::max_pairs; ++i) {
+            const GpuViewReservation c{0x50000000000ull + i * 0x40000, 0x20000, gpu_view_protect_readwrite};
+            const GpuViewReservation g{c.base + c.size, c.size, gpu_view_protect_noaccess};
+            table.record(c);
+            if (table.record(g) != GpuViewPairTable::Recorded::paired) ++refused;
+        }
+        const GpuViewReservation extra_cpu{0x50000000000ull + 0x400000, 0x20000, gpu_view_protect_readwrite};
+        const GpuViewReservation extra_gpu{extra_cpu.base + extra_cpu.size, extra_cpu.size, gpu_view_protect_noaccess};
+        table.record(extra_cpu);
+        check(refused == 0 && table.pairs() == GpuViewPairTable::max_pairs &&
+                  table.record(extra_gpu) == GpuViewPairTable::Recorded::refused && table.refused() == 2,
+              "gpu-view table: pairs are bounded to eight and a ninth is refused (the candidate list's overflow is a "
+              "refusal too)");
+        std::size_t unpaired = 0;
+        for (std::size_t i = 0; i < GpuViewPairTable::max_gpu_only; ++i) {
+            const GpuViewReservation g{0x60000000000ull + i * 0x40000, 0x20000, gpu_view_protect_noaccess};
+            if (table.record(g) == GpuViewPairTable::Recorded::gpu_only) ++unpaired;
+        }
+        check(unpaired == GpuViewPairTable::max_gpu_only, "gpu-view table: unpaired GPU views are bounded to eight");
+        table.clear();
+        check(table.pairs() == 0 && table.gpu_only_ranges() == 0 && table.refused() == 0,
+              "gpu-view table: clear forgets every recorded reservation");
+    }
+    // The candidate list keeps the newest eight: an old CPU window dropped by the bound cannot pair a new GPU view.
+    {
+        GpuViewPairTable table;
+        for (std::size_t i = 0; i < GpuViewPairTable::max_views; ++i) {
+            table.record(GpuViewReservation{0x70000000000ull + i * 0x40000, 0x20000, gpu_view_protect_readwrite});
+        }
+        const GpuViewReservation newest{0x70000000000ull + GpuViewPairTable::max_views * 0x40000, 0x20000,
+                                        gpu_view_protect_readwrite};
+        table.record(newest);
+        const GpuViewReservation view{newest.base + newest.size, newest.size, gpu_view_protect_noaccess};
+        check(table.record(view) == GpuViewPairTable::Recorded::paired && table.pair(0).cpu.base == newest.base,
+              "gpu-view table: the candidate bound keeps the newest CPU windows, which is what pairs");
+    }
+}
+
+// docs/peer_port_movie.md section 11: the pair through the real shim. Two reserve-only 64 KiB-page windows are made at
+// adjacent addresses for the measured shape, a physical page is mapped into the CPU one and written, and the resolve
+// hook answers the GPU-view VA with the CPU address; the switch's off value is the pre-port answer. No GPU and no title.
+void test_gpu_view_pairing_runtime(const PhysicalApi& api) {
+    using namespace rt::xmem;
+    check(gpu_view_resolve != nullptr && gpu_view_pairs != nullptr && gpu_view_resolved != nullptr &&
+              gpu_view_refused != nullptr && gpu_view_cpu_map_pages != nullptr,
+          "gpu-view runtime: the shim installed the resolve and counter hooks");
+    if (!gpu_view_resolve) return;
+    const auto free_span = [](SIZE_T bytes) -> std::uint8_t* {
+        auto* hint = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, bytes, MEM_RESERVE, PAGE_READWRITE));
+        if (!hint) return nullptr;
+        VirtualFree(hint, 0, MEM_RELEASE);
+        return hint;
+    };
+    constexpr SIZE_T kWindow = 2 * kPage64k;
+    std::uint64_t cpu_va = 0;
+
+    // The switch off (the default): the same two windows are made, and the hook answers "unavailable" for the GPU view,
+    // which is the import's pre-port source. Nothing is recorded.
+    set_gpu_view_pair_plan(GpuViewPairPlan{});
+    std::uint8_t* off_hint = free_span(2 * kWindow);
+    std::uint8_t* off_cpu = off_hint ? static_cast<std::uint8_t*>(api.virtual_alloc(
+                                           off_hint, kWindow, MEM_RESERVE | kXmem64kPages, 0x21, PAGE_READWRITE))
+                                     : nullptr;
+    std::uint8_t* off_gpu = off_hint ? static_cast<std::uint8_t*>(api.virtual_alloc(
+                                           off_hint + kWindow, kWindow, MEM_RESERVE | kXmem64kPages, 0x3, 0x801))
+                                     : nullptr;
+    check(off_cpu != nullptr && off_gpu != nullptr, "gpu-view runtime: the two reserve-only windows are made");
+    check(gpu_view_resolve(off_gpu ? reinterpret_cast<std::uint64_t>(off_gpu) : 0, 0x100, &cpu_va) ==
+              GpuViewResolve::unavailable,
+          "gpu-view runtime: with the switch off a GPU-view VA is not resolved (the pre-port source)");
+    check(gpu_view_pairs() == 0, "gpu-view runtime: with the switch off nothing is recorded");
+
+    // The switch on: a fresh pair at the measured shape; the CPU window takes a physical page with a pattern, and the
+    // GPU view's VA resolves to it.
+    set_gpu_view_pair_plan(GpuViewPairPlan{GpuViewPairMode::on, false});
+    std::uint8_t* hint = free_span(2 * kWindow);
+    std::uint8_t* cpu = hint ? static_cast<std::uint8_t*>(
+                                   api.virtual_alloc(hint, kWindow, MEM_RESERVE | kXmem64kPages, 0x21, PAGE_READWRITE))
+                             : nullptr;
+    std::uint8_t* gpu = hint ? static_cast<std::uint8_t*>(api.virtual_alloc(hint + kWindow, kWindow,
+                                                                            MEM_RESERVE | kXmem64kPages, 0x3, 0x801))
+                             : nullptr;
+    check(cpu != nullptr && gpu != nullptr, "gpu-view runtime: a second pair of reserve-only windows is made");
+    if (cpu && gpu) {
+        check(gpu_view_pairs() >= 1, "gpu-view runtime: the CPU window followed by the GPU view is recorded as a pair");
+        uint64_t pages[1]{};
+        uint64_t count = 1;
+        check(api.allocate(0x280, &count, pages) == TRUE && api.map(cpu, 1, pages) == cpu,
+              "gpu-view runtime: a physical page maps into the CPU view");
+        for (SIZE_T i = 0; i < kPage64k; i += 512) cpu[i] = static_cast<std::uint8_t>(0x30 + i / 512);
+        const auto gpu_va = reinterpret_cast<std::uint64_t>(gpu) + 0x800;
+        check(gpu_view_resolve(gpu_va, 0x100, &cpu_va) == GpuViewResolve::paired &&
+                  cpu_va == reinterpret_cast<std::uint64_t>(cpu) + 0x800,
+              "gpu-view runtime: the GPU-view VA resolves to the same offset in the CPU view");
+        if (cpu_va) {
+            const auto* bytes = reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(cpu_va));
+            check(bytes[0] == static_cast<std::uint8_t>(0x30 + 0x800 / 512),
+                  "gpu-view runtime: the resolved address is the title's bytes, not the GPU-view window's");
+        }
+        check(gpu_view_resolve(gpu_va, kWindow, &cpu_va) == GpuViewResolve::gpu_only,
+              "gpu-view runtime: a request past the pair's end is the named refusal");
+        const std::uint64_t resolved_before = gpu_view_resolved();
+        gpu_view_resolve(gpu_va, 0x100, &cpu_va);
+        check(gpu_view_resolved() == resolved_before + 1, "gpu-view runtime: resolve requests are counted");
+        // The switch off after recording: the recorded pair no longer answers, so the port's off path is the tree's.
+        set_gpu_view_pair_plan(GpuViewPairPlan{});
+        check(gpu_view_resolve(gpu_va, 0x100, &cpu_va) == GpuViewResolve::unavailable,
+              "gpu-view runtime: turning the switch off makes the recorded pair inert");
+        set_gpu_view_pair_plan(GpuViewPairPlan{GpuViewPairMode::on, false});
+        check(gpu_view_resolve(gpu_va, 0x100, &cpu_va) == GpuViewResolve::paired,
+              "gpu-view runtime: turning it on again answers from the same recorded pair (process lifetime)");
+        api.map(cpu, 1, nullptr);
+        VirtualFree(gpu, 0, MEM_RELEASE);
+        VirtualFree(cpu, 0, MEM_RELEASE);
+    }
+    if (off_cpu) VirtualFree(off_cpu, 0, MEM_RELEASE);
+    if (off_gpu) VirtualFree(off_gpu, 0, MEM_RELEASE);
+
+    // A GPU-only window with no same-size CPU candidate made just before it is a named refusal.
+    std::uint8_t* lone_hint = free_span(kWindow);
+    std::uint8_t* lone = lone_hint ? static_cast<std::uint8_t*>(
+                                         api.virtual_alloc(lone_hint, kWindow, MEM_RESERVE | kXmem64kPages, 0x3, 0x801))
+                                   : nullptr;
+    check(lone != nullptr, "gpu-view runtime: an unpaired GPU-only window is made");
+    if (lone) {
+        const std::uint64_t refused_before = gpu_view_refused();
+        check(gpu_view_resolve(reinterpret_cast<std::uint64_t>(lone) + 0x100, 0x100, &cpu_va) ==
+                  GpuViewResolve::gpu_only,
+              "gpu-view runtime: its VAs resolve to the named refusal (no CPU reservation was made just before it)");
+        check(gpu_view_refused() == refused_before + 1, "gpu-view runtime: refused requests are counted");
+        VirtualFree(lone, 0, MEM_RELEASE);
+    }
+    set_gpu_view_pair_plan(GpuViewPairPlan{});
+}
+
 // docs/peer_port_movie.md, the implemented rank-4 port: the pure half of the per-submission refresh of a title-written
 // texture. The switch text, the bounded compare budget (round-robin and never starving an oversized texture), the
 // changed byte range and the row band it names, the step the walk takes against the guard-page tracker's verdict, and the
@@ -1443,6 +1703,7 @@ int main() {
     test_title_virtual_alloc();
     test_page_write_watch();
     test_layout_plan();
+    test_gpu_view_pairing_table();  // docs/peer_port_movie.md section 11: the pure pairing rules
     test_plane_refresh_plan();  // docs/peer_port_movie.md: the pure per-submission refresh rules
 
     if (alloc_default && free_default) test_default_alloc(alloc, free_mem, alloc_default, free_default);
@@ -1455,6 +1716,7 @@ int main() {
         test_resolve_physical_page(physical);
         test_first_touch_during_remap(physical);
         test_placeholders(physical);
+        test_gpu_view_pairing_runtime(physical);  // docs/peer_port_movie.md section 11: the pair through the shim
     }
 
     print_result();
