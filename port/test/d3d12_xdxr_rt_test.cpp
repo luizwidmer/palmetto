@@ -6,6 +6,7 @@
 // and written again as d3d12_blas_update; then its postbuild COMPACTED_SIZE and a TLAS rebuild's CURRENT_SIZE are
 // checked against the prebuild sizes, and the BLAS is compacted (CopyRaytracingAccelerationStructure COMPACT) into a
 // buffer of exactly that size, written as d3d12_blas_compacted as <case>.bin + <case>.json at their console GPU virtual addresses.
+// The first BLAS/TLAS builds use the default-off COM path; later update/postbuild/copy calls arm PALMETTO_BVH_ROUTE=own.
 // Last, the BLAS again with MINIMIZE_MEMORY (BOX16 nodes: a smaller prebuild size and postbuild size), written as
 // d3d12_blas_box16, then updated in place with the same flags (d3d12_blas_box16_update); and once more without
 // ALLOW_UPDATE, so that its triangles are paired into TRI0/TRI1 leaves (d3d12_blas_paired; the ALLOW_UPDATE builds
@@ -66,6 +67,10 @@ bool write_file(const std::string& path, const void* data, std::size_t bytes) {
     return bool(f);
 }
 
+bool bvh_route_switch(const char* value) {
+    return _putenv_s("PALMETTO_BVH_ROUTE", value) == 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -87,6 +92,8 @@ int main(int argc, char** argv) {
         std::puts("SKIP: PALMETTO_RT_AS=khr");
         return 77;
     }
+    // Start with the byte-identical legacy COM branch even if the test runner inherited the opt-in route.
+    if (!bvh_route_switch("")) return fail("clear PALMETTO_BVH_ROUTE");
     Ref<ID3D12Device5> device;
     if (FAILED(rt::d3d12::create_vulkan_device_standalone(IID_PPV_ARGS(device.put())))) {
         std::puts("SKIP: no Vulkan D3D12 device");
@@ -324,6 +331,8 @@ int main(int argc, char** argv) {
     std::memcpy(mapped + (soup_va - upload->GetGPUVirtualAddress()), moved.data(), std::size_t(soup_bytes));
     upload->Unmap(0, nullptr);
     if (FAILED(allocator->Reset()) || FAILED(list->Reset(allocator.p, nullptr))) return fail("Reset for the update");
+    if (!bvh_route_switch("own")) return fail("arm PALMETTO_BVH_ROUTE");
+    std::puts("d3d12_xdxr_rt: PALMETTO_BVH_ROUTE=own armed for update/postbuild/copy checks");
     build.Inputs = blas_inputs;
     build.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
     build.DestAccelerationStructureData = blas->GetGPUVirtualAddress();

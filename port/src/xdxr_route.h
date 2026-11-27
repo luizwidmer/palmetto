@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
@@ -119,6 +120,7 @@ enum class Refusal {
     unknown_flag,           // a build flag bit outside the public 0x3f
     geometry_type,          // a geometry description that is not D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES
     vertex_format,          // a vertex format the GPU builder cannot read
+    vertex_stride,          // a stride the command-list IR cannot represent without truncation
     index_format,           // an index format the GPU builder cannot read
     triangle_count,         // a count that is not a whole number of triangles
     geometry_pointer,       // a null geometry description
@@ -130,6 +132,11 @@ enum class Refusal {
     serialization,          // postbuild type 2: the layer refuses serialization at replay
     pointers_unreadable,    // a null entry of an ARRAY_OF_POINTERS geometry list
     too_many_elements,      // the batch is larger than the bounded plan
+    command_list_type,      // the route does not record builds on bundles
+    copy_mode,              // XDXR copy supports clone and compact only
+    postbuild_type,         // standalone XDXR emit supports compacted/current size only
+    zero_address,           // a copy source or destination is null
+    backend,                // the attached device is not using the XDXR record builder
 };
 
 inline const char* refusal_name(Refusal refusal) {
@@ -142,6 +149,7 @@ inline const char* refusal_name(Refusal refusal) {
     case Refusal::unknown_flag: return "a build flag outside the public bits";
     case Refusal::geometry_type: return "a geometry that is not triangles";
     case Refusal::vertex_format: return "a vertex format the GPU builder cannot read";
+    case Refusal::vertex_stride: return "a vertex stride wider than the command-list field";
     case Refusal::index_format: return "an index format the GPU builder cannot read";
     case Refusal::triangle_count: return "a count that is not a whole number of triangles";
     case Refusal::geometry_pointer: return "a null geometry description";
@@ -152,7 +160,12 @@ inline const char* refusal_name(Refusal refusal) {
     case Refusal::offline_statistics: return "postbuild type 0x10 (offline statistics) is refused";
     case Refusal::serialization: return "postbuild type 2 (serialization) is refused";
     case Refusal::pointers_unreadable: return "a null entry in the geometry pointer list";
-    case Refusal::too_many_elements: return "the batch is larger than the bounded plan";
+    case Refusal::too_many_elements: return "the XDXR route exceeds its bounded element limit";
+    case Refusal::command_list_type: return "XDXR build commands are not recorded on bundles";
+    case Refusal::copy_mode: return "XDXR copy supports CLONE and COMPACT only";
+    case Refusal::postbuild_type: return "standalone XDXR postbuild supports COMPACTED_SIZE and CURRENT_SIZE only";
+    case Refusal::zero_address: return "a copy source or destination address is zero";
+    case Refusal::backend: return "the attached device is not configured for XDXR structures";
     }
     return "unknown refusal";
 }
@@ -161,7 +174,46 @@ inline const char* refusal_name(Refusal refusal) {
 // A test sets the variable itself.
 inline bool route_armed() {
     const char* value = std::getenv("PALMETTO_BVH_ROUTE");
-    return value && std::string(value) == "own";
+    return value && std::strcmp(value, "own") == 0;
+}
+
+// Additional public COM slots that the opt-in bridge can answer. These helpers keep the route's bounded contract
+// testable without a D3D12 device; callers pass the already-sampled switch value so one call cannot change modes.
+inline Refusal command_list_refusal(bool is_bundle, bool armed = route_armed()) {
+    if (!armed) return Refusal::disabled;
+    return is_bundle ? Refusal::command_list_type : Refusal::none;
+}
+
+inline Refusal backend_refusal(bool xdxr_enabled, bool armed = route_armed()) {
+    if (!armed) return Refusal::disabled;
+    return xdxr_enabled ? Refusal::none : Refusal::backend;
+}
+
+inline Refusal copy_refusal(std::uint32_t mode, std::uint64_t dest, std::uint64_t source,
+                            bool armed = route_armed()) {
+    if (!armed) return Refusal::disabled;
+    if (mode > 1) return Refusal::copy_mode;  // measured runtime copies: CLONE (0) and COMPACT (1)
+    if (!dest || !source) return Refusal::zero_address;
+    if (dest % kDestinationAlignment || source % kDestinationAlignment) return Refusal::alignment;
+    if (dest >= kMaxGuardedAddress || source >= kMaxGuardedAddress) return Refusal::address;
+    return Refusal::none;
+}
+
+// The batched builder ignores tools/unknown types, but the standalone D3D12 Emit slot must not claim support for
+// output kinds the layer cannot write. The offline-statistics and serialization cases retain their measured names.
+inline Refusal emit_postbuild_refusal(std::uint32_t info_type, bool armed = route_armed()) {
+    if (!armed) return Refusal::disabled;
+    if (info_type == kPostbuildInfoOfflineStatistics) return Refusal::offline_statistics;
+    if (info_type == 2) return Refusal::serialization;
+    if (info_type == 0 || info_type == 3) return Refusal::none;
+    return Refusal::postbuild_type;
+}
+
+inline Refusal emit_postbuild_count_refusal(std::uint32_t count, bool armed = route_armed()) {
+    if (!armed) return Refusal::disabled;
+    if (!count) return Refusal::null_desc;
+    if (count > 0x10000) return Refusal::too_many_elements;
+    return Refusal::none;
 }
 
 struct PrebuildAnswer {
@@ -202,6 +254,10 @@ inline StreamNotes read_stream(const StreamDesc* stream, std::uint32_t flags) {
 // The element count XdxrLayout is computed from: triangles (BLAS: index count or vertex count, divided by three) or
 // instances (TLAS). False with the named refusal when the descriptions cannot be read.
 inline bool count_elements(const BuildInputs& inputs, std::uint32_t& elements, Refusal& refusal) {
+    if (inputs.num_descs > 0x10000) {
+        refusal = Refusal::too_many_elements;
+        return false;
+    }
     if (inputs.type != kTopLevel && inputs.type != kBottomLevel) {
         refusal = Refusal::input_type;
         return false;
@@ -313,8 +369,12 @@ inline bool plan_one(const BatchedDesc2& element, BuildRecord& record, StreamNot
         return false;
     }
     if (element.inputs.flags & kBuildPerformUpdate) {
-        if (!(element.inputs.flags & kBuildAllowUpdate) || element.source_acceleration_structure_data >= kMaxGuardedAddress) {
+        if (!(element.inputs.flags & kBuildAllowUpdate)) {
             refusal = Refusal::update_flags;
+            return false;
+        }
+        if (element.source_acceleration_structure_data >= kMaxGuardedAddress) {
+            refusal = Refusal::address;
             return false;
         }
     }
@@ -356,6 +416,10 @@ inline bool plan_one(const BatchedDesc2& element, BuildRecord& record, StreamNot
                 refusal = Refusal::vertex_format;
                 return false;
             }
+            if (geometry->vertex_stride > 0xffffffffu) {
+                refusal = Refusal::vertex_stride;
+                return false;
+            }
             if (geometry->index_format != kFormatUnknown && geometry->index_format != kFormatR16Uint &&
                 geometry->index_format != kFormatR32Uint) {
                 refusal = Refusal::index_format;
@@ -381,7 +445,12 @@ inline bool plan_one(const BatchedDesc2& element, BuildRecord& record, StreamNot
         }
     }
     // The postbuild descriptions, in order: the layer writes COMPACTED_SIZE and CURRENT_SIZE, refuses serialization,
-    // and the shipped builder throws for the offline-statistics type (docs/xdxr.md section 4).
+    // and the shipped builder throws for the offline-statistics type (docs/xdxr.md section 4). Bound host-side planning
+    // before walking caller memory; the runtime title's measured batches are far smaller than this ceiling.
+    if (element.num_postbuild_info_descs > 0x10000) {
+        refusal = Refusal::too_many_elements;
+        return false;
+    }
     for (std::uint32_t i = 0; i < element.num_postbuild_info_descs; ++i) {
         const PostbuildInfoDesc* info =
             element.postbuild_info_descs ? &element.postbuild_info_descs[i] : nullptr;

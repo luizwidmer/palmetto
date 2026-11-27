@@ -6,6 +6,7 @@
 #include "../src/xdxr_descs.h"
 #include "../src/xdxr_layout.h"
 #include "../src/xdxr_route.h"
+#include "../src/bvh_route.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -312,6 +313,97 @@ int route_plan() {
     return 0;
 }
 
+int route_command_bridge() {
+    using palmetto::xdxr::command_route::BuildCommandPlan;
+    using palmetto::xdxr::command_route::plan_build;
+
+    route::GeometryDesc geometry = triangle_geometry(6, true, 6);
+    geometry.transform_va = 0x30000;
+    route::BuildDesc desc{};
+    desc.dest_acceleration_structure_data = 0x100000;
+    desc.inputs = bottom_level(&geometry, 1, route::kBuildAllowUpdate | route::kBuildAllowCompaction |
+                                                   route::kBuildPreferFastTrace | route::kBuildPreferFastBuild |
+                                                   route::kBuildMinimizeMemory | route::kBuildPerformUpdate);
+    desc.source_acceleration_structure_data = 0x200000;
+    desc.scratch_acceleration_structure_data = 0x400000;
+    PostbuildInfoDesc postbuilds[3]{};
+    postbuilds[0].dest_buffer = 0x600000;
+    postbuilds[0].info_type = 0;  // COMPACTED_SIZE
+    postbuilds[1].dest_buffer = 0x600008;
+    postbuilds[1].info_type = 3;  // CURRENT_SIZE
+    postbuilds[2].dest_buffer = 0x600010;
+    postbuilds[2].info_type = 1;  // tools visualization is ignored by the measured batched builder
+
+    const BuildCommandPlan disabled = plan_build(desc, 3, postbuilds, false);
+    CHECK(disabled.refusal == route::Refusal::disabled && disabled.build.triangles.empty() &&
+          disabled.postbuilds.empty());
+
+    // The adapter produces the same D3D12 -> command-list fields as the legacy COM mapping, but only after the
+    // measured planner accepts the description. It does not add another builder or change the XDXR layout.
+    const BuildCommandPlan plan = plan_build(desc, 3, postbuilds, true);
+    CHECK(plan.ok() && plan.ignored_postbuilds == 1 && plan.postbuilds.size() == 2);
+    CHECK(plan.build.dst_va == 0x100000 && plan.build.src_va == 0x200000 && plan.build.scratch_va == 0x400000);
+    CHECK(!plan.build.is_tlas && plan.build.update && plan.build.build_flags == 0x1f);
+    CHECK(plan.build.triangles.size() == 1);
+    const palmetto::RtTriangleGeometry& triangle = plan.build.triangles[0];
+    CHECK(triangle.vertex_va == 0x10000 && triangle.vertex_count == 6 && triangle.vertex_stride == 12);
+    CHECK(triangle.vertex_format == palmetto::xdxr::command_route::kVkR32G32B32Sfloat);
+    CHECK(triangle.index_va == 0x20000 && triangle.index_count == 6 && triangle.index_type == 2);
+    CHECK(triangle.transform_va == 0x30000 && triangle.opaque && triangle.flags == route::kGeometryFlagOpaque);
+    CHECK(plan.postbuilds[0].dest_va == 0x600000 && plan.postbuilds[0].type == 0);
+    CHECK(plan.postbuilds[0].sources.size() == 1 && plan.postbuilds[0].sources[0] == 0x100000);
+    CHECK(plan.postbuilds[1].dest_va == 0x600008 && plan.postbuilds[1].type == 3);
+
+    const std::uint64_t instances[2] = {0x900000, 0x900100};
+    route::BuildDesc tlas{};
+    tlas.dest_acceleration_structure_data = 0xa00000;
+    tlas.inputs.type = route::kTopLevel;
+    tlas.inputs.num_descs = 2;
+    tlas.inputs.descs_layout = route::kLayoutArrayOfPointers;
+    tlas.inputs.descs = reinterpret_cast<std::uint64_t>(instances);
+    tlas.scratch_acceleration_structure_data = 0xb00000;
+    const BuildCommandPlan tlas_plan = plan_build(tlas, 0, nullptr, true);
+    CHECK(tlas_plan.ok() && tlas_plan.build.is_tlas && tlas_plan.build.instances_va == tlas.inputs.descs);
+    CHECK(tlas_plan.build.instance_count == 2 && tlas_plan.build.instance_pointers);
+
+    // The other RT COM slots have narrowly named answers under the same switch; off remains a named refusal.
+    using route::Refusal;
+    CHECK(route::command_list_refusal(false, false) == Refusal::disabled);
+    CHECK(route::command_list_refusal(true, true) == Refusal::command_list_type);
+    CHECK(route::command_list_refusal(false, true) == Refusal::none);
+    CHECK(route::backend_refusal(false, false) == Refusal::disabled);
+    CHECK(route::backend_refusal(false, true) == Refusal::backend);
+    CHECK(route::backend_refusal(true, true) == Refusal::none);
+    CHECK(route::copy_refusal(0, 0x100000, 0x200000, false) == Refusal::disabled);
+    CHECK(route::copy_refusal(0, 0x100000, 0x200000, true) == Refusal::none);
+    CHECK(route::copy_refusal(1, 0x100000, 0x200000, true) == Refusal::none);
+    CHECK(route::copy_refusal(2, 0x100000, 0x200000, true) == Refusal::copy_mode);
+    CHECK(route::copy_refusal(0, 0, 0x200000, true) == Refusal::zero_address);
+    CHECK(route::copy_refusal(0, 0x100001, 0x200000, true) == Refusal::alignment);
+    CHECK(route::copy_refusal(0, std::uint64_t(1) << 40, 0x200000, true) == Refusal::address);
+    CHECK(route::emit_postbuild_refusal(0, false) == Refusal::disabled);
+    CHECK(route::emit_postbuild_refusal(0, true) == Refusal::none);
+    CHECK(route::emit_postbuild_refusal(3, true) == Refusal::none);
+    CHECK(route::emit_postbuild_refusal(1, true) == Refusal::postbuild_type);
+    CHECK(route::emit_postbuild_refusal(2, true) == Refusal::serialization);
+    CHECK(route::emit_postbuild_refusal(kPostbuildInfoOfflineStatistics, true) == Refusal::offline_statistics);
+    CHECK(route::emit_postbuild_count_refusal(1, false) == Refusal::disabled);
+    CHECK(route::emit_postbuild_count_refusal(0, true) == Refusal::null_desc);
+    CHECK(route::emit_postbuild_count_refusal(1, true) == Refusal::none);
+    CHECK(route::emit_postbuild_count_refusal(0x10001, true) == Refusal::too_many_elements);
+
+    route::BuildDesc too_many_geometries = desc;
+    too_many_geometries.inputs.num_descs = 0x10001;
+    CHECK(plan_build(too_many_geometries, 0, nullptr, true).refusal == Refusal::too_many_elements);
+    CHECK(plan_build(desc, 0x10001, postbuilds, true).refusal == Refusal::too_many_elements);
+    route::GeometryDesc too_wide_stride = geometry;
+    too_wide_stride.vertex_stride = std::uint64_t(1) << 32;
+    route::BuildDesc invalid_stride = desc;
+    invalid_stride.inputs.descs = reinterpret_cast<std::uint64_t>(&too_wide_stride);
+    CHECK(plan_build(invalid_stride, 0, nullptr, true).refusal == Refusal::vertex_stride);
+    return 0;
+}
+
 int route_switch_environment() {
 #if defined(_WIN32)
     _putenv_s("PALMETTO_BVH_ROUTE", "own");
@@ -382,7 +474,7 @@ int public_desc_copy() {
 
 int main() {
     if (stream_lookup() || flag_defaults() || record_views() || route_prebuild() || route_plan() ||
-        route_switch_environment())
+        route_command_bridge() || route_switch_environment())
         return 1;
 #ifdef XDXR_HAVE_D3D12
     if (public_desc_copy())

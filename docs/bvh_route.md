@@ -1,12 +1,12 @@
 # The BVH build route: measured gap and the builder-shaped answer
 
-**Status: readiness. The title requests no ray-tracing or BVH work in a 130 s boot (zero calls), the package helper's
-own runtime build path was measured on our stack and stops at a console list method the proxy stubs, and this slice
-implements the builder-shaped prebuild and build answers from the layer's own XDXR layout behind an opt-in switch
-(`PALMETTO_BVH_ROUTE=own`, default off). The route is not wired to a caller yet: the hand-off is a `GetProcAddress`
-hook in `port/src/pe_loader.cpp`, another slice's file, and the measured list method is in
-`port/shims/d3d12_xs_device.cpp`, another slice's. The boot is unchanged and that is the honest result. It follows
-[upstream_port.md](upstream_port.md); peer material below is this repository's own peer ledger, evidence only.**
+**Status (2026-11-27): opt-in public-D3D12 route; package-helper bridge remains blocked. The original 130.3 s boot
+measured zero build/copy/postbuild/prebuild calls, and the measured `XboxBvhBuilder` runtime sequence still stops at
+console list slot 148. This follow-on wires the GPU-free plan into public `ID3D12GraphicsCommandList4` Build/Copy/Emit
+methods behind `PALMETTO_BVH_ROUTE=own` (default off), reusing Palmetto's own XDXR builder. It does not hook the
+package's `GetProcAddress` exports, bypass slot 148, or implement rehydration; no title boot was run for this follow-on.
+The prior readiness notes below are historical where §8 supersedes them. It follows [upstream_port.md](upstream_port.md);
+peer material is the repository's own ledger, evidence only.**
 
 ## 1. Why this path is needed
 
@@ -144,13 +144,13 @@ stops at an unknown type, exactly as the DLL reads them) and reported as `Stream
 `+0x08` value selects the shipped builder's alternate bottom-level path — which this layout does not reproduce and
 does not need to, because the route answers both the prebuild and the build from one layout.
 
-### 3.1 What is not wired, and why
+### 3.1 What remains unwired: the package-helper export path
 
-No caller reaches `xdxr_route.h` yet. The title calls the package helper's exports, which the loader resolves from the
-mapped image in `port/src/pe_loader.cpp`; substituting the route means hooking that resolution when the switch is on,
-which is that file's owner's decision, not this slice's. The second half of the blocker — console list slot 148 — is
-in `port/shims/d3d12_xs_device.cpp`, owned by the list-slot slices. Both are named here rather than reached into. The
-switch therefore defaults off and the runtime path is byte-identical to the tree before this slice.
+The public D3D12 caller is wired in §8, but no caller reaches `xdxr_route.h` through the title's package-helper exports.
+The title's builder exports are resolved from the mapped image in `port/src/pe_loader.cpp`; substituting the route there
+would require an export-resolution hook when the switch is on. The other blocker — console list slot 148 — is in
+`port/shims/d3d12_xs_device.cpp`. Neither package-helper blocker is bypassed here. The public switch still defaults off,
+so the original command-list branches remain the fallback.
 
 ## 4. Cross-check against the reference and the peers
 
@@ -175,14 +175,14 @@ This slice did not open a peer clone. The cross-check uses this repository's own
   the `Rehydrate*` family is on the package DLL and would need the offline stream's decoded form first; the slice
   records it as a limit rather than a stand-in.
 
-## 5. A/B measurement
+## 5. Historical A/B measurement (readiness-only revision)
 
-Two boots of the same standard environment and switch set, one before the slice's files and one after (the tree
-contained other slices' in-flight work in both; the boot lock was held and one `palmetto` ran at a time). Nothing on the
-runtime path changed: the route is a new header no runtime code includes, and `XdxrLayout` moved without changing a
-number.
+This A/B (2026-11-25) predates §8's public COM wiring: two boots of the same standard environment and switch set, one
+before the readiness planner and one after (the tree contained other slices' in-flight work in both; the boot lock was
+held and one `palmetto` ran at a time). At that time the route was only a header and `XdxrLayout` moved without changing
+a number. This remains the pre-integration baseline; it does not measure route-on title behavior.
 
-| measurement | before this slice | after this slice |
+| measurement | before readiness planner | after planner, before §8 wiring |
 |---|---|---|
 | verdict | ALIVE 130.3 s, 0 exceptions | ALIVE 130.4 s, 0 exceptions |
 | traced D3D12 calls | 250,021 | 162,307 |
@@ -191,32 +191,31 @@ number.
 | `XboxBvhBuilder.dll` mapped | no | no |
 | submits / presents | 10,317 / 5,158 | 5,801 / 2,900 |
 
-**Verdict: unchanged in every counter this slice touches, latent negative in the boot.** The recording counters that
-identify the tree's stage are identical at the same timeline mark. The frame counters are about half in the second
-boot; the route adds no code to the runtime path and the only shared-hardware variable in this environment is other
-slices' GPU tests, so the difference is recorded as run-to-run load, not claimed as an effect of this slice. The title
-still asks for no ray-tracing work at this stage, which is the same measured negative
-[cleanroom_peers.md](cleanroom_peers.md) predicted for this slice. In this slice that negative is not a reason to hide
-the work: the package helper's build path was measured to a concrete blocker, and the layer-side answer exists and is
-tested.
+**Historical verdict for the readiness-only revision: unchanged in every counter it touched, latent negative in the boot.**
+The recording counters that identify the tree's stage are identical at the same timeline mark. The frame counters are
+about half in the second boot; in that revision the route was an unused header and added no runtime call. The only
+shared-hardware variable was other slices' GPU tests, so the difference is recorded as run-to-run load, not claimed as
+an effect of this follow-on. The title still asked for no ray-tracing work at that stage, which is the measured negative
+[cleanroom_peers.md](cleanroom_peers.md) predicted. The package helper's build path was measured to a concrete blocker;
+§8 records the later public-COM integration and its synthetic tests.
 
 ## 6. Limits and the next falsifier
 
-1. **Not wired.** The switch exists, the answer exists, and no caller uses it. Next falsifier: a boot on which the
+1. **Package-helper export handoff remains not wired.** The public D3D12 COM caller is now wired under §8, but no caller reaches that adapter through the package helper's export. Next falsifier: a boot on which the
    title's builder export is actually called. Wiring it means one of two measured steps — hook the loader's export
    resolution for `XboxBvhBuilder.dll` when `PALMETTO_BVH_ROUTE=own` (`port/src/pe_loader.cpp`), or serve console list
    slot 148 so the package helper can proceed (`port/shims/d3d12_xs_device.cpp`). Either one is another slice.
 2. **The package helper's own route is blocked before a dispatch.** Slot 148's shape is measured (40 bytes, 16-byte
    alignment, then "Failed to allocate upload buffer"); what the console returns and what the helper writes into it is
    not. Whoever serves it must read the helper's use of the block rather than return a fixed buffer.
-3. **Rehydrate and copy exports are not in the route.** `CopyRaytracingAccelerationStructure` maps onto the layer's
-   existing copy record and is a small next step; the `Rehydrate*` family needs the offline stream's decoded form.
+3. **The package helper's copy and rehydrate exports are not in this route.** `CopyRaytracingAccelerationStructure` maps onto the layer's
+   existing copy record under §8; the `Rehydrate*` family needs the offline stream's decoded form.
 4. **The stream description's semantics are read, not applied.** The measured alternate bottom-level path (type 0,
    `+0x08` above 10.0, with `MINIMIZE_MEMORY`) and the type 1 level record are reported in `StreamNotes` and change no
    size, because the route answers both prebuild and build from `XdxrLayout`. If a future measurement shows the title
    passes a non-empty stream, the notes are where the difference is visible.
-5. **The route's plan is GPU-free-tested; its records are not yet fed to a real build by a caller.** The GPU half
-   already has its own tests (`vk_xdxr_build_test`, `d3d12_xdxr_rt_test`); the wiring is what would join them.
+5. **The public COM records now reach Palmetto's builder under §8; the package helper still does not.** The GPU half
+   already has its own tests (`vk_xdxr_build_test`, `d3d12_xdxr_rt_test`); the route test in §8 now joins them for the public D3D12 API form.
 
 ## 7. Tests
 
@@ -226,7 +225,7 @@ tested.
   ARRAY_OF_POINTERS instance list), the update rules, the alignment/2^40 rules, the offline-statistics and
   serialization refusals, a geometry pointer list with and without a null entry, the vertex-format refusal, the
   non-batched form, the stream notes (including the alternate bottom-level path), and the environment switch. Synthetic
-  descriptions only: 43 of the target's CHECKs are new (the target had 26 before).
+  descriptions only. Those 43 checks are the original readiness-plan coverage; §8 records the added command-route bridge checks.
 * `bvh_builder_test` (`port/test/bvh_builder_test.cpp`, target `bvh_builder_test`, package-gated, exits 77 without
   `PALMETTO_GAME_DIR`): the `PALMETTO_BVH_BUILD=1` arm above. It checks the prebuild answer and the destination rules,
   reports the build's measured blocker, and passes when the helper refuses before writing the destination. Nothing
@@ -234,12 +233,89 @@ tested.
 * The layout move is checked by every target that already used `XdxrLayout` (`vk_xdxr_build_test`,
   `d3d12_xdxr_rt_test`, the device prebuild) and by the full `palmetto` build.
 
-## 8. Attribution
+## 8. Public D3D12 COM route follow-on (2026-11-27)
 
-This slice was implemented from this project's own measurements. The behaviour was cross-checked against the public
-GPL-3.0 project **ubiquitarianism/leonida** (<https://github.com/ubiquitarianism/leonida>), through this repository's
-own peer ledger ([cleanroom_peers.md](cleanroom_peers.md)) rather than a clone read; the ledger's ray-tracing rows
-quote **XCL** and **five-star**, whose public wording is cited in section 1. No code, comment text, identifier or table
-from that project was copied. The upstream project remains the copyright of its contributors and its license continues
-to apply to its own tree. The NOTICE.md entry belongs to the lead's commit, as [upstream_port.md](upstream_port.md)
-section 3 requires.
+### Peer comparison and measured delta
+
+The peer claims below are the public descriptions summarized in rank 6 of [cleanroom_peers.md](cleanroom_peers.md), not
+source-level parity claims. The local baseline is the 130.3 s trace in §2: zero standard Build/Copy/postbuild calls,
+zero prebuild calls, and no title request that reaches traversal. The helper arm in §3 independently stops at slot 148.
+
+| Peer mechanism | Local comparator and this delta | Remaining limit |
+|---|---|---|
+| XCL: the game's `XboxBvhBuilder` GPU build plus inline shader traversal | Palmetto already has its own GPU XDXR BVH4 builder and `image_bvh_intersect_ray` / `image_bvh64_intersect_ray` lowering. This follow-on routes public D3D12 command-list records into that builder when explicitly armed. | It does not execute XCL's builder or hook the game's helper exports; no title boot reaches the RT pass in the measured trace. |
+| Five Star: CPU-built XDXR structures placed at the console GPU addresses calculated by the helper's prebuild | Palmetto's own `XdxrLayout` and GPU builder write the same XDXR record family at supplied arena addresses. The adapter is not a CPU port of Five Star's builder and does not resolve its prebuild exports. | Helper prebuild/build/rehydrate exports remain out of this route; no package stream is consumed. |
+
+### Wiring, switch, and refusals
+
+[the route adapter](../port/src/bvh_route.h) adapts a validated `route::BuildDesc` plan into this project's existing
+`BuildAccelerationStructure` and postbuild command-list records; it is a translation layer, not a second builder. The
+public D3D12 geometry unions are copied field-by-field into the measured planner shape, including pointer-layout arrays;
+no public geometry byte-layout is assumed. `port/shims/d3d12_com.cpp` consults this adapter in the existing Build,
+Copy and Emit command-list methods only when `PALMETTO_BVH_ROUTE=own`. The environment switch is absent/off by
+default: the original branches remain the fallback and the synthetic GPU test starts with them before arming the route
+for update/postbuild/copy. No same-input byte-for-byte A/B dump was run; the off path itself is retained rather than
+rewritten. The new branch also verifies that the attached device has XDXR acceleration structures enabled and returns
+a named backend refusal on the KHR-AS configuration.
+
+The planner bounds geometry and postbuild walks at `0x10000` entries, rejects strides wider than the command IR can
+represent, and keeps the measured destination alignment/address guard (`256` bytes and below `2^40`). The adapter
+supports triangle geometry in the two measured vertex formats (`R32G32` and `R32G32B32` float), no/R16/R32 indices,
+TLAS instance arrays and pointer arrays, and the existing build-flag mapping. The Copy branch accepts Clone/Compact
+only with aligned, guarded source/destination addresses; Emit accepts compacted/current-size postbuild types. Bundles,
+unsupported geometry/formats/flags, invalid counts, serialization/offline-statistics requests and KHR-AS are named
+refusals, not a speculative fallback. Existing device prebuild answers still come from `XdxrLayout`; this follow-on
+does not add a second prebuild implementation.
+
+The descriptor/heap and shader translator paths were not modified. The adapter carries the requested console VAs into
+the existing builder; it does not allocate/rewrite descriptor heaps, root arguments, T#/S# descriptors or translated
+shader pointers. Consequently, the synthetic build/readback test below is not an end-to-end descriptor-driven shader
+trace. The original boot still measured zero RT requests, and no route-on title boot was run; this work does not claim
+the game now reaches BVH traversal.
+
+### Tests and single synthetic GPU arm
+
+* `_setup\\build_gta6rt.cmd`: passed `PALMETTO_OK` after the shared xmem link fix. `d3d12_com.cpp` and the adapter
+  compiled in the Palmetto target.
+* `xdxr_descs_test.exe`: passed (`xdxr_descs: ok`, checked against `d3d12.h`). The added bridge covers BLAS flag/
+  format/instance mapping, postbuild records and ignored types, opt-out, backend/copy/emit refusals, count bounds and
+  over-wide stride refusal.
+* CTest `d3d12_xdxr_rt` and `d3d12_xdxr_rt_check`: passed 2/2 on an NVIDIA GeForce RTX 4090. The log confirms
+  `PALMETTO_BVH_ROUTE=own` was armed for the update/postbuild/copy segment. The checker reported zero validation errors
+  and 0/1000 differing rays for BLAS, TLAS, update, compact, BOX16, BOX16 update and paired BLAS; this validates the
+  written CPU-readable XDXR structures against the independent ray checker, not a game shader dispatch. No device loss.
+* `python -I tooling/xdxr_bvh.py selftest`: four synthetic random/grid BOX32/BOX16 cases, 0 validation errors and
+  0/400 ray differences for each.
+* Python shader/decode units: `test_image_bvh*_hw.py` 5/5; `test_image_bvh_census.py` 15/15;
+  `test_rdna2_decode.py` 16 passed, 1 skipped because `llvm-mc` is unavailable.
+* Focused docs checks passed: links 7/7, repo paths 3/3, table rows 2/2, encoding 1/1, repeated lines 2/2,
+  repeated list items 3/3 and table IDs 2/2. The full docs suite was not green in the same run: its global CLI-flag and
+  environment-variable checks reported unrelated entries in `_setup/xcl/HANDOFF.md` and other in-flight slices; two
+  synthetic Git tests initially inherited malformed `GIT_CONFIG_*` and passed on the focused rerun after those
+  process-local variables were removed.
+* The descriptor, console-heap and `SetDescriptorHeaps` C++ targets were built with the isolated target build but were
+  not run in this pass. No descriptor-specific integration claim is made.
+* `_setup\\build_tests.cmd` was attempted but stopped in `port/test/graphics_pso_test.cpp` with syntax diagnostics
+  around lines 409–428 during another in-flight slice. Its owner later repaired that test; the shared integration rerun
+  is pending, so this run does not claim `TESTS_BUILT`.
+
+One synthetic GPU route test was the only light arm in this follow-on. No game data or package bytes were read, written,
+or used; no title boot was run.
+
+### Next falsifier
+
+Resolve the actual Xbox helper import/export path and measure the bytes/semantics of its slot-148 upload allocation
+before serving it; then exercise `BuildRaytracingAccelerationStructureBatched2X`, helper Copy and Rehydrate with synthetic
+geometry/stream data. Do not claim helper-export parity until those calls reach the layer and the output is checked in the
+title's shader-visible address/descriptor path.
+
+## 9. Attribution
+
+This follow-on compared its own measured route with the public claims summarized in rank 6 of
+[cleanroom_peers.md](cleanroom_peers.md): **XCL** (<https://github.com/xcl-dev/xcl>, GPL-2.0-only) and **Five Star
+Recomp** (<https://github.com/ThatRecompDev/five-star-recomp>, GPL-3.0-or-later). For this campaign the reference
+snapshots are XCL `623d02e` (README, design/wave64/shader-container documentation) and Five Star `ce2b333b` (README,
+D3D12.X/memory/storage/ray-tracing/audio documentation and loader-shim headers); the ledger's older audit snapshots
+are not the read target for this follow-on. No peer code, comment text, identifier or table was copied. The
+implementation comes from this project's own measured D3D12/XDXR descriptions, command-list IR and GPU builder. The
+NOTICE attribution row belongs to the lead's commit, as [upstream_port.md](upstream_port.md) section 3 requires.
