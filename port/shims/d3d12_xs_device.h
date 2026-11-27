@@ -255,6 +255,50 @@ ConsoleListExtraCounts console_list_extra_counts();
 void set_console_list_extras_enabled(int mode);
 bool console_list_extras_enabled();
 
+// ---- The cross-list memory wait and GPU-ordered bottom-of-pipe writes (docs/peer_port_streaming.md section 11) ------
+//
+// The model above writes slots 71/72 at record time and evaluates slot 74 then, so it never holds. These switches port
+// the console's GPU ordering on top of it, all off by default and only meaningful with PALMETTO_XS_CONSOLE_LIST_EXTRAS:
+//   PALMETTO_XS_MEMORY_WAIT_HOLD=1     split a list at an unmet wait, hold the segment after it, release it when the
+//                                     cell holds (a later list's write, or the watcher's poll) or at the bound;
+//   PALMETTO_XS_MEMORY_WAIT_BOUND_MS   the bound, default 5000 (the peers' bound), 1..600000;
+//   PALMETTO_XS_MEMORY_WAIT_MAX        concurrent held segments, default 16, 1..256;
+//   PALMETTO_XS_BOTTOM_OF_PIPE_GPU=1   write slot 71/72 values as GPU-ordered immediate writes at the recorded position
+//                                     (desktop WriteBufferImmediate, MARKER_OUT) instead of at record time;
+//   PALMETTO_XS_MEMORY_WAIT_TRACE=1    the first refusals and hold events are logged, no call changes.
+// The release is the layer's own Wait-before-Signal hold (queue_holds.h): the shim posts the queue's PC Wait on a
+// fence before the held segment and the watcher CPU-signals that fence, which the layer turns into the replay of the
+// held batch. A held list is split into real lists, and the state it set before the wait is replayed into the segment
+// after it; a list whose state cannot be replayed (render targets, descriptor heaps, predication, an open query, a
+// bundle) is not split, and the record-time evaluation stands as the named bounded fallback.
+struct MemoryWaitCounts {
+    std::uint64_t waits_unmet = 0;       // slot-74 waits the model found unmet at record time
+    std::uint64_t split = 0;             // lists split at a wait
+    std::uint64_t split_refused = 0;     // waits whose list could not be split (named on stderr, bounded lines)
+    std::uint64_t record_waits_met = 0;  // record-time waits a later recorded bottom-of-pipe write met
+    std::uint64_t record_waits_cross_list = 0;  // of those, the writer was a different list (the measured case)
+    std::uint64_t record_waits_same_list = 0;   // of those, the writer was later in the same list
+    std::uint64_t segments = 0;          // submissions the split batches became
+    std::uint64_t submits_split = 0;     // ExecuteCommandLists calls that carried a split list
+    std::uint64_t submit_fallback = 0;   // a batch that could not be planned/held and was submitted unsplit
+    std::uint64_t holds_created = 0;     // fences a held segment waits on
+    std::uint64_t holds_satisfied = 0;   // released because the cell held (the watcher's poll or a recorded write)
+    std::uint64_t holds_timeout = 0;     // released at the bound (the peers' bounded fallback)
+    std::uint64_t holds_cancelled = 0;   // released because the queue was destroyed
+    std::uint64_t holds_written = 0;     // holds a later bottom-of-pipe write met early
+    std::uint64_t holds_cross_list = 0;  // of those, the writer was a different list (the measured cross-list case)
+    std::uint64_t holds_at_bound = 0;    // the hold records' timed-out total (same as holds_timeout)
+    std::uint64_t gpu_writes = 0;        // slot 71/72 values recorded as GPU-ordered immediate writes
+    std::uint64_t gpu_refused = 0;       // GPU writes refused by shape (the CPU record-time write was used instead)
+    std::uint64_t gpu_addresses = 0;     // distinct pages the GPU write form was used on
+    std::uint64_t pending_holds = 0;     // holds the watcher has not released yet
+};
+MemoryWaitCounts memory_wait_counts();
+// 1: on, 0: off, -1: the environment switch (the default). Tests use these to exercise both arms in one process.
+void set_memory_wait_hold_enabled(int mode);
+void set_memory_wait_gpu_writes_enabled(int mode);
+void set_memory_wait_bound_ms(std::uint64_t milliseconds);
+
 // ---- Allocator slot 9: invoking the registered callback ----------------------------------------------------------
 //
 // docs/allocator_slot9.md. The registered callback game+0x555DF10 reads: argument 4, the size (2^arg4 when arg4 < 16,

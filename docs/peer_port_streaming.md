@@ -500,3 +500,201 @@ Uncommitted files of this slice: `port/src/deferred_compile.h`, `port/src/vulkan
 section of `docs/peer_port_streaming.md`. No git write was made by this slice; boots and captures are under
 `D:\leonida-work\fsrstable\` outside the repository, and no game data is added: RVAs, thread-id hashes, counts, times,
 state words and image means only.
+
+## 11. Measured: implemented ports 4-5 - the cross-list memory wait and the GPU-ordered bottom-of-pipe write
+
+**Status: measured; opt-in and off by default.** This section implements ranks 4 and 5 of the section 6 plan: the console
+64-bit memory wait (`Wait64BitValueX`, console list slot 74) as a cross-list hold with a list split and a watcher, and
+the bottom-of-pipe writes (slots 71/72) as GPU-ordered immediate writes at the recorded position instead of record-time
+CPU writes. Both extend the model of [bottom_of_pipe.md](bottom_of_pipe.md), which writes at record time and evaluates
+slot 74 at record time; with the two new switches unset that model's measured path is unchanged. No peer code was copied:
+sections 1-9 are the audit this port was planned from, [upstream_port.md](upstream_port.md) is the policy and section
+11.6 is the attribution.
+
+### 11.1 The measured shape this port answers
+
+One 130 s measurement boot (`boot-memwait-measure2`, content environment and class-0xa mitigation, `PALMETTO_XS_CONSOLE_LIST_EXTRAS=1`
+and the trace switches, binary `F52AE7B6...`): **ALIVE 130.2 s, 0 exceptions, 314,804 D3D12 calls**, every capture mean
+rgb `0.00 0.00 0.00`, the class-0xa upload `BLOCK ALLOC hit 1 size 0x1000 width 256 height 1, job-block 0, overlap no`.
+
+| measurement | value |
+|---|---|
+| slot 70 calls / forwarded | 9,375 / 9,375 |
+| slot 71 calls / writes / refused | 7,775 / 7,775 / 0 |
+| slot 72 calls / writes / timestamps / refused | 12,492 / 12,492 / 12,492 / 0 |
+| slot 74 calls / met / unmet / unreadable / refused | 3,126 / **3,126** / **0** / 0 / 0 |
+
+The result is the negative the section 6 plan predicted: **every measured wait is met at record time**, so no wait needs
+the cross-list consumer at this content population, and the hold stays unexercised rather than proven unnecessary. The
+waited cell is the slot-71 ring's base cell (`base + 0x00`), which neither slot-71 write (`+0x08`/`+0x0C` of a 72-byte
+record) nor slot 72 writes: the writer is the title's own GPU work ([bottom_of_pipe.md](bottom_of_pipe.md) 2.5), whose
+value is already there from the previous frame by the time the CPU records the wait. Whether a cell written by a *later*
+list is ever waited on is answered by the new counters in section 11.2: the measurement arm reports
+`record waits met by a write 0 (cross-list 0 same-list 0)` - no unmet record-time wait met a later write either.
+
+### 11.2 The design
+
+Our own mechanism, in our structure and naming: a pure policy header, the shim's list/queue code, and the layer's own
+Wait-before-Signal hold as the release path. Nothing in the replay or the queue code changed.
+
+| switch | what it does |
+|---|---|
+| `PALMETTO_XS_MEMORY_WAIT_HOLD=1` | split a list at an unmet wait and hold the segment after it (off: the record-time evaluation, unchanged) |
+| `PALMETTO_XS_MEMORY_WAIT_BOUND_MS` | the bound, default **5000** (the peers' bound), clamped 1..600000 |
+| `PALMETTO_XS_MEMORY_WAIT_MAX` | concurrent held segments, default **16**, clamped 1..256 |
+| `PALMETTO_XS_BOTTOM_OF_PIPE_GPU=1` | write slots 71/72 as GPU-ordered immediate writes at the recorded position (off: the record-time CPU write, unchanged) |
+| `PALMETTO_XS_MEMORY_WAIT_TRACE=1` | measurement only: the first 64 refusals/hold events and a counters line on the model's 16,384-event milestone; no call changes |
+
+- **The pure policy** is the new include-only header under `port/src`: the switch spellings and clamps, the measured comparison
+  (GREATER_EQUAL, D3D12 value 7, whole 64 bits; every other comparison refused by name), the hold records (cell,
+  deadline, submission order, states pending/satisfied/timed-out/cancelled), their bounded release and the segment plan a
+  batch of split lists becomes. It has no Vulkan, Windows, clock or thread dependency; the shim passes its clock.
+- **The split** (shim, slot 74, unmet wait, hold switch on): close the part recorded so far, create the next segment on
+  the shim's own command allocator (so the title's allocator stays free for it), replay the state the list had set into
+  it, and go on recording there. `closed_parts`/`between_waits` on the list proxy keep the part order; a Close closes the
+  last part, a Reset or a re-record without a submission drops the unused parts (counted as a named drop).
+- **The state replay** is the part that makes a split faithful: a desktop list after the wait does not inherit the head's
+  state. The shim keeps the measured by-value setters (pipeline state, root signature, root descriptor tables, 32-bit
+  constants with their values copied, root CBV/SRV/UAV views, viewports, scissors, blend factor, stencil reference,
+  topology, vertex/index buffers, depth bounds) and replays them into the new segment in order. A call whose state cannot
+  be re-set safely - render targets (CPU descriptor handles), descriptor heaps, stream-out targets, a bundle's own state,
+  predication on, a query left open - marks the list unsplittable, and a bounded state log (48 calls) does the same when
+  it overflows: the wait then keeps the record-time evaluation, counted as `split refused` and named on stderr.
+- **The submission** (shim, queue submit): the batch becomes a plan of parts and waits (`BatchPlan`). The shim
+  pre-creates one fence per boundary, registers one hold each, then submits the parts up to the first wait as one
+  `ExecuteCommandLists`, posts the queue's own PC `Wait` on that fence, and submits the segment after it - which the
+  layer's existing Wait-before-Signal hold (`queue_holds.h`) holds, in order, with everything the title submits after it.
+- **The watcher is the release**: one layer-owned shim thread polls each queue's oldest hold's cell in submission order
+  (a later boundary never overtakes an earlier one), and releases a hold when the comparison holds or the bound passes by
+  **CPU-signalling its fence** (`ID3D12Fence::Signal(1)`), which `VulkanFence::signal` records in `QueueHolds` and pumps -
+  the same release the peers' watcher thread gives, through machinery this tree already owned. A hold is cancelled (not
+  signalled) when its queue is destroyed or the process tears down; a queue destroyed with a held batch reports the drop.
+- **Bounded fallbacks, all counted and named**: a bundle (no submission of its own), a list without an allocator, a list
+  whose state cannot be replayed, an open query or predication at the wait, the state-log bound, the split bound (4
+  segments a list), a fence or a hold that cannot be created, or a plan past 64 parts: the batch is submitted as one
+  unsplit call with every part in order (the measured record-time model), never left unreleased.
+- **The GPU-ordered write** (shim, slots 71/72): the measured value is recorded as a desktop `WriteBufferImmediate` in
+  `MARKER_OUT` mode at the title VA, at the position the title's call was recorded - so the card writes it after the
+  list's earlier work, and a wait can see a value the CPU could not have written. Slot 72's 64 bits go as two dwords
+  (back to back; the measured call site only ever asks for a timestamp, whose value remains the CPU 100 MHz clock). The
+  write resolves through the replay's title-page import path: a command VA no mapping resolves is imported over the
+  title's own committed pages at first use. The measurement found that import's rule: a 4-byte write at a non-page
+  offset cannot be bound, so the form is only used at a **page-aligned** destination; the measured slot-71/72 cells are
+  not page-aligned, so the form is refused by name there and the record-time CPU write is the bounded fallback (see
+  11.5).
+
+### 11.3 Tests
+
+`port/test/xs_proxy_mock_test.cpp` gained two checks (GPU-free, the existing target; a new target would need a CMake
+change this slice does not own):
+
+- **the pure policy** (`check_memory_wait_policy`): every off and on spelling of the two switches, the bound and
+  hold-count clamps and defaults; the measured comparison and the refused comparisons; the hold records met by a value,
+  met by a later list's write (cross-list counted apart from same-list), the exact bound boundary, submission order (a
+  later hold never overtakes an earlier one), the concurrent bound and a queue's cancellation; the segment plan of a list
+  split twice plus an unsplit list (segments, part order, wait positions, segment membership) and its part bound.
+- **the proxy mechanism** (`check_memory_wait_split`): with the hold off an unmet wait is only counted (no split, no
+  second list, one `ExecuteCommandLists`, no `Wait`); with it on the head closes, a real list is created with the state
+  replayed (`OMSetStencilRef` arrives in the new segment), later recording goes there, a second unmet wait splits again,
+  and the submit becomes three `ExecuteCommandLists` and two queue `Wait`s with two holds pending; setting the cell makes
+  the watcher CPU-signal each fence with 1 in order; the bound releases a hold whose cell never holds and counts it; the
+  GPU write records one `WriteBufferImmediate` at a page-aligned VA (value and `MARKER_OUT` checked) and refuses a
+  non-page-aligned one with the record-time CPU write as the fallback. The target prints
+  `xs_proxy_mock_test: PASS` with every earlier check unchanged.
+
+Gates on the changed tree: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`; `_setup\build_tests.cmd` prints
+`TESTS_BUILT`; the GPU-free gate subset (`unimplemented_policy`, `buffer_va_index`, `deferred_compile`,
+`xs_proxy_mock`, `graphics_record`, `graphics_pso`, `frame_dump`, `xbox_present`, `dstorage`, `xapu_chad`) exits 0.
+
+### 11.4 A/B boots
+
+Two 130 s light boots, one binary, one at a time under `_setup/boot_lock.ps1`, the content environment from
+`D:\leonida-work\fsrstable\boot_arm.ps1` plus the class-0xa mitigation `PALMETTO_TITLE_CLASS0A_SIZE=1` and the model switch
+`PALMETTO_XS_CONSOLE_LIST_EXTRAS=1`; arm A leaves the two new switches unset, arm B sets
+`PALMETTO_XS_MEMORY_WAIT_HOLD=1`, `PALMETTO_XS_BOTTOM_OF_PIPE_GPU=1` and the bound 5000 ms. The pair is binary
+`7E59D9DB...`, the one whose on arm recorded the GPU-form writes; it is the pair that measured the refusal of section
+11.5. After it, the GPU form was restricted to page-aligned destinations (the fix the pair showed was needed, pinned by
+the proxy test). The stage-3 race of [decomp_first_ui.md](decomp_first_ui.md) section 17 costs retries: the final binary
+was re-verified by one clean switch-off boot (binary `4D97F918...`, ALIVE 130.2 s, 0 exceptions, 333,007 calls, same state
+words and capture means) while its switch-on retries stopped before 130 s on the same title-side race (`game+0x86f9df` at
+60.5 s, `game+0x559468f` at 55.2 s, `game+0x86f9fdf` family, 0 device losses), which is why the pair below is the earlier
+binary's: no regression was measured, and the fallback that came out of it is the one the tests pin.
+
+| measurement | A: switches off | B: switches on |
+|---|---|---|
+| binary SHA-256 | `7E59D9DB...` | `7E59D9DB...` |
+| verdict / exceptions / device losses | ALIVE 130.2 s (harness timeout), 0, 0 | ALIVE 130.3 s (harness timeout), 0, 0 |
+| D3D12 calls | 369,797 | 322,144 |
+| slot 71 calls / writes / refused | 7,474 / 7,474 / 0 | 7,912 / 7,912 / 0 |
+| slot 72 calls / writes / timestamps / refused | 12,642 / 12,642 / 12,642 / 0 | 12,423 / 12,423 / 12,423 / 0 |
+| slot 74 calls / met / unmet | 3,164 / 3,164 / **0** | 3,109 / 3,109 / **0** |
+| memory-wait counters line | switches 0/0; split 0 refused 0; holds 0; record waits met 0; gpu writes 0 | switches 1/1, hold 1, gpu-writes 1; slot74 unmet 0; split 0 refused 0; holds created 0; record waits met 0; **gpu writes 14,162 refused 9,217, addresses 4** |
+| refused submissions (`ExecuteCommandLists failed`) | 0 | **3,545** (the GPU form's 4-byte title-page imports; see 11.5) |
+| state words at 128 s (init / loading / session / machine) | 3 / 2 / 3 / current 3 next 3 (init 64 s, loading 60 s, session 64 s) | 3 / 2 / 3 / current 3 next 3 (init 68 s, loading 64 s, session 68 s) |
+| movie player at 128 s | state `0x9`, buffers 0, open 1, probe 0 | same |
+| class-0xa upload | `BLOCK ALLOC hit 1 size 0x1000 width 256 height 1`, job-block 0, overlap no | same |
+| captures / pixels | 13 captures, every mean rgb `0.00 0.00 0.00` | 13 captures, every mean rgb `0.00 0.00 0.00` |
+
+**Verdict: the hold is implemented and tested, but it is unexercised at this content population and both switches stay
+off by default; the GPU-write form is measured as refused by the replay's import rule, and the final code falls back to
+the record-time write.** The model's wait is met in 3,164 of 3,164 arm-A and 3,109 of 3,109 arm-B calls, so no split and
+no hold was ever created in either arm: the counters that would move if the port worked (split, holds, segments) are 0
+and the measurement axis that would prove a cross-list dependency (a record-time wait met by a later write) is 0 too.
+That is the plan's stated falsifier, measured. The GPU-write form did record writes in arm B (14,162, of which 9,217 fell
+back to the CPU write at their shape), and what it recorded at non-page offsets made the replay's 4-byte title-page
+import refuse **3,545 whole submissions** ("unknown resource; nothing was submitted") - the arm is ALIVE and the state
+words are arm A's, but a dropped submission is a regression no switch-on arm may keep. The final form therefore only
+records a page-aligned destination: at the measured cells it is refused by name and the record-time CPU write lands the
+same values as arm A, and the proxy test pins both halves (a page-aligned write recorded; a non-page-aligned one refused
+with the CPU fallback). Both arms' state words, movie state, class-0xa upload and capture means are identical: no
+movement, and the regression the first on arm showed is closed by the fallback rather than by the switch.
+
+### 11.5 Limits and the next falsifier
+
+- **The wait is unobservable at this population.** Every measured slot-74 cell already holds when the CPU records the
+  wait, so the hold's consumer never runs. **Next falsifier:** a boot or content window in which a slot-74 cell is short
+  of its target at record time (a cell a later list's GPU work writes): the `split`/`holds created` counters and the
+  hold's release would go non-zero there. If they stay zero again, the port stays readiness, not value.
+- **The split carries the list state only within bounds.** The measured frame lists set far more than the 48-call state
+  log and touch render targets/descriptor heaps, so in the on arm almost every list is marked unsplittable; a wait in
+  such a list keeps the record-time evaluation. The query-record list the measured slot-74 call site is in is short
+  enough; a wait in a frame list is not. **Next falsifier:** a wait in a list whose state is not replayable would show
+  `split refused` with the state name; lifting it needs the layer, not the shim, to own the segment state.
+- **The GPU-ordered write cannot reach the measured cells.** The replay imports a 4-byte command VA as its own small
+  span, and the title cells sit at non-page offsets, so the form is refused by shape in the final code and the
+  record-time CPU write is used. The measured arm B recorded the form before that rule and shows why: 14,162 immediate
+  writes, 9,217 refused at the destination shape, and 3,545 submissions refused by the import of the rest. The value
+  therefore still lands at record time, not at GPU order, and the port's GPU half is readiness measured as refused, not
+  a carried ordering. **Next falsifier:** a replay import that covers a whole page for a 4-byte write (or a registered
+  marker buffer the write can name) would let the form carry; until then the record-time model is the measured one.
+- **A 64-bit write is two dwords.** The desktop form has no 8-byte immediate write; the measured call site only asks for
+  a timestamp, and a reader of both halves could see them one at a time where the console writes 8 bytes.
+- **The timestamp value is still the CPU's clock.** Flags 1/2 ask the console for the GPU clock; the write's ordering is
+  GPU-ordered now but its value stays the CPU 100 MHz conversion (the same limit as [bottom_of_pipe.md](bottom_of_pipe.md)
+  limit 3).
+- **The release path is the layer's Wait-before-Signal hold, in order.** A hold whose fence is never signalled (device
+  loss, queue teardown) is cancelled and the held batch is dropped and reported by the layer, as any held work is; the
+  bound is what prevents a missing writer from holding a queue. One machine, one driver, one arm per boot; the stage-3
+  race costs retries (11.4), so a state that does not move in one pair is not a negative for the title as a whole.
+
+### 11.6 Cross-check against the peers, attribution and uncommitted files
+
+The behaviour was cross-checked against the public projects the audit names; no code, comment text, identifier or table
+was copied, and this implementation is this repository's own structure, naming and tests. **Five Star Recomp**
+(`45071d52`: `src/FiveStar.Loader/Shims/D3D12X/MemoryWaits.cs`, `ListSplits.cs`, `ListReplayState.cs`,
+`BottomOfPipeWrites.cs`): the same shape - `Wait64BitValueX` with a 5 s bound, a list split at the wait with the desktop
+state re-set on the new segment, a watcher thread that signals the queue's fence, and `WriteBufferImmediate` in
+`MARKER_OUT` mode at a translated address with the CPU clock for timestamps - reached independently from our own
+measurement; what is ours and differs is the release (the layer's existing `QueueHolds` CPU fence signal instead of a
+per-queue fence class), the segment plan and pure policy header with their tests, the bounded state-log refusal, the
+shim-created segment allocator, the per-submission planning in the proxy, and our switch/counter shape. **XCL**
+(`8b957be`: `crates/xcl/src/hle/d3d12x/list_x.rs`, `cpu_writes.rs`) carries the same split and a 2 s bound and sets the
+fence from the CPU; our bound is the 5 s one and our release is the same CPU signal through the layer. **Victory-fork**
+(`52ac4ec`: `crates/victory-gpu/src/queue2.rs`) carries the copy-lane fences and holds the audit names; our port uses
+the queue's own Wait hold rather than copy lanes. The upstream projects remain the copyright of their contributors under
+their own licences; the `NOTICE.md` row for this slice is the lead's to add at commit time: Five Star Recomp
+(GPL-3.0-or-later, commit `45071d52`), XCL (GPL-2.0-only, `8b957be`), victory-fork (GPL-3.0-or-later, `52ac4ec`).
+Uncommitted files of this slice: the new include-only header under `port/src`, `port/shims/d3d12_xs_device.cpp`,
+`port/shims/d3d12_xs_device.h`, `port/test/xs_proxy_mock_test.cpp` and this section of `docs/peer_port_streaming.md`. No
+git write was made by this slice; boots and captures are under `D:\leonida-work\fsrstable\` outside the repository, and
+no game data is added: RVAs, counts, addresses-as-shapes, state words and image means only.

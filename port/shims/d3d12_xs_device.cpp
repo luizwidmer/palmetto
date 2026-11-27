@@ -26,6 +26,7 @@
 #include "d3d12_trace.h"
 #include "startup_trace.h"  // rt::startup_trace::detail::crash_image_base: the mapped title's base for the slot-127 hook
 #include "xmem.h"  // rt::xmem::copy_page_mappings_fn, the mapping primitive of queue slot 31
+#include "../src/memory_wait_holds.h"  // the cross-list memory wait's pure policy (docs/peer_port_streaming.md section 11)
 #include <tlhelp32.h>
 // docs/present_wiring.md: the presentation core (xbox_present.cpp) publishes the console PresentX path through this
 // header's registration hook. Only its hook-only layer is included, so this translation unit - which is also compiled
@@ -97,8 +98,10 @@ extern "C" void palmetto_register_fence_value_watcher(void* fn) {
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
@@ -1623,6 +1626,12 @@ void destroy_child(ChildProxy* self) {
     if (device) proxy_release(device);
 }
 
+// The cross-list memory wait's queue side (docs/peer_port_streaming.md section 11): a queue destroyed with a hold
+// cancels it, so its watcher releases the fence it posted instead of signalling a queue that is gone.
+namespace memwait {
+void cancel_queue(std::uint64_t queue);
+}
+
 template <ChildKind K>
 unsigned long child_add_ref(ChildProxy* self) {
     note_child_slot<K>(1);
@@ -1633,7 +1642,10 @@ template <ChildKind K>
 unsigned long child_release(ChildProxy* self) {
     note_child_slot<K>(2);
     const unsigned long refs = self->refs.fetch_sub(1, std::memory_order_acq_rel) - 1;
-    if (refs == 0) destroy_child(self);
+    if (refs == 0) {
+        if constexpr (K == ChildKind::queue) memwait::cancel_queue(reinterpret_cast<std::uint64_t>(self));
+        destroy_child(self);
+    }
     return refs;
 }
 
@@ -1746,6 +1758,29 @@ struct ListProxy {
     // memory does implicitly - so the frame's recording is real rather than dropped.
     ID3D12CommandAllocator* allocator;  // AddRef'd while the proxy lives
     std::atomic<int> recording_state;   // 1: the real list is recording, 0: its last Close succeeded
+    // ---- The cross-list memory wait (docs/peer_port_streaming.md section 11; docs/bottom_of_pipe.md) -------------
+    // A console list records Wait64BitValueX mid-list. A wait that does not hold at record time splits the list
+    // there: the part recorded so far is closed into closed_parts, a new real list records the rest, and the wait is
+    // kept in between_waits. Part order at submission is closed_parts[0..], then `real` (the part still recording);
+    // between_waits[i] precedes the part after closed_parts[i], so its size is closed_parts.size().
+    D3D12_COMMAND_LIST_TYPE type = D3D12_COMMAND_LIST_TYPE_DIRECT;  // set at creation; a bundle is never split
+    std::vector<ID3D12GraphicsCommandList*> closed_parts;  // AddRef'd
+    std::vector<palmetto::memory_waits::Wait> between_waits;
+    ID3D12CommandAllocator* tail_allocator = nullptr;  // the allocator the segment after a wait is created on (owned)
+    // The desktop list a segment is recorded into does not inherit the state the head set. These are the calls the
+    // split replays into the new segment, in order; state_unsafe is set by a call whose state cannot be replayed
+    // safely (render targets, descriptor heaps, predication, an open query, a bundle), which refuses the split by name.
+    struct StateCall {
+        unsigned pc_slot = 0;
+        std::uint64_t args[4] = {};
+        std::vector<std::uint8_t> blob;  // copy of an array argument (viewports, scissors, views, constants)
+        unsigned blob_arg = 4;           // which argument word the blob pointer replaces (4 = none)
+    };
+    std::vector<StateCall> state_log;
+    bool state_unsafe = false;
+    unsigned open_queries = 0;   // BeginQuery without its EndQuery: a segment cannot end between them
+    bool predicated = false;     // SetPredication on: the state is per-list and is not carried
+    std::size_t splits = 0;      // segments this list was split into, since the last Reset
 
     void pin_cursor_at_limit() {
         const std::uint64_t at_limit = static_cast<std::uint64_t>(
@@ -1862,6 +1897,896 @@ inline void note_list_slot(unsigned slot, std::uint64_t a1 = 0, std::uint64_t a2
                  constant_like ? "index/count shape (possible root 32-bit constants)" : "other shape");
 }
 
+// ---- Cross-list memory waits and GPU-ordered bottom-of-pipe writes (docs/peer_port_streaming.md section 11) --------
+//
+// docs/bottom_of_pipe.md measured the console calls and implemented their record-time model: slot 71/72 write the value
+// when the list is recorded and slot 74 is evaluated then. A console does the opposite: the GPU writes the value after
+// the list's earlier work, and a wait mid-list stops the queue until the cell compares true, so a cell a later list
+// writes can hold an earlier list. This block carries both halves behind opt-in switches that extend the model, with
+// everything off by default and the measured path unchanged:
+//   PALMETTO_XS_MEMORY_WAIT_HOLD=1      split the list at an unmet wait and hold the segment after it; the queue's own
+//                                       Wait-before-Signal hold (queue_holds.h) is posted on a fence and a watcher
+//                                       CPU-signals it once the cell holds or at the bound;
+//   PALMETTO_XS_MEMORY_WAIT_BOUND_MS    the bound, default 5000 (the peers' 5 s), 1..600000;
+//   PALMETTO_XS_MEMORY_WAIT_MAX         concurrent held segments, default 16, 1..256;
+//   PALMETTO_XS_BOTTOM_OF_PIPE_GPU=1    write slot 71/72 values as GPU-ordered immediate writes (desktop
+//                                       WriteBufferImmediate in MARKER_OUT mode at the recorded position) instead of at
+//                                       record time;
+//   PALMETTO_XS_MEMORY_WAIT_TRACE=1     measurement only: the first refusals and hold events are logged; no call changes.
+// The pure policy (switch parsing, the comparison, the hold records, the segment plan) is port/src/memory_wait_holds.h.
+unsigned detect_list_slot_count(IUnknown* real);  // defined with the list proxy below
+
+namespace memwait {
+
+using palmetto::memory_waits::BatchPlan;
+using palmetto::memory_waits::comparison_met;
+using palmetto::memory_waits::Hold;
+using palmetto::memory_waits::Holds;
+using palmetto::memory_waits::Settings;
+using palmetto::memory_waits::Wait;
+
+// ---- counters and switches (the counters are the boot's table, the switches are also settable by the proxy test) ---
+struct Counts {
+    // slot 74: waits after the model's record-time evaluation, and what the hold did with the unmet ones.
+    std::atomic<std::uint64_t> waits_unmet{0}, split{0}, split_refused{0}, segments{0}, submits_split{0},
+        submit_fallback{0};
+    // the measurement of the cross-list writer: record-time waits a later recorded write met (the port's question).
+    std::atomic<std::uint64_t> record_waits_met{0}, record_waits_cross_list{0}, record_waits_same_list{0};
+    // the holds: recorded, released, how each ended, and the holds a recorded write met early.
+    std::atomic<std::uint64_t> holds_created{0}, holds_satisfied{0}, holds_timeout{0}, holds_cancelled{0},
+        holds_written{0}, holds_cross_list{0}, holds_at_bound{0};
+    // the GPU-ordered bottom-of-pipe writes.
+    std::atomic<std::uint64_t> gpu_writes{0}, gpu_refused{0}, gpu_addresses{0};
+};
+
+Counts& counts() {
+    static Counts counts;
+    return counts;
+}
+
+bool env_switch_on(const char* name) {
+    char value[8] = {};
+    return GetEnvironmentVariableA(name, value, sizeof(value)) > 0 && value[0] != '\0' && value[0] != '0';
+}
+
+// -2: not resolved yet, -1: the environment switch, 0/1: a test's explicit choice.
+std::atomic<int> g_hold_mode{-2};
+std::atomic<int> g_gpu_mode{-2};
+std::atomic<std::uint64_t> g_bound_override{0};  // 0: the environment setting
+
+Settings settings() {
+    static const Settings from_env = [] {
+        char hold[8] = {};
+        char bound[32] = {};
+        char max_holds[32] = {};
+        char gpu[8] = {};
+        GetEnvironmentVariableA("PALMETTO_XS_MEMORY_WAIT_HOLD", hold, sizeof(hold));
+        GetEnvironmentVariableA("PALMETTO_XS_MEMORY_WAIT_BOUND_MS", bound, sizeof(bound));
+        GetEnvironmentVariableA("PALMETTO_XS_MEMORY_WAIT_MAX", max_holds, sizeof(max_holds));
+        GetEnvironmentVariableA("PALMETTO_XS_BOTTOM_OF_PIPE_GPU", gpu, sizeof(gpu));
+        return palmetto::memory_waits::settings_from(hold, bound, max_holds, gpu);
+    }();
+    Settings resolved = from_env;
+    const std::uint64_t bound = g_bound_override.load(std::memory_order_relaxed);
+    if (bound) resolved.bound_ms = bound;
+    return resolved;
+}
+
+bool hold_enabled() {
+    const int mode = g_hold_mode.load(std::memory_order_relaxed);
+    return mode == 1 || (mode == -2 && settings().hold);
+}
+
+bool gpu_writes_enabled() {
+    const int mode = g_gpu_mode.load(std::memory_order_relaxed);
+    return mode == 1 || (mode == -2 && settings().gpu_writes);
+}
+
+bool trace_enabled() {
+    static const bool on = env_switch_on("PALMETTO_XS_MEMORY_WAIT_TRACE");
+    return on;
+}
+
+std::uint64_t now_ms() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch())
+                                          .count());
+}
+
+void print_summary();
+std::size_t pending_holds();  // defined with the watcher below: the holds not released yet
+
+// Bounded events: the first line of each refusal, then one summary every 16384 events (a boot killed by the harness
+// timeout never runs an exit summary).
+void event(const char* format, ...) {
+    static std::atomic<std::uint64_t> events{0};
+    const std::uint64_t n = events.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (trace_enabled()) {
+        // Bounded: the first 64 events of a boot, so a per-frame refusal cannot flood the log (the counters and the
+        // periodic summary line carry the rest).
+        static std::atomic<unsigned> printed{0};
+        if (printed.fetch_add(1, std::memory_order_relaxed) < 64) {
+            char line[480];
+            va_list args;
+            va_start(args, format);
+            std::vsnprintf(line, sizeof(line), format, args);
+            va_end(args);
+            std::fprintf(stderr, "[rt] d3d12_xs: memory waits: %s\n", line);
+        }
+    }
+    if (n == 1 || n % 16384 == 0) print_summary();
+}
+
+void print_summary() {
+    const Counts& c = counts();
+    const Settings limits = settings();
+    std::fprintf(stderr,
+                 "[rt] d3d12_xs: memory waits: switches hold %d gpu-writes %d bound %llu ms max %zu | slot74 unmet %llu | "
+                 "split %llu refused %llu | segments %llu submits %llu fallbacks %llu | record waits met by a write "
+                 "%llu (cross-list %llu same-list %llu) | holds created %llu satisfied %llu timeout %llu cancelled "
+                 "%llu met-by-write %llu cross-list %llu at-bound %llu | gpu writes %llu refused %llu addresses %llu | "
+                 "pending %zu\n",
+                 hold_enabled() ? 1 : 0, gpu_writes_enabled() ? 1 : 0,
+                 static_cast<unsigned long long>(limits.bound_ms), limits.max_holds,
+                 static_cast<unsigned long long>(c.waits_unmet.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.split.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.split_refused.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.segments.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.submits_split.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.submit_fallback.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.record_waits_met.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.record_waits_cross_list.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.record_waits_same_list.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.holds_created.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.holds_satisfied.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.holds_timeout.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.holds_cancelled.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.holds_written.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.holds_cross_list.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.holds_at_bound.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.gpu_writes.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.gpu_refused.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.gpu_addresses.load(std::memory_order_relaxed)), pending_holds());
+}
+
+// The PC vtable call shape the rest of this file uses: `this` in the first word, then the argument words.
+using CallFn = std::uint64_t(WINAPI*)(void*, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
+                                      std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
+                                      std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t);
+
+std::uint64_t call(void* object, unsigned slot, std::uint64_t a1 = 0, std::uint64_t a2 = 0, std::uint64_t a3 = 0,
+                   std::uint64_t a4 = 0, std::uint64_t a5 = 0, std::uint64_t a6 = 0) {
+    if (!object || !slot) return 0;
+    auto** const vtable = *reinterpret_cast<void***>(object);
+    return reinterpret_cast<CallFn>(vtable[slot])(object, a1, a2, a3, a4, a5, a6, 0, 0, 0, 0, 0, 0, 0, 0);
+}
+
+void add_ref(void* object) {
+    if (object) call(object, 1);
+}
+
+void release_object(void* object) {
+    if (object) call(object, 2);
+}
+
+constexpr unsigned kPcClose = 9;
+constexpr unsigned kPcReset = 10;
+constexpr unsigned kPcExecuteCommandLists = 10;
+constexpr unsigned kPcSignal = 14;      // ID3D12CommandQueue::Signal
+constexpr unsigned kPcQueueWait = 15;   // ID3D12CommandQueue::Wait
+constexpr unsigned kPcFenceSignal = 10; // ID3D12Fence::Signal (the CPU side)
+constexpr unsigned kPcCreateFence = 36;
+constexpr unsigned kPcCreateCommandAllocator = 9;
+constexpr unsigned kPcCreateCommandList = 12;
+constexpr unsigned kPcWriteBufferImmediate = 66;  // ID3D12GraphicsCommandList2
+constexpr unsigned kWriteBufferMarkerOut = 2;
+
+bool is_list_proxy_object(const void* object) {
+    return object && *reinterpret_cast<void* const*>(object) == reinterpret_cast<void*>(get_list_vtable());
+}
+
+// ---- The state a split segment has to re-set ----------------------------------------------------------------------
+//
+// The desktop list after a wait does not inherit the state the head set, so the split replays the state-setting calls
+// the logical list made since its Reset into the new segment, in order. Only calls whose arguments are by value or a
+// small readable array are kept; a call whose state cannot be re-set safely - render targets (CPU descriptors), the
+// descriptor heaps, predication, a query that is still open, a bundle's own state - sets state_unsafe, and a list
+// with that flag is not split (the wait keeps the record-time evaluation, counted as a refusal by name).
+constexpr std::size_t kStateLogMax = 48;
+constexpr unsigned kUnsafeNoArg = 4;  // blob_arg value: no blob argument
+
+bool is_state_slot(unsigned pc) {
+    switch (pc) {
+        case 20: case 21: case 22: case 23: case 24: case 25:  // topology, viewports, scissors, blend, stencil, PSO
+        case 29: case 30:                                      // compute/graphics root signature
+        case 31: case 32: case 33: case 34: case 35: case 36:  // root table, 32-bit constants
+        case 37: case 38: case 39: case 40: case 41: case 42:  // root CBV/SRV/UAV views
+        case 43: case 44:                                      // index/vertex buffers
+            return true;
+        default: return false;
+    }
+}
+
+// The array arguments the replay copies: slot -> (argument index, element size, count expression).
+void note_state_call(ListProxy* self, unsigned pc, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3,
+                     std::uint64_t a4) {
+    if (!self || !hold_enabled()) return;
+    if (pc == 46 || pc == 28 || pc == 45 || pc == 27) {  // render targets, descriptor heaps, stream-out, a bundle
+        self->state_unsafe = true;
+        // The split refusal names this later (split_at); do not log per call: every frame list sets such state.
+        return;
+    }
+    if (pc == 52) {  // BeginQuery
+        ++self->open_queries;
+        return;
+    }
+    if (pc == 53) {  // EndQuery
+        if (self->open_queries) --self->open_queries;
+        return;
+    }
+    if (pc == 55) {  // SetPredication: (buffer, offset, op); a null buffer turns it off
+        self->predicated = a1 != 0;
+        return;
+    }
+    if (pc == 11) {  // ClearState returns the list to its defaults
+        self->state_log.clear();
+        self->state_unsafe = false;
+        self->predicated = false;
+        return;
+    }
+    if (!is_state_slot(pc)) return;
+    if (self->state_log.size() >= kStateLogMax) {
+        self->state_unsafe = true;
+        // The split refusal names this later (split_at); a per-call line would flood a boot's log.
+        return;
+    }
+    ListProxy::StateCall store;
+    store.pc_slot = pc;
+    store.args[0] = a1;
+    store.args[1] = a2;
+    store.args[2] = a3;
+    store.args[3] = a4;
+    const auto copy_blob = [&store](std::uint64_t pointer, std::size_t bytes, unsigned arg) {
+        if (!pointer || !bytes || bytes > 4096) return false;
+        store.blob.resize(bytes);
+        std::memcpy(store.blob.data(), reinterpret_cast<const void*>(pointer), bytes);
+        store.blob_arg = arg;
+        return true;
+    };
+    switch (pc) {
+        case 21: {  // RSSetViewports(count, pViewports): D3D12_VIEWPORT is 24 bytes
+            if (!copy_blob(a2, std::size_t(a1) * sizeof(D3D12_VIEWPORT), 1)) {
+                self->state_unsafe = true;
+                (void)a1;
+                return;
+            }
+            break;
+        }
+        case 22: {  // RSSetScissorRects(count, pRects): D3D12_RECT is 16 bytes
+            if (!copy_blob(a2, std::size_t(a1) * sizeof(D3D12_RECT), 1)) {
+                self->state_unsafe = true;
+                (void)a1;
+                return;
+            }
+            break;
+        }
+        case 23: {  // OMSetBlendFactor(const FLOAT[4])
+            if (!copy_blob(a1, 4 * sizeof(float), 0)) {
+                self->state_unsafe = true;
+                return;
+            }
+            break;
+        }
+        case 35:
+        case 36: {  // Set*Root32BitConstants(rootIndex, count, pConstants, destOffset): 4 bytes each
+            if (!copy_blob(a3, std::size_t(a2) * sizeof(std::uint32_t), 2)) {
+                self->state_unsafe = true;  // split_at names the refusal; no per-call line (a boot has many lists)
+                return;
+            }
+            break;
+        }
+        case 43: {  // IASetIndexBuffer(const D3D12_INDEX_BUFFER_VIEW*)
+            if (!copy_blob(a1, sizeof(D3D12_INDEX_BUFFER_VIEW), 0)) {
+                self->state_unsafe = true;
+                return;
+            }
+            break;
+        }
+        case 44: {  // IASetVertexBuffers(startSlot, count, pViews)
+            if (!copy_blob(a3, std::size_t(a2) * sizeof(D3D12_VERTEX_BUFFER_VIEW), 2)) {
+                self->state_unsafe = true;  // split_at names the refusal
+                return;
+            }
+            break;
+        }
+        default: break;
+    }
+    self->state_log.push_back(std::move(store));
+}
+
+// The console's OMSetDepthBounds reaches the float-shaped slot-70 entry, not the integer forwarding path.
+void note_depth_bounds(ListProxy* self, float minimum, float maximum) {
+    if (!self || !hold_enabled()) return;
+    if (self->state_log.size() >= kStateLogMax) {
+        self->state_unsafe = true;
+        return;
+    }
+    ListProxy::StateCall store;
+    store.pc_slot = kPcOmSetDepthBounds;
+    store.args[0] = static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(minimum));
+    store.args[1] = static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(maximum));
+    self->state_log.push_back(std::move(store));
+}
+
+void replay_state_into(ListProxy* self, void* tail) {
+    for (const ListProxy::StateCall& call : self->state_log) {
+        if (call.pc_slot == kPcOmSetDepthBounds) {
+            using FloatFn = void(WINAPI*)(void*, float, float);
+            auto** const vtable = *reinterpret_cast<void***>(tail);
+            const auto minimum = std::bit_cast<float>(static_cast<std::uint32_t>(call.args[0]));
+            const auto maximum = std::bit_cast<float>(static_cast<std::uint32_t>(call.args[1]));
+            reinterpret_cast<FloatFn>(vtable[kPcOmSetDepthBounds])(tail, minimum, maximum);
+            continue;
+        }
+        std::uint64_t args[4] = {call.args[0], call.args[1], call.args[2], call.args[3]};
+        if (call.blob_arg < 4 && !call.blob.empty())
+            args[call.blob_arg] = reinterpret_cast<std::uint64_t>(call.blob.data());
+        (void)memwait::call(tail, call.pc_slot, args[0], args[1], args[2], args[3]);
+    }
+}
+
+// ---- The split ----------------------------------------------------------------------------------------------------
+
+bool read_cell(std::uint64_t address, std::uint64_t& out) {
+    if (!address) return false;
+    MEMORY_BASIC_INFORMATION region{};
+    if (VirtualQuery(reinterpret_cast<const void*>(address), &region, sizeof(region)) != sizeof(region)) return false;
+    if (region.State != MEM_COMMIT || (region.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+    const std::uint64_t end = reinterpret_cast<std::uint64_t>(region.BaseAddress) + region.RegionSize;
+    if (address > end || end - address < sizeof(out)) return false;
+    std::memcpy(&out, reinterpret_cast<const void*>(address), sizeof(out));
+    return true;
+}
+
+// Refuses a split by name: the first few lines are logged, every refusal is counted.
+void refuse_split(const char* why) {
+    counts().split_refused.fetch_add(1, std::memory_order_relaxed);
+    static std::atomic<unsigned> lines{0};
+    if (lines.fetch_add(1, std::memory_order_relaxed) < 8)
+        std::fprintf(stderr,
+                     "[rt] d3d12_xs: memory wait not split: %s; the wait keeps the record-time evaluation "
+                     "(docs/peer_port_streaming.md)\n",
+                     why);
+}
+
+// Closes the part the list recorded so far and opens the part after the wait, replaying the list's state into it.
+bool split_at(ListProxy* self, const Wait& wait) {
+    if (!self->allocator) {
+        refuse_split("the list has no allocator to record the next segment on");
+        return false;
+    }
+    if (self->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+        refuse_split("a bundle has no submission of its own to hold");
+        return false;
+    }
+    if (self->state_unsafe || self->open_queries || self->predicated) {
+        refuse_split(self->open_queries ? "a query is still open at the wait"
+                                        : self->predicated ? "predication is on at the wait"
+                                                           : "the list set state a new segment cannot re-set");
+        return false;
+    }
+    if (self->splits >= 4) {
+        refuse_split("the list reached its split bound (4 segments)");
+        return false;
+    }
+    // Each split creates one more desktop list. The allocator it is created on is the shim's own, so the title's
+    // allocator is free for the segment the title may reset next.
+    if (!self->tail_allocator) {
+        void* allocator = nullptr;
+        const IID iid = __uuidof(ID3D12CommandAllocator);
+        const auto hr = static_cast<HRESULT>(static_cast<std::uint32_t>(memwait::call(
+            self->device->real, kPcCreateCommandAllocator, static_cast<std::uint64_t>(self->type),
+            reinterpret_cast<std::uint64_t>(&iid), reinterpret_cast<std::uint64_t>(&allocator))));
+        if (FAILED(hr) || !allocator) {
+            refuse_split("the segment allocator could not be created");
+            return false;
+        }
+        self->tail_allocator = static_cast<ID3D12CommandAllocator*>(allocator);
+    }
+    ID3D12GraphicsCommandList* tail = nullptr;
+    {
+        const IID iid = __uuidof(ID3D12GraphicsCommandList);
+        const auto hr = static_cast<HRESULT>(static_cast<std::uint32_t>(memwait::call(
+            self->device->real, kPcCreateCommandList, 0, static_cast<std::uint64_t>(self->type),
+            reinterpret_cast<std::uint64_t>(self->tail_allocator), 0, reinterpret_cast<std::uint64_t>(&iid),
+            reinterpret_cast<std::uint64_t>(&tail))));
+        if (FAILED(hr) || !tail) {
+            refuse_split("the segment list could not be created");
+            return false;
+        }
+    }
+    // The new segment starts with the state the logical list had set; the head's commands stay in the head.
+    replay_state_into(self, tail);
+    const auto closed = static_cast<HRESULT>(
+        static_cast<std::uint32_t>(memwait::call(self->real, kPcClose)));
+    if (FAILED(closed)) {
+        // The head cannot be closed, so it cannot be submitted as a segment: drop the new one and keep the list as it
+        // was (the record-time fallback). Nothing was recorded into the tail, so the title's list is unchanged.
+        memwait::release_object(tail);
+        refuse_split("the segment before the wait did not close (the list is invalid)");
+        return false;
+    }
+    self->closed_parts.push_back(self->real);
+    self->between_waits.push_back(wait);
+    self->real = tail;
+    self->pc_slot_count = detect_list_slot_count(tail);
+    self->recording_state.store(1, std::memory_order_relaxed);
+    ++self->splits;
+    counts().split.fetch_add(1, std::memory_order_relaxed);
+    event("list %p split at wait cell 0x%llx >= 0x%llx (segment %zu)", static_cast<void*>(self),
+          static_cast<unsigned long long>(wait.address), static_cast<unsigned long long>(wait.value),
+          self->closed_parts.size());
+    return true;
+}
+
+// Releases the parts a split left behind (a submission consumed them; a Reset or a destroy discards them).
+void drop_parts(ListProxy* self, const char* why) {
+    if (!self) return;
+    const std::size_t parts = self->closed_parts.size();
+    for (ID3D12GraphicsCommandList* part : self->closed_parts) memwait::release_object(part);
+    self->closed_parts.clear();
+    self->between_waits.clear();
+    self->state_log.clear();
+    self->state_unsafe = false;
+    self->open_queries = 0;
+    self->predicated = false;
+    self->splits = 0;
+    if (parts && trace_enabled())
+        std::fprintf(stderr, "[rt] d3d12_xs: memory wait segments dropped on %s: %zu part(s) never submitted\n", why,
+                     parts);
+}
+
+void destroy_list_parts(ListProxy* self) {
+    if (!self) return;
+    for (ID3D12GraphicsCommandList* part : self->closed_parts) memwait::release_object(part);
+    self->closed_parts.clear();
+    self->between_waits.clear();
+    if (self->tail_allocator) memwait::release_object(self->tail_allocator);
+    self->tail_allocator = nullptr;
+}
+
+// ---- The GPU-ordered bottom-of-pipe write -------------------------------------------------------------------------
+//
+// The measured destinations are the title's own committed pages, which the replay imports over the title's memory at
+// first use (a command VA no mapping resolves is offered to the device importer). A GPU-ordered write is therefore a
+// desktop WriteBufferImmediate at the recorded title VA, MARKER_OUT so it runs after the list's earlier work, exactly
+// where the title's call was recorded. The import budget is bounded (32 ranges a boot), so the shim keeps its own
+// smaller budget of distinct pages and falls back to the record-time CPU write past it; a destination shape the
+// import path cannot take (below the arena window, unaligned, not committed host memory) is refused the same way.
+std::mutex g_gpu_mutex;
+std::vector<std::uint64_t> g_gpu_pages;
+constexpr std::size_t kGpuPageBudget = 8;
+constexpr std::uint64_t kArenaWindowEnd = std::uint64_t{1} << 32;
+
+bool gpu_destination_ok(std::uint64_t address, unsigned bytes) {
+    // The replay imports the VA a command names as a span of `bytes`, bound at the host pointer's alignment inside a
+    // page. A 4-byte bottom-of-pipe cell at a non-page offset makes that import refuse the whole submission (measured:
+    // "the pages' alignment or room does not fit the buffer" for the slot-71/72 cells, and 3,545 refused submissions
+    // in the A/B's first on arm). The measured cells are not page-aligned, so the GPU form is refused here by shape
+    // and the record-time CPU write is used: a bounded fallback, and the port's named limit until the replay imports
+    // a whole page for a 4-byte write.
+    if (address < kArenaWindowEnd || (address & 0xfff) != 0) return false;
+    MEMORY_BASIC_INFORMATION region{};
+    if (VirtualQuery(reinterpret_cast<const void*>(address), &region, sizeof(region)) != sizeof(region)) return false;
+    if (region.State != MEM_COMMIT || (region.Protect & (PAGE_NOACCESS | PAGE_GUARD | PAGE_WRITECOMBINE | PAGE_NOCACHE)))
+        return false;
+    const std::uint64_t end = reinterpret_cast<std::uint64_t>(region.BaseAddress) + region.RegionSize;
+    if (address > end || end - address < bytes) return false;
+    const std::uint64_t page = address & ~std::uint64_t{0xfff};
+    std::lock_guard lock(g_gpu_mutex);
+    for (const std::uint64_t known : g_gpu_pages)
+        if (known == page) return true;
+    if (g_gpu_pages.size() >= kGpuPageBudget) return false;
+    return true;
+}
+
+// Records the write(s) into the real list at the call's position. `words` is one (slot 71) or two (slot 72) dwords.
+bool gpu_write(ListProxy* self, std::uint64_t address, const std::uint32_t* words, unsigned count) {
+    if (!self || !self->real || count == 0 || count > 2) return false;
+    if (self->pc_slot_count <= kPcWriteBufferImmediate) {
+        counts().gpu_refused.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    const unsigned bytes = count * 4;
+    if (!gpu_destination_ok(address, bytes)) {
+        counts().gpu_refused.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    D3D12_WRITEBUFFERIMMEDIATE_PARAMETER parameters[2]{};
+    D3D12_WRITEBUFFERIMMEDIATE_MODE modes[2]{D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT,
+                                             D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT};
+    for (unsigned i = 0; i < count; ++i) {
+        parameters[i].Dest = address + 4ull * i;
+        parameters[i].Value = words[i];
+    }
+    (void)memwait::call(self->real, kPcWriteBufferImmediate, count,
+                        reinterpret_cast<std::uint64_t>(parameters), reinterpret_cast<std::uint64_t>(modes));
+    {
+        const std::uint64_t page = address & ~std::uint64_t{0xfff};
+        std::lock_guard lock(g_gpu_mutex);
+        bool known = false;
+        for (const std::uint64_t seen : g_gpu_pages) known = known || seen == page;
+        if (!known && g_gpu_pages.size() < kGpuPageBudget) {
+            g_gpu_pages.push_back(page);
+            counts().gpu_addresses.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    counts().gpu_writes.fetch_add(1, std::memory_order_relaxed);
+    if (trace_enabled()) {
+        static std::atomic<unsigned> lines{0};
+        if (lines.fetch_add(1, std::memory_order_relaxed) < 8)
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: memory waits: slot %s value 0x%llx written as a GPU-ordered immediate "
+                         "write at 0x%llx\n",
+                         count == 1 ? "71" : "72",
+                         static_cast<unsigned long long>(count == 2
+                                                             ? (std::uint64_t(words[0]) |
+                                                                (std::uint64_t(words[1]) << 32))
+                                                             : words[0]),
+                         static_cast<unsigned long long>(address));
+    }
+    return true;
+}
+
+// ---- The holds and their watcher ----------------------------------------------------------------------------------
+//
+// One hold per split boundary. The watcher polls the cell of each queue's oldest hold in submission order, releases it
+// when the comparison holds or the bound passes, and CPU-signals the fence it posted - the layer's own
+// Wait-before-Signal release (queue_holds.h), no GPU wait. A later list's recorded CPU write to the cell satisfies a
+// hold early (the measured cross-list case when the writer is another list) and a bottom-of-pipe write recorded
+// through the GPU form does not: the GPU writes it later, which is why the watcher polls.
+struct Watched {
+    std::uint64_t token = 0;
+    std::uint64_t queue = 0;
+    void* fence = nullptr;  // AddRef'd
+};
+
+std::mutex g_mutex;
+std::condition_variable g_cv;
+std::vector<Watched> g_watched;
+Holds g_holds;
+bool g_watcher_started = false;
+
+void watcher_main();
+
+void ensure_watcher_locked() {
+    if (g_watcher_started) return;
+    g_watcher_started = true;
+    std::thread(&watcher_main).detach();
+}
+
+// Starts watching one hold. Called before the segments are submitted, so a cell that already holds is released at
+// the watcher's first poll rather than at the bound.
+void watch_begin(std::uint64_t token, std::uint64_t queue, void* fence) {
+    std::lock_guard lock(g_mutex);
+    g_watched.push_back({token, queue, fence});
+    counts().holds_created.fetch_add(1, std::memory_order_relaxed);
+    ensure_watcher_locked();
+    g_cv.notify_all();
+}
+
+// The queue is gone: its holds are cancelled and the fences it would have signalled are released without a signal
+// (the layer reports the dropped held batches at queue teardown).
+void cancel_queue(std::uint64_t queue) {
+    std::vector<Watched> dropped;
+    {
+        std::lock_guard lock(g_mutex);
+        g_holds.cancel_queue(queue);
+        for (auto it = g_watched.begin(); it != g_watched.end();) {
+            if (it->queue == queue) {
+                dropped.push_back(*it);
+                it = g_watched.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (const Watched& watch : dropped) memwait::release_object(watch.fence);
+    if (!dropped.empty()) {
+        counts().holds_cancelled.fetch_add(dropped.size(), std::memory_order_relaxed);
+        event("%zu held segment(s) of a destroyed queue cancelled", dropped.size());
+    }
+}
+
+void cancel_all() {
+    std::vector<Watched> dropped;
+    {
+        std::lock_guard lock(g_mutex);
+        g_holds.cancel_all();
+        dropped.swap(g_watched);
+    }
+    for (const Watched& watch : dropped) memwait::release_object(watch.fence);
+    if (!dropped.empty()) counts().holds_cancelled.fetch_add(dropped.size(), std::memory_order_relaxed);
+}
+
+// Holds the watcher has not released yet (the boot report's "still pending" number, and the proxy test's wait).
+std::size_t pending_holds() {
+    std::lock_guard lock(g_mutex);
+    return g_holds.pending();
+}
+
+// The record-time measurement of the cross-list dependency (the port's question): every slot-74 wait that did not
+// hold when the model read it is remembered with the list that recorded it, for a bounded window. When a later
+// bottom-of-pipe write records the value that satisfies it, the pair is counted and the entry is taken: a different
+// list is the measured cross-list case, the same list is a wait whose writer is later in its own recording (the console
+// would need another queue for it). The boot's counters report both, so "does a cross-list dependency exist at this
+// content population" is answered even though none of these waits reached a submission unmet.
+struct RecordedWait {
+    std::uint64_t address = 0;
+    std::uint64_t comparison = 0;
+    std::uint64_t value = 0;
+    std::uint64_t list = 0;
+};
+
+constexpr std::size_t kRecordWaitMax = 64;
+std::vector<RecordedWait> g_record_waits;
+
+void note_record_wait(std::uint64_t list, const Wait& wait) {
+    std::lock_guard lock(g_mutex);
+    if (g_record_waits.size() >= kRecordWaitMax) g_record_waits.erase(g_record_waits.begin());
+    g_record_waits.push_back({wait.address, wait.comparison, wait.value, list});
+}
+
+// A later recorded bottom-of-pipe write: satisfies a hold early (the measured later-list case when the writer is a
+// different list) and counts the record-time wait it meets. Returns how many holds it met.
+std::size_t note_cpu_write(std::uint64_t address, std::uint64_t value, std::uint64_t writer_list) {
+    std::size_t met = 0;
+    std::uint64_t record_met = 0, cross = 0, same = 0;
+    {
+        std::lock_guard lock(g_mutex);
+        // The record-time measurement.
+        for (auto it = g_record_waits.begin(); it != g_record_waits.end();) {
+            if (it->address != address || !comparison_met(it->comparison, value, it->value)) {
+                ++it;
+                continue;
+            }
+            ++record_met;
+            if (it->list != writer_list) ++cross;
+            else ++same;
+            it = g_record_waits.erase(it);
+        }
+        counts().record_waits_met.fetch_add(record_met, std::memory_order_relaxed);
+        counts().record_waits_cross_list.fetch_add(cross, std::memory_order_relaxed);
+        counts().record_waits_same_list.fetch_add(same, std::memory_order_relaxed);
+        // The holds a write recorded while a submission was already waiting for it.
+        met = g_holds.wrote(address, value, writer_list);
+        if (met) {
+            counts().holds_written.fetch_add(met, std::memory_order_relaxed);
+            const auto holds = g_holds.counts();
+            counts().holds_cross_list.store(holds.cross_list, std::memory_order_relaxed);
+        }
+    }
+    if (record_met || met) {
+        char line[320];
+        std::snprintf(line, sizeof(line),
+                      "a recorded write of 0x%llx met %llu record-time wait(s) (cross-list %llu, same-list %llu) and "
+                      "%zu held segment(s) on cell 0x%llx",
+                      static_cast<unsigned long long>(value), static_cast<unsigned long long>(record_met),
+                      static_cast<unsigned long long>(cross), static_cast<unsigned long long>(same), met,
+                      static_cast<unsigned long long>(address));
+        event("%s", line);
+    }
+    if (met) g_cv.notify_all();
+    return met;
+}
+
+void watcher_main() {
+    for (;;) {
+        std::vector<uint64_t> queues;
+        {
+            std::unique_lock lock(g_mutex);
+            if (g_watched.empty()) {
+                g_cv.wait_for(lock, std::chrono::milliseconds(100));
+                continue;
+            }
+            std::uint64_t buffer[64];
+            const std::size_t count = g_holds.queues(buffer, std::size(buffer));
+            queues.assign(buffer, buffer + count);
+        }
+        if (queues.empty()) continue;
+        const std::uint64_t now = now_ms();
+        // Poll each queue's oldest hold. The cell is read outside the lock (title memory may be rewritten).
+        for (const std::uint64_t queue : queues) {
+            Hold front;
+            if (!g_holds.front(queue, front)) continue;
+            std::uint64_t current = 0;
+            if (read_cell(front.wait.address, current)) {
+                std::lock_guard lock(g_mutex);
+                const std::size_t met = g_holds.observe(front.wait.address, current);
+                if (met) counts().holds_satisfied.fetch_add(met, std::memory_order_relaxed);
+            }
+        }
+        {
+            std::lock_guard lock(g_mutex);
+            g_holds.expire(now);
+        }
+        // Release in submission order: one hold per queue per pass, so a later boundary never overtakes an earlier
+        // one (the layer would hold it anyway, but the release keeps the watcher's own order explicit).
+        std::vector<Watched> releasing;
+        {
+            std::lock_guard lock(g_mutex);
+            for (const std::uint64_t queue : queues) {
+                const std::uint64_t token = g_holds.releasable(queue);
+                if (!token) continue;
+                for (auto it = g_watched.begin(); it != g_watched.end(); ++it) {
+                    if (it->token != token) continue;
+                    releasing.push_back(*it);
+                    g_watched.erase(it);
+                    break;
+                }
+                Hold hold;
+                if (g_holds.front(queue, hold) && hold.token == token && hold.state == Hold::State::timed_out)
+                    counts().holds_timeout.fetch_add(1, std::memory_order_relaxed);
+                g_holds.release(token);
+            }
+        }
+        for (const Watched& watch : releasing) {
+            // The CPU signal is the release: VulkanFence::signal records it in QueueHolds and pumps the held batch.
+            (void)memwait::call(watch.fence, kPcFenceSignal, 1);
+            memwait::release_object(watch.fence);
+        }
+        {
+            std::lock_guard lock(g_mutex);
+            const auto holds = g_holds.counts();
+            counts().holds_at_bound.store(holds.timed_out, std::memory_order_relaxed);
+        }
+        std::unique_lock lock(g_mutex);
+        g_cv.wait_for(lock, std::chrono::microseconds(250));
+    }
+}
+
+// ---- The submission plan ------------------------------------------------------------------------------------------
+//
+// A batch that names a split list becomes several ExecuteCommandLists calls: the parts up to a wait, the queue's Wait
+// on the hold's fence, then the parts after it. The pre-created fences and holds come first, so a failure before
+// anything is submitted falls back to one unsplit call with every part in order (the record-time model, counted).
+
+// The real list behind an array entry: a plain layer list, or the part a proxy is recording into.
+void* channel_list_handle(std::uint64_t entry) {
+    if (is_list_proxy_object(reinterpret_cast<const void*>(entry)))
+        return static_cast<ListProxy*>(reinterpret_cast<void*>(entry))->real;
+    IUnknown* real = proxy_real_object(reinterpret_cast<const void*>(entry));
+    return real ? real : reinterpret_cast<void*>(entry);
+}
+
+bool submit_batch(ChildProxy* queue, const std::uint64_t& entries_word, const std::uint64_t& count_word) {
+    auto* const entries = reinterpret_cast<const std::uint64_t*>(entries_word);
+    const auto count = static_cast<std::uint32_t>(count_word);
+    if (!queue || !entries || !count) return false;
+    bool any_split = false;
+    for (std::uint32_t i = 0; i < count && !any_split; ++i)
+        any_split = is_list_proxy_object(reinterpret_cast<const void*>(entries[i])) &&
+                    !static_cast<ListProxy*>(reinterpret_cast<void*>(entries[i]))->closed_parts.empty();
+    if (!any_split) return false;
+
+    BatchPlan plan;
+    std::vector<ID3D12CommandList*> handles;
+    std::vector<ListProxy*> owners;
+    handles.reserve(64);
+    owners.reserve(64);
+    bool planned = true;
+    for (std::uint32_t i = 0; i < count && planned; ++i) {
+        const std::uint64_t entry = entries[i];
+        ListProxy* proxy = is_list_proxy_object(reinterpret_cast<const void*>(entry))
+                               ? static_cast<ListProxy*>(reinterpret_cast<void*>(entry))
+                               : nullptr;
+        if (!proxy || proxy->closed_parts.empty()) {
+            void* real = channel_list_handle(entry);
+            planned = plan.add_list(entry, 1, nullptr);
+            handles.push_back(static_cast<ID3D12CommandList*>(real));
+            owners.push_back(proxy && !proxy->closed_parts.empty() ? proxy : nullptr);
+            continue;
+        }
+        Wait waits[8];
+        const std::size_t boundaries = std::min<std::size_t>(proxy->between_waits.size(), std::size(waits));
+        for (std::size_t b = 0; b < boundaries; ++b) waits[b] = proxy->between_waits[b];
+        const auto part_count = static_cast<std::uint32_t>(proxy->closed_parts.size() + 1);
+        planned = plan.add_list(entry, part_count, waits);
+        for (ID3D12GraphicsCommandList* part : proxy->closed_parts) {
+            handles.push_back(part);
+            owners.push_back(proxy);
+        }
+        handles.push_back(proxy->real);
+        owners.push_back(proxy);
+    }
+    auto* const real_queue = queue->real;
+    const auto execute = [real_queue, &handles](std::size_t begin, std::size_t end) {
+        if (end <= begin) return;
+        (void)memwait::call(real_queue, kPcExecuteCommandLists, end - begin,
+                            reinterpret_cast<std::uint64_t>(handles.data() + begin));
+    };
+    // The fallback: one call with every part in order, no wait carried (today's record-time model).
+    const auto unsplit = [&](const char* why) {
+        counts().submit_fallback.fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<unsigned> lines{0};
+        if (lines.fetch_add(1, std::memory_order_relaxed) < 8)
+            std::fprintf(stderr, "[rt] d3d12_xs: memory wait hold not carried for a batch: %s\n", why);
+        execute(0, handles.size());
+        for (ListProxy* owner : owners)
+            if (owner) drop_parts(owner, "fallback");
+    };
+    if (!planned) {
+        unsplit("the batch plan exceeded its part bound");
+        return true;
+    }
+    // Pre-create one fence per wait and register the holds, before anything is submitted.
+    struct Boundary {
+        std::uint64_t fence = 0;
+        std::uint64_t token = 0;
+        Wait wait;
+        std::uint64_t list = 0;
+    };
+    std::vector<Boundary> boundaries;
+    boundaries.reserve(plan.segments());
+    const Settings limits = settings();
+    for (std::size_t i = 1; i < plan.parts(); ++i) {
+        const Wait wait = plan.wait_before(i);
+        if (wait.empty()) continue;
+        ID3D12Fence* fence = nullptr;
+        const IID iid = __uuidof(ID3D12Fence);
+        const auto hr = static_cast<HRESULT>(static_cast<std::uint32_t>(memwait::call(
+            queue->device ? queue->device->real : nullptr, kPcCreateFence, 0, D3D12_FENCE_FLAG_NONE,
+            reinterpret_cast<std::uint64_t>(&iid), reinterpret_cast<std::uint64_t>(&fence))));
+        if (FAILED(hr) || !fence) {
+            for (Boundary& boundary : boundaries) memwait::release_object(reinterpret_cast<void*>(boundary.fence));
+            unsplit("the hold fence could not be created");
+            return true;
+        }
+        boundaries.push_back({reinterpret_cast<std::uint64_t>(fence), 0, wait, plan.part(i).list});
+    }
+    const auto now = now_ms();
+    for (Boundary& boundary : boundaries) {
+        std::lock_guard lock(g_mutex);
+        boundary.token = g_holds.add(reinterpret_cast<std::uint64_t>(queue), boundary.list, boundary.wait, now,
+                                     limits.bound_ms, limits.max_holds);
+        if (!boundary.token) break;
+    }
+    const bool holds_taken = boundaries.empty() || boundaries.back().token != 0;
+    if (!holds_taken) {
+        for (Boundary& boundary : boundaries) {
+            {
+                std::lock_guard lock(g_mutex);
+                g_holds.cancel_queue(reinterpret_cast<std::uint64_t>(queue));
+            }
+            memwait::release_object(reinterpret_cast<void*>(boundary.fence));
+        }
+        unsplit("the concurrent hold bound was reached");
+        return true;
+    }
+    for (const Boundary& boundary : boundaries) watch_begin(boundary.token, reinterpret_cast<std::uint64_t>(queue),
+                                                            reinterpret_cast<void*>(boundary.fence));
+    // Submit the segments in order. A boundary's Wait is posted on the queue before the segment after it, so the
+    // layer's held deque holds that segment and everything the title submits after it.
+    std::size_t segment_begin = 0;
+    std::size_t boundary_index = 0;
+    for (std::size_t i = 1; i < plan.parts(); ++i) {
+        if (plan.wait_before(i).empty()) continue;
+        execute(segment_begin, i);
+        segment_begin = i;
+        const Boundary& boundary = boundaries[boundary_index++];
+        (void)memwait::call(real_queue, kPcQueueWait, boundary.fence, 1);
+        counts().segments.fetch_add(1, std::memory_order_relaxed);
+    }
+    execute(segment_begin, plan.parts());
+    counts().segments.fetch_add(1, std::memory_order_relaxed);
+    counts().submits_split.fetch_add(1, std::memory_order_relaxed);
+    for (ListProxy* owner : owners)  // the layer consumed the parts (held batches keep their own copies/pins)
+        if (owner) drop_parts(owner, "submission");
+    return true;
+}
+
+}  // namespace memwait
+
 // ---- Console list slots 70/71/72/74 (docs/bottom_of_pipe.md): counters and the measured model -------------------
 //
 // The measured shapes and their call sites are in d3d12_xs_device.h. Two switches, both off by default:
@@ -1924,7 +2849,12 @@ bool active() {
 void maybe_print_summary() {
     static std::atomic<std::uint64_t> events{0};
     const std::uint64_t n = events.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (n == 1 || n % 16384 == 0) print_summary();
+    if (n == 1 || n % 16384 == 0) {
+        print_summary();
+        // The cross-list memory wait's counters ride the same bounded milestone (their own line), so an arm with the
+        // hold on and no unmet wait still reports what it measured.
+        memwait::print_summary();
+    }
 }
 
 void print_summary() {
@@ -2004,8 +2934,8 @@ std::uint64_t console_clock_now() {
 }
 
 // List slot 71, Write32BitValueBottomOfPipeX(address, dword, flush, flags), measured (address, dword, 0, 0).
-void write32_bottom_of_pipe(std::uint64_t address, std::uint64_t value, std::uint64_t flush, std::uint64_t flags,
-                            std::uint64_t caller) {
+void write32_bottom_of_pipe(ListProxy* self, std::uint64_t address, std::uint64_t value, std::uint64_t flush,
+                            std::uint64_t flags, std::uint64_t caller) {
     if (!active()) return;
     Counts& c = counts();
     c.slot71_calls.fetch_add(1, std::memory_order_relaxed);
@@ -2028,19 +2958,30 @@ void write32_bottom_of_pipe(std::uint64_t address, std::uint64_t value, std::uin
         return;
     }
     const auto word = static_cast<std::uint32_t>(value);
+    // The GPU-ordered form (docs/peer_port_streaming.md section 11.3): an immediate write at the recorded position,
+    // which runs after the list's earlier work; the record-time CPU write is the bounded fallback.
+    if (memwait::gpu_writes_enabled() && memwait::gpu_write(self, address, &word, 1)) {
+        memwait::note_cpu_write(0, 0, 0);  // no CPU value: the GPU writes it later
+        c.slot71_writes.fetch_add(1, std::memory_order_relaxed);
+        maybe_print_summary();
+        return;
+    }
     if (!write_own(address, &word, sizeof(word))) {
         c.slot71_refused.fetch_add(1, std::memory_order_relaxed);
         refuse("slot 71", "the destination is not writable title memory", address, value, flush, flags);
         return;
     }
     c.slot71_writes.fetch_add(1, std::memory_order_relaxed);
+    // The CPU value is visible now: a hold waiting on this cell is met by this list's write (measured cross-list case
+    // when the writer is a different list).
+    memwait::note_cpu_write(address, word, reinterpret_cast<std::uint64_t>(self));
     maybe_print_summary();
 }
 
 // List slot 72, Write64BitValueBottomOfPipeX(address, qword, flush, flags), measured (address, 0, 0, 1): flags 1/2
 // ask for a timestamp instead of the value.
-void write64_bottom_of_pipe(std::uint64_t address, std::uint64_t value, std::uint64_t flush, std::uint64_t flags,
-                            std::uint64_t caller) {
+void write64_bottom_of_pipe(ListProxy* self, std::uint64_t address, std::uint64_t value, std::uint64_t flush,
+                            std::uint64_t flags, std::uint64_t caller) {
     if (!active()) return;
     Counts& c = counts();
     c.slot72_calls.fetch_add(1, std::memory_order_relaxed);
@@ -2065,22 +3006,35 @@ void write64_bottom_of_pipe(std::uint64_t address, std::uint64_t value, std::uin
         written = console_clock_now();
         c.slot72_timestamps.fetch_add(1, std::memory_order_relaxed);
     }
+    // The GPU-ordered form: the two dwords go as two immediate writes at the recorded position. A reader of both
+    // halves can see them one at a time (no 8-byte atomic write exists in the desktop form); the measured call site
+    // asks for a timestamp and the pages are host-coherent, so the pair is written back to back.
+    if (memwait::gpu_writes_enabled()) {
+        std::uint32_t words[2] = {static_cast<std::uint32_t>(written), static_cast<std::uint32_t>(written >> 32)};
+        if (memwait::gpu_write(self, address, words, 2)) {
+            memwait::note_cpu_write(0, 0, 0);  // no CPU value: the GPU writes it later
+            c.slot72_writes.fetch_add(1, std::memory_order_relaxed);
+            maybe_print_summary();
+            return;
+        }
+    }
     if (!write_own(address, &written, sizeof(written))) {
         c.slot72_refused.fetch_add(1, std::memory_order_relaxed);
         refuse("slot 72", "the destination is not writable title memory", address, value, flush, flags);
         return;
     }
     c.slot72_writes.fetch_add(1, std::memory_order_relaxed);
+    memwait::note_cpu_write(address, written, reinterpret_cast<std::uint64_t>(self));
     maybe_print_summary();
 }
 
 // List slot 74, Wait64BitValueX(address, comparison, qword, flags), measured (address, 7, qword, 1): comparison 7 is
 // GREATER_EQUAL and all 64 bits are compared. The model reads the cell at record time and counts whether it already
-// holds: when a bottom-of-pipe write of this list named the address, that write has been made (the model writes at
-// record time), so the recorded order meets it; a cell our memory map cannot read is refused by name; a cell that does
-// not hold yet is the measured unmet case, whose consumer would be the queue hold the replay layer does not carry.
-void memory_wait64(std::uint64_t address, std::uint64_t comparison, std::uint64_t value, std::uint64_t flags,
-                   std::uint64_t caller) {
+// holds; a cell our memory map cannot read is refused by name. A cell that does not hold yet is the console's wait:
+// with PALMETTO_XS_MEMORY_WAIT_HOLD the list is split here, the segment after the wait held until the cell holds (by a
+// later list's write or the watcher's poll) or the bound passes, and the wait is carried instead of evaluated.
+void memory_wait64(ListProxy* self, std::uint64_t address, std::uint64_t comparison, std::uint64_t value,
+                   std::uint64_t flags, std::uint64_t caller) {
     if (!active()) return;
     Counts& c = counts();
     c.slot74_calls.fetch_add(1, std::memory_order_relaxed);
@@ -2110,13 +3064,22 @@ void memory_wait64(std::uint64_t address, std::uint64_t comparison, std::uint64_
         c.slot74_met.fetch_add(1, std::memory_order_relaxed);
     } else {
         const std::uint64_t unmet = c.slot74_unmet.fetch_add(1, std::memory_order_relaxed) + 1;
+        memwait::counts().waits_unmet.fetch_add(1, std::memory_order_relaxed);
         if (unmet <= 8)
             std::fprintf(stderr,
                          "[rt] d3d12_xs: console list slot 74 memory wait not met at record time: cell 0x%llx holds "
-                         "0x%llx, wants >= 0x%llx (unmet %llu); the queue hold for a cross-list producer is not "
-                         "carried in this shim (docs/bottom_of_pipe.md)\n",
+                         "0x%llx, wants >= 0x%llx (unmet %llu)\n",
                          static_cast<unsigned long long>(address), static_cast<unsigned long long>(current),
                          static_cast<unsigned long long>(value), static_cast<unsigned long long>(unmet));
+        // The record-time measurement (the cross-list question) and, behind PALMETTO_XS_MEMORY_WAIT_HOLD, the
+        // console's hold: split the list at this wait. split_at refuses by name (counted) when the list cannot be
+        // split, and the record-time evaluation stands as the bounded fallback.
+        palmetto::memory_waits::Wait wait;
+        wait.address = address;
+        wait.comparison = comparison;
+        wait.value = value;
+        memwait::note_record_wait(reinterpret_cast<std::uint64_t>(self), wait);
+        if (memwait::hold_enabled() && self) (void)memwait::split_at(self, wait);
     }
     maybe_print_summary();
 }
@@ -3109,6 +4072,7 @@ inline bool is_list_iid(const IID& iid) {
 inline unsigned long list_add_ref(ListProxy* self) { return self->refs.fetch_add(1, std::memory_order_relaxed) + 1; }
 
 inline void destroy_list(ListProxy* self) {
+    memwait::destroy_list_parts(self);  // the segments a split left: never submitted, released here
     IUnknown* real = self->real;
     DeviceProxy* device = self->device;
     ID3D12CommandAllocator* allocator = self->allocator;
@@ -3188,21 +4152,21 @@ std::uint64_t WINAPI list_slot(ListProxy* self, std::uint64_t a1, std::uint64_t 
         // Console Write32BitValueBottomOfPipeX (docs/bottom_of_pipe.md): (address, dword, flush, flags), measured
         // (address, dword, 0, 0) at game+0x4ED46AA.
         note_list_slot(Slot, a1, a2, a3, a4);
-        console_list_extras::write32_bottom_of_pipe(a1, a2, a3, a4,
+        console_list_extras::write32_bottom_of_pipe(self, a1, a2, a3, a4,
                                                     reinterpret_cast<std::uint64_t>(_ReturnAddress()));
         return 0;
     } else if constexpr (Slot == 72) {
         // Console Write64BitValueBottomOfPipeX: (address, qword, flush, flags), measured (address, 0, 0, 1) at
         // game+0x2482B37, flags 1/2 asking for a timestamp.
         note_list_slot(Slot, a1, a2, a3, a4);
-        console_list_extras::write64_bottom_of_pipe(a1, a2, a3, a4,
+        console_list_extras::write64_bottom_of_pipe(self, a1, a2, a3, a4,
                                                     reinterpret_cast<std::uint64_t>(_ReturnAddress()));
         return 0;
     } else if constexpr (Slot == 74) {
         // Console Wait64BitValueX: (address, comparison, qword, flags), measured (address, 7, qword, 1) at
         // game+0x2484B12; comparison 7 is GREATER_EQUAL.
         note_list_slot(Slot, a1, a2, a3, a4);
-        console_list_extras::memory_wait64(a1, a2, a3, a4, reinterpret_cast<std::uint64_t>(_ReturnAddress()));
+        console_list_extras::memory_wait64(self, a1, a2, a3, a4, reinterpret_cast<std::uint64_t>(_ReturnAddress()));
         return 0;
     } else {
         note_list_slot(Slot, a1, a2, a3, a4);
@@ -3337,6 +4301,9 @@ std::uint64_t WINAPI list_slot(ListProxy* self, std::uint64_t a1, std::uint64_t 
             // Close, Reset) append no commands, never reopen anything, and keep their exact previous behaviour.
             if constexpr (pc >= 11) {
                 if (self->allocator && self->recording_state.load(std::memory_order_relaxed) == 0) {
+                    // A frame's recording starting over without a submission drops the segments a split had left:
+                    // they were never submitted, and the console's allocator-owned memory reuses them.
+                    if (!self->closed_parts.empty()) memwait::drop_parts(self, "reopen");
                     using ResetFn = HRESULT(WINAPI*)(void*, ID3D12CommandAllocator*, ID3D12PipelineState*);
                     const HRESULT reset = reinterpret_cast<ResetFn>(real_vtable[10])(self->real, self->allocator,
                                                                                     nullptr);
@@ -3344,6 +4311,9 @@ std::uint64_t WINAPI list_slot(ListProxy* self, std::uint64_t a1, std::uint64_t 
                     self->recording_state.store(1, std::memory_order_relaxed);
                 }
             }
+            // The state a split segment has to re-set (docs/peer_port_streaming.md section 11): kept only for the
+            // measured by-value setters while the hold switch is on, so the switch-off path pays one false branch.
+            if (memwait::hold_enabled()) memwait::note_state_call(self, pc, a1, a2, a3, a4);
             UnwrappedArray heaps;
             // Console slot 146 (enhanced barriers): the console records texture barriers with no resource, which the
             // console reads as "every texture" and the PC runtime refuses and records as an invalid list. Translate
@@ -3377,6 +4347,9 @@ std::uint64_t WINAPI list_slot(ListProxy* self, std::uint64_t a1, std::uint64_t 
                 }
             }
             if constexpr (Slot == 10) {
+                // A Reset starts the logical list over: the segments a split left unused are dropped, and the state a
+                // new segment would have to re-set is forgotten (the next recording sets it again).
+                memwait::drop_parts(self, "reset");
                 a1 = unwrap_object(a1);
                 self->pin_cursor_at_limit();
             } else if constexpr (Slot == kConsoleExecuteBundle) {
@@ -3494,6 +4467,8 @@ std::uint64_t WINAPI list_slot_om_set_depth_bounds(ListProxy* self, float minimu
             }
         }
         if (console_list_extras_enabled()) {
+            // The depth bounds are list state a split segment must re-set (docs/peer_port_streaming.md section 11).
+            if (memwait::hold_enabled()) memwait::note_depth_bounds(self, minimum, maximum);
             auto** const real_vtable = *reinterpret_cast<void***>(self->real);
             if (kPcOmSetDepthBounds < self->pc_slot_count) {
                 using Fn = void(WINAPI*)(void*, float, float);
@@ -3523,8 +4498,8 @@ void** get_list_vtable() {
     return vtable;
 }
 
-HRESULT wrap_list(IUnknown* created, DeviceProxy* device, ID3D12CommandAllocator* allocator, const IID* riid,
-                  void** out) {
+HRESULT wrap_list(IUnknown* created, DeviceProxy* device, ID3D12CommandAllocator* allocator,
+                  D3D12_COMMAND_LIST_TYPE type, const IID* riid, void** out) {
     if (out) *out = nullptr;
     if (!created) return E_FAIL;
     auto* proxy = new (std::nothrow) ListProxy();
@@ -3538,6 +4513,7 @@ HRESULT wrap_list(IUnknown* created, DeviceProxy* device, ID3D12CommandAllocator
     proxy->refs.store(1, std::memory_order_relaxed);
     proxy->pc_slot_count = detect_list_slot_count(created);
     proxy->allocator = allocator;
+    proxy->type = type;
     proxy->recording_state.store(1, std::memory_order_relaxed);  // CreateCommandList creates it recording
     if (allocator) allocator->AddRef();
     proxy->pin_cursor_at_limit();
@@ -3837,18 +4813,23 @@ std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_
         // "clock calibration pair" written through a2 - was wrong and overwrote the title's own list pointers with two
         // QPC words, which is why the frame loop never submitted anything.
         note_child_slot<K>(Slot);
-        UnwrappedArray lists;
-        if (!lists.fill(a2, a1)) return hr_to_u64(E_OUTOFMEMORY);
-        const std::uint64_t array = lists.data() ? lists.data() : a2;
-        using ExecuteFn = void(WINAPI*)(void*, std::uint64_t, std::uint64_t);
-        reinterpret_cast<ExecuteFn>(self->real_vtable[10])(self->real, a1, array);  // PC ExecuteCommandLists
-        static std::atomic<std::uint64_t> calls{0};
-        const std::uint64_t call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (call <= 3)
-            std::fprintf(stderr,
-                         "[rt] d3d12_xs: queue slot 35 submitted %llu command list(s) from %p (frame token 0x%llx)\n",
-                         static_cast<unsigned long long>(a1), reinterpret_cast<void*>(array),
-                         static_cast<unsigned long long>(a3));
+        // The cross-list memory wait (docs/peer_port_streaming.md section 11): a batch that names a list split at an
+        // unmet wait becomes several submissions with the queue's Wait before the segment after the wait. A batch with
+        // no split list keeps exactly the previous single forwarding call.
+        if (!memwait::submit_batch(self, a2, a1)) {
+            UnwrappedArray lists;
+            if (!lists.fill(a2, a1)) return hr_to_u64(E_OUTOFMEMORY);
+            const std::uint64_t array = lists.data() ? lists.data() : a2;
+            using ExecuteFn = void(WINAPI*)(void*, std::uint64_t, std::uint64_t);
+            reinterpret_cast<ExecuteFn>(self->real_vtable[10])(self->real, a1, array);  // PC ExecuteCommandLists
+            static std::atomic<std::uint64_t> calls{0};
+            const std::uint64_t call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (call <= 3)
+                std::fprintf(stderr,
+                             "[rt] d3d12_xs: queue slot 35 submitted %llu command list(s) from %p (frame token 0x%llx)\n",
+                             static_cast<unsigned long long>(a1), reinterpret_cast<void*>(array),
+                             static_cast<unsigned long long>(a3));
+        }
         d3d12_trace::record(child_trace_name<K>(Slot));
         return hr_to_u64(S_OK);
     } else if constexpr (K == ChildKind::allocator && Slot == kConsoleAllocatorCallbackSlot) {
@@ -3924,6 +4905,10 @@ std::uint64_t WINAPI child_slot(ChildProxy* self, std::uint64_t a1, std::uint64_
             a1 = unwrap_object(a1);
         UnwrappedArray unwrapped_lists;
         if constexpr (K == ChildKind::queue && Slot == 10) {
+            // The cross-list memory wait (docs/peer_port_streaming.md section 11): a batch that names a split list
+            // becomes several submissions with the queue's Wait before the segment after the wait. Everything else
+            // keeps exactly the previous single forwarding call.
+            if (memwait::submit_batch(self, a2, a1)) return hr_to_u64(S_OK);
             if (!unwrapped_lists.fill(a2, a1)) return hr_to_u64(E_OUTOFMEMORY);
             if (unwrapped_lists.data()) a2 = unwrapped_lists.data();
         }
@@ -4268,7 +5253,7 @@ HRESULT proxy_create_command_list_x(DeviceProxy* self, std::uint64_t desc_word, 
     const IID pc_iid = IsEqualIID(*riid, kConsoleGraphicsCommandListIid) ? __uuidof(ID3D12GraphicsCommandList) : *riid;
     const HRESULT hr = self->real->CreateCommandList(0, type, allocator, initial_state, pc_iid, &created);
     if (FAILED(hr)) return hr;
-    return wrap_list(static_cast<IUnknown*>(created), self, allocator, riid, out);
+    return wrap_list(static_cast<IUnknown*>(created), self, allocator, type, riid, out);
 }
 
 // Device slot 75: ID3D12Device9::CreateCommandQueue1(desc, creator_id, riid, out), called by slot index.
@@ -7658,6 +8643,45 @@ void set_console_list_extras_enabled(int mode) {
 bool console_list_extras_enabled() {
     const int mode = console_list_extras::g_mode.load(std::memory_order_relaxed);
     return mode == 1 || (mode == -2 && console_list_extras::env_enabled());
+}
+
+// ---- The cross-list memory wait's counters and test switches (docs/peer_port_streaming.md section 11) ---------------
+MemoryWaitCounts memory_wait_counts() {
+    MemoryWaitCounts out;
+    const auto& c = memwait::counts();
+    out.waits_unmet = c.waits_unmet.load(std::memory_order_relaxed);
+    out.split = c.split.load(std::memory_order_relaxed);
+    out.split_refused = c.split_refused.load(std::memory_order_relaxed);
+    out.record_waits_met = c.record_waits_met.load(std::memory_order_relaxed);
+    out.record_waits_cross_list = c.record_waits_cross_list.load(std::memory_order_relaxed);
+    out.record_waits_same_list = c.record_waits_same_list.load(std::memory_order_relaxed);
+    out.segments = c.segments.load(std::memory_order_relaxed);
+    out.submits_split = c.submits_split.load(std::memory_order_relaxed);
+    out.submit_fallback = c.submit_fallback.load(std::memory_order_relaxed);
+    out.holds_created = c.holds_created.load(std::memory_order_relaxed);
+    out.holds_satisfied = c.holds_satisfied.load(std::memory_order_relaxed);
+    out.holds_timeout = c.holds_timeout.load(std::memory_order_relaxed);
+    out.holds_cancelled = c.holds_cancelled.load(std::memory_order_relaxed);
+    out.holds_written = c.holds_written.load(std::memory_order_relaxed);
+    out.holds_cross_list = c.holds_cross_list.load(std::memory_order_relaxed);
+    out.holds_at_bound = c.holds_at_bound.load(std::memory_order_relaxed);
+    out.gpu_writes = c.gpu_writes.load(std::memory_order_relaxed);
+    out.gpu_refused = c.gpu_refused.load(std::memory_order_relaxed);
+    out.gpu_addresses = c.gpu_addresses.load(std::memory_order_relaxed);
+    out.pending_holds = memwait::pending_holds();
+    return out;
+}
+
+void set_memory_wait_hold_enabled(int mode) {
+    memwait::g_hold_mode.store(mode == 0 || mode == 1 ? mode : -2, std::memory_order_relaxed);
+}
+
+void set_memory_wait_gpu_writes_enabled(int mode) {
+    memwait::g_gpu_mode.store(mode == 0 || mode == 1 ? mode : -2, std::memory_order_relaxed);
+}
+
+void set_memory_wait_bound_ms(std::uint64_t milliseconds) {
+    memwait::g_bound_override.store(milliseconds, std::memory_order_relaxed);
 }
 
 AllocatorCallbackCounts allocator_callback_counts() {

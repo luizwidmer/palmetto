@@ -40,6 +40,9 @@
 // The console's depth-stencil + unordered-access pair (docs/3d_textures.md): the Vulkan-backed device translates it
 // on the console's placed-creation path, and the shared helper lives in the layer (port/src), not in this executable.
 #include "../src/console_texture.h"
+// The cross-list memory wait's pure policy (port/src/memory_wait_holds.h): the switch values, the measured comparison,
+// the hold records and the segment plan. The runtime user is shims/d3d12_xs_device.cpp; these checks pin it GPU-free.
+#include "../src/memory_wait_holds.h"
 
 #include <d3d12.h>
 #include <windows.h>
@@ -217,6 +220,11 @@ struct Mock {
     unsigned depth_bounds_calls;
     float depth_bounds_min;
     float depth_bounds_max;
+    // PC command-list slot 66 (WriteBufferImmediate): the GPU-ordered bottom-of-pipe write the proxy records at the
+    // title's call position (docs/peer_port_streaming.md section 11.3), and the parameters it was handed.
+    unsigned write_immediate_calls;
+    D3D12_WRITEBUFFERIMMEDIATE_PARAMETER write_immediate[2];
+    D3D12_WRITEBUFFERIMMEDIATE_MODE write_immediate_mode[2];
 };
 
 Mock g_pool[256];
@@ -635,6 +643,24 @@ void WINAPI mock_om_set_depth_bounds(Mock* self, float minimum, float maximum) {
     self->depth_bounds_max = maximum;
 }
 
+// PC ID3D12GraphicsCommandList2::WriteBufferImmediate (slot 66): the GPU-ordered bottom-of-pipe write form (MARKER_OUT
+// at the recorded position, docs/peer_port_streaming.md section 11.3). The proxy passes one parameter for slot 71 and
+// two (low, high) for slot 72; the table is shared by every mock kind, so another kind keeps the generic thunk.
+void WINAPI mock_write_buffer_immediate(Mock* self, UINT count, const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER* parameters,
+                                        const D3D12_WRITEBUFFERIMMEDIATE_MODE* modes) {
+    if (self->kind != Kind::command_list) {
+        (void)mock_slot<66>(self, count, reinterpret_cast<std::uint64_t>(parameters),
+                            reinterpret_cast<std::uint64_t>(modes), 0, 0);
+        return;
+    }
+    ++self->calls[66];
+    ++self->write_immediate_calls;
+    for (UINT i = 0; parameters && i < count && i < 2; ++i) {
+        self->write_immediate[i] = parameters[i];
+        self->write_immediate_mode[i] = modes ? modes[i] : D3D12_WRITEBUFFERIMMEDIATE_MODE_DEFAULT;
+    }
+}
+
 void** mock_vtable() {
     static void* table[kMockSlots];
     static const bool filled = [] {
@@ -647,6 +673,7 @@ void** mock_vtable() {
         table[41] = reinterpret_cast<void*>(&mock_create_command_signature);  // PC CreateCommandSignature
         table[18] = reinterpret_cast<void*>(&mock_slot18);  // GetDesc for a queue, CreateShaderResourceView for a device
         table[62] = reinterpret_cast<void*>(&mock_om_set_depth_bounds);  // PC OMSetDepthBounds (console list 70's target)
+        table[66] = reinterpret_cast<void*>(&mock_write_buffer_immediate);  // PC WriteBufferImmediate (GPU-ordered write)
         return true;
     }();
     (void)filled;
@@ -3336,6 +3363,260 @@ int check_console_texture_translation() {
     return 0;
 }
 
+// ---- The cross-list memory wait's pure policy (docs/peer_port_streaming.md section 11) --------------------------------
+//
+// The policy header is used by shims/d3d12_xs_device.cpp; these checks pin it with no proxy, no GPU and no environment:
+// the switch spellings and clamps, the measured comparison, the hold records (met at submission, met by a later list's
+// write, the bound, submission order, cancellation) and the segment plan a split batch becomes.
+int check_memory_wait_policy() {
+    namespace mw = palmetto::memory_waits;
+    // The switch spellings: every off form leaves both halves off, every on form turns the matching half on.
+    for (const char* off : {static_cast<const char*>(nullptr), "", "0", "off", "OFF", "false", "no", "  "}) {
+        const mw::Settings settings = mw::settings_from(off, nullptr, nullptr, off);
+        EXPECT(!settings.hold && !settings.gpu_writes);
+    }
+    for (const char* on : {"1", "on", "ON", "true", "yes", " 1 "}) {
+        const mw::Settings settings = mw::settings_from(on, nullptr, nullptr, on);
+        EXPECT(settings.hold && settings.gpu_writes);
+    }
+    EXPECT(mw::settings_from("1", "1", "0", "0").hold && !mw::settings_from("1", "1", "0", "0").gpu_writes);
+    // The bound and hold-count clamps, and a value that does not parse keeping the default.
+    EXPECT(mw::settings_from("1", nullptr, nullptr, "0").bound_ms == 5000);
+    EXPECT(mw::settings_from("1", "abc", "xyz", "0").bound_ms == 5000);
+    EXPECT(mw::settings_from("1", "0", "0", "0").bound_ms == 1);
+    EXPECT(mw::settings_from("1", "999999999", "999999", "0").bound_ms == 600000);
+    EXPECT(mw::settings_from("1", "250", "4", "0").bound_ms == 250);
+    EXPECT(mw::settings_from("1", "250", "4", "0").max_holds == 4);
+    EXPECT(mw::settings_from("1", "250", "0", "0").max_holds == 1);
+    EXPECT(mw::settings_from("1", "250", "1000", "0").max_holds == 256);
+    // The measured comparison: 7 is GREATER_EQUAL over the whole 64 bits; every other comparison stays unguessed.
+    EXPECT(mw::comparison_met(7, 3, 3) && mw::comparison_met(7, 4, 3) && !mw::comparison_met(7, 2, 3));
+    EXPECT(!mw::comparison_met(3, 9, 3) && !mw::comparison_met(8, 9, 3));
+
+    // The hold records. met at submission: the cell reaches the target while the hold is pending.
+    mw::Holds holds;
+    const mw::Wait wait{0x1000, 7, 3};
+    const std::uint64_t first = holds.add(1, 0x10, wait, 1000, 5000, 16);
+    EXPECT(first == 1 && holds.pending() == 1);
+    EXPECT(holds.observe(0x2000, 9) == 0);   // another cell does not meet it
+    EXPECT(holds.observe(0x1000, 2) == 0);   // short of the target does not meet it
+    EXPECT(holds.observe(0x1000, 3) == 1);   // the target meets it
+    EXPECT(holds.releasable(1) == first);
+    EXPECT(holds.release(first) && holds.pending() == 0);
+    // Satisfied by a later list's recorded write: the measured cross-list case is counted apart from a same-list one.
+    const std::uint64_t by_write = holds.add(2, 0x10, wait, 2000, 5000, 16);
+    EXPECT(holds.wrote(0x1000, 3, 0x20) == 1 && holds.releasable(2) == by_write);
+    EXPECT(holds.counts().cross_list == 1 && holds.counts().same_list == 0);
+    holds.release(by_write);
+    const std::uint64_t same = holds.add(3, 0x10, wait, 2000, 5000, 16);
+    EXPECT(holds.wrote(0x1000, 3, 0x10) == 1);
+    EXPECT(holds.counts().cross_list == 1 && holds.counts().same_list == 1);
+    holds.release(same);
+    // The bound: a hold that does not hold by its deadline is released and counted, so a missing writer cannot hold a
+    // queue for ever. The boundary is exact (3249 ms not expired, 3250 ms expired) and only the front is released.
+    const std::uint64_t timed = holds.add(4, 0x10, wait, 3000, 250, 16);
+    EXPECT(timed != 0 && holds.expire(3249) == 0 && holds.releasable(4) == 0);
+    EXPECT(holds.expire(3250) == 1 && holds.releasable(4) == timed);
+    holds.release(timed);
+    EXPECT(holds.counts().timed_out == 1);
+    // The submission order: the second hold of a queue whose cell holds first still waits for the first one.
+    const std::uint64_t order1 = holds.add(5, 0x11, mw::Wait{0x1000, 7, 1}, 4000, 5000, 16);
+    const std::uint64_t order2 = holds.add(5, 0x12, mw::Wait{0x1040, 7, 1}, 4000, 5000, 16);
+    EXPECT(order1 && order2);
+    EXPECT(holds.observe(0x1040, 1) == 1);
+    EXPECT(holds.releasable(5) == 0);  // the later hold does not overtake the earlier one
+    EXPECT(holds.observe(0x1000, 1) == 1);
+    EXPECT(holds.releasable(5) == order1 && holds.release(order1) && holds.releasable(5) == order2 &&
+           holds.release(order2));
+    // The concurrent bound (one hold allowed: the second is the bounded fallback) and a queue's cancellation.
+    const std::uint64_t only = holds.add(6, 0x13, wait, 5000, 5000, 1);
+    EXPECT(only != 0 && holds.add(6, 0x14, wait, 5000, 5000, 1) == 0);
+    EXPECT(holds.cancel_queue(6) == 1 && holds.pending() == 0);
+    EXPECT(holds.counts().cancelled == 1);
+    // The wait record itself: the segment plan of a split list. A split twice and B unsplit become A0 | wait | A1 |
+    // wait | A2, B0, so B0 runs in the segment after A's second wait (the console order of one batch's list array).
+    mw::BatchPlan plan;
+    const mw::Wait waits[2] = {{0x1000, 7, 1}, {0x1040, 7, 1}};
+    EXPECT(plan.add_list(0xAA, 3, waits));
+    EXPECT(plan.add_list(0xBB, 1, nullptr));
+    EXPECT(plan.parts() == 4 && plan.segments() == 3);
+    EXPECT(plan.part(0).list == 0xAA && plan.part(0).part == 0 && plan.part(2).part == 2);
+    EXPECT(plan.wait_before(0).empty() && !plan.wait_before(1).empty() && !plan.wait_before(2).empty() &&
+           plan.wait_before(3).empty());
+    EXPECT(plan.segment_of(0) == 0 && plan.segment_of(1) == 1 && plan.segment_of(2) == 2 && plan.segment_of(3) == 2);
+    // The plan's bound: a batch that does not fit is refused so the caller can submit it unsplit.
+    mw::BatchPlan full;
+    EXPECT(full.add_list(1, 64, nullptr) && !full.add_list(2, 1, nullptr));
+    std::printf("%s: the cross-list memory wait's switches, comparison, hold records (met, met-by-write, bound, order, "
+                "cancellation) and segment plan passed\n",
+                g_label);
+    return 0;
+}
+
+// ---- The cross-list memory wait through the proxy (docs/peer_port_streaming.md section 11) ----------------------------
+//
+// An unmet slot-74 wait on a console list and the switch on: the proxy closes the part recorded so far, records on in a
+// fresh real list with the state the list had set replayed, and at the queue's submit it posts the queue's Wait on a
+// fence before the segment after the wait. A watcher thread CPU-signals that fence when the cell holds or at the bound.
+// With the switch off nothing splits and the batch is the previous single ExecuteCommandLists call.
+int check_memory_wait_split() {
+    Mock* mock_device = nullptr;
+    void* device = make_device(mock_device, 11, true);
+    EXPECT(device != nullptr);
+    mock_device->list_level = 7;  // the GPU-ordered write needs ID3D12GraphicsCommandList2 (PC slot 66)
+    void* queue = make_queue(device);
+    EXPECT(queue != nullptr);
+    Mock* real_queue = reinterpret_cast<Mock*>(xs::queue_proxy_real_queue(queue));
+    const IID alloc_iid = __uuidof(ID3D12CommandAllocator);
+    void* allocator = nullptr;
+    EXPECT(hr_of(raw(device, 9, 0, word(&alloc_iid), word(&allocator))) == S_OK);
+    Mock* real_allocator = reinterpret_cast<Mock*>(xs::allocator_proxy_real_allocator(allocator));
+    struct XboxCommandListDesc {
+        std::uint32_t type;
+        std::uint32_t node_mask;
+        std::uint64_t reserved[2];
+    } desc{D3D12_COMMAND_LIST_TYPE_DIRECT, 0, {0, 0}};
+    const IID list_iid = __uuidof(ID3D12GraphicsCommandList);
+    void* list = nullptr;
+    EXPECT(hr_of(raw(device, 73, word(&desc), word(allocator), 0, word(&list_iid), word(&list))) == S_OK);
+    Mock* real_list = reinterpret_cast<Mock*>(xs::command_list_proxy_real_list(list));
+
+    xs::set_console_list_extras_enabled(1);
+    xs::set_memory_wait_gpu_writes_enabled(0);
+    xs::set_memory_wait_bound_ms(60000);  // the released-by-observation arms must not be confused by the bound
+    xs::set_memory_wait_hold_enabled(0);
+    volatile std::uint64_t cell = 0;
+
+    // The off arm (the measured path): an unmet wait is counted and nothing else happens - no split, no second list.
+    const xs::MemoryWaitCounts before_off = xs::memory_wait_counts();
+    raw(list, 24, 5, 0, 0, 0);  // OMSetStencilRef: list state
+    raw(list, 74, word(&cell), 7, 3, 1);
+    EXPECT(real_list->list_closed == false);
+    EXPECT(xs::memory_wait_counts().split == before_off.split);
+    EXPECT(xs::memory_wait_counts().waits_unmet == before_off.waits_unmet + 1);
+    EXPECT(hr_of(raw(list, 9, 0, 0, 0, 0)) == S_OK);
+    const unsigned create_lists_before = mock_device->calls[12];
+    const unsigned executes_before = real_queue->calls[10];
+    std::uint64_t array[1] = {word(list)};
+    raw(queue, 35, 1, word(array), 0, 0);
+    EXPECT(real_queue->calls[10] == executes_before + 1);  // one ExecuteCommandLists: the previous single call
+    EXPECT(real_queue->calls[15] == 0);                    // no queue Wait, no hold
+    EXPECT(mock_device->calls[12] == create_lists_before); // no segment list was created
+
+    // The on arm: the same wait splits the list. The head closes, a new real list records the rest (the state the list
+    // set is replayed into it), and the submit becomes the parts with the queue's Wait between them.
+    xs::set_memory_wait_hold_enabled(1);
+    const xs::MemoryWaitCounts before_on = xs::memory_wait_counts();
+    raw(list, 24, 5, 0, 0, 0);
+    raw(list, 74, word(&cell), 7, 3, 1);
+    EXPECT(real_list->list_closed);                                  // the part before the wait closed
+    EXPECT(mock_device->calls[12] == create_lists_before + 1);       // the part after it was created
+    Mock* tail = mock_device->last_child;
+    EXPECT(tail && tail->kind == Kind::command_list);
+    EXPECT(tail->calls[24] == 1);                    // the state the head set was replayed into the tail
+    const unsigned tail_replays = tail->calls[24];
+    raw(list, 85, 0x51, 0, 0, 0);                    // a recording call after the wait goes to the tail
+    EXPECT(tail->calls[16] == 1 && real_list->calls[16] == 0);
+    raw(list, 74, word(&cell), 7, 4, 1);             // a second unmet wait splits again
+    Mock* tail2 = mock_device->last_child;
+    EXPECT(tail2 && tail2 != tail);
+    EXPECT(tail2->calls[24] >= tail_replays);        // the whole state is replayed again for the second segment
+    EXPECT(xs::memory_wait_counts().split == before_on.split + 2);
+    EXPECT(hr_of(raw(list, 9, 0, 0, 0, 0)) == S_OK);  // Close: the last segment closes
+    const unsigned executes_split = real_queue->calls[10];
+    raw(queue, 35, 1, word(array), 0, 0);
+    // Three parts, two waits: three ExecuteCommandLists calls and two queue Waits.
+    EXPECT(real_queue->calls[10] == executes_split + 3);
+    EXPECT(real_queue->calls[15] == 2);
+    // Both holds are pending (the cells are short of their targets) and the watcher owns two fences.
+    EXPECT(xs::memory_wait_counts().submits_split == before_on.submits_split + 1);
+    EXPECT(xs::memory_wait_counts().segments >= before_on.segments + 3);
+    EXPECT(xs::memory_wait_counts().holds_created == before_on.holds_created + 2);
+    EXPECT(xs::memory_wait_counts().pending_holds == 2);
+    // A recorded write of the cell releases the first hold (the measured cross-list writer). The second wait's target
+    // is a different value, so it stays pending until the cell reaches that value too.
+    cell = 3;
+    for (int i = 0; i < 400 && xs::memory_wait_counts().holds_satisfied < before_on.holds_satisfied + 1; ++i)
+        Sleep(5);
+    EXPECT(xs::memory_wait_counts().holds_satisfied >= before_on.holds_satisfied + 1);
+    cell = 4;
+    for (int i = 0; i < 400 && xs::memory_wait_counts().pending_holds != 0; ++i) Sleep(5);
+    EXPECT(xs::memory_wait_counts().pending_holds == 0);
+    // Each hold's fence was CPU-signalled with 1 (the layer's release): the queue Wait was handed that same fence.
+    const auto fence = reinterpret_cast<Mock*>(static_cast<std::uintptr_t>(real_queue->args[15][0]));
+    EXPECT(fence && fence->kind == Kind::fence && fence->calls[10] == 1 && fence->args[10][0] == 1);
+    EXPECT(real_queue->args[15][1] == 1);
+    EXPECT(xs::memory_wait_counts().holds_timeout == before_on.holds_timeout);
+    EXPECT(xs::memory_wait_counts().submit_fallback == before_on.submit_fallback);
+
+    // The bound (the declared fallback): a hold whose cell never holds is released at PALMETTO_XS_MEMORY_WAIT_BOUND_MS
+    // and counted, and the held segment runs. The cell stays at 4 while the target is 9.
+    xs::set_memory_wait_bound_ms(50);
+    const xs::MemoryWaitCounts before_bound = xs::memory_wait_counts();
+    raw(list, 24, 5, 0, 0, 0);  // reopen after the Close above
+    raw(list, 74, word(&cell), 7, 9, 1);
+    EXPECT(hr_of(raw(list, 9, 0, 0, 0, 0)) == S_OK);
+    raw(queue, 35, 1, word(array), 0, 0);
+    EXPECT(xs::memory_wait_counts().holds_created == before_bound.holds_created + 1);
+    for (int i = 0; i < 600 && xs::memory_wait_counts().holds_timeout < before_bound.holds_timeout + 1; ++i)
+        Sleep(5);
+    EXPECT(xs::memory_wait_counts().holds_timeout == before_bound.holds_timeout + 1);
+    EXPECT(xs::memory_wait_counts().pending_holds == 0);
+    for (int i = 0; i < 200 && xs::memory_wait_counts().pending_holds != 0; ++i) Sleep(5);
+    xs::set_memory_wait_bound_ms(60000);
+
+    // The GPU-ordered write form (docs/peer_port_streaming.md section 11.3): slot 71's value is recorded as a desktop
+    // WriteBufferImmediate (MARKER_OUT) at the title address instead of the record-time CPU write, when the address is
+    // one the replay can import (above 4 GiB, committed host memory) and the list has the GCL2 slot.
+    xs::set_memory_wait_gpu_writes_enabled(1);
+    // The import rule the replay applies needs the write's VA at a page offset: a page-aligned cell is the shape the
+    // GPU form can carry here (the measured title cells are not page-aligned, so the boot falls back to the CPU write).
+    auto* page = static_cast<std::uint64_t*>(
+        VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    *page = 0;
+    const xs::MemoryWaitCounts before_gpu = xs::memory_wait_counts();
+    raw(list, 85, 0x52, 0, 0, 0);  // a recording call reopens the list after the Close below
+    raw(list, 71, word(page), 0x55AA, 0, 0);
+    if (page && reinterpret_cast<std::uintptr_t>(page) >= (std::uintptr_t{1} << 32)) {
+        EXPECT(*page == 0);  // the CPU did not write it: the GPU write runs at the recorded position
+        Mock* gpu_list = reinterpret_cast<Mock*>(xs::command_list_proxy_real_list(list));
+        EXPECT(gpu_list->write_immediate_calls == 1);
+        EXPECT(gpu_list->write_immediate[0].Value == 0x55AAu);
+        EXPECT(gpu_list->write_immediate[0].Dest == reinterpret_cast<std::uint64_t>(page));
+        EXPECT(gpu_list->write_immediate_mode[0] == D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT);
+        EXPECT(xs::memory_wait_counts().gpu_writes == before_gpu.gpu_writes + 1);
+    } else {
+        std::printf("%s: the GPU-ordered write arm skipped (the page address is below 4 GiB)\n", g_label);
+    }
+    // A 4-byte-aligned but not page-aligned cell is refused by name (the import rule above), and the CPU write is the
+    // measured fallback: the value still lands, the replay never refuses the submission.
+    if (page) {
+        std::uint32_t* word_cell = reinterpret_cast<std::uint32_t*>(reinterpret_cast<char*>(page) + 4);
+        *word_cell = 0;
+        const xs::MemoryWaitCounts before_shape = xs::memory_wait_counts();
+        raw(list, 71, word(word_cell), 0x55, 0, 0);
+        EXPECT(*word_cell == 0x55u);  // the record-time CPU write
+        EXPECT(xs::memory_wait_counts().gpu_refused == before_shape.gpu_refused + 1);
+        EXPECT(xs::memory_wait_counts().gpu_writes == before_shape.gpu_writes);
+        VirtualFree(page, 0, MEM_RELEASE);
+    }
+    xs::set_memory_wait_gpu_writes_enabled(0);
+
+    EXPECT(hr_of(raw(list, 9, 0, 0, 0, 0)) == S_OK);
+    xs::set_memory_wait_hold_enabled(-1);
+    xs::set_console_list_extras_enabled(-1);
+    xs::set_memory_wait_bound_ms(0);
+
+    EXPECT(release(list) == 0);
+    EXPECT(release(allocator) == 0 && real_allocator->refs == 0);
+    EXPECT(release(queue) == 0 && real_queue->refs == 0);
+    EXPECT(release(device) == 0 && mock_device->refs == 0);
+    std::printf("%s: the cross-list memory wait split (off/on, state replay, submit plan, watcher release, bound) and "
+                "the GPU-ordered bottom-of-pipe write passed\n",
+                g_label);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     no_dialogs();
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -3361,6 +3642,7 @@ int main(int argc, char** argv) {
         check_allocators() || check_xbox_slots() || check_frame_event_forwarding() ||
         check_slot74_and_slot25_standin() ||
         check_console_command_list() || check_allocator_callback_invocation() || check_slot57_graphics_record() ||
+        check_memory_wait_policy() || check_memory_wait_split() ||
         check_slot55_derived_pipeline_state() || check_console_command_signature() ||
         check_console_texture_translation() || check_slot70_console_view())
         return 1;
