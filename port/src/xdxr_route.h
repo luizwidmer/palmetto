@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -175,6 +176,89 @@ inline const char* refusal_name(Refusal refusal) {
 inline bool route_armed() {
     const char* value = std::getenv("PALMETTO_BVH_ROUTE");
     return value && std::strcmp(value, "own") == 0;
+}
+
+// The mapped helper's named exports are resolved by the title through GetProcAddress. These are method-name prefixes,
+// not package bytes: the build/test fixture pins the actual decorated symbols used by the title. Ordinal forms are
+// accepted too because PE clients may request either spelling.
+enum class HelperExport : std::uint8_t {
+    none,
+    prebuild,
+    build,
+    batched_build,
+    copy,
+    rehydrate_batched2,
+    rehydrate_batched,
+    rehydrate_device,
+};
+
+enum class HelperExportAction : std::uint8_t { package, route, refuse };
+
+inline HelperExport helper_export_kind(std::string_view module, std::string_view symbol) {
+    if (module != "xboxbvhbuilder.dll") return HelperExport::none;
+    if (symbol == "#2" || symbol.starts_with("?GetRaytracingAccelerationStructurePrebuildInfo@XboxBvhBuilder@@"))
+        return HelperExport::prebuild;
+    if (symbol == "#3" || symbol.starts_with("?BuildRaytracingAccelerationStructure@XboxBvhBuilder@@"))
+        return HelperExport::build;
+    if (symbol == "#4" || symbol.starts_with("?BuildRaytracingAccelerationStructureBatched2X@XboxBvhBuilder@@"))
+        return HelperExport::batched_build;
+    if (symbol == "#5" || symbol.starts_with("?CopyRaytracingAccelerationStructure@XboxBvhBuilder@@"))
+        return HelperExport::copy;
+    if (symbol == "#8" || symbol.starts_with("?RehydrateRaytracingAccelerationStructureBatched2X@XboxBvhBuilder@@"))
+        return HelperExport::rehydrate_batched2;
+    if (symbol == "#9" || symbol.starts_with("?RehydrateRaytracingAccelerationStructureBatchedX@XboxBvhBuilder@@"))
+        return HelperExport::rehydrate_batched;
+    if (symbol == "#10" || symbol.starts_with("?RehydrateRaytracingAccelerationStructureX@XboxBvhBuilder@@"))
+        return HelperExport::rehydrate_device;
+    return HelperExport::none;
+}
+
+inline const char* helper_export_name(HelperExport export_id) {
+    switch (export_id) {
+    case HelperExport::prebuild: return "GetRaytracingAccelerationStructurePrebuildInfo";
+    case HelperExport::build: return "BuildRaytracingAccelerationStructure";
+    case HelperExport::batched_build: return "BuildRaytracingAccelerationStructureBatched2X";
+    case HelperExport::copy: return "CopyRaytracingAccelerationStructure";
+    case HelperExport::rehydrate_batched2: return "RehydrateRaytracingAccelerationStructureBatched2X";
+    case HelperExport::rehydrate_batched: return "RehydrateRaytracingAccelerationStructureBatchedX";
+    case HelperExport::rehydrate_device: return "RehydrateRaytracingAccelerationStructureX";
+    case HelperExport::none: return "unknown helper export";
+    }
+    return "unknown helper export";
+}
+
+inline HelperExportAction helper_export_action(HelperExport export_id, bool armed = route_armed()) {
+    if (!armed || export_id == HelperExport::none) return HelperExportAction::package;
+    switch (export_id) {
+    case HelperExport::rehydrate_batched2:
+    case HelperExport::rehydrate_batched:
+    case HelperExport::rehydrate_device: return HelperExportAction::refuse;
+    case HelperExport::prebuild:
+    case HelperExport::build:
+    case HelperExport::batched_build:
+    case HelperExport::copy: return HelperExportAction::route;
+    case HelperExport::none: return HelperExportAction::package;
+    }
+    return HelperExportAction::package;
+}
+
+// The PE loader uses this selector around the original export pointer. With the switch off (or for any other symbol),
+// the exact package pointer is returned unchanged; both route and named-refusal thunks are opt-in replacements.
+inline void* select_helper_export(HelperExport export_id, void* package_export, void* route_export,
+                                  bool armed = route_armed()) {
+    if (helper_export_action(export_id, armed) == HelperExportAction::package || !route_export) return package_export;
+    return route_export;
+}
+
+inline const char* helper_export_refusal(HelperExport export_id) {
+    switch (export_id) {
+    case HelperExport::rehydrate_batched2: return "the trailing UINT64 array contract is unmeasured";
+    case HelperExport::rehydrate_batched:
+        return "the CPU-side dehydrated-stream reconstruction is not wired to the GPU XDXR builder";
+    case HelperExport::rehydrate_device:
+        return "the device-only CPU route has no measured destination extent or GPU submission contract";
+    default: return "none";
+    }
 }
 
 // Additional public COM slots that the opt-in bridge can answer. These helpers keep the route's bounded contract

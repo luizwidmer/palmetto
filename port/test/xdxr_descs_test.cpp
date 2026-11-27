@@ -313,6 +313,55 @@ int route_plan() {
     return 0;
 }
 
+int helper_export_routing() {
+    using route::HelperExport;
+    using route::HelperExportAction;
+    constexpr std::string_view module = "xboxbvhbuilder.dll";
+    const auto prebuild = route::helper_export_kind(
+        module,
+        "?GetRaytracingAccelerationStructurePrebuildInfo@XboxBvhBuilder@@QEAAXPEBUD3D12_BUILD_RAYTRACING_ACCELERATION_"
+        "STRUCTURE_INPUTS@@PEBUD3D12XBOX_XDXR_STREAM_DESC@@PEAUD3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO@@@Z");
+    const auto build = route::helper_export_kind(
+        module, "?BuildRaytracingAccelerationStructure@XboxBvhBuilder@@QEAAXPEAUCOMMANDLIST4@@PEBUDESC@@IPEBUPOSTBUILD@@@Z");
+    const auto batched = route::helper_export_kind(
+        module,
+        "?BuildRaytracingAccelerationStructureBatched2X@XboxBvhBuilder@@QEAAXPEAUID3D12GraphicsCommandList6@@IPEBUD3D12XBOX_"
+        "BUILD_RAYTRACING_ACCELERATION_STRUCTURE_BATCHED_DESC2@@@Z");
+    const auto copy = route::helper_export_kind(
+        module, "?CopyRaytracingAccelerationStructure@XboxBvhBuilder@@QEAAXPEAUCOMMANDLIST4@@_K_KW@Z");
+    const auto rehydrate2 = route::helper_export_kind(
+        module, "?RehydrateRaytracingAccelerationStructureBatched2X@XboxBvhBuilder@@QEAAXPEAUCOMMANDLIST8@@IPEBUDESC@@PEB_K@Z");
+    const auto rehydrate = route::helper_export_kind(
+        module, "?RehydrateRaytracingAccelerationStructureBatchedX@XboxBvhBuilder@@QEAAXPEAUCOMMANDLIST8@@IPEBUDESC@@@Z");
+    const auto rehydrate_device = route::helper_export_kind(
+        module, "?RehydrateRaytracingAccelerationStructureX@XboxBvhBuilder@@QEAAXPEAUDEVICE11@@PEBUDESC@@@Z");
+    CHECK(prebuild == HelperExport::prebuild && build == HelperExport::build &&
+          batched == HelperExport::batched_build && copy == HelperExport::copy);
+    CHECK(rehydrate2 == HelperExport::rehydrate_batched2 && rehydrate == HelperExport::rehydrate_batched &&
+          rehydrate_device == HelperExport::rehydrate_device);
+    CHECK(route::helper_export_kind("other.dll", "?BuildRaytracingAccelerationStructureBatched2X@XboxBvhBuilder@@") ==
+          HelperExport::none);
+    CHECK(route::helper_export_kind(module, "?OtherMethod@XboxBvhBuilder@@") == HelperExport::none);
+    CHECK(route::helper_export_kind(module, "#2") == HelperExport::prebuild);
+    CHECK(route::helper_export_kind(module, "#4") == HelperExport::batched_build);
+    CHECK(route::helper_export_kind(module, "#9") == HelperExport::rehydrate_batched);
+
+    CHECK(route::helper_export_action(prebuild, false) == HelperExportAction::package);
+    CHECK(route::helper_export_action(prebuild, true) == HelperExportAction::route);
+    CHECK(route::helper_export_action(rehydrate2, true) == HelperExportAction::refuse);
+    CHECK(route::helper_export_action(rehydrate, true) == HelperExportAction::refuse);
+    CHECK(route::helper_export_action(rehydrate_device, true) == HelperExportAction::refuse);
+    CHECK(std::strcmp(route::helper_export_refusal(rehydrate2), "the trailing UINT64 array contract is unmeasured") == 0);
+
+    int package_slot = 0;
+    int replacement_slot = 0;
+    CHECK(route::select_helper_export(prebuild, &package_slot, &replacement_slot, false) == &package_slot);
+    CHECK(route::select_helper_export(prebuild, &package_slot, &replacement_slot, true) == &replacement_slot);
+    CHECK(route::select_helper_export(rehydrate2, &package_slot, &replacement_slot, true) == &replacement_slot);
+    CHECK(route::select_helper_export(HelperExport::none, &package_slot, &replacement_slot, true) == &package_slot);
+    return 0;
+}
+
 int route_command_bridge() {
     using palmetto::xdxr::command_route::BuildCommandPlan;
     using palmetto::xdxr::command_route::plan_build;
@@ -474,7 +523,7 @@ int public_desc_copy() {
 
 int main() {
     if (stream_lookup() || flag_defaults() || record_views() || route_prebuild() || route_plan() ||
-        route_command_bridge() || route_switch_environment())
+        helper_export_routing() || route_command_bridge() || route_switch_environment())
         return 1;
 #ifdef XDXR_HAVE_D3D12
     if (public_desc_copy())

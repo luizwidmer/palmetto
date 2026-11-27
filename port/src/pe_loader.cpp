@@ -21,6 +21,10 @@
 #include "../shims/startup_trace.h"
 #include "base_reservation.h"
 
+#if defined(PALMETTO_VULKAN_DEVICE)
+extern "C" void* palmetto_bvh_helper_export(const char* module, const char* symbol, void* package_export);
+#endif
+
 namespace rt {
 
 std::string lower(std::string s) {
@@ -50,6 +54,20 @@ std::string narrow_module_key(const std::filesystem::path& path) {
         // It still has a native identity; it simply has no alias in the existing narrow lookup API.
     }
     return {};
+}
+
+// The Xbox helper is a normal mapped module, but the title resolves its public BVH entries through GetProcAddress.
+// This opt-in bridge is compiled only in the Vulkan runtime that links d3d12_com; on every other build, and for every
+// non-helper export, the loader returns the original mapped address.
+void* route_bvh_helper_export(const Module& module, const std::string& symbol, void* package_export) {
+#if defined(PALMETTO_VULKAN_DEVICE)
+    if (module.narrow_key == "xboxbvhbuilder.dll")
+        return ::palmetto_bvh_helper_export(module.narrow_key.c_str(), symbol.c_str(), package_export);
+#else
+    (void)module;
+    (void)symbol;
+#endif
+    return package_export;
 }
 
 // Windows matches module names case-insensitively with its own upcase table (RtlEqualUnicodeString); the
@@ -1277,7 +1295,8 @@ void* Loader::resolve_module_export(void* module_handle, const std::string& sym,
     }
     if (!target) return nullptr;
     owns_handle = true;
-    if (auto it = target->exports.find(sym); it != target->exports.end()) return it->second;
+    if (auto it = target->exports.find(sym); it != target->exports.end())
+        return route_bvh_helper_export(*target, sym, it->second);
     if (auto it = target->forwarders.find(sym); it != target->forwarders.end()) {
         try {
             const RuntimeLoadScope dynamic(runtime_loads_);
@@ -1760,7 +1779,7 @@ void* Loader::resolve(Module& m, const std::string& dll, const std::string& name
         Module& dep = load(bundled);
         if (auto it = dep.exports.find(sym); it != dep.exports.end()) {
             m.imports.push_back({dll, sym, Binding::Module});
-            return it->second;
+            return route_bvh_helper_export(dep, sym, it->second);
         }
         if (auto it = dep.forwarders.find(sym); it != dep.forwarders.end()) {
             Binding binding = Binding::Unimplemented;

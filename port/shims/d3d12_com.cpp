@@ -14,6 +14,7 @@
 #include <atomic>
 #include <bit>
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -35,6 +36,19 @@ static_assert(sizeof(D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC) ==
               sizeof(palmetto::xdxr::route::BuildDesc));
 static_assert(offsetof(D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC, Inputs) ==
               offsetof(palmetto::xdxr::route::BuildDesc, inputs));
+static_assert(sizeof(D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS) == sizeof(palmetto::xdxr::BuildInputs));
+static_assert(offsetof(D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS, Flags) ==
+              offsetof(palmetto::xdxr::BuildInputs, flags));
+static_assert(offsetof(D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS, NumDescs) ==
+              offsetof(palmetto::xdxr::BuildInputs, num_descs));
+static_assert(offsetof(D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS, DescsLayout) ==
+              offsetof(palmetto::xdxr::BuildInputs, descs_layout));
+static_assert(offsetof(D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS, InstanceDescs) ==
+              offsetof(palmetto::xdxr::BuildInputs, descs));
+static_assert(sizeof(D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC) ==
+              offsetof(palmetto::xdxr::BatchedDesc2, num_postbuild_info_descs));
+static_assert(offsetof(D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC, Inputs) ==
+              offsetof(palmetto::xdxr::BatchedDesc2, inputs));
 static_assert(sizeof(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC) ==
               sizeof(palmetto::xdxr::PostbuildInfoDesc));
 
@@ -119,6 +133,255 @@ palmetto::xdxr::route::GeometryDesc route_geometry(const D3D12_RAYTRACING_GEOMET
     out.index_format = static_cast<std::uint32_t>(geometry.Triangles.IndexFormat);
     out.transform_va = geometry.Triangles.Transform3x4;
     return out;
+}
+
+void note_bvh_helper_named_refusal(const char* operation, const char* reason) {
+    char text[384] = {};
+    std::snprintf(text, sizeof(text), "PALMETTO_BVH_ROUTE=own refused XboxBvhBuilder::%s: %s", operation, reason);
+    note_once(text);
+    d3d12_trace::record(operation, "unsupported");
+}
+
+struct HelperGeometryStorage {
+    std::vector<palmetto::xdxr::route::GeometryDesc> geometries;
+    std::vector<const palmetto::xdxr::route::GeometryDesc*> pointers;
+};
+
+// The public build-input prefix is the SDK layout, while geometry arrays use the SDK triangle-union ordering.
+// Convert either the SDK wrapper or the helper's byte-identical prefix into the route's CPU-only geometry records.
+palmetto::xdxr::BuildInputs helper_route_inputs(const palmetto::xdxr::BuildInputs& source,
+                                                HelperGeometryStorage& storage) {
+    palmetto::xdxr::BuildInputs out = source;
+    if (source.type != palmetto::xdxr::route::kBottomLevel || source.num_descs > 0x10000) return out;
+    if (source.descs_layout == palmetto::xdxr::route::kLayoutArray) {
+        const auto* descriptions = reinterpret_cast<const D3D12_RAYTRACING_GEOMETRY_DESC*>(source.descs);
+        if (!descriptions) return out;
+        storage.geometries.reserve(source.num_descs);
+        for (UINT i = 0; i < source.num_descs; ++i) storage.geometries.push_back(route_geometry(descriptions[i]));
+        out.descs = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(storage.geometries.data()));
+    } else if (source.descs_layout == palmetto::xdxr::route::kLayoutArrayOfPointers) {
+        const auto* descriptions = reinterpret_cast<const D3D12_RAYTRACING_GEOMETRY_DESC* const*>(source.descs);
+        if (!descriptions) return out;
+        storage.geometries.resize(source.num_descs);
+        storage.pointers.resize(source.num_descs);
+        for (UINT i = 0; i < source.num_descs; ++i) {
+            if (!descriptions[i]) continue;
+            storage.geometries[i] = route_geometry(*descriptions[i]);
+            storage.pointers[i] = &storage.geometries[i];
+        }
+        out.descs = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(storage.pointers.data()));
+    }
+    return out;
+}
+
+palmetto::xdxr::BuildInputs helper_route_inputs(
+    const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& source, HelperGeometryStorage& storage) {
+    palmetto::xdxr::BuildInputs raw{};
+    raw.type = static_cast<std::uint32_t>(source.Type);
+    raw.flags = static_cast<std::uint32_t>(source.Flags);
+    raw.num_descs = source.NumDescs;
+    raw.descs_layout = static_cast<std::uint32_t>(source.DescsLayout);
+    if (source.Type == D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL) {
+        raw.descs = source.InstanceDescs;
+    } else if (source.Type == D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL &&
+               source.DescsLayout == D3D12_ELEMENTS_LAYOUT_ARRAY) {
+        raw.descs = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(source.pGeometryDescs));
+    } else if (source.Type == D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL &&
+               source.DescsLayout == D3D12_ELEMENTS_LAYOUT_ARRAY_OF_POINTERS) {
+        raw.descs = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(source.ppGeometryDescs));
+    }
+    return helper_route_inputs(raw, storage);
+}
+
+palmetto::xdxr::route::BuildDesc helper_route_desc(
+    const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC& source, HelperGeometryStorage& storage) {
+    palmetto::xdxr::route::BuildDesc out{};
+    out.dest_acceleration_structure_data = source.DestAccelerationStructureData;
+    out.inputs = helper_route_inputs(source.Inputs, storage);
+    out.source_acceleration_structure_data = source.SourceAccelerationStructureData;
+    out.scratch_acceleration_structure_data = source.ScratchAccelerationStructureData;
+    return out;
+}
+
+bool helper_route_batch(const palmetto::xdxr::BatchedDesc2* descriptions, UINT count,
+                        std::vector<HelperGeometryStorage>& storage,
+                        std::vector<palmetto::xdxr::BatchedDesc2>& converted,
+                        palmetto::xdxr::route::BuildPlan& plan) {
+    if (!descriptions || count == 0) {
+        plan.refusal = palmetto::xdxr::route::Refusal::null_desc;
+        return false;
+    }
+    if (count > 0x10000) {
+        plan.refusal = palmetto::xdxr::route::Refusal::too_many_elements;
+        return false;
+    }
+    converted.assign(descriptions, descriptions + count);
+    storage.resize(count);
+    for (UINT i = 0; i < count; ++i) {
+        converted[i].inputs = helper_route_inputs(descriptions[i].inputs, storage[i]);
+        // The GPU route does not consume helper stream hints; avoid probing that separately-owned CPU pointer.
+        converted[i].stream = {};
+    }
+    plan = palmetto::xdxr::route::plan_batched(converted.data(), count, true);
+    return plan.ok();
+}
+
+bool helper_public_list(void* console_or_public_list, const char* operation,
+                        ID3D12GraphicsCommandList4** public_list) {
+    if (!public_list) return false;
+    *public_list = nullptr;
+    if (!console_or_public_list) {
+        note_bvh_route_refusal(operation, palmetto::xdxr::route::Refusal::null_desc);
+        d3d12_trace::record(operation, "unsupported");
+        return false;
+    }
+    ID3D12GraphicsCommandList* real =
+        rt::d3d12_xs::command_list_proxy_real_list(console_or_public_list);
+    if (!real) real = reinterpret_cast<ID3D12GraphicsCommandList*>(console_or_public_list);
+    const HRESULT hr = reinterpret_cast<IUnknown*>(real)->QueryInterface(
+        __uuidof(ID3D12GraphicsCommandList4), reinterpret_cast<void**>(public_list));
+    if (FAILED(hr) || !*public_list) {
+        note_bvh_helper_named_refusal(operation, "the list does not expose ID3D12GraphicsCommandList4");
+        return false;
+    }
+    if ((*public_list)->GetType() == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+        (*public_list)->Release();
+        *public_list = nullptr;
+        note_bvh_route_refusal(operation, palmetto::xdxr::route::Refusal::command_list_type);
+        d3d12_trace::record(operation, "unsupported");
+        return false;
+    }
+    return true;
+}
+
+void helper_prebuild_export(void*, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS* inputs,
+                            const palmetto::xdxr::StreamDesc* stream,
+                            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO* info) {
+    constexpr const char* operation = "GetRaytracingAccelerationStructurePrebuildInfo";
+    if (!palmetto::xdxr::route::route_armed()) {
+        if (info) *info = {};
+        note_bvh_route_refusal(operation, palmetto::xdxr::route::Refusal::disabled);
+        return;
+    }
+    if (!inputs || !info) {
+        if (info) *info = {};
+        note_bvh_route_refusal(operation, palmetto::xdxr::route::Refusal::null_desc);
+        d3d12_trace::record(operation, "unsupported");
+        return;
+    }
+    HelperGeometryStorage storage;
+    const palmetto::xdxr::BuildInputs route_inputs = helper_route_inputs(*inputs, storage);
+    const auto answer = palmetto::xdxr::route::prebuild(route_inputs, stream, true);
+    *info = {};
+    if (answer.refusal != palmetto::xdxr::route::Refusal::none) {
+        note_bvh_route_refusal(operation, answer.refusal);
+        d3d12_trace::record(operation, "unsupported");
+        return;
+    }
+    info->ResultDataMaxSizeInBytes = answer.result_size;
+    info->ScratchDataSizeInBytes = answer.scratch_size;
+    info->UpdateScratchDataSizeInBytes = answer.update_scratch_size;
+}
+
+void helper_build_export(void*, ID3D12GraphicsCommandList4* list,
+                         const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC* desc, UINT postbuild_count,
+                         const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC* postbuild) {
+    constexpr const char* operation = "BuildRaytracingAccelerationStructure";
+    if (!palmetto::xdxr::route::route_armed()) {
+        note_bvh_route_refusal(operation, palmetto::xdxr::route::Refusal::disabled);
+        return;
+    }
+    if (!desc || (postbuild_count && !postbuild)) {
+        note_bvh_route_refusal(operation, palmetto::xdxr::route::Refusal::null_desc);
+        d3d12_trace::record(operation, "unsupported");
+        return;
+    }
+    HelperGeometryStorage storage;
+    const auto route_desc = helper_route_desc(*desc, storage);
+    const auto plan = palmetto::xdxr::route::plan_single(
+        route_desc, postbuild_count,
+        reinterpret_cast<const palmetto::xdxr::PostbuildInfoDesc*>(postbuild), true);
+    if (!plan.ok()) {
+        note_bvh_route_refusal(operation, plan.refusal);
+        d3d12_trace::record(operation, "unsupported");
+        return;
+    }
+    ID3D12GraphicsCommandList4* public_list = nullptr;
+    if (!helper_public_list(list, operation, &public_list)) return;
+    public_list->BuildRaytracingAccelerationStructure(desc, postbuild_count, postbuild);
+    public_list->Release();
+}
+
+void helper_batched_build_export(void*, ID3D12GraphicsCommandList6* list, UINT count,
+                                 const palmetto::xdxr::BatchedDesc2* descriptions) {
+    constexpr const char* operation = "BuildRaytracingAccelerationStructureBatched2X";
+    if (!palmetto::xdxr::route::route_armed()) {
+        note_bvh_route_refusal(operation, palmetto::xdxr::route::Refusal::disabled);
+        return;
+    }
+    std::vector<HelperGeometryStorage> storage;
+    std::vector<palmetto::xdxr::BatchedDesc2> converted;
+    palmetto::xdxr::route::BuildPlan plan;
+    if (!helper_route_batch(descriptions, count, storage, converted, plan)) {
+        note_bvh_route_refusal(operation, plan.refusal);
+        d3d12_trace::record(operation, "unsupported");
+        return;
+    }
+    ID3D12GraphicsCommandList4* public_list = nullptr;
+    if (!helper_public_list(list, operation, &public_list)) return;
+    for (UINT i = 0; i < count; ++i) {
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC desc{};
+        std::memcpy(&desc, &descriptions[i], sizeof(desc));
+        public_list->BuildRaytracingAccelerationStructure(
+            &desc, descriptions[i].num_postbuild_info_descs,
+            reinterpret_cast<const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC*>(
+                descriptions[i].postbuild_info_descs));
+    }
+    public_list->Release();
+}
+
+void helper_copy_export(void*, ID3D12GraphicsCommandList4* list, UINT64 dest, UINT64 source,
+                        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE mode) {
+    constexpr const char* operation = "CopyRaytracingAccelerationStructure";
+    if (!palmetto::xdxr::route::route_armed()) {
+        note_bvh_route_refusal(operation, palmetto::xdxr::route::Refusal::disabled);
+        return;
+    }
+    const auto refusal = palmetto::xdxr::route::copy_refusal(static_cast<std::uint32_t>(mode), dest, source, true);
+    if (refusal != palmetto::xdxr::route::Refusal::none) {
+        note_bvh_route_refusal(operation, refusal);
+        d3d12_trace::record(operation, "unsupported");
+        return;
+    }
+    ID3D12GraphicsCommandList4* public_list = nullptr;
+    if (!helper_public_list(list, operation, &public_list)) return;
+    public_list->CopyRaytracingAccelerationStructure(dest, source, mode);
+    public_list->Release();
+}
+
+HRESULT helper_refuse_rehydrate_batched2_export(void*, ID3D12GraphicsCommandList8*, UINT,
+                                                const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC*,
+                                                const UINT64*) {
+    constexpr const char* operation = "RehydrateRaytracingAccelerationStructureBatched2X";
+    note_bvh_helper_named_refusal(
+        operation, palmetto::xdxr::route::helper_export_refusal(palmetto::xdxr::route::HelperExport::rehydrate_batched2));
+    return E_NOTIMPL;
+}
+
+HRESULT helper_refuse_rehydrate_batched_export(void*, ID3D12GraphicsCommandList8*, UINT,
+                                               const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC*) {
+    constexpr const char* operation = "RehydrateRaytracingAccelerationStructureBatchedX";
+    note_bvh_helper_named_refusal(
+        operation, palmetto::xdxr::route::helper_export_refusal(palmetto::xdxr::route::HelperExport::rehydrate_batched));
+    return E_NOTIMPL;
+}
+
+HRESULT helper_refuse_rehydrate_device_export(
+    void*, ID3D12Device11*, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC*) {
+    constexpr const char* operation = "RehydrateRaytracingAccelerationStructureX";
+    note_bvh_helper_named_refusal(
+        operation, palmetto::xdxr::route::helper_export_refusal(palmetto::xdxr::route::HelperExport::rehydrate_device));
+    return E_NOTIMPL;
 }
 
 // Measurement for the root-packing slice (docs/root_packing.md): the root-signature and heap shapes the title creates,
@@ -2776,4 +3039,50 @@ bool bound_descriptor_heap_bases(ID3D12GraphicsCommandList* list, D3D12_GPU_VIRT
     return true;
 }
 
+void* bvh_helper_export_impl(const char* module, const char* symbol, void* package_export) {
+    if (!module || !symbol || !package_export) return package_export;
+    const auto export_id = palmetto::xdxr::route::helper_export_kind(module, symbol);
+    const bool armed = palmetto::xdxr::route::route_armed();
+    if (palmetto::xdxr::route::helper_export_action(export_id, armed) ==
+        palmetto::xdxr::route::HelperExportAction::package)
+        return package_export;
+
+    void* route_export = nullptr;
+    switch (export_id) {
+    case palmetto::xdxr::route::HelperExport::prebuild:
+        route_export = reinterpret_cast<void*>(&helper_prebuild_export);
+        break;
+    case palmetto::xdxr::route::HelperExport::build:
+        route_export = reinterpret_cast<void*>(&helper_build_export);
+        break;
+    case palmetto::xdxr::route::HelperExport::batched_build:
+        route_export = reinterpret_cast<void*>(&helper_batched_build_export);
+        break;
+    case palmetto::xdxr::route::HelperExport::copy:
+        route_export = reinterpret_cast<void*>(&helper_copy_export);
+        break;
+    case palmetto::xdxr::route::HelperExport::rehydrate_batched2:
+        route_export = reinterpret_cast<void*>(&helper_refuse_rehydrate_batched2_export);
+        break;
+    case palmetto::xdxr::route::HelperExport::rehydrate_batched:
+        route_export = reinterpret_cast<void*>(&helper_refuse_rehydrate_batched_export);
+        break;
+    case palmetto::xdxr::route::HelperExport::rehydrate_device:
+        route_export = reinterpret_cast<void*>(&helper_refuse_rehydrate_device_export);
+        break;
+    case palmetto::xdxr::route::HelperExport::none:
+        break;
+    }
+    if (!route_export) return package_export;
+    char text[192] = {};
+    std::snprintf(text, sizeof(text), "PALMETTO_BVH_ROUTE=own intercepts XboxBvhBuilder::%s",
+                  palmetto::xdxr::route::helper_export_name(export_id));
+    note_once(text);
+    return palmetto::xdxr::route::select_helper_export(export_id, package_export, route_export, armed);
+}
+
 }  // namespace rt::d3d12
+
+extern "C" void* palmetto_bvh_helper_export(const char* module, const char* symbol, void* package_export) {
+    return rt::d3d12::bvh_helper_export_impl(module, symbol, package_export);
+}

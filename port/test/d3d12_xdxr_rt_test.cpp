@@ -14,6 +14,9 @@
 // `python -I tooling/xdxr_bvh.py check-build <out dir>` validates them and traces rays against brute force (ctest:
 // d3d12_xdxr_rt + d3d12_xdxr_rt_check). Exit 77 without a Vulkan device, or with PALMETTO_RT_AS=khr. No game files.
 #include "../shims/d3d12_com.h"
+#include "../src/xdxr_descs.h"
+
+extern "C" void* palmetto_bvh_helper_export(const char* module, const char* symbol, void* package_export);
 
 #include <cmath>
 #include <cstdint>
@@ -94,6 +97,19 @@ int main(int argc, char** argv) {
     }
     // Start with the byte-identical legacy COM branch even if the test runner inherited the opt-in route.
     if (!bvh_route_switch("")) return fail("clear PALMETTO_BVH_ROUTE");
+    int package_export_marker = 0;
+    constexpr const char* helper_prebuild_symbol =
+        "?GetRaytracingAccelerationStructurePrebuildInfo@XboxBvhBuilder@@QEAAXPEBUD3D12_BUILD_RAYTRACING_ACCELERATION_"
+        "STRUCTURE_INPUTS@@PEBUD3D12XBOX_XDXR_STREAM_DESC@@PEAUD3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO@@@Z";
+    constexpr const char* helper_batched_build_symbol =
+        "?BuildRaytracingAccelerationStructureBatched2X@XboxBvhBuilder@@QEAAXPEAUID3D12GraphicsCommandList6@@IPEBUD3D12XBOX_"
+        "BUILD_RAYTRACING_ACCELERATION_STRUCTURE_BATCHED_DESC2@@@Z";
+    if (palmetto_bvh_helper_export("xboxbvhbuilder.dll", helper_prebuild_symbol, &package_export_marker) !=
+        &package_export_marker)
+        return fail("helper export switch-off pointer identity");
+    if (palmetto_bvh_helper_export("other.dll", helper_prebuild_symbol, &package_export_marker) !=
+        &package_export_marker)
+        return fail("non-helper export pointer identity");
     Ref<ID3D12Device5> device;
     if (FAILED(rt::d3d12::create_vulkan_device_standalone(IID_PPV_ARGS(device.put())))) {
         std::puts("SKIP: no Vulkan D3D12 device");
@@ -332,6 +348,19 @@ int main(int argc, char** argv) {
     upload->Unmap(0, nullptr);
     if (FAILED(allocator->Reset()) || FAILED(list->Reset(allocator.p, nullptr))) return fail("Reset for the update");
     if (!bvh_route_switch("own")) return fail("arm PALMETTO_BVH_ROUTE");
+    const char* helper_symbols[] = {
+        helper_prebuild_symbol,
+        "?BuildRaytracingAccelerationStructure@XboxBvhBuilder@@QEAAX",
+        helper_batched_build_symbol,
+        "?CopyRaytracingAccelerationStructure@XboxBvhBuilder@@QEAAX",
+        "?RehydrateRaytracingAccelerationStructureBatched2X@XboxBvhBuilder@@QEAAX",
+        "?RehydrateRaytracingAccelerationStructureBatchedX@XboxBvhBuilder@@QEAAX",
+        "?RehydrateRaytracingAccelerationStructureX@XboxBvhBuilder@@QEAAX",
+    };
+    for (const char* symbol : helper_symbols)
+        if (palmetto_bvh_helper_export("xboxbvhbuilder.dll", symbol, &package_export_marker) ==
+            &package_export_marker)
+            return fail("helper export did not intercept while route is armed");
     std::puts("d3d12_xdxr_rt: PALMETTO_BVH_ROUTE=own armed for update/postbuild/copy checks");
     build.Inputs = blas_inputs;
     build.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
@@ -505,6 +534,112 @@ int main(int argc, char** argv) {
               "{\"kind\": \"blas\", \"pairs\": true, \"address\": " +
                   std::to_string(static_blas->GetGPUVirtualAddress()) + ", \"triangles\": " + tris + "}\n"))
         return fail("static BLAS readback");
+
+    // Synthetic helper-export coverage: the normal XboxBvhBuilder exports now resolve to our public D3D12 route when
+    // armed. This exercises the same 0x50 batched description as the package helper, without loading package bytes.
+    using HelperPrebuild = void (*)(void*, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS*,
+                                    const palmetto::xdxr::StreamDesc*,
+                                    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO*);
+    using HelperBuild = void (*)(void*, ID3D12GraphicsCommandList4*,
+                                 const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC*, UINT,
+                                 const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC*);
+    using HelperBatchedBuild = void (*)(void*, ID3D12GraphicsCommandList6*, UINT,
+                                        const palmetto::xdxr::BatchedDesc2*);
+    using HelperCopy = void (*)(void*, ID3D12GraphicsCommandList4*, UINT64, UINT64,
+                                D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE);
+    using HelperRefuseRehydrateBatched2 = HRESULT (*)(void*, ID3D12GraphicsCommandList8*, UINT,
+                                                       const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC*,
+                                                       const UINT64*);
+    using HelperRefuseRehydrateBatched = HRESULT (*)(void*, ID3D12GraphicsCommandList8*, UINT,
+                                                      const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC*);
+    using HelperRefuseRehydrateDevice = HRESULT (*)(void*, void*,
+                                                     const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC*);
+    auto helper_prebuild = reinterpret_cast<HelperPrebuild>(palmetto_bvh_helper_export(
+        "xboxbvhbuilder.dll", helper_prebuild_symbol, &package_export_marker));
+    auto helper_build = reinterpret_cast<HelperBuild>(palmetto_bvh_helper_export(
+        "xboxbvhbuilder.dll", "?BuildRaytracingAccelerationStructure@XboxBvhBuilder@@QEAAX",
+        &package_export_marker));
+    auto helper_batched_build = reinterpret_cast<HelperBatchedBuild>(palmetto_bvh_helper_export(
+        "xboxbvhbuilder.dll", helper_batched_build_symbol, &package_export_marker));
+    auto helper_copy = reinterpret_cast<HelperCopy>(palmetto_bvh_helper_export(
+        "xboxbvhbuilder.dll", "?CopyRaytracingAccelerationStructure@XboxBvhBuilder@@QEAAX",
+        &package_export_marker));
+    auto refuse_rehydrate_batched2 = reinterpret_cast<HelperRefuseRehydrateBatched2>(palmetto_bvh_helper_export(
+        "xboxbvhbuilder.dll", "?RehydrateRaytracingAccelerationStructureBatched2X@XboxBvhBuilder@@QEAAX",
+        &package_export_marker));
+    auto refuse_rehydrate_batched = reinterpret_cast<HelperRefuseRehydrateBatched>(palmetto_bvh_helper_export(
+        "xboxbvhbuilder.dll", "?RehydrateRaytracingAccelerationStructureBatchedX@XboxBvhBuilder@@QEAAX",
+        &package_export_marker));
+    auto refuse_rehydrate_device = reinterpret_cast<HelperRefuseRehydrateDevice>(palmetto_bvh_helper_export(
+        "xboxbvhbuilder.dll", "?RehydrateRaytracingAccelerationStructureX@XboxBvhBuilder@@QEAAX",
+        &package_export_marker));
+    if (!helper_prebuild || !helper_build || !helper_batched_build || !helper_copy || !refuse_rehydrate_batched2 ||
+        !refuse_rehydrate_batched || !refuse_rehydrate_device)
+        return fail("resolve helper build/copy/refusal exports");
+    if (refuse_rehydrate_batched2(nullptr, nullptr, 0, nullptr, nullptr) != E_NOTIMPL ||
+        refuse_rehydrate_batched(nullptr, nullptr, 0, nullptr) != E_NOTIMPL ||
+        refuse_rehydrate_device(nullptr, nullptr, nullptr) != E_NOTIMPL)
+        return fail("helper rehydrate exports did not return named refusal");
+
+    palmetto::xdxr::StreamDesc no_stream{};
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO helper_info{};
+    helper_prebuild(nullptr, &static_inputs, &no_stream, &helper_info);
+    if (helper_info.ResultDataMaxSizeInBytes != static_info.ResultDataMaxSizeInBytes ||
+        helper_info.ScratchDataSizeInBytes != static_info.ScratchDataSizeInBytes ||
+        helper_info.UpdateScratchDataSizeInBytes != static_info.UpdateScratchDataSizeInBytes)
+        return fail("helper prebuild does not match the public XDXR layout");
+
+    palmetto::xdxr::BatchedDesc2 helper_desc{};
+    helper_desc.dest_acceleration_structure_data = static_blas->GetGPUVirtualAddress();
+    helper_desc.inputs.type = static_cast<std::uint32_t>(static_inputs.Type);
+    helper_desc.inputs.flags = static_cast<std::uint32_t>(static_inputs.Flags);
+    helper_desc.inputs.num_descs = static_inputs.NumDescs;
+    helper_desc.inputs.descs_layout = static_cast<std::uint32_t>(static_inputs.DescsLayout);
+    helper_desc.inputs.descs = static_cast<std::uint64_t>(
+        reinterpret_cast<std::uintptr_t>(static_inputs.pGeometryDescs));
+    helper_desc.scratch_acceleration_structure_data = scratch->GetGPUVirtualAddress();
+    Ref<ID3D12GraphicsCommandList6> list6;
+    if (FAILED(hr = list->QueryInterface(IID_PPV_ARGS(list6.put())))) return fail("query helper GCL6", hr);
+    if (FAILED(allocator->Reset()) || FAILED(list->Reset(allocator.p, nullptr)))
+        return fail("Reset for helper standard build");
+    helper_build(nullptr, list.p, &build, 0, nullptr);
+    list->ResourceBarrier(1, &barrier);
+    list->CopyBufferRegion(static_rb.p, 0, static_blas.p, 0, static_info.ResultDataMaxSizeInBytes);
+    if (!submit(8)) return fail("helper standard build submission");
+    if (!dump(static_rb.p, static_info.ResultDataMaxSizeInBytes, "d3d12_helper_build",
+              "{\"kind\": \"blas\", \"pairs\": true, \"address\": " +
+                  std::to_string(static_blas->GetGPUVirtualAddress()) + ", \"triangles\": " + tris + "}\n"))
+        return fail("helper standard BLAS readback");
+
+    if (FAILED(allocator->Reset()) || FAILED(list->Reset(allocator.p, nullptr)))
+        return fail("Reset for helper batched build");
+    helper_batched_build(nullptr, list6.p, 1, &helper_desc);
+    list->ResourceBarrier(1, &barrier);
+    list->CopyBufferRegion(static_rb.p, 0, static_blas.p, 0, static_info.ResultDataMaxSizeInBytes);
+    if (!submit(9)) return fail("helper batched build submission");
+    if (!dump(static_rb.p, static_info.ResultDataMaxSizeInBytes, "d3d12_helper_batched",
+              "{\"kind\": \"blas\", \"pairs\": true, \"address\": " +
+                  std::to_string(static_blas->GetGPUVirtualAddress()) + ", \"triangles\": " + tris + "}\n"))
+        return fail("helper batched BLAS readback");
+
+    Ref<ID3D12Resource> helper_copy_blas, helper_copy_rb;
+    if (FAILED(hr = buffer(device.p, D3D12_HEAP_TYPE_DEFAULT, static_info.ResultDataMaxSizeInBytes, as_state, uav,
+                           helper_copy_blas.put())) ||
+        FAILED(hr = buffer(device.p, D3D12_HEAP_TYPE_READBACK, static_info.ResultDataMaxSizeInBytes,
+                           D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE, helper_copy_rb.put())))
+        return fail("helper copy buffers", hr);
+    if (FAILED(allocator->Reset()) || FAILED(list->Reset(allocator.p, nullptr)))
+        return fail("Reset for helper copy");
+    helper_copy(nullptr, list.p, helper_copy_blas->GetGPUVirtualAddress(), static_blas->GetGPUVirtualAddress(),
+                D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_CLONE);
+    list->ResourceBarrier(1, &barrier);
+    list->CopyBufferRegion(helper_copy_rb.p, 0, helper_copy_blas.p, 0, static_info.ResultDataMaxSizeInBytes);
+    if (!submit(10)) return fail("helper copy submission");
+    if (!dump(helper_copy_rb.p, static_info.ResultDataMaxSizeInBytes, "d3d12_helper_copy",
+              "{\"kind\": \"blas\", \"pairs\": true, \"address\": " +
+                  std::to_string(helper_copy_blas->GetGPUVirtualAddress()) + ", \"triangles\": " + tris + "}\n"))
+        return fail("helper copy BLAS readback");
+
     std::printf("d3d12_xdxr_rt: BLAS %llu bytes (prebuild %llu), TLAS (prebuild %llu), written to %s\n",
                 static_cast<unsigned long long>(blas_info.ResultDataMaxSizeInBytes),
                 static_cast<unsigned long long>(blas_info.ResultDataMaxSizeInBytes),

@@ -9,6 +9,10 @@
 #include "command_list.h"
 #include "xdxr_route.h"
 
+// Resolves an opt-in XboxBvhBuilder export bridge. The D3D12 COM layer supplies the route/refusal thunks; the PE loader
+// passes the original export pointer so the disabled and unrelated paths keep pointer identity.
+extern "C" void* palmetto_bvh_helper_export(const char* module, const char* symbol, void* package_export);
+
 namespace palmetto::xdxr::command_route {
 
 // VkBuildAccelerationStructureFlagsKHR values used by the IR's Vulkan replay path. Keep these local so the planner

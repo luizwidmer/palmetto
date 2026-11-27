@@ -319,3 +319,86 @@ D3D12.X/memory/storage/ray-tracing/audio documentation and loader-shim headers);
 are not the read target for this follow-on. No peer code, comment text, identifier or table was copied. The
 implementation comes from this project's own measured D3D12/XDXR descriptions, command-list IR and GPU builder. The
 NOTICE attribution row belongs to the lead's commit, as [upstream_port.md](upstream_port.md) section 3 requires.
+
+## 10. Helper-export interception addendum (2026-11-27)
+
+This addendum supersedes the earlier statement in §3.1 that no helper-export interception exists. It does **not** claim
+package-output parity or title-route readiness. This turn used only repository source and the recorded measurements
+cited below; no game data or package bytes were opened, read or executed, and no title boot was run.
+
+### 10.1 Measured export and resolver contract
+
+The title's bundled `XboxBvhBuilder.dll` exports are reached in two ways: static module-export resolution in
+`Loader::resolve` and dynamic `GetProcAddress` through `Loader::resolve_module_export` (the latter is called by the
+library-loader shim). Before this change both returned the mapped `Module::exports` address unchanged. The new bridge
+matches the exact helper module basename and measured export method prefix/ordinal only; it does not rewrite the PE
+export table or mapped bytes.
+
+The existing evidence in [xdxr.md](xdxr.md) and
+[d3d12_command_objects.md](d3d12_command_objects.md) establishes these signatures and shapes:
+
+| export | measured contract | route result with `PALMETTO_BVH_ROUTE=own` |
+|---|---|---|
+| prebuild (ordinal 2) | public `INPUTS` plus 16-byte `XDXR_STREAM_DESC`; exports return `void`; the helper builds a `BATCHED_DESC2` | answer from this tree's `XdxrLayout` |
+| standard build (ordinal 3) | GCL4, public build desc, postbuild count and pointer; wrapper builds one batched record | delegate to public COM build after route preflight |
+| batched build (ordinal 4) | GCL6, count and `0x50`-byte `BATCHED_DESC2` array; 256-byte `Dest` alignment and postbuild loop | preflight the whole batch, unwrap the Xbox list proxy, then record each build through GCL4 |
+| copy (ordinal 5) | GCL4, destination/source VAs and copy mode; the route supports clone/compact only | delegate to the public COM copy path after named validation |
+| rehydrate batched2 (ordinal 8) | GCL8, count, public desc array and a trailing `UINT64*` | named refusal: trailing array contract is unmeasured |
+| rehydrate batched (ordinal 9) | GCL8, count and public desc array | named refusal: the helper's CPU-side dehydrated-stream reconstruction is not wired to the GPU XDXR builder |
+| rehydrate device (ordinal 10) | Device11 and one public desc; the recorded CPU form reads source/geometry/destination/scratch as host pointers | named refusal: no measured destination extent or hidden GPU-submission contract for this route |
+
+`bvh.md` §4a records byte-exact CPU reconstruction of the offline BVH format for eight measured BLAS, plus checks on
+the archive stream packing. That data-format evidence is distinct from a safe runtime adapter for all three exported
+rehydrate signatures: the batched2 trailing array and the device-only call's destination/submission ownership are not
+implemented here. Refusal thunks return `E_NOTIMPL` and never fall through to the package implementation while the
+switch is armed.
+
+The package build's measured console-only slot 148 request (40 bytes, 16-byte alignment) remains the reason not to
+call the package build routine: its returned CPU pointer is passed unchanged as a GPU root address. The new build
+adapter avoids that call by unwrapping the console command-list proxy with the existing proxy helper and invoking the
+public GCL4 route. It uses this tree's XDXR layout/builder, not the helper's private compute pipelines or its internal
+BVH byte order. Constructor, `CpuValidateResultX`, `Set64BitMortonCodes`, other unrecognized exports and the package's
+own helper state are not intercepted; this slice makes no claims about them.
+
+### 10.2 Switch-off contract and focused coverage
+
+`PALMETTO_BVH_ROUTE` remains opt-in and defaults off. Both static and dynamic export resolution pass the original
+mapped function pointer through the selector. With the switch off, or for a different module/unknown symbol, the
+selector returns that exact pointer; no PE bytes or export entries are patched. With the switch on, measured
+prebuild/build/batched-build/copy symbols resolve to route thunks and the three rehydrate symbols resolve to named
+refusal thunks. The route classifier and pointer selector have CPU tests in `xdxr_descs_test`.
+
+`d3d12_xdxr_rt_test` now adds synthetic standard build, public-GCL6 batched-build and helper Copy calls through the
+export bridge, compares helper prebuild sizes against the direct public answer, and writes each structure for
+`xdxr_bvh.py check-build` ray checks. It also calls the three rehydrate refusal thunks and expects `E_NOTIMPL`. It uses
+only synthetic geometry. The test calls the C bridge directly with public lists; it does not yet
+exercise actual PE-loader resolution or a console command-list proxy. These new tests were **not built or run in this
+slice**: the lead requested one serialized full gate after all slices report. Schedule the existing `d3d12_xdxr_rt` and
+`d3d12_xdxr_rt_check` tests in that gate window, including the synthetic GPU cases; `TESTS_BUILT` and `PALMETTO_OK`
+remain pending. No title boot was run.
+
+### 10.3 Limits and next falsifier
+
+This change adds a source-level hook at the dynamic/static resolver callsites, but tests the C bridge directly—not the
+`Loader` or library-loader execution path, and not a console command-list proxy. It is not a live title import or a
+shader-visible title frame. The route's public prebuild uses `XdxrLayout`; it does not reproduce helper-specific stream
+alternate layouts, exact decompressed offline BVH topology, or package CPU write timing. The original helper constructor
+and non-routed exports remain in place. No claim of helper-export parity, title-ready BVH writes or rehydrate support is
+made until the deferred checks pass.
+
+**Next falsifier:** in the lead's serialized gate, build/run the synthetic GPU route and verify that the helper-resolved
+batched build and helper Copy pass the existing brute-force ray checker, while the off-mode pointer identity and
+rehydrate named-refusal tests pass. Add or schedule a bounded synthetic check that enters through `Loader::resolve_module_export`
+and supplies the Xbox command-list proxy, proving that `command_list_proxy_real_list` unwraps to the public GCL4 before
+Build/Copy. A later, separately authorized test should supply a synthetic dehydrated stream to each rehydrate entrypoint
+and check output bytes/addresses and command-list completion timing; any output mismatch, non-null batched2 side data
+that cannot be decoded, or device-only destination-size ambiguity keeps that export refused. Only after those checks
+should a boot test capture the title's actual dynamic import resolution and the shader-visible destination path.
+
+### 10.4 Attribution pointer for the lead's NOTICE row
+
+The code is this project's own implementation, derived from its local measured XDXR/COM contracts; no peer source,
+comments, identifiers or data tables were used. The slice evidence was cross-checked against rank 6 of
+[cleanroom_peers.md](cleanroom_peers.md): XCL (`623d02e`), Five Star Recomp (`34b4dfed`), VIctory (`63bcca4`),
+PercyScarlett (`e44c465`) and the victory-fork snapshot (`9a9091d`). The NOTICE row belongs to the lead's commit, as
+[upstream_port.md](upstream_port.md) section 3 requires.
