@@ -30,6 +30,12 @@ that landed our implementation, and whether the port was measured on a boot or i
 | DPI-aware window fit plan | `peer_port_first_ui.md` section 16 | `f2d6736a2` | measured planner; opt-in, no title arm yet |
 | BVH route plan wired into RT slots | `bvh_route.md` | `a19ce9aab` | measured GPU: route arm on update/postbuild/copy, 0/1000 ray diffs; helper rehydration unwired |
 | Kind-7 upscaler consumer plan | `fsr_route.md` section 9 | `0148cbfeb` | readiness: shapes measured, no FFX dispatch/consumer observation yet |
+| Viewport/scissor array capture and named refusals | `d3d12_vulkan.md` | `dfe2337ef` | measured: bounded capture, count>1 refused until pipeline dynamic states land |
+| Title-VA windows on the device | `vertex_buffer_va.md` section 24 | `75e9991a2` | measured: raw-VA resolve/window unit evidence; GPU falsifier named |
+| Bindless degradation override and telemetry | `bindless_degradation.md` section 9 | `33f20f0c2` | measured: default unchanged, legacy mode pinned; real exhaustion unmeasured |
+| Native write-fault watch and shadow invalidation | `title_memory_model.md` section 12 | `805b42ed4` | measured: 545 xmem checks, synthetic fault stress; no title consumer yet |
+| Synthetic audio decoder contract | `audio_decode.md` | `cd47ec306` | 18 Rust FFI contract tests; codec-header validation unproven |
+| 120 Hz and kind-7 arms | `window.md` / `fsr_route.md` | `5746b8123` | measured negatives: no enumeration trace; no post-map FSPX consumer |
 | Presenter attestation, fit rule and synthetic non-black control | `peer_port_first_ui.md` section 15 | `779ce8be0` | measured: synthetic bands reach the capture exactly; presenter is not the black cause |
 | Movie draw-path probes | `peer_port_movie.md` section 13 | `2e9915cbb` | measured: draw path never issued (all six sites zero); downstream of the session-3 poll |
 | Pull-request CI guarantees | board D-03 | `2bb13be8b` | measured: docs-only and runtime-path gaps closed and registered |

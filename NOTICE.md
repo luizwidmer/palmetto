@@ -171,3 +171,16 @@ event/thread mirror unlike this tree's watcher-backed proxy cell. VIctory's `cra
 as a contrasting atomic fence-value model; it does not establish this title's slot numbering. The target call shape,
 record validation and encoding remain derived from this repository's own measurements. No source, comments, identifiers or
 tables from these projects were copied; each upstream remains the copyright of its contributors under its own licence.
+
+The bounded viewport/scissor array capture and the named multi-element draw refusals ([docs/d3d12_vulkan.md](docs/d3d12_vulkan.md))
+were cross-checked against the peers' D3D12.X replay descriptions (Five Star Recomp GPL-3.0-or-later `34b4dfed`, VIctory
+GPL-3.0-or-later `63bcca4`, XCL GPL-2.0-only `623d02e`). The title-VA window device integration
+([docs/vertex_buffer_va.md](docs/vertex_buffer_va.md)) was cross-checked against Five Star Recomp (`34b4dfed`), VIctory
+(`63bcca4`) and XCL (`623d02e`) memory/VA material. The bindless degradation override and telemetry
+([docs/bindless_degradation.md](docs/bindless_degradation.md)) were cross-checked against the reference fork
+(`ubiquitarianism/leonida`, GPL-3.0, `273b3bdf9`), Five Star Recomp (`34b4dfed`) and XCL (`623d02e`). The native write-fault
+watch ([docs/title_memory_model.md](docs/title_memory_model.md), section 12) was cross-checked against Five Star Recomp,
+VIctory and XCL at the same campaign snapshots. The synthetic audio decoder contract ([docs/audio_decode.md](docs/audio_decode.md))
+was informed by the in-tree decoder only; peers were behavioural evidence. The 120 Hz/kind-7 arm results are measurements of
+this host, not peer claims. All are evidence only; no source, comments, identifiers or data tables were copied, and each
+upstream remains the copyright of its contributors under its own licence.
