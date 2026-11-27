@@ -3,11 +3,11 @@
 Ledger of **what people are sending** to the project's GitHub home, plus our own tracked findings for the boot port. Each row carries area, state and one-line evidence. Counts, error classes and commit ids only — no game data, package paths, shader bytes or hashes.
 Maintained by the issue-tracker agent as a standing, read-only-plus-this-file role.
 
-**Repo:** `palmetto`, branch `main`, HEAD `38231dd4d` · **GitHub:** [luizwidmer/palmetto](https://github.com/luizwidmer/palmetto)
-**Updated:** 2026-11-25 (only the two live issues, the pre-rename numbers marked historical, and the current frontier in "Where the project stands") · **Incoming:** #1 closed (re-baselined), #2 open · **Ours open:** 10 (O3 partial; O8, O9, O15, O18–O23) · **Done:** 25 · **Superseded:** 5 (O1, O6, O10, O12, O16) · **Open PRs:** 0.
+**Repo:** `palmetto`, branch `main`, HEAD `4177f6832` · **GitHub:** [luizwidmer/palmetto](https://github.com/luizwidmer/palmetto)
+**Updated:** 2026-11-27 (live GitHub state and the task-board pointer; the pre-rename numbers stay historical) · **Incoming:** #1 closed (re-baselined), #2 open · **Ours open:** 10 (O3 partial; O8, O9, O15, O18–O23) · **Done:** 25 · **Superseded:** 5 (O1, O6, O10, O12, O16) · **Open PRs:** 0.
 
-**Policy: ledger only.** Do not open, comment on, close, delete or edit GitHub issues/PRs, or commit/push, without an
-explicit ask. Replies to reports are **HOLD** — the repo owner has not approved public replies; nothing has been posted.
+**Policy: ledger only.** The task board and issue triage are the maintainer's lane; do not post replies to reporters
+without the repo owner's approval - that part is still **HOLD**. Work claims are public on the board, not in this file.
 
 **Where the project stands (measured on one machine; one 150 s boot unless named).** The retail target console title
 boots and runs through the runtime: **ALIVE past 300 s with no exception**; **all 10,241 slot-57 records build into real
@@ -36,8 +36,10 @@ Live issues on [luizwidmer/palmetto](https://github.com/luizwidmer/palmetto/issu
 
 | # | sender | state | what they sent | tracking |
 |---|---|---|---|---|
-| #2 | XccQ114 | open · being fixed in the tree | Post-rename de-branding residue, checked against the tree and the GitHub API: the claim procedure and the "How to build" contact link still spell the repository as a literal placeholder in GitHub URLs and a `gh -R` command (`CONTRIBUTING.md`, `AGENTS.md`, `.github/ISSUE_TEMPLATE/config.yml`); this ledger cited issue numbers from the pre-rename repository; two de-branding leftovers remain (`docs/movie_path.md` author name, `docs/bcpack_runtime.md` env-var name); `cmake -S runtime` names a directory with no `CMakeLists.txt` (`AGENTS.md`), while the source directory is `port` | Being fixed in this pass: the real repository in the links and commands, the title-based search for the coordination issue with an open-it-yourself fallback, this ledger rewritten (the pre-rename numbers noted below), both leftovers retired, `-S port`; the same placeholder-phrase sweep also corrected `build_port.py`'s clone instruction, the dashboard's default repository and the two tests that asserted the old strings. No reply posted (HOLD) |
+| #2 | XccQ114 | closed (done) | Post-rename de-branding residue, checked against the tree and the GitHub API: the claim procedure and the "How to build" contact link still spell the repository as a literal placeholder in GitHub URLs and a `gh -R` command (`CONTRIBUTING.md`, `AGENTS.md`, `.github/ISSUE_TEMPLATE/config.yml`); this ledger cited issue numbers from the pre-rename repository; two de-branding leftovers remain (`docs/movie_path.md` author name, `docs/bcpack_runtime.md` env-var name); `cmake -S runtime` names a directory with no `CMakeLists.txt` (`AGENTS.md`), while the source directory is `port` | Being fixed in this pass: the real repository in the links and commands, the title-based search for the coordination issue with an open-it-yourself fallback, this ledger rewritten (the pre-rename numbers noted below), both leftovers retired, `-S port`; the same placeholder-phrase sweep also corrected `build_port.py`'s clone instruction, the dashboard's default repository and the two tests that asserted the old strings. No reply posted (HOLD) |
 | #1 | marekpastuszczak-lang | closed (done) | A finding, not a fix: the black loading loop is the title's init state (2); four shim answers that differ from the console (silent speech, slot-25 depth-stencil + unordered-access sizing, sampled A8 1D/3D, device slot 74) and the two `int3` asserts those answers remove | Closed after re-baseline and implementation: [`docs/issue1_baseline.md`](issue1_baseline.md) re-measured the probe after the read repairs, landed the three deltas still absent at HEAD (slot-25 stand-in, sampled A8 1D/3D, device slot 74 `S_OK`), removed `game+0x1e6c2c5` and `game+0x344196`, and attributed the two remaining asserts to console device slot 41 (`CreateCommandSignature`); the issue's state words still hold (game state 2, session 0, still-black stationary loop) |
+| [#4](https://github.com/luizwidmer/palmetto/issues/4) | XccQ114 | open - task board | The shared coordination issue, now the canonical task board: claims and statuses indexed by task ID, with the repo copy of the rules and backlog snapshot in [taskboard.md](taskboard.md). |
+| [#5](https://github.com/luizwidmer/palmetto/pull/5) | XccQ114 | merged (done) | Crash report: dump every thread, not only the faulting one (O3) - verified on a test merge, approved and merged rebased. |
 
 **Pre-rename issue numbers are historical only.** Earlier versions of this page cited `#1`-`#5` from the repository
 that existed before the rename: that repository was deleted, its issue objects are gone, and the re-created repository
@@ -45,6 +47,12 @@ reused the numbers for different objects (the live `#1` above is the closed blac
 the old `#5` has no counterpart here at all). Treat every such number quoted by an older page, note or commit message
 as narrative history with no tracker link; the table above is the only live incoming list. The reports behind the old
 numbers cannot be replied to any more: nothing was posted, and the old draft replies are withdrawn as historical.
+
+## Task board
+
+[taskboard.md](taskboard.md) is the repository copy of the board rules and backlog; the pinned coordination issue (#4) is
+the live board. New work is claimed there by task ID (`P-`, `C-`, `D-` rows marked open; `F-` rows and maintainer rows need
+the maintainer's OK), and the row links the evidence page that defines what done means.
 
 ## Our findings — open
 
@@ -71,6 +79,8 @@ and no device call names them. O23 (slot 70's publication encoding) and O21 (slo
 console entry points on that path. O15 cannot be pinned by
 behaviour and needs a layout source. O3's fault-time every-thread dump is the highest-value diagnostic while the title
 runs; O8 and O9 are build/corpus hygiene. The full build is green (237/237), so O5 is done.
+
+**Status note (2026-11-27):** the frontier paragraphs above are the stage-2 snapshot that produced this ledger; the project has since reached stage 3 and the current work is tracked on the task board. The findings below remain the evidence record for those measurements.
 
 ## Our findings — done
 

@@ -12,14 +12,20 @@ Thanks for helping. A few rules keep the project safe to host:
 
 ## Before you start
 
-Claim the work in [the coordination issue][claims] first: the open issue titled "Coordinating who works on what" (it
-moves to a new issue when the thread gets long, so the link searches for it instead of naming a number). If that finds
-no open coordination issue, open one with exactly that title and claim work in it. Check its tables and the open pull
-requests, post `claiming: <ID>` there (or a one-line description for something not listed yet), and put the ID in
-your pull request. Found something that needs doing but won't do it yourself? Post `finding: <one line>` there, with
-where it is and why it matters, and it goes on the list for others. When two pull requests overlap anyway, the one
-that lands first is merged and the other is asked to rebase or close. GPU test results go in the pull request that
-changes them. Work on the D3D12 → Vulkan layer is planned and tracked in
+Work is claimed on the shared task board: the pinned coordination issue
+("Coordinating who works on what"), whose rules and a snapshot of the backlog live in
+[docs/taskboard.md](docs/taskboard.md). Read the board and the open pull requests first, then post one claim comment:
+
+```
+claiming: <ID> - <one line on the approach and the files you expect to touch>
+```
+
+Only `P-`, `C-` and `D-` rows marked `open` are claimable; `F-` rows and rows marked `maintainer` are the maintainer's
+lane, so ask in the issue before starting one. If the work has no row yet, post `finding: <one line>` with where it is and
+why it matters and the maintainer adds it. Name the task in the pull request body (`Task: <ID>`), keep one task per pull
+request, and when it merges post `done: <ID> -> #<PR>` - or `release: <ID>` the same day if you stop. When two pull requests
+overlap anyway, the one that lands first is merged and the other is asked to rebase or close. GPU test results go in the pull
+request that changes them. Work on the D3D12 -> Vulkan layer is planned and tracked in
 [docs/d3d12_vulkan.md](docs/d3d12_vulkan.md): the plan, what is measured, and which D3D12 methods are still open.
 
 [claims]: https://github.com/luizwidmer/palmetto/issues?q=is%3Aissue+is%3Aopen+in%3Atitle+%22Coordinating+who+works+on+what%22

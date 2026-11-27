@@ -36,20 +36,22 @@ loader that maps the game's executable and resolves its imports to shims. Nothin
 
 ## Claim before you start
 
-- Work is claimed in the coordination issue before a pull request is opened: the open issue titled "Coordinating
-  who works on what". It moves to a new issue when the thread gets long, so look it up instead of using an old
-  number:
+- Work is claimed on the shared task board before a pull request is opened: the pinned coordination issue
+  ("Coordinating who works on what"). Its rules and a backlog snapshot are in [docs/taskboard.md](docs/taskboard.md).
+  Look it up instead of using an old number:
 
   ```sh
   gh issue list -R luizwidmer/palmetto --state open --search "Coordinating who works on what in:title"
   ```
 
-  If that finds no open coordination issue, open one with exactly that title and claim work in it.
   With no `gh` auth, the search link in [CONTRIBUTING.md](CONTRIBUTING.md) works in a browser; say so when you cannot
   read the claims at all rather than guessing that a thing is unclaimed.
 
-  Check its tables and the open pull requests first. If someone has claimed the item or has a pull request for it,
-  stop and tell the user instead of writing it a second time.
+  Check its tables and the open pull requests first. Post one claim, `claiming: <ID> - <approach and files>`. Only `P-`,
+  `C-` and `D-` rows marked `open` are claimable; `F-` rows and rows marked `maintainer` need the maintainer's OK first.
+  If someone has claimed the item or has a pull request for it, stop and tell the user instead of writing it a second
+  time. Name the task in the pull request (`Task: <ID>`), one task per pull request, and post `done: <ID> -> #<PR>` or
+  `release: <ID>` when the work ends.
 - Put the item ID from that issue in the pull request, and `Depends on: #N` for every pull request yours builds on.
 - Found work you won't do yourself (a bug, a missing method, a stale doc, a follow-up of your own pull request)?
   Post it in the coordination issue as `finding: <one line>`, followed by where it is (file and line), why it matters,
