@@ -1,20 +1,21 @@
 # Translator fixes measured against the compute request union
 
-**Status: measured, uncommitted slice.** Five translator fixes and the loop guard, implemented from this tree's own
-analysis of the corpus, with the measured effect on the title's later compute-pipeline request union (the 668
-programs `corpus2/cov` asks for; [compute_slot67.md](compute_slot67.md)) and on the two corpora that already
+**Status: measured, uncommitted translator slices.** Six translation-coverage fixes and the loop guard, implemented from
+this tree's own analysis of the corpus, have measured effects on the title's later compute-pipeline request union (the
+668 programs `corpus2/cov` asks for; [compute_slot67.md](compute_slot67.md)) and on the two corpora that already
 translated completely. The gap analysis that ranked them is `translator_gap_plan.md` in the work folder; this page
-holds the implemented state, its numbers, its tests and its limits. No program bytes, package paths or hashes are
-reproduced here: counts and program keys only, and the keys are in the slice report, not in this page.
+holds the implemented state, its numbers, its tests and its limits. No program bytes, package paths, content hashes or
+per-program identifiers are reproduced here: aggregate counts and refusal names only.
 
 ## 1. Why these fixes
 
 The boot corpus has no translator gap: the 1,266 boot graphics programs and the 29 FidelityFX programs translate and
-validate (measured again by this slice, below). The gap is the request union: of its 668 programs the stable tree
-translated **444 (66.5%)** and refused 224, and every refused program is a slot-67
-`DeserializeComputePipelineStateX` refusal at run time. The refusal classes are one problem reached from different
-sides: the listings come from `llvm-mc`, which skips a word it cannot decode and keeps printing, so a program with a
-rejected word drifts out of alignment with its blob; the translator re-anchors and refuses what it cannot place.
+validate (measured again by the earlier slices, below). At the start of this fix series, the request union's stable tree
+translated **444 (66.5%)** of 668 programs and refused 224; every refused program is a slot-67
+`DeserializeComputePipelineStateX` refusal at run time. The later sections measure successive changes; the latest scan is
+in section 15. The refusal classes are one problem reached from different sides: the listings come from `llvm-mc`, which
+skips a word it cannot decode and keeps printing, so a program with a rejected word drifts out of alignment with its
+blob; the translator re-anchors and refuses what it cannot place.
 
 Two of the three fixes are small, self-contained refusals that were stopping 36 programs (25 + 11). The third is not
 coverage at all: it is termination. A translated loop whose exit never becomes reachable spins forever on the GPU and
@@ -281,3 +282,30 @@ The synthetic [fixture](../tests/semantic/fixtures/disasm/ps_smov_sgpr_gap.s) an
 The final `python -I tooling/rdna2spirv.py <listings> --out <scratch> --no-asm --wave64-emulate --refusals <scratch>/refusals.json` scan again translated and validated **491 / 668** programs and refused 177: fall-through 165, cannot re-anchor 8, `v_cmp` destination 2, mask destination 1, and normalized encoding 1. The rule restored the 12 measured words, but each affected program still reaches a later unsupported gap, so the net full-module closure is **0 programs**. All **491** modules that translated before this rule are byte-identical afterward (491/491; 0 changed, none missing, none added). Scan outputs and the refusal manifest remain outside the repository; only aggregate counts are recorded.
 
 The rule and fixture use this tree's RDNA2 decoder and semantics; peer notes were evidence-only, and no peer implementation or fixture was copied. No new `NOTICE.md` entry is needed.
+
+## 15. One exact LGKM wait in a decode gap
+
+### Measured sub-class
+
+A fresh GPU-free Python scan of the current 668-program request union, before this rule, translated and `spirv-val` checked **491 / 668** programs and refused 177: fall-through 165, cannot re-anchor 8, `v_cmp` destination 2, mask destination 1, and normalized encoding 1. An aggregate-only pass over the 165 fall-through refusals inspected 138 reachable four-byte gap candidates; exactly **30** decode as one complete, unmodified SOPP `s_waitcnt` with the sole operand `lgkmcnt(0)`. No program identifiers or native words are recorded.
+
+| refusal before this rule | programs |
+|---|---:|
+| fall-through into undecodable words | 165 |
+| undecodable words (cannot re-anchor) | 8 |
+| `v_cmp` destination | 2 |
+| mask destination | 1 |
+| reachable instruction with normalized encoding | 1 |
+| **total refused** | **177** |
+
+### Narrow rule and semantic fixture
+
+At a reachable fall-through only, the callback examines a four-byte gap when the next listed instruction starts exactly four bytes later. `scalar_waitcnt_lgkm0_gap_word()` accepts only a complete one-instruction RDNA2 decode whose raw encoding matches and whose sole operand is exactly `lgkmcnt(0)`. The existing `NOOPS` path emits no SPIR-V operation for `s_waitcnt`; this recovery adds no new wait/barrier behavior. The one-word recovery budget is shared with the earlier plain-SGPR-move rule. Other wait counts (`vmcnt(0)`, nonzero `lgkmcnt`), other opcodes, wider gaps and branch targets remain refused.
+
+The synthetic [fixture](../tests/semantic/fixtures/disasm/ps_s_waitcnt_lgkm0_gap.s) and [CPU semantic test](../tests/semantic/test_s_waitcnt_lgkm0_gap.py) verify the exported value after the hidden wait and keep `vmcnt(0)` / `lgkmcnt(1)` controls refused. This is CPU-only; no GPU or game shader is used.
+
+### Closure and byte-identity check
+
+The same union scan after the rule translated and validated **491 / 668** programs and refused the same 177 classes. The exact wait was recovered in 30 programs, but each still reaches a later unsupported gap, so full-module closure is **0 programs** and the refusal manifest has 0 status changes. All **491** previously translating modules are byte-identical afterward (491/491; 0 changed, missing or added), verified by SHA-256 comparison. Scan outputs were temporary and outside the repository; after the identity check only these aggregate counts remain.
+
+This rule follows the current tree's decoder and existing no-op contract; peer materials were evidence-only and no peer implementation or fixture was used.

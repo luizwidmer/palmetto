@@ -16578,8 +16578,8 @@ def reachable_code(insns, code_end=None, recover_gap=None):
             if k is None and nxt < code_end:
                 # The next words are ones llvm-mc could not decode (re-anchoring skipped them) and this instruction
                 # runs into them: ending the path here would drop every later store and export without a word.
-                # The measured scalar-move exception is considered only at a live fall-through with a listed
-                # instruction immediately after the 4-byte gap. It cannot repair a branch into data or a wider gap.
+                # The measured gap-word exceptions are considered only at a live fall-through with a listed
+                # instruction immediately after the 4-byte gap. They cannot repair a branch into data or a wider gap.
                 word = recover_gap(nxt) if recover_gap and nxt + 4 in by_pc else None
                 if (word is not None and word.get("pc") == nxt and len(word.get("enc", "")) == 8 and
                         nxt + 4 in by_pc):
@@ -17408,6 +17408,30 @@ def scalar_smov_gap_word(blob, pc):
     return ins
 
 
+def scalar_waitcnt_lgkm0_gap_word(blob, pc):
+    """Decode only the measured 4-byte SOPP `s_waitcnt lgkmcnt(0)` gap.
+
+    This exact wait follows the translator's existing NOOPS contract; this recovery adds no wait or barrier behavior.
+    Other wait counts may impose ordering this model does not prove equivalent, so they remain refused. Exact raw
+    encoding, full width and a single decoded instruction are required.
+    """
+    raw = blob[pc:pc + 4]
+    if len(raw) != 4:
+        return None
+    import rdna2_decode     # on demand: only a listing with a skipped word reaches this path
+    decoded = rdna2_decode.decode_bytes(raw, mcpu="gfx1030", code_start=pc)
+    if decoded["invalid"] or len(decoded["insns"]) != 1:
+        return None
+    ins = decoded["insns"][0]
+    if (base_op(ins["op"]) != "s_waitcnt" or len(ins.get("enc", "")) != 8 or
+            bytes.fromhex(ins["enc"]) != raw or ins.get("mods") or len(ins["args"]) != 1):
+        return None
+    operand = ins["args"][0]
+    if operand.get("k") != "special" or operand.get("t") != "lgkmcnt(0)":
+        return None
+    return ins
+
+
 def check_printed_encodings(path, info):
     """A listing without undecodable words is translated from LLVM's text, which shows the instruction LLVM decoded,
     not the bytes it read. Where those bytes sit next to the listing (fssm/ or fspx/), each instruction's printed
@@ -17565,8 +17589,8 @@ def translate(path):
             pos = at + len(enc)
         # The console's v_dot4_i32_i8 words llvm-mc could not decode are in the listing as the instruction it
         # decoded instead: re-anchoring put the line for the word's second half at +4 from the skipped word.
-        # Rebuild the whole word from the blob and drop that line (docs/fspx.md measured the shape). Other gaps are
-        # restored only by scalar_smov_gap_word's single measured plain-SGPR form; reachable_code refuses the rest.
+        # Rebuild the whole word from the blob and drop that line (docs/fspx.md measured the shape). Reachable gaps
+        # may restore one exact plain-SGPR move or one exact `s_waitcnt lgkmcnt(0)`; all other gaps remain refused.
         kept, prev_end = [], info["code_start"]
         for ins in insns:
             if ins["pc"] - prev_end == 4:
@@ -17580,16 +17604,18 @@ def translate(path):
             prev_end = ins["pc"] + len(ins["enc"]) // 2
         insns = kept
         insns = fold_far_branches(insns)
-        recovered_smov = [False]
+        recovered_gap = [False]
 
-        def recover_smov_gap(pc):
-            if recovered_smov[0]:
+        def recover_measured_gap_word(pc):
+            if recovered_gap[0]:
                 return None
             word = scalar_smov_gap_word(blob, pc)
+            if word is None:
+                word = scalar_waitcnt_lgkm0_gap_word(blob, pc)
             if word is not None:
-                recovered_smov[0] = True
+                recovered_gap[0] = True
             return word
-        insns = reachable_code(insns, info.get("code_end"), recover_smov_gap)
+        insns = reachable_code(insns, info.get("code_end"), recover_measured_gap_word)
         if any(i.get("normalized") for i in insns):
             raise Unsupported("reachable instruction with normalized encoding")
     else:
