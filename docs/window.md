@@ -154,3 +154,89 @@ windows for the adoption:
 
 The registered-PresentX test sets `PALMETTO_PRESENT_ADOPT=off` because it presents through, and asserts on, a window it
 knows.
+
+## 7. The title's 120 Hz display-mode answer (P-16)
+
+This is an answer-path slice, not a desktop mode change or a pixel claim. The title decides whether its display path may
+use the 120 Hz refresh choice by inspecting the mode records DXGI returns.
+
+### 7.1 Measured consumer and existing answer
+
+[The display measurement in `peer_port_first_ui.md`, section 14.1](peer_port_first_ui.md) locates the consumer in the
+`game+0x2481CA0` wrapper. Its mode-list record is `DXGI_MODE_DESC1`-shaped and `0x20` bytes: width at `+0x0`, height at
+`+0x4`, the refresh rational at `+0x8`, format at `+0x10`, scanline order at `+0x14`, scaling at `+0x18`, and the final
+stereo word at `+0x1C`. The title tests the refresh **numerator at record offset `+0x8`** against `0x78` (120); if any
+record matches, it stores byte `1` at `image+0x760E660` and `{120,1}` at `image+0xA9438D4`. Otherwise it stores flag `0`
+and `{60,1}`. The existing `PALMETTO_STATE_TRACE` sampler reads those two title-owned words; it does not write them or
+install a probe.
+
+The previous light arms measured flag `0` and refresh `60/1` on this 60 Hz host, through the long samples (the last at
+298 s); see [section 14.4](peer_port_first_ui.md). Those arms established the consumed answer, but did not dump the
+mode-list length or tuples. The next `PALMETTO_DXGI_MODE_ANSWER=host` trace records the count and up to 16 shaped records
+(while preserving a numerator-120 record in that bound); any other records are omitted by design. It is the bounded
+falsifier for whether the current host answer offered a 120 numerator.
+
+The existing DXGI source path is `collect_modes` in `port/shims/dxgi_com.cpp`: it enumerates `EnumDisplaySettingsW`
+records (bounded to 4096), takes width/height where both fields are valid, uses a concrete `dmDisplayFrequency` when it
+is greater than 1 and otherwise the current output refresh, then adds the current mode. It rejects zero dimensions/rates,
+deduplicates `(width,height,integer Hz)`, and sorts by width, height and refresh numerator. The `DXGI_MODE_DESC1`
+conversion retains the requested format, progressive scanline ordering and unspecified scaling, and sets stereo false.
+The title's observed 32-byte layout is asserted in the pure test below.
+
+### 7.2 Answer policy and bounded measurement switch
+
+`PALMETTO_DXGI_MODE_ANSWER` is read when a mode list is requested:
+
+| value | answer |
+|---|---|
+| unset, empty, `off`, `0`, `false` or `no` | the prior host mode list, with no injected record and no trace output |
+| `host` | the same host answer, plus a bounded trace of at most 4 mode-list samples and 16 records per sample |
+| `simulate-120` | keep the host list; if no record has refresh numerator 120, add one at the current output's size with rational `{120,1}`, requested format, progressive scanline order, unspecified scaling, and stereo false; trace the bounded list |
+| any other value or a value longer than 63 bytes | name the refusal once and fall back to the unmodified host answer |
+
+A host that already offers any numerator-120 record receives its native list unchanged, even when simulation is selected.
+If no such record exists but the current width or height is zero, the simulation request is refused by name and the host
+list remains unchanged. The switch changes only the answer exposed by the shim; it does not ask Windows to change the monitor mode, patch title memory,
+or directly pace presentation. `GetDisplayModeList`, `GetDisplayModeList1` and closest-mode matching share the same
+collector, so the optional mode is consistent across those methods. With the switch unset, mode creation, filtering,
+deduplication, sort order and `DXGI_MODE_DESC1` conversion retain the pre-slice host shape; no trace line or synthetic
+mode is produced.
+
+### 7.3 GPU-free tests and arm readiness
+
+The new [mode-answer test source](../port/test/dxgi_mode_answer_test.cpp) is a standalone GPU-free contract test: when the
+lead wires it into CMake, it needs no DXGI factory, D3D12 device, Vulkan device, window or game image. It covers switch
+parsing/refusal, host record shaping and order, duplicate/zero rejection, the default no-injection branch, current-size
+120/1 injection, already-present and missing-size refusals, `DXGI_MODE_DESC1` field shape, the title's numerator-only
+120 predicate, and a synthetic byte/rational store for flag `0`/`1` and `{60,1}`/`{120,1}`. The synthetic store is only a
+model of the measured words; no title memory is written. CMake/CTest registration is pending lead integration. The C++
+test source has **not yet been built or run**: the lead's Palmetto integration gate is still closed, and this slice did not
+build or relink the runtime.
+
+The lead confirmed that the host and boot lock were free at the time of coordination, but no arm was taken: the changed
+answer is not in a permitted build yet. Readiness is one `-Light` boot with `PALMETTO_DXGI_MODE_ANSWER=simulate-120` and
+the existing state trace, after the lead clears integration and the lock is rechecked. Expected observation: the bounded
+DXGI trace includes a 120/1 record and the subsequent state trace reads high-refresh flag `1`, refresh `120/1`. If the
+mode list contains that record but the title still stores `0`/`60/1`, the consumer-path hypothesis is falsified; if the
+record is absent, the answer switch or its mode-list call path is falsified. The arm is capped at one light run; stop
+research after two device losses. No game data is needed.
+
+### 7.4 Attribution and NOTICE handoff
+
+The implementation and test model are ours, based on this tree's recorded DXGI mode collection, the title's consumer and
+the consumed words above. Public peer trees were inspected as evidence only, not as code sources: Five Star Recomp's
+[`DisplayService.cs` at `34b4dfed`](https://github.com/ThatRecompDev/five-star-recomp/blob/34b4dfed/src/FiveStar.Loader/Shims/Gdk/DisplayService.cs)
+provides host-display capability context; VIctory's [`dxgi.rs` at `63bcca43`](https://github.com/Marvisak/VIctory/blob/63bcca43/crates/victory-gpu/src/dxgi.rs)
+reports one 3840x2160, 60/1 mode and names the title's 120 Hz check; PercyScarlett's
+[`runtime/victory` `dxgi.rs` at `e44c465e`](https://github.com/rpatty-dev/PercyScarlett/blob/e44c465e/runtime/victory/crates/victory-gpu/src/dxgi.rs)
+uses a configured-or-default size with one 60/1 mode; victory-fork's
+[`dxgi.rs` at `9a9091d1`](https://github.com/fxceless/victory-fork/blob/9a9091d1/crates/victory-gpu/src/dxgi.rs)
+uses the same fixed 60/1 answer; and XCL's
+[`gdk_table.rs` at `623d02e4`](https://github.com/xcl-dev/xcl/blob/623d02e4/crates/xcl/src/hle/xgameruntime/gdk_table.rs)
+records the display interface and slot mapping rather than this DXGI mode-list path. These references pointed to a
+measurement question; no code, comment text, identifier or table was copied. `NOTICE.md` is outside this task's write
+scope. **Draft NOTICE row for the lead:** “The measured DXGI display-mode answer path ([docs/window.md](window.md),
+section 7) was cross-checked against Five Star Recomp (GPL-3.0-or-later, `34b4dfed`), VIctory
+(GPL-3.0-or-later, `63bcca43`), PercyScarlett (GPL-2.0-only, `e44c465e`), victory-fork (GPL-3.0-or-later,
+`9a9091d1`) and XCL (GPL-2.0-only, `623d02e4`), as evidence of display handling only; the implementation and tests are
+ours, with no peer source, comment, identifier or table copied.”

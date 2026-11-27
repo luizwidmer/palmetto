@@ -1,4 +1,5 @@
 #include "dxgi_com.h"
+#include "dxgi_mode_answer.h"
 #include "d3d12_stubs.h"
 
 #include <winternl.h>  // NTSTATUS, which d3dkmthk.h needs and WIN32_LEAN_AND_MEAN leaves out
@@ -782,23 +783,84 @@ bool is_supported_display_format(DXGI_FORMAT fmt) noexcept {
     }
 }
 
-std::vector<DXGI_MODE_DESC> collect_modes(const DisplayInfo& info, DXGI_FORMAT fmt) {
-    std::vector<DXGI_MODE_DESC> modes;
-    if (!is_supported_display_format(fmt)) return modes;
+mode_answer::ParseResult read_mode_answer_policy() {
+    char value[64]{};
+    const DWORD length =
+        GetEnvironmentVariableA(mode_answer::switch_name.data(), value, static_cast<DWORD>(sizeof(value)));
+    const bool too_long = static_cast<std::size_t>(length) >= sizeof(value);
+    const std::size_t stored_length = too_long ? 0 : static_cast<std::size_t>(length);
+    const mode_answer::ParseResult parsed =
+        mode_answer::parse_policy(length != 0, std::string_view(value, stored_length), too_long);
+    if (parsed.refusal != mode_answer::Refusal::none) {
+        static std::atomic<bool> reported{false};
+        bool expected = false;
+        if (reported.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
+            const std::string_view reason = mode_answer::refusal_name(parsed.refusal);
+            std::fprintf(stderr, "[rt] dxgi: refused %.*s (%.*s); using the unmodified host mode enumeration\n",
+                         static_cast<int>(mode_answer::switch_name.size()), mode_answer::switch_name.data(),
+                         static_cast<int>(reason.size()), reason.data());
+        }
+    }
+    return parsed;
+}
 
-    std::set<std::tuple<UINT, UINT, UINT>> seen;
-    auto push_mode = [&](UINT w, UINT h, UINT hz) {
-        if (!w || !h || !hz) return;
-        if (!seen.emplace(w, h, hz).second) return;
-        DXGI_MODE_DESC m{};
-        m.Width = w;
-        m.Height = h;
-        m.RefreshRate = {hz, 1};
-        m.Format = fmt;
-        m.ScanlineOrdering = DXGI_MODE_SCANLINE_ORDER_PROGRESSIVE;
-        m.Scaling = DXGI_MODE_SCALING_UNSPECIFIED;
-        modes.push_back(m);
+void report_simulated_mode_refusal() {
+    static std::atomic<bool> reported{false};
+    bool expected = false;
+    if (reported.compare_exchange_strong(expected, true, std::memory_order_relaxed))
+        std::fprintf(stderr,
+                     "[rt] dxgi: refused PALMETTO_DXGI_MODE_ANSWER=simulate-120: the output has no nonzero current "
+                     "width/height; host modes unchanged\n");
+}
+
+void trace_mode_list(mode_answer::Policy policy, DXGI_FORMAT fmt, const std::vector<DXGI_MODE_DESC>& modes,
+                     mode_answer::SimulationResult simulation) {
+    static std::atomic<unsigned> samples{0};
+    const unsigned sample = samples.fetch_add(1, std::memory_order_relaxed);
+    if (sample >= 4) return;
+
+    const auto high = std::find_if(modes.begin(), modes.end(), [](const DXGI_MODE_DESC& mode) {
+        return mode.RefreshRate.Numerator == mode_answer::title_high_refresh_numerator;
+    });
+    const bool has_120 = high != modes.end();
+    const std::size_t high_index = has_120 ? static_cast<std::size_t>(high - modes.begin()) : modes.size();
+    std::size_t prefix_count = std::min<std::size_t>(modes.size(), has_120 && high_index >= 16 ? 15 : 16);
+    const bool print_120_tail = has_120 && high_index >= prefix_count;
+    const std::size_t shown = prefix_count + (print_120_tail ? 1 : 0);
+
+    const char* source = policy == mode_answer::Policy::simulate_120 ? "simulate-120" : "host";
+    const char* simulation_note = "";
+    if (policy == mode_answer::Policy::simulate_120) {
+        switch (simulation) {
+        case mode_answer::SimulationResult::already_offered: simulation_note = "; host already offered numerator 120"; break;
+        case mode_answer::SimulationResult::added: simulation_note = "; one current-size 120/1 mode added"; break;
+        case mode_answer::SimulationResult::refused_no_current_size:
+            simulation_note = "; refused because current dimensions are unavailable";
+            break;
+        case mode_answer::SimulationResult::not_requested: simulation_note = "; no synthetic mode requested"; break;
+        }
+    }
+    std::fprintf(stderr, "[rt] dxgi: display mode answer sample %u: source=%s format=%u count=%zu has120=%s%s\n",
+                 sample + 1, source, static_cast<unsigned>(fmt), modes.size(), has_120 ? "yes" : "no",
+                 simulation_note);
+    auto print_mode = [](std::size_t index, const DXGI_MODE_DESC& mode) {
+        std::fprintf(stderr,
+                     "[rt] dxgi: mode[%zu]=%ux%u @%u/%u format=%u scanline=%u scaling=%u stereo=0\n", index,
+                     mode.Width, mode.Height, mode.RefreshRate.Numerator, mode.RefreshRate.Denominator,
+                     static_cast<unsigned>(mode.Format), static_cast<unsigned>(mode.ScanlineOrdering),
+                     static_cast<unsigned>(mode.Scaling));
     };
+    for (std::size_t i = 0; i < prefix_count; ++i) print_mode(i, modes[i]);
+    if (print_120_tail) print_mode(high_index, modes[high_index]);
+    if (shown < modes.size())
+        std::fprintf(stderr, "[rt] dxgi: mode list trace omitted %zu other record(s)\n", modes.size() - shown);
+}
+
+std::vector<DXGI_MODE_DESC> collect_modes(const DisplayInfo& info, DXGI_FORMAT fmt) {
+    if (!is_supported_display_format(fmt)) return {};
+
+    mode_answer::ModeListBuilder builder(fmt);
+    const mode_answer::ParseResult policy = read_mode_answer_policy();
 
     if (info.monitor) {
         // Bound the driver enumeration loop defensively in case a faulty driver never stops returning modes.
@@ -812,20 +874,19 @@ std::vector<DXGI_MODE_DESC> collect_modes(const DisplayInfo& info, DXGI_FORMAT f
             const UINT hz =
                 ((dm.dmFields & DM_DISPLAYFREQUENCY) != 0 && dm.dmDisplayFrequency > 1) ? dm.dmDisplayFrequency
                                                                                         : info.current_refresh_hz;
-            push_mode(dm.dmPelsWidth, dm.dmPelsHeight, hz);
+            builder.add(dm.dmPelsWidth, dm.dmPelsHeight, hz);
         }
     }
-    push_mode(info.current_width, info.current_height, info.current_refresh_hz);
+    builder.add(info.current_width, info.current_height, info.current_refresh_hz);
 
-    std::sort(modes.begin(), modes.end(), [](const DXGI_MODE_DESC& a, const DXGI_MODE_DESC& b) {
-        return std::tie(a.Width, a.Height, a.RefreshRate.Numerator) <
-               std::tie(b.Width, b.Height, b.RefreshRate.Numerator);
-    });
+    const mode_answer::SimulationResult simulation = mode_answer::ensure_simulated_120(
+        builder, policy.policy, info.current_width, info.current_height);
+    if (simulation == mode_answer::SimulationResult::refused_no_current_size) report_simulated_mode_refusal();
+
+    std::vector<DXGI_MODE_DESC> modes = std::move(builder).finish_sorted();
+    if (policy.policy == mode_answer::Policy::host_modes_trace || policy.policy == mode_answer::Policy::simulate_120)
+        trace_mode_list(policy.policy, fmt, modes, simulation);
     return modes;
-}
-
-constexpr DXGI_MODE_DESC1 to_mode_desc1(const DXGI_MODE_DESC& m) noexcept {
-    return {m.Width, m.Height, m.RefreshRate, m.Format, m.ScanlineOrdering, m.Scaling, FALSE};
 }
 
 constexpr DXGI_MODE_DESC from_mode_desc1(const DXGI_MODE_DESC1& m) noexcept {
@@ -980,14 +1041,14 @@ public:
     // IDXGIOutput1
     HRESULT STDMETHODCALLTYPE GetDisplayModeList1(DXGI_FORMAT fmt, UINT, UINT* num_modes,
                                                   DXGI_MODE_DESC1* desc) override {
-        return fill_mode_list(info_, fmt, num_modes, desc, to_mode_desc1);
+        return fill_mode_list(info_, fmt, num_modes, desc, mode_answer::to_mode_desc1);
     }
     HRESULT STDMETHODCALLTYPE FindClosestMatchingMode1(const DXGI_MODE_DESC1* mode_to_match, DXGI_MODE_DESC1* closest,
                                                        IUnknown* concerned_device) override {
         if (!mode_to_match || !closest) return DXGI_ERROR_INVALID_CALL;
         DXGI_MODE_DESC best{};
         const HRESULT hr = find_closest_mode(info_, from_mode_desc1(*mode_to_match), concerned_device, best);
-        *closest = SUCCEEDED(hr) ? to_mode_desc1(best) : DXGI_MODE_DESC1{};
+        *closest = SUCCEEDED(hr) ? mode_answer::to_mode_desc1(best) : DXGI_MODE_DESC1{};
         return hr;
     }
     HRESULT STDMETHODCALLTYPE GetDisplaySurfaceData1(IDXGIResource*) override { return DXGI_ERROR_INVALID_CALL; }
