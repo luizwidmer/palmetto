@@ -13,15 +13,16 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MS_SELECTION_FIXTURE = os.path.join(ROOT, "tests", "fixtures", "graphics_programs_ms_synthetic.json")
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 import build_port  # noqa: E402
 
 
-def write_json(path, value):
+def write_json(path, value, *, sort_keys=True):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
-        json.dump(value, f, sort_keys=True)
+        json.dump(value, f, sort_keys=sort_keys)
 
 
 def read_bytes(path):
@@ -64,6 +65,12 @@ class GraphicsPublicationTests(unittest.TestCase):
         # The hashes are synthetic. Non-list notes have the same behavior as the tool's wanted-list parser.
         write_json(self.wanted, {**{stage: [self.hashes[stage]] for stage in stages}, "note": "synthetic"})
 
+    def write_ms_selection_fixture(self):
+        # Preserve the deliberately non-canonical ms/vs/ps key order to test stable stage ordering.
+        with open(MS_SELECTION_FIXTURE, encoding="utf-8") as source:
+            with open(self.wanted, "w", encoding="utf-8", newline="\n") as target:
+                target.write(source.read())
+
     def seed_published(self, include_ms=True):
         entries = {
             self.names["cs"]: {"stage": "cs", "fspx_code_sha256": self.hashes["cs"]},
@@ -90,9 +97,9 @@ class GraphicsPublicationTests(unittest.TestCase):
             "missing": {stage: [] for stage in stages},
             "other_stage": {stage: [] for stage in stages},
         })
-        for name in names:
+        for stage, name in zip(stages, names):
             with open(os.path.join(self.extracted, "fspx", name + ".code"), "wb") as f:
-                f.write(b"synthetic-code-only")
+                f.write(("synthetic-" + stage).encode("ascii"))
             write_json(os.path.join(self.extracted, "fspx", name + ".json"), {})
             with open(os.path.join(self.extracted, "disasm", name + ".s"), "w", encoding="utf-8", newline="\n") as f:
                 f.write("synthetic listing\n")
@@ -136,6 +143,8 @@ class GraphicsPublicationTests(unittest.TestCase):
         self.assertEqual(build_port.graphics_owned_for("ps,vs"), ("lib_ps_", "lib_vs_"))
         self.assertEqual(json.loads(build_port.graphics_extraction_settings(
             "package", "llvm-test", self.wanted))["stages"], "ps,vs")
+        self.assertEqual(json.loads(build_port.graphics_settings(
+            "package", "llvm-test", False, (), self.wanted))["stages"], "ps,vs")
         self.run_cached_publisher()
 
         self.assertEqual(read_bytes(index_path), before_index)
@@ -146,13 +155,26 @@ class GraphicsPublicationTests(unittest.TestCase):
         self.assertNotIn(self.names["ms"], published)
         self.assertIn(self.names["old_ms"], published)
 
-    def test_explicit_ms_selection_publishes_under_stage_and_code_hash(self):
-        self.write_selection(("ps", "vs", "ms"))
-        self.seed_published(include_ms=False)
+    def test_synthetic_ms_fixture_publishes_under_stage_and_code_hash_in_stable_order(self):
+        self.write_ms_selection_fixture()
+        self.seed_published(include_ms=True)
         self.seed_cached_selection(("ps", "vs", "ms"))
 
-        self.assertEqual(build_port.graphics_requested_stages(self.wanted), "ps,vs,ms")
-        self.assertEqual(build_port.graphics_owned_for("ps,vs,ms"), ("lib_ps_", "lib_vs_", "lib_ms_"))
+        with open(self.wanted, encoding="utf-8") as f:
+            selection = json.load(f)
+        self.assertEqual(list(selection), ["ms", "vs", "ps"])
+        self.assertEqual(selection, {
+            "ms": [self.hashes["ms"]],
+            "vs": [self.hashes["vs"]],
+            "ps": [self.hashes["ps"]],
+        })
+        stages = build_port.graphics_requested_stages(self.wanted)
+        self.assertEqual(stages, "ps,vs,ms")
+        self.assertEqual(build_port.graphics_owned_for(stages), ("lib_ps_", "lib_vs_", "lib_ms_"))
+        self.assertEqual(json.loads(build_port.graphics_extraction_settings(
+            "package", "llvm-test", self.wanted, stages))["stages"], stages)
+        self.assertEqual(json.loads(build_port.graphics_settings(
+            "package", "llvm-test", False, (), self.wanted, stages))["stages"], stages)
         self.run_cached_publisher()
 
         index_path = os.path.join(self.fspx, "index.json")
@@ -160,17 +182,50 @@ class GraphicsPublicationTests(unittest.TestCase):
             published = json.load(f)
         self.assertEqual(published[self.names["ms"]], {
             "stage": "ms", "fspx_code_sha256": self.hashes["ms"]})
-        with open(os.path.join(self.fspx, self.names["ms"] + ".spv"), "rb") as f:
-            self.assertEqual(f.read(), ("synthetic-spirv-" + self.names["ms"]).encode("ascii"))
+        self.assertEqual(read_bytes(os.path.join(self.fspx, self.names["ms"] + ".spv")),
+                         ("synthetic-spirv-" + self.names["ms"]).encode("ascii"))
         self.assertEqual(published[self.names["cs"]], {
             "stage": "cs", "fspx_code_sha256": self.hashes["cs"]})
         self.assertIn(self.names["ps"], published)
         self.assertIn(self.names["vs"], published)
+        self.assertNotIn(self.names["old_ms"], published)
+        self.assertFalse(os.path.exists(os.path.join(self.fspx, self.names["old_ms"] + ".spv")))
+
+    def test_empty_ms_list_keeps_default_publication_byte_identical(self):
+        # The input order is intentionally non-canonical, but an empty MS list is not opt-in.
+        write_json(self.wanted, {
+            "ms": [],
+            "vs": [self.hashes["vs"]],
+            "ps": [self.hashes["ps"]],
+        }, sort_keys=False)
+        self.seed_published(include_ms=True)
+        self.seed_cached_selection(("ps", "vs"))
+        index_path = os.path.join(self.fspx, "index.json")
+        before_index = read_bytes(index_path)
+        before_modules = {
+            name: read_bytes(os.path.join(self.fspx, name + ".spv"))
+            for name in (self.names["cs"], self.names["ps"], self.names["vs"], self.names["old_ms"])
+        }
+
+        self.assertEqual(build_port.graphics_requested_stages(self.wanted), "ps,vs")
+        self.assertEqual(build_port.graphics_owned_for("ps,vs"), ("lib_ps_", "lib_vs_"))
+        self.assertEqual(json.loads(build_port.graphics_extraction_settings(
+            "package", "llvm-test", self.wanted))["stages"], "ps,vs")
+        self.assertEqual(json.loads(build_port.graphics_settings(
+            "package", "llvm-test", False, (), self.wanted))["stages"], "ps,vs")
+        self.run_cached_publisher()
+
+        self.assertEqual(read_bytes(index_path), before_index)
+        for name, content in before_modules.items():
+            self.assertEqual(read_bytes(os.path.join(self.fspx, name + ".spv")), content)
 
     def test_missing_or_ps_vs_only_selection_keeps_ms_opt_in_off(self):
         self.assertEqual(build_port.graphics_requested_stages(os.path.join(self.root, "missing.json")), "ps,vs")
         self.write_selection(("ps", "vs"))
         self.assertEqual(build_port.graphics_requested_stages(self.wanted), "ps,vs")
+        write_json(self.wanted, {"ms": []})
+        self.assertEqual(build_port.graphics_requested_stages(self.wanted), "ps,vs")
+        self.assertEqual(build_port.graphics_owned_for("ps,vs"), ("lib_ps_", "lib_vs_"))
 
 
 if __name__ == "__main__":

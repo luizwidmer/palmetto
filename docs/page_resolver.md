@@ -1,14 +1,17 @@
 # The page-list resolver: a live physical-page transfer for DirectStorage
 
-**Status: implemented behind `PALMETTO_DS_PAGES`, measured negative on the boot gate.** The console DirectStorage request
-can name its destination (or its source) as a list of 64 KiB physical page numbers instead of a linear buffer. Until this
-slice our `port/shims/dstorage.cpp` computed the page plan and then refused a live request by name, because `xmem` kept
-its page table private. It now installs a page resolver in `port/shims/xmem.cpp`, and the request path transfers through
-it with the same plan/copy math the tests already covered. The measured boot issues no page-list request
-(`dest-pages=0 source-pages=0` over 8,272 requests, [story_load_probe.md](story_load_probe.md) section 5), so the A/B pair
-is a latent negative: the mechanism is inert on today's frontier, and the counters that would prove it works are in
-place for the boot that reaches it. The porting policy is [upstream_port.md](upstream_port.md); the preceding advanced
-slice is [directstorage_advanced.md](directstorage_advanced.md).
+**Status: the live resolver and transfer are implemented behind `PALMETTO_DS_PAGES`; the optional page-watch hand-off is
+behind `PALMETTO_DS_PAGES_VIEW`. The title-request frontier remains a measured negative, while a synthetic request arm
+covers the destination path.** The console DirectStorage request can name its destination (or its source) as a list of
+64 KiB physical page numbers instead of a linear buffer. The resolver in `port/shims/xmem.cpp` backs the tested plan/copy
+path in `port/shims/dstorage_advanced.h` and `port/shims/dstorage.cpp`. With `PALMETTO_DS_PAGES_VIEW=1` (and
+`PALMETTO_DS_PAGES=1`), a physical-page destination instead goes through xmem's bounded page-write hook so armed mapped
+views report the write to the page tracker. The title itself still issues no page-list request: its later 9,216-request
+trace is `file -> buffer`, with `dest-pages=0 source-pages=0` ([peer_port_streaming.md](peer_port_streaming.md) section
+13.1). A separate `PALMETTO_DS_PAGES_ARM` synthetic request is documented and measured in sections 14.3-14.4 there; its
+two page-list requests are the arm's, not the title's. See sections 6, 7 and 9 here for current limits, test results and
+the remaining falsifier. The porting policy is [upstream_port.md](upstream_port.md); the preceding advanced slice is
+[directstorage_advanced.md](directstorage_advanced.md).
 
 Counts, page numbers, spans, RVAs and HRESULTs only; no package bytes, package paths, shader data or extracted tables.
 
@@ -21,19 +24,22 @@ destinations that way, and a request of that shape fails whole before this slice
 returns `E_NOTIMPL` with "the xmem page table is not exposed, so there is no page resolver for a live request"
 (`port/shims/dstorage.cpp`, the pre-slice `page_list_request`).
 
-The measured need today is zero, and the page says so rather than dressing the readiness as progress:
+The measured need in title-originated requests is still zero; the synthetic arm is reported separately rather than treated as title demand:
 
 | Measure | Value | Evidence |
 |---|---|---|
-| Requests in the committed 130 s / 300 s boots | 4,199 / 8,272, all `file -> buffer`, `zlib` on, `bcpack=0 swizzle=0` | [story_load_probe.md](story_load_probe.md) section 5, [streamed_consumer.md](streamed_consumer.md) section 2 |
-| Page-list shape counters | `dest-pages=0 source-pages=0` in both boots, refusals 0 | same traces (`PALMETTO_DSTORAGE_TRACE=1`) |
+| Requests in the earlier committed 130 s / 300 s boots | 4,199 / 8,272, all `file -> buffer`, `zlib` on, `bcpack=0 swizzle=0` | [story_load_probe.md](story_load_probe.md) section 5, [streamed_consumer.md](streamed_consumer.md) section 2 |
+| Latest follow-up title request shapes | 9,216 `file -> buffer`, `zlib=6,005`, `bcpack=0 swizzle=0`; title-originated page-list flags remain 0 | [peer_port_streaming.md](peer_port_streaming.md) section 13.1 |
+| Synthetic arm requests, not title requests | Two memory-source/destination-page-list requests: one 100,000-byte transfer and one missing-page refusal; `pages transferred=1`, `pages refused=1` | [peer_port_streaming.md](peer_port_streaming.md) sections 14.2-14.4 |
+| Page-list shape counters in title population | `dest-pages=0 source-pages=0`; the arm's two page-list requests are synthetic | [story_load_probe.md](story_load_probe.md) section 5, [peer_port_streaming.md](peer_port_streaming.md) sections 13.1 and 14.4 |
 | Slot-31 page-mapping calls | 0 in the 130 s boot (the call site and the page pools exist) | [cpu_view_mapping.md](cpu_view_mapping.md) section 1 |
 | Page-pool registrations the title does | four per boot (`XMemAllocatePhysicalPages`, caller `game+0x1E6C2C1`) | [cpu_view_mapping.md](cpu_view_mapping.md) section 1 |
 
-So the slice is proactive: the page pools are built every boot, the page-list ABI is part of the request shape that a
-streamed texture library uses, and the refusal was the one named correctness gap left in the advanced request path. The
-promotion falsifier is a trace with `dest-pages` or `source-pages` non-zero on an arm with `PALMETTO_DS_PAGES=1`; that
-boot must show the transfer counters move and every status `S_OK` (section 6).
+So the resolver covers a page-list shape named by the console ABI, while the measured title population remains linear.
+The original `E_NOTIMPL` page-list refusal is removed behind `PALMETTO_DS_PAGES=1`; its title-originated promotion
+falsifier is a trace with `dest-pages` or `source-pages` non-zero, non-zero transfer counters and every status `S_OK`. To
+validate the optional page-watch hand-off, the run must also set `PALMETTO_DS_PAGES_VIEW=1` and show a `changed` compare
+for a watched texture whose pages were delivered (section 9).
 
 ## 2. Measured shapes the resolver has to answer
 
@@ -43,7 +49,7 @@ boot must show the transfer counters move and every status `S_OK` (section 6).
 | Page backing | one pagefile-backed section per `XMemAllocatePhysicalPages` call, committed on touch, mapped into reserve-only windows | `port/shims/xmem.cpp` |
 | Page-list plan | a page array plus a byte offset into the first page; only the pages the transfer needs are read | `plan_page_transfer` in `port/shims/dstorage_advanced.h` |
 | Source page list | a page list only makes sense for a memory source (a file read is linear) | ABI shape, and the upstream check (section 4) |
-| Request shape in the boot | the page arrays are never named; `Destination` is a process-heap buffer | [streamed_consumer.md](streamed_consumer.md) section 2 |
+| Title-originated request shape | no page arrays on the latest 9,216 title requests; `Destination` is a linear process-heap buffer | [peer_port_streaming.md](peer_port_streaming.md) sections 13.1 and 14.4 |
 | Title page windows | reserve-only 64 KiB windows; a mapped page is a `MapViewOfFile3` view of the page's section | `port/shims/xmem.cpp`, `copy_page_mappings` |
 | Test shape | real pages and real windows without a GPU (`xmem_test`), synthetic page tables (`dstorage_test`) | section 7 |
 
@@ -67,7 +73,7 @@ silently read a page table it does not have.
 then resolves every page the plan names before the first byte moves, and only then copies the bytes in or out of the
 caller's scratch buffer. Resolving first is the difference that matters for a destination page list: the pages are real
 title memory, so a half-applied scatter would be visible to the title. A resolver miss returns `unresolved_page` with the
-page number, and every page and the buffer are untouched. The named results are `no_resolver`, `null_buffer`,
+page number, and all page bytes and the buffer remain untouched. The named results are `no_resolver`, `null_buffer`,
 `unresolved_page`, `empty`, `zero_page`, `too_many_pages`, `too_short` and `offset_out_of_range`.
 
 **The request path (`port/shims/dstorage.cpp`, `page_list_request`).** Behind `PALMETTO_DS_PAGES=1` (off by default, one
@@ -83,8 +89,10 @@ cached boolean when unset) the request path now:
 4. materialises the source bytes in the queue worker's own vector: a file read, a memory copy, or a gather out of a
    source page list; then the zlib stage inflates to exactly `DestinationSize` (a malformed stream leaves every page as
    it was);
-5. publishes: scatters into the destination page list through the resolver, or copies into a linear destination for a
-   source page list; a transfer success counts `pages transferred` and `pages bytes` and logs one bounded line.
+5. publishes: by default, scatters into a destination page list through the resolver; when `PALMETTO_DS_PAGES_VIEW=1`
+   (which requires `PALMETTO_DS_PAGES=1`), sends that destination through xmem's bounded page-write hook so armed
+   mappings are recorded by the page-watch tracker; for a source page list, copies into the linear destination. A
+   successful transfer counts `pages transferred` and `pages bytes` and logs one bounded line.
 
 **Two corrections the live path needed.** `process()` reported every completed request's `Destination` as a streamed
 block to the device-side registry ([streamed_consumer.md](streamed_consumer.md) section 1). For a page-list request that
@@ -127,9 +135,10 @@ between the source read and the destination publish (the reference's zlib/BCPack
    arithmetic), so the resolver is an xmem export and the request path owns the transfer ordering, staging and refusals.
    The page-table lookup stays in xmem, the request semantics stay in dstorage.
 2. **No paired CPU view.** Section 3: the reference fills its GPU-only/CPU-paired pair at both addresses; this tree has
-   one address, so the resolver returns the page's single backing and there is no second mapping or watch notification to
-   make. This is the #968 comparison applied to page lists: the paired view was needed for the reference's separate
-   reservations, not for the console semantics.
+   one backing per physical page, so no additional CPU alias is needed for visibility. The later `PALMETTO_DS_PAGES_VIEW`
+   route uses existing armed title mappings when it needs a page-watch signal; it does not create a paired view or a second
+   mapping (sections 6 and 9). This is the #968 comparison applied to page lists: the paired view was needed for the
+   reference's separate reservations, not for the console semantics.
 3. **The refusal is by page number before any write.** The reference commits the pages and fails the transfer on a page
    it cannot commit; ours resolves the whole plan first and reports `unresolved_page` with the offending page number, so
    the request fails with the destination provably unchanged. Both preserve the no-partial-destination rule; ours names
@@ -182,9 +191,10 @@ it; that is consistent with the two arms' counters.
 
 ## 6. Limits
 
-- **No measured request.** The boot does not ask for a page list, so the A/B pair can only show the mechanism is inert
-  on the default boot and that the switch moves no counter. The falsifier that promotes it is a trace with `dest-pages`
-  or `source-pages` non-zero; that boot must show `pages transferred` non-zero, every status `S_OK` and no new refusal.
+- **No measured title-originated page-list request.** The section-5 A/B pair and the later load population contain none;
+  the diagnostic arm injects two synthetic requests (one transfer, one named refusal), which proves the request branch but
+  not title demand. The promotion falsifier is a title-originated trace with `dest-pages` or `source-pages` non-zero; it
+  must show `pages transferred` non-zero, every status `S_OK` and no new refusal.
 - **BCPack and swizzle over a page list are refused by name** (zlib is supported). Composing the decode stages with the
   scatter is the next increment; `port/shims/dstorage_advanced.h`'s staging and predictor paths already own those stages.
 - **The page-list stage does not use the queue staging area** (`PALMETTO_DS_STAGING`): the transfer materialises its
@@ -196,49 +206,49 @@ it; that is consistent with the two arms' counters.
   section; a title that frees a page number while its own request is transferring is out of contract (the console keeps
   an enqueued request's page list live until its status completes). A concurrent free would invalidate the address; the
   request path does not defend against a contract violation.
-- **PAGE_GUARD/write-watch hand-off is linear-destination only.** `PALMETTO_DS_PIN` releases the stream consumer's
-  `PAGE_GUARD` on a linear destination before writing and re-arms it after. A page-list write goes to the page backing,
-  not through the title's mapped view, so a guard armed on that view is not handed back. There is no measured page-list
-  request and no guard on one, but a future streamed page-list shape that also wants the hand-off must extend the pinner
-  with the resolver's views.
-- **No second view**, by design (section 3). If a future alias/mirror layer reads title pages through another address or
-  keeps a copy, this resolver is where its invalidation has to be added.
+- **The page-watch hand-off depends on the destination switch.** With `PALMETTO_DS_PAGES_VIEW` unset,
+  `PALMETTO_DS_PAGES=1` keeps the resolver scatter into the physical-page backing; a `PAGE_GUARD` armed on a mapped title
+  view does not see that store. With both switches on, a page-list destination goes through xmem's bounded
+  `write_physical_pages` hook, which resolves and commits every planned page before writing and repeats the bytes through
+  every armed mapped view so the tracker records the delivery. The view switch does not affect source-page gathers. A
+  missing write hook or unresolved page is a named refusal, not a fallback. This is an opt-in extension of the original
+  limit, not evidence that the title requests page lists: title-originated `dest-pages` and `source-pages` remain zero in
+  the measured frontier (section 9).
+- **No additional CPU/GPU alias or mirror is created** by this resolver (section 3). The optional page-watch hook uses
+  existing mapped title views only to record writes; it does not create another mapping. If a future alias/mirror layer
+  keeps a separate copy of title pages, this resolver is where its invalidation has to be added.
 - **The reference's post-#968 gaps are unchanged here.** The mapping is applied when the copy runs, not in queue order,
   and a page list the title remaps after `Submit` is used as it is at execution time (the page numbers are snapshotted on
-  the worker, as the reference also snapshots); neither is exercised by a measured request yet.
+  the worker, as the reference also snapshots); neither remap-timing case is exercised by the synthetic arm or a
+  title-originated page-list request yet.
 
 ## 7. Tests
 
-**`port/test/dstorage_test.cpp`, target `dstorage_test` (GPU-free, no game data): 224 checks, 0 failed** (213 before
-this slice; the page-list section gained 11). New checks, on synthetic page tables through the request path's own seam:
+**Current host-test result from the existing binaries (this reconciliation did not build or relink `palmetto`):**
+`port/build/dstorage_test.exe` passed **261 checks, 0 failed**; `port/build/xmem_test.exe` passed **496 checks**. The
+older 224/258 totals from the first resolver slice were snapshots, not the current test inventory.
 
-- a live write transfer resolves two spans and reports the plan, and the bytes are visible at the planned page offsets;
-- a live read transfer gathers the same bytes back;
-- a page number with no live backing is `unresolved_page` with that page number, and **every page is left untouched**;
-- a null resolver (the hook-off build) is `no_resolver`, and every page is left untouched;
-- the plan's own refusals surface through the transfer: `zero_page`, `too_many_pages`, `empty`, `null_buffer`.
-
-The plan shapes, the copy math both ways and the existing refusals stay as they were.
-
-**`port/test/xmem_test.cpp`, target `xmem_test` (real physical pages and windows, no GPU): 258 checks, OK.** New checks:
-
-- the resolver hook is installed;
-- a live page number resolves to a CPU view that holds what the title's mapping holds (one memory);
-- a write through the resolved view is visible at the title's mapped view;
-- an allocated but never-touched page resolves and is committed on the way out, and mapping it afterwards shows the
-  resolver's bytes;
-- the request path's own `transfer_page_list` over real pages scatters a 100,000-byte payload and reads it back through
-  the title's mappings, and a page number that was never allocated is `unresolved_page` with the mapped pages unchanged;
-- page 0, a never-allocated number and a freed page number do not resolve.
+- `dstorage_test` keeps the pure plan shapes and copy math for both directions, and tests `transfer_page_list` against a
+  synthetic resolver: unresolved pages are named and leave payload/page bytes unchanged; null resolver, zero page,
+  too-many-pages, empty and null-buffer cases refuse. Its page-write request-shape checks validate the 4,321-byte offset,
+  two planned spans, span-to-hook conversion, refusal shape and `PALMETTO_DS_PAGES_ARM` switch parsing.
+- `xmem_test` exercises real allocated physical pages and mapped windows: resolver aliasing/commit behavior, scatter and
+  gather through the transfer seam, missing/freed-page refusal, and the bounded physical-page write hook. Its mapped
+  destination fixture checks armed aliases, recorded watch pages, `changed`/drained polls, and all-or-nothing refusal for
+  an unallocated page.
+- The real `page_list_request` branch is covered separately by the opt-in synthetic `PALMETTO_DS_PAGES_ARM`: the existing
+  fixture is 21/21 PASS, and section 14.4 records one prior 130.2 s light boot with 0 exceptions and 0 device losses.
+  Those arm requests are synthetic; they do not demonstrate a title-originated page-list request.
 
 ```powershell
 cmake --build port\build --target xmem_test dstorage_test -j 24
-port\build\xmem_test.exe          # xmem_test: OK (258 checks)
-port\build\dstorage_test.exe      # 224 checks, 0 failed
+port\build\xmem_test.exe          # xmem_test: OK (496 checks)
+port\build\dstorage_test.exe      # 261 checks, 0 failed
 ```
 
-The full-request path is covered end to end at the unit level; a boot cannot cover it until the title issues a page-list
-request.
+The transfer seam and xmem hook have host coverage, and the actual request branch has the synthetic arm coverage above.
+The remaining promotion falsifier is a title-originated request with `dest-pages` non-zero, successful transfer and status,
+and—when testing the watch path—a `changed` compare for the delivered watched texture (section 9).
 
 ## 8. Attribution
 
@@ -253,3 +263,31 @@ reference's own docs (its `directstorage.md` and its `linux_proton.md`). No code
 upstream project remains the copyright of its contributors and its license continues to apply to its own tree. The
 `NOTICE.md` credit for this slice is added by the policy slice that owns that file ([upstream_port.md](upstream_port.md)
 section 6).
+
+## 9. Reconciliation: current request coverage and remaining falsifier
+
+This addendum reconciles this resolver page with the later mapped-destination work in
+[peer_port_streaming.md](peer_port_streaming.md) sections 13-14. It records the current code and existing test results; it
+adds no runtime code.
+
+| Request shape | Current coverage and limit |
+|---|---|
+| Title's measured load requests | The latest light population is 9,216 `file -> buffer` requests (`zlib=6,005`, BCPack/swizzle off); title-originated `dest-pages=0 source-pages=0` ([peer_port_streaming.md](peer_port_streaming.md) section 13.1). |
+| Memory source page list -> linear destination | Accepted only on a memory-source queue; page bytes are gathered through xmem before optional zlib and linear publish. A read-side page list does not notify the write-watch tracker. |
+| File or memory source -> destination page list | Behind `PALMETTO_DS_PAGES=1`; page numbers are bounded to the plan (32 spans, about 2 MiB), all needed pages are checked before publishing, and an optional zlib result is scattered. `PALMETTO_DS_PAGES_VIEW=1` selects xmem's page-write hook to record writes through armed mappings; with it unset the resolver scatter remains the default page-list path. |
+| Unsupported or invalid shapes | Both page-list flags, a null list, or an unresolved page are named refusals; a source page list on a file queue returns `E_DSTORAGE_INVALID_SOURCE_TYPE`; BCPack/swizzle over a list or a missing resolver/write hook returns `E_NOTIMPL`; an inaccessible array returns `E_DSTORAGE_ACCESS_VIOLATION`. Page-plan failures are logged by name; the existing 1 GiB request cap (source plus destination for memory-source requests), 32 MiB linear-destination cap and 32-span page-plan cap bound the transfer. |
+
+The checked current source is `page_list_request` in `port/shims/dstorage.cpp` and the resolver/write hooks in
+`port/shims/xmem.cpp`. Existing binaries passed: `xmem_test` **496 checks, OK** and `dstorage_test` **261 checks, 0
+failed**. The synthetic `PALMETTO_DS_PAGES_ARM` exercises the real request branch only when both page switches are on;
+[peer_port_streaming.md](peer_port_streaming.md) section 14 records its 21/21 GPU-free fixture, and one prior 130.2 s
+light arm with 0 exceptions and 0 device losses. In that arm, the two page-list requests were synthetic: one delivered
+100,000 bytes across two spans and one failed all-or-nothing on an unmapped page. This reconciliation did not build or
+relink `palmetto` and did not repeat the arm.
+
+**Remaining falsifier:** a title-originated destination-page request must make `dest-pages` non-zero and show a completed
+transfer/status; to establish the optional page-watch hand-off, the same run must also show a `changed` compare for the
+watched texture whose pages were delivered. The synthetic arm validates the request path, but does not change the measured
+title population or justify enabling either switch by default. The page-write follow-up and its peer cross-check are
+already attributed in [peer_port_streaming.md](peer_port_streaming.md) section 13.6 and the existing `NOTICE.md` row; this
+reconciliation introduces no new peer mechanism.

@@ -1,10 +1,11 @@
-# Remaining upstream mechanisms: what we still lack, ranked, and the next three slices
+# Remaining upstream mechanisms: ranked baseline and current measured status
 
-**Status: analysis page, read-only.** This page inventories the upstream story-load mechanisms our tree still lacks,
-ranks them by the chance they are the next wall after the measured frontiers, and gives each a port-ready plan (files
-to read, effort, acceptance test). No boot was run for it, no code was changed, and no game data or upstream code
-appears here; every number is either a measured count from a page of ours or a numstat line count from the
-public fork's clone at `D:\leonida-work\leonida-fork`.
+**Status: read-only analysis with a current measured/landed overlay (2026-11-27).** The original rank table, mechanism notes and next-slice plan preserve the earlier hypothesis snapshot; their former
+“Our tree today” and “Measured symptom” cells are
+historical baseline, not live status. Section 1.1 adds the current measured/landed results for ranks 1–9 with page and
+commit references. No new boot was run for this documentation update, no code was changed, and no game data or upstream
+code appears here; every number is either a measured count from a page of ours or a numstat line count from the public
+fork's clone at `D:\leonida-work\leonida-fork`.
 
 Inputs read: [upstream_port.md](upstream_port.md) (the porting policy), [d3d12_vulkan.md](d3d12_vulkan.md),
 [story_load_probe.md](story_load_probe.md), [frame_first_light.md](frame_first_light.md),
@@ -29,7 +30,10 @@ Rank is the likelihood that the mechanism gates the next observable phase. "Fron
 belongs to: `streamed content` = the story load once it starts; `memory` = the process footprint; `world` = the phase
 after the load; `post-load` = polish once content exists.
 
-| # | Mechanism (upstream name) | Frontier | Upstream evidence (commits, files, +/−) | Our tree today | Measured symptom in our pages | Effort | Independently testable |
+The following eight-column table preserves the original prioritization snapshot. Its tree/symptom cells are historical;
+section 1.1 is the current status overlay and supersedes them wherever later evidence changes the state.
+
+| # | Mechanism (upstream name) | Frontier | Upstream evidence (commits, files, +/−) | Our tree then (historical baseline) | Measured symptom then (historical baseline) | Effort | Independently testable |
 |---:|---|---|---|---|---|---|---|
 | 1 | DirectStorage **page-list resolver** and live page transfer | streamed content | `273b3bdf9` `shims/dstorage.cpp` +419/−94, `dstorage_staging.h` +104; `0aecc5efa` (#968) 3 files +151 (`d3d12_xs_device.cpp` +87, `xmem.cpp` +56, `xmem.h` +8) | plan and copy math implemented in `port/shims/dstorage_advanced.h` + `port/shims/dstorage.cpp`; a live request is refused by name ("no page resolver"); `port/shims/xmem.h` exposes commit only | page-list requests measured 0 (`dest-pages=0 source-pages=0`, 8,272 shapes in 300 s); mechanism inert, the refusal is named | S | yes - unit test through a synthetic resolver; promotion falsifier is a trace with `dest-pages` non-zero |
 | 2 | **Bindless table degradation** and larger image arrays | streamed content | `273b3bdf9` `src/vulkan_bindless.h` +260/−65, `src/descriptor_table.h` +57/−12, `src/gfx10_descriptors.h` +11, `shims/d3d12_xs_desc_clean.h` +74 (new), `shims/d3d12_xs_alloc_size.h` +268 (new) | `port/src/vulkan_bindless.h` 979 lines: a failed replacing flush returns false, and the queue then refuses the whole submission (`port/src/vulkan_backend.h:3134`); no spares, no host fallback, no degrade; 2D-array/3D/1D arrays not grown | 0 refused submissions today because the image population is 32 images / 279.1 MiB; the fork's streamed population is ~38,000 images | S/M | yes - `port/test/d3d12_bindless_churn_test.cpp` plus an injected allocation failure |
@@ -41,15 +45,33 @@ after the load; `post-load` = polish once content exists.
 | 8 | **Pipeline compile workers** | post-load | `3de22a1904` (#1547) 6 files +412 (`src/pipeline_workers.h` +173 new, `vulkan_replay.h` +136/−12, `d3d12_vulkan_device.cpp` +45/−7, `vulkan_backend.h` +29/−1); `273b3bdf9` `d3d12_pipeline_compile.h` +128 (new), `d3d12_pipeline_checkpoint.h` +97 (new), `pipeline_cache_store.h` +69, `pipeline_profile.h` +70; `ed94fbef9` `d3d12_pipeline_compile.h` +232/−28 | compilation is inline; our own `port/src/pipeline_cache.h` and the persistent/recipe cache exist; no worker threads | one 0-30 s burst: 51,786 graphics pipelines in 20,545.9 ms (driver 34.9%, layer 44.9%); nothing created later; 0 refusals | S/M | yes - fake compile timing in `port/test/pipeline_cache_test.cpp` and a boot with a cold driver cache |
 | 9 | **Presentation pacing/tokens** (shared `WaitFrameEventX`/`PresentX` source) | post-load | `89e0ea9b55` (#402) 5 files +290/−71; `273b3bdf9` `src/frame_pacer.h` +19/−6, `src/d3d12_xs_frame_events.h` +47 (new), `shims/xbox_present.cpp` +48/−15, `src/vulkan_present.h` +378/−19; `afb14d56c` +38/−12, `ddafa07b46` +235/−57 | `port/src/frame_pacer.h` 436 lines, `port/shims/xbox_present.cpp` 665 lines, device slots 78/79/80 served, and a token bridge accepts the device proxy's reported token; the pacer is not the token source | 8,625 presents / 90 s with 0 failed; 33,275 presents / 300 s; the presented frame loop is alive and is not the gate | S | yes - `port/test/frame_pacer_test.cpp` and `port/test/xbox_present_test.cpp`; a boot counting token origins |
 
-## 2. Why this order, and where the current frontiers sit
+### 1.1 Current measured/landed status (2026-11-27)
+
+This compact overlay is authoritative for the ranks below; the original detail and rationale remain available as history.
+A status of “readiness” or an empty title population is not a claim of title behavior.
+
+| # | Current status | Latest evidence |
+|---:|---|---|
+| 1 | **Landed; title demand absent.** A diagnostic boot arm exercised the real DirectStorage request path with a synthetic request: 100,000 bytes delivered through two mapped views and 25 page-watch trips; the title's own file reads still had 0 destination-page lists. | [page_resolver.md](page_resolver.md); [peer_port_streaming.md](peer_port_streaming.md), §§13–14; [`66b33d782`](https://github.com/luizwidmer/palmetto/commit/66b33d782); [`f495a6261`](https://github.com/luizwidmer/palmetto/commit/f495a6261) |
+| 2 | **Landed; exhaustion remains latent.** Bindless replacement degradation and array growth are implemented; the measured population is 32 image allocations / 279.1 MiB with 0 refused submissions, so title-scale exhaustion is not demonstrated. | [bindless_degradation.md](bindless_degradation.md); [`61f544a1b`](https://github.com/luizwidmer/palmetto/commit/61f544a1b) |
+| 3 | **Partial; CPU-only alias tracking.** The alias-expanded watcher fans out by backing-section identity plus offset and has 496 CPU checks; it does not prove GPU-visible shared memory. P-30 was deferred after P-31's two on-arm device losses, not measured negative. | [title_memory_model.md](title_memory_model.md), §§10–11 (**§11 in-flight**); [peer_port_movie.md](peer_port_movie.md), §11; [`3323f7834`](https://github.com/luizwidmer/palmetto/commit/3323f7834); [`4b0821bcb`](https://github.com/luizwidmer/palmetto/commit/4b0821bcb) |
+| 4 | **Partial; refresh consumer landed, measured population empty.** The 300 s plane-refresh arm tracked two 2×2, 64-byte textures over 8,191 texture/submission pairs: 0 changed, 0 uploaded, and no movie draw to sample them. Memory growth remains measured but unattributed. | [peer_port_movie.md](peer_port_movie.md), §§8.4–8.5; [story_load_probe.md](story_load_probe.md); [`9a86418c4`](https://github.com/luizwidmer/palmetto/commit/9a86418c4) |
+| 5 | **Partial; translator fixes landed, corpus still partial.** The latest request-union scan validates 480/668 and leaves 188 refused; the prior additive corpus publish records 444 entries. The 33 additions noted as unpublished in the translator page and the three later lane-mask outputs are not recorded as a newer corpus publish. | [compute_corpus_2.md](compute_corpus_2.md); [translator_fixes.md](translator_fixes.md), §§5–6, 12; [`1a48d38da`](https://github.com/luizwidmer/palmetto/commit/1a48d38da); [`e93cfe4e1`](https://github.com/luizwidmer/palmetto/commit/e93cfe4e1) |
+| 6 | **Partial; measured feed landed, but did not produce a frame.** The opt-in vertex/transform feed supplies the measured bound vertex V#; the constant-pass target remains zero and two of three with-feed arms stalled before the frame loop. Directly indexed heap-base placement and spills remain open. | [vertex_constant_feed.md](vertex_constant_feed.md); [root_arguments.md](root_arguments.md); [`58472232b`](https://github.com/luizwidmer/palmetto/commit/58472232b) |
+| 7 | **Opt-in stream/publication landed; selected MS population is empty.** There are 0 MS resolver keys against 7,498 library MS programs, no `ms` selection, and all 10,241 measured slot-57 calls remain vertex-family; no title mesh record or picture was observed. | [mesh_stage.md](mesh_stage.md), §8; [`5798bb070`](https://github.com/luizwidmer/palmetto/commit/5798bb070) |
+| 8 | **Workers and hold measured; the pool/session gate did not move.** The hold A/B removed pipeline-wait time from title threads, but the five pool-2 events stayed unsignalled and state was unchanged at 298 s. The separate overlap A/B recorded no queue-room wait at bound 64; both on attempts lost the device, so it does not establish a causal improvement. | [deferred_compile.md](deferred_compile.md); [peer_port_streaming.md](peer_port_streaming.md), §§10.4–10.5 and §16 (**§16 in-flight**); [`375a9b14c`](https://github.com/luizwidmer/palmetto/commit/375a9b14c); [`8b7a800be`](https://github.com/luizwidmer/palmetto/commit/8b7a800be); [`5798bb070`](https://github.com/luizwidmer/palmetto/commit/5798bb070) |
+| 9 | **Present-driven pacing landed; handshake changed, title state did not.** The 50 s A/B changed token ownership and measured cadence, with about 12% fewer presents, but state words and captures matched through 44 s before the loading transition; the separate 33,275-present / 300 s run shows the present path itself is live. | [peer_port_first_ui.md](peer_port_first_ui.md), §12; [window.md](window.md), §5; [`7c867c03e`](https://github.com/luizwidmer/palmetto/commit/7c867c03e) |
+
+## 2. Original rationale and frontier ordering (historical baseline)
 
 The four measured frontiers, in the order the last pages name them:
 
 1. **First light / the black constant pass** ([frame_first_light.md](frame_first_light.md)): both targets read 0 of
-   8,294,400 pixels; the content dies at the constant pass's own inputs. A vertex/transform-feed slice is in flight in
-   this checkout (uncommitted) and targets the two measured feeds (the console driver block at `s0`/`s1` and the
-   console root layout from `s8`); that work is the *current* frontier, so item 6 is ranked mid-table rather than
-   first: only its heap-base/spill/flag residue remains after the feed lands.
+   8,294,400 pixels; the content dies at the constant pass's own inputs. At the time of this original ranking, a
+   vertex/transform-feed slice for the console driver block at `s0`/`s1` and root layout at `s8` was in flight; it has
+   since landed, but the target remains zero and two of three with-feed arms stalled before the frame loop (current rank 6
+   above). The first-light result remains the picture frontier; the heap-base/spill/flag residue is still a separate
+   world-path question.
 2. **State-2 idle** ([story_load_probe.md](story_load_probe.md) section 3, [loading_gate.md](loading_gate.md)):
    `0x7446510` stays 2 and `0x98f828c` stays 0 to 298.9 s after a fully answered user sign-in at 115.1 s. No mechanism
    in this list is named in the fork's history as a loader fix, so the ranking below does not claim to gate it.
@@ -58,13 +80,13 @@ The four measured frontiers, in the order the last pages name them:
    translator coverage), so they are the most likely walls immediately after the state step.
 4. **Memory** ([story_load_probe.md](story_load_probe.md) section 2): rank 4, with rank 3 for the copy-invalidation
    half. The growth is measured but not attributed, so this rank is a hazard and a mitigation path, not a proven cause.
-   A memory-attribution measurement is in flight in this checkout (uncommitted `alloc_trace` instrumentation); it should
-   decide whether the write-watch/title-memory work of rank 4 is the fix or only the next measurement.
+   At the time of this original ranking, an `alloc_trace` measurement was the proposed next attribution step. The current
+   overlay still records the growth as unattributed and does not claim rank 4 as its cause.
 
 The three "cheap and independently testable" ranks (1, 2 and 9) are S or S/M and need no boot to prove their own
 mechanics; 3, 4 and 5 are the M/L work that needs the measured population to pay off.
 
-## 3. Mechanism notes
+## 3. Mechanism notes (historical baseline; current status in section 1.1)
 
 ### 3.1 Page-list resolver and live page transfer (rank 1, S)
 
@@ -309,11 +331,12 @@ quality item.
 **Acceptance test.** `port/test/frame_pacer_test.cpp` and `port/test/xbox_present_test.cpp`; a boot counting token
 origins and wait timeouts.
 
-## 4. The three next slices
+## 4. Original three-slice plan (historical)
 
-The two in-flight slices (the vertex/transform feed and the second compute-corpus publish) cover the current frontier
-and rank 5's corpus half; the three below are the next independent slices, ordered by rank. Each can start without
-waiting for the others, and each keeps the default path unchanged until its A/B.
+The original plan described the vertex/transform feed and second compute-corpus publish as in flight, then listed three
+independent slices ordered by rank. Those two have since landed; ranks 1 and 2 are also implemented, while ranks 3 and 4
+have only partial CPU/texture-refresh coverage. The read/build/acceptance details below are preserved as plan history,
+not as current assignments or claims that those mechanisms remain wholly unimplemented; use section 1.1 for current status.
 
 ### Slice A - DirectStorage page resolver and live transfer (rank 1, effort S)
 
@@ -369,7 +392,7 @@ and remap-race protections. Acceptance: `buffer_va_index_test` extended with the
 time and the footprint compared in one A/B pair; a draw that binds a title-memory buffer as a V# fetches the right
 bytes.
 
-## 5. Dependencies
+## 5. Original dependency sketch (historical)
 
 | Slice/item | Needs before it | What it unblocks |
 |---|---|---|
@@ -382,7 +405,7 @@ bytes.
 | Rank 7 mesh | rank 6's heap offset for the mesh stage and the stream-description PSO path | mesh content passes |
 | Ranks 8-9 | nothing; post-load | frame pacing and compile latency once content exists |
 
-## 6. Cheap post-story-load changes, deferred
+## 6. Cheap post-story-load changes, deferred in the original plan
 
 The fork's post-#984 merges are mostly *after* its load worked, so they are deferred here and listed so the next
 planner does not rediscover them. Sizes are numstat runtime +/− at the named commit.
@@ -412,17 +435,18 @@ Already ported and therefore not repeated above: the barrier into `LAYOUT_UNDEFI
 
 ## 7. Limits
 
-- This page is a plausibility ranking from upstream commit sizes/messages, the fork's own docs and our measured pages.
-  It ran no boot and changed nothing; a rank is a hypothesis with a named falsifier, not a measurement of the next wall.
+- The original rank ordering is a plausibility ranking from upstream commit sizes/messages, the fork's own docs and our
+  measured pages; no new boot was run for this documentation update and no code was changed. A rank is a hypothesis with
+  a named falsifier, not a measurement of the next wall.
 - Our line counts were taken from the working tree; the fork's are numstat per commit and path scope, so
   a total can differ from another page that counts a different scope (for example the whole squash, or tests included).
 - The memory growth of [story_load_probe.md](story_load_probe.md) is measured but not attributed. Rank 4 is placed high
   because it is the only carried mechanism aimed at that class, not because it is proven to be the cause.
 - The fork's upstream paths are cited as evidence only; no upstream code, comment text or table was copied, and the
   implementation of any slice here stays ours ([upstream_port.md](upstream_port.md)).
-- Two slices are in flight in this working tree and are not this page's own work: a vertex/transform feed for the
-  console layout and a second compute-corpus publish. They are named where they affect a rank and are not counted as
-  ported here.
+- The original snapshot's in-flight labels for the vertex/transform feed and second compute-corpus publish are historical.
+  Their landed/measured outcomes are recorded in section 1.1 ranks 6 and 5; the detailed mechanism plans above retain the
+  context in which those slices were first ranked.
 
 ## 8. Attribution
 

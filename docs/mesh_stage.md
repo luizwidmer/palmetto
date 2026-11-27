@@ -347,3 +347,41 @@ The synthetic publisher and existing shader-library Python tests pass. The C++/`
 shared build window; no slot-57 boot arm was run for this slice because the current selection/corpus has no MS resolver key
 or measured mesh record to exercise. This is readiness evidence only: it makes no mesh-picture or device-stability claim.
 The attribution and NOTICE ownership in section 7 remain unchanged; the lead adds the NOTICE row at commit.
+
+### 8.5. Selection counts and a synthetic publication falsifier
+
+The work-folder indices, request manifest, and extraction report were counted from JSON metadata only. No `.spv`, DXBC,
+FSPX code, or shader module bytes were opened for this recount; no real program-hash values were recorded or published.
+
+| metadata source | entries/requests | MS count relevant to native program resolution |
+|---|---:|---|
+| translated corpus `shaders/spirv/index.json` | 26,501 | 9,282 `stage: ms`; all 9,282 carry `fssm_sha256`, and 0 carry `fspx_code_sha256` |
+| runtime `shaders/spirv/fspx/index.json` | 1,896 (630 CS, 947 PS, 319 VS) | 0 MS entries / 0 MS resolver keys |
+| selected translation `shaders/spirv/pipeline_graphics/index.json` | 1,266 (947 PS, 319 VS) | 0 MS entries |
+| work-folder `graphics_programs.json` request union | 1,266 unique hashes (947 PS, 319 VS) | 0 MS hashes; no non-empty `ms` list |
+| extraction `shaders/pipeline_graphics/wanted.json` | — | MS wanted 0, found 0, missing 0, other-stage 0 |
+
+This separates **translated MS exists** (9,282 FSSM-keyed corpus entries) from **MS can resolve for a native slot-57 library
+program** (none). The current selection asks for no MS, the selected graphics translation contains no MS row, and the
+runtime-read FSPX index contains no MS resolver key. The `fspx_code_sha256` key path remains the blocking condition.
+
+The falsifier is pinned in `tests/test_build_port_graphics_publication.py` using the
+[synthetic selection fixture](../tests/fixtures/graphics_programs_ms_synthetic.json). That fixture has one synthetic
+code identifier for each of PS, VS, and MS; its field order is deliberately `ms`, `vs`, `ps` so the test proves the
+publisher canonicalizes the selection to `ps,vs,ms`.
+The fixture hashes identify only the test strings `synthetic-<stage>`. The test creates matching synthetic extraction,
+translation-index, and `.spv` placeholder files in a temporary directory; no actual shader or game data is involved.
+It proves that an explicit mixed PS/VS/MS selection is merged with the MS entry marked `stage: ms` and carrying its
+`fspx_code_sha256`; stale MS-prefixed rows are pruned while the compute entry remains. The default PS/VS path (both an
+omitted MS field and an empty MS list) preserves an existing MS row and module byte-for-byte.
+
+**Exact resolver falsifier:** the real publication claim passes only when a non-empty external `ms` request hash matches a
+measured MS program in the pipeline library, translation emits its `stage: ms` row with that same
+`fspx_code_sha256` and a module, and the merge places both under the runtime-read `fspx` index/module directory. A
+non-empty list by itself, an MS row keyed only by `fssm_sha256`, or a test fixture alone is not real-corpus resolution.
+The present work-folder count falsifies a claim that the current request/corpus union already contains such a resolver
+entry: request MS 0, selected translation MS 0, FSPX MS keys 0.
+
+Commands: `python -I tests/test_build_port_graphics_publication.py` and
+`python -I tests/test_shader_library.py`. These are GPU-free synthetic tests; no title boot or runtime build/relink was
+run for this Python-only slice.
