@@ -12,6 +12,12 @@ probe below) shows the wait is exactly what holds the machine - but also that a 
 continues and faults at `0x147B961` without ever requesting stage 3. The next fact needed is the tracker's pending work
 and its producer.
 
+**Historical-scope note (2026-11-27):** the stage-2 state, unsignalled wait and no-stage-3-request verdict below are
+measurements of this page's earlier boot configuration, not a universal current stop. Later measured arms reach and hold
+stage 3 with the opt-in class-0xa workaround; their remaining visible-content gap is the UI/movie draw path (see
+[decomp_first_ui.md](decomp_first_ui.md) sections 16-18, [peer_port_first_ui.md](peer_port_first_ui.md) sections 14-15,
+and [decomp_campaign.md](decomp_campaign.md)). Current task ownership is on [docs/taskboard.md](taskboard.md).
+
 ## 1. What ran
 
 | | |

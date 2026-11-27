@@ -3,13 +3,28 @@
 Ledger of **what people are sending** to the project's GitHub home, plus our own tracked findings for the boot port. Each row carries area, state and one-line evidence. Counts, error classes and commit ids only — no game data, package paths, shader bytes or hashes.
 Maintained by the issue-tracker agent as a standing, read-only-plus-this-file role.
 
-**Repo:** `palmetto`, branch `main`, HEAD `4177f6832` · **GitHub:** [luizwidmer/palmetto](https://github.com/luizwidmer/palmetto)
-**Updated:** 2026-11-27 (live GitHub state and the task-board pointer; the pre-rename numbers stay historical) · **Incoming:** #1 closed (re-baselined), #2 open · **Ours open:** 10 (O3 partial; O8, O9, O15, O18–O23) · **Done:** 25 · **Superseded:** 5 (O1, O6, O10, O12, O16) · **Open PRs:** 0.
+**Repo:** `palmetto`, branch `main`, HEAD `3bbb51497` · **GitHub:** [luizwidmer/palmetto](https://github.com/luizwidmer/palmetto)
+*HEAD is the observed checkout for this sweep; the lead will refresh this field at integration.*
+**Updated:** 2026-11-27 (live GitHub state and the task-board pointer; the pre-rename numbers stay historical) · **Incoming:** #1 closed (re-baselined), #2 closed (post-rename residue) · **Ours open:** 10 (O3 partial; O8, O9, O15, O18–O23) · **Done:** 25 · **Superseded:** 5 (O1, O6, O10, O12, O16) · **Open PRs:** 0.
 
 **Policy: ledger only.** The task board and issue triage are the maintainer's lane; do not post replies to reporters
 without the repo owner's approval - that part is still **HOLD**. Work claims are public on the board, not in this file.
 
-**Where the project stands (measured on one machine; one 150 s boot unless named).** The retail target console title
+## Current measured picture frontier (2026-11-27)
+
+**Latest picture evidence (Windows 11/RTX 4090; later arms are separate):** On the default, unmitigated path, a clean
+stage-3 arm reaches the title-side class-0xa zero-byte overrun and faults about a second later. The opt-in title-side
+`PALMETTO_TITLE_CLASS0A_SIZE=1` experiment sizes that upload to 0x1000: a clean 300 s arm enters and holds stage 3 for the
+remaining ~230 s, yet the first-run page owners remain at 0 hits; the movie player reaches state 9 with `buffers 0`, and
+frame-buffer registration/per-frame decode both remain at 0 hits. Captures stay black. Separately, the presenter's
+synthetic four-band control reaches capture with its expected values. The current visible-content frontier is therefore
+the title-side UI/movie draw path, not the earlier stage-2 wait or a missing decoder shim/presenter. The mitigation is
+off by default and does not establish console-faithful behavior. See [decomp_first_ui.md](decomp_first_ui.md) sections
+16-18, [peer_port_first_ui.md](peer_port_first_ui.md) sections 14-15, and [first_visible.md](first_visible.md).
+
+### Historical issue-1 baseline (measured on one machine; one 150 s boot unless named)
+
+The retail target console title
 boots and runs through the runtime: **ALIVE past 300 s with no exception**; **all 10,241 slot-57 records build into real
 PC graphics pipelines** and **41,545 derived pipelines** are created through the console slot-55 answer; after the
 title's page VAs were rebased into one arena the frame's draws **execute with 0 refused submissions**; the runtime
@@ -80,7 +95,7 @@ console entry points on that path. O15 cannot be pinned by
 behaviour and needs a layout source. O3's fault-time every-thread dump is the highest-value diagnostic while the title
 runs; O8 and O9 are build/corpus hygiene. The full build is green (237/237), so O5 is done.
 
-**Status note (2026-11-27):** the frontier paragraphs above are the stage-2 snapshot that produced this ledger; the project has since reached stage 3 and the current work is tracked on the task board. The findings below remain the evidence record for those measurements.
+**Ledger note (2026-11-27):** the historical issue-1 baseline above and the findings below preserve their original measurements; they are not rewritten as the live frontier. Read the current measured stage-3/mitigation state above, and use the [task board](taskboard.md) for current ownership and next work.
 
 ## Our findings — done
 

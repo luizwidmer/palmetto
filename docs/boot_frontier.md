@@ -1,13 +1,19 @@
 # Boot frontier
 
-**Status: measured** on the retail 1.0.2.1 package, Windows 11, RTX 4090, `PALMETTO_D3D12=vulkan`, with the shader corpus
-in `PALMETTO_SHADERS` (26,555 game and XboxBvhBuilder modules plus the FSPX set that translates) and
-`PALMETTO_SKIP_INT3=1` while the allocator assertion below is unmodelled.
+**Historical measurement context:** the opening snapshot was measured on the retail 1.0.2.1 package, Windows 11,
+RTX 4090, `PALMETTO_D3D12=vulkan`, with the shader corpus in `PALMETTO_SHADERS` (26,555 game and XboxBvhBuilder
+modules plus the FSPX set that translates) and `PALMETTO_SKIP_INT3=1` while the allocator assertion below was
+unmodelled.
 
-This note records how far the boot currently gets and what stops it, so the next attempt starts from a measurement
-rather than a guess. Counts, arities and error classes only; no package bytes or addresses.
+This file preserves the boot-frontier sequence recorded through 2026-11-24; its opening table and dated entries are
+historical measurements, not the live frontier. The current stage-3/mitigation and UI/movie state is summarized at the
+end and linked from [decomp_campaign.md](decomp_campaign.md) and [first_visible.md](first_visible.md). Counts, arities
+and error classes only; no package bytes or addresses.
 
-## Where the run stops
+## Initial snapshot: where the run stopped (historical)
+
+Within this historical table, "current stop" means the stop current to that original run, not the repository's live
+frontier.
 
 | # | Stop | Class | Measured |
 |---:|---|---|---|
@@ -15,7 +21,7 @@ rather than a guess. Counts, arities and error classes only; no package bytes or
 | 2 | device slot 67 `DeserializeComputePipelineStateX`, 42 calls | missing translation | **solved**: they are the title's own precompiled compute programs from the pipeline library inside `shaders.arc`, not FidelityFX programs; 38 of the 42 translate, the corpus carries them, and 0 creations fail |
 | 3 | device slot 108 forwarded to the PC table | unknown shape | **current stop**: called with two arguments (an output pointer and a structure pointer) from 29 sites |
 
-The run reaches **2,238 D3D12 calls** and stops at the third row.
+At that snapshot, the run reaches **2,238 D3D12 calls** and stops at the third row.
 
 Two facts about the first two rows matter for planning:
 
@@ -874,11 +880,22 @@ but it is the only remaining place a console-addressed view could be lost. The p
 structs and the engine object at `+0x1FA38` is the next device-side increment:
 [streamed_consumer.md](streamed_consumer.md) sections 5/7-8, [boot_audit.md](boot_audit.md) section 5.
 
-Where the boot stands now: it runs its own frame loop for the whole timeout, builds every pipeline it asks for,
-executes its draws (17,674-27,935 per 150 s, 0 refused submissions), presents into the title's own window, and the full
-configure+build is green (237/237) - and the presented frame is still black. The frame-content frontier is the geometry
-path, which produces no fragments even unculled (O22: framecap is dumping the translated vertex shader's output to find
-where coverage dies), with the never-written sampled 4K texture behind it (O19: its producer is the next named place).
-The streamed blocks are closed as an upload lead (O20 named a CPU deserializer); console slot 70 (O23) and XG slot 10
-(O21) are the remaining unmodelled console entry points, and the fixed-function state cannot be pinned by behaviour
-(O15). The open rows and their evidence are in [issues.md](issues.md).
+**Historical summary of the 2026-11-24 snapshot:** it ran its own frame loop for the whole timeout, built every pipeline
+it asked for, executed its draws (17,674-27,935 per 150 s, 0 refused submissions), presented into the title's own window,
+and the full configure+build was green (237/237) - while the presented frame remained black. The frame-content frontier
+was the geometry path, which produced no fragments even unculled (O22: framecap was dumping the translated vertex
+shader's output to find where coverage dies), with the never-written sampled 4K texture behind it (O19: its producer was
+the next named place). The streamed blocks were closed as an upload lead (O20 named a CPU deserializer); console slot 70
+(O23) and XG slot 10 (O21) were the remaining unmodelled console entry points, and the fixed-function state could not be
+pinned by behaviour (O15). The open rows and their evidence are in [issues.md](issues.md).
+
+## Current status pointer (2026-11-27)
+
+The 2026-11-24 snapshot above is not the current picture frontier. Later measured runs reach and hold stage 3 with the
+opt-in, title-side `PALMETTO_TITLE_CLASS0A_SIZE=1` workaround; without it, the class-0xa zero-byte request still faults
+in a clean stage-3 arm. The later first-run probe records 0 hits for its page owners, and the movie player reaches state
+0x9 while frame-buffer registration and per-frame decode remain at 0; captures stay black. Separately, the presenter's
+synthetic control reaches capture with its expected non-black values. The workaround is off by default and is not a
+console-faithful fix. See [decomp_first_ui.md](decomp_first_ui.md) sections 16-18,
+[peer_port_first_ui.md](peer_port_first_ui.md) sections 14-15, [decomp_campaign.md](decomp_campaign.md),
+[first_visible.md](first_visible.md), and [issues.md](issues.md) for the current frontier and task-board pointer.

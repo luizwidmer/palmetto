@@ -14,6 +14,9 @@ threading contract, the allocator, and the complete import surface.
 
 ## The six slices
 
+The table preserves the strongest findings at the time of the static campaign; later boot/UI/movie follow-ups below
+update the live frontier without rewriting those slice measurements.
+
 | page | what it maps | strongest measured findings |
 |---|---|---|
 | [decomp_stage.md](decomp_stage.md) | Stage/session state words, writers, transition conditions, the phase protocol and the stage-3 job graph | The stage machine is `current/requested/pending` with a phase byte; stage 2→3 needs the stage-2 boot sequence to return; stage 3→4 has two conditions; the session word has a single 2-instruction writer that earlier pages called unwritten; the session-3 poll gates on a loading/streaming completion record. |
@@ -25,22 +28,22 @@ threading contract, the allocator, and the complete import surface.
 
 ## What the campaign changed
 
-1. **The class-0xa crash is title-side, twice over.** The class is a compile-time constant, the stride switch has no
-   case for it, the allocator hands back a zero-size chunk, and the copy length is a literal. No runtime answer of
-   ours participates; no shim fix is implied. The only runtime lever left is the renderer branch that chooses to build
-   that command — and the campaign shows the branch is not selected by any answer we serve on PC.
-2. **The black frame is a chronology problem, not a compose problem.** The compose draw's console table is fed (the
-   earlier "empty matrix" was a publication-off arm), its control rasterises with culling off, and a correctly
-   rasterising compose of a zero source is black. What is missing is the content producer that runs after stage 3
-   stays alive.
-3. **The first visible frame is a UI/movie frame.** Every peer port's first visible frame is a first-run/UI/menu or
-   movie frame, not the 3D content pass; our boot never reaches the producer that draws one.
-4. **The remaining stand-ins are enumerable.** The import map lists every stand-in or refusal on the stage-3,
-   first-run, UI and movie paths, so the next implementation slices can be chosen from evidence.
+1. **The class-0xa overrun is title-side; the workaround is opt-in and experimental.** The class is a compile-time
+   constant, its stride switch returns zero, and the copy is 0x1000 bytes. The title-side `PALMETTO_TITLE_CLASS0A_SIZE=1`
+   row-stride workaround lets the executor pass survive, but it is off by default and is not a console-faithful fix.
+2. **A later stage-3 window rules out a short-window-only explanation.** With that workaround, a clean 300 s arm holds
+   stage 3 for about 230 s, yet its captures remain black. The synthetic presenter control reaches capture correctly, so
+   the missing pixels are not explained by a broken present/copy path alone.
+3. **The UI/movie producer is still not issuing a visible draw.** In the later probes the first-run page owners remain
+   at 0 hits; the movie player reaches state 0x9, but its frame-buffer registration and per-frame decode remain at 0.
+   The current measured gap is the title's screen/movie draw path, not an absent Bink shim.
+4. **The remaining stand-ins are enumerable.** The import map lists stand-ins or refusals on the stage-3, first-run,
+   UI and movie paths; implementation still follows measured falsifiers, not the old ranking alone.
 
-## Consolidated roadmap (from the six rankings)
+## Original consolidated roadmap (historical plan; measured follow-ups below)
 
-Frontier-first; each row names the page that justifies it and the files it would touch.
+This was the frontier-first sequence before later stage-3/mitigation and UI/movie probes; it is retained as history.
+Each row names the page that justified it and the files it expected to touch.
 
 | # | slice | why it is next | files | falsifier |
 |---|---|---|---|---|
@@ -56,10 +59,11 @@ sole gate, XGameUi/XLauncher dialogs, XAppCapture, xg slot 10 tiling, DirectStor
 containers, `XMemIsToolsMemAvailable`, and the renderer/memory hypotheses already measured negative in the earlier
 pages.
 
-## Measured follow-ups
+## Measured follow-ups in the campaign snapshot (historical)
 
-The roadmap rows were taken up immediately after the campaign; this table records what the measurements retired and what
-they renamed, so the page cannot be read as a list of open hypotheses that are already settled.
+The roadmap rows were taken up immediately after the campaign; this table preserves what those measurements retired and
+what they renamed at that time. Later updates to the live frontier are summarized below; the measurements in this table
+remain historical evidence, not a current status list.
 
 | roadmap row | measured outcome | evidence |
 |---|---|---|
@@ -72,10 +76,21 @@ they renamed, so the page cannot be read as a list of open hypotheses that are a
 
 | 7. Series-S FSR branch survival | **Shape survives, coincidence blocked by a GPU-side loss.** The R9G9B9E5 output shape is created (invalid-argument refusal gone); every post-reboot Series-S arm then loses the device on a driver event-153 fault, which also hits a control arm with no Series-S shape, so the loss is not the shape. No arm reached stage 3 with the Series-S answer, so the class-0xa question stays open; FSR programs remain 0 of 29. The fault report API itself crashes this driver; validation is too slow for the window. | decomp_renderer.md sections 12-13 |
 
-The dominant remaining wall for the picture is unchanged: stage 3 dies a few seconds after entry on the title-side
-class-0xa zero-byte overrun, so the first-run producers that follow stage 3 do not run. The campaign's own evidence says
-there is no runtime answer in that overrun; the console-type branch is the only measured lever that might avoid the
-command entirely, which is why it is the next experiment rather than another decode.
+## Current picture frontier (2026-11-27)
+
+The default path still has the title-side class-0xa zero-byte overrun, but it is no longer the only measured outcome:
+the opt-in `PALMETTO_TITLE_CLASS0A_SIZE=1` workaround lets a clean long arm reach and hold stage 3. In that mitigated
+window, the first-run page owners remain at 0 hits; Bink reaches player state 0x9, but frame-buffer registration and
+per-frame decode remain at 0 hits, so no movie frame is drawn. Captures remain black. The independent synthetic-present
+control reaches the capture correctly. The active picture frontier is therefore the title-side first-run/movie draw path
+rather than the old stage-2 wait, a missing Bink shim, or a broken presenter; the workaround remains off by default and
+is not a console-faithful fix. See [decomp_first_ui.md](decomp_first_ui.md) sections 16-18,
+[peer_port_first_ui.md](peer_port_first_ui.md) sections 14-15, [first_visible.md](first_visible.md), and the current
+[task board](taskboard.md).
+
+The Series-S/FSR-specific portions of original roadmap row 6 and historical follow-up row 7 remain the measurements from
+[decomp_renderer.md](decomp_renderer.md) sections 12-13; the in-flight FSR-route owner owns any later update, so this sweep
+does not revise that result.
 
 ## Limits
 

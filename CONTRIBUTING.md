@@ -13,7 +13,7 @@ Thanks for helping. A few rules keep the project safe to host:
 ## Before you start
 
 Work is claimed on the shared task board: the pinned coordination issue
-("Coordinating who works on what"), whose rules and a snapshot of the backlog live in
+([search by title][claims]), whose rules and a snapshot of the backlog live in
 [docs/taskboard.md](docs/taskboard.md). Read the board and the open pull requests first, then post one claim comment:
 
 ```

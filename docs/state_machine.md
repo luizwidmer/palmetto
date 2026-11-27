@@ -1,7 +1,7 @@
 # State machine: the loading stage chain, its three words, and the transition that is missing
 
-**Status: decompiled and measured.** The title's init/loading state machine is reconstructed from the mapped image
-with the local Ghidra workflow (24 functions decompiled, plus static reference scans) and measured in one 130 s boot
+**Historical status: decompiled and measured in one 130 s boot.** The title's init/loading state machine is reconstructed
+from the mapped image with the local Ghidra workflow (24 functions decompiled, plus static reference scans) and measured
 with an opt-in in-process probe. The three tracker words are **not** three independent gates: they are
 
 * `0x7446510` - the **game/stage state** word (1 = initial stage, 2 = init/load stage, 3 = running; 4..6 = later
@@ -13,14 +13,20 @@ with an opt-in in-process probe. The three tracker words are **not** three indep
 * `0x98F828C` - the **session/online state** dispatched by `FUN_141D83960` (states 0..16; 0 and 10 are "nothing to
   do"). No writer of this word exists in the image's static code: state 0 is the offline value.
 
+**Current status note (2026-11-27):** the stage-2 wait and missing request described by this page are the result of
+its earlier single boot, not a universal current stop. Later measured runs reach and hold stage 3 with the opt-in
+class-0xa workaround, although UI page owners and movie decode still remain unhit (see [decomp_first_ui.md](decomp_first_ui.md)
+sections 16-18 and [peer_port_first_ui.md](peer_port_first_ui.md) sections 14-15). Keep the boot trace below as historical
+evidence; the current frontier and ownership are tracked in [docs/taskboard.md](taskboard.md).
+
 The stage chain is linear: the stage-1 entry handler ends by requesting stage 2, and the stage-2 entry handler
 `FUN_14081B270` runs the boot sequence `FUN_1421B8960` and then ends by requesting stage 3 with
 `call 0x813660` at **RVA `0x81B2EF`**. Inside that boot sequence a wait loop at **`0x21B8A3E`** blocks until the byte
 `0x71B9048` equals 2 (`FUN_145EA6930`, called at `0x21B8A43`); that byte is written **only** by the boot-media
 module constructor `FUN_145BF9A40` at **RVA `0x5BF9CE0`**, which `FUN_14220FCA0` calls during module initialisation.
-The named missing transition is the last line of this chain - the request to stage 3 (`0x81B2EF`) being executed by
-the pump - and the probe added in this slice distinguishes "still inside the boot wait" from "stage 3 requested but
-never executed" by sampling the state-machine object's current (`+0x10`) and requested (`+0x12`) stage.
+In the measured boot, the missing transition was the last line of this chain - the request to stage 3 (`0x81B2EF`)
+being executed by the pump. The probe added in this slice distinguishes "still inside the boot wait" from "stage 3
+requested but never executed" by sampling the state-machine object's current (`+0x10`) and requested (`+0x12`) stage.
 
 Everything below is RVA, counter, state number and API-name output only; no game bytes, package paths or shader data.
 
@@ -309,7 +315,10 @@ the requested stage stays 2 for the remaining 106 s. The title's own change reco
 last-change tick `0x7446508` is 62,022,057 from 22 s to the kill (the loading tick runs to 62,128,057, so the title's
 clock itself kept moving while the stage did not).
 
-## 10. Smallest next experiment
+## 10. Smallest next experiment (historical proposal)
+
+This was the next experiment proposed from the single boot in this page; the later wait follow-up is recorded in
+[stage2_blocker.md](stage2_blocker.md). Keep the proposal below as historical context, not a current to-do.
 
 The probe's own boot already picked between the candidates: the boot-media gate is 2 before stage 2 starts (so the
 wait loop is out), and the state-machine object's requested stage stays 2 (so the stage-3 request is never made).

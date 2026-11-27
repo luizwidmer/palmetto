@@ -1,30 +1,31 @@
-# The peer ports' first visible frames, the ranked divergence with this tree, and the next five tests
+# The peer ports' first visible frames, the updated divergence with this tree, and five tests
 
-**Status: research and ranking; no boot and no runtime code.** The peer ports publish first visible frames (first-run
-screens, menus, a launch movie, a lit opening scene) while every frame this tree presents is black. Read against their
-own records, that is not one picture bug. Their first visible pixels are the title's **2D UI, logo and video frames**,
+**Status: research and synthesis; no boot or runtime code for this page.** The peer ports publish first visible frames
+(first-run screens, menus, a launch movie, a lit opening scene) while every frame this tree presents is black. Read against
+their own records, that is not one picture bug. Their first visible pixels are the title's **2D UI, logo and video frames**,
 drawn after their boot has left the background loop; the peers' documented earlier frames are black (four of the five
 record it), and their 3D world is the *last* thing to become visible (five-star's still is not on screen). This page
-quotes the peers' public status sentences as evidence, maps each claim onto this project's measured frontier, and ranks
-the divergence:
-**boot chronology and the content's producer first, the draw-state/colour feed third, the target/format measured equal,
-the present path behind it, pipeline availability measured out for the passes we reach.** Section 6 turns the ranking
-into five falsifiable tests; one is already being measured by the in-flight `contentblack` slice.
+quotes the peers' public status sentences as evidence and maps each claim onto this project's measured frontier. Its
+original ranking put boot chronology/content producer first and draw-state/colour feed third; later stage-3/UI/movie
+probes shift the live lead to producer reachability (sections 1 and 5). Section 6 preserves the original five-test plan
+and records which follow-ups have since answered parts of it.
 
 The evidence is each peer's public README, docs, status page and change notes, plus the public tracker snapshot. Peer
 code, comment text, identifiers and tables are **not** copied into this tree; the sentences below are cited as another
 project's published observation, and every conclusion is tied to a page of our own measurement. No game data, package
-path, shader byte, extracted table or peer flag appears here. Tree `f22ff4d41` plus the in-flight slices' files; no boot
-was run for this page, no CMake and no runtime file changed.
+path, shader byte, extracted table or peer flag appears here. Historical source snapshot: tree `f22ff4d41` plus the
+then-in-flight slice files. No boot was run for this page, and no CMake or runtime file changed; this hash is not the
+current repository HEAD.
 
 Peer clones and commits read (all outside the repository, read-only): five-star-recomp `0bfa755` (GPL-3.0-or-later),
 XCL `6d12f58` (GPL-2.0-only), PercyScarlett `e44c465` (GPL-2.0-only), VIctory `13f91ca` (GPL-3.0-or-later),
 victory-fork `9c184b3` (GPL-3.0-or-later), and the tracker snapshot (`page.txt`). The credit is in `NOTICE.md`.
 
-## 1. The question, our measured state, and the two numbering systems
+## 1. The original picture-frontier snapshot (historical), later status, and the two numbering systems
 
 The reframed question is **"why do the peers' frames have visible content while ours are black"**, not "why is our
-frame black in isolation". This tree's measured picture frontier, at the tree this page is written on:
+frame black in isolation". The following table preserves the original short content-window measurements at the source
+snapshot above; it is not the current live frontier:
 
 | measurement | value (page) |
 |---|---|
@@ -40,12 +41,27 @@ frame black in isolation". This tree's measured picture frontier, at the tree th
 | the console upscaler | the peer FSR precondition does not hold here: 0 of 29 FidelityFX programs is requested, the title's own upscale pass runs, and the layer's stretch stand-in leaves the frame black because its source is ([upscale_standin.md](upscale_standin.md) sections 2.2, 5) |
 | the stop that ends the window | a title-side compile-time class 0xa: the image's own format table and a `mov eax,0xa` getter ask the title's allocator for 0 bytes and a 0x1000-byte copy overruns the block; no D3D12 description and no layer answer is in the chain ([vertex_buffer_va.md](vertex_buffer_va.md) section 16.4) |
 
+**Latest measured follow-up (2026-11-27; separate arms, not a rewrite of the snapshot above):** the unmitigated clean
+`boot-mitig-off4` arm still reaches stage 3 and faults about a second later on the class-0xa path. With the opt-in
+title-side `PALMETTO_TITLE_CLASS0A_SIZE=1` workaround, later arms survive the executor pass; a clean 300 s arm holds
+stage 3 for about 230 s but still captures black. In the UI/page-probe arm, the RBF0 dispatcher hits 141 times before
+stage 3 while the probed first-run page owners stay at 0; in the movie arms, the player reaches state 0x9 with
+`buffers 0`, but frame-buffer registration and per-frame decode remain at 0. Separately, the synthetic four-band present
+control reaches capture with its expected values. The old 1.4-4.3 s window is therefore a historical default-path
+measurement, not the only stage-3 outcome; the present frontier is the title-side first-run/movie draw. The workaround is
+off by default and is not a console-faithful fix. See [decomp_first_ui.md](decomp_first_ui.md) sections 16-18,
+[peer_port_first_ui.md](peer_port_first_ui.md) sections 14-15, [decomp_campaign.md](decomp_campaign.md), and the
+[current task board](taskboard.md).
+
 Two numbering systems appear in this page and must not be mixed. **This tree's "stage 3"** is the title's own
 game/stage word (`0x7446510`, meaning 1 initial, 2 init/load, 3 running, 4..6 later), decompiled and measured in
 [state_machine.md](state_machine.md) section 2; the stage-2 handler and its boot sequence are [stage2_blocker.md](stage2_blocker.md).
 **The tracker's "stage N"** is the public tracker's own seven-step reading of each project, not a title word. Its
 legend, from the snapshot (standings): 1 Loads, 2 Starts up, 3 Graphics device, **4 First frames**, **5 Recognisable
 picture**, **6 In-game**, 7 Playable.
+
+The crosswalk below is the original short-window comparison; its stage-5 row remains a historical statement about that
+arm, not a claim that the title cannot reach stage 3 under the later mitigation.
 
 | tracker step | projects the tracker places there (snapshot) | what our tree measures at the same step |
 |---|---|---|
@@ -98,7 +114,8 @@ All five peers and this tree present the title's own `PresentX` plane; the title
 side (this title creates none - [display_path.md](display_path.md) section 4 measures that the boot calls no
 `CreateSwapChain*`), so each runtime owns the swapchain and the presenter.
 The present paths are the same class of mechanism. The differences are conversion and composition downstream of the
-plane, and they are worth naming because two of them are real picture differences:
+plane, and they are worth naming because two of them are real picture differences. The tree-side movie reach in the
+table below is the earlier 130 s snapshot; section 1's current-status note records the later state-0x9/no-decode result.
 
 | peer | how the title's plane reaches the window | resolution, format and colour space | upscale and video |
 |---|---|---|---|
@@ -111,10 +128,14 @@ plane, and they are worth naming because two of them are real picture difference
 The measured equality matters for the ranking: the plane is a 4K R8G8B8A8-family image on both sides with colour
 space 0, and our presented resource is the target the frame draws (verified by resource identity). A colour-space,
 10-bit, HDR or letterbox difference *can* make a correct image display wrongly, but it cannot turn a target that reads
-`0 0 0` on every texel into a visible picture. That is why the present path ranks below the boot chronology even though
-the peers do more in it.
+`0 0 0` on every texel into a visible picture. The later synthetic four-band control reaches capture with its expected
+values ([peer_port_first_ui.md](peer_port_first_ui.md) section 15), so presentation remains behind producer reachability
+in the current ranking; the black title frame is not evidence of a presenter failure.
 
 ## 4. Mechanisms the peers name as required, split into "any non-black pixel" and extras
+
+The tree-side cells preserve the source-snapshot comparison; the later stage-3 UI/movie probe results are summarized in
+section 1 and do not replace these earlier measurements.
 
 | mechanism | peers that name it | required for any non-black pixel? | this tree's measured state |
 |---|---|---|---|
@@ -130,10 +151,11 @@ the peers do more in it.
 | HDR / 10-bit targets, depth bounds, real queries | VIctory lists them as missing; five-star's present maps FP16/R10G10B10A2 when the title asks | **no** | the title's plane is 8-bit format 37 in the measured window |
 | ray tracing and streamed texture batching | every peer in the world still has black shadows; victory-fork's batching and card-copy work are speed and correctness of content already drawn | **no** for first light | deferred with content ([cleanroom_peers.md](cleanroom_peers.md) "The gaps that matter most") |
 
-## 5. The ranked divergence with this tree
+## 5. Original ranked divergence (current update follows)
 
-Ranked by how much of the measured gap each explains, strongest first. Every row is falsifiable by one measurement
-named in section 6.
+This table preserves the original ranking and measurements: D1-D4/D6 are the source snapshot; D5 includes a later
+section-15 control observation but retains its historical verdict. Later evidence shifts the leading explanation from
+short-window chronology to producer reachability; the current status follows the table.
 
 | rank | divergence | what the peers' evidence says | our measurement that bears on it | verdict |
 |---|---|---|---|---|
@@ -141,20 +163,22 @@ named in section 6.
 | **D2** | the content's producer: the peers' first visible pixels are the 2D UI/video path, ours are the two-pass background/upscale loop | five-star's first real image is its "UI layer and the intro video"; VIctory's are first-boot screens and the intro video; XCL's is the account prompt; PercyScarlett's are logos and menus | our content window is 3-draw submissions into a 4K intermediate plus a 4K display buffer, the measured background/upscale pair ([vertex_buffer_va.md](vertex_buffer_va.md) section 10.2); no first-run UI class is asked for and no Bink entry runs ([first_run_path.md](first_run_path.md) section 2.3, [movie_path.md](movie_path.md)) | **strong**: the producer of "theirs visible" is a pass class our window does not contain yet, not a conversion of the pass we do contain |
 | **D3** | draw state and colour feed: even a content pass would be black on our current data | the peers' enabling fixes at this layer are feed-shaped: five-star's buffer-view descriptor record was unfilled at first, so a UI batch program read row 0 of its CBV for every row and every UI vector collapsed onto one line; XCL's descriptor-heap identity fix took the presented buffers from 0 including alpha to visible | the constant pass's user data is 2 of 32 non-zero, the transform scalars `s8/s9/s10/s28` are unset, the driver-block fetch lands on the descriptor table, and its colour dwords are zero ([frame_first_light.md](frame_first_light.md) section 6, [colour_path.md](colour_path.md) section 3.3) | **real, but downstream**: it explains why a content pass would still be black after D1/D2 change, not why the frames we see are black now |
 | **D4** | the target and its format | five-star's boot plane is the same 3840x2160 R8G8B8A8-family plane with colour-space dword 0; XCL and PercyScarlett present the console plane or a stretch of it | our presented resource is the frame's own 4K format-37 target, verified by resource id, and the copy path writes `51 102 204` into the same target ([vertex_buffer_va.md](vertex_buffer_va.md) section 10.2) | **measured equal**: target size, format family and plane identity are not the divergence |
-| **D5** | the present path: own compositor, colour space, letterbox, overlay | five-star scales into an aspect rectangle over black with sRGB/scRGB/HDR10 colour-space selection; PercyScarlett blends an overlay plane; XCL presents through its own window | our presenter adopts the title's window and blits the title's plane; the plane's colour space is 0 and its format 8-bit ([window.md](window.md) section 5, [present_wiring.md](present_wiring.md) section 6); the presenter is now attested end to end with a synthetic non-black control and a measured fit/colour rule ([peer_port_first_ui.md](peer_port_first_ui.md) section 15) | **measured**: the synthetic control reaches the capture exactly, so a zero-source plane is the only reason the title frame stays black; fill/fit and the DPI-unaware window are recorded as opt-in/next (P-24/P-25 on the task board) |
+| **D5** | the present path: own compositor, colour space, letterbox, overlay | five-star scales into an aspect rectangle over black with sRGB/scRGB/HDR10 colour-space selection; PercyScarlett blends an overlay plane; XCL presents through its own window | our presenter adopts the title's window and blits the title's plane; the plane's colour space is 0 and its format 8-bit ([window.md](window.md) section 5, [present_wiring.md](present_wiring.md) section 6); the presenter is now attested end to end with a synthetic non-black control and a measured fit/colour rule ([peer_port_first_ui.md](peer_port_first_ui.md) section 15) | **measured**: the synthetic control reaches the capture exactly, the synthetic control reaches capture exactly, so a zero-source plane is the only reason the title frame stays black; fill/fit and the DPI-unaware window are recorded as opt-in/next (P-24/P-25 on the task board) |
 | **D6** | pipeline and format availability at the first frames | PercyScarlett, XCL and victory-fork all record black while pipelines are missing or being rebuilt, and XCL records a format-view mismatch as the black/device-loss cause | our passes' records convert with 0 refusals and the graphics population is 51,786, and the window's measured stops are the title's own crash family, not a view-format refusal ([upscale_standin.md](upscale_standin.md) section 2.2, [frame_first_light.md](frame_first_light.md) section 2, [vertex_buffer_va.md](vertex_buffer_va.md) section 16.5) | **measured out for the passes we see**, untested for a content pass we cannot reach (T1) |
 
-The boot chronology is therefore the answer to the reframed question, and it has a measured cause on our side: the
-title's running stage begins and the boot stops 1.4-4.3 s later on a title-side zero-byte allocation, so the window in
-which the first-run/UI/movie frames could be drawn never exists. The peers' own records show black frames at their
-earlier presents, and their first visible content is a later state's; that comparison is what makes the chronology the
-strongest divergence. The draw state is the next real gap, but it is the gap that would keep a *content* frame
-black; it cannot make the title's own pre-content frame non-black, because that frame's colour input is zero by design.
+The original short-window snapshot made chronology the leading explanation: stage 3 was reached and the unmitigated
+class-0xa path stopped the boot shortly after. Later arms change that ranking: with the opt-in workaround, a clean 300 s
+run remains at stage 3 for about 230 s, yet the first-run page owners remain at 0 hits and the movie player at state 0x9
+still issues no registration/decode call. The synthetic presenter control also passes. The strongest current divergence is
+therefore producer reachability (D2), not simply elapsed time or the present path; draw state and colour feed remain
+downstream questions for a title content draw that has not occurred. The original stage-2/short-window numbers above
+remain historical measurements, not deleted or recomputed.
 
-## 6. The next five falsifiable tests, frontier-first
+## 6. Original five falsifiable tests (historical plan)
 
-Each test names the mechanism, the file that would carry the measurement, what to measure and the observable that
-decides it. None of them needs game data in the repository; all run on the user's own package and work folder.
+Each test names the mechanism, the file that would carry the measurement, what to measure and the observable that decides
+it. The table preserves the original plan; later coverage for T1/T2 and the current frontier are summarized below. None
+needs game data in the repository; all run on the user's own package and work folder.
 
 | id | falsifiable test | mechanism | our file | what to measure | expected observable | in-flight coverage |
 |---|---|---|---|---|---|---|
@@ -164,9 +188,17 @@ decides it. None of them needs game data in the repository; all run on the user'
 | **T4** | the colour window on the first content frame | the constant pass's four colour dwords are the whole colour input of its pixel shader | `port/src/vulkan_replay.h` (the existing colour reader) and the existing colour-path watch | the block at `block + 0x20` and its byte-exact watch at the content draws, not only at the stationary-loop draws | still zero: the title has not populated the colour it would draw, which is the D1/D2 chronology; non-zero while the target stays black: the draw-state/feed gap is the cause | not covered (the existing measurement is the stationary loop's, [colour_path.md](colour_path.md) section 4) |
 | **T5** | the content pass's draw state and feed | the unset transform scalars and the driver-block vertex-stream descriptor keep a pass's vertex stage degenerate | `port/src/vulkan_replay.h`, `port/shims/d3d12_com.cpp`, `port/src/graphics_pso.cpp` (as named in [frame_first_light.md](frame_first_light.md) section 10) | the vertex-path dump on the first content submission: `clip-position scalars`, the `s0/s1` fetch decode, and the 32-dword user data | degenerate scalars and the driver-block fetch landing on the descriptor table: a content frame would be black even after T1; non-degenerate: the draw state is clean and the next gap is the colour image or the pass order | `contentblack` (task-135) already records the content draws' root arguments, viewport/scissor and host pipeline state, which is this test's measurement |
 
-Ordering rule: T1 and T2 answer the reframed question (whether the peers' visible frames are reachable at all in our
-window); T3 closes the present path honestly with a control; T4 and T5 are the picture work that would be needed after
-the window exists.
+**Coverage update (2026-11-27; the original plan above is retained):** T1's lifetime question is answered, not the pixel
+question: the opt-in class-0xa workaround preserves a 300 s arm at stage 3, but captures remain black ([decomp_first_ui.md](decomp_first_ui.md)
+section 16; [peer_port_first_ui.md](peer_port_first_ui.md) section 14). T2 is negative for the probed producers: RBF0
+resource dispatch is 141 hits before stage 3, first-run page owners are 0-hit, and Bink state 0x9 still has no buffers,
+registration or decode ([peer_port_first_ui.md](peer_port_first_ui.md) section 14; [decomp_first_ui.md](decomp_first_ui.md)
+sections 16-18). T3's synthetic presenter control is answered in section 15. T4/T5 remain downstream questions for a title
+content draw that has not occurred.
+
+Ordering rule: the current live ranking is producer reachability first, then downstream color/draw questions; the original
+T1/T2 plan asked whether those producers were reachable at all, T3 closes the tested present path, and T4/T5 remain after
+a title content draw.
 
 ## 7. Limits, and what this page does not claim
 
@@ -177,11 +209,10 @@ the window exists.
   authors' own figures on different hardware; this page uses them for the order of milestones only.
 - **The tracker is a third party's reading.** Its rows are marked "source: project README" and its steps are its own
   scale; it is cited as one more reading of the same public claims, not as an authority.
-- **Our measured state is the cited pages'.** No boot was run for this research slice; the content window, the black
-  content pixels and the stop are the numbers of [vertex_buffer_va.md](vertex_buffer_va.md) sections 10-16, the frame
-  content is [frame_first_light.md](frame_first_light.md), and the colour data is [colour_path.md](colour_path.md).
-  The two slices in flight (`classa`, `contentblack`) own their files and are extending those measurements; this page
-  does not duplicate or pre-empt them.
+- **Our measured state is from the cited pages.** No boot was run for this research slice; its original short-window
+  measurements remain those of [vertex_buffer_va.md](vertex_buffer_va.md) sections 10-16, [frame_first_light.md](frame_first_light.md)
+  and [colour_path.md](colour_path.md). At the source snapshot, the `classa`/`contentblack` slices were in flight; later
+  stage-3/UI/movie measurements are cited in sections 1, 5 and 6 rather than duplicated here.
 - **Their 3D picture is not claimed to be right either.** five-star's lit image is "still wrong" (its own status page)
   and every in-game peer still has black shadow or missing ray-traced light; the comparison here is about first visible
   content, not picture parity.
