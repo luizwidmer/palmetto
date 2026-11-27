@@ -52,12 +52,14 @@ rt::crash_report::dump_all(L"<work-dir>", /*summary_path=*/nullptr, "exception 0
 
 The trace's own exception path reads two switches (`shims/startup_trace.h`, `log_exception`):
 `PALMETTO_CRASH_REPORT=<file>` writes the faulting thread's report, `PALMETTO_CRASH_REPORT_ALL=<directory>` runs the
-every-thread pass. They are independent and can be set together; the faulting thread's report is written first.
+every-thread pass. They are independent and can be set together; the faulting thread's report is written first. Both
+values are read with `GetEnvironmentVariableW(..., 512)`, so a value of 512 characters or more is ignored and the
+report or the pass it asked for does not run (`shims/startup_trace.h`, `wants_own` and `wants_all`).
 
 Both switches are gated on the exception code, because the handler is first-chance and the trace's job is to survive
 exceptions the title handles for itself:
 
-- Only a code with the SEVERE bit (`0xC0000000`) takes a report, and five routinely handled codes are excluded by
+- Only a code with the SEVERE bit (`0xC0000000`) takes a report, and six routinely handled codes are excluded by
   name: a C++ throw (`0xE06D7363`, which does carry the SEVERE bit), `0x40010006` and `0x4001000A` (`DBG_PRINTEXCEPTION`
   and its wide form), `0x80000003` (breakpoint), `0x80000004` (single step) and `0x406D1388` (`SetThreadName`). Without
   the gate each handled C++ exception wrote a fresh set of reports, so the directory described the last throw instead
@@ -93,7 +95,8 @@ from the faulting thread's stack alone.
 2. The index file and the per-thread report files are opened here, while nothing is suspended — all of them at once,
    up to `kMaxDumpedThreads` (256) handles. They are *not* opened in batches; see the paragraph after step 4 for the
    probe that turned a 32-file batching revision back into a single burst.
-3. For each id, in a short suspend window: `OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT)`, `SuspendThread`,
+3. For each id, `OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT)` is called with nothing suspended, so a lock
+   it takes can still be released by whoever holds it. Then, in a short suspend window: `SuspendThread`,
    `GetThreadContext` with `CONTEXT_CONTROL | CONTEXT_INTEGER`, then the same walker `dump()` uses, writing through
    `dump_to_handle` to the handle opened in step 2. Inside the window there is no `CreateFileW`, no path joining and no
    allocation left: only `SuspendThread`, `GetThreadContext` and `WriteFile` on a handle somebody else already opened.
