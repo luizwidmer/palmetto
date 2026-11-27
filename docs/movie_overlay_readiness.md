@@ -64,7 +64,7 @@ buffer state, a completed frame on the same handle, the matching plane upload/re
 `PresentX` containing that resource as plane 1. A registration without decode, a decode without a matching upload, or a
 one-plane present is not evidence for the overlay route. If the title remains in its measured playing state while
 registration stays at zero, this overlay contract is not the current boot blocker; return to the title-side draw/load
-falsifiers already recorded in [peer_port_movie.md](peer_port_movie.md#3-what-would-make-the-movie-draw-issue).
+falsifiers already recorded in [peer_port_movie.md](peer_port_movie.md#3-comparison-with-our-chain).
 
 If that evidence is ever measured, the exact consumption point is the existing second-plane decision in
 `port/shims/xbox_present.cpp`: after the `PresentX` plane list is validated and before its second-plane composition rule
