@@ -40,6 +40,7 @@
 #include "code_hooks.h"
 #include "host_cpu.h"
 #include "mods.h"
+#include "movie_draw_probe.h"
 #include "pe_loader.h"
 #include "title_class0a.h"
 #include "title_watchdog.h"
@@ -8666,6 +8667,264 @@ void start_bink_probe() {
     std::fflush(stderr);
 }
 
+// ---- Movie draw-path probe (PALMETTO_MOVIE_PROBE=draw) ------------------------------------------------------------
+// docs/peer_port_movie.md section 13. The peers instrument the draw frame rather than the decoder (XCL's frame trace,
+// Five Star's draw probes, VIctory's watch/poke). This tree's question is narrower: the movie player reaches the
+// middleware's playing state 0x9 with a non-null Bink handle and `buffers 0`, and the draw that would call the decode
+// wrapper (and therefore the frame-buffer registration) is never observed. Four measured sites and two inside-gate
+// controls decide between "never issued", "issued and skipped at the frame-ready word [player+0x1c7]" and "blocked
+// above the layer":
+//
+//   layer-draw     0x23495A0  the layer entry (rcx = the layer object)
+//   player-draw    0x2349D80  the player draw the layer runs (rcx = the layer object)
+//   draw-ready     0x2349DD4  `cmp byte [rax+0x1c7],0` inside the draw (rax = the resolved player): the skip decision
+//   advance        0x51B45B0  the second, independent per-frame advance (rcx = the movie component)
+//   advance-decode 0x51B4646  `mov rcx,[rsi+8]` / `call 0x2ef0e0` (rsi = the movie component)
+//   decode         0x2EF0E0   the per-frame decode wrapper, the same-boot control
+//
+// A site is armed only after its measured instruction bytes match (movie_draw_probe.h shape_matches) and its address is
+// a committed executable image address; a mismatch is refused by name, so the probe cannot patch an instruction whose
+// meaning was not measured. Every hit is counted; the log is bounded to a few full dumps per site plus every 1024th hit
+// up to 64 thousand, a site is disarmed after 4096 hits so the probe cannot become the measurement, and a 10 s reporter
+// prints the counters and the verdict they name. The trap discipline is the one the other probes use (restore the
+// original byte, single-step, re-arm). Opt-in; with the switch unset nothing is parsed, patched or logged.
+namespace md = palmetto::movie_draw;
+constexpr unsigned kMovieDrawHitCap = 4096;
+
+struct MovieDrawProbe {
+    std::atomic<bool> ready{false};
+    std::atomic<std::uintptr_t> address[md::kSiteCount] = {};
+    unsigned char original[md::kSiteCount] = {};
+    std::atomic<unsigned> hits[md::kSiteCount] = {};
+    unsigned armed = 0, refused = 0;
+};
+
+MovieDrawProbe& movie_draw_probe() {
+    static MovieDrawProbe probe;
+    return probe;
+}
+
+thread_local unsigned movie_draw_repoke_site = 0;  // 1-based site whose int3 the single-step re-arms
+
+std::string movie_draw_prefix(const char* what) {
+    char buffer[96];
+    std::snprintf(buffer, sizeof buffer, "[rt] movie draw t=%.3f %s", executor_watch_seconds(), what);
+    return buffer;
+}
+
+std::uintptr_t movie_draw_register_value(const CONTEXT& context, unsigned reg) {
+    switch (reg) {
+        case md::kRcx: return static_cast<std::uintptr_t>(context.Rcx);
+        case md::kRdx: return static_cast<std::uintptr_t>(context.Rdx);
+        case md::kRax: return static_cast<std::uintptr_t>(context.Rax);
+        case md::kRsi: return static_cast<std::uintptr_t>(context.Rsi);
+        case md::kRdi: return static_cast<std::uintptr_t>(context.Rdi);
+        case md::kR8: return static_cast<std::uintptr_t>(context.R8);
+        case md::kR9: return static_cast<std::uintptr_t>(context.R9);
+        case md::kRbx: return static_cast<std::uintptr_t>(context.Rbx);
+        case md::kRbp: return static_cast<std::uintptr_t>(context.Rbp);
+        default: return 0;
+    }
+}
+
+void movie_draw_write_byte(unsigned site, unsigned char value) {
+    MovieDrawProbe& probe = movie_draw_probe();
+    const auto address = probe.address[site].load(std::memory_order_relaxed);
+    if (!address) return;
+    DWORD old_protect = 0;
+    if (VirtualProtect(reinterpret_cast<void*>(address), 1, PAGE_EXECUTE_READWRITE, &old_protect)) {
+        *reinterpret_cast<unsigned char*>(address) = value;
+        VirtualProtect(reinterpret_cast<void*>(address), 1, old_protect, &old_protect);
+    }
+}
+
+void movie_draw_append_words(std::string& text, const CONTEXT& context, const md::ControlWord* words, unsigned count) {
+    for (unsigned i = 0; i < count; ++i) {
+        const md::ControlWord& word = words[i];
+        std::uintptr_t base = movie_draw_register_value(context, word.reg);
+        text += " ";
+        text += word.name;
+        text += "=";
+        if (word.base == 1) {
+            if (!base) {
+                text += "null";
+                continue;
+            }
+            base = static_cast<std::uintptr_t>(executor_watch_read_u64(base + word.deref));
+        }
+        if (!base) {
+            text += "null";
+            continue;
+        }
+        const auto address = static_cast<std::uintptr_t>(base + word.offset);
+        if (!executor_watch_readable(address, word.width)) {
+            text += "?";
+            continue;
+        }
+        if (word.width == 1) {
+            text += std::to_string(static_cast<unsigned>(executor_watch_read_u32(address) & 0xFFu));
+        } else if (word.width == 4) {
+            text += std::to_string(executor_watch_read_u32(address));
+        } else {
+            const std::uint64_t value = executor_watch_read_u64(address);
+            text += word.label ? executor_watch_label(value, executor_watch_image_base, executor_watch_image_size)
+                               : executor_watch_hex(value);
+        }
+    }
+}
+
+void movie_draw_log_hit(unsigned site, CONTEXT& context) {
+    MovieDrawProbe& probe = movie_draw_probe();
+    const md::SiteShape& shape = md::kSites[site];
+    const unsigned hit = probe.hits[site].load(std::memory_order_relaxed);
+    char head[384];
+    std::snprintf(head, sizeof head,
+                  "[rt] movie draw probe t=%.3f site %s hit %u tid %lu at image+0x%llx rax 0x%llx rbx 0x%llx rcx "
+                  "0x%llx rdx 0x%llx rsi 0x%llx rdi 0x%llx r8 0x%llx r9 0x%llx rbp 0x%llx",
+                  executor_watch_seconds(), shape.name, hit, static_cast<unsigned long>(GetCurrentThreadId()),
+                  static_cast<unsigned long long>(static_cast<std::uintptr_t>(context.Rip) - executor_watch_image_base),
+                  static_cast<unsigned long long>(context.Rax), static_cast<unsigned long long>(context.Rbx),
+                  static_cast<unsigned long long>(context.Rcx), static_cast<unsigned long long>(context.Rdx),
+                  static_cast<unsigned long long>(context.Rsi), static_cast<unsigned long long>(context.Rdi),
+                  static_cast<unsigned long long>(context.R8), static_cast<unsigned long long>(context.R9),
+                  static_cast<unsigned long long>(context.Rbp));
+    std::string text = head;
+    const std::uintptr_t caller = executor_watch_read_u64(static_cast<std::uintptr_t>(context.Rsp));
+    text += " caller " + executor_watch_label(caller, executor_watch_image_base, executor_watch_image_size);
+    text += "\n  " + movie_draw_prefix("control words:");
+    movie_draw_append_words(text, context, shape.words, shape.word_count);
+    if (hit <= 2) text += "\n  " + movie_draw_prefix("stack") + executor_watch_title_stack(context.Rsp);
+    text += "\n";
+    executor_watch_print(text);
+}
+
+LONG CALLBACK movie_draw_exception(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT& context = *info->ContextRecord;
+    MovieDrawProbe& probe = movie_draw_probe();
+    if (!probe.ready.load(std::memory_order_relaxed)) return EXCEPTION_CONTINUE_SEARCH;
+    if (info->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT) {
+        const auto at = reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress);
+        unsigned site = md::kSiteCount;
+        for (unsigned i = 0; i < md::kSiteCount; ++i)
+            if (probe.address[i].load(std::memory_order_relaxed) == at) {
+                site = i;
+                break;
+            }
+        if (site == md::kSiteCount) return EXCEPTION_CONTINUE_SEARCH;
+        const unsigned hit = probe.hits[site].fetch_add(1, std::memory_order_relaxed) + 1;
+        if (hit <= 3 || (hit % 1024 == 0 && hit <= 64 * 1024)) movie_draw_log_hit(site, context);
+        movie_draw_write_byte(site, probe.original[site]);
+        if (hit > kMovieDrawHitCap) {
+            // A hot site is restored permanently after the bound: the reach and the count are measured, the trap cost
+            // stops being part of the measurement.
+            probe.address[site].store(0, std::memory_order_relaxed);
+            std::fprintf(stderr, "[rt] movie draw probe: site %s disarmed after %u hits\n", md::kSites[site].name, hit);
+            std::fflush(stderr);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        movie_draw_repoke_site = site + 1;
+        context.EFlags |= 0x100;  // trap after the restored instruction, then put the int3 back
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (info->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP) {
+        if (!movie_draw_repoke_site) return EXCEPTION_CONTINUE_SEARCH;
+        const unsigned site = movie_draw_repoke_site - 1;
+        movie_draw_repoke_site = 0;
+        movie_draw_write_byte(site, 0xCC);
+        context.EFlags &= ~static_cast<DWORD>(0x100);
+        context.Dr6 = 0;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// Validates and arms the six sites, then starts the counter reporter. Called after the image is mapped and after the
+// crash reporter's handler is registered, so this probe's handler runs first for its own int3 addresses.
+void start_movie_draw_probe(std::uintptr_t image_base, std::size_t image_size) {
+    MovieDrawProbe& probe = movie_draw_probe();
+    executor_watch_image_base = image_base;
+    executor_watch_image_size = image_size;
+    unsigned armed = 0, refused = 0;
+    for (unsigned site = 0; site < md::kSiteCount; ++site) {
+        const md::SiteShape& shape = md::kSites[site];
+        const auto address = static_cast<std::uintptr_t>(image_base + shape.rva);
+        MEMORY_BASIC_INFORMATION info{};
+        const bool in_image = address >= image_base && address + shape.signature_length <= image_base + image_size;
+        const bool queried =
+            in_image && VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof info) == sizeof info;
+        const bool executable =
+            queried && info.State == MEM_COMMIT &&
+            (info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+        if (!executable) {
+            std::fprintf(stderr,
+                         "[rt] movie draw probe: site %s image+0x%x refused (not a committed executable image "
+                         "address)\n",
+                         shape.name, shape.rva);
+            ++refused;
+            continue;
+        }
+        unsigned char bytes[16] = {};
+        const bool read = executor_watch_read_block(address, bytes, shape.signature_length);
+        if (!read || !md::shape_matches(site, bytes)) {
+            std::fprintf(stderr, "[rt] movie draw probe: site %s image+0x%x refused (bytes", shape.name, shape.rva);
+            for (unsigned i = 0; read && i < shape.signature_length; ++i) std::fprintf(stderr, " %02x", bytes[i]);
+            std::fprintf(stderr, ", expected");
+            for (unsigned i = 0; i < shape.signature_length; ++i) std::fprintf(stderr, " %02x", shape.signature[i]);
+            std::fprintf(stderr, ")\n");
+            ++refused;
+            continue;
+        }
+        DWORD old_protect = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(address), 1, PAGE_EXECUTE_READWRITE, &old_protect)) {
+            std::fprintf(stderr, "[rt] movie draw probe: site %s image+0x%x is not writable; refused\n", shape.name,
+                         shape.rva);
+            ++refused;
+            continue;
+        }
+        probe.original[site] = *reinterpret_cast<unsigned char*>(address);
+        probe.address[site].store(address, std::memory_order_relaxed);
+        *reinterpret_cast<unsigned char*>(address) = 0xCC;
+        VirtualProtect(reinterpret_cast<void*>(address), 1, old_protect, &old_protect);
+        ++armed;
+        std::fprintf(stderr,
+                     "[rt] movie draw probe: armed site %s image+0x%x (%u-byte shape %02x %02x, byte was %02x, %u "
+                     "control word(s))\n",
+                     shape.name, shape.rva, shape.signature_length, shape.signature[0], shape.signature[1],
+                     probe.original[site], shape.word_count);
+    }
+    probe.armed = armed;
+    probe.refused = refused;
+    if (armed == 0) {
+        std::fprintf(stderr, "[rt] movie draw probe: no site validated; not armed\n");
+        std::fflush(stderr);
+        return;
+    }
+    probe.ready.store(true, std::memory_order_relaxed);
+    void* const handler = AddVectoredExceptionHandler(1, movie_draw_exception);
+    std::thread([] {
+        for (int sample = 1; sample <= 120; ++sample) {
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+            MovieDrawProbe& probe = movie_draw_probe();
+            if (!probe.ready.load(std::memory_order_relaxed)) return;
+            const auto hits = [&probe](unsigned site) { return probe.hits[site].load(std::memory_order_relaxed); };
+            const md::Verdict verdict = md::verdict_of(hits(md::kLayerDraw), hits(md::kPlayerDraw),
+                                                      hits(md::kDrawReady), hits(md::kDecode));
+            std::fprintf(stderr,
+                         "[rt] movie draw probe at %d s: layer %u draw %u ready %u advance %u advance-decode %u decode "
+                         "%u verdict %s\n",
+                         sample * 10, hits(md::kLayerDraw), hits(md::kPlayerDraw), hits(md::kDrawReady),
+                         hits(md::kAdvance), hits(md::kAdvanceDecode), hits(md::kDecode), md::verdict_name(verdict));
+            std::fflush(stderr);
+        }
+    }).detach();
+    std::fprintf(stderr,
+                 "[rt] movie draw probe: %u of %u site(s) armed, %u refused, counters and verdict every 10 s (handler "
+                 "%p)\n",
+                 armed, md::kSiteCount, refused, handler);
+    std::fflush(stderr);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -9050,17 +9309,22 @@ int wmain(int argc, wchar_t** argv) {
             }
         }
         // PALMETTO_MOVIE_PROBE=<group>: bounded opt-in int3 entry probes on the movie/Bink path
-        // (docs/decomp_first_ui.md sections 13-15). "player" is the four middleware play steps the component's
-        // per-player update drives: per-frame decode 0x2EF0E0, probe/metadata open 0x442EA70, playback open 0x199EF20
-        // and frame-buffer registration 0x442F760. "player2" is the four steps around them: the player prepare
-        // 0x199EF10, the player wrapper 0x18AA500, the frame-buffer configure 0x442F0B0 and the finalise-to-playing
-        // step 0x5536E00 (the state machine's 8 -> 9 transition). "trigger" is the game-side request chain: module
-        // init 0x577F500, play request 0x3A16260, descriptor helper 0x18501E0 and stop 0x3A1A860. "frontend" is the
-        // front-end manager the request's UI owner runs through: manager create/init 0x3DA1A80, manager teardown
-        // 0x3DA2FB0, member destroy 0x3DADD00 and the last service getter of the per-frame render FUN_1403DB3F0
-        // 0x3DB492 (the site whose indirect jump is the measured stop). Same one-shot machinery and logging as
-        // PALMETTO_POKE_LOG; a hit means the measured boot reached a path that the static negative says it does not,
-        // so the probe set is a reach signal, not a hot-path trace. Off when unset.
+        // (docs/decomp_first_ui.md sections 13-15, docs/peer_port_movie.md section 13). "player" is the four middleware
+        // play steps the component's per-player update drives: per-frame decode 0x2EF0E0, probe/metadata open
+        // 0x442EA70, playback open 0x199EF20 and frame-buffer registration 0x442F760. "player2" is the four steps
+        // around them: the player prepare 0x199EF10, the player wrapper 0x18AA500, the frame-buffer configure 0x442F0B0
+        // and the finalise-to-playing step 0x5536E00 (the state machine's 8 -> 9 transition). "trigger" is the
+        // game-side request chain: module init 0x577F500, play request 0x3A16260, descriptor helper 0x18501E0 and stop
+        // 0x3A1A860. "frontend" is the front-end manager the request's UI owner runs through: manager create/init
+        // 0x3DA1A80, manager teardown 0x3DA2FB0, member destroy 0x3DADD00 and the last service getter of the per-frame
+        // render FUN_1403DB3F0 0x3DB492 (the site whose indirect jump is the measured stop). "draw" is the movie's own
+        // draw path - layer entry 0x23495A0, player draw 0x2349D80, the frame-ready compare 0x2349DD4, the second
+        // per-frame advance 0x51B45B0 and its decode preparation 0x51B4646, and the decode wrapper 0x2EF0E0 as the
+        // control - implemented as its own bounded/validated instrument (see the movie draw probe section above) and
+        // installed after the crash image is set, so it is only flagged here. Same one-shot machinery and logging as
+        // PALMETTO_POKE_LOG for the other groups; a hit means the measured boot reached a path that the static negative
+        // says it does not, so the probe set is a reach signal, not a hot-path trace. Off when unset.
+        bool movie_draw_probe_requested = false;
         constexpr std::uint32_t kMoviePlayerProbeSites[] = {0x2EF0E0, 0x442EA70, 0x199EF20, 0x442F760};
         constexpr std::uint32_t kMoviePlayerStep2ProbeSites[] = {0x199EF10, 0x18AA500, 0x442F0B0, 0x5536E00};
         constexpr std::uint32_t kMovieTriggerProbeSites[] = {0x577F500, 0x3A16260, 0x18501E0, 0x3A1A860};
@@ -9118,9 +9382,13 @@ int wmain(int argc, wchar_t** argv) {
             } else if (value == L"frontend") {
                 std::printf("[rt] PALMETTO_MOVIE_PROBE=frontend: %u front-end manager probe(s)\n",
                             poke_log_sites(kMovieFrontEndProbeSites, 4));
+            } else if (value == L"draw") {
+                std::printf("[rt] PALMETTO_MOVIE_PROBE=draw: the movie draw-path probe is installed after the image "
+                            "is mapped\n");
+                movie_draw_probe_requested = true;
             } else {
-                std::printf("[rt] PALMETTO_MOVIE_PROBE: unknown group (use player, player2, trigger or frontend); no "
-                            "probe installed\n");
+                std::printf("[rt] PALMETTO_MOVIE_PROBE: unknown group (use player, player2, trigger, frontend or "
+                            "draw); no probe installed\n");
             }
         }
         // PALMETTO_UI_PROBE=<group>: bounded opt-in int3 entry probes on the front-end UI resource/draw path (P4 of
@@ -9346,6 +9614,13 @@ int wmain(int argc, wchar_t** argv) {
         // pointer comes from; the library base is read from its export table (diagnostic; see the probe above). Off by
         // default.
         if (const char* bink = std::getenv("PALMETTO_BINK_PROBE"); bink && *bink && *bink != '0') start_bink_probe();
+        // PALMETTO_MOVIE_PROBE=draw: the movie draw-path probe (docs/peer_port_movie.md section 13) - six validated
+        // int3 sites on the layer draw, the player draw and its frame-ready compare, the second per-frame advance and
+        // its decode preparation, and the decode wrapper as the control, with bounded hit logs/counters and a 10 s
+        // verdict line. Installed after the crash reporter's handler is registered, so this probe's handler runs
+        // first for its own addresses. Off by default.
+        if (movie_draw_probe_requested)
+            start_movie_draw_probe(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size);
         const int code = rt::process::run_entry(main_module.base + main_module.entry_rva);
         std::fflush(stdout);
         std::printf("game exited with code %d\n", code);

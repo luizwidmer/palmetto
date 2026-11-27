@@ -1,8 +1,10 @@
 # The peer ports' movie path: Bink 2 decode, the plane textures and the present
 
 **Status: peer audit (sections 1-7, written as a read-only audit: documentation only, no boot, every page quoted) plus
-four implemented ports (sections 8-9, 11 and 12, with their own tests and their light boots), their attribution
-(sections 8.7, 9.6, 11.7 and 12.7) and the uncommitted file lists (sections 10, 11.8 and 12.8).** The five peer ports
+four implemented ports (sections 8-9, 11 and 12, with their own tests and their light boots), one implemented
+measurement (section 13, the movie draw-path probe, with its test and its one clean 300 s arm), their attribution
+(sections 8.7, 9.6, 11.7, 12.7 and 13.8) and the uncommitted file lists (sections 10, 11.8, 12.8 and 13.9).** The five
+peer ports
 were re-cloned and read
 at the commits in section 1 to answer one question: how does a port get a movie from the title's
 `BinkOpenWithOptions` to a pixel on screen, and
@@ -1161,5 +1163,197 @@ Implementation: [xg_xs.cpp](../port/shims/xg_xs.cpp), [xg_xs.h](../port/shims/xg
 CMake files, `NOTICE.md`, `docs/README.md` and the other docs pages are unchanged by this port (the working tree's
 other modified files - `main.cpp`, `xgameruntime_offline.cpp`, `dstorage*`, `xmem*` - belong to the other in-flight
 slices). No git write was made and no peer code is in the tree.
+
+## 13. Implemented measurement: the movie draw-path probe (section 4 item 2), and the measured step is "never issued"
+
+**Status: implemented and measured; negative on the draw question, with the answer established and no layer answer to
+fix.** Section 3.3 item 2 named this falsifier: execution probes on the layer entry `0x23495A0`, the player draw
+`0x2349D80` and the second per-frame advance `0x51B45B0`, where "a hit on the draw with decode at 0 separates 'issued
+and skipped' from 'never issued'". One clean 300.4 s light arm with the class-0xa mitigation and the content
+environment ran the movie player to state `0x9` (non-null Bink handle, `buffers 0`) at 62 s and held it to the 298 s
+last sample; none of the six measured draw-path sites ran in that 236 s window. The arm's 29 counter lines (10 s
+through 290 s) all read `layer 0 draw 0 ready 0 advance 0 advance-decode 0 decode 0`, the verdict was `never-issued`
+at every one, and no hit dump was printed. The frame thread the frame handshake runs through was in the session-3 poll
+at every stage-3 pump sample, the loading task waited on a title semaphore, and every presenter capture stayed black.
+**The draw is never issued, not issued and skipped**, so the frame-ready word `player+0x1c7`, the layer's `+0x90`
+visibility bit and the advance's `+0x511`/`+0x4f8` bytes are unreached, not refusing; the gate is above the layer entry
+in the session-3/frame-pump wall [decomp_first_ui.md](decomp_first_ui.md) section 17 measures. No shim answer, layer
+answer or default path changed; the only new code is the opt-in probe and its test.
+
+### 13.1 The measured sites, and what each one decides
+
+The path is the one [decomp_first_ui.md](decomp_first_ui.md) section 5 maps from the image: the layer entry `0x23495A0`
+calls the player draw `0x2349D80`, which resolves the player through `0x22626e0`, gates on `[player+0x1c7]`, and calls
+the decode wrapper `0x2EF0E0` at `0x234A117`; the independent per-frame advance `0x51B45B0` calls the same wrapper at
+`0x51B464A` with the player entity at `[component+8]`. A read-only disassembly pass over the image (outside the
+repository, under `D:\leonida-work\moviedraw`) fixed the exact first bytes and the register each site receives:
+
+| probe site | RVA | measured instruction shape at the site | register on entry | what a hit decides |
+|---|---|---|---|---|
+| `layer-draw` | `0x23495A0` | `56 57 48 83 EC 58` (push rsi; push rdi; sub rsp,0x58), then `cmp dword [rcx+0x30],-1` | rcx = the layer object | the layer's per-frame entry ran: the renderer issued the draw to a thread |
+| `player-draw` | `0x2349D80` | `41 57 41 56 41 54 56 57 55 53` (the seven-register prologue), then `movss xmm6,[rcx+0xc]` | rcx = the layer object | the layer entry reached the player draw |
+| `draw-ready` | `0x2349DD4` | `80 B8 C7 01 00 00 00` (`cmp byte [rax+0x1c7],0`) | rax = the resolved player | the draw reached the frame-ready gate; the captured byte says whether it skips (0) or continues |
+| `advance` | `0x51B45B0` | `56 48 83 EC 20 80 B9 11 05` (push rsi; sub rsp,0x20; `cmp byte [rcx+0x511],0`) | rcx = the movie component; `[rcx+8]` = the player entity | the independent per-frame advance ran |
+| `advance-decode` | `0x51B4646` | `48 8B 4E 08 E8 91 AA 13` (`mov rcx,[rsi+8]`; `call 0x2ef0e0`) | rsi = the movie component | the advance took the branch that calls the decode |
+| `decode` | `0x2EF0E0` | `41 57 41 56 41 54 56 57 53` (the six-register prologue), then `mov al,[rcx+0x1c4]`; `cmp al,9` | rcx = the player entity | the per-frame decode wrapper entered (the same-boot control section 17 measured at 0) |
+
+Two rows are inside-gate controls rather than audit names: a `player-draw` hit with `decode` at zero would be
+attributed to the exact `player+0x1c7` value by `draw-ready` instead of to a guess, and an `advance` hit that does not
+reach the decode would be attributed to the branch `advance-decode` watches.
+
+### 13.2 The design: validation, bounded logs and counters, and a named verdict
+
+- **The table and the pure rules are a new include-only header**, [movie_draw_probe.h](../port/src/movie_draw_probe.h):
+  the six sites with their RVAs, 7-10 byte instruction signatures and control-word descriptors, `shape_matches()` and
+  `verdict_of()`. It has no Windows header and no image read, so its rules are unit-tested on synthetic bytes
+  ([movie_draw_probe_test.cpp](../port/test/movie_draw_probe_test.cpp)).
+- **One new group on the existing switch**, `PALMETTO_MOVIE_PROBE=draw` (the fifth group; `player`, `player2`, `trigger`
+  and `frontend` are unchanged). The probe has its own vectored handler registered after the crash reporter's, so it runs
+  first for its own six addresses and every other probe and the `PALMETTO_SKIP_INT3` handler keep theirs. The trap
+  discipline is the tree's: write `int3`, restore the original byte, single-step, re-arm; no debug register and no
+  thread suspension.
+- **Two validations before any patch.** The site's address must be inside the mapped image and in a committed executable
+  region, and the bytes there must equal the measured instruction shape byte for byte; a site that fails either is
+  *refused by name* and not patched, so the probe cannot patch an instruction whose meaning was not measured. The arm's
+  log is the gate evidence: 6 of 6 sites armed, 0 refused.
+- **Bounded cost and bounded logs.** Every hit is counted; the full dump (registers, caller, the site's control words,
+  the title stack) prints on hits 1-3 and then on every 1024th hit up to 64k; a site is disarmed after 4096 hits so a hot
+  path cannot make the probe the measurement; a reporter prints the six counters and the verdict every 10 s (at most 120
+  samples). Nothing is parsed, patched or printed when the switch is unset: one `getenv` in the switch dispatch is the
+  whole default cost.
+- **The control words are the measured gate inputs**, not free-form memory dumps: the layer's `+0x30`, `+0x68`, `+0x90`,
+  `+0xc`, `+0x34`, `+0x88` and `+0x2c`; the player's `+0x1c4` state, `+0x1c7` frame-ready, `+0x1b8` buffers, `+0x50`
+  handle and `+0x1e5`; the component's `+0x8` player entity, `+0x511`, `+0x550`, `+0x560`, `+0x4f8`, `+0x5f2`, `+0x8ae`
+  and `+0x50c`; the decode wrapper's `+0x1c4`, `+0x1c7`, `+0x1b8`, `+0x50`, `+0x1e5`, `+0x1b6` and `+0x198`.
+- **The verdict is a pure function of the four draw counters**, so the reporter's answer is the same rule the test
+  checks: no layer/draw/decode = `never-issued`; layer without draw = `layer-only`; draw without the frame-ready site =
+  `draw-not-ready`; frame-ready without decode = `ready-not-decoded`; decode entered = `decode-reached` (decode wins
+  because the advance calls it without the layer draw).
+
+### 13.3 The arm
+
+One boot, `-Light`, the boot template's section-12 content environment with `PALMETTO_TITLE_CLASS0A_SIZE=1` and
+`PALMETTO_MOVIE_PROBE=draw`, a 300 s timeout, one at a time under the shared boot lock (`-Who portmovieprobe`); logs,
+captures and readbacks are outside the repository.
+
+| measure | value |
+|---|---|
+| arm / binary | `movieprobe1`; SHA-256 `A5FF73ABA4C3DE15DCC942910B9F53AF23F217EB03E07493F55D8F9DBDCF20DF` |
+| wall / verdict | 300.4 s, killed by the harness timeout; `VERDICT: ALIVE`; 0 exceptions; 0 device losses; 52,340 trace events |
+| probe | 6 of 6 sites armed, 0 refused; the counter reporter ran 29 times (10 s through 290 s) |
+| mitigation | the class-0xa row-stride patch reports 3 redirected call sites; the arm's alloc-watch stage-3 entry is the executor pass and no fault follows it |
+| state words | boot-media gate `0x2` at 4 s; init 2/loading 1 at 18 s; loading 2/session 1 at 56 s; **init 3 and session 3 at 60 s**, machine current 3 next 3 (the stage-3 pump reads stage 3 at 58.6 s) |
+| movie slot | ready from 22 s (players 58); slot 0 entity non-null, active 1, armed 1, media id `0x540714f3` from the 56 s sample |
+| movie player | state `0x3` at 58-60 s (probe 1, open 1); **state `0x9`, handle non-null, `buffers 0`, probe 0, open 1, error 0 from the 62 s sample to the 298 s last sample** |
+| draw-path counters | every sample: `layer 0 draw 0 ready 0 advance 0 advance-decode 0 decode 0 verdict never-issued`; no hit dump line in the arm |
+| frame thread | tid 40524 in `[session3-poll session-dispatch stage3-post transition pump-loop machine-wrapper tick-dispatch frame-pump frame-update]`, `NtDelayExecution` 33 ms, at every stage-3 pump sample (+2.0, +5.0, +10.0, +20.0 and +40.0 s) |
+| loading task | tid 48720 in `[loading-update loading-task task-executor loading-worker]` from the +5.0 s sample, waiting on a title semaphore |
+| renderer | 23,995 `ExecuteCommandLists` in the arm, the last one at the kill (trace event #1,018,840), so the window is a rendering title, not a hung one |
+| pixels | 12 presenter captures (frames 1-2201, 2564x1421) all mean rgb `0.00 0.00 0.00`; 4 centre readbacks (draws 4084-4087) read the layer's write-control colour `51 102 204` twice and `0 0 0` twice |
+
+The stage-3 arrival here is earlier than section 17's `long1` (58.6 s against 114.4 s), the environmental race sections
+10-16 record; the movie window is therefore longer (236 s). The player is in `0x9` by the 62 s sample, 3.4 s after the
+stage-3 read (the 2 s state trace bounds the transition to the 60-62 s samples).
+
+### 13.4 What the zero measures: never issued, and the poll is above it
+
+- **The draw is never issued.** The deepest counter the boot reached is zero at both ends of the path: the layer entry
+  never ran and the decode wrapper never ran, so there is no branch value to read - the frame-ready byte and the layer
+  visibility bit the probe captures are not reached. This is section 3.3 item 2's falsifier answered in the "never
+  issued" direction: the movie display job's draw is not issued in this window, so nothing inside the draw can be the
+  gate.
+- **The player's state advance and the draw are different steps.** The movie component's player state went `0x3` to
+  `0x9` at 62 s, i.e. the component's playback/finalise steps ran (section 15.1's state machine), and the last probe
+  sample shows the handle non-null and `open 1`. The renderer-side layer entry still never ran. A boot that reaches the
+  playing state is therefore not enough for the draw: the missing piece is the renderer-side per-frame issue, which is
+  what the parked frame thread would drive.
+- **The session-3 poll is above the draw, not inside it.** The frame thread was in the session-3 poll at every stage-3
+  pump sample, including the +5.0 s sample (the player was already `0x9` by then), and the loading task was parked on a
+  title semaphore; no layer or draw site ran in the following 236 s. That confirms section 17.2's attribution at the
+  movie layer and makes the draw's absence a consequence of the same wall: the movie update's render issue does not
+  happen while the poll holds.
+- **No layer answer is refused on this path.** The probe's negative is not "a call came back refused": no call on the
+  path is made. There is therefore no runtime answer to fix here, and the negative is the result; the ports behind the
+  wall (items 4-8) stay conditional on the draw issuing.
+- **What it does not settle.** It cannot separate section 3.3 item 1 (the session-3 loading record) from item 3 (the
+  movie being the gate) in the "movie blocks the session record" direction: the movie cannot finish without decoding,
+  and the decode is downstream of the same missing issue. It does remove the draw path itself from the candidate list.
+
+### 13.5 Tests and gates
+
+- **The pure seam is tested.** The new ctest target `movie_draw_probe` runs 441 checks with 0 failures: the six sites'
+  RVAs and unique names, the signature bounds, the control-word descriptor rules, the byte-shape refusal for a mutated
+  byte, a shifted stream and a null pointer, the prefix rule, and every verdict mapping and precedence.
+- **Gates on the changed tree**: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`, `_setup\build_tests.cmd` prints
+  `TESTS_BUILT`, and the GPU-free gate subset exits 0 - `code_hooks`, `frame_dump`, `unimplemented_policy`,
+  `graphics_record`, `graphics_pso`, `buffer_va_index`, `dstorage`, `xapu_chad`, `deferred_compile`, `arena_size`,
+  `xbox_present`, `xs_proxy_mock`, `xmem`, `movie_draw_probe` (14 of 14). The pre-existing quarantined
+  `d3d12_fence_timing_test` is not part of the gate subset ([testing.md](testing.md) line 95). All twelve
+  `tests/test_docs_*.py` checks pass on the current tree; the whole-tree variable check
+  (`test_docs_env_vars.py`) also reads three variables of the concurrently in-flight present-fit slice's uncommitted
+  [xbox_present.cpp](../port/shims/xbox_present.cpp) and [vulkan_present.h](../port/src/vulkan_present.h) -
+  `PALMETTO_PRESENT_FIT`, `PALMETTO_PRESENT_GEOMETRY` and `PALMETTO_PRESENT_SYNTHETIC` - which this page names here
+  only because the check reads the whole tree. That slice's own documentation row for them is still owed; this slice
+  adds no variable (it reuses `PALMETTO_MOVIE_PROBE`).
+- **The probe's own gate evidence is the arm's arming log**: six sites validated by their measured bytes and armed, none
+  refused; every hit line is absent from the arm because no site ran. The disassembly that produced the signatures is
+  outside the repository and reads RVAs and instruction bytes only.
+
+### 13.6 Limits and the next falsifier
+
+- **One boot.** The arm is clean (0 exceptions, 0 device losses) but it is one 300 s window; the stage-3 arrival is the
+  environmental race, and the "never issued" answer covers this window. A later arm that reaches the same state should
+  reproduce it.
+- **The hit path is tested only on synthetic bytes.** No real hit exercised the register/control-word/stack formatting
+  in this arm; the first three hits of each site are what a later arm would print, and the test covers the rules rather
+  than the trap mechanics (which are the tree's existing ones).
+- **No probe-off A/B was run**, because nothing on the path ran: the probe's cost in this arm was the one-shot trap at
+  six cold sites (zero hits) and one reporter line per 10 s. The switch-off default is byte-identical (one `getenv`).
+- **Next falsifiers, in the order they would decide.** (a) A boot in which the session-3 loading record's completion is
+  observed or the frame thread leaves the poll (section 17.8's named arms, and section 4 item 3): the same switch must
+  then show a `layer-draw` hit; if it does not, the issue is gated inside the renderer's job list, not the pump. (b) A
+  boot in which the renderer runs the movie display job again while the poll still holds (the class-0xa visibility path
+  of section 16): a layer hit with the frame thread still parked moves the attribution from the pump to the job issue.
+  (c) A later hit at `player-draw` that stops before `draw-ready` sends the next slice to the `[rcx+0xc]` scale gate; a
+  `draw-ready` hit with `player+0x1c7 == 0` names the frame-ready word as the skip and the next slice is the frame
+  update that sets it (section 4 items 4 and 6); a `draw-ready` hit with `+0x1c7 != 0` and `decode` 0 would move the
+  attribution past the ready gate to the state writes between `0x2349DD4` and `0x234A117`, which this probe does not
+  instrument.
+
+### 13.7 Cross-check against the peers (reference only, no code copied)
+
+The five peers were read at section 1's commits; the mechanism class this slice follows is their instrument-the-draw-
+frame choice, not a port. None of the three trees has a draw-path measurement of a title that never issues the draw,
+because their own titles reach it.
+
+| peer mechanism | what this slice does | difference |
+|---|---|---|
+| XCL (`8b957be`) traces the frame, and its title-texture notes place the decoder's planes through a placed texture (section 2.2 item 3) | six execution probes on the draw path's measured sites, with bounded counters and the gate words captured | XCL's title reaches the draw; this probe measures a tree whose draw is never issued, which is the state XCL's title does not have |
+| Five Star Recomp (`45071d5`) probes the draw path and hashes/detiles the pages behind it | the layer/player gate words and the frame-ready compare are captured at the draw sites | Five Star's probe explains content once the draw runs; this slice uses the same reach instrument for the issue question |
+| VIctory (`63bcca4`) and victory-fork (`52ac4ec`) watch and poke the resources the draw samples | a per-hit register and control-word dump plus a per-site counter, no write watch | the watch/poke instrument is on title texture pages (section 8's port); this probe watches the draw's own entry instructions and decides reach, not content |
+
+### 13.8 Attribution
+
+This measurement was implemented from this project's own measurements and boot log. The behaviour was cross-checked
+against the public GPL projects named in section 1 at the commits there - **XCL** (`8b957be`, frame tracing and the
+title-texture notes), **Five Star Recomp** (`45071d5`, the draw probes) and **VIctory** (`63bcca4`, the watch/poke
+instrument) - as evidence for the mechanism class of instrumenting the draw frame. **No code from those projects was
+copied.** The upstream projects remain the copyright of their contributors and their licences continue to apply to
+their own trees (XCL and PercyScarlett GPL-2.0-only; Five Star, VIctory and the reference GPL-3.0). The
+[upstream_port.md](upstream_port.md) section 6 template is the text for a [NOTICE.md](../NOTICE.md) entry if the lead
+wants one for this measurement (that file is outside this page's write scope); the page is already indexed in
+`docs/README.md`, whose row covers "the implemented ports and their measured follow-ups", so no new index row is owed.
+
+### 13.9 Uncommitted files of this slice
+
+Implementation: the new include-only header [movie_draw_probe.h](../port/src/movie_draw_probe.h) and
+[main.cpp](../port/src/main.cpp) (the `draw` group, the probe section and the install call). Tests: the new
+[movie_draw_probe_test.cpp](../port/test/movie_draw_probe_test.cpp) and one target/test registration in
+[CMakeLists.txt](../port/CMakeLists.txt). Docs: this page. No shim, `NOTICE.md`, `docs/README.md`, other docs page or
+workflow file is touched; the tree's other modified files, if any, belong to the other in-flight slices. No git write
+was made and no peer code is in the tree. No game data is in the code, the tests or this page: RVAs, instruction bytes,
+field offsets, register/pointer values, counts, times and image means only.
+
+
 
 

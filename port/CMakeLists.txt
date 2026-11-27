@@ -3447,6 +3447,10 @@ if(TARGET Vulkan::Headers)
       target_compile_definitions(code_hooks_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
       add_test(NAME code_hooks COMMAND code_hooks_test)
     endif()
+    # movie_draw_probe.h: the measured movie draw-path site table (RVAs, instruction shapes), the byte-shape refusal
+    # rule and the counter verdict that names the step reached (docs/peer_port_movie.md section 13).
+    add_executable(movie_draw_probe_test test/movie_draw_probe_test.cpp)
+    add_test(NAME movie_draw_probe COMMAND movie_draw_probe_test)
     # The subgroup size a pipeline stage asks for, from synthetic index entries and device properties.
     add_executable(subgroup_size_test test/subgroup_size_test.cpp)
     target_link_libraries(subgroup_size_test PRIVATE Vulkan::Headers)
