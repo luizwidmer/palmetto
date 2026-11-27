@@ -140,3 +140,17 @@ section 15) were informed by Five Star Recomp (GPL-3.0-or-later, `ce2b333b`) asp
 13) were informed by XCL (`623d02e`), Five Star Recomp (`ce2b333b`) and VIctory (`63bcca4`) movie draw/middleware notes. All
 are read as evidence of behaviour only; the implementations are our own, no source, comment, identifier or data table is
 copied, and the upstream projects remain the copyright of their contributors under their own licences.
+
+The alias-aware title-memory watch and delivery fanout ([docs/title_memory_model.md](docs/title_memory_model.md), section
+10) were cross-checked against public mechanism descriptions in XCL (GPL-2.0-only, `623d02e`), victory-fork
+(GPL-3.0-or-later, `9a9091d`), Five Star Recomp (GPL-3.0-or-later, `ce2b333b`) and VIctory (GPL-3.0-or-later, `63bcca4`).
+The submission-overlap bounds ([docs/peer_port_streaming.md](docs/peer_port_streaming.md), section 15) were cross-checked
+against VIctory (`63bcca4`), victory-fork (`9a9091d`), XCL (`623d02e`) and PercyScarlett (GPL-2.0-only, `e44c465`). The
+mesh publication ([docs/mesh_stage.md](docs/mesh_stage.md), section 8) was cross-checked against XCL (`623d02e`) and Five
+Star Recomp (`ce2b333b`) mesh/geometry descriptions. The DPI window fit ([docs/peer_port_first_ui.md](docs/peer_port_first_ui.md),
+section 16) was cross-checked against Five Star Recomp (`ce2b333b`), XCL (`623d02e`), VIctory (`63bcca4`), PercyScarlett
+(`e44c465`) and victory-fork (`9a9091d`). The BVH route plan ([docs/bvh_route.md](docs/bvh_route.md)) was cross-checked
+against XCL (`623d02e`) and Five Star Recomp (`ce2b333b`). The kind-7 upscaler readiness plan
+([docs/fsr_route.md](docs/fsr_route.md), section 9) was cross-checked against XCL (`623d02e`) and PercyScarlett
+(`e44c465`). All are read as evidence of behaviour only; the implementations are our own, no source, comment, identifier or
+data table is copied, and the upstream projects remain the copyright of their contributors under their own licences.

@@ -24,6 +24,12 @@ that landed our implementation, and whether the port was measured on a boot or i
 | Row-aware XG upload for movie planes | `peer_port_movie.md` section 12 | `6da738f85` | measured: records 3/3, uploads 1/3 before; readiness, no decode window yet |
 | Physical-page completion delivery | `peer_port_streaming.md` section 13 | `fdfacfdf2` | measured: zero physical-page destinations at this population, latent negative |
 | Measured display answers and UI page probe | `peer_port_first_ui.md` section 14 | `ef46566d1` | measured: UI layer runs, page flow does not; display answers console-correct |
+| Aliased page watch and backing-identity delivery | `title_memory_model.md` section 10 | `3323f7834` | measured CPU: aliases tracked across remap, fanout by Section+offset; no boot evidence |
+| Overlapped submission counters and bounds | `peer_port_streaming.md` section 15 | `5798bb070` | measured GPU: queues and holds on the card; no title A/B |
+| MS-capable mesh publication | `mesh_stage.md` section 8 | `5798bb070` | measured: build-pipeline omission closed; 0 MS resolver keys in the current corpus |
+| DPI-aware window fit plan | `peer_port_first_ui.md` section 16 | `f2d6736a2` | measured planner; opt-in, no title arm yet |
+| BVH route plan wired into RT slots | `bvh_route.md` | `a19ce9aab` | measured GPU: route arm on update/postbuild/copy, 0/1000 ray diffs; helper rehydration unwired |
+| Kind-7 upscaler consumer plan | `fsr_route.md` section 9 | `0148cbfeb` | readiness: shapes measured, no FFX dispatch/consumer observation yet |
 | Presenter attestation, fit rule and synthetic non-black control | `peer_port_first_ui.md` section 15 | `779ce8be0` | measured: synthetic bands reach the capture exactly; presenter is not the black cause |
 | Movie draw-path probes | `peer_port_movie.md` section 13 | `2e9915cbb` | measured: draw path never issued (all six sites zero); downstream of the session-3 poll |
 | Pull-request CI guarantees | board D-03 | `2bb13be8b` | measured: docs-only and runtime-path gaps closed and registered |

@@ -73,10 +73,10 @@ Priority order is top to bottom within each lane.
 |---|---|---|---|---|---|
 | P-01 | renderer | Presenter fit/scale/colour-space, plus a synthetic non-black present control through the presenter capture | maintainer | done (`779ce8be0`) | [peer_port_first_ui.md](peer_port_first_ui.md) section 15 |
 | P-02 | platform | First-run screen-state input script (screen signatures/holds as the peers do), opt-in | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) rank 5 |
-| P-03 | movie | Bink import-level call witness and opt-in movie fast-advance | open | open | [peer_port_movie.md](peer_port_movie.md) rank 1 |
+| P-03 | movie | Bink import-level call witness and opt-in movie fast-advance | maintainer | done (`a32719e56`) | [peer_port_movie.md](peer_port_movie.md) section 14 |
 | P-04 | movie | Movie draw-path probes (layer draw, draw submit, advance, decode control) | maintainer | done (`2e9915cbb`) | [peer_port_movie.md](peer_port_movie.md) section 13 |
-| P-05 | platform | Task-queue/async parity test against the vendored implementation (GPU-free) | open | open | [peer_port_streaming.md](peer_port_streaming.md) rank 6 |
-| P-06 | renderer | Overlap submission with the card: flights/copy lanes instead of one ordered queue | open | open | [peer_port_streaming.md](peer_port_streaming.md) rank 8 |
+| P-05 | platform | Task-queue/async parity test against the vendored implementation (GPU-free) | maintainer | done (`a32719e56`) | [task_queue_parity.md](task_queue_parity.md) section 9 |
+| P-06 | renderer | Overlap submission with the card: flights/copy lanes instead of one ordered queue | maintainer | done (`5798bb070`) | [peer_port_streaming.md](peer_port_streaming.md) section 15 |
 | P-07 | movie | Bink audio witness: what the decoder asks the audio shims for (cannot make the draw issue) | open | open | [peer_port_movie.md](peer_port_movie.md) rank 8 |
 | P-08 | streaming | Terminal-read conversion diagnostic arm: an uncommittable destination, to exercise the conversion | open | open | [peer_port_streaming.md](peer_port_streaming.md) section 12 |
 | P-09 | memory | GPU-view pairing population/refusal arm on a settled tree | open | open | [peer_port_movie.md](peer_port_movie.md) section 11 |
@@ -91,24 +91,24 @@ Priority order is top to bottom within each lane.
 | P-18 | platform | Deferral-acquiring boot: exercise the display timeout deferral end to end | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 14 |
 | P-19 | movie | Movie-plane decode-run census: the XG row rule and the placed-stride consumer when decode first runs | open | open | [peer_port_movie.md](peer_port_movie.md) section 12 |
 | P-20 | renderer | Content-window texture descriptor census: most distinct shapes are refused at create | open | open | [peer_port_movie.md](peer_port_movie.md) section 12 |
-| P-21 | streaming | Mapped physical-page destination arm: exercise the delivery through an armed page watch | open | open | [peer_port_streaming.md](peer_port_streaming.md) section 13 |
+| P-21 | streaming | Mapped physical-page destination arm: exercise the delivery through an armed page watch | maintainer | done (`f495a6261`) | [peer_port_streaming.md](peer_port_streaming.md) section 14 |
 | P-22 | platform | UI 2D-batch probe arm (draw mode): the batch path behind the page flow | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 14 |
 | P-23 | movie | Session-3 completion arm must produce a layer-draw hit, or locate the gate in the renderer job list | open | open | [peer_port_movie.md](peer_port_movie.md) section 13 |
 | P-24 | renderer | Decide the presenter fit default once a real content frame exists to judge (fill vs aspect) | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 15 |
-| P-25 | platform | DPI-unaware window: the title's window is oversized against the virtualized monitor; measure window fitting | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 15 |
+| P-25 | platform | DPI-unaware window: the title's window is oversized against the virtualized monitor; measure window fitting | maintainer | done (`f2d6736a2`) | [peer_port_first_ui.md](peer_port_first_ui.md) section 16 |
 | P-26 | ci | Branch protection: require the guaranteed CI jobs in repository settings (not enforceable from the tree) | maintainer | open | [dev-tools.md](dev-tools.md) |
 
 ### Parity features (claimable with maintainer coordination)
 
 | ID | area | task | owner | status | evidence page |
 |---|---|---|---|---|---|
-| C-01 | memory | Title memory model: GPU-visible aliasing/write-watch against the peers' shared-memory designs | open | open | [cleanroom_peers.md](cleanroom_peers.md) rank 3 |
-| C-02 | rt | Ray-tracing/BVH build route and inline-traversal wiring | open | open | [bvh_route.md](bvh_route.md), [cleanroom_peers.md](cleanroom_peers.md) rank 6 |
-| C-03 | audio | Audio decode real data path: XMA2 and Opus wired to the title's own streams | open | open | [audio_decode.md](audio_decode.md), [cleanroom_peers.md](cleanroom_peers.md) rank 8 |
-| C-04 | renderer | Console FSR upscaler route: the kind-7 consumer semantics behind the compose draw | open | open | [fsr_route.md](fsr_route.md), [upscale_standin.md](upscale_standin.md) |
-| C-05 | renderer | Mesh: publish the library's MS programs under the resolver's key, then wire the mesh stream | open | open | [mesh_stage.md](mesh_stage.md) |
+| C-01 | memory | Title memory model: GPU-visible aliasing/write-watch against the peers' shared-memory designs | maintainer | done (`3323f7834`) | [title_memory_model.md](title_memory_model.md) section 10 |
+| C-02 | rt | Ray-tracing/BVH build route and inline-traversal wiring | maintainer | done (`a19ce9aab`, helper rehydration unwired) | [bvh_route.md](bvh_route.md) |
+| C-03 | audio | Audio decode real data path: XMA2 and Opus wired to the title's own streams | maintainer | deferred (measured absence, `3bbb51497`; own falsifier) | [audio_decode.md](audio_decode.md) section 9 |
+| C-04 | renderer | Console FSR upscaler route: the kind-7 consumer semantics behind the compose draw | maintainer | done (`0148cbfeb`, readiness only) | [fsr_route.md](fsr_route.md) section 9 |
+| C-05 | renderer | Mesh: publish the library's MS programs under the resolver's key, then wire the mesh stream | maintainer | done (`5798bb070`, readiness: 0 MS keys) | [mesh_stage.md](mesh_stage.md) section 8 |
 | C-06 | renderer | D3D12X command-replay parity gaps listed as open in the layer plan | open | open | [d3d12_vulkan.md](d3d12_vulkan.md) |
-| C-07 | shaders | Translator refusal batches: a rule plus a semantic fixture per measured refusal class | open | open | [design.md](design.md) contract table, [translator_fixes.md](translator_fixes.md) |
+| C-07 | shaders | Translator refusal batches: a rule plus a semantic fixture per measured refusal class | maintainer | done (`e93cfe4e1`) | [design.md](design.md) contract table, [translator_fixes.md](translator_fixes.md) |
 | C-08 | renderer | Presentation pacing/tokens beyond the frame clock: per-origin pacing as the peers implement it | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) rank 1 follow-up |
 
 ### Docs, tooling and CI (claimable)
@@ -118,7 +118,7 @@ Priority order is top to bottom within each lane.
 | D-01 | coordination | Task-board maintenance and weekly triage: keep rows current, sequence overlapping claims | maintainer | in progress | this page |
 | D-02 | docs | Refresh the parity matrix audit trail for the peers' newest commits | open | open | [cleanroom_peers.md](cleanroom_peers.md) |
 | D-03 | ci | CI: run the GPU-free contract tests and the documentation checks on every pull request | maintainer | done (`2bb13be8b`) | [.github/workflows](../.github/workflows), [dev-tools.md](dev-tools.md) |
-| D-04 | docs | Index/link sweep: stale HEADs, dead links and out-of-date frontier descriptions | open | open | [issues.md](issues.md), [README.md](README.md) |
+| D-04 | docs | Index/link sweep: stale HEADs, dead links and out-of-date frontier descriptions | maintainer | done (`9edd62c44`) | [issues.md](issues.md), [README.md](README.md) |
 | D-05 | docs | Crash-report page follows the merged every-thread dump (O3): verify the page matches the shipped switch | open | open | [crash_report.md](crash_report.md) |
 | D-06 | platform | Synthetic benchmark and launcher measurement correctness | spyro24955 | claimed | issue #4 claim comment |
 | D-07 | platform | D3D12XboxCreateDevice COM proxy interface investigation | spyro24955 | claimed | issue #4 claim comment |

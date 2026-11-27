@@ -3,7 +3,7 @@
 Ledger of **what people are sending** to the project's GitHub home, plus our own tracked findings for the boot port. Each row carries area, state and one-line evidence. Counts, error classes and commit ids only — no game data, package paths, shader bytes or hashes.
 Maintained by the issue-tracker agent as a standing, read-only-plus-this-file role.
 
-**Repo:** `palmetto`, branch `main`, HEAD `3bbb51497` · **GitHub:** [luizwidmer/palmetto](https://github.com/luizwidmer/palmetto)
+**Repo:** `palmetto`, branch `main`, HEAD `0148cbfeb` (the integration commit for the peer-port batch follows this line) · **GitHub:** [luizwidmer/palmetto](https://github.com/luizwidmer/palmetto)
 *HEAD is the observed checkout for this sweep; the lead will refresh this field at integration.*
 **Updated:** 2026-11-27 (live GitHub state and the task-board pointer; the pre-rename numbers stay historical) · **Incoming:** #1 closed (re-baselined), #2 closed (post-rename residue) · **Ours open:** 10 (O3 partial; O8, O9, O15, O18–O23) · **Done:** 25 · **Superseded:** 5 (O1, O6, O10, O12, O16) · **Open PRs:** 0.
 
