@@ -1,14 +1,15 @@
-# Audio decode: the measured path, the XMA2 half wired, and the Opus half added
+# Audio decode: measured XMA2/Opus readiness; title stream not yet measured
 
-**Status: measured, implemented behind a switch, tested, and measured in one boot.** This page is the parity slice
-for audio decode (rank 8 in the clean-room programme, [cleanroom_peers.md](cleanroom_peers.md)). It answers three
-questions with our own measurements: which audio paths the retail title actually reaches in our boot, where a decode
-can plug into that path, and what happens when it does. The short answer is a negative that the boot now states with
-numbers instead of a hypothesis: the title brings its audio stack up at +22.25 s, allocates 350 hardware XMA contexts,
-and then never programmes a context, never enqueues a command and never sends a stream command, so there is no
-compressed audio to decode at this stage and the output stays silent. The decode itself is real and tested: the
-existing XMA2 decoder crate now builds and is wired to the measured command path behind a switch, and an Opus decoder
-is added to the same boundary. Nothing is faked and the silent stand-in stays the default.
+**Status: decoder libraries and the opt-in boundary tested; no title-stream decode measured.**
+
+This page is the parity slice for audio decode (rank 8 in the clean-room programme,
+[cleanroom_peers.md](cleanroom_peers.md)). It answers three questions with our own measurements: which audio paths the
+retail title actually reaches in our boot, where a decode can plug into that path, and what happens when it does. The
+short answer is a negative that the boot now states with numbers instead of a hypothesis: the title brings its audio
+stack up at +22.25 s, allocates 350 hardware XMA contexts, and then never programmes a context, never enqueues a command
+and never sends a stream command, so there is no compressed audio to decode at this stage and the output stays silent.
+The decoder libraries are real and their C ABI is tested with synthetic packets. The opt-in shim boundary remains
+readiness only because this boot provides no measured title packet or context to feed; the default shims remain silent.
 
 The peer claim being tested (quoted in [cleanroom_peers.md](cleanroom_peers.md)): XCL documents "Opus 0x704F decoded
 via MSOpusDecoder.dll; XMA1 / XMA2 decoded in pure Rust", VIctory documents "Menu, video and loading sound; XMA
@@ -234,8 +235,9 @@ by this page.
   `port/CMakeLists.txt` edit; but nothing builds the crate or copies the DLL next to `palmetto.exe` yet. The
   required target change (a custom target that runs `cargo build --locked --release` and copies
   `palmetto_xma2_decoder.dll` beside the `palmetto` target) is stated to the lead, who owns `port/CMakeLists.txt`.
-- **Attribution in NOTICE.md is deferred.** `NOTICE.md` is outside this slice's write scope; the credit below must be
-  added there by the lead before the slice is committed.
+- **Decoder-package attribution is recorded.** The existing `NOTICE.md` row for `xma` and `opusdec` (LGPL-2.1-or-later /
+  BSD-3-Clause) credits the decoder dependencies and our wrapper. This status update adds no decoder or peer implementation,
+  so it requires no new NOTICE row.
 - **Performance with the switch on.** The switch-on boot pays one DLL load, one 22,400-byte scan for each of five
   polls, and one decode attempt per submitted command (none in this boot). With the switch off it pays one
   environment read per call and nothing else.
@@ -263,8 +265,8 @@ against the public peers named in [cleanroom_peers.md](cleanroom_peers.md) as ev
 VIctory and victory-fork (GPL-3.0-or-later), five-star (GPL-3.0-or-later) and g6shim (GPL-3.0-or-later); no peer code,
 comment text, identifier or table was copied.
 
-The decoders are third-party packages consumed as Cargo dependencies and wrapped by our own C ABI, and they are
-credited through the crate's own NOTICE files and must also be credited in `NOTICE.md` (deferred to the lead):
+The decoders are third-party packages consumed as Cargo dependencies and wrapped by our own C ABI. Their attribution
+is already recorded in the `NOTICE.md` row `xma / opusdec decoder packages` (LGPL-2.1-or-later / BSD-3-Clause).
 
 - `xma` **LGPL-2.1-or-later**, from the public project `omonkeyz/xbox-emulator` at revision
   `27122f7dfcceb9a899555362ee0dde2d530e033c`: a Rust port of FFmpeg's WMA Pro / XMA decoder (`libavcodec/wmaprodec.c`,
@@ -279,3 +281,41 @@ credited through the crate's own NOTICE files and must also be credited in `NOTI
 
 The wrapper (`port/xma_decoder/src/lib.rs`, header and tests) and the runtime boundary are our own code under
 GPL-3.0-or-later.
+
+## 9. C-03 result: no measured title stream at this frontier
+
+This task rechecked the title's own import-call-site record and the 130 s trace in section 5. Peer runtime descriptions
+remain evidence of possible mechanisms, not proof of what this boot submitted. At the measured loading frontier:
+
+| Surface | Measured evidence | What is still missing for a real decode |
+|---|---|---|
+| XMA2 / SHAPE | 350 XMA contexts allocated; five bounded scans read 5,600 dwords each and find 0 non-zero. The only observed `AcpHal::SubmitCommand` is `cmd=2`, `d1=0xF0F0F0F0`, `d2=0xFFFFFFFF`, a config pointer, and `d3=0`. | No programmed context identifies an APU input range, packet bounds, or output-ring cursor. The one ACP command does not establish a stream input. |
+| XApu queue | `XApuConnect` succeeds and `XApuGetResultCount` is polled 19,094 times; `XApuEnqueueCommand` and `XApuDequeueResult` are both 0. Static sites show command types 5/1/2/3 with a stream slot and a 0x280-byte per-slot input area, but no live packet or length/codec value is captured. | The 0x280-byte region is not an XMA2 packet. The existing opt-in XMA2 attempt on that region is a tested `packet_size` refusal, not stream decoding; its contents are not proven to be an Opus packet either. |
+| Opus / DSP | `XDspConnectWithMaximumStreamLimit` receives the title's 0x60000-byte buffer, but `XDspActivate` and `XDspSubmitCommand` are both 0. The wrapper swaps the activate outputs, and the submit-command pointer roles are not resolved by the current measurement. | No measured Opus packet, format, or stream-buffer range reaches the decoder. Direct Opus tests use synthetic packets only. |
+
+**C-03 is not yet wired to a measured title stream at this frontier.** The Rust decoders and the existing opt-in boundary
+are readiness; the tests in section 7 prove decoder/boundary behavior with synthetic data, not title-stream playback. No
+new decoder or shim behavior is added here: mapping an unknown context or DSP pointer to compressed data would invent an
+input layout and could read unrelated title memory. The default-off behavior remains unchanged.
+
+**Falsifier for the next pass.** Re-open this path only when an own-title trace or static call-site capture provides at
+least one of these:
+
+- a live `XApuEnqueueCommand` with its type, slot, source bounds/length and framing/codec semantics established from the
+title's writes (record fields and counts only, never payload bytes); or
+- a non-zero XMA context plus enough measured fields to map its input address/range and output ring through the title's
+  APU mapping calls; or
+- an `XDspActivate`/`XDspSubmitCommand` call with the swapped output roles resolved at the title call site and the
+  submitted stream's bounds, format and packet framing established.
+
+Then implement only that measured route behind `PALMETTO_AUDIO_DECODE`, keep unsupported shapes as named refusals, add
+synthetic contract tests for the measured fields, and verify that switch-off remains byte-identical. A zero-context,
+zero-command boot or a peer claim alone does not unlock the path.
+
+**Arm and data limits.** No new arm was run for this docs-only result: section 5 already records a 130 s switch-on boot
+(ALIVE 130.3 s, 0 exceptions) with the decoder library loaded and no submitted commands or decode attempts. No boot lock
+was acquired. No audio bytes, package bytes, or decoded samples were captured or added to the repository.
+
+**NOTICE.** The existing `NOTICE.md` row `xma / opusdec decoder packages` (LGPL-2.1-or-later / BSD-3-Clause) credits the
+third-party decoder dependencies and our wrapper. This status note adds no dependency or peer implementation, so no new
+NOTICE row is needed.
