@@ -117,6 +117,39 @@ std::string read_string(const std::string& name, uint8_t* base, uint32_t image_s
     return {s, end};
 }
 
+// An image's file-backed data is mapped in 4 KiB page units whatever SectionAlignment says, so the copy rule and the
+// protection-conflict check below use the page, not the section alignment.
+constexpr uint64_t kImagePageSize = 0x1000;
+
+uint64_t align_up(uint64_t value, uint64_t alignment) { return (value + alignment - 1) & ~(alignment - 1); }
+
+// The virtual extent a section header declares: VirtualSize, or SizeOfRawData when VirtualSize is zero (the PE/COFF
+// convention for a section whose only size field is the raw one).
+uint64_t section_virtual_size(const IMAGE_SECTION_HEADER& sec) {
+    return sec.Misc.VirtualSize ? sec.Misc.VirtualSize : sec.SizeOfRawData;
+}
+
+std::string section_label(const IMAGE_SECTION_HEADER& sec, unsigned index) {
+    char name[9] = {};
+    std::memcpy(name, sec.Name, sizeof(sec.Name));
+    return name[0] ? std::string(name) : "#" + std::to_string(index);
+}
+
+// The PAGE_* protection a section's characteristics ask for. Windows derives an image section's protection from the
+// same bits and keeps READ separate: an executable section without IMAGE_SCN_MEM_READ is PAGE_EXECUTE (measured:
+// VirtualQuery on a LoadLibrary view reports 0x10) and a section with no access bits is PAGE_NOACCESS (0x1). This
+// mapping is private VirtualAlloc memory rather than a file-backed image section, so a writable section is
+// PAGE_READWRITE instead of Windows' copy-on-write PAGE_WRITECOPY; the guest can write both, which is all the section
+// asks for.
+DWORD section_protection(const IMAGE_SECTION_HEADER& sec) {
+    const bool execute = (sec.Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
+    const bool write = (sec.Characteristics & IMAGE_SCN_MEM_WRITE) != 0;
+    const bool read = (sec.Characteristics & IMAGE_SCN_MEM_READ) != 0;
+    if (execute) return write ? PAGE_EXECUTE_READWRITE : (read ? PAGE_EXECUTE_READ : PAGE_EXECUTE);
+    if (write) return PAGE_READWRITE;
+    return read ? PAGE_READONLY : PAGE_NOACCESS;
+}
+
 // PE/COFF: NumberOfRvaAndSizes counts the data directories; entries past it are not directories, whatever they hold.
 IMAGE_DATA_DIRECTORY directory(const IMAGE_NT_HEADERS64* nt, unsigned index) {
     return index < nt->OptionalHeader.NumberOfRvaAndSizes ? nt->OptionalHeader.DataDirectory[index] : IMAGE_DATA_DIRECTORY{};
@@ -134,6 +167,10 @@ IMAGE_TLS_DIRECTORY64* tls_directory(Module& m) {
     // Through directory(), as every other directory: an entry past NumberOfRvaAndSizes is not a TLS directory.
     const auto dir = directory(nt, IMAGE_DIRECTORY_ENTRY_TLS);
     if (!dir.Size || !dir.VirtualAddress) return nullptr;
+    // A directory smaller than the fixed header cannot describe TLS: the old read trusted 40 bytes that the
+    // directory itself says are not part of it (the landed pe_image parser refuses the same shape).
+    if (dir.Size < sizeof(IMAGE_TLS_DIRECTORY64))
+        throw std::runtime_error(m.name + ": the TLS directory is smaller than its header");
     require_range(m.name, dir.VirtualAddress, sizeof(IMAGE_TLS_DIRECTORY64), m.size, "the TLS directory");
     return at<IMAGE_TLS_DIRECTORY64>(m.base, dir.VirtualAddress);
 }
@@ -145,7 +182,13 @@ IMAGE_TLS_DIRECTORY64* tls_directory(Module& m) {
 // reuses that index for the mapped image. When more than one manually mapped module uses static TLS at once, the loader
 // clones palmetto_tls_host.dll to a per-process temporary path on demand and loads it, so the OS assigns an independent
 // module TLS index for each simultaneous module (up to kMaxMappedTlsModules).
-constexpr DWORD kMaxModuleTlsSlots = 64;
+// TlsAlloc's slot space: TEB->TlsSlots holds this many cells, so the /GA rewrite's gs:[1480h + 8*slot] encoding
+// is only valid below it. This is NOT the module TLS index space __declspec(thread) uses
+// (TEB->ThreadLocalStoragePointer): the OS assigns that index and grows every thread's array to cover it, and it
+// is bounded only by the process's static-TLS modules (measured beyond 1100 here), so the old 64 cap rejected
+// valid images. The cap below is a sanity bound on the OS-assigned value, which the image does not control.
+constexpr DWORD kMaxTlsAllocSlots = 64;
+constexpr uint32_t kMaxModuleTlsIndex = 0x10000;
 constexpr size_t kMaxMappedTlsModules = 16;
 void** module_tls_slots() { return reinterpret_cast<void**>(__readgsqword(0x58)); }
 
@@ -397,7 +440,7 @@ void release_thread_slot(size_t slot) {
     }
     if (entry.block) {
         void** slots = module_tls_slots();
-        if (slots && entry.index < kMaxModuleTlsSlots && slots[entry.index] == entry.block)
+        if (slots && entry.index < kMaxModuleTlsIndex && slots[entry.index] == entry.block)
             slots[entry.index] = entry.saved;
         VirtualFree(entry.block, 0, MEM_RELEASE);
     }
@@ -448,8 +491,9 @@ bool has_existing_thread_block(DWORD thread, const Module& m) {
 // The /GA view a thread's TlsSlots[Module::tls_ga_slot] points at: [0] and [tls_index] are this thread's block.
 // Null when it cannot be allocated.
 void** make_ga_view(const Module& m, void* block) {
-    auto* view = static_cast<void**>(
-        VirtualAlloc(nullptr, kMaxModuleTlsSlots * sizeof(void*), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    // Indexed by the module TLS index (and 0), so the view covers the OS-assigned index, not the TlsAlloc count.
+    const SIZE_T bytes = (static_cast<SIZE_T>(m.tls_index) + 1) * sizeof(void*);
+    auto* view = static_cast<void**>(VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
     if (!view) return nullptr;
     view[0] = block;
     view[m.tls_index] = block;
@@ -480,7 +524,7 @@ void install_thread_block(Module& m) {
     }
     if (m.tls_index == kNoTlsIndex) return;
     void** slots = module_tls_slots();
-    if (!slots || m.tls_index >= kMaxModuleTlsSlots)
+    if (!slots || m.tls_index >= kMaxModuleTlsIndex)
         throw std::runtime_error(m.name + ": cannot install TLS in this thread");
 
     void* block = VirtualAlloc(nullptr, static_cast<SIZE_T>(total), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -586,6 +630,22 @@ void run_callbacks(Module& m, uint32_t reason, bool trace = false) {
                                                      ",\"reason\":" + std::to_string(reason));
         callback(m.base, static_cast<DWORD>(reason), nullptr);
     }
+}
+
+// A mapped DLL's DllMain for a thread event. Windows delivers the TLS callbacks first and then DllMain for both
+// DLL_THREAD_ATTACH and DLL_THREAD_DETACH (measured on this host), and it keeps delivering them after
+// DisableThreadLibraryCalls when the image has static TLS (that call performs no optimization then); a module
+// without static TLS that called it is skipped. Only the slot owners and existing-thread records reach this today:
+// a mapped DLL without static TLS still gets no thread events (a Loader-wide initialised-module list would be the
+// complete fix).
+void notify_dllmain_thread(Module& m, uint32_t reason) {
+    if (!m.initialised) return;
+    const bool static_tls = m.tls_index != kNoTlsIndex && (m.tls_raw_size || m.tls_zero_fill);
+    if (m.thread_calls_disabled && !static_tls) return;
+    auto* nt = at<IMAGE_NT_HEADERS64>(m.base, reinterpret_cast<IMAGE_DOS_HEADER*>(m.base)->e_lfanew);
+    if (!(nt->FileHeader.Characteristics & IMAGE_FILE_DLL) || !m.entry_rva) return;
+    auto entry = reinterpret_cast<BOOL(NTAPI*)(void*, DWORD, void*)>(m.base + m.entry_rva);
+    entry(m.base, reason, nullptr);
 }
 
 // ---- Threads that existed before load() ---------------------------------------------------------------------------
@@ -708,7 +768,7 @@ void restore_tls_cell(void** cell, void* view) noexcept {
 // Takes a block out of its slot and frees it. The existing-threads lock is held; b.vector is null when the thread
 // is gone.
 void remove_existing_block(const ExistingThreadBlock& b) {
-    if (b.vector && b.index < kMaxModuleTlsSlots) restore_thread_slot(b.vector, b.index, b.block, b.saved);
+    if (b.vector && b.index < kMaxModuleTlsIndex) restore_thread_slot(b.vector, b.index, b.block, b.saved);
     if (b.ga_view) {
         if (b.ga_cell) restore_tls_cell(b.ga_cell, b.ga_view);
         VirtualFree(b.ga_view, 0, MEM_RELEASE);
@@ -722,7 +782,7 @@ constexpr size_t kMaxEndedThreads = 1024;
 // load(): every other running thread gets its own copy of m's template. Not fatal where it cannot be done.
 void install_on_existing_threads(Module& m) {
     const uint64_t total = static_cast<uint64_t>(m.tls_raw_size) + m.tls_zero_fill;
-    if (!total || m.tls_index >= kMaxModuleTlsSlots || m.tls_slot >= kMaxMappedTlsModules) return;
+    if (!total || m.tls_index >= kMaxModuleTlsIndex || m.tls_slot >= kMaxMappedTlsModules) return;
     // Stays ahead of the TLS lock: the first call resolves the function with GetModuleHandle and GetProcAddress, which
     // take the Windows loader lock, and a thread inside its attach event holds that lock while it waits for ours.
     if (!query_thread_fn()) return;
@@ -886,6 +946,7 @@ void release_existing_blocks_of_this_thread() {
             continue;
         try {
             run_callbacks(*m, DLL_THREAD_DETACH);
+            notify_dllmain_thread(*m, DLL_THREAD_DETACH);
         } catch (const std::exception& e) {
             std::fprintf(stderr, "[rt] loader: thread detach: %s\n", e.what());
         }
@@ -924,6 +985,7 @@ void __cdecl on_host_thread_event(DWORD reason) {
             try {
                 install_thread_block(*m);
                 if (m->initialised) run_callbacks(*m, DLL_THREAD_ATTACH);
+                notify_dllmain_thread(*m, DLL_THREAD_ATTACH);
             } catch (const std::exception& e) {
                 // The thread runs on without this module's TLS; later slots still get theirs.
                 std::fprintf(stderr, "[rt] loader: thread attach, slot %zu (%s): %s\n", slot, m->name.c_str(),
@@ -944,6 +1006,7 @@ void __cdecl on_host_thread_event(DWORD reason) {
                 g_thread_tls_slots[i].generation == m->tls_generation) {
                 try {
                     if (m->initialised) run_callbacks(*m, DLL_THREAD_DETACH);
+                    notify_dllmain_thread(*m, DLL_THREAD_DETACH);
                 } catch (const std::exception& e) {
                     std::fprintf(stderr, "[rt] loader: thread detach, slot %zu (%s): %s\n", i, m->name.c_str(),
                                  e.what());
@@ -1063,6 +1126,10 @@ bool bundled_owns_handle(void* ctx, void* module) {
     return static_cast<Loader*>(ctx)->owns_module_handle(module);
 }
 
+void bundled_disable_thread_calls(void* ctx, void* module) {
+    static_cast<Loader*>(ctx)->disable_thread_calls(module);
+}
+
 void* bundled_find_loaded_w(void* ctx, const std::wstring& basename) {
     return static_cast<Loader*>(ctx)->find_loaded_module_w(basename);
 }
@@ -1078,6 +1145,7 @@ const shims::BundledModuleOps kBundledOps{
     &bundled_owns_handle,
     &bundled_find_loaded_w,
     &bundled_load_w,
+    &bundled_disable_thread_calls,
 };
 
 // Marks what a run-time load maps as a dynamic load for as long as it is in scope (the caller holds the mutex).
@@ -1134,6 +1202,10 @@ Loader::~Loader() {
                 remove_from_existing_threads(*m);
             }
             uninstall_tls_for_thread(*m);
+            if (m->tls_ga_slot != kNoTlsIndex) {
+                TlsFree(m->tls_ga_slot);
+                m->tls_ga_slot = kNoTlsIndex;
+            }
         }
         // Before the image is freed: a stale table would let a later stack walk read unmapped memory.
         if (m->function_table) RtlDeleteFunctionTable(static_cast<PRUNTIME_FUNCTION>(m->function_table));
@@ -1359,6 +1431,11 @@ void Loader::register_unwind(Module& m) {
         const RUNTIME_FUNCTION& f = table[i];
         if (f.EndAddress < f.BeginAddress || f.EndAddress > m.size) reject(i, "covers code outside the image");
         if (f.BeginAddress < previous_end) reject(i, "is out of order or overlaps the one before it");
+        // UnwindData bit 0 marks the indirect form: the masked value is a chained RUNTIME_FUNCTION, not
+        // UNWIND_INFO, and the unwinder follows that entry's own UnwindData without checking it. No image in the
+        // measured set (3,780 x64 images, 5,023,071 entries) uses the form, so it is refused instead of handed to
+        // the unwinder unvalidated.
+        if (f.UnwindData & 1u) reject(i, "uses the unvalidated indirect unwind-data form");
         // UNWIND_INFO starts with a 4-byte header; its codes and handler data are the unwinder's to read.
         const uint32_t info = f.UnwindData & ~1u;
         if (info > m.size || m.size - info < 4) reject(i, "has unwind data outside the image");
@@ -1373,11 +1450,25 @@ void Loader::register_unwind(Module& m) {
 void Loader::initialise() {
     // Not order_: map_image pushes a module there before bind_imports maps its dependencies, so order_ lists an
     // importer ahead of the DLLs it imports. init_order_ is filled once a module's imports are all loaded.
-    for (auto* m : init_order_) initialise(*m);
+    // An index loop, not an iterator: a TLS callback or DllMain can run a run-time load that appends to
+    // init_order_, and the reallocation invalidates an iterator held across that call (the old loop then read
+    // freed memory). A module appended during the loop is initialised by the nested call already; the guard below
+    // keeps the module whose attach is running out of it.
+    for (size_t i = 0; i < init_order_.size(); ++i) initialise(*init_order_[i]);
 }
 
 void Loader::initialise(Module& m) {
-    if (m.initialised) return;
+    if (m.initialised || m.initialising) return;
+    // A module's TLS callback or DllMain can run a run-time load that reaches initialise() again. The module whose
+    // DLL_PROCESS_ATTACH is running must not be entered a second time: without this guard the second entry runs its
+    // TLS callbacks and DllMain again, which recurses without bound (measured: STATUS_STACK_OVERFLOW).
+    struct Initialising {
+        Module& m;
+        explicit Initialising(Module& module) : m(module) { m.initialising = true; }
+        ~Initialising() { m.initialising = false; }
+        Initialising(const Initialising&) = delete;
+        Initialising& operator=(const Initialising&) = delete;
+    } initialising{m};
 
     // TLS was installed by load(); initialise() only delivers the events, so no slot is allocated or written twice.
     run_tls_callbacks(m, DLL_PROCESS_ATTACH);
@@ -1436,6 +1527,57 @@ Module& Loader::map_image(const std::filesystem::path& path, const std::string& 
     if (oh.AddressOfEntryPoint && oh.AddressOfEntryPoint >= oh.SizeOfImage)
         throw std::runtime_error(name + ": the entry point is outside the image");
 
+    // The layouts the Windows image loader refuses are refused here before any memory is allocated, so a bad header is
+    // a named error instead of a partially mapped image. Measured against LoadLibrary on this host, which rejects an
+    // ImageBase that is not a multiple of the 64 KiB allocation granularity, a FileAlignment outside the PE/COFF
+    // power-of-two range, a SectionAlignment that is not a power of two or is smaller than FileAlignment, and a section
+    // whose VirtualAddress is not aligned to SectionAlignment. (An ImageBase of 0 keeps the old "map anywhere" path:
+    // several existing fixtures use it to force relocation.) The two fields are optional in the synthetic fixtures the
+    // old loader's tests build, so a zero FileAlignment/SectionAlignment keeps the old lenient placement.
+    const auto is_power_of_two = [](uint32_t value) { return value && !(value & (value - 1)); };
+    if (oh.ImageBase && (oh.ImageBase & 0xFFFFull))
+        throw std::runtime_error(name + ": ImageBase is not a multiple of 64 KiB");
+    if (oh.FileAlignment &&
+        (!is_power_of_two(oh.FileAlignment) || oh.FileAlignment < 0x200 || oh.FileAlignment > 0x10000))
+        throw std::runtime_error(name + ": FileAlignment is not a power of two between 0x200 and 0x10000");
+    if (oh.SectionAlignment && (!is_power_of_two(oh.SectionAlignment) ||
+                                (oh.FileAlignment && oh.SectionAlignment < oh.FileAlignment)))
+        throw std::runtime_error(name + ": SectionAlignment is not a power of two at least FileAlignment");
+    {
+        const IMAGE_SECTION_HEADER* checked = IMAGE_FIRST_SECTION(nt);
+        for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++checked) {
+            if (oh.SectionAlignment && checked->VirtualAddress % oh.SectionAlignment)
+                throw std::runtime_error(name + ": section " + std::to_string(i) + " is not aligned to SectionAlignment");
+            const uint64_t checked_size = section_virtual_size(*checked);
+            if (!checked_size) continue;
+            // Page protection is page-granular, so two sections that share a page with different PAGE_* requests cannot
+            // both be represented: the later VirtualProtect replaces the earlier one's (an RX section in the same page
+            // as an RW one would lose execute permission). Windows never has to choose because its SectionAlignment is
+            // at least one page; an image that declares a smaller one is refused when the requests differ.
+            const uint64_t page_first = checked->VirtualAddress & ~(kImagePageSize - 1);
+            const uint64_t page_last =
+                align_up(static_cast<uint64_t>(checked->VirtualAddress) + checked_size, kImagePageSize);
+            const IMAGE_SECTION_HEADER* other = IMAGE_FIRST_SECTION(nt);
+            for (unsigned j = 0; j < i; ++j, ++other) {
+                const uint64_t other_size = section_virtual_size(*other);
+                if (!other_size) continue;
+                const uint64_t other_first = other->VirtualAddress & ~(kImagePageSize - 1);
+                const uint64_t other_last =
+                    align_up(static_cast<uint64_t>(other->VirtualAddress) + other_size, kImagePageSize);
+                if (page_first < other_last && other_first < page_last &&
+                    section_protection(*checked) != section_protection(*other))
+                    throw std::runtime_error(name + ": sections " + section_label(*other, j) + " and " +
+                                             section_label(*checked, i) + " share a page with different protections");
+            }
+        }
+    }
+
+    // A relocation directory exists only when both its RVA and size are non-zero (rt::pe::Directory::present()).
+    // A /FIXED image can carry {RVA 0, Size N}; judging by Size alone then reads the DOS header as a relocation
+    // block. The measured tiny_game_fixed fixture has exactly {0, 0xd}.
+    const auto relocation_directory = directory(nt, IMAGE_DIRECTORY_ENTRY_BASERELOC);
+    const bool relocatable = relocation_directory.VirtualAddress != 0 && relocation_directory.Size != 0;
+
     auto* m = new Module;
     m->name = name;
     m->narrow_key = narrow_key;
@@ -1452,8 +1594,7 @@ Module& Loader::map_image(const std::filesystem::path& path, const std::string& 
         m->base = static_cast<uint8_t*>(VirtualAlloc(reinterpret_cast<void*>(oh.ImageBase), oh.SizeOfImage,
                                                      MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
     if (!m->base) {
-        const auto relocs = directory(nt, IMAGE_DIRECTORY_ENTRY_BASERELOC);
-        if (!relocs.Size)
+        if (!relocatable)
             throw std::runtime_error(m->name + ": preferred base is taken and the image has no relocations");
         m->base = static_cast<uint8_t*>(VirtualAlloc(nullptr, oh.SizeOfImage, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
         if (!m->base) throw std::runtime_error(m->name + ": VirtualAlloc failed");
@@ -1470,7 +1611,27 @@ Module& Loader::map_image(const std::filesystem::path& path, const std::string& 
     for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
         if (sec->VirtualAddress < oh.SizeOfHeaders)
             throw std::runtime_error(m->name + ": section " + std::to_string(i) + " overlaps the headers");
-        uint32_t n = std::min(sec->SizeOfRawData, sec->Misc.VirtualSize ? sec->Misc.VirtualSize : sec->SizeOfRawData);
+        if (!sec->SizeOfRawData) continue;
+        // A section that names no file offset has no file-backed bytes: Windows leaves it zero-filled even when
+        // SizeOfRawData is non-zero (measured: LoadLibrary maps zeros for PointerToRawData 0), so copying from the file
+        // start would put the DOS/NT headers where the image expects uninitialized data.
+        if (!sec->PointerToRawData) continue;
+        // PE/COFF: SizeOfRawData is FileAlignment-rounded and may hold bytes past VirtualSize. Windows maps the raw data
+        // of every 4 KiB page the section's virtual extent touches (measured: a section with VirtualSize 0x123 and
+        // SizeOfRawData 0x400 has file bytes up to 0x400 in its page), capped by SizeOfRawData; the rest of the page is
+        // zero. Copying only VirtualSize truncated that page, so bytes Windows maps from the file read as zero here,
+        // including any relocation target that lands in them (test_page_tail_relocation).
+        uint64_t n = (std::min)(static_cast<uint64_t>(sec->SizeOfRawData),
+                                align_up(static_cast<uint64_t>(sec->VirtualAddress) + section_virtual_size(*sec),
+                                         kImagePageSize) -
+                                    sec->VirtualAddress);
+        // Never run into the next section's first byte: only an image whose sections share a page can get here, and the
+        // copy must not overwrite the section placed after this one.
+        for (unsigned j = 0; j < nt->FileHeader.NumberOfSections; ++j) {
+            const IMAGE_SECTION_HEADER* other = IMAGE_FIRST_SECTION(nt) + j;
+            if (other->VirtualAddress > sec->VirtualAddress)
+                n = (std::min)(n, static_cast<uint64_t>(other->VirtualAddress) - sec->VirtualAddress);
+        }
         if (!n) continue;
         if (sec->PointerToRawData > file.size() || n > file.size() - sec->PointerToRawData)
             throw std::runtime_error(m->name + ": section " + std::to_string(i) + " reads past the end of the file");
@@ -1481,8 +1642,8 @@ Module& Loader::map_image(const std::filesystem::path& path, const std::string& 
     int64_t delta = reinterpret_cast<int64_t>(m->base) - static_cast<int64_t>(oh.ImageBase);
     if (delta) {
         m->relocated = true;
-        const auto dir = directory(nt, IMAGE_DIRECTORY_ENTRY_BASERELOC);
-        if (!dir.Size) throw std::runtime_error(m->name + ": the image has no relocations and isn't at its base");
+        if (!relocatable) throw std::runtime_error(m->name + ": the image has no relocations and isn't at its base");
+        const auto dir = relocation_directory;
         require_range(m->name, dir.VirtualAddress, dir.Size, m->size, "the relocation table");
         auto* block = at<IMAGE_BASE_RELOCATION>(m->base, dir.VirtualAddress);
         auto* end = reinterpret_cast<uint8_t*>(block) + dir.Size;
@@ -1576,7 +1737,7 @@ void Loader::initialize_tls(Module& m) {
         index = ensure_tls_host(slot).index;
         if (index == TLS_OUT_OF_INDEXES)
             throw std::runtime_error(m.name + ": palmetto_tls_host.dll is missing or has no module TLS index");
-        if (index >= kMaxModuleTlsSlots) throw std::runtime_error(m.name + ": reserved TLS index is out of range");
+        if (index >= kMaxModuleTlsIndex) throw std::runtime_error(m.name + ": reserved TLS index is out of range");
 
         // The fields are complete before a thread event can see the owner.
         ExclusiveTlsLock lock;
@@ -1602,8 +1763,11 @@ void Loader::initialize_tls(Module& m) {
         const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(m.base);
         const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(m.base + dos->e_lfanew);
         if (!(nt->FileHeader.Characteristics & IMAGE_FILE_DLL) && total && index != 0 && ga_tls_patch_enabled()) {
-            static const DWORD ga_slot = TlsAlloc();
-            if (ga_slot == TLS_OUT_OF_INDEXES || ga_slot >= 64) {
+            // One TlsAlloc slot per mapped /GA module, not one shared static: the cell holds that module's
+            // per-thread view, so a shared cell makes every module's install overwrite the previous view (the
+            // first module then reads the second one's TLS block; measured as a title AV before).
+            const DWORD ga_slot = TlsAlloc();
+            if (ga_slot == TLS_OUT_OF_INDEXES || ga_slot >= kMaxTlsAllocSlots) {
                 std::fprintf(stderr, "[rt] loader: %s: no TlsAlloc slot below 64 for its index-0 TLS reads\n",
                              m.name.c_str());
             } else {
@@ -1620,6 +1784,10 @@ void Loader::initialize_tls(Module& m) {
         install_thread_block(m);
     } catch (...) {
         ExclusiveTlsLock lock;
+        if (m.tls_ga_slot != kNoTlsIndex) {
+            TlsFree(m.tls_ga_slot);
+            m.tls_ga_slot = kNoTlsIndex;
+        }
         m.tls_index = kNoTlsIndex;
         m.tls_slot = kNoTlsIndex;
         m.tls_generation = 0;
@@ -1635,6 +1803,16 @@ void Loader::initialize_tls(Module& m) {
     // Threads started from here on get their copy from the helper DLL's DLL_THREAD_ATTACH; the ones already running
     // get it now.
     install_on_existing_threads(m);
+}
+
+void Loader::disable_thread_calls(void* module_handle) {
+    // Called from a mapped DllMain, so it can run while this thread is inside initialise(); mutex_ is recursive.
+    std::lock_guard lock(mutex_);
+    for (Module* m : order_)
+        if (m->base == module_handle) {
+            m->thread_calls_disabled = true;
+            return;
+        }
 }
 
 void Loader::install_tls_for_thread(Module& m) { install_thread_block(m); }
@@ -1664,6 +1842,8 @@ void Loader::parse_exports(Module& m) {
     const uint64_t dir_begin = dir.VirtualAddress, dir_end = dir_begin + dir.Size;
     auto add_export = [&](const std::string& key, uint32_t rva) {
         if (!rva) return;  // An unused address-table slot is absent even when a name refers to it.
+        if (rva < nt->OptionalHeader.SizeOfHeaders)
+            throw std::runtime_error(m.name + ": export " + key + " points into the image headers");
         if (rva >= dir_begin && rva < dir_end)
             m.forwarders[key] = read_string(m.name, m.base, m.size, rva, "a forwarded export");
         else if (rva >= m.size)  // base + rva would point past the mapping, and a caller would jump there
@@ -1711,18 +1891,30 @@ void* Loader::resolve_forwarder(const std::string& spec, Binding& binding, int d
     // shim_key, not the bare module name: forwarder strings usually leave out ".dll" ("MSVCP140.?foo"), and the host
     // CRT copies are named with it, so a forwarded CRT symbol must skip the bundled Xbox build as a direct import does.
     const std::filesystem::path candidates[] = {game_dir_ / module, game_dir_ / (module + ".dll")};
+    bool bundled_module_found = false;
     for (const auto& candidate : candidates) {
         std::error_code ec;
-        if (prefer_host_copy(shim_key) || !std::filesystem::exists(candidate, ec)) continue;
-        Module& dep = load(candidate);
-        if (auto it = dep.exports.find(symbol); it != dep.exports.end()) {
+        if (prefer_host_copy(shim_key) || !std::filesystem::is_regular_file(candidate, ec)) continue;
+        Module* dep = nullptr;
+        try {
+            dep = &load(candidate);
+        } catch (const std::exception& e) {
+            // A package file with the target's name that is not a loadable module is "not found" for this forwarder:
+            // the caller binds a failure thunk, and one bad re-export does not refuse the importing image.
+            std::fprintf(stderr, "[rt] loader: forwarder %s names %s, which is not a loadable module: %s\n",
+                         spec.c_str(), path_utf8(candidate).c_str(), e.what());
+            continue;
+        }
+        bundled_module_found = true;
+        if (auto it = dep->exports.find(symbol); it != dep->exports.end()) {
             binding = Binding::Module;
             return it->second;
         }
-        if (auto it = dep.forwarders.find(symbol); it != dep.forwarders.end())
+        if (auto it = dep->forwarders.find(symbol); it != dep->forwarders.end())
             return resolve_forwarder(it->second, binding, depth + 1);
-        return nullptr;  // the bundled module exists and does not export it; don't look for a host namesake
+        // The first spelling was another module; the next spelling may be the real target.
     }
+    if (bundled_module_found) return nullptr;  // exists in the package and does not export it: no host namesake
 
     HMODULE h = LoadLibraryExA(module.c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!h) return nullptr;
@@ -1775,7 +1967,7 @@ void* Loader::resolve(Module& m, const std::string& dll, const std::string& name
     }
     // Bundled game module (an Xbox build that ships beside the game)?
     auto bundled = game_dir_ / dll;
-    if (!prefer_host_copy(key) && std::filesystem::exists(bundled)) {
+    if (!prefer_host_copy(key) && std::filesystem::is_regular_file(bundled)) {
         Module& dep = load(bundled);
         if (auto it = dep.exports.find(sym); it != dep.exports.end()) {
             m.imports.push_back({dll, sym, Binding::Module});
@@ -1788,6 +1980,10 @@ void* Loader::resolve(Module& m, const std::string& dll, const std::string& name
                 return p;
             }
         }
+        // The package ships this module: a symbol it does not export is a missing console import, not permission to
+        // bind a same-named host DLL's export. resolve_forwarder() already refuses the host namesake.
+        m.imports.push_back({dll, sym, Binding::Unimplemented});
+        return shims::make_unimplemented_thunk(dll, sym);
     }
     // Host Windows: system DLLs and API sets. LOAD_LIBRARY_SEARCH_SYSTEM32 keeps the game folder out of the search.
     if (HMODULE h = LoadLibraryExA(dll.c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)) {
@@ -2058,12 +2254,16 @@ void Loader::bind_imports(Module& m) {
 
     // Thunk tables have no length field: they end at a zero entry, so each step is checked against the image.
     auto bind_thunks = [&](const std::string& dll, uint64_t lookup_rva, uint64_t iat_rva) {
+        if (!iat_rva || iat_rva < nt->OptionalHeader.SizeOfHeaders)
+            throw std::runtime_error(m.name + ": an import address table is missing or inside the image headers");
         for (;; lookup_rva += sizeof(IMAGE_THUNK_DATA64), iat_rva += sizeof(IMAGE_THUNK_DATA64)) {
             require_range(m.name, lookup_rva, sizeof(IMAGE_THUNK_DATA64), m.size, "an import lookup table");
             require_range(m.name, iat_rva, sizeof(IMAGE_THUNK_DATA64), m.size, "an import address table");
             auto* lookup = at<IMAGE_THUNK_DATA64>(m.base, static_cast<uint32_t>(lookup_rva));
             if (!lookup->u1.AddressOfData) return;
             bool by_ord = IMAGE_SNAP_BY_ORDINAL64(lookup->u1.Ordinal);
+            if (by_ord && (lookup->u1.Ordinal & 0x7FFFFFFF0000ull))
+                throw std::runtime_error(m.name + ": an ordinal import thunk has bits outside the ordinal field");
             uint16_t ord = by_ord ? (uint16_t)IMAGE_ORDINAL64(lookup->u1.Ordinal) : 0;
             std::string name;
             if (!by_ord) {
@@ -2089,6 +2289,8 @@ void Loader::bind_imports(Module& m) {
             if (!d->Name) break;
             std::string dll = read_string(m.name, m.base, m.size, d->Name, "an imported DLL name");
             uint32_t lookup = d->OriginalFirstThunk ? d->OriginalFirstThunk : d->FirstThunk;
+            if (!d->OriginalFirstThunk && (d->TimeDateStamp || directory(nt, IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT).Size))
+                throw std::runtime_error(m.name + ": a bound import descriptor has no OriginalFirstThunk to rebind from");
             bind_thunks(dll, lookup, d->FirstThunk);
         }
     }
@@ -2150,9 +2352,8 @@ void Loader::protect_sections(Module& m) {
     VirtualProtect(m.base, nt->OptionalHeader.SizeOfHeaders, PAGE_READONLY, &old);
     auto* sec = IMAGE_FIRST_SECTION(nt);
     for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
-        bool x = sec->Characteristics & IMAGE_SCN_MEM_EXECUTE, w = sec->Characteristics & IMAGE_SCN_MEM_WRITE;
-        DWORD prot = x ? (w ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ) : (w ? PAGE_READWRITE : PAGE_READONLY);
-        uint64_t size = sec->Misc.VirtualSize ? sec->Misc.VirtualSize : sec->SizeOfRawData;
+        const DWORD prot = section_protection(*sec);
+        uint64_t size = section_virtual_size(*sec);
         if (sec->VirtualAddress >= m.size) continue;
         size = std::min<uint64_t>(size, m.size - sec->VirtualAddress);
         if (size) VirtualProtect(m.base + sec->VirtualAddress, static_cast<SIZE_T>(size), prot, &old);

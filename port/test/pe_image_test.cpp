@@ -1,6 +1,7 @@
 // Synthetic fixtures for the PE-image parsing core (docs/pe_loader_rewrite.md). No game data: every header, section and
 // table below is built by this test, so the shapes are the test's own and the real images are never needed.
 #include "pe_image.h"
+#include "pe_image_fixture.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -11,6 +12,8 @@
 namespace {
 
 int failures = 0;
+int refusal_shapes = 0;
+int positive_edge_shapes = 0;
 
 void check(bool condition, const char* what) {
     if (condition) return;
@@ -33,6 +36,7 @@ void check_string(const std::string& got, const std::string& want, const char* w
 
 // A malformed image must be refused, and the refusal must name the image and the specific shape.
 void check_error(const std::vector<std::uint8_t>& bytes, const char* fragment, const char* what) {
+    ++refusal_shapes;
     try {
         (void)rt::pe::Image::parse(bytes, "synthetic.dll");
     } catch (const rt::pe::Error& e) {
@@ -46,113 +50,7 @@ void check_error(const std::vector<std::uint8_t>& bytes, const char* fragment, c
     ++failures;
 }
 
-struct Builder {
-    std::vector<std::uint8_t> bytes = std::vector<std::uint8_t>(0x1600, 0);
-    static constexpr std::uint64_t kImageBase = 0x140000000ull;
-    static constexpr std::uint32_t kNt = 0x80;
-    static constexpr std::uint32_t kOptional = 0x98;
-    static constexpr std::uint32_t kSections = 0x188;
-
-    void u16(std::uint32_t off, std::uint16_t v) { std::memcpy(bytes.data() + off, &v, sizeof(v)); }
-    void u32(std::uint32_t off, std::uint32_t v) { std::memcpy(bytes.data() + off, &v, sizeof(v)); }
-    void u64(std::uint32_t off, std::uint64_t v) { std::memcpy(bytes.data() + off, &v, sizeof(v)); }
-    void text(std::uint32_t off, const char* s) { std::memcpy(bytes.data() + off, s, std::strlen(s) + 1); }
-    std::uint32_t file_of(std::uint32_t rva) const { return rva < 0x1000 ? rva : rva - 0x2000 + 0x600; }
-
-    Builder() {
-        // DOS header.
-        u16(0, 0x5A4D);
-        u32(0x3C, kNt);
-        // NT headers and file header.
-        u32(kNt, 0x00004550);
-        u16(kNt + 4, 0x8664);   // AMD64
-        u16(kNt + 6, 2);        // sections
-        u16(kNt + 20, 0xF0);    // SizeOfOptionalHeader
-        u16(kNt + 22, 0x0022);  // executable, large address aware
-        // PE32+ optional header.
-        u16(kOptional, 0x020B);
-        u32(kOptional + 16, 0x1000);  // entry point
-        u64(kOptional + 24, kImageBase);
-        u32(kOptional + 32, 0x1000);  // SectionAlignment
-        u32(kOptional + 36, 0x200);   // FileAlignment
-        u32(kOptional + 56, 0x4000);  // SizeOfImage
-        u32(kOptional + 60, 0x400);   // SizeOfHeaders
-        u16(kOptional + 68, 3);       // console
-        u32(kOptional + 108, 16);     // NumberOfRvaAndSizes
-        // Section table.
-        write_section(0, ".text", 0x1000, 0x200, 0x400, 0x200, 0x60000020);
-        write_section(1, ".rdata", 0x2000, 0x1000, 0x600, 0x1000, 0x40000040);
-        // Export directory at 0x2000: three functions, two names (an alias), one forwarder.
-        directory(0, 0x2000, 0x100);
-        u32(file_of(0x2000) + 12, 0x2070);  // Name
-        u32(file_of(0x2000) + 16, 5);       // Base ordinal
-        u32(file_of(0x2000) + 20, 3);       // NumberOfFunctions
-        u32(file_of(0x2000) + 24, 2);       // NumberOfNames
-        u32(file_of(0x2000) + 28, 0x2040);  // AddressOfFunctions
-        u32(file_of(0x2000) + 32, 0x2050);  // AddressOfNames
-        u32(file_of(0x2000) + 36, 0x2060);  // AddressOfNameOrdinals
-        u32(file_of(0x2040), 0x1000);
-        u32(file_of(0x2044), 0x20A0);  // forwarder target
-        u32(file_of(0x2048), 0);
-        u32(file_of(0x2050), 0x2090);  // "Alpha"
-        u32(file_of(0x2054), 0x2096);  // "Alias"
-        u16(file_of(0x2060), 0);
-        u16(file_of(0x2062), 1);
-        text(file_of(0x2080), "synthetic.dll");
-        text(file_of(0x2090), "Alpha");
-        text(file_of(0x2096), "Alias");
-        text(file_of(0x20A0), "other.Symbol");
-        // Import directory at 0x2100: one descriptor, one by-name import, one by-ordinal import.
-        directory(1, 0x2100, 0x100);
-        u32(file_of(0x2100), 0x2140);   // OriginalFirstThunk
-        u32(file_of(0x2104), 0);        // TimeDateStamp
-        u32(file_of(0x2108), 0);        // ForwarderChain
-        u32(file_of(0x210C), 0x2180);   // Name
-        u32(file_of(0x2110), 0x21A0);   // FirstThunk
-        u64(file_of(0x2140), 0x2160);
-        u64(file_of(0x2148), 0x8000000000000002ull);
-        u64(file_of(0x2150), 0);
-        u16(file_of(0x2160), 0);
-        text(file_of(0x2162), "FuncA");
-        text(file_of(0x2180), "Synthetic.dll");
-        u64(file_of(0x21A0), 0x2160);
-        u64(file_of(0x21A8), 0x8000000000000002ull);
-        u64(file_of(0x21B0), 0);
-        // Base relocations at 0x2200: one DIR64 entry and one absolute filler.
-        directory(5, 0x2200, 12);
-        u32(file_of(0x2200), 0x1000);
-        u32(file_of(0x2204), 12);
-        u16(file_of(0x2208), static_cast<std::uint16_t>((10u << 12) | 0x10));
-        u16(file_of(0x220A), 0);
-        // TLS directory at 0x2300: template at 0x2700, index at 0x2500, callbacks at 0x2520.
-        directory(9, 0x2300, 40);
-        u64(file_of(0x2300), kImageBase + 0x2700);
-        u64(file_of(0x2308), kImageBase + 0x2708);
-        u64(file_of(0x2310), kImageBase + 0x2500);
-        u64(file_of(0x2318), kImageBase + 0x2520);
-        u32(file_of(0x2320), 4);
-        u64(file_of(0x2520), kImageBase + 0x1000);
-        u64(file_of(0x2528), 0);
-        // Exception directory at 0x2400: two RUNTIME_FUNCTION entries.
-        directory(3, 0x2400, 24);
-    }
-
-    void write_section(unsigned index, const char* name, std::uint32_t va, std::uint32_t vsize, std::uint32_t raw_ptr,
-                       std::uint32_t raw_size, std::uint32_t characteristics) {
-        const std::uint32_t off = kSections + index * 40;
-        std::memcpy(bytes.data() + off, name, std::strlen(name));
-        u32(off + 8, vsize);
-        u32(off + 12, va);
-        u32(off + 16, raw_size);
-        u32(off + 20, raw_ptr);
-        u32(off + 36, characteristics);
-    }
-
-    void directory(unsigned index, std::uint32_t rva, std::uint32_t size) {
-        u32(kOptional + 112 + index * 8, rva);
-        u32(kOptional + 112 + index * 8 + 4, size);
-    }
-};
+using pe_image_fixture::Builder;
 
 void test_valid_image() {
     const Builder b;
@@ -338,6 +236,7 @@ void test_refusals() {
     {
         auto b = Builder();
         b.u32(b.file_of(0x2000) + 20, 0);  // NumberOfFunctions 0 leaves no symbols
+        b.u32(b.file_of(0x2000) + 24, 0);  // NumberOfNames must also be zero
         auto image = rt::pe::Image::parse(b.bytes, "synthetic.dll");
         check(image.exports().empty(), "zero-function export directory is empty");
     }
@@ -346,6 +245,128 @@ void test_refusals() {
         b.u32(Builder::kOptional + 112 + 1 * 8, 0);  // import directory rva 0
         auto image = rt::pe::Image::parse(b.bytes, "synthetic.dll");
         check(image.imports().empty(), "absent import directory is empty");
+    }
+    {
+        auto b = Builder();
+        b.u32(b.file_of(0x2000) + 20, 0);  // names cannot exist without function slots
+        check_error(b.bytes, "export name table has no function table", "export names without functions");
+    }
+    {
+        auto b = Builder();
+        b.directory(1, 0x2100, 20);  // only the non-null descriptor fits; no terminator is declared
+        check_error(b.bytes, "not terminated inside its declared size", "import directory terminator past its size");
+    }
+    {
+        auto b = Builder();
+        b.directory(0, 0x2000, 0xA1);  // the forwarder starts at 0x20A0, but its NUL is outside the directory
+        check_error(b.bytes, "not terminated inside the export directory", "forwarder past export-directory end");
+    }
+    {
+        auto b = Builder();
+        b.u32(b.file_of(0x2050), 0x11FF);  // string at the last .text byte must not continue into .rdata
+        b.bytes[b.file_of(0x11FF)] = 'X';
+        b.bytes[b.file_of(0x2000)] = 'Y';
+        check_error(b.bytes, "not terminated in its file-backed range", "export name crosses a section boundary");
+    }
+    {
+        auto b = Builder();
+        b.u32(b.file_of(0x2200), 0x3000);  // page-aligned target at the final image byte
+        b.u16(b.file_of(0x2208), static_cast<std::uint16_t>((10u << 12) | 0xFFFu));
+        check_error(b.bytes, "relocation target runs outside the image", "DIR64 target crosses image end");
+    }
+    {
+        auto b = Builder();
+        b.u32(b.file_of(0x2200), 0xFFFFF801u);  // old 32-bit page+offset arithmetic could wrap into the headers
+        b.u16(b.file_of(0x2208), static_cast<std::uint16_t>((10u << 12) | 0xFFFu));
+        check_error(b.bytes, "page RVA is not 4-KiB aligned", "relocation page/target wrap");
+    }
+    {
+        auto b = Builder();
+        b.u32(b.file_of(0x2000) + 16, 0xFFFFFFFFu);  // the second name has ordinal index 1
+        check_error(b.bytes, "export ordinal exceeds the 32-bit range", "export ordinal overflow");
+    }
+    {
+        auto b = Builder();
+        b.u32(Builder::kSections + 16, 0);  // virtual-only .text still occupies [0x1000, 0x1200)
+        b.u32(Builder::kSections + 20, 0);
+        b.u32(Builder::kSections + 40 + 12, 0x1100);  // .rdata intersects the virtual-only section
+        check_error(b.bytes, "overlap in the image", "virtual-only section overlap");
+    }
+    {
+        auto b = Builder();
+        b.u32(b.file_of(0x2100) + 16, 0);  // lookup exists, but FirstThunk/IAT is absent
+        check_error(b.bytes, "no import address table", "import descriptor without IAT");
+    }
+}
+
+void test_positive_edge_shapes() {
+    {
+        auto b = Builder();
+        b.u32(Builder::kSections + 16, 0);  // .text has a virtual span but no file-backed bytes
+        b.u32(Builder::kSections + 20, 0xFFFFFFFFu);  // PointerToRawData is ignored when SizeOfRawData is zero
+        auto image = rt::pe::Image::parse(b.bytes, "synthetic.dll");
+        check_equal(image.sections()[0].mapped_raw_size(), 0, "zero-raw section has no copied bytes");
+        check(image.section_data(image.sections()[0]).empty(), "zero-raw section data is empty");
+        check(image.sections()[0].contains(0x1100, 1), "zero-raw section still contains its virtual range");
+        ++positive_edge_shapes;
+    }
+    {
+        auto b = Builder();
+        b.u16(Builder::kNt + 6, 0);  // header-only PE, no section headers
+        b.u32(Builder::kOptional + 16, 0);  // no entry point
+        b.u32(Builder::kOptional + 56, 0x400);  // image consists only of its headers
+        for (unsigned i = 0; i < rt::pe::Image::kDirectoryCount; ++i) b.directory(i, 0, 0);
+        auto image = rt::pe::Image::parse(b.bytes, "synthetic.dll");
+        check(image.sections().empty(), "header-only image has no sections");
+        check(!image.directory(rt::pe::Image::kDirectoryExport).present(), "header-only image has no exports");
+        check(image.exports().empty() && image.imports().empty(), "header-only image has no import/export symbols");
+        check_equal(image.size_of_image(), 0x400, "header-only image size equals its headers");
+        ++positive_edge_shapes;
+    }
+    {
+        auto b = Builder();
+        b.u16(b.file_of(0x2062), 0);  // both Alpha and Alias name function-table slot zero
+        auto image = rt::pe::Image::parse(b.bytes, "synthetic.dll");
+        check_equal(image.exports().size(), 3, "two aliases plus one ordinal-only forwarder");
+        check_string(image.exports()[0].name, "Alpha", "first alias name");
+        check_string(image.exports()[1].name, "Alias", "second alias name");
+        check_equal(image.exports()[0].rva, 0x1000, "first alias target");
+        check_equal(image.exports()[1].rva, 0x1000, "second alias shares its target RVA");
+        check_equal(image.exports()[0].ordinal, image.exports()[1].ordinal, "aliases share one ordinal");
+        check(image.exports()[2].name.empty(), "forwarder is retained as an ordinal-only export");
+        check_string(image.exports()[2].forwarder, "other.Symbol", "forwarder string inside export directory");
+        ++positive_edge_shapes;
+    }
+    {
+        auto b = Builder();
+        b.u32(b.file_of(0x2040), 0);  // Alpha's name points at a zero EAT slot
+        auto image = rt::pe::Image::parse(b.bytes, "synthetic.dll");
+        check_equal(image.exports().size(), 1, "only the non-hole named export is emitted");
+        check_string(image.exports()[0].name, "Alias", "non-hole export remains available");
+        check_string(image.exports()[0].forwarder, "other.Symbol", "named hole is skipped like the legacy loader");
+        ++positive_edge_shapes;
+    }
+    {
+        auto b = Builder();
+        b.u64(b.file_of(0x2310), 0);  // no index slot
+        b.u64(b.file_of(0x2318), 0);  // no callback table
+        b.u32(b.file_of(0x2320), 0);  // no zero-fill tail
+        auto image = rt::pe::Image::parse(b.bytes, "synthetic.dll");
+        check(image.tls().present, "template-only TLS directory is present");
+        check_equal(image.tls().template_rva, 0x2700, "template-only TLS RVA");
+        check_equal(image.tls().template_size, 8, "template-only TLS size");
+        check_equal(image.tls().index_rva, 0, "template-only TLS has no index");
+        check_equal(image.tls().callbacks_rva, 0, "template-only TLS has no callback table");
+        check(image.tls().callback_rvas.empty(), "template-only TLS has zero callbacks");
+        ++positive_edge_shapes;
+    }
+    {
+        auto b = Builder();
+        b.directory(rt::pe::Image::kDirectoryException, 0x2400, 0);  // zero size means absent
+        auto image = rt::pe::Image::parse(b.bytes, "synthetic.dll");
+        check(!image.directory(rt::pe::Image::kDirectoryException).present(), "zero-sized exception directory is absent");
+        check(!image.exceptions().present && image.exceptions().size == 0, "zero-sized exceptions stay absent");
+        ++positive_edge_shapes;
     }
 }
 
@@ -364,10 +385,17 @@ int main() {
         std::fprintf(stderr, "FAIL: refusal test threw: %s\n", e.what());
         ++failures;
     }
+    try {
+        test_positive_edge_shapes();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FAIL: positive edge-shape test threw: %s\n", e.what());
+        ++failures;
+    }
     if (failures) {
         std::fprintf(stderr, "pe_image_test: %d failure(s)\n", failures);
         return 1;
     }
-    std::printf("pe_image_test: OK (valid synthetic image and %d refusal shapes)\n", 18);
+    std::printf("pe_image_test: OK (valid synthetic image, %d refusal shapes, %d positive edge shapes)\n",
+                refusal_shapes, positive_edge_shapes);
     return 0;
 }

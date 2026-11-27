@@ -480,6 +480,11 @@ bool owns_bundled_module_handle(void* module) {
     return false;
 }
 
+void disable_bundled_thread_calls(void* module) {
+    for (const auto& entry : snapshot_bundled_loaders())
+        if (entry.ops->disable_thread_calls) entry.ops->disable_thread_calls(entry.ctx, module);
+}
+
 Table::Table(const Entry* entries, size_t count) {
     for (size_t i = 0; i < count; ++i) table()[lower_ascii(entries[i].dll) + "!" + entries[i].name] = entries[i].fn;
 }

@@ -673,6 +673,112 @@ if(BUILD_TESTING)
     target_link_options(loader_test PRIVATE /OPT:NOREF ${PALMETTO_HOST_BASE})
     add_dependencies(loader_test palmetto_tls_host)
     add_test(NAME loader COMMAND loader_test)
+
+    # PE-loader rewrite and loader-audit targets. Every fixture is built by the test; no game or package bytes.
+    add_executable(pe_image_fuzz_test
+      test/pe_image_fuzz_test.cpp
+      src/pe_image.cpp
+    )
+    target_include_directories(pe_image_fuzz_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/test)
+    target_compile_definitions(pe_image_fuzz_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(pe_image_fuzz_test PRIVATE /W4 /permissive- /utf-8)
+    target_link_options(pe_image_fuzz_test PRIVATE /OPT:NOREF)
+    add_test(NAME pe_image_fuzz COMMAND pe_image_fuzz_test)
+
+    add_executable(pe_mapper_test
+      test/pe_mapper_test.cpp
+      src/pe_image.cpp
+      src/pe_mapper.cpp
+    )
+    target_include_directories(pe_mapper_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/test)
+    target_compile_definitions(pe_mapper_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(pe_mapper_test PRIVATE /W4 /permissive- /utf-8 /EHsc)
+    target_link_options(pe_mapper_test PRIVATE /OPT:NOREF)
+    add_test(NAME pe_mapper COMMAND pe_mapper_test)
+
+    add_executable(pe_resolver_test
+      test/pe_resolver_test.cpp
+      src/pe_resolver.cpp
+    )
+    target_include_directories(pe_resolver_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(pe_resolver_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(pe_resolver_test PRIVATE /W4 /permissive- /utf-8)
+    target_link_options(pe_resolver_test PRIVATE /OPT:NOREF)
+    add_test(NAME pe_resolver COMMAND pe_resolver_test)
+
+    add_executable(pe_loader_shadow_test
+      test/pe_loader_shadow_test.cpp
+      src/pe_loader_shadow.cpp
+      src/pe_image.cpp
+    )
+    target_include_directories(pe_loader_shadow_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/test)
+    target_compile_definitions(pe_loader_shadow_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(pe_loader_shadow_test PRIVATE /W4 /permissive- /utf-8)
+    target_link_options(pe_loader_shadow_test PRIVATE /OPT:NOREF)
+    add_test(NAME pe_loader_shadow COMMAND pe_loader_shadow_test)
+
+    add_executable(stream_reap_test test/stream_reap_test.cpp)
+    target_compile_options(stream_reap_test PRIVATE /W4 /permissive- /utf-8)
+    target_link_options(stream_reap_test PRIVATE /OPT:NOREF)
+    add_test(NAME stream_reap COMMAND stream_reap_test)
+
+    add_executable(movie_overlay_readiness_test test/movie_overlay_readiness_test.cpp)
+    target_compile_options(movie_overlay_readiness_test PRIVATE /W4 /permissive- /utf-8)
+    target_link_options(movie_overlay_readiness_test PRIVATE /OPT:NOREF)
+    add_test(NAME movie_overlay_readiness COMMAND movie_overlay_readiness_test)
+
+    add_executable(loader_core_audit_test
+      test/loader_core_audit_test.cpp
+      src/pe_loader.cpp
+      shims/registry.cpp
+    )
+    target_include_directories(loader_core_audit_test PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/shims ${CMAKE_CURRENT_SOURCE_DIR}/test)
+    target_compile_definitions(loader_core_audit_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(loader_core_audit_test PRIVATE /W4 /permissive- /utf-8 /EHsc)
+    target_link_options(loader_core_audit_test PRIVATE /OPT:NOREF ${PALMETTO_HOST_BASE})
+    target_link_libraries(loader_core_audit_test PRIVATE psapi)
+    add_dependencies(loader_core_audit_test palmetto_tls_host)
+    add_test(NAME loader_core_audit COMMAND loader_core_audit_test)
+
+    add_executable(loader_bind_audit_test
+      test/loader_bind_audit_test.cpp
+      src/pe_loader.cpp
+      shims/registry.cpp
+    )
+    target_include_directories(loader_bind_audit_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/shims)
+    target_compile_definitions(loader_bind_audit_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+    target_compile_options(loader_bind_audit_test PRIVATE /W4 /permissive- /utf-8 /EHsc)
+    target_link_options(loader_bind_audit_test PRIVATE /OPT:NOREF ${PALMETTO_HOST_BASE})
+    add_dependencies(loader_bind_audit_test palmetto_tls_host)
+    add_test(NAME loader_bind_audit COMMAND loader_bind_audit_test)
+
+    add_executable(loader_tls_audit_test
+      test/loader_tls_audit_test.cpp
+      src/pe_loader.cpp
+      shims/registry.cpp
+      shims/library_loader.cpp
+    )
+    target_include_directories(loader_tls_audit_test PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/shims ${CMAKE_CURRENT_SOURCE_DIR}/test)
+    target_compile_definitions(loader_tls_audit_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+    target_compile_options(loader_tls_audit_test PRIVATE /W4 /permissive- /utf-8 /EHsc)
+    target_link_options(loader_tls_audit_test PRIVATE /OPT:NOREF ${PALMETTO_HOST_BASE})
+    add_dependencies(loader_tls_audit_test tiny_tls palmetto_tls_host)
+    add_test(NAME loader_tls_audit COMMAND loader_tls_audit_test "$<TARGET_FILE:tiny_tls>")
+
+    add_executable(loader_selfcheck_test
+      test/loader_selfcheck_test.cpp
+      src/pe_loader.cpp
+      src/pe_image.cpp
+      shims/registry.cpp
+    )
+    target_include_directories(loader_selfcheck_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/shims)
+    target_compile_definitions(loader_selfcheck_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+    target_compile_options(loader_selfcheck_test PRIVATE /W4 /permissive- /utf-8 /EHsc)
+    target_link_options(loader_selfcheck_test PRIVATE /OPT:NOREF ${PALMETTO_HOST_BASE})
+    add_dependencies(loader_selfcheck_test palmetto_tls_host)
+    add_test(NAME loader_selfcheck COMMAND loader_selfcheck_test)
     # PE loader tests use two locally built fixtures: a DLL with exports, imports and relocations, and an EXE that
     # imports it so Loader::load exercises recursive module loading. They contain no game data.
     set(TINY_FIXTURE_DIR "${CMAKE_CURRENT_BINARY_DIR}/fixtures/$<CONFIG>")

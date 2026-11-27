@@ -37,6 +37,12 @@ struct Module {
     uint32_t entry_rva = 0;
     bool relocated = false;
     bool initialised = false;
+    // initialise() is delivering DLL_PROCESS_ATTACH in this module: a run-time load from its TLS callbacks or
+    // DllMain must not re-enter it (a second DLL_PROCESS_ATTACH, or unbounded recursion).
+    bool initialising = false;
+    // The module's DllMain called DisableThreadLibraryCalls: thread events skip its DllMain unless the image has
+    // static TLS (Windows keeps delivering them then, measured).
+    bool thread_calls_disabled = false;
 
     // The image's exception directory (.pdata), registered with RtlAddFunctionTable by load() so that exception
     // dispatch and stack walks can unwind through its frames. Removed when the loader is destroyed.
@@ -124,6 +130,10 @@ public:
     // not run TLS callbacks (use run_tls_callbacks with DLL_THREAD_ATTACH/DETACH for that).
     void install_tls_for_thread(Module& m);
     void uninstall_tls_for_thread(Module& m);
+
+    // A mapped module's DllMain called DisableThreadLibraryCalls(hinstance). A library-loader shim reaches this
+    // through the bundled-loader ops so thread events can honour it (see notify_dllmain_thread in pe_loader.cpp).
+    void disable_thread_calls(void* module_handle);
 
     // Run-time module lookup/loading used by the library_loader shim for bundled package DLLs.
     void* find_loaded_module(const std::string& dll_lower) const;

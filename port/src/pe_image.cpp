@@ -16,10 +16,14 @@ constexpr std::uint32_t kSectionExecutable = 0x20000000;
 constexpr std::uint32_t kSectionReadable = 0x40000000;
 constexpr std::uint32_t kSectionWritable = 0x80000000;
 constexpr unsigned kMaxSections = 96;
-constexpr unsigned kMaxExportFunctions = 1u << 20;
+constexpr unsigned kMaxExportFunctions = 1u << 16;
+constexpr unsigned kMaxExportNames = 1u << 16;
 constexpr unsigned kMaxImportLibraries = 4096;
 constexpr unsigned kMaxImportSymbols = 1u << 16;
+constexpr unsigned kMaxRelocationBlocks = 1u << 20;
+constexpr unsigned kMaxRelocations = 1u << 20;
 constexpr unsigned kMaxTlsCallbacks = 1024;
+constexpr std::size_t kMaxDirectoryStringBytes = 1u << 20;
 constexpr std::uint32_t kExportDirectoryBytes = 40;
 constexpr std::uint32_t kImportDescriptorBytes = 20;
 constexpr std::uint32_t kTlsDirectoryBytes = 40;
@@ -109,7 +113,6 @@ void Image::parse_headers() {
     characteristics_ = load<std::uint16_t>(file_header, 18);
     if (machine != kAmd64Machine) fail("not an x86-64 PE (machine " + std::to_string(machine) + ")");
     if (optional_size < kOptMinimumBytes) fail("the optional header is too small for a PE32+ image");
-    if (section_count == 0) fail("the image has no sections");
     if (section_count > kMaxSections) fail("the image has more than " + std::to_string(kMaxSections) + " sections");
 
     const std::size_t optional_offset = nt_offset + 4 + 20;
@@ -252,12 +255,24 @@ std::uint64_t Image::qword_at(std::uint32_t rva, const char* what) const {
 
 std::string Image::read_string(std::uint32_t rva, const char* what) const {
     const std::size_t offset = file_offset(rva, 1, what);
+    std::uint64_t rva_end = size_of_headers_;
+    if (rva >= size_of_headers_) {
+        const Section* section = section_for(rva);
+        if (!section) fail(std::string(what) + " is not backed by file data");
+        rva_end = static_cast<std::uint64_t>(section->virtual_address) + section->mapped_raw_size();
+    }
+    if (rva_end <= rva) fail(std::string(what) + " is not backed by file data");
+    const std::uint64_t available_in_range = rva_end - rva;
+    const std::size_t available_in_file = file_.size() - offset;
+    const std::size_t available = static_cast<std::size_t>(
+        std::min<std::uint64_t>(available_in_range, available_in_file));
+    const std::size_t limit = offset + available;
     std::size_t end = offset;
-    while (end < file_.size() && file_[end]) {
+    while (end < limit && file_[end]) {
         ++end;
         if (end - offset > 4096) fail(std::string(what) + " is longer than 4096 characters");
     }
-    if (end == file_.size()) fail(std::string(what) + " is not terminated inside the file");
+    if (end == limit) fail(std::string(what) + " is not terminated in its file-backed range");
     return std::string(reinterpret_cast<const char*>(file_.data() + offset), end - offset);
 }
 
@@ -271,6 +286,7 @@ std::span<const std::uint8_t> Image::section_data(const Section& section) const 
 void Image::parse_exports(const Directory& directory) {
     if (directory.size < kExportDirectoryBytes) fail("the export directory is smaller than its header");
     const std::uint32_t rva = directory.rva;
+    const std::uint64_t export_end = static_cast<std::uint64_t>(directory.rva) + directory.size;
     const std::uint32_t name_rva = dword_at(rva + 12, "the export directory");
     const std::uint32_t base_ordinal = dword_at(rva + 16, "the export directory");
     const std::uint32_t function_count = dword_at(rva + 20, "the export directory");
@@ -279,14 +295,43 @@ void Image::parse_exports(const Directory& directory) {
     const std::uint32_t names_rva = dword_at(rva + 32, "the export directory");
     const std::uint32_t ordinals_rva = dword_at(rva + 36, "the export directory");
     (void)name_rva;
-    if (function_count > kMaxExportFunctions || name_count > kMaxExportFunctions)
+    if (function_count > kMaxExportFunctions || name_count > kMaxExportNames)
         fail("the export directory has too many entries");
-    if (function_count == 0) return;
+    if (function_count == 0) {
+        if (name_count) fail("the export name table has no function table");
+        return;
+    }
     require_rva(functions_rva, static_cast<std::uint64_t>(function_count) * 4, "the export function table");
     if (name_count) {
         require_rva(names_rva, static_cast<std::uint64_t>(name_count) * 4, "the export name table");
         require_rva(ordinals_rva, static_cast<std::uint64_t>(name_count) * 2, "the export ordinal table");
     }
+    const auto ordinal_for = [this, base_ordinal](std::uint32_t index) {
+        if (index > std::numeric_limits<std::uint32_t>::max() - base_ordinal)
+            fail("an export ordinal exceeds the 32-bit range");
+        return base_ordinal + index;
+    };
+    std::size_t string_bytes = 0;
+    const auto account_string = [this, &string_bytes](const std::string& value) {
+        if (value.size() > kMaxDirectoryStringBytes - string_bytes)
+            fail("the export directory has too much string data");
+        string_bytes += value.size();
+    };
+    const auto read_forwarder = [this, &directory, export_end, &account_string](std::uint32_t forwarder_rva) {
+        if (forwarder_rva < directory.rva || static_cast<std::uint64_t>(forwarder_rva) >= export_end)
+            fail("an export forwarder is outside the export directory");
+        std::string value;
+        for (std::uint64_t cursor = forwarder_rva; cursor < export_end; ++cursor) {
+            const char ch = static_cast<char>(byte_at(static_cast<std::uint32_t>(cursor), "an export forwarder"));
+            if (!ch) {
+                account_string(value);
+                return value;
+            }
+            value.push_back(ch);
+            if (value.size() > 4096) fail("an export forwarder is longer than 4096 characters");
+        }
+        fail("an export forwarder is not terminated inside the export directory");
+    };
     // A function can have several names (aliases), so read the name table first and emit one symbol per name; functions
     // without a name are then emitted once by ordinal.
     std::vector<bool> named(function_count, false);
@@ -296,12 +341,14 @@ void Image::parse_exports(const Directory& directory) {
         if (ordinal_index >= function_count) fail("an export name points past the function table");
         ExportSymbol symbol;
         symbol.name = read_string(symbol_name_rva, "an export name");
-        symbol.ordinal = base_ordinal + ordinal_index;
-        symbol.by_name = true;
+        account_string(symbol.name);
         symbol.rva = dword_at(functions_rva + ordinal_index * 4, "an export function");
-        if (!symbol.rva || !rva_in_image(symbol.rva, 1)) fail("an export function runs outside the image");
-        if (symbol.rva >= directory.rva && symbol.rva < directory.rva + directory.size)
-            symbol.forwarder = read_string(symbol.rva, "an export forwarder");
+        if (symbol.rva == 0) continue;  // a name that indexes a zero EAT slot is a hole, not an export
+        symbol.ordinal = ordinal_for(ordinal_index);
+        symbol.by_name = true;
+        if (!rva_in_image(symbol.rva, 1)) fail("an export function runs outside the image");
+        if (symbol.rva >= directory.rva && static_cast<std::uint64_t>(symbol.rva) < export_end)
+            symbol.forwarder = read_forwarder(symbol.rva);
         named[ordinal_index] = true;
         exports_.push_back(std::move(symbol));
     }
@@ -311,38 +358,61 @@ void Image::parse_exports(const Directory& directory) {
         if (!rva_in_image(function_rva, 1)) fail("an export function runs outside the image");
         if (named[i]) continue;
         ExportSymbol symbol;
-        symbol.ordinal = base_ordinal + i;
+        symbol.ordinal = ordinal_for(i);
         symbol.rva = function_rva;
-        if (function_rva >= directory.rva && function_rva < directory.rva + directory.size)
-            symbol.forwarder = read_string(function_rva, "an export forwarder");
+        if (function_rva >= directory.rva && static_cast<std::uint64_t>(function_rva) < export_end)
+            symbol.forwarder = read_forwarder(function_rva);
         exports_.push_back(std::move(symbol));
     }
 }
 
 void Image::parse_imports(const Directory& directory) {
-    require_rva(directory.rva, kImportDescriptorBytes, "the import directory");
-    std::uint32_t descriptor_rva = directory.rva;
+    if (directory.size < kImportDescriptorBytes) fail("the import directory is smaller than one descriptor");
+    std::uint64_t descriptor_offset = 0;
+    std::size_t string_bytes = 0;
+    std::size_t total_symbols = 0;
+    const auto account_string = [this, &string_bytes](const std::string& value) {
+        if (value.size() > kMaxDirectoryStringBytes - string_bytes)
+            fail("the import directory has too much string data");
+        string_bytes += value.size();
+    };
     for (unsigned library = 0;; ++library) {
         if (library >= kMaxImportLibraries) fail("the import directory has too many descriptors");
-        if (!rva_in_image(descriptor_rva, kImportDescriptorBytes))
-            fail("the import directory is not terminated inside the image");
+        if (directory.size - descriptor_offset < kImportDescriptorBytes)
+            fail("the import directory is not terminated inside its declared size");
+        const std::uint64_t descriptor_rva64 = static_cast<std::uint64_t>(directory.rva) + descriptor_offset;
+        if (descriptor_rva64 > std::numeric_limits<std::uint32_t>::max() ||
+            !rva_in_image(descriptor_rva64, kImportDescriptorBytes))
+            fail("an import descriptor runs outside the image");
+        const std::uint32_t descriptor_rva = static_cast<std::uint32_t>(descriptor_rva64);
         const std::uint32_t original_thunk = dword_at(descriptor_rva, "an import descriptor");
         const std::uint32_t name_rva = dword_at(descriptor_rva + 12, "an import descriptor");
         const std::uint32_t first_thunk = dword_at(descriptor_rva + 16, "an import descriptor");
         if (!original_thunk && !name_rva && !first_thunk) break;  // null terminator
         if (!name_rva) fail("an import descriptor has no DLL name");
+        if (!first_thunk) fail("an import descriptor has no import address table");
         ImportLibrary import;
         import.name = read_string(name_rva, "an imported DLL name");
+        account_string(import.name);
         const std::uint32_t thunk_rva = original_thunk ? original_thunk : first_thunk;
         if (!thunk_rva) fail("an import descriptor has no thunk table");
-        require_rva(thunk_rva, 8, "an import thunk table");
         for (unsigned index = 0;; ++index) {
             if (index >= kMaxImportSymbols) fail("an import library has too many symbols");
-            const std::uint64_t entry = qword_at(thunk_rva + index * 8, "an import thunk");
+            const std::uint64_t entry_rva64 = static_cast<std::uint64_t>(thunk_rva) +
+                                              static_cast<std::uint64_t>(index) * 8;
+            if (entry_rva64 > std::numeric_limits<std::uint32_t>::max() || !rva_in_image(entry_rva64, 8))
+                fail("an import thunk table runs outside the image");
+            const std::uint64_t entry = qword_at(static_cast<std::uint32_t>(entry_rva64), "an import thunk");
             if (!entry) break;
+            const std::uint64_t iat_rva64 = static_cast<std::uint64_t>(first_thunk) +
+                                            static_cast<std::uint64_t>(index) * 8;
+            if (iat_rva64 > std::numeric_limits<std::uint32_t>::max() || !rva_in_image(iat_rva64, 8))
+                fail("an import address slot runs outside the image");
+            if (total_symbols >= kMaxImportSymbols)
+                fail("the import directory has too many symbols");
+            ++total_symbols;
             ImportSymbol symbol;
-            symbol.iat_rva = first_thunk + index * 8;
-            require_rva(symbol.iat_rva, 8, "an import address slot");
+            symbol.iat_rva = static_cast<std::uint32_t>(iat_rva64);
             if (entry & (std::uint64_t{1} << 63)) {
                 symbol.by_ordinal = true;
                 symbol.ordinal = static_cast<std::uint16_t>(entry & 0xFFFF);
@@ -351,22 +421,27 @@ void Image::parse_imports(const Directory& directory) {
                 const std::uint32_t by_name_rva = static_cast<std::uint32_t>(entry);
                 require_rva(by_name_rva, 3, "an import-by-name entry");
                 symbol.name = read_string(by_name_rva + 2, "an imported symbol name");
+                account_string(symbol.name);
             }
             import.symbols.push_back(std::move(symbol));
         }
         imports_.push_back(std::move(import));
-        descriptor_rva += kImportDescriptorBytes;
+        descriptor_offset += kImportDescriptorBytes;
     }
 }
 
 void Image::parse_relocations(const Directory& directory) {
     require_rva(directory.rva, directory.size, "the relocation directory");
     std::uint32_t offset = 0;
+    unsigned blocks = 0;
     while (offset < directory.size) {
+        if (blocks >= kMaxRelocationBlocks) fail("the relocation directory has too many blocks");
+        ++blocks;
         if (directory.size - offset < 8) fail("a relocation block header runs past the directory");
         const std::uint32_t block_rva = directory.rva + offset;
         const std::uint32_t page = dword_at(block_rva, "a relocation block");
         const std::uint32_t block_size = dword_at(block_rva + 4, "a relocation block");
+        if (page & 0xFFFu) fail("a relocation block page RVA is not 4-KiB aligned");
         if (block_size < 8 || (block_size & 1u)) fail("a relocation block has an invalid size");
         if (block_size > directory.size - offset) fail("a relocation block runs past the directory");
         const std::uint32_t count = (block_size - 8) / 2;
@@ -374,8 +449,16 @@ void Image::parse_relocations(const Directory& directory) {
             const std::uint16_t entry = word_at(block_rva + 8 + i * 2, "a relocation entry");
             Relocation relocation;
             relocation.type = static_cast<std::uint16_t>(entry >> 12);
-            relocation.rva = page + (entry & 0xFFF);
-            if (!rva_in_image(relocation.rva, 1)) fail("a relocation entry runs outside the image");
+            const std::uint64_t target_rva = static_cast<std::uint64_t>(page) + (entry & 0xFFFu);
+            if (target_rva > std::numeric_limits<std::uint32_t>::max() || !rva_in_image(target_rva, 1))
+                fail("a relocation entry runs outside the image");
+            relocation.rva = static_cast<std::uint32_t>(target_rva);
+            std::uint64_t target_size = 1;
+            if (relocation.type == 1 || relocation.type == 2) target_size = 2;
+            else if (relocation.type == kRelHighLow) target_size = 4;
+            else if (relocation.type == kRelDir64) target_size = 8;
+            if (!rva_in_image(target_rva, target_size)) fail("a relocation target runs outside the image");
+            if (relocations_.size() >= kMaxRelocations) fail("the relocation directory has too many entries");
             relocations_.push_back(relocation);
         }
         offset += block_size;
@@ -415,7 +498,11 @@ void Image::parse_tls(const Directory& directory) {
         require_rva(tls_.callbacks_rva, 8, "the TLS callback table");
         for (unsigned i = 0;; ++i) {
             if (i >= kMaxTlsCallbacks) fail("the TLS callback table has too many entries");
-            const std::uint64_t callback_va = qword_at(tls_.callbacks_rva + i * 8, "a TLS callback");
+            const std::uint64_t callback_slot64 = static_cast<std::uint64_t>(tls_.callbacks_rva) +
+                                                  static_cast<std::uint64_t>(i) * 8;
+            if (callback_slot64 > std::numeric_limits<std::uint32_t>::max() || !rva_in_image(callback_slot64, 8))
+                fail("the TLS callback table runs outside the image");
+            const std::uint64_t callback_va = qword_at(static_cast<std::uint32_t>(callback_slot64), "a TLS callback");
             if (!callback_va) break;
             tls_.callback_rvas.push_back(to_rva(callback_va, "a TLS callback"));
         }

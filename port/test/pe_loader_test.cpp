@@ -4,7 +4,8 @@
 // public Loader API and checks the mapped headers, exports (by name and ordinal), import binding, recursive module
 // loading/dedupe, section protections and forced base relocation. Negative inputs must throw std::runtime_error
 // without leaving a module behind. The fixtures are passed as argv[1] and argv[2] by CTest. It also checks how the
-// loader's reserved range is read back from PALMETTO_BASE_RESERVED (base_reservation.h).
+// loader's reserved range is read back from PALMETTO_BASE_RESERVED (base_reservation.h): the parse, and the
+// needed()/commit_reserved() decisions on synthesized PE headers (no game data, no extra fixture).
 //
 // An optional final section reads PALMETTO_GAME_DIR and maps the 16 DLLs a retail package ships, without executing
 // any of them or copying any file. It skips when the variable is unset; see test_optional_package.
@@ -14,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -681,6 +683,142 @@ void test_inherited_reservation() {
     if (saved_length && saved_length < 64) SetEnvironmentVariableW(br::kVariable, saved);
 }
 
+// A 0x400-byte PE32+ header with the fields base_reservation.h reads. The test never maps it, so SizeOfImage and the
+// relocation directory are the only image facts involved.
+std::vector<uint8_t> synthetic_image_header(uint64_t image_base, uint32_t size_of_image, uint32_t reloc_rva,
+                                            uint32_t reloc_size, uint16_t machine = IMAGE_FILE_MACHINE_AMD64,
+                                            uint16_t size_of_optional_header = sizeof(IMAGE_OPTIONAL_HEADER64)) {
+    std::vector<uint8_t> bytes(0x400, 0);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(bytes.data());
+    dos->e_magic = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = 0x100;
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(bytes.data() + 0x100);
+    nt->Signature = IMAGE_NT_SIGNATURE;
+    nt->FileHeader.Machine = machine;
+    nt->FileHeader.SizeOfOptionalHeader = size_of_optional_header;
+    nt->FileHeader.Characteristics = IMAGE_FILE_EXECUTABLE_IMAGE;
+    nt->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+    nt->OptionalHeader.ImageBase = image_base;
+    nt->OptionalHeader.SizeOfImage = size_of_image;
+    nt->OptionalHeader.SizeOfHeaders = 0x200;
+    nt->OptionalHeader.NumberOfRvaAndSizes = 16;
+    nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC] = {reloc_rva, reloc_size};
+    return bytes;
+}
+
+// The two decisions the fixed-base path depends on (base_reservation.h): does the preferred range need reserving in a
+// relaunched child (needed), and does an inherited reservation commit the loader's mapping (commit_reserved). The
+// synthesized headers name a range this process holds, so both are decided without any game file.
+void test_base_reservation(const fs::path& temp_dir) {
+    namespace br = rt::base_reservation;
+    std::printf("\n-- base reservation: needed() and commit_reserved() --\n");
+
+    // VirtualAlloc hands back allocation-granularity (64 KiB) aligned addresses, as a PE ImageBase must be.
+    void* hold = VirtualAlloc(nullptr, 0x10000, MEM_RESERVE, PAGE_NOACCESS);
+    if (!hold) {
+        check(false, "a 64 KiB range is held for the needed() checks");
+        return;
+    }
+    const uint64_t base = reinterpret_cast<uint64_t>(hold);
+    const auto write_image = [&](const char* name, uint64_t image_base, uint32_t size_of_image, uint32_t reloc_rva,
+                                 uint32_t reloc_size) {
+        const auto bytes = synthetic_image_header(image_base, size_of_image, reloc_rva, reloc_size);
+        const fs::path path = temp_dir / name;
+        write_file(path, bytes.data(), bytes.size());
+        return path;
+    };
+
+    // A fixed-base image whose range this process holds needs its whole 64 KiB-rounded range reserved in a child.
+    const fs::path fixed = write_image("fixed_base.exe", base, 0x5000, 0, 0);
+    const auto need = br::needed(fixed);
+    check(need.has_value() && need->base == base && need->size == 0x10000,
+          "needed(): a fixed-base image whose range is taken needs a 64 KiB reservation");
+    // The measured /FIXED fixture shape: a base-relocation directory with RVA 0 and a non-zero size is not a
+    // relocation directory. Checking only the size treated exactly this image as relocatable and skipped the
+    // reservation it exists for.
+    const auto stale = br::needed(write_image("stale_reloc_dir.exe", base, 0x5000, 0, 0xd));
+    check(stale.has_value() && stale->base == base,
+          "needed(): a relocation directory with RVA 0 does not make a fixed-base image relocatable");
+    check(!br::needed(write_image("relocatable.exe", base, 0x5000, 0x200, 0x10)),
+          "needed(): an image with a present relocation directory needs no reservation");
+    check(br::needed(write_image("no_reloc_size.exe", base, 0x5000, 0x200, 0)).has_value(),
+          "needed(): a relocation directory with size 0 is no directory, so the image still needs the reservation");
+
+    // Header shapes the loader itself rejects: needed() must leave the report to it, not relaunch first.
+    const auto write_raw = [&](const char* name, uint16_t machine, uint16_t size_of_optional_header) {
+        const auto bytes = synthetic_image_header(base, 0x5000, 0, 0, machine, size_of_optional_header);
+        const fs::path path = temp_dir / name;
+        write_file(path, bytes.data(), bytes.size());
+        return path;
+    };
+    check(!br::needed(write_raw("wrong_machine.exe", IMAGE_FILE_MACHINE_I386,
+                                static_cast<uint16_t>(sizeof(IMAGE_OPTIONAL_HEADER64)))),
+          "needed(): an image the loader rejects as not x86-64 is not relaunched for");
+    check(!br::needed(write_raw("short_optional_header.exe", IMAGE_FILE_MACHINE_AMD64, 0x10)),
+          "needed(): a short optional header is not treated as a fixed-base image");
+    check(!br::needed(write_image("unaligned_base.exe", base + 0x100, 0x5000, 0, 0)),
+          "needed(): an ImageBase that is not 64 KiB aligned is not reserved for");
+    check(!br::needed(write_image("wrapping_range.exe", 0xFFFFFFFFFFFF0000ull, 0x20000, 0, 0)),
+          "needed(): an ImageBase and SizeOfImage that wrap the address space are not reserved for");
+    check(!br::needed(write_image("empty_image.exe", base, 0, 0, 0)), "needed(): SizeOfImage 0 is not an image");
+    // The same fixed image with its range free needs nothing.
+    VirtualFree(hold, 0, MEM_RELEASE);
+    hold = nullptr;
+    check(!br::needed(fixed), "needed(): a fixed-base image whose range is free needs no reservation");
+
+    // commit_reserved(): the child commits the loader's mapping inside the parent's reservation.
+    void* const reserved = VirtualAlloc(nullptr, 0x10000, MEM_RESERVE, PAGE_NOACCESS);
+    check(reserved != nullptr, "a 64 KiB range is reserved for the commit_reserved() checks");
+    if (!reserved) return;
+    const uint64_t commit_base = reinterpret_cast<uint64_t>(reserved);
+    wchar_t saved[64] = {};
+    const DWORD saved_length = GetEnvironmentVariableW(br::kVariable, saved, 64);
+    const auto set_marker = [](uint64_t marker_base, uint64_t marker_size) {
+        wchar_t value[64] = {};
+        std::swprintf(value, 64, L"%llx:%llx", static_cast<unsigned long long>(marker_base),
+                      static_cast<unsigned long long>(marker_size));
+        SetEnvironmentVariableW(br::kVariable, value);
+    };
+    set_marker(commit_base, 0x10000);
+    check(br::commit_reserved(commit_base, 0x20000) == nullptr,
+          "commit_reserved(): a size larger than the reserved range is refused");
+    set_marker(commit_base, 0x1000);
+    check(br::commit_reserved(commit_base, 0x5000) == nullptr,
+          "commit_reserved(): a marker range smaller than the image is refused");
+    set_marker(commit_base + 0x10000, 0x10000);
+    check(br::commit_reserved(commit_base, 0x5000) == nullptr,
+          "commit_reserved(): a marker for another base does not commit this one");
+    set_marker(commit_base, 0x10000);
+    void* const committed = br::commit_reserved(commit_base, 0x5000);
+    check(committed == reserved, "commit_reserved(): the image's range is committed at the reserved base");
+    if (committed == reserved) {
+        MEMORY_BASIC_INFORMATION info{};
+        check(VirtualQuery(committed, &info, sizeof info) && info.State == MEM_COMMIT &&
+                  reinterpret_cast<uint64_t>(info.AllocationBase) == commit_base,
+              "commit_reserved(): the committed range still belongs to the reservation's allocation");
+        static_cast<uint8_t*>(committed)[0] = 1;  // it was PAGE_NOACCESS: the commit made it writable
+        check(static_cast<uint8_t*>(committed)[0] == 1, "commit_reserved(): the committed range is writable");
+        check(br::commit_reserved(commit_base, 0x5000) == nullptr,
+              "commit_reserved(): a second commit of the same range is refused");
+        MEMORY_BASIC_INFORMATION tail{};
+        check(VirtualQuery(reinterpret_cast<void*>(commit_base + 0x8000), &tail, sizeof tail) &&
+                  tail.State == MEM_RESERVE,
+              "commit_reserved(): the rest of the reservation stays reserved");
+    }
+    SetEnvironmentVariableW(br::kVariable, nullptr);
+    VirtualFree(reserved, 0, MEM_RELEASE);
+    check(br::commit_reserved(commit_base, 0x1000) == nullptr,
+          "commit_reserved(): no marker and no reservation is no commit");
+    // A marker naming a range this process does not hold must not commit anything (it prints one diagnostic line).
+    set_marker(commit_base, 0x10000);
+    check(br::commit_reserved(commit_base, 0x1000) == nullptr,
+          "commit_reserved(): a marker naming an unreserved range is refused");
+    if (saved_length && saved_length < 64)
+        SetEnvironmentVariableW(br::kVariable, saved);
+    else
+        SetEnvironmentVariableW(br::kVariable, nullptr);
+}
+
 // The opt-in console-type override (docs/console_type_branches.md): the switch's spelling, the measured ConsoleMode
 // mapping in both directions, the exact registry-name match, and the answers the hooks would serve, including the
 // switch-off shape. No title string is used: the synthetic key/value below are the test's own, and the real match runs
@@ -824,6 +962,7 @@ int main(int argc, char** argv) {
         test_rejections(dll, temp.path);
         test_unwind(dll);
         test_inherited_reservation();
+        test_base_reservation(temp.path);
         test_console_type_override();
         test_optional_package();
         test_optional_package_unwind();

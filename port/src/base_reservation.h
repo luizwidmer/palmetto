@@ -13,6 +13,13 @@
 // shared region starts at 0x180000000), so a range there can't be had either way.
 //
 // Nothing changes where the range is free at start-up (Windows, x86-64 Wine) or where the image has relocations.
+// Measured on package 1.0.2.1: the title image is relocatable after all - a 0x12a350-byte .reloc directory (2,763
+// blocks, 599,676 entries, 598,282 of them DIR64) - so needed() returns nullopt for it, the loader maps it at
+// 0x140000000 while that range is free and moves it with relocations where it is not, and this reservation applies
+// to fixed-base images such as the tiny_game_fixed fixture (/FIXED, ImageBase 0x140000000). That fixture's header has
+// a base-relocation directory of {RVA 0, Size 0xd}: a directory is present only when its RVA and its size are both
+// non-zero, the rule rt::pe::Directory::present() (pe_image.h) and the Windows loader follow. Reading only the size
+// treated that fixed image as relocatable and skipped the reservation.
 
 #include <windows.h>
 
@@ -57,13 +64,31 @@ inline void* commit_reserved(std::uint64_t base, std::uint64_t size) {
     if (!r || base != r->base || size > r->size) return nullptr;
     MEMORY_BASIC_INFORMATION info{};
     if (!VirtualQuery(reinterpret_cast<void*>(base), &info, sizeof info) || info.State != MEM_RESERVE ||
-        reinterpret_cast<std::uint64_t>(info.AllocationBase) != base)
+        reinterpret_cast<std::uint64_t>(info.AllocationBase) != base) {
+        // The marker is inherited but this range is no longer its reservation: a stale or hand-set environment
+        // variable, or a reservation something gave back. Map as usual rather than commit memory that is not ours.
+        std::fprintf(stderr,
+                     "[rt] base reservation: %ls names %#llx-%#llx, but this process has no reservation there; "
+                     "allocating as usual\n",
+                     kVariable, static_cast<unsigned long long>(base),
+                     static_cast<unsigned long long>(base + size));
         return nullptr;
-    return VirtualAlloc(reinterpret_cast<void*>(base), static_cast<SIZE_T>(size), MEM_COMMIT, PAGE_READWRITE);
+    }
+    void* const committed =
+        VirtualAlloc(reinterpret_cast<void*>(base), static_cast<SIZE_T>(size), MEM_COMMIT, PAGE_READWRITE);
+    if (committed)
+        std::fprintf(stderr, "[rt] base reservation: committed %#llx-%#llx from the inherited reservation\n",
+                     static_cast<unsigned long long>(base), static_cast<unsigned long long>(base + size));
+    return committed;
 }
 
 // The preferred range of `image` when it has no relocations and that range is not free in this process; nullopt
 // when the image can be mapped as it is (or is not a readable PE32+, which the loader reports itself).
+//
+// The header checks mirror the ones pe_loader.cpp's map_image() makes through the same fields: a file the loader will
+// reject must not make palmetto start itself again first, and a base or a size that VirtualAllocEx cannot take must
+// fall through to the loader's own named error instead of a relaunch that can only fail. The relocation decision uses
+// the directory's RVA and its size, not the size alone (see the measured fixed fixture note above).
 inline std::optional<Range> needed(const std::filesystem::path& image) {
     std::ifstream file(image, std::ios::binary);
     IMAGE_DOS_HEADER dos{};
@@ -71,14 +96,22 @@ inline std::optional<Range> needed(const std::filesystem::path& image) {
         return std::nullopt;
     IMAGE_NT_HEADERS64 nt{};
     if (!file.seekg(dos.e_lfanew) || !file.read(reinterpret_cast<char*>(&nt), sizeof nt) ||
-        nt.Signature != IMAGE_NT_SIGNATURE || nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
-        !nt.OptionalHeader.SizeOfImage)
+        nt.Signature != IMAGE_NT_SIGNATURE || nt.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
+        static_cast<std::size_t>(nt.FileHeader.SizeOfOptionalHeader) < sizeof(IMAGE_OPTIONAL_HEADER64) ||
+        nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC || !nt.OptionalHeader.SizeOfImage)
         return std::nullopt;
     const auto& oh = nt.OptionalHeader;
-    if (oh.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_BASERELOC &&
-        oh.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size)
-        return std::nullopt;  // relocatable: the loader moves it if the base is taken
+    if (oh.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_BASERELOC) {
+        const auto& relocs = oh.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+        // A directory with RVA 0 is not a relocation directory, whatever its size field holds (as the /FIXED fixture
+        // above shows), so only a present directory makes the image relocatable.
+        if (relocs.VirtualAddress && relocs.Size)
+            return std::nullopt;  // relocatable: the loader moves it if the base is taken
+    }
     const Range r{oh.ImageBase, (static_cast<std::uint64_t>(oh.SizeOfImage) + 0xffff) & ~std::uint64_t{0xffff}};
+    // VirtualAlloc and VirtualAllocEx need an allocation-granularity-aligned address that no valid range follows, and
+    // the reservation loop below needs base + size not to wrap the address space.
+    if (!r.base || (r.base & 0xffffull) || r.base > ~std::uint64_t{0} - r.size) return std::nullopt;
     for (std::uint64_t at = r.base; at < r.base + r.size;) {
         MEMORY_BASIC_INFORMATION info{};
         if (!VirtualQuery(reinterpret_cast<void*>(at), &info, sizeof info)) return r;
@@ -135,6 +168,10 @@ inline int relaunch(const Range& r) {
                      static_cast<unsigned long long>(r.base), static_cast<unsigned long long>(r.base + r.size), error);
         return 1;
     }
+    // The one line that says a second process is running: everything after it comes from that child.
+    std::fprintf(stderr, "[rt] base reservation: reserved %#llx-%#llx in the relaunched process (pid %lu)\n",
+                 static_cast<unsigned long long>(r.base), static_cast<unsigned long long>(r.base + r.size),
+                 static_cast<unsigned long>(process.dwProcessId));
     if (ResumeThread(process.hThread) == static_cast<DWORD>(-1)) {  // still suspended: the wait would never end
         const DWORD error = GetLastError();
         abandon();

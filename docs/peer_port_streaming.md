@@ -1443,3 +1443,132 @@ changed bound from other host/device conditions. No source or test code was adde
 P-30's alias/watch arm was not run after the two consecutive losses. Its status is recorded in
 [title_memory_model.md](title_memory_model.md); it is **not** a controlled negative about aliases or page-list activity.
 
+## 17. Pure policy slice: bounded ordered retirement for async completions
+
+**Status: helper and synthetic test only; not wired into `Queue::run` in this round.** This is a no-boot, rank-3-adjacent
+slice: if a future opt-in worker pool lets DirectStorage request work finish out of order, a bounded retirement gate must
+keep its observable completion entries in submission order. This code does not add workers, change the current queue,
+claim a streaming-speed improvement, or explain the title's current loading state. The current one-worker queue already
+executes `process(e)` and publishes the entry's result serially, so the gate is not needed by the measured default path.
+
+### 17.1 Evidence and gap
+
+The peer evidence is the [VIctory DirectStorage module at snapshot `63bcca4`](https://github.com/Marvisak/VIctory/blob/63bcca4/crates/victory-hle/src/modules/dstorage.rs)
+(GPL-3.0-or-later; read from the read-only clone at `D:\leonida-work\peers\victory`). Its `Scheduler` assigns sequence
+numbers to queued requests, tracks running requests and failures by sequence, and `Lane::flush` leaves a status entry
+pending until every earlier request has finished, then reports the first failure in enqueue order. This module is one
+runtime family, not proof that our title needs its worker pool. The peer plan already records the difference in section
+2: VIctory/PercyScarlett use a shared worker pool, while this tree's queue has one worker per queue.
+
+Our existing implementation is deliberately simpler: `port/shims/dstorage.cpp` `Queue::run` removes `entries_.front()`,
+executes `process(e)`, traces it, and releases its references before taking the next entry. `process` updates the
+first-failure accumulator, status array, fence/event and error record inline. There is no out-of-order completion record
+to retire today. The unimplemented mechanism here is only the **bounded ordering policy** that could sit between parallel
+work and those existing observable side effects; it is a helper seam, not a claim that the current worker is incorrect.
+
+The community issue-scout snapshot has no open `DirectStorage`/queue-completion row (`D:\leonida-work\issuescout\open.json`);
+its closed [PR #969](https://github.com/ubiquitarianism/leonida/pull/969) is specifically the physical-page destination
+write path, not ordered completion retirement. The local rank-3 observations remain authoritative: the title's status
+arrays completed and no storage dependency was measured ([streamed_consumer.md](streamed_consumer.md) section 6).
+
+### 17.2 The local policy
+
+The new `stream_reap.h` header defines `palmetto::stream_reap::OrderedRetirer<T, Capacity>` as a fixed-size,
+allocation-free ring of ticketed results (payload values must be nothrow-movable):
+
+- `issue()` is called in submission order and returns a monotonic ticket. The capacity is a compile-time bound; a full
+  ring returns `capacity_full`, and the ticket counter refuses wrap with `sequence_exhausted`.
+- `complete(ticket, value)` may arrive in any order. Unknown or retired tickets and duplicate completion are refused by
+  name; no stored result is overwritten.
+- `take_ready()` returns only the current front ticket. A later finished request, status, signal, event or block-release
+  payload remains unobservable until every earlier ticket has been taken. The helper does not itself fold HRESULTs: the
+  single ordered publisher must apply the existing first-failure/status/fence/event rules when it consumes each value.
+- The helper is deliberately not thread-safe. A future caller must serialize `issue`, `complete` and draining, and keep
+  the single publisher's observable side effects in retirement order; protecting only the ring while allowing two
+  publishers to race would not preserve ordering.
+- `PALMETTO_DS_REAP_ORDER` is a strict parser seam only, not read by the runtime yet. Unset, empty, `0`, `off` and `no`
+  are off; only `1`, `on`, `yes` and `true` enable it (case-insensitive). An unknown value returns the named
+  `invalid_switch_value` refusal and stays off. A default-constructed retirer is disabled; disabled operations return
+  `disabled` without changing its state.
+
+Other named outcomes are `waiting_for_earlier`, `empty`, `unknown_ticket`, `duplicate_completion` and
+`internal_slot_conflict`; `refusal_name()` gives each a stable printable spelling. The helper has no Win32, file, title,
+GPU or peer dependency. It does not copy the peer scheduler or its priority policy: it is a small local state machine over
+caller-owned completion values.
+
+### 17.3 Synthetic coverage
+
+The standalone `stream_reap_test.cpp` source is host-only. It exercises switch parsing/default-off, a deliberately
+reversed completion sequence (`request 1`, status, signal, then `request 0`), the no-early-status invariant, first-failure
+folding in retirement order, capacity and slot reuse, duplicate/future/retired tickets, stable refusal names and the
+no-wrap boundary. No boot or game file is needed. This new test is not added to CMake in this slice; it is compiled
+standalone with the VS18 x64 environment so the main target/configuration files remain untouched:
+
+```powershell
+cmd /d /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat`" && cl /nologo /EHsc /std:c++20 /W4 /permissive- /utf-8 /Fo:port\build\stream_reap_test.obj port\test\stream_reap_test.cpp /Fe:port\build\stream_reap_test.exe && port\build\stream_reap_test.exe"
+```
+
+Result for this slice: **55 checks, 0 failures**. No `dstorage.cpp`, `CMakeLists.txt`, `main.cpp`, `pe_loader.cpp`, shim,
+`NOTICE.md` or game-data file was changed. The default runtime is byte-identical to the pre-slice runtime because this
+helper is only included by its standalone test; no path in `palmetto` references it. The proposed switch remains inert
+until a separately reviewed integration.
+
+### 17.4 Integration gate and falsifiers
+
+Do not wrap the current `process(e)` call in the helper: it already performs reads **and** publishes status/fence/event
+side effects inline, and one worker finishes entries in order. A real opt-in integration first has to separate work that
+may run concurrently from publication/refcount release, issue tickets before dispatch, and funnel each completed payload
+through one ordered publisher. `capacity_full` must apply backpressure before dispatch (not run a later entry inline past
+an earlier one); named ticket errors must fail closed rather than silently drop or reorder a completion. The switch-off
+branch must remain the current queue path, byte for byte.
+
+The minimal call-site shape for the lead's follow-up is:
+
+```cpp
+// Queue thread: issue in submission order, under the same lock used by completions.
+const auto admission = [&] {
+    std::lock_guard lock(retirement_mutex);
+    return retirer.issue();
+}();
+if (admission.refusal != palmetto::stream_reap::Refusal::none) {
+    // capacity_full means wait for a retirement slot and retry before dispatch; never run this entry past earlier work.
+    refuse_or_backpressure(admission.refusal);
+    return;
+}
+
+// Worker: perform request work only; status/fence/event publication and Entry release remain for the ordered publisher.
+const HRESULT hr = execute_entry_work(entry);
+{
+    std::lock_guard lock(retirement_mutex);  // serializes complete(), drain and publication as one ordered operation
+    const auto accepted = retirer.complete(admission.ticket, CompletedEntry{std::move(entry), hr});
+    if (accepted != palmetto::stream_reap::Refusal::none) {
+        refuse_opt_in_queue(accepted);
+        return;
+    }
+    for (;;) {
+        auto ready = retirer.take_ready();
+        if (ready.refusal == palmetto::stream_reap::Refusal::waiting_for_earlier ||
+            ready.refusal == palmetto::stream_reap::Refusal::empty)
+            break;
+        if (ready.refusal != palmetto::stream_reap::Refusal::none) {
+            refuse_opt_in_queue(ready.refusal);
+            break;
+        }
+        publish_entry_in_order(std::move(*ready.value));  // existing status/fence/event/error/release tail
+    }
+}
+```
+
+This is the integration seam, not a drop-in patch: `execute_entry_work`, `CompletedEntry`, `refuse_opt_in_queue` and
+`publish_entry_in_order` name the split the runtime change must introduce. The exact correctness falsifier is a synthetic
+batch where request 1 fails before request 0 completes and the later status/signal also completes early: if any later
+entry is returned or published before request 0, or the status does not report the first failed request in submission
+order, the implementation fails. The practical title falsifier, after a reviewed integration only, is a bounded trace with
+zero concurrent request work and a peak buffered-completion count of zero; that would show this mechanism is unobservable
+for the title and provides no measured benefit, so it must stay off and no speedup may be claimed. No title boot or A/B was
+run by this slice.
+
+Peer attribution for the evidence read here: VIctory (GPL-3.0-or-later, snapshot `63bcca4`,
+`crates/victory-hle/src/modules/dstorage.rs`, linked above). No peer code, comment text, identifiers or tables were copied.
+No `NOTICE.md` edit was made; the lead can add the reference note if the later runtime integration is adopted.
+
