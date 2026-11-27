@@ -407,3 +407,39 @@ are mechanism references only; no code, comments, identifiers or tables were cop
 measurements and cross-checked against XCL (`623d02e`) and PercyScarlett (`e44c465`), both GPL-2.0-only; no peer code was
 copied, and each project's copyright and licence continue to apply to its own tree. The row is recorded under the
 implemented-peer-port credits in `NOTICE.md`.
+
+## 10. P-28 follow-up: Type-6 arms reached the branch, but not a kind-7 consumer
+
+Two `-Light` 90 s arms used the same integrated binary (SHA-256
+`1DD3A3E84789BDB06EDBB0D078A724F940FC1E38B0C05CF4A3A7CB1F077A28E6`), the standard content/state/capture environment,
+`PALMETTO_CONSOLE_TYPE=6`, `PALMETTO_TITLE_CLASS0A_SIZE=1`, and the template's `PALMETTO_SLOT67_PROGRAM_LOG=1`. No
+build, relink, code change or git write was made.
+
+- **`p28-kind7-20261127-1011`**, 10:11:14.483–10:12:45.286 (-03), wall 90.2 s. The title's registry reads were
+  answered `0x60` (type 6); the class-0xa mitigation reported three redirected call sites and row stride `width*0x10`.
+  At t=84/88 s the sampled words were `init=2`, `loading=2`, `session=1`, machine `current=2 next=2`. The 1920x1080x1
+  format-67 shape was placed on the mutable `R32_UINT` backing; its render-target view was refused by name. The FSR DLL
+  mapped from `game_dir`, but the post-map slot-67 trace showed no FSPX request (0 of 29 upscaler programs in this
+  observed window), no `ffxDispatch`-labelled event, and no resource-identity trace linking that shape to a later compose
+  draw. At `t=79518.508`, stderr recorded `[rt] replay: the Vulkan device was lost`, followed by
+  `ExecuteCommandLists` failure and `present failed (VkResult -4)`; the process reported access violation `0xC0000005`
+  at `game+0x86f9df`, read `0x6`. Twelve captures (1904x1041) all had mean RGB `0.00 0.00 0.00`.
+- **`p28-kind7-retry-20261127-1014`**, 10:14:39.257–10:16:10.232 (-03), wall 90.3 s, `ALIVE` at timeout, zero
+  exceptions and no device-loss line. The type-6 override and mitigation were applied, but the last sample at t=88 s
+  remained `init=2`, `loading=1`, `session=0`, machine `current=2 next=2`; no format-67 shape or FSR DLL mapping appeared.
+  Twelve captures (1904x1041) again had mean RGB `0.00 0.00 0.00`.
+
+The first arm confirms that the type-6 branch can reach the candidate shape and load the DLL, but it does **not** establish
+an FFX dispatch, an upscaler output, or a compose consumer. The slot-67 trace showed no post-load program request; the
+available trace does not directly instrument the `ffxDispatch` API entry or identify a resource through a later draw.
+Thus this remains readiness-only, not a translation failure and not evidence that kind 7 skips composition. The one retry
+followed one device loss and was loss-free; the two-consecutive-loss rule was not reached, but the task's one-retry/three-arm
+budget is exhausted. Boot logs, metadata and JSONL traces remain outside the repository under
+`D:\leonida-work\fsrstable\boot-p28-kind7-20261127-1011` and
+`D:\leonida-work\fsrstable\boot-p28-kind7-retry-20261127-1014`; capture PPMs remain in the corresponding outside-repo
+capture folders and were not copied here.
+
+**Next falsifier:** only after a stable host and a separately authorized arm, observe the first post-load FFX pipeline
+request/`ffxDispatch`, match the requested program against the 29-program corpus, then identify that exact output resource
+in a subsequent compose draw (view format/features/layout, source/destination rectangles, filter and numeric conversion).
+Until that same-resource link is measured, keep the kind-7 consumer at `consumer_not_observed`.

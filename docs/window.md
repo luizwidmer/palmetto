@@ -240,3 +240,28 @@ section 7) was cross-checked against Five Star Recomp (GPL-3.0-or-later, `34b4df
 (GPL-3.0-or-later, `63bcca43`), PercyScarlett (GPL-2.0-only, `e44c465e`), victory-fork (GPL-3.0-or-later,
 `9a9091d1`) and XCL (GPL-2.0-only, `623d02e4`), as evidence of display handling only; the implementation and tests are
 ours, with no peer source, comment, identifier or table copied.”
+
+### 7.5 P-36 follow-up: simulate-120 was not reflected in sampled state
+
+The lead cleared the integration gate; no build or relink was run. One `-Light` 90 s arm used the integrated `palmetto.exe`
+(SHA-256 `1DD3A3E84789BDB06EDBB0D078A724F940FC1E38B0C05CF4A3A7CB1F077A28E6`) and
+`PALMETTO_DXGI_MODE_ANSWER=simulate-120`, with the boot template's state, timeline, slot-67 and capture/readback probes.
+It ran under the shared boot lock at 10:08:51.629–10:10:22.469 (-03), wall 90.3 s; the runner ended it at the 90 s
+limit, verdict `ALIVE`, zero exceptions, and no device-loss line.
+
+At the last state sample (t=88 s), the words were `init=2`, `loading=1`, `session=0`, machine `current=2 next=2`; the
+high-refresh flag remained `0` and refresh remained `60/1`. No `[rt] dxgi: display mode answer sample` or `mode[...]`
+line appeared in stdout or stderr. Although §7.2 documents a trace for `simulate-120`, this integrated run did not emit it;
+the trace may be emitted only under the `host` policy in this binary, or the relevant mode-list enumeration may not have
+been reached. Neither the call nor the simulated `{120,1}` answer was observed; absence of a trace is not evidence that the
+title rejected a returned 120/1 record.
+
+The template recorded 12 presenter captures at 2564x1421, each mean RGB `0.00 0.00 0.00`; the PPMs remain only in the
+outside-repository capture folder. Raw boot evidence (`meta.txt`, `stderr.log`, `boot.jsonl`, `summary.txt`) is under
+`D:\leonida-work\fsrstable\boot-p36-120-20261127-1008` and captures are under
+`D:\leonida-work\fsrstable\capture-p36-120-20261127-1008`; no image or game content was copied here.
+
+**Next falsifier:** first observe a `host`-policy mode-list sample (or otherwise establish that the title reaches the
+mode-list call), then in a separately authorized bounded simulation arm verify a returned current-size 120/1 record and
+sample the consumer words. A confirmed 120/1 answer followed by flag `0` / refresh `60/1` would falsify the expected
+consumer path; this arm alone does not.

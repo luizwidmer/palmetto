@@ -176,9 +176,9 @@ The 36 failures split into these result groups:
   `run_tiny_game_stack` and `run_tiny_game_dir` failed the guest assertion `a file round trip through the CRT works`.
   The guest used `GetTempPathA` and CRT file calls on a synthetic `palmetto_tiny_game_<pid>.txt`; a standalone run from
   `D:\leonida\port\build` reproduced the failure with both the original `TEMP`/`TMP`
-  (`C:\Users\LUIZWI~1\AppData\Local\Temp`) and the build-local `temp_probe_alt`. In both, `GAME:` resolved to
-  `D:\leonida\port\build\fixtures\game\RelWithDebInfo` and the overlay to
-  `D:\leonida\port\build\fixtures\game\RelWithDebInfo\overlay`; stderr contained only the loader TLS-remap and
+  (`C:\Users\LUIZWI~1\AppData\Local\Temp`) and the build-local `temp_probe_alt`. In both, `GAME:` resolved to the
+  fixtures' `RelWithDebInfo` directory (with the overlay as its child directory); stderr contained only the loader
+  TLS-remap and
   offline XGameRuntime messages. A follow-up confirmed this was a test-fixture byte-count error, not a loader failure;
   the post-fix checks and measurements are recorded below.
 - **Stale shader-library fixture (1):** `shader_library` failed its old binary's fixed-Huffman zlib fixture check.
