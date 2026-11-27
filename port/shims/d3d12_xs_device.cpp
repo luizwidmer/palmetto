@@ -5529,9 +5529,15 @@ std::atomic<bool> g_slot70_shape_logged{false};
 // The matrix publication (PALMETTO_SLOT70_PUBLISH=1): publications written, and why the rest were not.
 std::atomic<std::uint64_t> g_slot70_matrix_published{0};
 std::atomic<std::uint64_t> g_slot70_matrix_empty{0};     // the record's block pages held zeros
-std::atomic<std::uint64_t> g_slot70_matrix_unplaced{0};  // the block is not inside a buffer the title placed at slot 133
+std::atomic<std::uint64_t> g_slot70_matrix_unplaced{0};  // the block start is not inside a buffer the title placed at slot 133
 std::atomic<std::uint64_t> g_slot70_matrix_unreadable{0};
+std::atomic<std::uint64_t> g_slot70_matrix_shape_refused{0};
+std::atomic<std::uint64_t> g_slot70_matrix_range_refused{0};
 std::atomic<bool> g_slot70_matrix_logged{false};
+std::atomic<bool> g_slot70_matrix_resource_shape_logged{false};
+std::atomic<bool> g_slot70_matrix_record_shape_logged{false};
+std::atomic<bool> g_slot70_matrix_destination_logged{false};
+std::atomic<bool> g_slot70_matrix_range_logged{false};
 // The census measured texture-shaped resource descriptions at this slot (60 calls, all at the startup wrapper site). They
 // are not pinned to a console T# encoding, so the publication refuses them by name instead of writing a guess.
 std::atomic<std::uint64_t> g_slot70_texture_refused{0};
@@ -5542,6 +5548,14 @@ std::atomic<std::uint64_t> g_slot70_pairs_found{0};
 std::atomic<std::uint64_t> g_slot70_pairs_published{0};
 std::atomic<std::uint64_t> g_slot70_pairs_none{0};
 std::atomic<bool> g_slot70_pair_logged{false};
+
+void slot70_refuse_matrix_shape(const char* reason, std::atomic<bool>& logged) {
+    g_slot70_matrix_shape_refused.fetch_add(1, std::memory_order_relaxed);
+    if (!logged.exchange(true, std::memory_order_relaxed))
+        std::fprintf(stderr, "[rt] d3d12_xs: slot 70 publish: refusing unmeasured matrix shape (%s); no descriptor written\n",
+                     reason);
+}
+
 // The creation lifetime registry (section 9): every console resource creation the proxy handles, bounded by count, with
 // the description, the made resource, its GPU VA (a buffer VA or an image key) and the title VA. Declared here so the
 // slot-70 summary can report it.
@@ -5709,10 +5723,13 @@ void slot70_summary(std::uint64_t calls) {
                  static_cast<unsigned long long>(g_slot70_published.load(std::memory_order_relaxed)));
     // The matrix publication: what was written, and what was refused and why (counts only - no block bytes).
     std::fprintf(stderr,
-                 "[rt] d3d12_xs: slot 70 publish: %llu matrix V# written, %llu refused (empty block pages), %llu "
-                 "refused (block outside a slot-133 range), %llu refused (block unreadable), %llu refused "
+                 "[rt] d3d12_xs: slot 70 publish: %llu matrix V# written, %llu refused (shape mismatch), %llu "
+                 "refused (declared range extends past placement), %llu refused (empty block pages), %llu refused "
+                 "(block start outside a slot-133 range), %llu refused (block unreadable), %llu refused "
                  "(texture-shaped description, no pinned T# encoding)\n",
                  static_cast<unsigned long long>(g_slot70_matrix_published.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(g_slot70_matrix_shape_refused.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(g_slot70_matrix_range_refused.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(g_slot70_matrix_empty.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(g_slot70_matrix_unplaced.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(g_slot70_matrix_unreadable.load(std::memory_order_relaxed)),
@@ -6144,13 +6161,24 @@ std::uint64_t proxy_console_slot70(DeviceProxy* self, std::uint64_t caller, std:
     }
     const auto* resource = reinterpret_cast<const D3D12_RESOURCE_DESC*>(a1);
     const auto* view = reinterpret_cast<const D3D12_CONSTANT_BUFFER_VIEW_DESC*>(a2);
+    const auto* record_bytes = reinterpret_cast<const std::uint8_t*>(a2);
     const bool view_readable = readable_range(reinterpret_cast<const void*>(a2), sizeof(D3D12_CONSTANT_BUFFER_VIEW_DESC));
+    const bool record_readable = readable_range(reinterpret_cast<const void*>(a2), 0x40);
     const bool desc_readable = readable_range(reinterpret_cast<const void*>(a1), sizeof(D3D12_RESOURCE_DESC));
-    // The destination is a 32-byte-aligned slot in memory this process can write.
-    // The destination is a 16-byte-aligned descriptor slot in memory this process can write. The publication boots
-    // measured 32-byte-aligned offsets in three boots and a 16-byte-aligned ring base in the fourth (the object array
-    // is 16-byte aligned), so 16 is the rule the measurement supports; the V# itself is 16 bytes.
-    const bool dest_readable = (a3 & 15) == 0 && readable_range(reinterpret_cast<const void*>(a3), 16);
+    const bool buffer_dimension = desc_readable && resource->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
+    // The measured destination is a 16-byte-aligned 32-byte descriptor entry. The proxy writes only the first 16 bytes
+    // for the V#, but checks the measured entry size before reading its before/after diagnostic window.
+    const bool dest_readable = (a3 & 15) == 0 && readable_range(reinterpret_cast<const void*>(a3), 32);
+    std::uint32_t record_count = 0, declared = 0, format_word = 0;
+    std::uint64_t record_word10 = 0, record_word20 = 0, block = 0;
+    if (record_readable) {
+        std::memcpy(&declared, record_bytes + 0x08, sizeof(declared));
+        std::memcpy(&record_word10, record_bytes + 0x10, sizeof(record_word10));
+        std::memcpy(&record_count, record_bytes + 0x18, sizeof(record_count));
+        std::memcpy(&record_word20, record_bytes + 0x20, sizeof(record_word20));
+        std::memcpy(&block, record_bytes + 0x28, sizeof(block));
+        std::memcpy(&format_word, record_bytes + 0x30, sizeof(format_word));
+    }
     std::uint32_t before[8] = {};
     bool dest_zero = false;
     if (dest_readable) {
@@ -6186,12 +6214,11 @@ std::uint64_t proxy_console_slot70(DeviceProxy* self, std::uint64_t caller, std:
                                                              : 0));
         }
     }
-    if (probe && desc_readable && resource->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER &&
-        readable_range(reinterpret_cast<const void*>(a2), 0x40))
-        slot70_texture_probe(resource, reinterpret_cast<const std::uint8_t*>(a2), true, a3, call);
+    if (probe && desc_readable && resource->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER && record_readable)
+        slot70_texture_probe(resource, record_bytes, true, a3, call);
     if (probe && call % 1024 == 0) slot70_texture_probe_redump(call);
-    if (slot70_census_enabled() && readable_range(reinterpret_cast<const void*>(a2), 0x40))
-        slot70_census_note(resource, desc_readable, reinterpret_cast<const std::uint8_t*>(a2), true, a3, call);
+    if (slot70_census_enabled() && record_readable)
+        slot70_census_note(resource, desc_readable, record_bytes, true, a3, call);
     else if (slot70_census_enabled())
         slot70_census_note(resource, desc_readable, nullptr, false, a3, call);
     if (call % 4096 == 0) {
@@ -6200,33 +6227,46 @@ std::uint64_t proxy_console_slot70(DeviceProxy* self, std::uint64_t caller, std:
         if (slot70_census_enabled()) slot70_census_summary(call);
     }
 
-    // The measured shape: a readable buffer description, a readable view record with a nonzero address and size, and a
-    // 32-byte-aligned writable destination slot. Anything else is not this call and is refused rather than guessed.
-    const bool buffer_desc = desc_readable && resource->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && resource->Width;
+    // The falsified CBV probe and the matrix publication share an ABI but are separate hypotheses. A nonzero resource
+    // description and a readable first 16 bytes are enough only for the former diagnostic; the matrix publisher below
+    // pins the per-frame call to the complete measured description/record shape.
+    const bool buffer_desc = buffer_dimension && resource->Width;
 
-    // ---- The matrix publication (PALMETTO_SLOT70_PUBLISH=1, docs/device_slot70.md section 6) ----------------------
-    // The measured record is the console's publication of the per-frame transform: 0x20 elements, a 128-byte buffer
-    // description, and a CPU block at +0x28 that the caller filled. The console device writes the descriptor that view
-    // needs; this tree's answer is the refusal below, so the destination slot stays empty. The publication writes a
-    // MATRIX V# over that block:
-    //   w0 = block VA bits 31:0, w1 = block VA bits 47:32 (stride 0, so w2 is a byte count), w2 = the record's declared
-    //   byte size (>= 64: the translated module reads 16 dwords = 64 bytes, each gated by declared >= 4*(k+1)),
-    //   w3 = 0x30000FAC (raw out-of-bounds select + identity destination select; the module never reads w3 for a matrix
-    //   fetch, and 0x30000FAC is the layer's raw-buffer convention for the other raw views).
-    // The base is written as the block's TITLE VA, not an arena VA: the layer's console-heap mirror and in-place scan
-    // rebase every 48-bit V# base that names a registered title buffer at submission (measured: "2 V# base(s) rebased"),
-    // and the replay's page pull then copies the V#'s declared range from the title pages into the arena before the GPU
-    // reads it (docs/page_content.md). Only a block inside a buffer the title placed at console slot 133 has such a
-    // registration, so a block outside the ranges this proxy accepted there is refused instead of published into a V#
-    // nothing backs.
+    // ---- The matrix publication (PALMETTO_SLOT70_PUBLISH=1, docs/device_slot70.md section 12) ----------------------
+    // The dominant site is exactly one measured shape: a 0x80-byte BUFFER description, a 0x20 element record whose
+    // declared byte count is 0x1688, +0x10 == 0, +0x20 == 1, and +0x30 == 0x16. Its +0x00 word differed between the
+    // offline store and the boot (the boot had the destination address), so it is intentionally not used as a validator.
+    // Only the record's +0x28 block is encoded as a MATRIX V#: w0/w1 carry its 48-bit title VA, w1's stride is zero, w2
+    // carries the declared byte count, and w3 is 0x30000FAC. This opt-in path must keep the entire declared range inside
+    // one slot-133 placement, because the layer rebases the V# base and page-pulls the declared bytes at submission.
     const bool publish = slot70_publish_enabled();
-    const auto* record_bytes = reinterpret_cast<const std::uint8_t*>(a2);
-    const std::uint32_t record_count =
-        view_readable ? *reinterpret_cast<const std::uint32_t*>(record_bytes + 0x18) : 0;
-    const std::uint64_t block = view_readable ? *reinterpret_cast<const std::uint64_t*>(record_bytes + 0x28) : 0;
-    const std::uint32_t declared = view_readable ? *reinterpret_cast<const std::uint32_t*>(record_bytes + 0x08) : 0;
-    const std::uint32_t format_word = view_readable ? *reinterpret_cast<const std::uint32_t*>(record_bytes + 0x30) : 0;
-    if (publish && buffer_desc && view_readable && dest_readable && record_count == 0x20 && block != 0 && declared >= 64) {
+    const bool matrix_candidate = buffer_dimension && record_readable &&
+                                  (record_count == 0x20 || record_word20 == 1 || format_word == 0x16);
+    if (publish && matrix_candidate) {
+        if (resource->Alignment != 0 || resource->Width != 0x80 || resource->Height != 1 ||
+            resource->DepthOrArraySize != 1 || resource->MipLevels != 1 || resource->Format != DXGI_FORMAT_UNKNOWN ||
+            resource->Flags != D3D12_RESOURCE_FLAG_NONE) {
+            slot70_refuse_matrix_shape("resource description is not the measured 0x80-byte BUFFER shape",
+                                       g_slot70_matrix_resource_shape_logged);
+            return hr_to_u64(E_NOTIMPL);
+        }
+        const char* record_shape_reason = nullptr;
+        if (record_count != 0x20) record_shape_reason = "element count at +0x18 is not 0x20";
+        else if (declared != 0x1688) record_shape_reason = "declared byte count at +0x08 is not 0x1688";
+        else if (record_word10 != 0) record_shape_reason = "record qword at +0x10 is not zero";
+        else if (record_word20 != 1) record_shape_reason = "record qword at +0x20 is not one";
+        else if (format_word != 0x16) record_shape_reason = "format word at +0x30 is not 0x16";
+        else if (block == 0) record_shape_reason = "block address at +0x28 is zero";
+        if (record_shape_reason) {
+            slot70_refuse_matrix_shape(record_shape_reason, g_slot70_matrix_record_shape_logged);
+            return hr_to_u64(E_NOTIMPL);
+        }
+        if (!dest_readable) {
+            slot70_refuse_matrix_shape("destination is not a readable, 16-byte-aligned 32-byte descriptor entry",
+                                       g_slot70_matrix_destination_logged);
+            return hr_to_u64(E_NOTIMPL);
+        }
+
         unsigned non_zero = 0;
         const bool block_readable = readable_range(reinterpret_cast<const void*>(block), 64);
         if (block_readable) {
@@ -6239,46 +6279,66 @@ std::uint64_t proxy_console_slot70(DeviceProxy* self, std::uint64_t caller, std:
             g_slot70_matrix_unreadable.fetch_add(1, std::memory_order_relaxed);
             if (!g_slot70_matrix_logged.exchange(true, std::memory_order_relaxed))
                 std::fprintf(stderr,
-                             "[rt] d3d12_xs: slot 70 publish: the record's block 0x%llx is not readable from this "
-                             "process; publishing nothing\n",
-                             static_cast<unsigned long long>(block));
-        } else if (non_zero == 0) {
+                             "[rt] d3d12_xs: slot 70 publish: the record's block is not readable for its first 64 bytes; "
+                             "publishing nothing\n");
+            return hr_to_u64(E_NOTIMPL);
+        }
+        if (non_zero == 0) {
             g_slot70_matrix_empty.fetch_add(1, std::memory_order_relaxed);
             if (!g_slot70_matrix_logged.exchange(true, std::memory_order_relaxed))
                 std::fprintf(stderr,
                              "[rt] d3d12_xs: slot 70 publish: the record's block pages are empty (first 64 bytes all "
                              "zero); publishing nothing, the publication carries no data yet\n");
-        } else if (!placed) {
+            return hr_to_u64(E_NOTIMPL);
+        }
+        if (!placed) {
             g_slot70_matrix_unplaced.fetch_add(1, std::memory_order_relaxed);
             if (!g_slot70_matrix_logged.exchange(true, std::memory_order_relaxed))
                 std::fprintf(stderr,
-                             "[rt] d3d12_xs: slot 70 publish: block 0x%llx is not inside a buffer placed through "
-                             "console slot 133; publishing nothing (its V# base would not be rebased or pulled)\n",
-                             static_cast<unsigned long long>(block));
-        } else {
-            std::uint32_t descriptor[8] = {};
-            descriptor[0] = static_cast<std::uint32_t>(block & 0xFFFFFFFFu);
-            descriptor[1] = static_cast<std::uint32_t>((block >> 32) & 0xFFFFu);  // stride 0 in bits 29:16
-            descriptor[2] = declared < 64 ? 64u : declared;
-            descriptor[3] = 0x30000FACu;  // raw OOB select + identity destination select (never read for a matrix V#)
-            // The V# is 16 bytes; the following 16 bytes of a 32-byte descriptor stay as the title left them.
-            std::memcpy(reinterpret_cast<void*>(a3), descriptor, 16);
-            const std::uint64_t published = g_slot70_matrix_published.fetch_add(1, std::memory_order_relaxed) + 1;
-            if (probe && (published <= 4 || call % 4096 == 0)) {
-                std::fprintf(stderr,
-                             "[rt] d3d12_xs: slot 70 publish #%llu: block 0x%llx (placed range 0x%llx + 0x%llx, offset "
-                             "0x%llx), declared 0x%x, format 0x%x -> dest page=0x%llx off=0x%llx V# %08x %08x %08x "
-                             "%08x\n",
-                             static_cast<unsigned long long>(published), static_cast<unsigned long long>(block),
-                             static_cast<unsigned long long>(placed_base),
-                             static_cast<unsigned long long>(placed_width),
-                             static_cast<unsigned long long>(block - placed_base), declared, format_word,
-                             static_cast<unsigned long long>(a3 & ~std::uint64_t(0xFFFF)),
-                             static_cast<unsigned long long>(a3 & 0xFFFF), descriptor[0], descriptor[1], descriptor[2],
-                             descriptor[3]);
-            }
-            return hr_to_u64(S_OK);
+                             "[rt] d3d12_xs: slot 70 publish: block start is not inside a buffer placed through "
+                             "console slot 133; publishing nothing (its V# base would not be rebased or pulled)\n");
+            return hr_to_u64(E_NOTIMPL);
         }
+        const std::uint64_t placed_offset = block - placed_base;
+        if (declared > placed_width - placed_offset) {
+            g_slot70_matrix_range_refused.fetch_add(1, std::memory_order_relaxed);
+            if (!g_slot70_matrix_range_logged.exchange(true, std::memory_order_relaxed))
+                std::fprintf(stderr,
+                             "[rt] d3d12_xs: slot 70 publish: declared V# range (0x%x bytes) extends past its slot-133 "
+                             "placement; publishing nothing\n",
+                             declared);
+            return hr_to_u64(E_NOTIMPL);
+        }
+        if (!readable_range(reinterpret_cast<const void*>(block), declared)) {
+            g_slot70_matrix_unreadable.fetch_add(1, std::memory_order_relaxed);
+            if (!g_slot70_matrix_logged.exchange(true, std::memory_order_relaxed))
+                std::fprintf(stderr,
+                             "[rt] d3d12_xs: slot 70 publish: full declared V# range is not readable; publishing "
+                             "nothing\n");
+            return hr_to_u64(E_NOTIMPL);
+        }
+
+        std::uint32_t descriptor[8] = {};
+        descriptor[0] = static_cast<std::uint32_t>(block & 0xFFFFFFFFu);
+        descriptor[1] = static_cast<std::uint32_t>((block >> 32) & 0xFFFFu);  // stride 0 in bits 29:16
+        descriptor[2] = declared;
+        descriptor[3] = 0x30000FACu;  // raw OOB select + identity destination select (never read for a matrix V#)
+        // The V# is 16 bytes; the following 16 bytes of a 32-byte descriptor stay as the title left them.
+        std::memcpy(reinterpret_cast<void*>(a3), descriptor, 16);
+        const std::uint64_t published = g_slot70_matrix_published.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (probe && (published <= 4 || call % 4096 == 0)) {
+            std::fprintf(stderr,
+                         "[rt] d3d12_xs: slot 70 publish #%llu: block 0x%llx (placed range 0x%llx + 0x%llx, offset "
+                         "0x%llx), declared 0x%x, format 0x%x -> dest page=0x%llx off=0x%llx V# %08x %08x %08x "
+                         "%08x\n",
+                         static_cast<unsigned long long>(published), static_cast<unsigned long long>(block),
+                         static_cast<unsigned long long>(placed_base), static_cast<unsigned long long>(placed_width),
+                         static_cast<unsigned long long>(placed_offset), declared, format_word,
+                         static_cast<unsigned long long>(a3 & ~std::uint64_t(0xFFFF)),
+                         static_cast<unsigned long long>(a3 & 0xFFFF), descriptor[0], descriptor[1], descriptor[2],
+                         descriptor[3]);
+        }
+        return hr_to_u64(S_OK);
     }
 
     // ---- Pairing a texture-shaped publication with a recorded creation (PALMETTO_SLOT70_PAIR=1) ------------------

@@ -1806,11 +1806,33 @@ int run_env_slots(bool valid) {
         EXPECT(hr_of(raw(device, 78, 0, 16667, 1, 0)) == S_OK && mock->calls[78] == 0);
         EXPECT(hr_of(raw(device, 79, 0, 0, 0, 0)) == S_OK && mock->calls[79] == 0);
         EXPECT(hr_of(raw(device, 80, 0, 0, 0, 0, word(&token))) == S_OK && token && mock->calls[80] == 0);
-        // 70 is measured as a console slot now: the title's thunk calls it with three arguments, so the proxy refuses
-        // it (measured by console-measured arity) instead of forwarding it to the PC CreatePlacedResource1. The
-        // forwarded-slot check therefore uses 77: inside the 80-slot PC vtable and not a slot the proxy overrides
-        // (74 is now the measured console three-word slot).
-        EXPECT(hr_of(raw(device, 70)) == E_NOTIMPL && mock->calls[70] == 0);
+        // Slot 70's publication switch is explicitly off for this fresh process. A synthetic record with the measured
+        // matrix markers must take the same inline E_NOTIMPL path: no descriptor byte changes and no PC slot is reached.
+        EXPECT(SetEnvironmentVariableA("PALMETTO_SLOT70_PROBE", "0") != FALSE);
+        EXPECT(SetEnvironmentVariableA("PALMETTO_SLOT70_CBV", "0") != FALSE);
+        EXPECT(SetEnvironmentVariableA("PALMETTO_SLOT70_PUBLISH", "0") != FALSE);
+        EXPECT(SetEnvironmentVariableA("PALMETTO_SLOT70_CENSUS", "0") != FALSE);
+        EXPECT(SetEnvironmentVariableA("PALMETTO_SLOT70_PAIR", "0") != FALSE);
+        D3D12_RESOURCE_DESC slot70_desc{};
+        slot70_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        slot70_desc.Width = 0x80;
+        slot70_desc.Height = slot70_desc.DepthOrArraySize = slot70_desc.MipLevels = 1;
+        alignas(8) std::uint8_t slot70_record[0x40] = {};
+        const std::uint32_t slot70_declared = 0x1688, slot70_count = 0x20, slot70_format = 0x16;
+        const std::uint64_t slot70_word20 = 1, slot70_block = 0x12340000;
+        std::memcpy(slot70_record + 0x08, &slot70_declared, sizeof(slot70_declared));
+        std::memcpy(slot70_record + 0x18, &slot70_count, sizeof(slot70_count));
+        std::memcpy(slot70_record + 0x20, &slot70_word20, sizeof(slot70_word20));
+        std::memcpy(slot70_record + 0x28, &slot70_block, sizeof(slot70_block));
+        std::memcpy(slot70_record + 0x30, &slot70_format, sizeof(slot70_format));
+        std::uint32_t slot70_destination[8] = {0xA1A1A1A1u, 0xB2B2B2B2u, 0xC3C3C3C3u, 0xD4D4D4D4u,
+                                               0xE5E5E5E5u, 0xF6F6F6F6u, 0x17171717u, 0x28282828u};
+        std::uint32_t slot70_before[8] = {};
+        std::memcpy(slot70_before, slot70_destination, sizeof(slot70_before));
+        EXPECT(hr_of(raw(device, 70, word(&slot70_desc), word(slot70_record), word(slot70_destination))) == E_NOTIMPL &&
+               mock->calls[70] == 0);
+        EXPECT(std::memcmp(slot70_before, slot70_destination, sizeof(slot70_before)) == 0);
+        // The forwarded-slot control remains a non-Xbox entry inside the 80-slot PC vtable.
         EXPECT(hr_of(raw(device, 77)) == S_OK && mock->calls[77] == 1);  // not an Xbox slot: forwarded unchanged
     }
     EXPECT(release(device) == 0 && mock->refs == 0);
@@ -2915,12 +2937,12 @@ int check_slot55_derived_pipeline_state() {
 
 // ---- 13. Console slot 70: the measured descriptor publication (docs/device_slot70.md) ----
 //
-// Measured shape: (arg1 = D3D12_RESOURCE_DESC* of a BUFFER, arg2 = a 0x40-byte record, arg3 = a 32-byte-aligned
-// descriptor slot that holds zeros before the call), followed by a cache-line writeback of arg3. Two opt-in behaviours
+// Measured shape: (arg1 = D3D12_RESOURCE_DESC* of a BUFFER, arg2 = a 0x40-byte record, arg3 = a 16-byte-aligned
+// 32-byte descriptor entry that held zeros before the call), followed by a cache-line writeback of arg3. Two opt-in behaviours
 // are covered here: PALMETTO_SLOT70_PUBLISH=1 writes the MATRIX V# over the record's CPU block (the measured producer of
 // the matrix descriptor), and PALMETTO_SLOT70_CBV=1 is the falsified constant-buffer-view conversion. Both switches are
 // read once, on the first slot-70 call, so main sets them before any check runs; the default refusal is exercised by the
-// --env-slots-invalid run, which the runner starts with no slot-70 switch set.
+// --env-slots-invalid run, which explicitly clears all five slot-70 switches before checking byte-identical refusal.
 int check_slot70_console_view() {
     Mock* mock = nullptr;
     void* device = make_device(mock, 11, true);
@@ -2955,7 +2977,7 @@ int check_slot70_console_view() {
     }
 
     // 2. A call outside the measured shape is refused, not written: a null view address, a destination that is not
-    //    32-byte aligned, and a description that is not a buffer description. These are the cases where a guess would
+    //    16-byte aligned, and a description that is not a buffer description. These are the cases where a guess would
     //    write a descriptor over the title's memory.
     {
         const unsigned before = mock->cbv_calls;
@@ -2982,7 +3004,7 @@ int check_slot70_console_view() {
             return S_OK;
         };
         xs::set_placed_at_va_handler(placed);
-        alignas(64) static std::uint32_t block_pages[0x1000 / sizeof(std::uint32_t)] = {};  // 4 KiB, first words filled
+        alignas(64) static std::uint32_t block_pages[0x4000 / sizeof(std::uint32_t)] = {};  // declared view range fits
         for (unsigned i = 0; i < 32; ++i) block_pages[i] = 0x3f800000u + i;  // identity-shaped floats (not title data)
         D3D12_RESOURCE_DESC placed_desc{};
         placed_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -3001,7 +3023,9 @@ int check_slot70_console_view() {
         const std::uint64_t block = reinterpret_cast<std::uint64_t>(block_pages);  // inside the placed range
         std::memcpy(matrix_record + 0x08, &view->SizeInBytes, sizeof(std::uint32_t));      // declared = 0x1688
         const std::uint32_t count = 0x20;
+        const std::uint64_t record_word20 = 1;
         std::memcpy(matrix_record + 0x18, &count, sizeof(count));
+        std::memcpy(matrix_record + 0x20, &record_word20, sizeof(record_word20));
         std::memcpy(matrix_record + 0x28, &block, sizeof(block));
         const std::uint32_t format_word = 0x16;
         std::memcpy(matrix_record + 0x30, &format_word, sizeof(format_word));
@@ -3016,24 +3040,72 @@ int check_slot70_console_view() {
         EXPECT(mock->cbv_calls == cbv_before);  // the publication is not the falsified CBV conversion
         EXPECT(mock->calls[70] == 0);           // and the console slot is still never forwarded by number
 
+        auto matrix_refused_without_write = [&](const D3D12_RESOURCE_DESC& candidate_desc,
+                                                const std::uint8_t* candidate_record) {
+            alignas(32) std::uint32_t destination[8] = {};
+            const unsigned cbv_calls = mock->cbv_calls;
+            const HRESULT result = hr_of(raw(device, 70, word(&candidate_desc), word(candidate_record), word(destination)));
+            const std::uint32_t zero[8] = {};
+            return result == E_NOTIMPL && mock->cbv_calls == cbv_calls &&
+                   std::memcmp(destination, zero, sizeof(destination)) == 0;
+        };
+
+        // One-field near misses of the measured per-frame shape are named refusals, never a partial V# or the falsified
+        // CBV conversion. The signature checks the stable record fields; +0 is intentionally left unconstrained.
+        D3D12_RESOURCE_DESC wrong_width = resource;
+        wrong_width.Width = 0x100;
+        EXPECT(matrix_refused_without_write(wrong_width, matrix_record));
+        std::uint8_t near_miss[0x40] = {};
+        std::memcpy(near_miss, matrix_record, sizeof(near_miss));
+        const std::uint32_t other_declared = 0x1687;
+        std::memcpy(near_miss + 0x08, &other_declared, sizeof(other_declared));
+        EXPECT(matrix_refused_without_write(resource, near_miss));
+        std::memcpy(near_miss, matrix_record, sizeof(near_miss));
+        const std::uint64_t other_word10 = 1;
+        std::memcpy(near_miss + 0x10, &other_word10, sizeof(other_word10));
+        EXPECT(matrix_refused_without_write(resource, near_miss));
+        std::memcpy(near_miss, matrix_record, sizeof(near_miss));
+        const std::uint64_t other_word20 = 2;
+        std::memcpy(near_miss + 0x20, &other_word20, sizeof(other_word20));
+        EXPECT(matrix_refused_without_write(resource, near_miss));
+        std::memcpy(near_miss, matrix_record, sizeof(near_miss));
+        const std::uint32_t other_format = 0x17;
+        std::memcpy(near_miss + 0x30, &other_format, sizeof(other_format));
+        EXPECT(matrix_refused_without_write(resource, near_miss));
+        std::memcpy(near_miss, matrix_record, sizeof(near_miss));
+        const std::uint32_t other_count = 0x10;
+        std::memcpy(near_miss + 0x18, &other_count, sizeof(other_count));
+        EXPECT(matrix_refused_without_write(resource, near_miss));
+
+        // The declared V# range, not only its first 64 bytes/base, must fit the slot-133 placement. This block is
+        // readable and its start is placed, but only its last 64 bytes remain in that resource range.
+        const std::size_t tail_dword = std::size(block_pages) - 16;
+        block_pages[tail_dword] = 0x3f800000u;
+        const std::uint64_t near_end_block = reinterpret_cast<std::uint64_t>(block_pages) + sizeof(block_pages) - 64;
+        std::memcpy(near_miss, matrix_record, sizeof(near_miss));
+        std::memcpy(near_miss + 0x28, &near_end_block, sizeof(near_end_block));
+        EXPECT(matrix_refused_without_write(resource, near_miss));
+        block_pages[tail_dword] = 0;
+
         // A block whose first 64 bytes are zero is not published: the record is carrying no data yet (logged once).
         const std::uint64_t empty_block = reinterpret_cast<std::uint64_t>(block_pages) + 0x800;  // zeroed region
-        std::memcpy(matrix_record + 0x28, &empty_block, sizeof(empty_block));
-        alignas(32) std::uint32_t empty_dest[8] = {};
-        EXPECT(hr_of(raw(device, 70, word(&resource), word(matrix_record), word(empty_dest))) == E_NOTIMPL);
-        EXPECT(empty_dest[0] == 0 && empty_dest[1] == 0);
+        std::memcpy(near_miss, matrix_record, sizeof(near_miss));
+        std::memcpy(near_miss + 0x28, &empty_block, sizeof(empty_block));
+        EXPECT(matrix_refused_without_write(resource, near_miss));
 
         // A block outside every placed range is refused too: its V# base would neither be rebased nor pulled.
         static std::uint32_t unplaced_block[16] = {1, 2, 3};
         const std::uint64_t unplaced_block_va = reinterpret_cast<std::uint64_t>(unplaced_block);
-        std::memcpy(matrix_record + 0x28, &unplaced_block_va, sizeof(unplaced_block_va));
-        EXPECT(hr_of(raw(device, 70, word(&resource), word(matrix_record), word(published_dest))) == E_NOTIMPL);
+        std::memcpy(near_miss, matrix_record, sizeof(near_miss));
+        std::memcpy(near_miss + 0x28, &unplaced_block_va, sizeof(unplaced_block_va));
+        EXPECT(matrix_refused_without_write(resource, near_miss));
 
-        // A record that is not the measured shape (element count != 0x20) is not published.
-        const std::uint32_t other_count = 0x10;
-        std::memcpy(matrix_record + 0x18, &other_count, sizeof(other_count));
-        std::memcpy(matrix_record + 0x28, &block, sizeof(block));
-        EXPECT(hr_of(raw(device, 70, word(&resource), word(matrix_record), word(published_dest))) == E_NOTIMPL);
+        // An unaligned destination for a matrix-shaped call is a named refusal and leaves the whole entry unchanged.
+        alignas(32) std::uint32_t unaligned_storage[9] = {};
+        auto* unaligned_matrix_dest = reinterpret_cast<std::uint32_t*>(reinterpret_cast<std::uint8_t*>(unaligned_storage) + 4);
+        const std::uint32_t unaligned_before[8] = {};
+        EXPECT(hr_of(raw(device, 70, word(&resource), word(matrix_record), word(unaligned_matrix_dest))) == E_NOTIMPL);
+        EXPECT(std::memcmp(unaligned_matrix_dest, unaligned_before, sizeof(unaligned_before)) == 0);
 
         // A texture-shaped publication pairs with the console resource the title created just before it: the
         // publication's resource description matches the slot-127 creation on dimension/width/height/format/mips/array,
@@ -3139,9 +3211,9 @@ int check_slot70_console_view() {
     EXPECT(release(device) == 0 && mock->refs == 0);
     std::printf("%s: console slot 70 covers the measured descriptor publication - PALMETTO_SLOT70_CBV=1 still hands "
                 "the PC CreateConstantBufferView the measured view and destination, PALMETTO_SLOT70_PUBLISH=1 writes "
-                "the MATRIX V# (base = the placed block, stride 0, declared size, raw 0x30000FAC) over a block inside a "
-                "buffer placed through console slot 133, and a block outside the placed ranges, an empty block, a "
-                "record whose element count is not 0x20 and a texture-shaped resource description are refused\n", g_label);
+                "the MATRIX V# only for the exact measured shape and only when its full declared range fits the slot-133 "
+                "placement; changed fields, empty/unplaced/out-of-range blocks and texture-shaped records refuse without "
+                "writing a descriptor\n", g_label);
     return 0;
 }
 

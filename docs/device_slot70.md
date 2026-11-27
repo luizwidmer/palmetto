@@ -398,11 +398,11 @@ records, destination bytes and per-heap destination statistics; the falsified CB
 matrix publication over the record's block behind `PALMETTO_SLOT70_PUBLISH=1`, with the placement/readability/emptiness
 refusals; a bounded shape census (`PALMETTO_SLOT70_CENSUS=1`) that measured the 34-35 shapes above; the named refusal of texture-shaped records (no pinned T# encoding); the texture-destination probe that measured the title's non-write and the later re-dumps; the pairing rule (`PALMETTO_SLOT70_PAIR=1`) that turns a texture publication whose resource was created in the same window into the layer's own T# at the destination; non-write and the later re-dumps; and a shape test that refuses anything that is not the measured call instead of guessing.
 
-**Not modelled / still open:** the record's other fields are measured but not interpreted (the first word differs between
-the two sites - `0x100000027` at the wrapper site, the destination address at the dominant site - and its writer is not
-explained; the resource description in `arg1` is not used by the publication, and `+0x10` is zero in both sites). The
-publication writes the matrix view; whether the title then copies that descriptor into the table slot its draw names is
-what the measured boot below decides.
+**Not modelled / still open:** the first record word differs between the two sites - `0x100000027` at the wrapper site,
+the destination address at the dominant site - and its writer is not explained; the validator does not use that word.
+The resource description in `arg1` is now used only as an exact shape gate, not as V# encoding input. Sample/layout fields
+and other console record semantics remain uninterpreted. The publication writes the matrix view; whether the title then
+copies that descriptor into the table slot its draw names is what the measured boot below decides.
 
 ## 11. Gates, files and the next falsifier
 
@@ -429,3 +429,100 @@ If the fetch slot is a real matrix V# and the PS control stays black, the fetch-
 still carry no usable transform; if the slot stays zero, the title does not copy the staging descriptor into its table
 and the next frontier is where it does. The measurement that would refute the whole mapping is a destination the title
 itself writes before the call; at 12,214 of 12,288 dominant-site calls it did not.
+
+## 12. Strict validation of the per-frame matrix publication (follow-up)
+
+**Status: the implementation gap in the task note was stale.** The task arrived with the note “encoding not modelled”
+(O23). Relative to this tree, that statement was out of date: sections 5–9 already describe the matrix V# encoding,
+`PALMETTO_SLOT70_PUBLISH=1` handler and its measured acceptance, and [slot70_publication.md](slot70_publication.md)
+records the later compose-pass control. This follow-up does not claim to discover or implement slot 70 for the first time.
+It tightens the boundary around the already opt-in publication, where source inspection found two gaps: the prior gate read
+fields beyond the first 16 record bytes after proving only that those first 16 were readable, and it checked that the
+block's first address was inside a slot-133 placement but not that the *entire declared V# range* fit that placement.
+
+### 12.1 Measured shape and the unchanged open field
+
+The dominant per-frame call (`game+0x4D9F363`, return site `game+0x4D9F369`) is measured at 13,568 calls in a 130.2 s
+boot; 12,214 of the first 12,288 destinations were zero before the call. The validated shape is the one in section 3:
+
+| argument | measured per-frame fields used by this validator |
+|---|---|
+| `arg1` | `D3D12_RESOURCE_DESC`: `Dimension=BUFFER`, `Alignment=0`, `Width=0x80`, `Height=1`, `DepthOrArraySize=1`, `MipLevels=1`, `Format=0`, `Flags=0` |
+| `arg2` | 0x40-byte record: `+0x08=0x1688`, `+0x10=0`, `+0x18=0x20`, `+0x20=1`, `+0x28` is the caller-filled block VA, `+0x30=0x16` |
+| `arg3` | 16-byte-aligned descriptor entry with a 16-byte V# payload; the tested entry window is 32 bytes |
+
+`arg2+0x00` is deliberately *not* a predicate: the offline store was `0x100000027`, while the boot record carried the
+destination address. Its writer is still unexplained (§3), so the implementation does not infer meaning from it. Sample/layout
+fields from the packed resource description are not newly interpreted either.
+
+### 12.2 What changed and what stays off
+
+The implementation in `port/shims/d3d12_xs_device.cpp` remains behind the existing, read-once
+`PALMETTO_SLOT70_PUBLISH=1` switch; no new runtime switch was added. It now reads the full 0x40-byte record before extracting
+its fields and accepts the matrix candidate only when the resource description and all measured per-frame fields above
+match. The candidate discriminator uses the BUFFER dimension and one of the record's measured markers (`count=0x20`,
+`+0x20=1`, or `+0x30=0x16`); the known `+0x00` discrepancy is excluded. A candidate with a resource, record, or
+destination mismatch is refused by name with `E_NOTIMPL` and no descriptor write. Non-candidate records retain the existing
+CBV diagnostic / texture-pair / named default-refusal paths; no second unmeasured encoding was added.
+
+For an otherwise valid candidate, the block must remain readable for the full 0x1688 declared bytes, be non-empty in the
+first 64 bytes, and lie within one buffer range registered through slot 133. The check uses a relative offset and subtraction
+(`declared <= placed_width - offset`) after proving the block start is in-range, avoiding end-address overflow. A declared
+range that crosses the placement boundary, an unreadable full range, an empty block, or a block outside registered ranges
+is refused by name before writing. The accepted descriptor remains the measured 16-byte MATRIX V#; the following 16 bytes
+of the 32-byte entry remain untouched.
+
+Switch-off remains the original inline path: with all `PALMETTO_SLOT70_*` switches unset/zero, the slot thunk returns
+`E_NOTIMPL` without calling the measurement handler, leaving the descriptor bytes unchanged and never reaching the PC
+method at slot 70. `--env-slots-invalid` now supplies a synthetic record with the measured marker fields and a sentinel
+destination, then checks the sentinel is byte-identical after refusal.
+
+### 12.3 Fence slot 12 is already implemented; no fence change in this slice
+
+The second task area was also checked against the current source and test. Fence proxy slot 12 already returns the address of
+a stable per-proxy completed-value cell, refreshes it from the real fence, and registers the Vulkan-layer watcher for a target
+not yet reached (`d3d12_xs_device.cpp`, child dispatch). `check_fence1` in `port/test/xs_proxy_mock_test.cpp` checks the cell
+address and value, repeated-address stability, watcher target, queue-signal refresh, and refusal of the tail after slot 12.
+The independent measurement is in [fence_slot12.md](fence_slot12.md): the old `E_NOTIMPL` pointer dereference stop at
+`game+0x4fb0b03` is gone, and the measured follow-up ran to the 400 s harness limit without exception, recording 245,524
+slot-12 calls. No new slot-12 code or fence row was needed here; this slice only records that the task's current-tree fence
+path was already answered.
+
+### 12.4 Peer cross-check and limits
+
+The peer trees were read as evidence, not copied. Five Star Recomp at `34b4dfed` documents slot 70 in
+`src/FiveStar.Loader/Shims/D3D12X/XboxAddressDescriptors.cs` and
+`src/FiveStar.Loader/Shims/D3D12X/Resources/AddressShaderViews.cs` as a generic address-based shader view using its own
+64-byte address-view description; that is not evidence for this title's per-frame 0x40 matrix record or its descriptor
+words. Its `src/FiveStar.Loader/Shims/D3D12X/FenceValueMirror.cs` uses an event-driven mirror. XCL at `623d02e` explicitly
+identifies fence slot 12 as the completed-value address in `crates/xcl/src/hle/d3d12x/fence_x.rs` and tests the stable cell
+in `crates/xcl/tests/d3d12_resource_and_sync.rs`; that supports the fence semantics but uses its own thread/event mechanism,
+not this proxy's watcher. VIctory at `63bcca4` was checked in `crates/victory-gpu/src/fence.rs` for its atomic fence-value
+model; that file does not identify this title's slot numbering. The target callsite, record fields and V# acceptance remain
+based on this repository's own disassembly, traces and controls. No peer code, comments, identifiers or tables were copied.
+
+### 12.5 Tests, arm status and next falsifier
+
+`check_slot70_console_view` now exercises a synthetic accepted record plus independent one-field near misses for resource
+width, declared size, `+0x10`, `+0x20`, element count and format word. Each refusal must leave all destination bytes unchanged
+and must not call the falsified PC CBV path. It also tests a block whose start is placed/readable but whose 0x1688-byte V#
+range crosses the placement end, plus the existing empty, unplaced, unaligned and texture cases. `--env-slots-invalid`
+checks switch-off against a sentinel buffer. The existing fence test is unchanged. The separate `xbox_present_test`
+dependency build passed after the source redefinition fix, but it does not execute `check_slot70_console_view`; the latest
+slot-70 mock assertions were not rebuilt or run. No `PALMETTO_OK` / `TESTS_BUILT` gate or Palmetto executable build/relink
+is claimed before the integration hold clears.
+
+No Palmetto build/relink or boot was attempted: the lead's integration hold prevents a new binary from containing this
+change. A read-only readiness sample saw no `palmetto` process and no boot lock, but the host is not cleared solely by that
+idle snapshot: the matched, same-binary P-31 controls in [peer_port_streaming.md](peer_port_streaming.md#16-p-31-title-ab-bounded-submission-window)
+showed overlap-off alive for 130.3 s with no device-loss line, while overlap-on and its unchanged retry each logged one
+Vulkan device loss before stopping at 64.3 s and 68.5 s. This one-control/two-on observation is not causal; it is sufficient
+reason not to add another arm while the integration hold is active. No boot lock was acquired. Before any later arm, the lead
+must clear integration, the required build gates must pass, the host must be settled, and the single boot lock must be free;
+then run one bounded publication-on boot under that lock and stop after two device losses.
+
+The falsifier is whether the measured dominant-site records still satisfy the exact shape and place their whole declared
+range, and whether the published descriptor remains the matrix V# accepted by the compose control in
+[slot70_publication.md](slot70_publication.md). Any named refusal on the measured dominant shape, a V# whose declared bytes
+are not fully covered, or a zero compose-control readback with the descriptor present would refute this increment's intended
+boundary or its downstream interpretation. The outcome remains **unmeasured on the changed binary** until that arm.
