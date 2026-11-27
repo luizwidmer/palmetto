@@ -86,13 +86,13 @@ Priority order is top to bottom within each lane.
 | P-13 | platform | UI resource probe and measured display capability answers | maintainer | done (`ef46566d1`) | [peer_port_first_ui.md](peer_port_first_ui.md) section 14 |
 | P-14 | streaming | Physical-page completion destinations for DirectStorage | maintainer | done (`fdfacfdf2`) | [peer_port_streaming.md](peer_port_streaming.md) section 13 |
 | P-15 | platform | HDR-desktop boot: does the Enabled HDR answer reach the plane colour space or the capture | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 14 |
-| P-16 | platform | 120 Hz-host display answer: compare the consumed refresh when the mode answer is not the host's (dxgi path) | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 14 |
+| P-16 | platform | 120 Hz-host display answer: compare the consumed refresh when the mode answer is not the host's (dxgi path) | maintainer | done (`78b15c388`) | [window.md](window.md) |
 | P-17 | platform | Probe the RBF0 handler one level below the dispatcher and the page-flow step's reachability | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 14 |
 | P-18 | platform | Deferral-acquiring boot: exercise the display timeout deferral end to end | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 14 |
 | P-19 | movie | Movie-plane decode-run census: the XG row rule and the placed-stride consumer when decode first runs | open | open | [peer_port_movie.md](peer_port_movie.md) section 12 |
-| P-20 | renderer | Content-window texture descriptor census: most distinct shapes are refused at create | open | open | [peer_port_movie.md](peer_port_movie.md) section 12 |
+| P-20 | renderer | Content-window texture descriptor census: most distinct shapes are refused at create | maintainer | done (`1fdd100bb`) | [texture_layout.md](texture_layout.md) section 8 |
 | P-21 | streaming | Mapped physical-page destination arm: exercise the delivery through an armed page watch | maintainer | done (`f495a6261`) | [peer_port_streaming.md](peer_port_streaming.md) section 14 |
-| P-22 | platform | UI 2D-batch probe arm (draw mode): the batch path behind the page flow | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 14 |
+| P-22 | platform | UI 2D-batch probe arm (draw mode): the batch path behind the page flow | maintainer | done (`dc6e6d949`) | [decomp_first_ui.md](decomp_first_ui.md) section 19 |
 | P-23 | movie | Session-3 completion arm must produce a layer-draw hit, or locate the gate in the renderer job list | open | open | [peer_port_movie.md](peer_port_movie.md) section 13 |
 | P-24 | renderer | Decide the presenter fit default once a real content frame exists to judge (fill vs aspect) | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) section 15 |
 | P-25 | platform | DPI-unaware window: the title's window is oversized against the virtualized monitor; measure window fitting | maintainer | done (`f2d6736a2`) | [peer_port_first_ui.md](peer_port_first_ui.md) section 16 |
@@ -107,7 +107,7 @@ Priority order is top to bottom within each lane.
 | C-03 | audio | Audio decode real data path: XMA2 and Opus wired to the title's own streams | maintainer | deferred (measured absence, `3bbb51497`; own falsifier) | [audio_decode.md](audio_decode.md) section 9 |
 | C-04 | renderer | Console FSR upscaler route: the kind-7 consumer semantics behind the compose draw | maintainer | done (`0148cbfeb`, readiness only) | [fsr_route.md](fsr_route.md) section 9 |
 | C-05 | renderer | Mesh: publish the library's MS programs under the resolver's key, then wire the mesh stream | maintainer | done (`5798bb070`, readiness: 0 MS keys) | [mesh_stage.md](mesh_stage.md) section 8 |
-| C-06 | renderer | D3D12X command-replay parity gaps listed as open in the layer plan | open | open | [d3d12_vulkan.md](d3d12_vulkan.md) |
+| C-06 | renderer | D3D12X command-replay parity gaps listed as open in the layer plan | maintainer | first step done (`5e8beeeb6`, viewport readiness only) | [d3d12_vulkan.md](d3d12_vulkan.md) |
 | C-07 | shaders | Translator refusal batches: a rule plus a semantic fixture per measured refusal class | maintainer | done (`e93cfe4e1`) | [design.md](design.md) contract table, [translator_fixes.md](translator_fixes.md) |
 | C-08 | renderer | Presentation pacing/tokens beyond the frame clock: per-origin pacing as the peers implement it | open | open | [peer_port_first_ui.md](peer_port_first_ui.md) rank 1 follow-up |
 
@@ -116,7 +116,7 @@ Priority order is top to bottom within each lane.
 | ID | area | task | owner | status | evidence page |
 |---|---|---|---|---|---|
 | D-01 | coordination | Task-board maintenance and weekly triage: keep rows current, sequence overlapping claims | maintainer | in progress | this page |
-| D-02 | docs | Refresh the parity matrix audit trail for the peers' newest commits | open | open | [cleanroom_peers.md](cleanroom_peers.md) |
+| D-02 | docs | Refresh the parity matrix audit trail for the peers' newest commits | maintainer | done (`cf0fb8174`) | [cleanroom_peers.md](cleanroom_peers.md) |
 | D-03 | ci | CI: run the GPU-free contract tests and the documentation checks on every pull request | maintainer | done (`2bb13be8b`) | [.github/workflows](../.github/workflows), [dev-tools.md](dev-tools.md) |
 | D-04 | docs | Index/link sweep: stale HEADs, dead links and out-of-date frontier descriptions | maintainer | done (`9edd62c44`) | [issues.md](issues.md), [README.md](README.md) |
 | D-05 | docs | Crash-report page follows the merged every-thread dump (O3): verify the page matches the shipped switch | open | open | [crash_report.md](crash_report.md) |
@@ -131,3 +131,12 @@ Priority order is top to bottom within each lane.
   exists.
 - Please add a row when you land a port or a measurement that changes a lane: [docs/README.md](README.md) names the page,
   and the board row links it.
+| P-32 | renderer | Full multi-viewport/scissor array replay (needs the d3d12_com array copy and dynamic viewport count) | open | open | [d3d12_vulkan.md](d3d12_vulkan.md) |
+| P-33 | memory | Title-VA device integration: outside-arena GPU windows, raw-VA buffer resolve, shader-visible rewrites and page pulls | open | open | [vertex_buffer_va.md](vertex_buffer_va.md) |
+| P-34 | audio | Measured audio effect descriptor and DSP send with formats/lifecycle | open | open | [audio_shims.md](audio_shims.md) section 9 |
+| P-35 | renderer | XG array slot-2 layout observation (the row-major array layout is still a hypothesis) | open | open | [texture_layout.md](texture_layout.md) section 8 |
+| P-36 | platform | DXGI simulate-120 light arm (does the consumer take 120/1 and set the flag) | open | open | [window.md](window.md) |
+| P-37 | renderer | Presenter HDR10 surface arm (the ST.2084 surface was unavailable on the test host) | open | open | [present_wiring.md](present_wiring.md) section 9 |
+| P-38 | platform | Device-health post-gate arm with the helper enabled | open | open | [device_health.md](device_health.md) |
+| P-39 | quality | Triage the remaining full-suite failures: synthetic CRT file round trip, queue-proxy signal causes, console-heap precondition | open | open | [testing.md](testing.md) |
+| P-40 | renderer | Slot-70 strict-validation arm: do the measured dominant-site calls pass and is the matrix V# accepted by compose | open | open | [device_slot70.md](device_slot70.md) section 12 |
