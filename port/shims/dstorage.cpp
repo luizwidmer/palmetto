@@ -3205,11 +3205,269 @@ Factory& factory() {
     return *f;
 }
 
+// ---- The mapped-destination exercise arm (docs/peer_port_streaming.md section 14) -----------------------------------
+//
+// A bounded, opt-in diagnostic that exercises section 13's delivery through the request path, not through the write hook
+// alone. The switch is PALMETTO_DS_PAGES_ARM, and it runs only with PALMETTO_DS_PAGES=1 and PALMETTO_DS_PAGES_VIEW=1
+// (without them the request path refuses a page list or scatters it through the resolver). On the first
+// DStorageGetFactory call it reserves a synthetic 64 KiB-page window, allocates three pages of this process's own page
+// table, maps two of them, arms the page-watch tracker on the mapping, and enqueues a real memory-source
+// IDStorageQueueX::EnqueueRequest whose destination is a physical-page list over those two pages. The queue's worker
+// runs it through page_list_request and xmem's write hook, so the arm checks the whole chain: the status is S_OK, the
+// bytes are at the title's mapping, the tracker recorded the written pages and its poll answers `changed`, and the
+// request path's own counters moved. A second request names one mapped page and one page number that is not live: the
+// delivery is refused whole with E_INVALIDARG, the mapped page is unchanged, and the refusal line names the page. With
+// the switch unset nothing is allocated, printed or called: the default path is the code before this section. In the arm
+// the factory's answer is E_FAIL when one of the arm's checks failed, so a GPU-free fixture can gate on it (section 14.3:
+// port/test/fixtures/tiny_game.cpp's `dstorage-arm` mode). The arm is non-fatal to the host: every pointer is checked, the
+// status wait is bounded at 5 s, and a timed-out wait leaks the queue rather than closing it (Close waits for the worker).
+
+using PagesArmVirtualAllocFn = void*(WINAPI*)(void*, SIZE_T, DWORD, ULONGLONG, DWORD);
+using PagesArmAllocatePagesFn = BOOL(WINAPI*)(std::uint64_t, std::uint64_t*, std::uint64_t*);
+using PagesArmMapPagesFn = void*(WINAPI*)(void*, std::uint64_t, const std::uint64_t*);
+using PagesArmFreePagesFn = BOOL(WINAPI*)(std::uint64_t, const std::uint64_t*);
+
+// The arm's one-shot result: -2 not run, 2 skipped (the production switches are off), 1 passed, 0 failed.
+std::atomic<int>& pages_arm_result() {
+    static std::atomic<int> result{-2};
+    return result;
+}
+
+struct PagesArmCheck {
+    int checks = 0;
+    int failed = 0;
+    void operator()(bool ok, const char* what) {
+        ++checks;
+        if (!ok) ++failed;
+        std::lock_guard lock(log_mutex());
+        std::fprintf(stderr, "[rt] ds pages arm: %s %s\n", ok ? "PASS" : "FAIL", what);
+    }
+    int finish(const char* note) {
+        std::lock_guard lock(log_mutex());
+        std::fprintf(stderr, "[rt] ds pages arm: %s, %d/%d check(s) passed%s\n", failed ? "FAIL" : "PASS", checks - failed,
+                     checks, note);
+        return failed ? 0 : 1;
+    }
+};
+
+// One synthetic destination request, its status poll and the tracker/counter assertions. Called once at most; the
+// caller has already checked that the page-list destination write is switched on.
+int pages_arm_exercise() {
+    PagesArmCheck check;
+    const auto virtual_alloc = reinterpret_cast<PagesArmVirtualAllocFn>(rt::shims::find("xmem.dll", "XMemVirtualAlloc"));
+    const auto allocate_pages =
+        reinterpret_cast<PagesArmAllocatePagesFn>(rt::shims::find("xmem.dll", "XMemAllocatePhysicalPages"));
+    const auto map_pages = reinterpret_cast<PagesArmMapPagesFn>(rt::shims::find("xmem.dll", "XMemMapPhysicalPages"));
+    const auto free_pages =
+        reinterpret_cast<PagesArmFreePagesFn>(rt::shims::find("xmem.dll", "XMemFreePhysicalPages"));
+    check(virtual_alloc && allocate_pages && map_pages && free_pages,
+          "the xmem page exports resolve through the shim registry");
+    check(rt::xmem::write_physical_pages && rt::xmem::page_watch_arm && rt::xmem::page_watch_forget &&
+              rt::xmem::page_watch_poll && rt::xmem::page_watch_write_trips && rt::xmem::page_watch_pages,
+          "xmem installs the physical-page write hook and the page-watch tracker");
+    if (!virtual_alloc || !allocate_pages || !map_pages || !free_pages || !rt::xmem::write_physical_pages ||
+        !rt::xmem::page_watch_arm || !rt::xmem::page_watch_forget || !rt::xmem::page_watch_poll ||
+        !rt::xmem::page_watch_write_trips || !rt::xmem::page_watch_pages)
+        return check.finish(" (the xmem seams this arm needs are not installed)");
+
+    constexpr std::uint64_t kPages = 3;
+    constexpr std::size_t kPageBytes = 0x10000;               // the console's 64 KiB physical page
+    constexpr DWORD kXmem64kWindows = 0x20400000;             // xmem.cpp: the 64 KiB page mode of the measured windows
+    constexpr std::uint16_t kRequestOffset = 4321;            // the arm's request offset into its first page
+    constexpr std::size_t kRequestBytes = 100000;             // the arm's destination size (two spans: 61215 + 38785)
+    std::uint8_t* window = nullptr;
+    std::uint64_t pages[kPages] = {};
+    std::uint64_t count = kPages;
+    bool pages_allocated = false;
+    bool mapped = false;
+    bool armed = false;
+    IDStorageQueueX2* queue = nullptr;
+    IDStorageStatusArrayX* status = nullptr;
+    bool close_queue = true;
+    const auto cleanup = [&] {
+        if (queue && close_queue) queue->Release();  // Close submits, drains and joins the worker
+        if (status && close_queue) status->Release();  // the worker may finish a status entry until the queue is closed
+        if (armed) rt::xmem::page_watch_forget(window);
+        if (mapped) map_pages(window, 2, nullptr);
+        if (pages_allocated) free_pages(kPages, pages);
+    };
+
+    window = static_cast<std::uint8_t*>(virtual_alloc(nullptr, 2 * kPageBytes, MEM_RESERVE | kXmem64kWindows, 0x23,
+                                                      PAGE_READWRITE | PAGE_GRAPHICS_READWRITE));
+    check(window != nullptr, "a synthetic 64 KiB-page window reserves for the request destination");
+    count = kPages;
+    pages_allocated = allocate_pages(0x280, &count, pages) == TRUE && count == kPages;
+    check(pages_allocated, "three synthetic physical pages allocate from the page table");
+    if (!window || !pages_allocated) {
+        cleanup();
+        return check.finish(" (the arm's synthetic pages could not be reserved)");
+    }
+    mapped = map_pages(window, 2, pages) == window;
+    check(mapped, "the request's two destination pages map into the window");
+    if (!mapped) {
+        cleanup();
+        return check.finish(" (the arm's destination could not be mapped)");
+    }
+    std::memset(window, 0, 2 * kPageBytes);
+    const std::uint64_t guarded_before = rt::xmem::page_watch_pages();
+    armed = rt::xmem::page_watch_arm(window, 2 * kPageBytes);
+    check(armed, "the destination window arms the page-watch tracker before the request");
+    if (!armed) {
+        cleanup();
+        return check.finish(" (the arm's destination could not be armed)");
+    }
+    check(rt::xmem::page_watch_pages() == guarded_before + 32,
+          "the arm guards the destination's 32 4 KiB pages (two 64 KiB pages)");
+    const std::uint64_t trips_before = rt::xmem::page_watch_write_trips();
+
+    DSTORAGE_QUEUE_DESC desc{};
+    desc.SourceType = DSTORAGE_REQUEST_SOURCE_MEMORY;
+    desc.Capacity = kMinQueueCapacity;
+    desc.Priority = DSTORAGE_PRIORITY_REALTIME;
+    desc.Name = "palmetto-pages-arm";
+    void* object = nullptr;
+    HRESULT hr = factory().CreateQueue(&desc, __uuidof(IUnknown), &object);
+    queue = static_cast<IDStorageQueueX2*>(object);
+    check(SUCCEEDED(hr) && queue != nullptr, "the arm creates a memory queue through the shim's own factory");
+    object = nullptr;
+    hr = factory().CreateStatusArray(2, "palmetto-pages-arm", __uuidof(IUnknown), &object);
+    status = static_cast<IDStorageStatusArrayX*>(object);
+    check(SUCCEEDED(hr) && status != nullptr, "the arm creates a two-entry status array for its requests");
+    if (!queue || !status) {
+        cleanup();
+        return check.finish(" (the arm could not create its queue or status array)");
+    }
+
+    const std::uint64_t delivered_before = g_advanced.page_write_delivered.load(std::memory_order_relaxed);
+    const std::uint64_t bytes_before = g_advanced.page_write_bytes.load(std::memory_order_relaxed);
+    const std::uint64_t views_before = g_advanced.page_write_views.load(std::memory_order_relaxed);
+    const std::uint64_t watch_pages_before = g_advanced.page_write_watch_pages.load(std::memory_order_relaxed);
+    const std::uint64_t refused_before = g_advanced.page_write_refused.load(std::memory_order_relaxed);
+
+    std::vector<std::uint8_t> payload(kRequestBytes);
+    for (std::size_t at = 0; at < payload.size(); ++at) payload[at] = static_cast<std::uint8_t>((at * 29 + 7) & 0xff);
+    const std::uint64_t page_numbers[2] = {pages[0], pages[1]};
+    DSTORAGE_REQUEST request{};
+    request.Options.AsUINT64 = options::kSourceMemory | options::kDestinationPages;
+    request.DestinationPageArray = const_cast<PULONG_PTR>(page_numbers);
+    request.DestinationPageOffset = kRequestOffset;
+    request.DestinationSize = static_cast<UINT32>(kRequestBytes);
+    request.Source = payload.data();
+    request.SourceSize = static_cast<UINT32>(kRequestBytes);
+    request.Name = "pages-arm";
+    queue->EnqueueRequest(&request);
+    queue->EnqueueStatus(status, 0);
+    queue->Submit();
+    bool complete = false;
+    const ULONGLONG deadline = GetTickCount64() + 5000;
+    while (GetTickCount64() < deadline) {
+        if (status->IsComplete(0)) {
+            complete = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    check(complete, "the request's status entry completes inside the 5 s bound");
+    const HRESULT delivered = status->GetHResult(0);
+    check(delivered == S_OK, "the request completes S_OK");
+    const std::size_t first_bytes = kPageBytes - kRequestOffset;
+    bool landed = window != nullptr;
+    for (std::size_t at = 0; landed && at < first_bytes; ++at) landed &= window[kRequestOffset + at] == payload[at];
+    for (std::size_t at = 0; landed && at < kRequestBytes - first_bytes; ++at)
+        landed &= window[kPageBytes + at] == payload[first_bytes + at];
+    check(landed, "the delivered bytes land at the title's mappings of both destination pages");
+    check(rt::xmem::page_watch_write_trips() - trips_before == 25,
+          "the tracker records the delivery's 25 written 4 KiB pages as write trips");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::changed,
+          "the tracker answers changed for the delivery, so the plane refresh compares and re-uploads");
+    check(g_advanced.page_write_delivered.load(std::memory_order_relaxed) == delivered_before + 1 &&
+              g_advanced.page_write_bytes.load(std::memory_order_relaxed) == bytes_before + kRequestBytes &&
+              g_advanced.page_write_views.load(std::memory_order_relaxed) == views_before + 2 &&
+              g_advanced.page_write_watch_pages.load(std::memory_order_relaxed) == watch_pages_before + 25 &&
+              g_advanced.page_write_refused.load(std::memory_order_relaxed) == refused_before,
+          "the request path ran the page-write branch and counted the delivery (1 delivered, 100000 bytes, 2 views, "
+          "25 watched pages)");
+
+    // The all-or-nothing refusal through the same request path: one mapped page and one page number that is not live.
+    constexpr std::uint64_t kAbsentPage = 0x1fffff0;  // a multiple of 16 below the slot limit that was never allocated
+    const std::uint64_t mixed[2] = {pages[0], kAbsentPage};
+    std::vector<std::uint8_t> mixed_payload(kPageBytes + 4096, 0xa6);
+    const std::vector<std::uint8_t> window_before(window, window + 2 * kPageBytes);
+    const std::uint64_t trips_before_refusal = rt::xmem::page_watch_write_trips();
+    const std::uint64_t refused_count_before = g_advanced.page_write_refused.load(std::memory_order_relaxed);
+    DSTORAGE_REQUEST missing{};
+    missing.Options.AsUINT64 = options::kSourceMemory | options::kDestinationPages;
+    missing.DestinationPageArray = const_cast<PULONG_PTR>(mixed);
+    missing.DestinationPageOffset = 0;
+    missing.DestinationSize = static_cast<UINT32>(kPageBytes + 4096);
+    missing.Source = mixed_payload.data();
+    missing.SourceSize = static_cast<UINT32>(kPageBytes + 4096);
+    missing.Name = "pages-arm-missing";
+    queue->EnqueueRequest(&missing);
+    queue->EnqueueStatus(status, 1);
+    queue->Submit();
+    complete = false;
+    const ULONGLONG refusal_deadline = GetTickCount64() + 5000;
+    while (GetTickCount64() < refusal_deadline) {
+        if (status->IsComplete(1)) {
+            complete = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    if (!complete) {
+        close_queue = false;  // a stuck worker would make Close wait: leak the queue rather than hang the host
+        check(false, "the refused request's status entry completes inside the 5 s bound");
+    }
+    const HRESULT refused = status->GetHResult(1);
+    check(refused == E_INVALIDARG, "the request path refuses the whole request with E_INVALIDARG (names the page on stderr)");
+    check(g_advanced.page_write_refused.load(std::memory_order_relaxed) == refused_count_before + 1,
+          "the refusal is counted by the request path, with the page number in its message");
+    check(std::vector<std::uint8_t>(window, window + 2 * kPageBytes) == window_before,
+          "the all-or-nothing refusal wrote nothing into the mapped destination");
+    check(rt::xmem::page_watch_write_trips() == trips_before_refusal, "the refused request recorded no write trip");
+    DSTORAGE_ERROR_RECORD record{};
+    queue->RetrieveErrorRecord(&record);
+    check(record.FailureCount != 0 && record.FirstFailure.HResult == E_INVALIDARG &&
+              record.FirstFailure.CommandType == DSTORAGE_COMMAND_TYPE_REQUEST,
+          "the queue's error record names the refused request command and the E_INVALIDARG answer");
+
+    cleanup();
+    check(rt::xmem::page_watch_pages() == guarded_before, "the arm released its 32 guarded pages after the exercise");
+    return check.finish("");
+}
+
+int pages_arm_once() {
+    static std::once_flag once;
+    std::call_once(once, [] { pages_arm_result().store(pages_arm_exercise(), std::memory_order_relaxed); });
+    return pages_arm_result().load(std::memory_order_relaxed);
+}
+
+// True when PALMETTO_DS_PAGES_ARM is on. The production switches are checked inside the exercise, so an arm switch
+// without them is a logged skip rather than a failure.
+bool pages_arm_requested() {
+    static const bool on = palmetto::dstorage::env_switch("PALMETTO_DS_PAGES_ARM");
+    return on;
+}
+
 HRESULT WINAPI dstorage_get_factory(REFIID riid, void** ppv) {
     if (!ppv) return bad_call("DStorageGetFactory", E_POINTER, "null ppv");
     *ppv = nullptr;
     if (!iid_policy().accept_creating(riid, Kind::Factory, "DStorageGetFactory")) return E_NOINTERFACE;
     Factory& f = factory();
+    if (pages_arm_requested()) {
+        const int arm = pages_arm_once();
+        if (arm == 0) {
+            log_once("pages-arm-failed",
+                     "PALMETTO_DS_PAGES_ARM: the mapped-destination exercise failed a check (see the PASS/FAIL lines "
+                     "above); the factory answer is E_FAIL so a fixture can gate on it");
+            return E_FAIL;
+        }
+        if (arm == 2)
+            log_once("pages-arm-skipped",
+                     "PALMETTO_DS_PAGES_ARM is set but PALMETTO_DS_PAGES and PALMETTO_DS_PAGES_VIEW are not both on; "
+                     "the page-list destination write is off, so the arm did not run");
+    }
     f.AddRef();
     *ppv = static_cast<IDStorageFactoryX2*>(&f);
     return S_OK;

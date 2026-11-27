@@ -863,6 +863,138 @@ void test_write_physical_pages(const PhysicalApi& api) {
     check(api.free_pages(kPages, pages) == TRUE, "free the destination write's pages");
 }
 
+// The page-list destination *request* shape end to end (port/shims/xmem.h, docs/peer_port_streaming.md sections 13-14):
+// a DirectStorage request names its destination as a page array plus a byte offset into the first page. The request path
+// (port/shims/dstorage.cpp, page_list_request) snapshots the numbers, plans the spans with dstorage_advanced.h's
+// plan_page_transfer and hands exactly those spans to rt::xmem::write_physical_pages. This fixture runs the same three
+// steps against a synthetic page array whose pages are mapped AND under the page-watch tracker, so the one delivery the
+// boot never asked for is exercised with the request's own arithmetic: the plan names the mapped pages, the bytes land
+// in the title's mappings (including an armed alias of the first page), the tracker records the written 4 KiB pages and
+// answers `changed` for the poll the plane refresh consumes, and one span whose page is not live refuses the whole
+// request by naming that page with nothing written. Test code, synthetic pages, no game data.
+void test_page_list_destination_request(const PhysicalApi& api) {
+    using palmetto::dstorage::PagePlan;
+    using palmetto::dstorage::PagePlanError;
+    using palmetto::dstorage::plan_page_transfer;
+    check(rt::xmem::write_physical_pages != nullptr && rt::xmem::page_watch_arm && rt::xmem::page_watch_forget &&
+              rt::xmem::page_watch_poll && rt::xmem::page_watch_write_trips,
+          "page-list request: xmem exposes the write hook and the page-watch tracker");
+    if (!rt::xmem::write_physical_pages || !rt::xmem::page_watch_arm || !rt::xmem::page_watch_forget ||
+        !rt::xmem::page_watch_poll || !rt::xmem::page_watch_write_trips)
+        return;
+    constexpr uint64_t kPages = 3;
+    auto* const window = static_cast<uint8_t*>(api.virtual_alloc(
+        nullptr, 2 * kPage64k, MEM_RESERVE | kXmem64kPages, 0x23, PAGE_READWRITE | PAGE_GRAPHICS_READWRITE));
+    auto* const alias = static_cast<uint8_t*>(api.virtual_alloc(
+        nullptr, kPage64k, MEM_RESERVE | kXmem64kPages, 0x23, PAGE_READWRITE | PAGE_GRAPHICS_READWRITE));
+    check(window != nullptr && alias != nullptr, "page-list request: two windows reserve for the mapped destination");
+    if (!window || !alias) return;
+    uint64_t pages[kPages] = {};
+    uint64_t count = kPages;
+    check(api.allocate(0x280, &count, pages) == TRUE && count == kPages,
+          "page-list request: three physical pages for the destination");
+    if (count != kPages) return;
+    check(api.map(window, 2, pages) == window, "page-list request: the request's two destination pages map");
+    check(api.map(alias, 1, pages) == alias, "page-list request: the first destination page also maps as an alias");
+    std::memset(window, 0, 2 * kPage64k);
+    std::memset(alias, 0, kPage64k);
+
+    // The destination is watched at both mappings before the delivery: the tracker is what the plane refresh polls.
+    check(rt::xmem::page_watch_arm(window, 2 * kPage64k), "page-list request: the destination window arms the page watch");
+    check(rt::xmem::page_watch_arm(alias, kPage64k), "page-list request: the alias mapping arms the page watch");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unchanged,
+          "page-list request: the armed destination has no write to report before the delivery");
+    const std::uint64_t trips_before = rt::xmem::page_watch_write_trips();
+
+    // The request as the console names it: page numbers, an offset into the first page, a destination size.
+    const std::uint64_t numbers[kPages] = {pages[0], pages[1], pages[2]};
+    constexpr std::uint16_t kOffset = 4321;
+    constexpr std::size_t kBytes = 100000;
+    constexpr std::size_t kFirstBytes = kPage64k - kOffset;  // what the first page of the plan holds
+    constexpr std::size_t kSecondBytes = kBytes - kFirstBytes;
+    PagePlan plan;
+    check(plan_page_transfer(numbers, kPages, kOffset, kBytes, plan) == PagePlanError::ok,
+          "page-list request: the page array and the first-page offset plan");
+    check(plan.count == 2 && plan.bytes == kBytes, "page-list request: the plan is the two mapped pages' spans");
+    check(plan.spans[0].page == pages[0] && plan.spans[0].offset == kOffset && plan.spans[0].bytes == kFirstBytes &&
+              plan.spans[1].page == pages[1] && plan.spans[1].offset == 0 && plan.spans[1].bytes == kSecondBytes,
+          "page-list request: the spans carry the request offset and the tail in request order");
+    check(rt::xmem::page_watch_write_trips() == trips_before,
+          "page-list request: planning moves no byte and records no trip");
+
+    std::vector<std::uint8_t> payload(kBytes);
+    for (std::size_t at = 0; at < payload.size(); ++at) payload[at] = static_cast<std::uint8_t>((at * 29 + 7) & 0xff);
+    rt::xmem::PhysicalPageWrite writes[2] = {};
+    for (unsigned i = 0; i < plan.count; ++i) {
+        writes[i].page = plan.spans[i].page;
+        writes[i].offset = plan.spans[i].offset;
+        writes[i].bytes = plan.spans[i].bytes;
+    }
+    rt::xmem::PhysicalPageWriteStats stats;
+    std::uint64_t failed = 1;
+    check(rt::xmem::write_physical_pages(writes, plan.count, payload.data(), &stats, &failed) && failed == 0,
+          "page-list request: the planned spans are delivered by the request path's write hook");
+    check(stats.spans == 2 && stats.bytes == kBytes, "page-list request: the delivery reports the request's spans and bytes");
+    check(stats.watch_views == 3,
+          "page-list request: the delivery repeats through both window pages and the armed alias (three views)");
+    check(stats.watch_pages == 40,
+          "page-list request: the delivery records 40 written 4 KiB pages across the three armed views");
+    bool delivered = true;
+    for (std::size_t at = 0; at < kFirstBytes; ++at) delivered &= window[kOffset + at] == payload[at];
+    for (std::size_t at = 0; at < kSecondBytes; ++at) delivered &= window[kPage64k + at] == payload[kFirstBytes + at];
+    check(delivered, "page-list request: the bytes land at the title's mappings of both destination pages");
+    // The page's backing is the one memory every mapping reads, so the same bytes must be there without a view.
+    const auto resolve = rt::xmem::resolve_physical_page_fn;
+    const std::uint8_t* const backing0 = resolve ? resolve(pages[0]) : nullptr;
+    const std::uint8_t* const backing1 = resolve ? resolve(pages[1]) : nullptr;
+    check(backing0 != nullptr && std::memcmp(backing0 + kOffset, payload.data(), kFirstBytes) == 0,
+          "page-list request: the first span's bytes are in the page's backing, not only at a mapping");
+    check(backing1 != nullptr && std::memcmp(backing1, payload.data() + kFirstBytes, kSecondBytes) == 0,
+          "page-list request: the second span's bytes are in the page's backing");
+    bool alias_delivered = true;
+    for (std::size_t at = 0; at < kFirstBytes; ++at) alias_delivered &= alias[kOffset + at] == payload[at];
+    check(alias_delivered, "page-list request: the armed alias mapping sees the same delivered bytes");
+    check(rt::xmem::page_watch_write_trips() - trips_before == 40,
+          "page-list request: the tracker records the delivery's 4 KiB pages as write trips");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::changed,
+          "page-list request: the tracker answers changed, so the plane refresh compares and re-uploads");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unchanged,
+          "page-list request: the trip is drained once and the next poll has nothing to report");
+
+    // All-or-nothing through the same request shape: the second span's page is not live. The plan still names it
+    // (liveness is the write hook's rule), the write refuses the whole request with the page, and no mapped page moves.
+    constexpr std::uint64_t kAbsentPage = 0x1fffff0;  // a multiple of 16 below the slot limit that was never allocated
+    const std::uint64_t mixed[2] = {pages[0], kAbsentPage};
+    PagePlan mixed_plan;
+    check(plan_page_transfer(mixed, 2, 0, kPage64k + 4096, mixed_plan) == PagePlanError::ok && mixed_plan.count == 2 &&
+              mixed_plan.spans[1].page == kAbsentPage,
+          "page-list request: a request naming a mapped and an unmapped page still plans (the hook rules on liveness)");
+    rt::xmem::PhysicalPageWrite mixed_writes[2] = {{pages[0], 0, kPage64k}, {kAbsentPage, 0, 4096}};
+    std::vector<std::uint8_t> mixed_payload(kPage64k + 4096, 0xa6);
+    const std::vector<std::uint8_t> window_before(window, window + 2 * kPage64k);
+    const std::vector<std::uint8_t> alias_before(alias, alias + kPage64k);
+    const std::uint64_t trips_before_refusal = rt::xmem::page_watch_write_trips();
+    failed = 0;
+    check(!rt::xmem::write_physical_pages(mixed_writes, mixed_plan.count, mixed_payload.data(), &stats, &failed) &&
+              failed == kAbsentPage,
+          "page-list request: the delivery refuses the whole request and names the unmapped page");
+    check(std::vector<std::uint8_t>(window, window + 2 * kPage64k) == window_before &&
+              std::vector<std::uint8_t>(alias, alias + kPage64k) == alias_before,
+          "page-list request: the refused delivery wrote nothing into the mapped destination");
+    check(rt::xmem::page_watch_write_trips() == trips_before_refusal,
+          "page-list request: the refused delivery recorded no write trip");
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unchanged,
+          "page-list request: the tracker still has nothing to report after the refusal");
+
+    rt::xmem::page_watch_forget(alias);
+    rt::xmem::page_watch_forget(window);
+    check(rt::xmem::page_watch_poll() == rt::xmem::WriteWatchPoll::unavailable,
+          "page-list request: the tracker is unarmed again after the fixture");
+    api.map(alias, 1, nullptr);
+    api.map(window, 2, nullptr);
+    check(api.free_pages(kPages, pages) == TRUE, "page-list request: free the fixture's physical pages");
+}
+
 void test_first_touch_during_remap(const PhysicalApi& api) {
     constexpr uint64_t kSlice = 16;
     constexpr uint64_t kSlices = 256;
@@ -1812,6 +1944,7 @@ int main() {
         test_copy_page_mappings(physical);
         test_resolve_physical_page(physical);
         test_write_physical_pages(physical);  // docs/peer_port_streaming.md section 13: the page-list destination write
+        test_page_list_destination_request(physical);  // section 14: the mapped-and-armed request shape end to end
         test_first_touch_during_remap(physical);
         test_placeholders(physical);
         test_gpu_view_pairing_runtime(physical);  // docs/peer_port_movie.md section 11: the pair through the shim

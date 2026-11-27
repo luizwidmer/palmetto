@@ -10,9 +10,12 @@
 //                 resolver, an unresolved page refused with nothing written, and the no-resolver/named refusals
 //   unshuffle     modes 1-4 are permutations with the table's stripe positions, and the refusals
 //   predictor     missing/unreadable/malformed/no-section/out-of-range/bad-length, a valid directory and a combined file
-//   bcpack        the test rANS encoder reproduces the reference chunks and every codec decodes, the documented BC7
+//   bcpack        the test rANS encoder reproduces the reference chunks and every codec decodes the documented BC7
 //                 example, malformed streams and destination bounds, and built-in history through the predictor file
+//   page write    the page-list destination request shape (section 14): the arm's page array + first-page offset plan,
+//                 the conversion into the xmem write hook's spans, and the arm switch's spelling
 #include "../shims/dstorage_advanced.h"
+#include "../shims/xmem.h"  // rt::xmem::PhysicalPageWrite: the request path's write-hook span record (header only)
 
 #include "test_temp_dir.h"
 
@@ -479,6 +482,85 @@ void test_page_lists() {
     const auto no_buffer =
         transfer_page_list(table.numbers.data(), 1, 0, 16, &PageTable::resolve, &table, nullptr, true);
     check(no_buffer.error == PageTransferError::null_buffer, "pages: a null scratch buffer is a null_buffer refusal");
+}
+
+// ---- the page-list destination request shape -----------------------------------------------------------------------
+//
+// docs/peer_port_streaming.md section 14's exercise. The delivery branch itself (shims/dstorage.cpp, page_list_request,
+// behind PALMETTO_DS_PAGES_VIEW) needs the whole runtime, so this target pins the arithmetic that branch composes and
+// that the mapped-and-armed fixtures run against real pages: the page array + first-page offset plan for the request
+// shapes the arm uses, and the conversion of that plan into the xmem write hook's span records
+// (rt::xmem::PhysicalPageWrite). A page number with no live backing is not a plan error - it is named by the write hook,
+// which is the all-or-nothing refusal the request path turns into its named E_INVALIDARG.
+
+void test_page_write_request_shapes() {
+    // The arm's request shape (port/shims/dstorage.cpp PALMETTO_DS_PAGES_ARM and xmem_test's page-list request fixture):
+    // two mapped pages, a 4,321-byte offset into the first, 100,000 destination bytes.
+    const std::uint64_t mapped[3] = {16, 32, 48};
+    constexpr std::uint16_t kOffset = 4321;
+    constexpr std::size_t kBytes = 100000;
+    constexpr std::size_t kFirstBytes = kPageListPageBytes - kOffset;
+    PagePlan plan;
+    check(plan_page_transfer(mapped, 3, kOffset, kBytes, plan) == PagePlanError::ok,
+          "page-write request: the arm's page array and first-page offset plan");
+    check(plan.count == 2 && plan.bytes == kBytes, "page-write request: the arm's plan is two spans over 100,000 bytes");
+    check(plan.spans[0].page == 16 && plan.spans[0].offset == kOffset && plan.spans[0].bytes == kFirstBytes &&
+              plan.spans[1].page == 32 && plan.spans[1].offset == 0 && plan.spans[1].bytes == kBytes - kFirstBytes,
+          "page-write request: the spans carry the request offset and the tail in request order");
+
+    // The conversion the request path runs: one hook span per planned span, field for field.
+    rt::xmem::PhysicalPageWrite writes[2] = {};
+    for (unsigned i = 0; i < plan.count; ++i) {
+        writes[i].page = plan.spans[i].page;
+        writes[i].offset = plan.spans[i].offset;
+        writes[i].bytes = plan.spans[i].bytes;
+    }
+    check(writes[0].page == 16 && writes[0].offset == kOffset && writes[0].bytes == kFirstBytes && writes[1].page == 32 &&
+              writes[1].offset == 0 && writes[1].bytes == kBytes - kFirstBytes,
+          "page-write request: the plan converts to the xmem write hook's span record, in order");
+    std::size_t total = 0;
+    for (unsigned i = 0; i < plan.count; ++i) total += writes[i].bytes;
+    check(total == plan.bytes && total == kBytes,
+          "page-write request: the hook spans cover the request's destination bytes exactly once");
+
+    // The refusal shape: one mapped page and one page number that was never allocated. The plan names it (liveness is
+    // the write hook's rule), so the all-or-nothing refusal with that page number is the hook's answer.
+    const std::uint64_t mixed[2] = {16, 0x1fffff0};
+    PagePlan mixed_plan;
+    check(plan_page_transfer(mixed, 2, 0, kPageListPageBytes + 4096, mixed_plan) == PagePlanError::ok &&
+              mixed_plan.count == 2 && mixed_plan.spans[0].page == 16 &&
+              mixed_plan.spans[0].bytes == kPageListPageBytes && mixed_plan.spans[1].page == 0x1fffff0,
+          "page-write request: a mapped and an unmapped page still plan; the hook names the unmapped page");
+
+    // Boundaries of the same conversion: whatever offset the request names, the span bytes sum to the destination size.
+    const std::uint64_t list[4] = {16, 32, 48, 64};
+    bool sums_hold = true;
+    for (std::uint16_t offset : {std::uint16_t{0}, std::uint16_t{1}, std::uint16_t{4095}, std::uint16_t{4321},
+                                 std::uint16_t{65535}}) {
+        for (std::size_t bytes : {std::size_t{1}, std::size_t{4096}, kPageListPageBytes, kPageListPageBytes + 1}) {
+            PagePlan p;
+            if (plan_page_transfer(list, 4, offset, bytes, p) != PagePlanError::ok || p.bytes != bytes) {
+                sums_hold = false;
+                continue;
+            }
+            std::size_t sum = 0;
+            for (unsigned i = 0; i < p.count; ++i) {
+                sum += p.spans[i].bytes;
+                if (i > 0 && p.spans[i].offset != 0) sums_hold = false;
+            }
+            sums_hold &= sum == bytes;
+        }
+    }
+    check(sums_hold, "page-write request: every offset and size boundary converts to spans that sum to the request");
+
+    // PALMETTO_DS_PAGES_ARM is the fixture's switch and reads through the project's one switch convention.
+    using palmetto::dstorage::env_switch;
+    SetEnvironmentVariableA("PALMETTO_DS_PAGES_ARM", "1");
+    check(env_switch("PALMETTO_DS_PAGES_ARM"), "page-write request: PALMETTO_DS_PAGES_ARM=1 is on");
+    SetEnvironmentVariableA("PALMETTO_DS_PAGES_ARM", "off");
+    check(!env_switch("PALMETTO_DS_PAGES_ARM"), "page-write request: PALMETTO_DS_PAGES_ARM=off is off");
+    SetEnvironmentVariableA("PALMETTO_DS_PAGES_ARM", nullptr);
+    check(!env_switch("PALMETTO_DS_PAGES_ARM"), "page-write request: an unset PALMETTO_DS_PAGES_ARM is off");
 }
 
 // ---- unshuffle -----------------------------------------------------------------------------------------------------
@@ -1208,6 +1290,7 @@ int main() {
     test_record_trace_spec();
     test_pinning();
     test_page_lists();
+    test_page_write_request_shapes();
     test_unshuffle();
     test_predictor(scratch);
     test_bcpack_vectors();

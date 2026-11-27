@@ -1123,3 +1123,159 @@ and `runtime/shims/xmem.cpp`). Uncommitted files of this slice: `port/shims/dsto
 and captures are under `D:\leonida-work\fsrstable\` outside the repository, and no game data is added: RVAs,
 Win32/HRESULT codes, sizes, page counts, counts, times, state words and image means only.
 
+## 14. Measured: the mapped-destination arm - the physical-page delivery exercised through an armed page watch
+
+**Status: measured; opt-in diagnostic arm and tests, one light boot; no delivery bug found and no section-13 code
+changed.** This section closes the exercise section 13 left open. The delivery was implemented and unit-tested through
+its hook, but the clean boot population issued no physical-page destination (`dest-pages=0`), so the request path that
+calls the hook - `page_list_request`'s `pages_view` branch - had never run against a mapped, watched destination. The
+arm here runs exactly that branch with a synthetic request through the real console entry point, in the real runtime
+binary, with the destination's pages mapped and armed on the page-watch tracker; it asserts the bytes landing, the
+tracker's trip and the all-or-nothing refusal that names an unmapped page. It is gated by a GPU-free fixture and was also
+observed in one light boot. This is a follow-up exercise of our own port, not a new peer port: no peer code was copied
+and no peer mechanism landed, so there is no new `NOTICE.md` row (section 13's credit stands).
+
+### 14.1 What was still unexercised
+
+Section 13.5 named the next falsifier: a trace with `dest-pages` non-zero on an arm with `PALMETTO_DS_PAGES=1
+PALMETTO_DS_PAGES_VIEW=1` must show `page-write delivered` non-zero and every status `S_OK`, and a `changed`
+plane-refresh compare over a watched texture whose pages it delivered. The clean pair could only measure
+`dest-pages=0` over 9,216 requests, so two pieces of the delivery stayed implicit:
+
+| piece | what section 13 had | what was missing |
+|---|---|---|
+| the request-path branch | implemented in `port/shims/dstorage.cpp` behind `PALMETTO_DS_PAGES_VIEW`; its two seams (`plan_page_transfer` and `rt::xmem::write_physical_pages`) are unit-tested | no request had ever reached the branch, so its validation order, span conversion, counters, status and refusal were unmeasured end to end |
+| the armed-mapping trip | the hook's unit test arms a mapped window and delivers through it | the request path's own delivery had never been observed to leave the tracker a trip, so "a delivery makes the next `page_watch_poll()` answer changed" was a property of the hook test, not of the request |
+| the all-or-nothing refusal | `unresolved_page`/`failed_page` tested at the hook and the resolver | the request path's conversion of that failure into its named `E_INVALIDARG` and a status the queue reports was unmeasured |
+
+### 14.2 The design
+
+Two pieces, both opt-in and off by default: the runtime-side arm in `port/shims/dstorage.cpp` and a GPU-free fixture mode
+in `port/test/fixtures/tiny_game.cpp`. Neither changes the section-13 delivery; with the arm switch unset the request
+path is the code section 13 committed.
+
+| switch / mode | what it does |
+|---|---|
+| `PALMETTO_DS_PAGES_ARM=1` | the diagnostic arm. Runs once, at the first `DStorageGetFactory` call, and only when `PALMETTO_DS_PAGES=1` and `PALMETTO_DS_PAGES_VIEW=1` are also on (otherwise it logs one skip line and does nothing). The factory's answer is `E_FAIL` when one of the arm's checks failed, so a fixture can gate on it; with the switch unset the answer is unchanged. |
+| the synthetic destination | reserves one 64 KiB-page window, allocates three pages of this process's own xmem page table, maps two of them, zeroes them, arms the page-watch tracker on the two-page mapping, then creates a memory queue and a two-entry status array through the shim's own factory. |
+| the delivered request | a memory-source `DSTORAGE_REQUEST` whose destination is the physical-page array over the two mapped pages with `DestinationPageOffset=4321` and 100,000 bytes; the worker plans it (two spans, 61,215 + 38,785 bytes) and runs the `pages_view` branch. The arm polls the status with a 5 s bound and asserts `S_OK`, the 100,000 bytes at both mapped pages, 25 tracker write trips (15 + 10 4 KiB pages), the tracker's `changed` poll, and the request path's counters moving by exactly one delivery. |
+| the refusal request | a second memory-source request whose destination page array names the first mapped page and one page number that was never allocated (`0x1fffff0`). It asserts the status is `E_INVALIDARG`, the request path's `page_write refused` counter moved, the mapped window is byte-identical to its snapshot, the tracker recorded no trip, and the queue's error record names the request command and the `E_INVALIDARG` answer. The stderr refusal line names the page number. |
+| the fixture mode | `port/test/fixtures/tiny_game.cpp`'s `dstorage-arm` argument: the stand-in game resolves `DStorageGetFactory` through the shim registry (`GetModuleHandleA("dstorage_xs.dll")` + `GetProcAddress`) and ends the run on that answer. No GPU, no shader corpus, no game data and no boot: it runs the real runtime binary with the real shim under `palmetto --run`. |
+| what is not changed | the delivery, the resolver scatter, the page table and tracker, the queue, the status and error semantics, and every counter the default boot prints. With the arm switch unset `DStorageGetFactory` adds one cached boolean read. |
+
+**Bounds and refusals.** The arm is one window reservation (128 KiB, left reserved for process life because the console
+`XMemVirtualAlloc` has no release; no page stays committed after the unmap), three physical pages freed after the run, one
+queue and one status array closed and freed, and two requests of at most 100,000 bytes. Every pointer is checked before
+use; the two status waits are bounded at 5 s; a timed-out wait leaks the queue rather than calling `Close`, which would
+wait for the stuck worker. The arm assumes it is the only page-watch client while it runs, because its trip count is the
+process-wide tracker's - true for the fixture and for a default boot (the plane-refresh and card-copy watch switches are
+off), and stated in 14.5.
+
+### 14.3 Tests
+
+| target | before -> after | what was added |
+|---|---|---|
+| `port/test/xmem_test.cpp` (`xmem_test`) | **428 -> 458 checks, 0 failed (+30)**, all PASS | `test_page_list_destination_request`: the request shape as the console names it (page array + first-page offset + destination size) planned with `plan_page_transfer`, converted into the hook's `rt::xmem::PhysicalPageWrite` spans exactly as the request branch does, and delivered against real xmem pages whose two-page window and one-page alias are both mapped and armed. It asserts the plan's spans and order, the bytes at every mapping, the same bytes in each page's backing, the three armed views, the 40 recorded 4 KiB pages, the 40 write trips, the `changed` poll and the drained second poll; then a request naming the mapped page and an unallocated page, whose delivery refuses whole with `failed_page` naming it, writes nothing, records no trip, and leaves the next poll `unchanged`. |
+| `port/test/dstorage_test.cpp` (`dstorage_test`) | **251 -> 261 checks, 0 failed (+10)** | `test_page_write_request_shapes`: the arm's plan (two spans, 4,321-byte offset, 61,215 + 38,785 bytes), the plan-to-hook-span conversion field for field, the refusal shape (a mapped and an unallocated page still plan - liveness is the hook's rule), every offset/size boundary summing to the destination size, and the `PALMETTO_DS_PAGES_ARM` spelling through the project's one switch convention. The delivery branch itself is not linked here (it needs the whole runtime), which is why the fixture below and `xmem_test` carry it. |
+| the GPU-free fixture | **21/21 arm checks PASS, guest exit 0** | `palmetto --run tiny_game.exe -- hello 42 dstorage-arm` with `PALMETTO_DS_PAGES=1 PALMETTO_DS_PAGES_VIEW=1 PALMETTO_DS_PAGES_ARM=1 PALMETTO_DSTORAGE_TRACE=1`: the real console entry point, the real queue worker and the real delivery, with no GPU and no game data. |
+
+```powershell
+cmake --build port\build --target xmem_test dstorage_test -j 24
+port\build\xmem_test.exe      # xmem_test: OK (458 checks)
+port\build\dstorage_test.exe  # 261 checks, 0 failed
+# the mapped-destination arm through the real console entry point (GPU-free; no game data):
+$env:PALMETTO_DS_PAGES=1; $env:PALMETTO_DS_PAGES_VIEW=1; $env:PALMETTO_DS_PAGES_ARM=1
+port\build\palmetto.exe --run port\build\fixtures\game\RelWithDebInfo\tiny_game.exe -- hello 42 dstorage-arm
+# -> [rt] ds pages arm: PASS, 21/21 check(s) passed; tiny_game: dstorage arm PASS; exit 0
+```
+
+Gates on the changed tree: `_setup\build_gta6rt.cmd` prints `PALMETTO_OK`; `_setup\build_tests.cmd` prints
+`TESTS_BUILT`; the GPU-free gate subset (`dstorage` 261, `xmem` 458, `deferred_compile` 50, `frame_dump`,
+`unimplemented_policy` 98, `graphics_record` 180, `graphics_pso` 350, `buffer_va_index`, `xapu_chad` 87, `arena_size`,
+`xbox_present`, `xs_proxy_mock`) exits 0; the docs checks pass (38 tests, 209 subtests).
+
+### 14.4 Measured runs
+
+The GPU-free fixture is the primary evidence: it is the same executable, the same shims and the same request path a
+boot uses, with a synthetic guest instead of the title. Raw logs and metadata are outside the repository under
+`D:\leonida-work\pages-arm\` (`fixture-arm.log`, `fixture-arm-meta.txt`, `gate-tests.txt`, `boot-arm-summary.txt`);
+binaries: `palmetto.exe` `12132745...`, guest `18195078...`.
+
+| assertion | fixture measurement (from `fixture-arm.log`) |
+|---|---|
+| arm checks | **21/21 PASS**; `tiny_game: dstorage arm PASS`; guest exit **0** |
+| the delivery line | `a physical-page request was delivered through the page write (destination page list, 2 span(s) over 100000 byte(s), 2 armed title mapping(s) written through, 25 page(s) recorded for the page watch, zlib off; ...)` |
+| status | `status done index=0 hr=0x00000000` before the request's own `S_OK` check |
+| the tracker | 25 write trips recorded, poll `changed`, next poll `unchanged` (the trip drained once) |
+| the all-or-nothing refusal | `a physical-page request is refused: page 33554416 has no live physical page (unresolved_page; the physical-page write is all-or-nothing) (0x80070057; destination page list, page offset 0, ...)`; the mapped window byte-identical to its snapshot and no trip |
+| the request-path counters | delivered `+1`, bytes `+100000`, views `+2`, watch-pages `+25`, refused unchanged; then refused `+1` on the second request |
+
+One light boot, one attempt, under `_setup/boot_lock.ps1`, the section-12 content environment of
+`D:\leonida-work\fsrstable\boot_arm.ps1` plus `PALMETTO_TITLE_CLASS0A_SIZE=1`, `PALMETTO_DSTORAGE_TRACE=1` and the three
+`PALMETTO_DS_PAGES*` switches; binary `77E82DB1...` built from the shared tree at 07:57 (so it carries the other in-flight
+slices' uncommitted changes, identical in this one arm; the differential against section 13's pair is only these
+switches plus the arm). The boot reached the load window and held the section-13 state words, and the arm ran inside it
+with the title's own page table:
+
+| measurement | `boot-pagesarm1` (arm on) |
+|---|---|
+| verdict / exceptions / device losses | **ALIVE 130.2 s**, 0, 0 (harness timeout; one attempt, no retry) |
+| D3D12 calls / startup-trace events | 332,499 / 19,910 |
+| the arm's own checks in the boot | **21/21 PASS** (same lines as the fixture, with the title's page table and tracker) |
+| request shapes at the last mark | `file=9216 memory=2 zlib=6005 bcpack=0 swizzle=0 dest-pages=2 source-pages=0` - the 2 memory requests and the 2 destination page lists are the arm's; the title's 9,216 file requests still name none |
+| delivery counters | `pages planned=2 transferred=1 bytes=100000 refused=1`; `page-write delivered=1 bytes=100000 views=2 watch-pages=25 refused=1` - the counters section 13.5 said had never moved |
+| state at 128 s (init / loading / session / machine) | 3 / 2 / 3 / current 3 next 3 (last changes 72, 68, 72 s) - the section-13 pair's words |
+| movie player at 128 s / class-0xa upload | state `0x9`, buffers 0, open 1 / the same 3 redirected call sites |
+| captures / pixels | 12 captured frames, 2564x1421, every mean rgb `0.00 0.00 0.00`; replay readbacks `51 102 204` and `0 0 0` |
+
+**Verdict: the mapped-destination delivery works end to end through the request path, and the all-or-nothing refusal
+names the page.** The arm ran in both places the delivery can be driven without the title: the GPU-free fixture and the
+real load window. The request path's counters moved for the first time (one delivered request, 100,000 bytes, 2 armed
+views, 25 watched pages, one refused request), the bytes were verified at the title's mappings, the tracker answered
+`changed` and then drained, and the second request was refused whole with `E_INVALIDARG` and its page number on stderr
+while the mapped page stayed byte-identical. The boot's state words, movie state, class-0xa line and capture means are
+the section-13 pair's, and the title's own request population is unchanged (9,216 file requests, `dest-pages=0`): the
+delivery did not regress the default path. No delivery bug was measured, so nothing was fixed; the section-13 delivery
+code is untouched.
+
+### 14.5 Limits and the next falsifier
+
+- **The title still asks for no page-list destination.** The arm proves the request path works for a synthetic request;
+  it does not create a title request. Section 13.5's falsifier stays the real one: a boot trace with the title's own
+  `dest-pages` non-zero, the delivery counters moving for it, and a `changed` plane-refresh compare over a watched
+  texture whose pages it delivered. The arm is the bounded stand-in until that population exists.
+- **The arm is the only page-watch client during its run.** Its trip count and `changed` poll read the process-wide
+  tracker, so running it with `PALMETTO_PLANE_REFRESH=watch` or `PALMETTO_CARD_COPY_WATCH` armed could mix the title's
+  writes into the delta. The fixture and the reported boot run without those switches; the arm is a diagnostic, not a
+  concurrent-tracker test.
+- **One window reservation stays reserved.** The console `XMemVirtualAlloc` has no release, so the arm leaves its 128 KiB
+  reservation for process life (its pages are unmapped and freed, so nothing stays committed). One reservation per
+  process is the bound.
+- **The arm changes one answer in arm mode only.** When a check fails, `DStorageGetFactory` returns `E_FAIL` so the
+  fixture gates on it; a boot with the arm switch on and a failing check would see the title's DirectStorage factory
+  fail. With the switch unset the answer is the pre-section code exactly.
+- **The synthetic request is one shape.** Memory source, no compression, one destination page list. `zlib` over a page
+  list stays covered by section 13's unit seam only; BCPack and swizzle over a page list remain refused by name
+  (section 13.5). An alias mapping and a not-yet-mapped page are covered at the hook by `xmem_test` (section 13.3 and
+  14.3), not by a title request.
+- **The tracker's first-access semantics are unchanged.** A delivery records the written pages even where an earlier
+  access cleared a guard before the poll, exactly as section 13 measured; a second title write inside that window is
+  still invisible (section 13.5, [card_copies.md](card_copies.md)).
+- **One machine, one backend, a shared tree.** The boot is one RTX 4090 / Vulkan run on an executable that also carries
+  other slices' uncommitted changes; it is one attempt with 0 device losses, and the rate counters (D3D12 calls,
+  frames) are not comparable across single boots (the limit of sections 10.5, 12.4 and 13.4). What it does show is the
+  arm's own PASS lines and the counters the delivery owns.
+
+### 14.6 Attribution and uncommitted files
+
+This section was implemented from this project's own measurements: the destination trace in section 13.1, the page
+table and guard-page tracker in [card_copies.md](card_copies.md) and [title_memory_model.md](title_memory_model.md),
+the page-list seam in [page_resolver.md](page_resolver.md), and the request path section 13 committed
+([upstream_port.md](upstream_port.md) is the policy). No peer code, comment text, identifier or table was copied, no new
+peer mechanism landed and no `NOTICE.md` row is added by this section; section 13.6's credit for the delivery itself
+stands. Uncommitted files of this section: `port/shims/dstorage.cpp` (the arm), `port/test/xmem_test.cpp` (the request
+fixture), `port/test/dstorage_test.cpp` (the request-shape pins), `port/test/fixtures/tiny_game.cpp` (the `dstorage-arm`
+mode) and this section of `docs/peer_port_streaming.md`. No git write was made by this slice; boots, captures and the
+fixture's logs are under `D:\leonida-work\` outside the repository, and no game data is added: page numbers as shapes,
+sizes, counts, status HRESULTs, state words and image means only.
+

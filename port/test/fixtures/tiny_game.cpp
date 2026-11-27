@@ -10,6 +10,9 @@
 // A fourth, `stack` (run_tiny_game_stack), checks that the entry thread and a thread created with dwStackSize 0
 // both have 8 MB of stack: a driver compiles shaders on the game's threads (BUILD-1457). Only under palmetto: run
 // natively, the second thread gets this program's own 1 MB.
+// A `dstorage-arm` mode (docs/peer_port_streaming.md section 14) asks the dstorage shim for its factory and ends the run
+// on that answer, which runs the shim's opt-in mapped physical-page destination arm and gates on its checks; it is only
+// meaningful under palmetto with the arm's three PALMETTO_DS_PAGES* switches set.
 // An `abort-*` mode installs a SIGABRT disposition and calls abort(); tiny_game_abort_test compares the exact exit
 // codes with a native run of the same image. No game files.
 // On MSVC, `eh` needs more than the unwind tables #176 registers: _CxxThrowException finds the throwing image
@@ -17,6 +20,7 @@
 // so tooling/scripts/run_wine_tests.py (which passes a test's command line but not its ENVIRONMENT) runs them too. stdout is
 // unbuffered, so a crash still shows how far the run got.
 #include <windows.h>
+#include <unknwn.h>  // IUnknown/__uuidof for the dstorage-arm mode's DStorageGetFactory call
 
 #include <csignal>
 #include <cstdint>
@@ -79,6 +83,28 @@ int main(int argc, char** argv) {
           "argv is the game's command line (\"hello\" \"42\"), not palmetto's");
     check(std::strstr(GetCommandLineA(), "hello 42") != nullptr, "GetCommandLineA is the game's command line");
     check(g_static.value == 1234, "a static initializer ran before main");
+
+    if (has_arg(argc, argv, "dstorage-arm")) {
+        // docs/peer_port_streaming.md section 14: the runtime's mapped-destination exercise arm runs inside the dstorage
+        // shim's DStorageGetFactory when PALMETTO_DS_PAGES_ARM=1 is set (with PALMETTO_DS_PAGES=1 and
+        // PALMETTO_DS_PAGES_VIEW=1). This mode asks for the factory through the shim's own console name and ends the run
+        // on its answer, so the arm's PASS/FAIL lines gate the fixture's exit code:
+        //   PALMETTO_DS_PAGES=1 PALMETTO_DS_PAGES_VIEW=1 PALMETTO_DS_PAGES_ARM=1 \
+        //     palmetto --run tiny_game.exe -- hello 42 dstorage-arm
+        // The arm needs no GPU, no shader corpus and no game data; it runs its own synthetic physical pages.
+        using GetFactoryFn = HRESULT(WINAPI*)(REFIID, void**);
+        HMODULE dstorage = GetModuleHandleA("dstorage_xs.dll");  // the shim registry answers an owned module as loaded
+        auto get_factory = dstorage != nullptr
+                               ? reinterpret_cast<GetFactoryFn>(GetProcAddress(dstorage, "DStorageGetFactory"))
+                               : nullptr;
+        void* factory_object = nullptr;
+        const HRESULT hr = get_factory != nullptr ? get_factory(__uuidof(IUnknown), &factory_object) : E_NOTIMPL;
+        check(hr == S_OK, "DStorageGetFactory answers S_OK after the mapped-destination arm");
+        if (factory_object != nullptr) static_cast<IUnknown*>(factory_object)->Release();
+        std::printf("tiny_game: dstorage arm %s\n", SUCCEEDED(hr) ? "PASS" : "FAIL");
+        std::fflush(stdout);
+        std::exit(SUCCEEDED(hr) ? 0 : 1);  // the arm's own PASS/FAIL lines are the evidence this mode runs for
+    }
 
     std::vector<int> v(1 << 20);
     for (size_t i = 0; i < v.size(); ++i) v[i] = int(i);
