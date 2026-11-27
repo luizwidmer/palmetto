@@ -100,3 +100,13 @@ was informed by Five Star Recomp's D3D12.X shim and debugging notes and by XCL's
 projects are read as evidence of behaviour only; the implementations in this repository are our own, no source, comment,
 identifier or data table is copied, and the upstream projects remain the copyright of their contributors under their own
 licences.
+
+The plane refresh and plane composition ports ([docs/peer_port_movie.md](docs/peer_port_movie.md), sections 8-9) were
+informed by XCL (GPL-2.0-only, `8b957be`) title-texture and mirror code, VIctory and victory-fork (GPL-3.0-or-later,
+`63bcca4` / `52ac4ec`) texture re-upload and compositor code, Five Star Recomp (GPL-3.0-or-later, `45071d52`) per-plane
+refresh code and PercyScarlett (GPL-2.0-only, `e44c465`) overlay code. The cross-list memory wait and GPU-ordered
+bottom-of-pipe ports ([docs/peer_port_streaming.md](docs/peer_port_streaming.md), section 11) were informed by Five Star
+Recomp's memory-wait/list-split/write code, XCL's list and CPU-write code and victory-fork's copy-lane queue code. All of
+these are read as evidence of behaviour only; the implementations in this repository are our own, no source, comment,
+identifier or data table is copied, and the upstream projects remain the copyright of their contributors under their own
+licences.
