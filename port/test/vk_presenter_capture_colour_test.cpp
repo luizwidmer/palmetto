@@ -3,8 +3,10 @@
 // picture lands in the window, so its cases are pinned here without a GPU; the GPU test presents real frames.
 #include "vk_presenter_capture_colour.h"
 #include "../src/present_fit.h"
+#include "../src/present_colour.h"
 
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <initializer_list>
@@ -149,6 +151,98 @@ int main() {
         EXPECT(std::string(palmetto::present_fit::rule_name(Rule::fill)) == "fill");
         EXPECT(std::string(palmetto::present_fit::rule_name(Rule::fit)) == "fit");
     }
-    std::printf("present fit/scale rule: fill, fit and the switch spellings ok\n");
+    // ---- Measured SDR/HDR transfer, gamut and Vulkan surface-family rules --------------------------------------
+    using namespace palmetto::present_colour;
+    const auto near = [](float actual, float expected, float epsilon = 0.0001f) {
+        return std::abs(actual - expected) <= epsilon;
+    };
+    for (const float encoded : {0.0f, 0.0031308f, 0.04045f, 0.5f, 1.0f})
+        EXPECT(near(srgb_encode(srgb_decode(encoded)), encoded, 0.00002f));
+    for (const float encoded : {0.0f, 0.1f, 0.5f, 0.9f, 1.0f})
+        EXPECT(near(gamma22_encode(gamma22_decode(encoded)), encoded, 0.00002f));
+    EXPECT(near(srgb_decode(0.04045f), 0.0031308f, 0.000002f));
+    EXPECT(near(gamma22_decode(0.5f), 0.21763764f, 0.000002f));
+    EXPECT(near(nits_to_pq(100.0f), 0.5080784f, 0.0002f));
+    EXPECT(near(nits_to_pq(1000.0f), 0.7518271f, 0.0002f));
+    EXPECT(near(nits_to_pq(10000.0f), 1.0f, 0.000002f));
+    EXPECT(near(pq_to_nits(nits_to_pq(1000.0f)), 1000.0f, 0.1f));
+
+    const Rgb red2020 = bt709_to_bt2020({1.0f, 0.0f, 0.0f});
+    EXPECT(near(red2020.r, 0.627404f, 0.000002f));
+    EXPECT(near(red2020.g, 0.069097f, 0.000002f));
+    EXPECT(near(red2020.b, 0.016391f, 0.000002f));
+    const Rgb source_linear{0.12f, 0.43f, 0.78f};
+    const Rgb recovered = bt2020_to_bt709(bt709_to_bt2020(source_linear));
+    EXPECT(near(recovered.r, source_linear.r, 0.00002f));
+    EXPECT(near(recovered.g, source_linear.g, 0.00002f));
+    EXPECT(near(recovered.b, source_linear.b, 0.00002f));
+    const Rgb sdr_half = sdr_decode({0.5f, 0.5f, 0.5f}, SdrEotf::gamma22);
+    const Rgb hdr_working = to_working(sdr_half, 1.0f, false, true, 203.0f, 1000.0f);
+    EXPECT(near(hdr_working.r, 0.21763764f * 203.0f, 0.001f));
+    EXPECT(near(hdr_working.g, hdr_working.r, 0.0001f));
+    EXPECT(near(hdr_working.b, hdr_working.r, 0.0001f));
+    const Rgb hdr_recovered = pq_to_nits(nits_to_pq(hdr_working));
+    EXPECT(near(hdr_recovered.r, hdr_working.r, 0.1f));
+    const Rgb below_knee{0.4f, 0.5f, 0.6f};
+    const Rgb unchanged = tone_map_hdr_to_sdr(below_knee, 203.0f, 1000.0f);
+    EXPECT(near(unchanged.r, below_knee.r) && near(unchanged.g, below_knee.g) && near(unchanged.b, below_knee.b));
+    const float hdr_peak_sdr = 1000.0f / 203.0f;
+    const Rgb peak_mapped = tone_map_hdr_to_sdr({hdr_peak_sdr, hdr_peak_sdr, hdr_peak_sdr}, 203.0f, 1000.0f);
+    EXPECT(near(peak_mapped.r, 1.0f, 0.0001f));
+
+    // This is the measured plain-present target: UNORM B8G8R8A8 with sRGB-nonlinear colour space.
+    constexpr SurfaceFormat measured_surface[] = {
+        {SurfacePixelFormat::b8g8r8a8_unorm, SurfaceColourSpace::srgb_nonlinear},
+    };
+    const SurfaceChoice measured_choice = choose_surface_format(measured_surface, 1, false, false);
+    EXPECT(measured_choice.index == 0 && measured_choice.matched && !measured_choice.hdr_active);
+    // The preference order, not the surface enumeration order, is B8 then R8 for each colour family.
+    constexpr SurfaceFormat srgb_family[] = {
+        {SurfacePixelFormat::r8g8b8a8_srgb, SurfaceColourSpace::srgb_nonlinear},
+        {SurfacePixelFormat::b8g8r8a8_srgb, SurfaceColourSpace::srgb_nonlinear},
+        {SurfacePixelFormat::b8g8r8a8_unorm, SurfaceColourSpace::srgb_nonlinear},
+    };
+    const SurfaceChoice srgb_choice = choose_surface_format(srgb_family, 3, true, false);
+    EXPECT(srgb_choice.index == 1 && srgb_choice.matched && !srgb_choice.srgb_missing);
+    constexpr SurfaceFormat unorm_fallback[] = {
+        {SurfacePixelFormat::r8g8b8a8_unorm, SurfaceColourSpace::srgb_nonlinear},
+        {SurfacePixelFormat::b8g8r8a8_unorm, SurfaceColourSpace::srgb_nonlinear},
+    };
+    const SurfaceChoice fallback_choice = choose_surface_format(unorm_fallback, 2, true, false);
+    EXPECT(fallback_choice.index == 1 && fallback_choice.matched && fallback_choice.srgb_missing);
+    constexpr SurfaceFormat hdr_families[] = {
+        {SurfacePixelFormat::a2r10g10b10_unorm, SurfaceColourSpace::hdr10_st2084},
+        {SurfacePixelFormat::a2b10g10r10_unorm, SurfaceColourSpace::hdr10_st2084},
+        {SurfacePixelFormat::b8g8r8a8_unorm, SurfaceColourSpace::srgb_nonlinear},
+    };
+    const SurfaceChoice hdr_choice = choose_surface_format(hdr_families, 3, false, true);
+    EXPECT(hdr_choice.index == 1 && hdr_choice.matched && hdr_choice.hdr_active && !hdr_choice.hdr_missing);
+    const SurfaceChoice hdr_fallback_choice = choose_surface_format(measured_surface, 1, false, true);
+    EXPECT(hdr_fallback_choice.index == 0 && hdr_fallback_choice.matched && !hdr_fallback_choice.hdr_active &&
+           hdr_fallback_choice.hdr_missing);
+    constexpr SurfaceFormat wrong_hdr_colour_space[] = {
+        {SurfacePixelFormat::a2b10g10r10_unorm, SurfaceColourSpace::srgb_nonlinear},
+        {SurfacePixelFormat::b8g8r8a8_unorm, SurfaceColourSpace::srgb_nonlinear},
+    };
+    const SurfaceChoice wrong_hdr_choice = choose_surface_format(wrong_hdr_colour_space, 2, false, true);
+    EXPECT(wrong_hdr_choice.index == 1 && wrong_hdr_choice.matched && !wrong_hdr_choice.hdr_active &&
+           wrong_hdr_choice.hdr_missing);
+    const SurfaceChoice unmatched = choose_surface_format(nullptr, 0, false, false);
+    EXPECT(unmatched.index == 0 && !unmatched.matched);
+
+    Hdr10OutputMode hdr_mode = Hdr10OutputMode::diagnostic;
+    const char* refusal = nullptr;
+    EXPECT(parse_hdr10_output("", hdr_mode, &refusal));
+    EXPECT(hdr_mode == Hdr10OutputMode::off && refusal == nullptr);
+    EXPECT(parse_hdr10_output("OuTpUt", hdr_mode, &refusal));
+    EXPECT(hdr_mode == Hdr10OutputMode::diagnostic && refusal == nullptr);
+    EXPECT(parse_hdr10_output("0", hdr_mode, &refusal));
+    EXPECT(hdr_mode == Hdr10OutputMode::off && refusal == nullptr);
+    hdr_mode = Hdr10OutputMode::diagnostic;
+    EXPECT(!parse_hdr10_output("2", hdr_mode, &refusal));
+    EXPECT(hdr_mode == Hdr10OutputMode::diagnostic);
+    EXPECT(refusal && std::string(refusal).find("PALMETTO_PRESENT_HDR10") != std::string::npos);
+
+    std::printf("present fit/scale, SDR/HDR conversion math and surface-family policy ok\n");
     return 0;
 }

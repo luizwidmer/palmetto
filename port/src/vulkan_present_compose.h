@@ -9,10 +9,12 @@
 #include "vulkan_backend.h"
 #include "present_compose_spv.h"
 #include "upscale_kind7.h"
+#include "present_colour.h"
 
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 namespace palmetto {
 
@@ -31,6 +33,36 @@ static_assert(sizeof(PresentComposePush) == 112);
 namespace compose_flag {
 inline constexpr std::uint32_t point = 1, srgb_source = 2, hdr10 = 4, straight_alpha = 8;
 }
+
+namespace present_colour::vulkan {
+// Translate Vulkan WSI entries to the small semantic set that the GPU-free selection tests exercise.
+inline SurfacePixelFormat format_from_vk(VkFormat format) {
+    switch (format) {
+    case VK_FORMAT_B8G8R8A8_SRGB: return SurfacePixelFormat::b8g8r8a8_srgb;
+    case VK_FORMAT_R8G8B8A8_SRGB: return SurfacePixelFormat::r8g8b8a8_srgb;
+    case VK_FORMAT_B8G8R8A8_UNORM: return SurfacePixelFormat::b8g8r8a8_unorm;
+    case VK_FORMAT_R8G8B8A8_UNORM: return SurfacePixelFormat::r8g8b8a8_unorm;
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return SurfacePixelFormat::a2b10g10r10_unorm;
+    case VK_FORMAT_A2R10G10B10_UNORM_PACK32: return SurfacePixelFormat::a2r10g10b10_unorm;
+    default: return SurfacePixelFormat::other;
+    }
+}
+
+inline SurfaceColourSpace colour_space_from_vk(VkColorSpaceKHR colour_space) {
+    if (colour_space == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) return SurfaceColourSpace::srgb_nonlinear;
+    if (colour_space == VK_COLOR_SPACE_HDR10_ST2084_EXT) return SurfaceColourSpace::hdr10_st2084;
+    return SurfaceColourSpace::other;
+}
+
+inline SurfaceChoice choose_surface_format(const std::vector<VkSurfaceFormatKHR>& formats,
+                                           bool srgb_source, bool hdr_request) {
+    std::vector<SurfaceFormat> semantic;
+    semantic.reserve(formats.size());
+    for (const VkSurfaceFormatKHR& format : formats)
+        semantic.push_back({format_from_vk(format.format), colour_space_from_vk(format.colorSpace)});
+    return palmetto::present_colour::choose_surface_format(semantic.data(), semantic.size(), srgb_source, hdr_request);
+}
+}  // namespace present_colour::vulkan
 
 namespace upscale_kind7 {
 // Candidate Vulkan formats for the measured DXGI shapes: 67 is E5B9G9R9, and the existing compose target is DXGI 37

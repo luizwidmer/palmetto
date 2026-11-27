@@ -308,3 +308,76 @@ changed for this.
   it.
 * The window is one per process and process-lifetime by design (see section 2); a recreation after a lost device is
   not modelled.
+
+## 9. Measured colour-space path and HDR10 output diagnostic
+
+This slice measures and preserves the existing PresentX default, then adds an opt-in HDR10 request for the composed-plane
+path. The code and captures below are this tree's own; public peer ports were checked only for behavioural evidence.
+
+### 9.1 Measured default path
+
+The presenter measurement in [peer_port_first_ui.md](peer_port_first_ui.md#151-what-was-measured-before-the-port) records
+one full-plane present: source `VK_FORMAT_R8G8B8A8_UNORM` (format 37), 3840x2160, plane colour-space word 0 (G22/P709),
+whole-plane source rectangle and full-output placement. That placement takes the plain `present()` blit, not the compositor.
+The output was 2564x1421 `VK_FORMAT_B8G8R8A8_UNORM` (format 44),
+`VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` (0), with no HDR10 request or ST.2084 surface entry. The blit is UNORM-to-UNORM,
+so the captured 8-bit values are copied without EOTF decode/encode; the bilinear rescale changes geometry, not colour
+values. This is the measured reason not to force an sRGB target or conversion on the default plane path.
+
+The existing plain-blit family rule remains: an sRGB source requests an sRGB 8-bit family; a non-sRGB source requests
+UNORM; an HDR10 composed plane requests a listed 10-bit ST.2084 target. The selector in `present_colour.h` keeps B8 before
+R8, keeps `VK_FORMAT_A2B10G10R10_UNORM_PACK32` before `VK_FORMAT_A2R10G10B10_UNORM_PACK32`, and pairs an HDR format only
+with `VK_COLOR_SPACE_HDR10_ST2084_EXT`. An sRGB-source request falls back to UNORM only when the surface lists no
+matching sRGB format. If no policy entry matches, the prior behavior of selecting the surface's first entry is retained.
+For composed output the shader already writes transfer-encoded values into an UNORM/10-bit swapchain image; format-family
+selection must not add another transfer encode.
+
+### 9.2 Conversion reference and opt-in output
+
+`port/src/present_compose.comp` is the GPU conversion path. It decodes SDR as sRGB or gamma 2.2 and HDR10 with ST.2084
+PQ, transforms linear Rec.709 and Rec.2020 values with the compositor's 709/2020 matrices, blends premultiplied colour in
+linear light, uses the configured SDR white (default 203 nits) and HDR peak (default 1000 nits), and encodes HDR output
+as PQ. HDR-to-SDR converts to Rec.709, normalizes by SDR white and applies the existing luminance shoulder above its
+0.8-white knee. [The GPU-free reference header](../port/src/present_colour.h) mirrors those transfer/matrix/shoulder values and the
+format-selection/parser policy; it does not replace or execute the shader. CPU assertions and GPU captures below keep the
+reference and shader anchored to the same known colours.
+
+`PALMETTO_PRESENT_HDR10=output` is the opt-in *output* request (unset by default). On the `present_planes()` compose
+path, it asks for a listed HDR10/ST.2084 surface even when the input is SDR; the composer converts SDR Rec.709 to linear
+Rec.2020, scales by SDR white and applies PQ. It does not change the source-plane EOTF: the caller's
+`PresentPlanes::sdr_eotf` remains authoritative (the existing `PALMETTO_SDR_EOTF=gamma22` option covers the measured
+word-0 G22/P709 tag). Values `1`, `on`, `true`, `yes` and `diagnostic` are also accepted case-insensitively; `0`, `off`,
+`false` and `no` disable it. Unset/empty is off. Any other spelling is refused by name and the diagnostic stays off.
+
+If the surface has no 10-bit ST.2084 entry, or its listed HDR10 format cannot be a blit destination, the presenter prints
+a named `PALMETTO_PRESENT_HDR10=output refused` reason and retains SDR output (HDR10 input is tone-mapped as before).
+This switch only affects `present_planes()`; the measured whole-plane `present()` path bypasses composition, so its default
+commands, output format and captured bytes stay unchanged. With the switch off, SDR planes retain the prior SDR swapchain
+selection; HDR-source requests retain their prior behavior.
+
+### 9.3 Verification and limits
+
+* `port/test/vk_presenter_capture_colour_test.cpp` remains GPU-free. It now checks sRGB and gamma-2.2 round trips, PQ
+  anchors (100/1000/10000 nits), the 709/2020 matrix inverse, the SDR-white/HDR-peak conversion and shoulder, measured
+  B8 UNORM + sRGB-nonlinear selection, family preference/fallback, HDR10 selection, missing-HDR fallback, and strict
+  switch parsing. Built and run standalone through the existing CMake target: passed.
+* [The GPU test source](../port/test/vk_presenter_colour_test.cpp) uploads a synthetic RGBA8 pattern with four known bands,
+  captures the plain `present()` blit and the real composition, compares the default G22/P709 SDR bytes and the shader's
+  PQ/Rec.2020 encoding against the CPU reference, then toggles the production HDR10-output request. The GPU test was
+  compiled and run on an NVIDIA GeForce RTX 4090: raw plain-blit values matched (tolerance 1), composed SDR round-trip
+  matched (tolerance 2), and forced-PQ UNORM8 matched (tolerance 3); the WSI surface did not expose HDR10, so the named refusal was observed and the SDR fallback
+  capture matched. No HDR10 10-bit capture is claimed for this host. The test ended with zero Vulkan validation errors.
+* The GPU source is registered as a separate Windows test target (`vk_presenter_colour_test`, CTest name
+  `vk_presenter_colour`), labelled `gpu;vulkan;present`, with a 60-second timeout and return code 77 treated as skipped
+  when the Vulkan/Win32 capture path is unavailable. Its CMake stanza is adjacent to the presenter sync test and links
+  `Vulkan::Headers` plus `user32`; the integration owner adds that stanza separately to avoid overlapping CMake edits.
+  After integration, build it with `cmake --build port/build --target vk_presenter_colour_test` and run
+  `ctest --test-dir port/build -C RelWithDebInfo -R "^vk_presenter_colour$" --output-on-failure`.
+* No title boot or `PALMETTO_OK` build/relink was run or claimed; the current WSI surface also gives no local HDR10
+  display proof. The next HDR falsifier is to run this GPU capture on a surface listing a usable HDR10/ST.2084 format
+  and check the captured packed 10-bit PQ values. The opt-in output cannot alter the measured plain-blit/title path unless
+  that caller already routes through `present_planes()`.
+
+### 9.4 NOTICE draft row (not applied to `NOTICE.md`)
+
+> The PresentX colour/HDR10 attestation and opt-in composed HDR10 output ([docs/present_wiring.md](present_wiring.md), section 9) were independently implemented from this tree's measured UNORM/G22/P709 plane and Vulkan surface. Behaviour was cross-checked against Five Star Recomp (GPL-3.0-or-later, `34b4dfed`), VIctory (GPL-3.0-or-later, `63bcca43`), PercyScarlett (GPL-2.0-only, `e44c465e`), victory-fork (GPL-3.0-or-later, `9a9091d1`) and XCL (GPL-2.0-only, `623d02e4`), including Five Star's format-family and ST.2084 HDR10 rule. Those projects were read as behavioural evidence only: no source, comments, identifiers or tables were copied; each upstream remains the copyright of its contributors under its own licence.

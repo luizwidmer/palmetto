@@ -27,8 +27,12 @@
 //     and once the swapchain format and colour space it chose, so one boot attests fit, scale and colour space;
 //   - PALMETTO_PRESENT_SYNTHETIC=N (off by default, 1..8) presents the presenter's own known 16:9 non-black pattern
 //     instead of the title's plane for the first N presents of the title's own plain present path, through the same
-//     blit, swapchain and capture: the capture then reads the known values and the path is proven end to end.
-// With all three unset the recorded commands, formats and presents are the tree's byte for byte.
+//     blit, swapchain and capture: the capture then reads the known values and the path is proven end to end;
+//   - PALMETTO_PRESENT_HDR10=output (off by default) asks the composed-plane path to use a listed ST.2084 HDR10 surface
+//     even when its input plane is SDR; the shader converts SDR Rec.709 into PQ Rec.2020. If the surface has no usable
+//     ST.2084 target (none listed or it cannot be blitted), it names the refusal and keeps composed output SDR. Plain
+//     present() blits bypass the composer, and an unset switch leaves their recorded commands, formats and presents
+//     byte for byte unchanged.
 //
 // Tearing on request (PresentX's ImmediateThresholdPercent): with VK_KHR_swapchain_maintenance1 (or the EXT original)
 // the vsync swapchain is created with FIFO plus IMMEDIATE (FIFO_RELAXED when the surface cannot switch to IMMEDIATE),
@@ -233,6 +237,19 @@ public:
                              synthetic_max_presents);
             }
         }
+        if (const char* value = std::getenv("PALMETTO_PRESENT_HDR10"); value && *value) {
+            const char* refusal = nullptr;
+            present_colour::Hdr10OutputMode mode = present_colour::Hdr10OutputMode::off;
+            if (present_colour::parse_hdr10_output(value, mode, &refusal)) {
+                hdr10_output_diagnostic_ = mode == present_colour::Hdr10OutputMode::diagnostic;
+                if (hdr10_output_diagnostic_)
+                    std::fprintf(stderr,
+                                 "[rt] present: PALMETTO_PRESENT_HDR10=output: composed SDR planes request an HDR10 "
+                                 "surface and are converted to PQ Rec.2020 when one is listed\n");
+            } else {
+                std::fprintf(stderr, "[rt] present: %s; composed HDR10 output stays off\n", refusal);
+            }
+        }
         ok_ = recreate(true, false);
         if (!ok_ && capture_to_disk_) {
             // The surface refused a TRANSFER_SRC swapchain, or the staging buffer could not be made: present
@@ -334,13 +351,13 @@ public:
 
     // PresentX with planes (docs section 4.5): one or two textures, each scaled from its source rectangle to its
     // destination rectangle of the window, plane 1 blended over plane 0, composed by a compute pass into an RGBA16F image
-    // that is then copied to the swapchain image. Colour spaces are converted to the swapchain's: when a plane is HDR10 and
-    // the surface lists an HDR10 (ST.2084) format the swapchain uses it (hdr_active()), else the HDR10 planes are
-    // tone mapped to SDR (shoulder above 0.8 of SDR white, then clipped). Planes are filtered and blended in linear light. The swapchain
-    // is always UNORM here; sRGB-format sources are
-    // encoded again by the pass. Sources must be single-sample, sampled (no DENY_SHADER_RESOURCE) float/UNORM/sRGB
-    // colour textures; others are refused (VK_ERROR_FORMAT_NOT_SUPPORTED). Rectangles outside their range give
-    // VK_ERROR_UNKNOWN. vsync and `tear` as for present().
+    // that is then blitted to the swapchain image. Colour spaces are converted to the output: an HDR10 input plane or
+    // PALMETTO_PRESENT_HDR10=output requests HDR10 only when the surface lists a blit-capable ST.2084 format (hdr_active());
+    // otherwise the output stays SDR and HDR10 input is tone-mapped (shoulder above 0.8 SDR white, then clipped). Planes are
+    // filtered and blended in linear light. The SDR swapchain is UNORM; an HDR request uses a 10-bit UNORM ST.2084
+    // format. sRGB-format sources are encoded again by the pass. Inputs must be single-sample, sampled (no
+    // DENY_SHADER_RESOURCE) float/UNORM/sRGB colour textures; others are refused (VK_ERROR_FORMAT_NOT_SUPPORTED).
+    // Rectangles outside their range give VK_ERROR_UNKNOWN; vsync and `tear` behave as for present().
     VkResult present_planes(const PresentPlanes& planes, bool vsync, bool tear = false) {
         if (planes.count < 1 || planes.count > 2) return VK_ERROR_UNKNOWN;
         if (!(planes.sdr_white_nits > 0.0f) || !std::isfinite(planes.sdr_white_nits)) return VK_ERROR_UNKNOWN;
@@ -374,6 +391,12 @@ public:
     // Tests, on surfaces without HDR10: compose as if the output were HDR10 but write the PQ values into the (8-bit,
     // UNORM) swapchain, so the encoder can be checked on any GPU. Takes effect with the next present_planes().
     void force_hdr_encoding(bool on) { force_hdr_encoding_ = on; }
+    // The opt-in HDR10-output diagnostic (PALMETTO_PRESENT_HDR10=output), exposed so the GPU test can toggle it without
+    // changing process-global environment. The next present_planes() requests HDR10; plain present() is untouched.
+    void set_hdr10_output_diagnostic(bool on) {
+        std::lock_guard lock(present_mutex_);
+        hdr10_output_diagnostic_ = on;
+    }
 
     // The fit/scale rule (port/src/present_fit.h) the plain present path and the synthetic control use. fill (the
     // construction default and the tree's measured path) stretches the source over the whole window; fit keeps the
@@ -555,7 +578,8 @@ private:
         // frame keeps whatever the swapchain has (black is black), except that a blit needs the SDR one.
         bool want_hdr = swapchain_hdr_req_;
         if (planes)
-            want_hdr = (planes->plane[0].hdr10) || (planes->count > 1 && planes->plane[1].hdr10);
+            want_hdr = hdr10_output_diagnostic_ || (planes->plane[0].hdr10) ||
+                       (planes->count > 1 && planes->plane[1].hdr10);
         else if (binding)
             want_hdr = false;
         if (vsync != vsync_ || stale_ || srgb != swapchain_srgb_ || want_hdr != swapchain_hdr_req_) {
@@ -1492,49 +1516,42 @@ private:
         if (vkGetPhysicalDeviceSurfaceFormatsKHR_(physical_, surface_, &count, formats.data()) != VK_SUCCESS || !count)
             return false;
         formats.resize(count);
-        // An sRGB source wants an sRGB swapchain (the blit decodes and encodes, which cancel); any other source
-        // wants UNORM (the bytes go through as they are). BGRA before RGBA, as the surface lists them.
-        VkSurfaceFormatKHR chosen = formats[0];
-        bool found = false;
-        bool chose_hdr = false;
-        if (hdr) {
-            // A plane in HDR10 (PQ, Rec.2020): the surface's ST.2084 format, which needs VK_EXT_swapchain_colorspace on
-            // the instance. Without it the composition converts to SDR.
-            for (const VkFormat wanted : {VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_A2R10G10B10_UNORM_PACK32}) {
-                for (const auto& f : formats)
-                    if (f.format == wanted && f.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
-                        chosen = f;
-                        found = chose_hdr = true;
-                        break;
-                    }
-                if (found) break;
-            }
-            if (!found && !warned_hdr_) {
-                warned_hdr_ = true;
+        // Preserve the measured family rule for a plain blit (sRGB source -> sRGB target; otherwise UNORM). Composed
+        // planes use the same UNORM output family because the shader performs the transfer conversion before its blit.
+        present_colour::SurfaceChoice selection = present_colour::vulkan::choose_surface_format(formats, srgb, hdr);
+        bool hdr_format_unusable = false;
+        if (selection.hdr_active && !(format_features(formats[selection.index].format) & VK_FORMAT_FEATURE_BLIT_DST_BIT)) {
+            // The compositor blits its PQ-encoded RGBA16F result into the surface image. A WSI-listed ST.2084 entry
+            // that cannot be a blit destination is not usable here; select the measured SDR family instead of failing.
+            selection = present_colour::vulkan::choose_surface_format(formats, srgb, false);
+            selection.hdr_missing = true;
+            hdr_format_unusable = true;
+        }
+        const VkSurfaceFormatKHR chosen = formats[selection.index];
+        const bool chose_hdr = selection.hdr_active;
+        if (selection.hdr_missing && !warned_hdr_) {
+            warned_hdr_ = true;
+            if (hdr_format_unusable && hdr10_output_diagnostic_)
+                std::fprintf(stderr,
+                             "[rt] present: PALMETTO_PRESENT_HDR10=output refused: the surface ST.2084 format cannot be a "
+                             "blit destination; composed output remains SDR\n");
+            else if (hdr_format_unusable)
+                std::fprintf(stderr,
+                             "[rt] present: HDR10 output refused: the surface ST.2084 format cannot be a blit destination; "
+                             "HDR10 planes are tone-mapped to SDR\n");
+            else if (hdr10_output_diagnostic_)
+                std::fprintf(stderr,
+                             "[rt] present: PALMETTO_PRESENT_HDR10=output refused: the surface has no HDR10 (ST.2084) "
+                             "format; composed output remains SDR (HDR10 source planes are tone-mapped)\n");
+            else
                 std::fprintf(stderr, "[rt] present: the surface has no HDR10 (ST.2084) format; HDR10 planes are converted to "
                                      "SDR by tone mapping\n");
-            }
         }
-        for (const VkFormat wanted : srgb ? std::array<VkFormat, 2>{VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_R8G8B8A8_SRGB}
-                                                : std::array<VkFormat, 2>{VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM}) {
-            if (chose_hdr) break;
-            for (const auto& f : formats)
-                if (f.format == wanted && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-                    chosen = f;
-                    found = true;
-                    break;
-                }
-            if (found) break;
-        }
-        if (!found && srgb) {
-            if (!warned_srgb_) std::fprintf(stderr, "[rt] present: the surface has no sRGB 8-bit format; an sRGB back buffer is shown darker\n");
+        if (selection.srgb_missing) {
+            if (!warned_srgb_)
+                std::fprintf(stderr,
+                             "[rt] present: the surface has no sRGB 8-bit format; an sRGB back buffer is shown darker\n");
             warned_srgb_ = true;
-            for (const auto& f : formats)
-                if ((f.format == VK_FORMAT_B8G8R8A8_UNORM || f.format == VK_FORMAT_R8G8B8A8_UNORM) &&
-                    f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-                    chosen = f;
-                    break;
-                }
         }
         // PALMETTO_PRESENT_GEOMETRY=1: the section-15 attestation, once per presenter: the swapchain geometry and the
         // colour-space handling the measured present path acts on. Measurement only; nothing here reads the switch later.
@@ -1737,6 +1754,7 @@ private:
     bool swapchain_srgb_ = false;  // the swapchain format follows the source being presented (set once it exists)
     bool swapchain_hdr_req_ = false;  // the swapchain was built for an HDR10 request (it has the format only if hdr_active_)
     bool hdr_active_ = false;
+    bool hdr10_output_diagnostic_ = false;  // PALMETTO_PRESENT_HDR10: ask the composed-plane path for an HDR10 surface
     std::atomic<std::uint64_t> composed_{0};
     std::atomic<bool> force_hdr_encoding_{false};
     bool warned_hdr_ = false;
