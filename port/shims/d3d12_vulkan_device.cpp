@@ -10356,6 +10356,31 @@ public:
             return false;
         }
 
+        // PALMETTO_TITLE_VA_WINDOWS is opt-in, so this diagnostic does not touch the default import path. The exact
+        // compare below is TitleVaAliasTable::add_window(device_address, bytes) against the arena base used as
+        // heap_base; recording both endpoints makes a negative host ordering falsifiable without guessing from the
+        // refusal name alone.
+        const std::uint64_t arena_base = state_.arena.address;
+        if (state_.arena.size > UINT64_MAX - arena_base) {
+            discard();
+            why = "no_arena_geometry";
+            return false;
+        }
+        const std::uint64_t arena_end = arena_base + state_.arena.size;
+        const std::uint64_t heap_base = state_.context->heap_base();
+        const char* ordering = device_address < arena_base ? "below_heap_base" :
+                               device_address < arena_end ? "inside_arena" : "at_or_above_arena_end";
+        const std::uint64_t base_distance = device_address < arena_base ? arena_base - device_address :
+                                                                        device_address - arena_base;
+        std::fprintf(stderr,
+                     "[rt] d3d12: title-VA window BDA candidate: raw VA 0x%llx + 0x%llx; candidate BDA 0x%llx; "
+                     "heap_base 0x%llx; arena [0x%llx,0x%llx); ordering=%s base_distance=0x%llx; "
+                     "allocation_bytes=0x%llx\n",
+                     static_cast<unsigned long long>(va), static_cast<unsigned long long>(bytes),
+                     static_cast<unsigned long long>(device_address), static_cast<unsigned long long>(heap_base),
+                     static_cast<unsigned long long>(arena_base), static_cast<unsigned long long>(arena_end), ordering,
+                     static_cast<unsigned long long>(base_distance), static_cast<unsigned long long>(requirements.size));
+
         const std::uint64_t id = state_.next_title_va_window_id.fetch_add(1, std::memory_order_relaxed);
         if (!id) {
             discard();

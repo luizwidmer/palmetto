@@ -2896,11 +2896,12 @@ the measured title-buffer window model, not a claim that the peers share one imp
 
 ## 24. Outside-arena title-VA window device adapter
 
-**Status: implemented behind `PALMETTO_TITLE_VA_WINDOWS`; portable/replay-lookup units pass; the synthetic GPU case is now in the existing draw test, with its run pending.**
+**Status: implemented behind `PALMETTO_TITLE_VA_WINDOWS`; portable/replay-lookup units pass; manual production BDA probe on RTX 4090/256 MiB arena accepted the window, but the test's final CPU pixel assertion was blocked by queue-slot-14 `Signal`; dedicated Title-VA CTest is deferred as P-48.**
 This extends section 23's tested policy into the Vulkan device path. The public runtime switch is strict: unset/false keeps the prior
 external-host import path; an explicit true value selects the window adapter; malformed text logs `invalid_switch` and refuses
 new raw spans. The off branch installs no window allocator/resolver, creates no window Vulkan objects, and keeps the existing
-buffer/index/import path unchanged.
+buffer/index/import path unchanged. The diagnostic candidate/base line added for this measurement is reached only after the
+explicit opt-in and Vulkan BDA allocation; it does not change the default path.
 
 ### 24.1 Measured lookup and lifecycle
 
@@ -2954,34 +2955,56 @@ unsupported and unmeasured; do not treat the window as coherent with the title's
 Bounds are fixed and checked twice: no more than 32 windows/aliases, 4 MiB per window, and 32 MiB total logical window bytes;
 the device separately caps actual Vulkan allocation bytes at 32 MiB. Only host-coherent memory is accepted, so the upload
 path never omits a required non-coherent flush. No window is reclaimed before device teardown; exhausting a table or byte
-budget is a named refusal (`window_table_full` / `window_budget_spent`), not an unbounded allocation. Other named device
-refusals include `no_arena_geometry`, `buffer_device_address_unavailable`, `title_va_rebasing_disabled`,
-`title_pages_unreadable`, `host_coherent_memory_unavailable`, buffer/memory create-bind-map failures, below-arena/overlap,
-48-bit-unrepresentable BDA, alias overlap/out-of-bounds, and `invalid_switch`.
+budget is a named refusal (`window_table_full` / `window_budget_spent`), not an unbounded allocation. The production BDA
+ordering compare reports `window_below_heap_base` when a candidate BDA precedes the single `heap_base`, and
+`window_overlaps_arena` when it is below the arena's exclusive end. Other named device refusals include
+`no_arena_geometry`, `buffer_device_address_unavailable`, `title_va_rebasing_disabled`, `title_pages_unreadable`,
+`host_coherent_memory_unavailable`, buffer/memory create-bind-map failures, 48-bit-unrepresentable BDA, alias overlap/out-of-bounds,
+and `invalid_switch`.
 
 ### 24.3 Verification and limits
 
 `port/test/buffer_va_index_test.cpp` retains the CPU switch and policy-boundary cases and its synthetic replay composition:
 raw title VA -> `ConsoleVaMap` -> `BufferVaIndex` -> exact `heap_base + console VA` BDA, plus a V# patch that preserves its
-format/stride bits. The synthetic GPU arm is in the existing `d3d12_draw_test` CTest target in
-`port/test/d3d12_draw_test.cpp` (the CMake stanza at `port/CMakeLists.txt` lines 2901–2911 is reused; no CMake edit). It
-passes a committed `VirtualAlloc` byte pattern as a raw vertex-buffer VA, with no D3D12 resource behind it. An explicit
-test-only `VulkanDeviceInfo::title_va_window_test_hooks` supplies a separate coherent Vulkan `VkBuffer`, raw-VA resolver,
-and source-page pull callback; these hooks bypass only the production `create_title_va_window` BDA allocator/resolver and
-copy, while the same `VulkanContext` submission registration, `buffer_at` replay lookup, D3D12 draw and GPU readback run.
-The shader echoes all four vertex-color bytes to an integer render target. After first registration, the test changes the
-source page and submits again; the second readback must equal the changed pattern, and the hook verifies a second pull into
-the same mapped backing. A view one byte beyond that synthetic window and an overlapping `WriteBufferImmediate` must stay
-unresolved with `alias_view_out_of_bounds` and `write_buffer_immediate_unsupported`. This test covers direct vertex-view
-resolution only: it does not test the production BDA placement/`TitleVaAliasTable` path, `ConsoleVaMap` root/table/V#
-rebasing, or arbitrary shader UAV writeback.
+format/stride bits. The added ordering case models the production compare: a candidate below `heap_base` refuses by
+`window_below_heap_base`, a candidate at or inside the arena refuses by `window_overlaps_arena`, and the first candidate
+at `arena_end` has a nonnegative delta satisfying `heap_base + console_va == BDA`.
 
-A separate non-injected run on the NVIDIA GeForce RTX 4090, with `d.request_buffer_device_address=true`, reached the
-production allocator but refused its candidate window as `window_below_heap_base`; `buffer_at` then remained unresolved
-and no invalid draw was submitted. The earlier run omitted that Vulkan test-device feature, so it is not relied upon. The
-corrected run confirms one named host refusal, not a successful production window: the numeric candidate BDA/arena pair,
-production BDA ordering on other drivers, and successful root/table/V# aliasing remain unmeasured. No game bytes, game
-shaders, package paths, extracted tables, or title boot were used.
+The synthetic GPU evidence was captured manually with Vulkan validation off. A committed synthetic `VirtualAlloc` page
+was passed as a raw vertex-buffer VA, with no D3D12 resource behind it; test-only
+`VulkanDeviceInfo::title_va_window_test_hooks` supplied a separate coherent Vulkan `VkBuffer`, raw-VA resolver and
+source-page pull callback. The hook seam bypasses only production `create_title_va_window`'s BDA allocator/resolver and
+copy; `VulkanContext` submission registration, `buffer_at` replay lookup, D3D12 draw and GPU readback were exercised. The
+reported manual result was `raw ... registered and resolved; pulled readback 21 43 65 87 -> 9a bc de f0`; assertions
+covered one backing, two pulls, an out-of-window view refusal (`alias_view_out_of_bounds`), and an overlapping immediate
+write refusal (`write_buffer_immediate_unsupported`). The validation-off console log was not retained; the overall draw
+CTest invocation later failed at an unrelated stale 512 MiB heap-OOM expectation (line 730), so that full target result is
+not green evidence for this slice. This manual arm covers direct vertex-view resolution only: it does not test production
+BDA placement/`TitleVaAliasTable`, `ConsoleVaMap` root/table/V# rebasing, or arbitrary shader UAV writeback. The test hooks
+remain a test-only seam; the shared `d3d12_draw_test` source is byte-identical to baseline in the final tree. The P-45
+production measurement below used a temporary env-gated branch and restored it after the one run. A dedicated GPU CTest
+target is deferred as P-48.
+
+**Production BDA ordering measurement (validation off, no game data):** with `PALMETTO_TITLE_VA_WINDOWS=1`,
+`PALMETTO_ARENA_MB=256`, empty test hooks, and Vulkan buffer-device-address enabled, a synthetic committed host span
+`0x153aed10000 + 0x120000` reached the production `create_title_va_window` allocator on the NVIDIA GeForce RTX 4090. Its
+candidate BDA was `0x17490000`; `heap_base`/arena base was `0x07400000`, and the arena was
+`[0x07400000, 0x17400000)` (exclusive end). The BDA start is `0x90000` above that end, with representable console delta
+`0x10090000`. `TitleVaAliasTable` accepted the window, the raw alias registered, and the production resolver/pull path
+logged five 1.125 MiB refreshes (5.6 MiB total). `ExecuteCommandLists` returned success, five draws were emitted, and
+internal render-target readback diagnostics ran. The test process then exited 1 at the unrelated Xbox queue slot-14
+`Signal` proxy refusal before the fixture's CPU pixel-map assertion; therefore this proves production placement,
+registration, pulls and draw submission for this 256 MiB arena ordering, but not an end-to-end sampled pixel. No device
+loss occurred.
+
+An earlier uninstrumented run was reported as `window_below_heap_base`, but its candidate/base pair was not captured and
+one earlier probe omitted the Vulkan test-device BDA feature; that qualitative refusal is not the result of this measured
+run. A preceding diagnostic attempt inherited `PALMETTO_ARENA_MB=1024` and stopped at the fixture's 512 MiB heap OOM
+assertion before requesting any window, so it produced no BDA candidate. This measurement is conditional on the 256 MiB
+arena and this RTX 4090 allocation order; it does not establish that 1 GiB arenas or other adapters will place a candidate
+above the arena. No relaxed check was added: below-base candidates still must refuse as `window_below_heap_base` because
+the shader requires `heap_base + console_va` and cannot represent a negative delta. No game bytes, game shaders, package
+paths, extracted tables, or title boot were used.
 
 **Synthetic-arm falsifier:** the first draw must log window registration, the hook must allocate one backing and resolve
 both valid draws, both readbacks must match their respective source bytes, and the second draw must invoke the pull hook;
@@ -2989,12 +3012,14 @@ the two negative controls must return `unresolved_resource` with their exact nam
 registration/resolution/pull, stale or mismatched GPU bytes, a successful bad-view/write submission, or device loss falsifies
 this measured replay arm. Absence of host-coherent memory for the test buffer is an explicit skip, not a pass.
 
-**Production-adapter falsifier (not yet satisfied):** with test hooks empty, record the candidate window BDA and arena
-base/extent. For a candidate below the base, the production path must refuse as `window_below_heap_base` and leave the
-submission unresolved; acceptance/submission with that invalid delta falsifies the guard. With a candidate BDA above
-`heap_base + arena_size` and a representable 48-bit delta, the ordinary adapter must register the window, pull the changed
-source bytes, and produce the same GPU readback; refusal or mismatched bytes falsifies the successful production path.
-The present host has shown the below-base refusal but not the successful case or numeric-address trace.
+**Production-adapter falsifier / remaining limit:** the measured 256 MiB RTX 4090 run had hooks empty and a candidate
+`BDA >= arena_end`; it registered, pulled the raw page five times, and returned a successful draw submission. The expected
+pixel assertion remains open because the fixture's Xbox queue slot-14 `Signal` proxy refused before CPU mapping the
+readback. A candidate below `heap_base` must still refuse as `window_below_heap_base` and remain unresolved; accepting or
+submitting with that negative delta falsifies the guard. A candidate at/above `arena_end` with a representable 48-bit delta
+should register, pull and produce the expected readback; refusal or mismatched bytes falsifies that successful path. The
+positive 256 MiB measurement falsifies a blanket claim that this RTX 4090 always puts the window below the heap base, but
+does not establish ordering for 1 GiB arenas or other adapters; the earlier below-base report has no numeric pair.
 
 **Shader-UAV falsifier (not yet run):** allocate a separate synthetic raw title page and window, expose its V# as a UAV,
 then have a controlled shader store a distinct sentinel and wait for completion without any intervening CPU-to-GPU pull.

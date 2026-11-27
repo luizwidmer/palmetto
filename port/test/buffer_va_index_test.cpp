@@ -249,6 +249,27 @@ void title_va_alias_cases() {
     check(table.add_window(9, arena - 0x1000, 0x1000) == TitleVaAliasRefusal::window_below_heap_base &&
               table.add_window(10, arena + 0x1000, 0x1000) == TitleVaAliasRefusal::window_overlaps_arena,
           "negative-bias and arena-overlapping windows are refused");
+
+    // Mirror the production allocator's BDA ordering refusal with a synthetic heap_base and arena extent. A candidate
+    // ending exactly at heap_base still has a negative bias; equality is not a valid external window because the arena
+    // itself begins there; the first byte at arena_end is representable with a nonnegative console VA.
+    TitleVaAliasTable ordering(TitleVaWindowsSwitch::on, arena, arena_bytes);
+    const auto below_base = ordering.add_window(1, arena - 0x1000, 0x1000);
+    const auto at_base = ordering.add_window(2, arena, 0x1000);
+    const auto overlaps_end = ordering.add_window(3, arena_end - 1, 1);
+    const auto at_arena_end = ordering.add_window(4, arena_end, 0x1000);
+    check(below_base == TitleVaAliasRefusal::window_below_heap_base &&
+              at_base == TitleVaAliasRefusal::window_overlaps_arena &&
+              overlaps_end == TitleVaAliasRefusal::window_overlaps_arena &&
+              at_arena_end == TitleVaAliasRefusal::none && ordering.window_count() == 1 &&
+              ordering.window_bytes() == 0x1000,
+          "BDA ordering refuses below-base or overlapping candidates and accepts the exact arena-end boundary");
+    TitleVaAliasResolution boundary{};
+    check(ordering.add_alias(401, title_a + 0x400000, 0x1000, 4) == TitleVaAliasRefusal::none &&
+              ordering.resolve(title_a + 0x400000, 0x1000, boundary) == TitleVaAliasRefusal::none &&
+              boundary.console_va == arena_bytes && boundary.device_address == arena_end &&
+              arena + boundary.console_va == boundary.device_address,
+          "the first accepted BDA above the arena has no underflow and preserves heap_base + console_va");
     check(table.add_window(11, arena + TitleVaAliasTable::kConsoleVaSpace, 0x1000) ==
               TitleVaAliasRefusal::window_v48_unrepresentable,
           "a window outside the 48-bit V# address extent is refused");
@@ -263,8 +284,12 @@ void title_va_alias_cases() {
     check(no_geometry.add_window(1, external, 0x1000) == TitleVaAliasRefusal::no_arena_geometry,
           "a window without the one heap_base and arena extent is refused");
     check(std::strcmp(palmetto::title_va_alias_refusal_name(TitleVaAliasRefusal::window_v48_unrepresentable),
-                      "window_v48_unrepresentable") == 0,
-          "refusal names are stable for startup-trace reporting");
+                      "window_v48_unrepresentable") == 0 &&
+              std::strcmp(palmetto::title_va_alias_refusal_name(TitleVaAliasRefusal::window_below_heap_base),
+                          "window_below_heap_base") == 0 &&
+              std::strcmp(palmetto::title_va_alias_refusal_name(TitleVaAliasRefusal::window_overlaps_arena),
+                          "window_overlaps_arena") == 0,
+          "BDA ordering refusal names are stable for startup-trace reporting");
 
     TitleVaAliasTable budget(TitleVaWindowsSwitch::on, arena, arena_bytes);
     constexpr std::uint64_t budget_base = arena_end + 0x10000000ull;
