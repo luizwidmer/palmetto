@@ -326,3 +326,83 @@ code, comment text, identifier or table from any of them was copied; every imple
 measured on this project's own package, and the projects remain the copyright of their contributors under their own
 licences (the attribution rule is [upstream_port.md](upstream_port.md) section 3, and the `NOTICE.md` entry for the
 referenced project is the lead's to add).
+
+## 9. C-04: Series-S kind-7 consumer readiness
+
+**Status: readiness only; no title-level kind-7 consumer has been observed.** This update narrows the earlier default-boot
+negative in sections 2.3 and 4.3-4.4: the default route is still the title-owned six-sample kind-6 compose described in
+[upscale_standin.md](upscale_standin.md), but a Series-S answer (`PALMETTO_CONSOLE_TYPE=6`) is now measured to select the
+kind-7 branch and create its output shape. What remains absent is the FFX dispatch and any observation of that output
+being consumed by a compose draw. This is not a translation failure or evidence that kind 7 skips the draw.
+
+### 9.1 Measured branch and the consumer gap
+
+| case | measurement | consequence |
+|---|---|---|
+| default console answer | the title selects kind 6; its existing compose draw has six pixel-stage image samples and reads the measured 3840x2160 colour image into the 3840x2160 target ([upscale_standin.md](upscale_standin.md) sections 2.1 and 4.1) | this is the current picture path and remains byte-identical when the readiness switch is unset |
+| Series-S answer | the registry read maps type 6, the selector returns 7, and the title selects its kind-7 object ([console_type_branches.md](console_type_branches.md) section 2.4; [decomp_renderer.md](decomp_renderer.md) section 11.4) | the console branch is real; the default kind-6 draw is not evidence for its consumer |
+| kind-7-created shape | DXGI format 67 (`R9G9B9E5_SHAREDEXP`), 1920x1080x1, one mip/layer/sample, RT+UAV flags; the branch also places 1280x720 colour/depth resources in formats 57/62 ([decomp_renderer.md](decomp_renderer.md) sections 11.4 and 12.1) | the 1920x1080 image is the candidate kind-7 output source; the 1280x720 colour/depth shapes are candidate dispatch inputs, not proof of which resources FFX consumed |
+| format backing | the created shape is served by the measured mutable `R32_UINT` backing on the Series-S arm, while its render-target view remains refused by name ([decomp_renderer.md](decomp_renderer.md) sections 12.2 and 13.3) | resource creation alone does not prove that a writable FFX output or a later sampled view was used |
+| FFX request / dispatch | the shape-served Series-S arms record **0 of 29** FSPX programs; the FFX DLL maps, but the first upscaler pipeline and `ffxDispatch` are not reached ([decomp_renderer.md](decomp_renderer.md) sections 12.3-12.5 and 13.1-13.5) | no output contents, resource identity at the consumer, filter, numeric transform or compose rectangle has been observed |
+
+The shape-served arms in sections 12-13 (`fsr1`, `fsr2`, `fsr7`, `df1`, `df2`, `fsr9`) stop in machine stage 2 before
+the FFX dispatch; the 0/29 count is unchanged. The older `s61`/`s62` arms reached stage 3 while the shape itself was
+still refused at creation, so they are not consumer evidence either. Several later arms reported device loss, including
+a control arm without the Series-S shape; the loss cause is unassigned and the host has no stable repeatable FFX window.
+No result supports forcing a runtime route or treating a same-format image as kind 7.
+
+### 9.2 Readiness planner and compose contract
+
+`port/src/upscale_kind7.h` is a GPU-free, fail-closed planner kept separate from `upscale_standin::plan`. Its candidate
+source is the created 1920x1080 DXGI-67 shape, not the 1280x720 candidate colour/depth inputs. Its candidate target is
+the measured default kind-6 3840x2160 compose target; that geometry is a testable mapping hypothesis only, not an
+observed kind-7 destination. The separate `Provenance::series_s_kind7_output` input must be explicitly supplied; format,
+extent and layout alone never identify an FFX output.
+
+The only switch spelling accepted by `PALMETTO_UPSCALE_KIND7_CONSUMER` is the exact token `measured` (case-insensitive,
+with surrounding space, tab, CR or LF trimmed). The plan still refuses unless the caller also supplies a resolved, sampled
+E5B9G9R9 view, the measured source/target formats and extents, an allowed sampled-image layout, both explicitly recorded
+whole-rect bounds, an observed producer-to-compose link, point filtering and passthrough numeric semantics. Each failure returns a named refusal; the measured
+current input stops at `consumer_not_observed`. `map_point_texel` exposes the candidate centre-to-texel map for tests,
+but callers must require `Plan::compose` before recording any draw.
+
+`port/src/vulkan_present_compose.h` adds only a Vulkan adapter: it maps the candidate E5B9G9R9 and RGBA16F formats,
+checks `VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT`, and maps the explicit source layout to the present composer's accepted
+SHADER_READ_ONLY_OPTIMAL/GENERAL states before passing evidence to the pure planner. It neither assigns kind-7 provenance
+nor changes `PresentComposer::record`/`present_planes`. The generic present compositor already accepts sampled single-plane
+colour images with those tracked layouts, point or linear fetch, and an explicit
+SDR/HDR colour transform; none of those details has been observed for the title's FFX output. No runtime caller currently
+applies the planner, so the opt-in switch cannot alter a title frame before the missing link is measured. With the switch
+off, the existing command recording remains byte-for-byte untouched.
+
+### 9.3 Tests, arms and limits
+
+- `port/test/frame_dump_test.cpp` covers the switch token, named refusals, explicit provenance, VkFormat mapping and
+  sampled-image support, measured extents, full-rectangle checks, the refusal when the consumer link is absent, and the
+  candidate point-map endpoints/2x footprint. These are GPU-free checks; a synthetic complete input exercises the pure
+  planner only and is not a claim that the title has made that observation.
+- `port/test/vk_presenter_sync_test.cpp` adds a feature-gated synthetic E5 image through the generic PresentX compositor
+  and capture. It verifies that this host can sample and compose a controlled packed-float image when the format
+  advertises sampled/transfer-destination support. It does not use the title's resource, the FFX dispatch or an accepted
+  kind-7 plan; the test's candidate remains refused for `consumer_not_observed`.
+- No game boot or package-DLL arm was run for this readiness slice. The existing shape-served Series-S arms already end
+  before FFX and the recent host arms include repeated device losses; the optional arm is deferred until the host is
+  stable. The stop rule is two device losses.
+
+**Next falsifier:** one stable light Series-S arm must survive the loading window, reach the first FFX pipeline creation
+and `ffxDispatch`, then show the exact output resource being sampled by a subsequent compose draw. Record the output and
+consumer resource identity, Vulkan view format/features/layout, source and destination rectangles, filter, and numeric
+conversion; a nonzero FSPX count alone is not enough. If two device losses occur, stop the arm. Until the same-resource
+consumer is observed, keep the route at readiness and retain the named refusal.
+
+### 9.4 Peer credit and NOTICE handoff
+
+The readiness decision is based on this project's own route and stage measurements, cross-checked against **XCL**
+(GPL-2.0-only, reference clone `623d02e`) for the public claim that the game's console FSR DLL's 29 pipelines and 20
+passes can run, and **PercyScarlett** (GPL-2.0-only, reference clone `e44c465`) for the stretch-of-colour fallback. These
+are mechanism references only; no code, comments, identifiers or tables were copied. The existing attribution in section
+8 and the clean-room rule in [upstream_port.md](upstream_port.md) remain in force.
+
+**Lead-owned NOTICE row to add:** the kind-7 consumer readiness planner and synthetic compose seam were implemented from
+this project's own measurements and cross-checked against XCL (`623d02e`) and PercyScarlett (`e44c465`), both GPL-2.0-only;
+no peer code was copied, and each project's copyright and licence continue to apply to its own tree.

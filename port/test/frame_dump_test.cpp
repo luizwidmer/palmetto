@@ -4,6 +4,8 @@
 // on, including a resolve that writes the target AFTER its last draw. No Vulkan loader, GPU or game data.
 #include "../src/vulkan_replay.h"
 #include "../src/vulkan_backend.h"  // docs/vertex_buffer_va.md section 12: the pacing knobs' pure mapping
+#include "../src/vulkan_present_compose.h"  // kind-7 compose-format adapter; no device is created here
+#include "../src/upscale_kind7.h"
 
 #include <cmath>
 #include <cstdint>
@@ -448,6 +450,184 @@ int main() {
                su::pipeline_id != palmetto::frame_dump::ps_control_pipeline_id,
            "the stand-in's pipeline id is its own (not one of the frame dump's controls)");
 
+    // Series-S kind-7 consumer readiness (docs/fsr_route.md): the measured output/target formats and extents define
+    // only a candidate whole-rect mapping. The title has not yet shown a kind-7 output entering a compose draw, and the
+    // filter/numeric interpretation remain unknown, so the real readiness input must refuse to draw by name.
+    namespace k7 = palmetto::upscale_kind7;
+    expect(!k7::parse_switch(nullptr) && !k7::parse_switch("") && !k7::parse_switch("0") &&
+               !k7::parse_switch("on") && !k7::parse_switch("measuredly") && k7::parse_switch("measured") &&
+               k7::parse_switch(" MeAsUrEd \t"),
+           "the kind-7 consumer requires the exact opt-in token `measured`");
+    const auto kind7_inputs = [] {
+        k7::Inputs in;
+        in.switch_on = true;
+        in.provenance = k7::Provenance::series_s_kind7_output;
+        in.source_resolved = true;
+        in.source_format = k7::Format::r9g9b9e5_ufloat;
+        in.source_sampled = true;
+        in.source_width = k7::source_width;
+        in.source_height = k7::source_height;
+        in.target_format = k7::Format::r16g16b16a16_float;
+        in.target_width = k7::target_width;
+        in.target_height = k7::target_height;
+        return in;
+    };
+    const auto observed_kind7_inputs = [&] {
+        auto in = kind7_inputs();
+        in.consumer_observed = true;
+        in.source_layout = k7::SourceLayout::shader_read_only;
+        in.has_source_rect = true;
+        in.source_rect = {0.0f, 0.0f, float(k7::source_width), float(k7::source_height)};
+        in.has_target_rect = true;
+        in.target_rect = {0.0f, 0.0f, float(k7::target_width), float(k7::target_height)};
+        return in;
+    };
+    auto kind7_off = kind7_inputs();
+    kind7_off.switch_on = false;
+    const k7::Plan kind7_off_plan = k7::plan(kind7_off);
+    expect(kind7_off_plan.refusal == k7::Refusal::switch_off && !kind7_off_plan.candidate_mapping &&
+               !kind7_off_plan.compose,
+           "switch-off refuses before producing candidate geometry or a draw");
+    auto no_provenance = kind7_inputs();
+    no_provenance.provenance = k7::Provenance::unknown;
+    expect(k7::plan(no_provenance).refusal == k7::Refusal::no_kind7_provenance,
+           "format and extent alone never establish kind-7 provenance");
+    const k7::Plan compose_adapter_candidate = k7::plan_present_candidate(
+        kind7_inputs(), VK_FORMAT_E5B9G9R9_UFLOAT_PACK32, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_FORMAT_R16G16B16A16_SFLOAT);
+    expect(compose_adapter_candidate.refusal == k7::Refusal::consumer_not_observed &&
+               compose_adapter_candidate.candidate_mapping && !compose_adapter_candidate.compose,
+           "the Vulkan compose adapter validates formats but still refuses the unobserved consumer link");
+    auto adapter_no_provenance = kind7_inputs();
+    adapter_no_provenance.provenance = k7::Provenance::unknown;
+    expect(k7::plan_present_candidate(adapter_no_provenance, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32,
+                                      VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                      VK_FORMAT_R16G16B16A16_SFLOAT).refusal ==
+               k7::Refusal::no_kind7_provenance,
+           "the compose format adapter does not manufacture kind-7 provenance");
+    expect(k7::plan_present_candidate(kind7_inputs(), VK_FORMAT_R8G8B8A8_UNORM,
+                                      VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                      VK_FORMAT_R16G16B16A16_SFLOAT).refusal ==
+               k7::Refusal::source_format_unmeasured,
+           "a different Vulkan source view format has a named refusal");
+    expect(k7::plan_present_candidate(kind7_inputs(), VK_FORMAT_E5B9G9R9_UFLOAT_PACK32, 0,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_FORMAT_R16G16B16A16_SFLOAT).refusal == k7::Refusal::source_not_sampled,
+           "the measured E5 source is refused if the Vulkan view lacks sampled-image support");
+    expect(k7::plan_present_candidate(kind7_inputs(), VK_FORMAT_E5B9G9R9_UFLOAT_PACK32,
+                                      VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                      VK_FORMAT_R8G8B8A8_UNORM).refusal ==
+               k7::Refusal::target_format_unmeasured,
+           "the compose adapter refuses a target format outside the measured RGBA16F target");
+    auto adapter_bad_layout = kind7_inputs();
+    adapter_bad_layout.consumer_observed = true;
+    expect(k7::plan_present_candidate(adapter_bad_layout, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32,
+                                      VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                      VK_FORMAT_R16G16B16A16_SFLOAT).refusal == k7::Refusal::source_layout_unsupported,
+           "the compose adapter names a source layout that the compositor cannot sample");
+    auto unresolved = kind7_inputs();
+    unresolved.source_resolved = false;
+    expect(k7::plan(unresolved).refusal == k7::Refusal::source_unresolved,
+           "an unresolved kind-7 source is refused");
+    auto wrong_source_format = kind7_inputs();
+    wrong_source_format.source_format = k7::Format::other;
+    expect(k7::plan(wrong_source_format).refusal == k7::Refusal::source_format_unmeasured,
+           "a non-RGB9E5 source format is refused");
+    auto empty_source = kind7_inputs();
+    empty_source.source_width = 0;
+    expect(k7::plan(empty_source).refusal == k7::Refusal::source_extent_degenerate,
+           "a zero-width source is a named refusal");
+    auto unmeasured_source = kind7_inputs();
+    unmeasured_source.source_width = 1280;
+    expect(k7::plan(unmeasured_source).refusal == k7::Refusal::source_extent_unmeasured,
+           "a non-1920x1080 source shape is refused");
+    auto wrong_target_format = kind7_inputs();
+    wrong_target_format.target_format = k7::Format::other;
+    expect(k7::plan(wrong_target_format).refusal == k7::Refusal::target_format_unmeasured,
+           "a non-RGBA16F target format is refused");
+    auto empty_target = kind7_inputs();
+    empty_target.target_height = 0;
+    expect(k7::plan(empty_target).refusal == k7::Refusal::target_extent_degenerate,
+           "a zero-height target is a named refusal");
+    auto unmeasured_target = kind7_inputs();
+    unmeasured_target.target_width = 1920;
+    expect(k7::plan(unmeasured_target).refusal == k7::Refusal::target_extent_unmeasured,
+           "a non-3840x2160 target shape is refused");
+    auto cropped_source = observed_kind7_inputs();
+    cropped_source.source_rect = {1.0f, 0.0f, float(k7::source_width), float(k7::source_height)};
+    expect(k7::plan(cropped_source).refusal == k7::Refusal::rect_unmeasured,
+           "an unmeasured source crop is refused");
+    auto placed_target = observed_kind7_inputs();
+    placed_target.target_rect = {0.0f, 0.0f, float(k7::target_width - 1), float(k7::target_height)};
+    expect(k7::plan(placed_target).refusal == k7::Refusal::rect_unmeasured,
+           "an unmeasured target rectangle is refused");
+    auto missing_rects = kind7_inputs();
+    missing_rects.consumer_observed = true;
+    missing_rects.source_layout = k7::SourceLayout::shader_read_only;
+    missing_rects.filter = k7::Filter::point;
+    missing_rects.numeric_mode = k7::NumericMode::passthrough;
+    expect(k7::plan(missing_rects).refusal == k7::Refusal::rect_unmeasured,
+           "an observed consumer with unmeasured rectangles cannot reuse the candidate mapping");
+    auto unknown_layout = observed_kind7_inputs();
+    unknown_layout.source_layout = k7::SourceLayout::unmeasured;
+    expect(k7::plan(unknown_layout).refusal == k7::Refusal::source_layout_unmeasured,
+           "an observed consumer with no sampled-image layout evidence is refused");
+    auto bad_layout = observed_kind7_inputs();
+    bad_layout.source_layout = k7::SourceLayout::other;
+    expect(k7::plan(bad_layout).refusal == k7::Refusal::source_layout_unsupported,
+           "the generic compose contract rejects a layout other than SHADER_READ_ONLY_OPTIMAL or GENERAL");
+    const k7::Plan candidate = k7::plan(kind7_inputs());
+    expect(candidate.candidate_mapping && !candidate.compose &&
+               candidate.refusal == k7::Refusal::consumer_not_observed,
+           "measured shapes expose candidate geometry but no unobserved consumer is drawn");
+    expect(candidate.source_rect.left == 0.0f && candidate.source_rect.top == 0.0f &&
+               candidate.source_rect.right == 1920.0f && candidate.source_rect.bottom == 1080.0f &&
+               candidate.target_rect.left == 0.0f && candidate.target_rect.top == 0.0f &&
+               candidate.target_rect.right == 3840.0f && candidate.target_rect.bottom == 2160.0f,
+           "candidate mapping uses the full 1080p source and full measured 4K target");
+    auto unknown_filter = observed_kind7_inputs();
+    expect(k7::plan(unknown_filter).refusal == k7::Refusal::filter_unmeasured,
+           "the kind-7 consumer's unobserved filter is refused");
+    auto linear_filter = observed_kind7_inputs();
+    linear_filter.filter = k7::Filter::linear;
+    expect(k7::plan(linear_filter).refusal == k7::Refusal::filter_not_supported,
+           "the stand-in refuses a filter it does not implement");
+    auto unknown_numeric_mode = observed_kind7_inputs();
+    unknown_numeric_mode.filter = k7::Filter::point;
+    expect(k7::plan(unknown_numeric_mode).refusal == k7::Refusal::numeric_mode_unmeasured,
+           "the output numeric interpretation must be measured");
+    auto transformed_numeric_mode = observed_kind7_inputs();
+    transformed_numeric_mode.filter = k7::Filter::point;
+    transformed_numeric_mode.numeric_mode = k7::NumericMode::transformed;
+    expect(k7::plan(transformed_numeric_mode).refusal == k7::Refusal::numeric_transform_unimplemented,
+           "a requested colour transform is refused rather than guessed");
+    auto synthetic_ready_input = observed_kind7_inputs();
+    synthetic_ready_input.source_layout = k7::SourceLayout::general;
+    synthetic_ready_input.filter = k7::Filter::point;
+    synthetic_ready_input.numeric_mode = k7::NumericMode::passthrough;
+    const k7::Plan synthetic_ready = k7::plan_present_candidate(
+        synthetic_ready_input, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_FORMAT_R16G16B16A16_SFLOAT);
+    expect(synthetic_ready.compose && synthetic_ready.refusal == k7::Refusal::none,
+           "an explicitly complete synthetic input can exercise the opt-in plan through the Vulkan adapter");
+    expect(k7::plan_present_candidate(synthetic_ready_input, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32,
+                                      VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                                      VK_FORMAT_R16G16B16A16_SFLOAT).compose,
+           "the Vulkan adapter accepts the compositor's explicitly supported GENERAL layout");
+    std::int32_t k7_x = -1, k7_y = -1;
+    expect(k7::map_point_texel(synthetic_ready, 0, 0, k7_x, k7_y) && k7_x == 0 && k7_y == 0,
+           "the first 4K pixel maps to source texel 0,0");
+    expect(k7::map_point_texel(synthetic_ready, 1, 0, k7_x, k7_y) && k7_x == 0,
+           "the second 4K pixel still maps to source texel 0");
+    expect(k7::map_point_texel(synthetic_ready, 2, 0, k7_x, k7_y) && k7_x == 1,
+           "the third 4K pixel advances to source texel 1");
+    expect(k7::map_point_texel(synthetic_ready, 3839, 2159, k7_x, k7_y) && k7_x == 1919 && k7_y == 1079,
+           "the last 4K pixel maps inside the last 1080p source texel");
+    expect(!k7::map_point_texel(synthetic_ready, 3840, 0, k7_x, k7_y),
+           "a destination coordinate outside the target is refused");
+    expect(std::strcmp(k7::refusal_name(k7::Refusal::consumer_not_observed),
+                       "no measured link from the kind-7 output to this compose draw") == 0,
+           "the readiness refusal names the missing consumer observation");
+
     // ---- Title pages a command names directly (docs/vertex_buffer_va.md) --------------------------------------
     // A draw's vertex views and index view and a WriteBufferImmediate address are the command arguments the replay
     // resolves through buffer_at. The submission-time scan offers exactly those spans to the device's import, and the
@@ -696,7 +876,42 @@ int main() {
         expect(palmetto::title_import_capture_window_from("9999") == 512, "the window is bounded");
     }
 
+    {
+        // docs/peer_port_streaming.md section 15: the widened flight window is explicitly opt-in, keeps 64 when off,
+        // defaults to 96 when on, separates the existing COPY lane, and never crosses its [64,128] hard range.
+        using palmetto::SubmissionFlightSettings;
+        using palmetto::SubmissionLane;
+        const auto off = SubmissionFlightSettings::parse(nullptr, "128", "72");
+        expect(!off.enabled && off.bound(SubmissionLane::direct) == 64 && off.bound(SubmissionLane::compute) == 64 &&
+                   off.bound(SubmissionLane::copy) == 64,
+               "unset overlap switch ignores per-lane overrides and keeps the legacy 64 bound");
+        const auto zero = SubmissionFlightSettings::parse("0", "128", "80");
+        expect(!zero.enabled && zero.bound(SubmissionLane::direct) == 64 && zero.bound(SubmissionLane::copy) == 64,
+               "zero overlap switch leaves every lane at the legacy bound");
+        const auto defaults = SubmissionFlightSettings::parse("1", nullptr, nullptr);
+        expect(defaults.enabled && defaults.bound(SubmissionLane::direct) == 96 &&
+                   defaults.bound(SubmissionLane::compute) == 96 && defaults.bound(SubmissionLane::copy) == 96,
+               "opt-in defaults each lane to 96 command buffers");
+        const auto separate = SubmissionFlightSettings::parse("1", "80", "72");
+        expect(separate.bound(SubmissionLane::direct) == 80 && separate.bound(SubmissionLane::compute) == 80 &&
+                   separate.bound(SubmissionLane::copy) == 72,
+               "COPY has an independent bound while direct and compute share theirs");
+        const auto clamped = SubmissionFlightSettings::parse("1", "0", "9999");
+        expect(clamped.bound(SubmissionLane::direct) == 64 && clamped.bound(SubmissionLane::copy) == 128,
+               "parsed bounds clamp to the legacy minimum and the hard maximum");
+        const auto malformed = SubmissionFlightSettings::parse("1", "not-a-number", "96tail");
+        expect(malformed.bound(SubmissionLane::direct) == 96 && malformed.bound(SubmissionLane::copy) == 96,
+               "malformed bound values fall back to the enabled default");
+        SubmissionFlightSettings manual{};
+        manual.enabled = true;
+        manual.direct_bound = 999;
+        manual.copy_bound = 1;
+        expect(manual.bound(SubmissionLane::direct) == 128 && manual.bound(SubmissionLane::copy) == 64,
+               "explicit settings cannot bypass the hard bound");
+    }
+
     if (failures) return 1;
-    std::printf("frame_dump_test: command kinds, ordered writers and table windows exact\n");
+    std::printf("frame_dump_test: command kinds, ordered writers, kind-7 consumer readiness, table windows and "
+                "submission-flight policy exact\n");
     return 0;
 }

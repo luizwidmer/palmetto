@@ -548,6 +548,105 @@ int main() {
             std::printf("presenter sync: synthetic pattern fitted with black bars through the same capture ok\n");
         }
 
+        // 2e. Readiness-only kind-7 seam: a synthetic RGB9E5 sampled image with the measured source extent is accepted
+        // by the existing PresentX compose pass and stretched over its output. This proves only Vulkan format sampling,
+        // whole-source rect plumbing and the generic compositor; it does not claim that the title's FFX output reaches
+        // this presenter, nor does the SDR-range synthetic texel establish the title's transfer function.
+        {
+            using namespace upscale_kind7;
+            constexpr VkFormat source_format = VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;
+            EXPECT(format_from_vk(source_format) == Format::r9g9b9e5_ufloat);
+            EXPECT(format_from_vk(VK_FORMAT_R16G16B16A16_SFLOAT) == Format::r16g16b16a16_float);
+            EXPECT(format_from_vk(VK_FORMAT_R8G8B8A8_UNORM) == Format::other);
+
+            VkFormatProperties properties{};
+            const auto get_format_properties =
+                d.instance_fn<PFN_vkGetPhysicalDeviceFormatProperties>("vkGetPhysicalDeviceFormatProperties");
+            EXPECT(get_format_properties);
+            get_format_properties(d.physical, source_format, &properties);
+            const bool transfer_destination =
+                (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) != 0;
+            if (!sampled_source_format(source_format, properties.optimalTilingFeatures) || !transfer_destination) {
+                std::printf("kind-7 compose seam: E5 sampled/transfer-dst feature unavailable, GPU source test skipped\n");
+            } else {
+                Inputs input{};
+                input.switch_on = parse_switch("measured");  // a synthetic switch-on plan; no process environment change
+                input.provenance = Provenance::series_s_kind7_output;
+                input.source_resolved = true;
+                input.source_format = format_from_vk(source_format);
+                input.source_width = source_width;
+                input.source_height = source_height;
+                input.target_format = format_from_vk(VK_FORMAT_R16G16B16A16_SFLOAT);
+                input.target_width = target_width;
+                input.target_height = target_height;
+                const Plan candidate = plan_present_candidate(input, source_format, properties.optimalTilingFeatures,
+                                                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                                              VK_FORMAT_R16G16B16A16_SFLOAT);
+                EXPECT(candidate.candidate_mapping && !candidate.compose &&
+                       candidate.refusal == Refusal::consumer_not_observed);
+                EXPECT(candidate.source_rect.right == float(source_width) &&
+                       candidate.source_rect.bottom == float(source_height) &&
+                       candidate.target_rect.right == float(target_width) &&
+                       candidate.target_rect.bottom == float(target_height));
+
+                const VkImage source = d.image(source_format, source_width, source_height, 1, VK_IMAGE_USAGE_SAMPLED_BIT);
+                EXPECT(source != VK_NULL_HANDLE);
+                EXPECT(d.run([&](VkCommandBuffer command) {
+                    d.initial_layout(command, source, VK_IMAGE_ASPECT_COLOR_BIT, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                    VkClearColorValue colour{};
+                    colour.float32[0] = 0.5f;
+                    colour.float32[1] = 0.25f;
+                    colour.float32[2] = 0.125f;
+                    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                    d.fn<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(
+                        command, source, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &colour, 1, &range);
+                    VkImageMemoryBarrier readable{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                    readable.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    readable.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                    readable.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    readable.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    readable.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    readable.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    readable.image = source;
+                    readable.subresourceRange = range;
+                    d.fn<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(
+                        command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
+                        0, nullptr, 1, &readable);
+                    return true;
+                }));
+                ResourceBinding source_binding{};
+                source_binding.image = source;
+                source_binding.format = source_format;
+                source_binding.aspects = VK_IMAGE_ASPECT_COLOR_BIT;
+                source_binding.width = source_width;
+                source_binding.height = source_height;
+                source_binding.mip_levels = 1;
+                source_binding.array_layers = 1;
+                source_binding.depth = 1;
+                source_binding.samples = 1;
+                source_binding.sampled = true;
+                context.add_resource(4, source_binding, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+                PresentPlanes planes{};
+                planes.count = 1;
+                planes.plane[0].source = 4;
+                planes.plane[0].has_source_rect = true;
+                // Independent generic PresentX source rect; do not use the refused candidate plan to authorize a draw.
+                planes.plane[0].source_rect = {0, 0, static_cast<std::int32_t>(source_width),
+                                               static_cast<std::int32_t>(source_height)};
+                planes.plane[0].point_filter = true;  // synthetic control; the title's kind-7 filter is unmeasured
+                EXPECT(presenter.present_planes(planes, true) == VK_SUCCESS);
+                std::vector<std::uint8_t> pixels;
+                VkExtent2D extent{};
+                VkFormat capture_format = VK_FORMAT_UNDEFINED;
+                EXPECT(presenter.read_back(pixels, &extent, &capture_format));
+                const bool bgra = capture_format == VK_FORMAT_B8G8R8A8_UNORM || capture_format == VK_FORMAT_B8G8R8A8_SRGB;
+                EXPECT(presenter_capture_matches_rgb(pixels, extent.width, extent.height, bgra, {128, 64, 32}, 2));
+                context.remove_resource(4);
+                std::printf("kind-7 compose seam: synthetic E5 sampled plane -> PresentComposer capture matched; title link remains unobserved\n");
+            }
+        }
+
         // 3. Concurrent present() + VulkanQueue::execute() + add/remove_resource() hammering LayoutTracker.
         std::atomic<bool> stop{false};
         std::atomic<bool> worker_failed{false};

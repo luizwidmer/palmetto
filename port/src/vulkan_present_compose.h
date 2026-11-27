@@ -8,6 +8,7 @@
 
 #include "vulkan_backend.h"
 #include "present_compose_spv.h"
+#include "upscale_kind7.h"
 
 #include <array>
 #include <cstdint>
@@ -30,6 +31,38 @@ static_assert(sizeof(PresentComposePush) == 112);
 namespace compose_flag {
 inline constexpr std::uint32_t point = 1, srgb_source = 2, hdr10 = 4, straight_alpha = 8;
 }
+
+namespace upscale_kind7 {
+// Candidate Vulkan formats for the measured DXGI shapes: 67 is E5B9G9R9, and the existing compose target is DXGI 37
+// (RGBA16F). This maps format only: it never tags an image as kind 7 or proves the unobserved consumer link.
+inline Format format_from_vk(VkFormat format) {
+    if (format == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32) return Format::r9g9b9e5_ufloat;
+    if (format == VK_FORMAT_R16G16B16A16_SFLOAT) return Format::r16g16b16a16_float;
+    return format == VK_FORMAT_UNDEFINED ? Format::unknown : Format::other;
+}
+inline bool sampled_source_format(VkFormat format, VkFormatFeatureFlags optimal_tiling_features) {
+    return format == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 &&
+           (optimal_tiling_features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+}
+inline SourceLayout source_layout_from_vk(VkImageLayout layout) {
+    if (layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return SourceLayout::shader_read_only;
+    if (layout == VK_IMAGE_LAYOUT_GENERAL) return SourceLayout::general;
+    return SourceLayout::other;
+}
+// Adapt the actual Vulkan view/target formats, source sampled-image capability and source layout into the GPU-free
+// readiness planner. Provenance, resolved-resource identity, extents, rectangles, the observed consumer link, filter and
+// numeric mode remain caller evidence; this helper never infers them from a matching format.
+inline Plan plan_present_candidate(const Inputs& evidence, VkFormat source_view_format,
+                                   VkFormatFeatureFlags source_optimal_features, VkImageLayout source_layout,
+                                   VkFormat target_format) {
+    Inputs checked = evidence;
+    checked.source_format = format_from_vk(source_view_format);
+    checked.source_sampled = sampled_source_format(source_view_format, source_optimal_features);
+    checked.source_layout = source_layout_from_vk(source_layout);
+    checked.target_format = format_from_vk(target_format);
+    return palmetto::upscale_kind7::plan(checked);
+}
+}  // namespace upscale_kind7
 
 class PresentComposer {
 public:
