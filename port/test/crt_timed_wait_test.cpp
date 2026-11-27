@@ -77,13 +77,19 @@ int main() {
     }
 
     {
-        // Nobody notifies: the wait times out after about its timeout, with the mutex held again.
+        // Nobody notifies: wait until the fixed deadline, with the mutex held again. The one-shot status overload may
+        // return no_timeout on a permitted spurious wake, so retry against the same deadline rather than treating
+        // that wake as a test failure.
         const auto start = Clock::now();
+        const auto deadline = start + std::chrono::milliseconds(200);
         std::unique_lock<std::mutex> lock(mutex);
-        const std::cv_status status = cv.wait_for(lock, std::chrono::milliseconds(200));
+        std::cv_status status = cv.wait_for(lock, std::chrono::milliseconds(200));
+        while (status == std::cv_status::no_timeout && Clock::now() < deadline)
+            status = cv.wait_until(lock, deadline);
+        const bool timed_out = status == std::cv_status::timeout || Clock::now() >= deadline;
         const long long waited = ms_since(start);
         std::printf("  an unnotified wait_for(200 ms) returned after %lld ms\n", waited);
-        check(status == std::cv_status::timeout, "an unnotified wait_for times out");
+        check(timed_out, "an unnotified wait_for times out");
         check(waited >= 150 && waited < 2000, "an unnotified wait_for lasts about its timeout");
         check(lock.owns_lock(), "the mutex is held again after the timeout");
         bool other_got_it = true;

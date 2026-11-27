@@ -20,15 +20,21 @@ foreach(variant "bare" "dot")
     TIMEOUT 90
     RESULT_VARIABLE code OUTPUT_VARIABLE output ERROR_VARIABLE output)
   string(REPLACE "\r\n" "\n" output "${output}")
+  # Keep path assertions separate from guest completion: a failing CRT smoke check must not be reported as a GAME: path
+  # failure when the GAME: probe itself passed.
+  if(NOT output MATCHES "(^|\n)tiny_game: PASS GAME:")
+    string(APPEND failures "--- ${variant}: GAME: probe did not pass (exit ${code})\n${output}\n")
+  endif()
   # An absolute GAME: root: a drive letter (Windows, and Wine's Z:) or a leading slash, and an overlay inside it.
-  if(NOT code STREQUAL "0" OR NOT output MATCHES "(^|\n)tiny_game: PASS GAME:"
-      OR NOT output MATCHES "(^|\n)tiny_game: OK(\n|$)"
-      OR NOT output MATCHES "(^|\n)console paths: GAME: -> ([A-Za-z]:|[\\/])[^\n]*, writes -> ([A-Za-z]:|[\\/])[^\n]*overlay(\n|$)"
+  if(NOT output MATCHES "(^|\n)console paths: GAME: -> ([A-Za-z]:|[\\/])[^\n]*, writes -> ([A-Za-z]:|[\\/])[^\n]*overlay(\n|$)")
+    string(APPEND failures "--- ${variant}: runtime did not report absolute GAME: and overlay paths (exit ${code})\n${output}\n")
+  endif()
+  if(NOT code STREQUAL "0" OR NOT output MATCHES "(^|\n)tiny_game: OK(\n|$)"
       OR NOT output MATCHES "(^|\n)game exited with code 0(\n|$)")
-    string(APPEND failures "--- ${variant}: returned ${code}\n${output}\n")
+    string(APPEND failures "--- ${variant}: synthetic guest did not finish successfully (exit ${code})\n${output}\n")
   endif()
 endforeach()
 file(REMOVE "${guest_dir}/tiny_game_probe.txt")
 if(failures)
-  message(FATAL_ERROR "GAME: did not resolve to the game folder\n${failures}")
+  message(FATAL_ERROR "GAME directory test failed\n${failures}")
 endif()

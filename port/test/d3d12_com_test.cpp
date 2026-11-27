@@ -338,11 +338,11 @@ int main(int argc, char** argv) {
         EXPECT(context.layout(rt::d3d12::resource_id(ds_resource), 0) == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         EXPECT(context.layout(rt::d3d12::resource_id(ds_resource), 1) == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
-        // A depth outside [0, 1] makes Close report the invalid call, as D3D12 does.
+        // docs/d3d12_vulkan.md: WARP retains out-of-range depth values; the clear does not invalidate the list.
         EXPECT(SUCCEEDED(allocator->Reset()));
         EXPECT(SUCCEEDED(list->Reset(allocator.p, nullptr)));
         list->ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_DEPTH, 2.0f, 0, 0, nullptr);
-        EXPECT(list->Close() == E_INVALIDARG);
+        EXPECT(list->Close() == S_OK);
 
         // State-setting calls on a closed direct list or bundle are ignored and do not mutate recorded state.
         EXPECT(SUCCEEDED(allocator->Reset()));

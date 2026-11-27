@@ -39,8 +39,8 @@ const std::vector<std::uint8_t> stored = {
     0x78, 0x01, 0x01, 0x28, 0x00, 0xd7, 0xff, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
     0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
     0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x29, 0xcc, 0x03, 0x0d};
-const std::vector<std::uint8_t> fixed = {0x78, 0x01, 0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0x40, 0x26, 0x73,
-                                         0x52, 0xf3, 0xf3, 0x32, 0x53, 0x12, 0x01, 0x7a, 0xaf, 0x09, 0x79};
+const std::vector<std::uint8_t> fixed = {0x78, 0x01, 0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0x40, 0x26, 0x0b, 0x12,
+                                         0x73, 0x72, 0x53, 0x4b, 0x4a, 0xf2, 0x01, 0x84, 0xca, 0x0a, 0x03};
 const std::vector<std::uint8_t> dynamic = {
     0x78, 0xda, 0x1d, 0x92, 0xdb, 0x0a, 0xc0, 0x30, 0x08, 0x43, 0xbf, 0x55, 0x30, 0xa0, 0x20, 0x0a, 0x5e, 0xfe, 0x7f,
     0xe9, 0xf6, 0x54, 0x66, 0x6c, 0x4e, 0xb4, 0x13, 0xb6, 0x22, 0x26, 0x40, 0x08, 0xaa, 0xc0, 0xc3, 0x40, 0x0e, 0x17,
@@ -481,7 +481,7 @@ int fspx_checks() {
     // The game's own shaders keep resolving as FSSM.
     auto fssm = bytes("FSSM and a native program");
     CHECK(compute_program(fssm).kind == Kind::fssm && compute_program(fssm).bytes == fssm);
-    CHECK(compute_program(container({{fixed, 25}})).kind == Kind::fssm);
+    CHECK(compute_program(container({{fixed, 26}})).kind == Kind::fssm);
 
     // Refused: each is Kind::none, so the PSO keeps today's E_INVALIDARG.
     const auto refused = [](const std::vector<std::uint8_t>& input) {
@@ -619,8 +619,8 @@ int main() {
         CHECK(fssm_program(huge_parts).empty());
     }
     // Two different 0x0D payloads: the last one is the program, as tooling/fssm_unpack.py (and so fssm_sha256) has it.
-    CHECK(fssm_program(container({{fixed, 25}, {dynamic, 600}})) == skewed(600));
-    CHECK(fssm_program(container({{dynamic, 600}, {fixed, 25}})) == bytes("hello hello hello palmetto"));
+    CHECK(fssm_program(container({{fixed, 26}, {dynamic, 600}})) == skewed(600));
+    CHECK(fssm_program(container({{dynamic, 600}, {fixed, 26}})) == bytes("hello hello hello palmetto"));
 
     // An index with one findable shader, one without a hash, and the module next to it.
     const testfiles::ScratchDir scratch("palmetto_shader_library_test");
@@ -763,7 +763,7 @@ int main() {
     // XboxBvhBuilder.dll's programs (docs/embedded_shaders.md): FSSM in a DXIL container like the game's shaders,
     // translated into <dir>/bvh (entries named "bvh/<name>") and found by fssm_sha256, the game shaders' key.
     {
-        const auto builder = container({{fixed, 25}});  // what the DLL passes to slot 62: the whole container
+        const auto builder = container({{fixed, 26}});  // what the DLL passes to slot 62: the whole container
         const auto untranslated = container({{stored, 40}});
         const std::string builder_hash = sha256_hex(bytes("hello hello hello palmetto"));
         const auto code = fspx_code(0x5000);

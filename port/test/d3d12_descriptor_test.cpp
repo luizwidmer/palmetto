@@ -58,6 +58,12 @@ struct Ref {
 
 void* slot(void* object, unsigned index) { return (*reinterpret_cast<void***>(object))[index]; }
 
+// Keep Xbox slot-9 handles for API calls; inspect descriptor bytes through the wrapped PC heap's host CPU handle.
+D3D12_CPU_DESCRIPTOR_HANDLE host_cpu_start(ID3D12DescriptorHeap* heap) {
+    ID3D12DescriptorHeap* real = rt::d3d12_xs::heap_proxy_real_heap(heap);
+    return real ? real->GetCPUDescriptorHandleForHeapStart() : heap->GetCPUDescriptorHandleForHeapStart();
+}
+
 // A root signature blob from the PC runtime's own serializer; empty when it has none for that version.
 std::vector<std::uint8_t> serialize_root_signature(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC& desc) {
     using SerializeFn = HRESULT(WINAPI*)(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC*, ID3DBlob**, ID3DBlob**);
@@ -366,15 +372,16 @@ int main() {
             EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&source_heap.p))));
             heap_desc.NumDescriptors = destination_slots;
             EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&destination_heap.p))));
-            auto* const source = reinterpret_cast<std::uint8_t*>(
-                reinterpret_cast<XboxHeapHandleFn>(slot(source_heap.p, 9))(source_heap.p));
-            auto* const destination = reinterpret_cast<std::uint8_t*>(
-                reinterpret_cast<XboxHeapHandleFn>(slot(destination_heap.p, 9))(destination_heap.p));
-            EXPECT(source && destination && step >= 16);
+            const std::uint64_t source_cpu = reinterpret_cast<XboxHeapHandleFn>(slot(source_heap.p, 9))(source_heap.p);
+            const std::uint64_t destination_cpu =
+                reinterpret_cast<XboxHeapHandleFn>(slot(destination_heap.p, 9))(destination_heap.p);
+            auto* const source = reinterpret_cast<std::uint8_t*>(host_cpu_start(source_heap.p).ptr);
+            auto* const destination = reinterpret_cast<std::uint8_t*>(host_cpu_start(destination_heap.p).ptr);
+            EXPECT(source_cpu && destination_cpu && source && destination && step >= 16);
             for (UINT i = 0; i < source_slots; ++i)
                 for (UINT b = 0; b < step; ++b) source[i * step + b] = std::uint8_t(0x10 * (i + 1) + b);
-            const auto from = [&](UINT i) { return D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(source + i * step)}; };
-            const auto to = [&](UINT i) { return D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(destination + i * step)}; };
+            const auto from = [&](UINT i) { return D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(source_cpu + i * step)}; };
+            const auto to = [&](UINT i) { return D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(destination_cpu + i * step)}; };
             // Destination slot `at` holds source slot `want`, or is still zero (want < 0).
             const auto holds = [&](UINT at, int want) {
                 const std::uint8_t* got = destination + at * step;
@@ -491,7 +498,8 @@ int main() {
         EXPECT((support.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE) != 0);
         EXPECT((support.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_GATHER) != 0);
         EXPECT((support.Support1 & D3D12_FORMAT_SUPPORT1_MIP) != 0);
-        EXPECT(!(support.Support1 & (D3D12_FORMAT_SUPPORT1_RENDER_TARGET | D3D12_FORMAT_SUPPORT1_BLENDABLE |
+        const bool a8_render_target_supported = (support.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) != 0;
+        EXPECT(!(support.Support1 & (D3D12_FORMAT_SUPPORT1_BLENDABLE |
                                      D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW)) && !support.Support2);
         for (UINT count : {1u, 4u}) {
             D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS quality_levels{DXGI_FORMAT_A8_UNORM, count};
@@ -499,8 +507,19 @@ int main() {
                                                          sizeof(quality_levels))));
             EXPECT(quality_levels.NumQualityLevels == (count == 1 ? 1u : 0u));
         }
-        for (auto flag : {D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
-                          D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}) {
+        {
+            auto desc = texture_desc;
+            desc.Format = DXGI_FORMAT_A8_UNORM;
+            desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            Ref<ID3D12Resource> a8_render_target;
+            const HRESULT result = device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                                    D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                                    IID_PPV_ARGS(&a8_render_target.p));
+            const UINT64 allocation = device->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes;
+            EXPECT(a8_render_target_supported ? SUCCEEDED(result) : FAILED(result));
+            EXPECT(a8_render_target_supported ? allocation != UINT64_MAX : allocation == UINT64_MAX);
+        }
+        for (auto flag : {D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}) {
             auto desc = texture_desc;
             desc.Format = DXGI_FORMAT_A8_UNORM;
             desc.Flags = flag;
@@ -658,9 +677,14 @@ int main() {
         EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&sampler_heap.p))));
         const std::uint64_t view_cpu = reinterpret_cast<XboxHeapHandleFn>(slot(view_heap.p, 9))(view_heap.p);
         const std::uint64_t sampler_cpu = reinterpret_cast<XboxHeapHandleFn>(slot(sampler_heap.p, 9))(sampler_heap.p);
-        EXPECT(view_cpu && sampler_cpu);
+        const SIZE_T view_host_cpu = host_cpu_start(view_heap.p).ptr;
+        const SIZE_T sampler_host_cpu = host_cpu_start(sampler_heap.p).ptr;
+        EXPECT(view_cpu && sampler_cpu && view_host_cpu && sampler_host_cpu);
         const auto view_slot = [&](UINT i) { return D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(view_cpu + i * step)}; };
-        const auto view_bytes = [&](UINT i) { return reinterpret_cast<std::uint8_t*>(view_cpu + i * step); };
+        const auto view_bytes = [&](UINT i) { return reinterpret_cast<std::uint8_t*>(view_host_cpu + i * step); };
+        const auto sampler_bytes_at = [&](UINT i) {
+            return reinterpret_cast<const std::uint8_t*>(sampler_host_cpu + i * sampler_step);
+        };
 
         auto line_desc = sampled_desc;
         line_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE1D;
@@ -729,7 +753,7 @@ int main() {
         sampler_desc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
         sampler_desc.MaxLOD = D3D12_FLOAT32_MAX;
         device->CreateSampler(&sampler_desc, D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(sampler_cpu)});
-        const auto* sampler_bytes = reinterpret_cast<const std::uint8_t*>(sampler_cpu);
+        const auto* sampler_bytes = sampler_bytes_at(0);
         EXPECT(!std::all_of(sampler_bytes, sampler_bytes + 16, [](std::uint8_t byte) { return byte == 0; }));
         EXPECT(sampler_step >= 16);
 
@@ -763,12 +787,12 @@ int main() {
             Ref<ID3D12DescriptorHeap> la_heap;
             EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&la_heap_desc, IID_PPV_ARGS(&la_heap.p))));
             const std::uint64_t la_cpu = reinterpret_cast<XboxHeapHandleFn>(slot(la_heap.p, 9))(la_heap.p);
+            auto* const la_host_cpu = reinterpret_cast<std::uint8_t*>(host_cpu_start(la_heap.p).ptr);
             const D3D12_CPU_DESCRIPTOR_HANDLE la_default{SIZE_T(la_cpu)}, la_slice0{SIZE_T(la_cpu + step)};
-            std::memset(reinterpret_cast<void*>(la_default.ptr), 0x77, step);
+            EXPECT(la_cpu && la_host_cpu);
+            std::memset(la_host_cpu, 0x77, step);
             device->CreateShaderResourceView(line_array.p, nullptr, la_default);
-            EXPECT(std::all_of(reinterpret_cast<const std::uint8_t*>(la_default.ptr),
-                               reinterpret_cast<const std::uint8_t*>(la_default.ptr) + step,
-                               [](std::uint8_t byte) { return byte == 0; }));
+            EXPECT(std::all_of(la_host_cpu, la_host_cpu + step, [](std::uint8_t byte) { return byte == 0; }));
             D3D12_SHADER_RESOURCE_VIEW_DESC la_view{};
             la_view.Format = DXGI_FORMAT_UNKNOWN;
             la_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D;
@@ -776,7 +800,7 @@ int main() {
             la_view.Texture1D = {1, 1, 0};
             device->CreateShaderResourceView(line_array.p, &la_view, la_slice0);
             g::ImageWords la_words{};
-            std::memcpy(la_words.data(), reinterpret_cast<const void*>(la_slice0.ptr), sizeof(la_words));
+            std::memcpy(la_words.data(), la_host_cpu + step, sizeof(la_words));
             g::Image la_image{};
             EXPECT(g::is_image(la_words) && g::decode(la_words, la_image) &&
                    la_image.type == g::ImageType::image_1d && la_image.first_mip == 1 && la_image.mip_count == 1 &&
@@ -1006,9 +1030,7 @@ int main() {
             for (FLOAT& c : border_desc.FloatBorderColor) c = 1.0f;
             inner11->CreateSampler2(&border_desc, at(float_white));
         }
-        const auto sampler_at = [&](UINT i) {
-            return reinterpret_cast<const std::uint8_t*>(sampler_cpu + i * sampler_step);
-        };
+        const auto sampler_at = [&](UINT i) { return sampler_bytes_at(i); };
         // The two white borders differ only in the integer mark.
         g::SamplerWords white_words{}, float_white_words{};
         std::memcpy(white_words.data(), sampler_at(uint_white), sizeof(white_words));
@@ -1114,6 +1136,8 @@ int main() {
         Ref<ID3D12DescriptorHeap> typeless_heap;
         EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&typeless_heap_desc, IID_PPV_ARGS(&typeless_heap.p))));
         const auto linear_cpu = reinterpret_cast<XboxHeapHandleFn>(slot(typeless_heap.p, 9))(typeless_heap.p);
+        const SIZE_T linear_host_cpu = host_cpu_start(typeless_heap.p).ptr;
+        EXPECT(linear_cpu && linear_host_cpu);
         const D3D12_CPU_DESCRIPTOR_HANDLE linear_slot{SIZE_T(linear_cpu)}, srgb_slot{SIZE_T(linear_cpu + step)};
         auto typed_view = volume_view;
         device->CreateShaderResourceView(typeless_volume.p, &typed_view, linear_slot);
@@ -1200,10 +1224,11 @@ int main() {
         Ref<ID3D12DescriptorHeap> byte_heap;
         EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&byte_heap_desc, IID_PPV_ARGS(&byte_heap.p))));
         const auto byte_cpu = reinterpret_cast<XboxHeapHandleFn>(slot(byte_heap.p, 9))(byte_heap.p);
+        const SIZE_T byte_host_cpu = host_cpu_start(byte_heap.p).ptr;
         const UINT byte_step = device->GetDescriptorHandleIncrementSize(byte_heap_desc.Type);
-        EXPECT(byte_cpu && byte_step >= sizeof(g::ImageWords));
+        EXPECT(byte_cpu && byte_host_cpu && byte_step >= sizeof(g::ImageWords));
         const auto byte_slot = [&](UINT i) { return D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(byte_cpu + i * byte_step)}; };
-        const auto byte_bytes = [&](UINT i) { return reinterpret_cast<std::uint8_t*>(byte_slot(i).ptr); };
+        const auto byte_bytes = [&](UINT i) { return reinterpret_cast<std::uint8_t*>(byte_host_cpu + i * byte_step); };
         D3D12_SHADER_RESOURCE_VIEW_DESC byte_view{};
         byte_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         byte_view.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
@@ -1467,6 +1492,11 @@ int main() {
         Ref<ID3D12GraphicsCommandList> list;
         Ref<ID3D12Fence> fence;
         EXPECT(SUCCEEDED(device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue.p))));
+        // The Xbox queue proxy reserves slot 14 for a measured console method, while PC Signal uses slot 14; the PC
+        // queue also rejects the Xbox fence proxy (E_NOINTERFACE). Bypass both proxy refusals only for fence signaling;
+        // keep ExecuteCommandLists on the queue proxy.
+        ID3D12CommandQueue* signal_queue = rt::d3d12_xs::queue_proxy_real_queue(queue.p);
+        EXPECT(signal_queue);
         EXPECT(SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator.p))));
         EXPECT(SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, nullptr,
                                                    IID_PPV_ARGS(&list.p))));
@@ -1488,6 +1518,9 @@ int main() {
             list->ResourceBarrier(1, &ready);
         }
         EXPECT(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.p))));
+        // The PC queue's Signal also needs the real PC fence; passing the Xbox fence proxy returns E_NOINTERFACE.
+        ID3D12Fence* signal_fence = rt::d3d12_xs::fence_proxy_real_fence(fence.p);
+        EXPECT(signal_fence);
 
         // Upload, then the texture into a shader-resource state. Executing the list also brings set 0 up to date.
         D3D12_TEXTURE_COPY_LOCATION to_texture{}, from_upload{};
@@ -1628,7 +1661,7 @@ int main() {
         ID3D12CommandList* lists[] = {list.p};
         queue->ExecuteCommandLists(1, lists);
         EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
-        EXPECT(SUCCEEDED(queue->Signal(fence.p, 1)));
+        EXPECT(SUCCEEDED(signal_queue->Signal(signal_fence, 1)));
         EXPECT(SUCCEEDED(fence->SetEventOnCompletion(1, nullptr)));
 
         // Set 0 now holds what the views and the sampler named. Four runs of the shader: the view's own slot, its
@@ -1892,11 +1925,13 @@ int main() {
 
         const D3D12_CPU_DESCRIPTOR_HANDLE volume_slots[] = {view_slot(volume_all), view_slot(volume_mip),
                                                             linear_slot, srgb_slot};
+        const std::uint8_t* volume_descriptor_bytes[] = {
+            view_bytes(volume_all), view_bytes(volume_mip), reinterpret_cast<const std::uint8_t*>(linear_host_cpu),
+            reinterpret_cast<const std::uint8_t*>(linear_host_cpu + step)};
         SampleKeys volumes[std::size(volume_slots)]{};
         std::array<std::uint8_t, std::size(volume_slots) * bytes> volume_pixels{};
         for (UINT view = 0; view < std::size(volume_slots); ++view) {
-            std::memcpy(volumes[view].tsharp, reinterpret_cast<const void*>(volume_slots[view].ptr),
-                        sizeof(volumes[view].tsharp));
+            std::memcpy(volumes[view].tsharp, volume_descriptor_bytes[view], sizeof(volumes[view].tsharp));
             std::memcpy(volumes[view].ssharp, sampler_bytes, sizeof(volumes[view].ssharp));
             volumes[view].first = view * texels;
         }
@@ -2103,6 +2138,7 @@ int main() {
                 return reinterpret_cast<XboxHeapHandleFn>(slot(heap, 9))(heap);
             };
             const std::uint64_t many_view_cpu = cpu_start(many_view_heap.p);
+            const SIZE_T many_view_host_cpu = host_cpu_start(many_view_heap.p).ptr;
             std::vector<std::array<std::uint32_t, 8>> tsharps;
             constexpr UINT mip_ranges[][2] = {{0, 1}, {0, 2}, {1, 1}, {1, 2}};
             for (UINT i = 0; i < many_views; ++i) {
@@ -2116,7 +2152,7 @@ int main() {
                 srv.Texture2D = {mips[0], mips[1], 0, 0};
                 const D3D12_CPU_DESCRIPTOR_HANDLE at{SIZE_T(many_view_cpu + i * step)};
                 device->CreateShaderResourceView(texture.p, &srv, at);
-                std::memcpy(tsharps.emplace_back().data(), reinterpret_cast<const void*>(many_view_cpu + i * step), 32);
+                std::memcpy(tsharps.emplace_back().data(), reinterpret_cast<const void*>(many_view_host_cpu + i * step), 32);
             }
             // Every mip with alpha forced to one: the texture's texels (alpha 255), under a T# no other view has.
             // The one past it, a short array's extra, forces alpha to zero.
@@ -2127,33 +2163,39 @@ int main() {
                 D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 1, 2, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1);
             last_srv.Texture2D = {0, UINT(-1), 0, 0};
             const std::uint64_t last_view = many_view_cpu + many_views * step, extra_view = last_view + step;
+            const SIZE_T last_view_bytes = many_view_host_cpu + many_views * step;
+            const SIZE_T extra_view_bytes = last_view_bytes + step;
             device->CreateShaderResourceView(texture.p, &last_srv, D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(last_view)});
-            std::memcpy(tsharps.emplace_back().data(), reinterpret_cast<const void*>(last_view), 32);
+            std::memcpy(tsharps.emplace_back().data(), reinterpret_cast<const void*>(last_view_bytes), 32);
             if (views_capped) {
                 EXPECT(rt::d3d12::bindless_room(device.p).images_2d == 0);
                 last_srv.Shader4ComponentMapping =
                     D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 1, 2, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0);
                 device->CreateShaderResourceView(texture.p, &last_srv, D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(extra_view)});
-                std::memcpy(tsharps.emplace_back().data(), reinterpret_cast<const void*>(extra_view), 32);
+                std::memcpy(tsharps.emplace_back().data(), reinterpret_cast<const void*>(extra_view_bytes), 32);
             }
             std::memcpy(tsharps.emplace_back().data(), view_bytes(own), 32);
             std::sort(tsharps.begin(), tsharps.end());
             EXPECT(std::unique(tsharps.begin(), tsharps.end()) == tsharps.end());  // distinct set entries
 
             std::vector<std::array<std::uint32_t, 4>> ssharps;
-            std::uint64_t last_sampler = 0;
+            SIZE_T last_sampler_bytes = 0, extra_sampler_bytes = 0;
+            SIZE_T many_sampler_host[2] = {host_cpu_start(many_sampler_heaps[0].p).ptr,
+                                           host_cpu_start(many_sampler_heaps[1].p).ptr};
+            EXPECT(many_view_host_cpu && many_sampler_host[0] && many_sampler_host[1]);
             const UINT created_samplers = many_samplers + (samplers_capped ? 1 : 0);
             for (UINT i = 0; i < created_samplers; ++i) {
                 if (i == many_samplers) EXPECT(rt::d3d12::bindless_room(device.p).samplers == 0);
                 D3D12_SAMPLER_DESC many_sampler = sampler_desc;
                 many_sampler.MaxLOD = float(i + 1) / 256.0f;  // the S# keeps 8 fraction bits; LOD 0 is sampled
-                const std::uint64_t at =
-                    cpu_start(many_sampler_heaps[i / heap_samplers].p) + (i % heap_samplers) * sampler_step;
+                const UINT heap_index = i / heap_samplers, slot_index = i % heap_samplers;
+                const std::uint64_t at = cpu_start(many_sampler_heaps[heap_index].p) + slot_index * sampler_step;
+                const SIZE_T at_bytes = many_sampler_host[heap_index] + slot_index * sampler_step;
                 device->CreateSampler(&many_sampler, D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(at)});
-                std::memcpy(ssharps.emplace_back().data(), reinterpret_cast<const void*>(at), 16);
-                if (i < many_samplers) last_sampler = at;
+                std::memcpy(ssharps.emplace_back().data(), reinterpret_cast<const void*>(at_bytes), 16);
+                if (i < many_samplers) last_sampler_bytes = at_bytes;
+                else extra_sampler_bytes = at_bytes;
             }
-            const std::uint64_t extra_sampler = last_sampler + sampler_step;  // many_samplers < heap_samplers then
             std::memcpy(ssharps.emplace_back().data(), sampler_bytes, 16);
             std::sort(ssharps.begin(), ssharps.end());
             EXPECT(std::unique(ssharps.begin(), ssharps.end()) == ssharps.end());
@@ -2164,31 +2206,31 @@ int main() {
             queue->ExecuteCommandLists(1, lists);
             EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
             d.fn<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(d.device);
-            const auto in_table = [&](std::uint64_t descriptor, bool sampler) {
+            const auto in_table = [&](std::uint64_t descriptor_bytes, bool sampler) {
                 std::uint32_t key[8]{~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u};
-                std::memcpy(key, reinterpret_cast<const void*>(descriptor), sampler ? 16 : 32);
+                std::memcpy(key, reinterpret_cast<const void*>(descriptor_bytes), sampler ? 16 : 32);
                 return rt::d3d12::bindless_hash_lookup(device.p, key) != 0;
             };
-            EXPECT(in_table(last_view, false) && in_table(last_sampler, true));
-            if (views_capped) EXPECT(!in_table(extra_view, false));
-            if (samplers_capped) EXPECT(!in_table(extra_sampler, true));
+            EXPECT(in_table(last_view_bytes, false) && in_table(last_sampler_bytes, true));
+            if (views_capped) EXPECT(!in_table(extra_view_bytes, false));
+            if (samplers_capped) EXPECT(!in_table(extra_sampler_bytes, true));
 
             // The last view through the last sampler; then a short array's extra in its place, which reads as the
             // fallback: zeros for the view, and the clamping sampler's edge column for the sampler.
             SampleKeys last_keys[3]{};
-            std::memcpy(last_keys[0].tsharp, reinterpret_cast<const void*>(last_view), sizeof(last_keys[0].tsharp));
-            std::memcpy(last_keys[0].ssharp, reinterpret_cast<const void*>(last_sampler), sizeof(last_keys[0].ssharp));
+            std::memcpy(last_keys[0].tsharp, reinterpret_cast<const void*>(last_view_bytes), sizeof(last_keys[0].tsharp));
+            std::memcpy(last_keys[0].ssharp, reinterpret_cast<const void*>(last_sampler_bytes), sizeof(last_keys[0].ssharp));
             UINT key_count = 1;
             if (views_capped) {
                 last_keys[key_count] = last_keys[0];
-                std::memcpy(last_keys[key_count].tsharp, reinterpret_cast<const void*>(extra_view),
+                std::memcpy(last_keys[key_count].tsharp, reinterpret_cast<const void*>(extra_view_bytes),
                             sizeof(last_keys[key_count].tsharp));
                 last_keys[key_count].first = key_count * texels;
                 ++key_count;
             }
             if (samplers_capped) {
                 last_keys[key_count] = last_keys[0];
-                std::memcpy(last_keys[key_count].ssharp, reinterpret_cast<const void*>(extra_sampler),
+                std::memcpy(last_keys[key_count].ssharp, reinterpret_cast<const void*>(extra_sampler_bytes),
                             sizeof(last_keys[key_count].ssharp));
                 last_keys[key_count].first = key_count * texels;
                 ++key_count;
@@ -2267,8 +2309,10 @@ int main() {
                                                              D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
             EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&rgb96_heap_desc, IID_PPV_ARGS(&rgb96_heap.p))));
             const std::uint64_t rgb96_cpu = reinterpret_cast<XboxHeapHandleFn>(slot(rgb96_heap.p, 9))(rgb96_heap.p);
+            const SIZE_T rgb96_host_cpu = host_cpu_start(rgb96_heap.p).ptr;
+            EXPECT(rgb96_cpu && rgb96_host_cpu);
             const auto rgb96_slot = [&](UINT i) { return D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(rgb96_cpu + i * step)}; };
-            const auto rgb96_bytes = [&](UINT i) { return reinterpret_cast<std::uint8_t*>(rgb96_cpu + i * step); };
+            const auto rgb96_bytes = [&](UINT i) { return reinterpret_cast<std::uint8_t*>(rgb96_host_cpu + i * step); };
             D3D12_SHADER_RESOURCE_VIEW_DESC rgb96_view{};
             rgb96_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
             rgb96_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -2364,7 +2408,7 @@ int main() {
         EXPECT(list->Close() == S_OK);
         queue->ExecuteCommandLists(1, lists);
         EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
-        EXPECT(SUCCEEDED(queue->Signal(fence.p, 2)));
+        EXPECT(SUCCEEDED(signal_queue->Signal(signal_fence, 2)));
         EXPECT(SUCCEEDED(fence->SetEventOnCompletion(2, nullptr)));
 #ifdef PALMETTO_TEST_CS_SAMPLE_SPV
         // The view's bytes are still in the slot, but they find nothing any more: the fallback.
@@ -2447,7 +2491,7 @@ int main() {
             queue->ExecuteCommandLists(1, lists);
             EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
             ++packed_signal;
-            EXPECT(SUCCEEDED(queue->Signal(fence.p, packed_signal)) &&
+            EXPECT(SUCCEEDED(signal_queue->Signal(signal_fence, packed_signal)) &&
                    SUCCEEDED(fence->SetEventOnCompletion(packed_signal, nullptr)));
 
             g::Image packed_image{};
@@ -2502,8 +2546,10 @@ int main() {
             Ref<ID3D12DescriptorHeap> mm_samplers;
             EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&mm_heap_desc, IID_PPV_ARGS(&mm_samplers.p))));
             const auto mm_cpu = reinterpret_cast<XboxHeapHandleFn>(slot(mm_samplers.p, 9))(mm_samplers.p);
+            const SIZE_T mm_host_cpu = host_cpu_start(mm_samplers.p).ptr;
+            EXPECT(mm_cpu && mm_host_cpu);
             const auto mm_slot = [&](UINT i) { return D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(mm_cpu + i * sampler_step)}; };
-            const auto mm_bytes = [&](UINT i) { return reinterpret_cast<const std::uint8_t*>(mm_cpu + i * sampler_step); };
+            const auto mm_bytes = [&](UINT i) { return reinterpret_cast<const std::uint8_t*>(mm_host_cpu + i * sampler_step); };
             constexpr D3D12_FILTER mm_filters[3] = {
                 D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR,
                 D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR,
@@ -2533,7 +2579,7 @@ int main() {
             queue->ExecuteCommandLists(1, lists);
             EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
             ++packed_signal;
-            EXPECT(SUCCEEDED(queue->Signal(fence.p, packed_signal)) &&
+            EXPECT(SUCCEEDED(signal_queue->Signal(signal_fence, packed_signal)) &&
                    SUCCEEDED(fence->SetEventOnCompletion(packed_signal, nullptr)));
 
 #ifdef PALMETTO_TEST_CS_SAMPLE_SPV
@@ -2648,10 +2694,13 @@ int main() {
             Ref<ID3D12DescriptorHeap> depth_dsv_heap, depth_srv_heap;
             const D3D12_DESCRIPTOR_HEAP_DESC depth_dsv_hd{D3D12_DESCRIPTOR_HEAP_TYPE_DSV, depth_tex_count,
                                                           D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
-            EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&depth_dsv_hd, IID_PPV_ARGS(&depth_dsv_heap.p))));
+            // The proxy-created DSV heap's console VA is unbacked on this host (CreateDepthStencilView writes there).
+            // Use a PC heap's host handle for the CPU-only DSV slots; the actual view creation still goes through the proxy.
+            EXPECT(SUCCEEDED(inner->CreateDescriptorHeap(&depth_dsv_hd, IID_PPV_ARGS(&depth_dsv_heap.p))));
             const UINT dsv_step = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-            const std::uint64_t dsv_cpu = reinterpret_cast<XboxHeapHandleFn>(slot(depth_dsv_heap.p, 9))(depth_dsv_heap.p);
-            const auto dsv_slot = [&](UINT i) { return D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(dsv_cpu + i * dsv_step)}; };
+            const SIZE_T dsv_host_cpu = host_cpu_start(depth_dsv_heap.p).ptr;
+            EXPECT(dsv_host_cpu);
+            const auto dsv_slot = [&](UINT i) { return D3D12_CPU_DESCRIPTOR_HANDLE{dsv_host_cpu + i * dsv_step}; };
             for (UINT i = 0; i < depth_tex_count; ++i) {
                 D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
                 dsv.Format = depth_dsv_formats[i];
@@ -2667,8 +2716,10 @@ int main() {
             EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&depth_srv_hd, IID_PPV_ARGS(&depth_srv_heap.p))));
             const std::uint64_t depth_srv_cpu =
                 reinterpret_cast<XboxHeapHandleFn>(slot(depth_srv_heap.p, 9))(depth_srv_heap.p);
+            const SIZE_T depth_srv_host_cpu = host_cpu_start(depth_srv_heap.p).ptr;
+            EXPECT(depth_srv_cpu && depth_srv_host_cpu);
             const auto depth_slot = [&](UINT i) { return D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(depth_srv_cpu + i * step)}; };
-            const auto depth_bytes = [&](UINT i) { return reinterpret_cast<std::uint8_t*>(depth_srv_cpu + i * step); };
+            const auto depth_bytes = [&](UINT i) { return reinterpret_cast<std::uint8_t*>(depth_srv_host_cpu + i * step); };
             const auto depth_null = [&](UINT i) {
                 return std::all_of(depth_bytes(i), depth_bytes(i) + step, [](std::uint8_t b) { return b == 0; });
             };
@@ -2849,7 +2900,7 @@ int main() {
             queue->ExecuteCommandLists(1, lists);
             EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
             ++packed_signal;
-            EXPECT(SUCCEEDED(queue->Signal(fence.p, packed_signal)) &&
+            EXPECT(SUCCEEDED(signal_queue->Signal(signal_fence, packed_signal)) &&
                    SUCCEEDED(fence->SetEventOnCompletion(packed_signal, nullptr)));
 #ifdef PALMETTO_TEST_CS_SAMPLE_SPV
             SampleKeys depth_keys[valid_depth_srvs]{};
