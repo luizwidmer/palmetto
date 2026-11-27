@@ -170,8 +170,8 @@ The command-list surface maps to the IR as follows:
 | `Set*Root32BitConstant(s)` / `Set*Root*View` / `Set*RootDescriptorTable` | update root args; build the push-constant block at the draw/dispatch |
 | `SetDescriptorHeaps` | state; scan/populate the bindless arrays and hash table at execute |
 | `IASetVertexBuffers` / `IASetIndexBuffer` / `IASetPrimitiveTopology` | state; bind arena buffer + offset, dynamic topology |
-| `RSSetViewports` / `RSSetScissorRects` | state; dynamic viewport/scissor |
-| `OMSetRenderTargets` / `OMSetBlendFactor` / `OMSetStencilRef` | state; rendering scope and dynamic state |
+| `RSSetViewports` / `RSSetScissorRects` | state; dynamic viewport/scissor. The live shim currently snapshots element 0 only; the opt-in readiness preflight below names multi-element arrays but is not wired into runtime replay. |
+| `OMSetRenderTargets` / `OMSetBlendFactor` / `OMSetStencilRef` / `OMSetFrontAndBackStencilRef` | state; rendering scope and dynamic state. Replay sets the front and back stencil references separately. |
 | `DrawInstanced` / `DrawIndexedInstanced` | command with a state snapshot |
 | `Dispatch` / `DispatchMesh` | command with a state snapshot |
 | `Copy*` / `Resolve*` / `Clear*` | copy/clear command |
@@ -181,6 +181,21 @@ The command-list surface maps to the IR as follows:
 | `ExecuteIndirect` | command; signature + argument buffer |
 | `BeginRenderPass` / `EndRenderPass` | rendering scope |
 | `ExecuteBundle` | play the bundle's state calls and draws on this list, copy its state-free commands in order |
+
+**Measured C-06 step: multi-viewport/scissor readiness, not full replay.** In `port/shims/d3d12_com.cpp`, a valid `RSSetViewports` / `RSSetScissorRects` call with more than one element logs a one-time stub and copies only element 0; it does not refuse the call. The boot trace in [page_content.md](page_content.md#4-where-the-frame-is-now-blocked-the-draws-own-target-reads-back-black) observed the retained first viewport as 3840x2160 at the origin (depth 0..1), and [frame_capture.md](frame_capture.md#3-the-measured-frame) recorded two draws whose retained viewport/scissor cover the target. Because the shim discards later elements before replay, these captures do not establish the original array counts or prove that every title call uses one element.
+
+`port/src/viewport_replay_readiness.h` is a CPU-only strict preflight for that open method. Only the exact value
+`PALMETTO_D3D12X_STRICT_VIEWPORTS=1` opts in: counts 0 or 1 are ready; counts 2..16 return the named refusals
+`multiple_viewports_require_dynamic_viewport_count` or `multiple_scissors_require_dynamic_scissor_count`; counts above
+16 return `viewport_count_exceeds_d3d12_limit` or `scissor_count_exceeds_d3d12_limit` before any array is read.
+Unset or any other value yields `legacy_unchanged` with no refusal. The helper is not wired into the live COM/replay
+path this round, so it does not change the current element-0 behavior; `port/test/viewport_replay_readiness_test.cpp`
+pins the switch and each result in seven named CPU-only cases, without COM, Vulkan or game data. The CMake target is
+left for the lead's integration.
+
+**Next falsifier for full support:** after the round-14 `d3d12_com.cpp` integration is clear, copy the viewport/scissor arrays into draw state, plumb Vulkan dynamic viewport/scissor counts (including the device's `multiViewport` capability), and run a synthetic GPU draw using two distinct viewports and scissor rectangles; a device without the required feature must refuse by name. Until that test passes, multi-element replay remains open.
+
+The latest peer snapshots reviewed for context are Five Star Recomp `34b4dfed`, VIctory `63bcca4` and XCL `623d02e` (as indexed in [cleanroom_peers.md](cleanroom_peers.md)). They supply no viewport-array semantics used by this slice; the helper and test follow this tree's own code and measurements, with no peer code or identifiers copied.
 
 The IR is the place to add the trace, validation and "unsupported call" reporting. It also lets the layer replay a
 frame deterministically from a capture, which is valuable for comparing against the game.
@@ -371,9 +386,9 @@ What is implemented (all of it testable without the game):
   SDK's `d3d12.h` by `tooling/gen_d3d12_stubs.py`. The stub reports its name once, so the vtables follow the SDK
   order exactly and nothing derived from the SDK is checked in. Unknown IIDs are logged and refused. Resources
   are identified by their `ID3D12Resource` pointer, and RTV/DSV CPU handles point at a `TargetView`.
-  `OMSetFrontAndBackStencilRef` records its two `UINT`s on the list (and `Reset` clears them), but nothing applies
-  them yet: Vulkan can set the faces with `vkCmdSetStencilReference` and a face mask, but only a pipeline that
-  consumes the dynamic state can, and this layer has no pipeline or draw path.
+  `OMSetFrontAndBackStencilRef` records its two `UINT`s on the list (and `Reset` clears them); draw replay applies
+  them with separate `vkCmdSetStencilReference` calls for FRONT and BACK. `d3d12_com_test` covers GCL8 state and
+  bundle inheritance, while this page does not claim a GPU pixel test proving the per-face raster effect.
 - **Device** (`port/shims/d3d12_vulkan_device.cpp`): an `ID3D12Device11` (PC ABI, 80 slots) that the Xbox-ABI
   proxy (`d3d12_xs_device.cpp`) forwards to, so slot 14's heap-handle conversion and slot 76's resource creation
   work unchanged. It creates the objects above, plus:
@@ -674,8 +689,9 @@ side inwards:
     dynamic indexing of sampled- and storage-image arrays, and update after bind for sampled images, storage
     images and storage buffers. The standalone device enables them where the GPU has them.
   - Every `ExecuteCommandLists` flushes the set before its commands are written.
-  - `rt::d3d12::bindless_set` and `bindless_set_layout` hand out the set and its layout: what a pipeline whose
-    shader declares set-0 bindings is created with and binds. Nothing in the layer creates such a pipeline yet.
+  - `rt::d3d12::bindless_set` and `bindless_set_layout` hand out the set and its layout for pipelines whose shaders
+    declare set-0 bindings. The synthetic `d3d12_m2_textured_test` (graphics) and `d3d12_set0_compute_test` (compute)
+    exercise this path; the game's full descriptor contract remains open (section 3.4).
 - **Layouts.** A descriptor in set 0 has one image layout for as long as it lives, but D3D12 lets a texture be
   sampled in a shader-resource state and also while promoted from `COMMON`, which is `GENERAL` here (section
   4.3). So with the bindless set, a texture's shader-resource states use `GENERAL` too
@@ -929,8 +945,8 @@ The compute path, end to end:
     standalone device enables where the GPU has it and reports in `VulkanDeviceInfo::features`; without it such a
     PSO is `E_NOTIMPL`. The PSO's topology type must be `TRIANGLE`, the GS's input (`E_INVALIDARG` otherwise). The
     push-constant range names the geometry stage only on such a device (`d3d12_geometry_test`).
-  - **Refused with a log:** hull and domain stages, stream output, MSAA, set-0 bindings, and two stages
-    that both read their code base (question 14, section 5.2). More than eight render targets is `E_INVALIDARG`.
+  - **Refused with a log:** hull and domain stages, stream output, MSAA, set-0 bindings on devices without the
+    bindless set, and two stages that both read their code base (question 14, section 5.2). More than eight render targets is `E_INVALIDARG`.
   - **Push constants:** both PSO paths declare the 144-byte block as one range. Its stage flags are the whole
     stage table the graphics path accepts, and the replay pushes with the same flags. A device whose
     `maxPushConstantsSize` is below 144 (#224's `push_constants_need_fallback`) has every PSO refused, with the
@@ -950,7 +966,7 @@ The compute path, end to end:
     dynamic-rendering scope. Its layer count is the smallest layer count of the bound views.
   - **Viewport:** it is flipped (negative height), because translated vertex shaders write D3D clip coordinates;
     front-face winding then matches D3D12's.
-  - Only the first viewport and scissor are used, and primitive restart is not modelled yet.
+  - Only the first viewport and scissor are used; multi-element arrays remain open (the bounded C-06 readiness step is above). Primitive restart is modelled: replay enables it for indexed strip topologies only when the PSO's 0xFFFF/0xFFFFFFFF cut matches the index width, and disables it otherwise.
 
   **Resources and heaps:**
   - A buffer of 0 bytes, or one whose size wraps when aligned, is `E_INVALIDARG`. One the arena cannot hold is
@@ -975,10 +991,11 @@ The compute path, end to end:
     and offset alignment checks (`4 MiB` vs `64 KiB`, `D3D-222`). `CreatePlacedResource2`'s castable-format list
     reaches the placed texture's image as the committed path's does (D3D-90).
 
-Known gaps: set 0 in pipelines (the device keeps the bindless set, but no pipeline declares or binds it yet) and
-therefore every translated shader that declares bindings; tessellation, geometry and mesh pipelines,
-multisampled pipelines, several viewports, primitive restart; `requiredSubgroupSize = 64` for wave64 compute;
-the game's present entry point (`PresentX`; the DXGI factory/swapchain and the presenter above are what it
+Known gaps include tessellation and stream-output pipelines, multisampled pipelines, and multi-viewport/scissor-array
+replay (the C-06 helper above is readiness-only); device/stage combinations that cannot require a translated subgroup
+size; and which present front end the game uses (`PresentX` or a DXGI swapchain; see question 6). Geometry and mesh PSOs,
+primitive restart, and GCL8 front/back stencil-reference replay are implemented as described above; GPU pixel-level
+coverage of the front/back effect remains open.
 - **Subgroup size (compute and graphics PSOs).** A translated shader assumes one subgroup size, and a GPU whose
   default differs runs it inexact: a wave64 shader reads lanes 32-63 of a 32-wide subgroup, and a wave32 pixel
   shader on a 64-wide default reads the other half's lanes (a public prior-art project, on RDNA4). `port/src/subgroup_size.h`
@@ -1042,12 +1059,13 @@ the game's present entry point (`PresentX`; the DXGI factory/swapchain and the p
     properties and the resulting create-info chain; `d3d12_subgroup_test` (GPU) runs `cs_w64x_readlane` natively
     and with `--wave64-emulate`, and `cs_wqm_w32`, through D3D12 PSOs and compares the read-back words.
 
-Known gaps: set 0 in pipelines (the device keeps the bindless set, but no pipeline declares or binds it yet) and
-therefore every translated shader that declares bindings; tessellation, geometry and mesh pipelines,
-multisampled pipelines, several viewports, primitive restart; subgroup size for mesh pipelines (the decision covers them, no mesh PSO exists to chain it into), and for wave64 vertex, geometry and, on a GPU that cannot require 64 for pixel shaders (NVIDIA), pixel shaders, which have no emulation (SHADER-10); wave32 pixel shaders on a GPU that runs the fragment stage 64-wide and cannot require 32 for it (RDNA2 under AMD's Windows driver, "Subgroup size" above), where two waves share a subgroup;
-the game's present entry point (DXGI factory/swapchain or `PresentX`; the presenter above is what either
-calls), HDR and fullscreen; buffer and constant-buffer views (UAV clears read the descriptor bytes, so they do
-not wait on view creation), typeless volume RTVs, depth-stencil resolves to a destination offset other than
+Known gaps: tessellation and stream-output pipelines, multisampled pipelines, and full multi-viewport/scissor-array
+replay (the C-06 helper above is readiness-only); wave64 vertex, geometry and pixel shaders where the device cannot
+require size 64 (NVIDIA's pixel case has no emulation yet, SHADER-10), plus wave32 pixel shaders on a GPU that runs the
+fragment stage 64-wide and cannot require 32 (RDNA2 under AMD's Windows driver, "Subgroup size" above), where two
+waves share a subgroup; the game's present entry point (DXGI factory/swapchain or `PresentX`; the presenter above is
+what either calls), HDR and fullscreen; buffer and constant-buffer views (UAV clears read the descriptor bytes, so
+they do not wait on view creation), typeless volume RTVs, depth-stencil resolves to a destination offset other than
 the source rectangle's;
 default-heap buffers are not zero-filled yet; a fence cannot be signalled to a lower value (Vulkan timelines only
 increase; such a signal is reported and dropped); a CPU `Signal` above a queue `Signal` the GPU has not reached
@@ -2116,7 +2134,7 @@ The trace will enumerate them.
 | `ID3D12Device` … `ID3D12Device11` | one `Device` object with the public chain plus measured Xbox overrides | The shipped BVH builder names Device11; slots 1/15/18/19/27/38 matched desktop in prior art, slot 62 is called as `CreateComputePipelineState`, slot 76 is Xbox texture creation, and heap slots 9/10 return in RAX. Unknown Xbox IIDs/slots are logged and refused. |
 | `ID3D12CommandQueue` | one leased `VkQueue` per live queue: direct queues on the graphics family, compute queues on an async-compute family and copy queues on a transfer-only (DMA) family when the GPU has them (`src/queue_families.h`), else graphics-family leases | Distinct Vulkan queues allow cross-queue waits and signals to make progress. With more than one family in use, buffers, images, the arena and staging are created `VK_SHARING_MODE_CONCURRENT` over those families, so no ownership transfers are needed. Barriers on copy and compute queues are narrowed to the stages their family has; render-target and depth clears are refused there (as in D3D12), and the D24/RGB96 copy conversions and bindless flushes stay off a transfer-only queue. Tested by `vk_queue_test`. `PresentX`, `SuspendX`, `ResumeX` are Xbox queue methods, not in the public vtable; public GDKX samples present only through them (§4.5). Call shapes known, slots **Open**. |
 | `ID3D12CommandAllocator` | IR arena + `VkCommandPool` | Reset only when the previous submission's fence is complete. |
-| `ID3D12GraphicsCommandList` … `8` | `CommandList` with IR | Replay at `ExecuteCommandLists`; bundles inlined. Supports render passes, mesh dispatch, enhanced barriers; records the GCL8 front/back stencil references (applied only once a pipeline path consumes them). `Draw` views are inlined and moved into the command stream (D3D-289), eliminating per-draw heap allocations. |
+| `ID3D12GraphicsCommandList` … `8` | `CommandList` with IR | Replay at `ExecuteCommandLists`; bundles inlined. Supports render passes, mesh dispatch, enhanced barriers; records GCL8 front/back stencil references and applies them as separate FRONT/BACK dynamic references at draw replay. Multi-viewport/scissor arrays still snapshot element 0 only (C-06 readiness note above). `Draw` views are inlined and moved into the command stream (D3D-289), eliminating per-draw heap allocations. |
 | `ID3D12RootSignature` | `RootSignature` + `VkPipelineLayout` | Deserialize the blob with the host `D3D12CreateVersionedRootSignatureDeserializer` when possible; clear the measured `0x03000000` flag byte on a copy first; fall back to a local parser. Build the user-SGPR map and static samplers. |
 | `ID3D12PipelineState` | `VkPipeline` + a `PipelineInfo` | Shader hash → SPIR-V + index entry; PSO state → Vulkan state; dynamic state where possible. The BVH builder's compute PSOs arrive at device slot 62 with a plain `D3D12_COMPUTE_PIPELINE_STATE_DESC`. |
 | `ID3D12DescriptorHeap` | `DescriptorHeap` (shadow + optional arena range) | CBV/SRV/UAV and sampler heaps can be shader-visible; RTV/DSV are host-only. Start handles use the measured RAX return at heap slots 9/10. Increments are layer-chosen (32/32) pending the console value. |
