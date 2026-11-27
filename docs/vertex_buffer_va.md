@@ -2795,3 +2795,101 @@ window gate's measurement, the substituted-control cache and its key, and the me
 ([raster_state.md](raster_state.md) section 2, [state_blob.md](state_blob.md) section 9, [frame_capture.md](frame_capture.md))
 with the record decode refused in 21.3. The A/B reuses the content probe and the PS-only control, not a new probe. No
 peer code was used and no game data is added: pipeline ids, counts, switches and outcomes only.
+
+## 23. Bounded title-VA aliases for device-address windows outside the arena
+
+**Status: measured gap and CPU-only policy helper; no device hook or boot arm.** Rank 3 of
+[remaining_mechanisms.md](remaining_mechanisms.md) names the gap as "title buffers at raw addresses." Sections 10-22 do
+not show a general title-VA-to-device-window path: the measured `page_address_space.md` example has two overlapping
+ranges, an arena alias for a slot-133 placed buffer (`0x0AE00000` bytes) and an arena mirror for a shader-visible
+console heap (`0x02600000` bytes). The caller's buffer/table kind decides which mapping is meant. The map has no
+outside-arena window record. A raw buffer VA that no registered resource or prior import holds remains a named
+miss/refusal; the replay does not guess an arena offset.
+
+### 23.1 What the current paths declare
+
+| measured case | current rule and limit |
+|---|---|
+| slot-133 placed buffer | The title's `CreatePlacedResourceX` path asks the layer for an arena-backed stand-in. On success the title VA is registered as an alias for that arena offset, so `buffer_at`, root/table rebasing and V# patching can share the one `heap_base + console_va` equation. The arena default is 1024 MiB; the measured full-arena boot refused 79 buffer placements for `no room` (82 total slot-133 creation failures included 3 pre-existing placed-texture refusals). The failed raw ranges never acquire an alias. |
+| console shader-visible heap | Slot 14 mirrors the title's descriptor bytes into the arena and registers the heap VA as a `descriptors` range. If the title backing is unreadable or there is no arena room, the map is marked incomplete and named draws remain refused. The table VA is not treated as a buffer VA; overlapping kinds are selected by the call site. |
+| raw streamed views | The measured unresolved stream was title-owned committed/readable memory, not a `CreatePlacedResourceX` resource: a `0x120000`-byte vertex view, an overlapping `0x11ff80`-byte view beginning `0x80` later, and a nearby `0x60000`-byte index view. The miss probe found none of the then-registered 3,282 placed-buffer/heap ranges held that VA. The bounded first-use import subsequently brought in two title spans without arena room; that policy caps one span at 32 MiB, 32 spans and 64 MiB total, and refuses empty, low-VA or unreadable/uncommitted ranges by name. It resolves command binding but is not a persistent BDA window; the vertex V# feed still had to copy draw-reachable bytes into the arena because an imported buffer's BDA is not named by the arena's shader base. |
+| stage-3 vertex staging | `stage_title_span` caches at most eight title-VA spans, at most 4 MiB each, and recopies the title's current bytes on use. A full-span request in the measured content boot was refused as `no arena room`; a draw-reachable bounded span then fit. Missing or unbacked spans keep the draw's recorded pair and are not executed with a guessed address. |
+| upload/readback V# bias | D3D-53 measured that a 64-bit root-argument bias can address an out-of-arena host BDA, but the same negative `host_bda - heap_base` truncated into a V#'s 48-bit base faults and loses the queue submission on both test GPUs. An arbitrary separate BDA therefore cannot be made a V# base by blindly subtracting `heap_base`. |
+
+The title's large `XMemVirtualAlloc` heap request (`0x25400000` bytes, large-pages path) is a CPU placement declared by
+the title; changing its returned base did not create a GPU arena window or change the renderer stop (section 19). The
+outside-arena gap is the GPU-address mapping and content feed, not a missing CPU allocation answer. The separate
+clean-room Slice 3 in [cleanroom_peers.md](cleanroom_peers.md) is physical-page alias tracking, write watch and changed-page
+refresh; this table neither discovers page identity nor implements that slice.
+
+### 23.2 The helper and its refusal contract
+
+`port/src/title_va_alias.h` adds the portable `TitleVaAliasTable`; it is a tested mapping policy, not yet a live Vulkan
+adapter. `PALMETTO_TITLE_VA_WINDOWS` is parsed strictly: unset/empty/false keeps the feature off, an explicit true value
+opts in, and malformed text produces `invalid_switch` rather than accidentally enabling it. The table uses fixed arrays
+of 32 windows and 32 aliases, caps each outside-arena device window at 4 MiB and all windows at 32 MiB (the measured
+section-18 staging budget of eight 4 MiB spans), and does not grow or allocate memory when full.
+
+A registered window must have a non-zero, overflow-safe BDA range outside the arena, at or above `heap_base`, with its
+entire positive delta and extent fitting the V# 48-bit address space. Each raw title-VA alias must be non-zero, outside
+the 32-bit arena VA window, non-overlapping, and fully backed by one registered window. Separate title VAs can name the
+same bytes only when the caller supplies the same window and byte offset; the helper does not infer physical-page
+identity. Resolution requires the requested view to fit wholly inside both the alias and window. Teardown refuses to
+remove a window while aliases still reference it.
+
+Refusal tags are stable strings for diagnostics: `switch_off`, `invalid_switch`, `no_arena_geometry`,
+`title_va_inside_arena_window`, `window_below_heap_base`, `window_overlaps_arena`, `window_v48_unrepresentable`,
+`window_too_large`, `window_budget_spent`, `window_table_full`, `alias_table_full`, `alias_window_missing`,
+`alias_outside_window`, `alias_overlap`, `alias_unmapped`, `alias_view_out_of_bounds`, `range_overflow`, and
+`alias_has_live_views` (plus named zero/duplicate-ID cases). `resolve` leaves its output unchanged on refusal. With the
+switch off the new table stays empty and returns `switch_off`; no existing `ConsoleVaMap`, `buffer_at`, V# patch or
+`stage_title_span` path was changed, so the runtime's off path remains byte-identical in this code-only slice.
+
+### 23.3 Integration boundary and falsifier
+
+The next phase is the device adapter: create and own the `VkBuffer`/device memory for a window, pass its actual BDA to
+the table, resolve raw VAs from `buffer_at`, rewrite all shader-visible root/table/V# copies to the returned
+heap-relative VA, and refresh or pull the title's current bytes before the dependent submission. This helper alone does
+none of those device operations; until they are wired, `PALMETTO_TITLE_VA_WINDOWS=1` is only a pure policy input and
+cannot change a boot. No Palmetto build, relink or GPU arm was run here; the lead's integration gate and the host's recent
+device-loss history remain ahead of any light arm.
+
+**Next falsifier:** after the adapter is integrated and the lead clears the gate, a synthetic draw must bind an
+out-of-arena upload buffer as a V#, resolve a title alias to a window, and read back the known synthetic bytes. The
+observed V# must reconstruct exactly `heap_base + console_va == window BDA` for the whole view; the opt-in arm must keep
+its submission and device alive, while the switch-off control must retain the old path. A refused registration when the
+BDA is below `heap_base`, overlaps the arena, exceeds the 48-bit extent or crosses a view bound is the expected safe
+negative. The falsifier is a V# mismatch/readback mismatch, a new refusal on the accepted synthetic draw, or device loss;
+any such result keeps the switch off. No boot effect is claimed by the helper test.
+
+### 23.4 Tests and gates
+
+`port/test/buffer_va_index_test.cpp` now exercises the strict switch parse, switch-off output/state preservation, two raw
+VA aliases resolving to one synthetic BDA window, exact `heap_base` arithmetic, view and alias bounds, overlap and
+missing-window refusals, below-base/arena-overlap/48-bit/overflow cases, per-window and total byte budgets, table
+capacities, and alias-before-window teardown. These are GPU-free synthetic values only. The lead will run the shared
+full test/docs gates after every slice reports stable; this slice has not built Palmetto or run a GPU test.
+
+### 23.5 Attribution and NOTICE draft
+
+The independent helper follows this repository's own address equation, measured refusal paths and fixed-capacity test
+style. The public GPL-3.0 reference fork [ubiquitarianism/leonida](https://github.com/ubiquitarianism/leonida) is a
+separate evidence source: commit `273b3bdf9` records `src/title_va_alias.h`,
+`shims/d3d12_title_buffer_windows.h` and `src/buffer_va_index.h`; commit `ed94fbef9` (#1723) records additional
+buffer-window and placed-image mapping work (`placed_image_map_note.h`, `xg_xs_layout.h`). The five peer snapshots named
+for this task are credited as evidence context only: Five Star Recomp (`34b4dfed`, GPL-3.0-or-later), VIctory
+(`63bcca4`, GPL-3.0-or-later), PercyScarlett (`e44c465`, GPL-2.0-only), victory-fork (`9a9091d`, GPL-3.0-or-later)
+and XCL (`623d02e`, GPL-2.0-only); their repositories and audit pins are recorded in
+[cleanroom_peers.md](cleanroom_peers.md). Their commits are not a source of code, comments, identifiers, signatures or
+tables for this helper; the local address checks, refusal set and bounds are independently written. The page's scope is
+the measured title-buffer window model, not a claim that the peers share one implementation.
+
+> **Draft NOTICE.md row (not applied; NOTICE.md is intentionally unchanged):** The bounded title-VA alias/window
+> policy ([docs/vertex_buffer_va.md](vertex_buffer_va.md), section 23) was informed as behavior evidence only by the
+> public GPL-3.0 project [ubiquitarianism/leonida](https://github.com/ubiquitarianism/leonida) (commits `273b3bdf9`
+> and `ed94fbef9`; `src/title_va_alias.h`, `shims/d3d12_title_buffer_windows.h`, `src/buffer_va_index.h`,
+> `placed_image_map_note.h` and `xg_xs_layout.h`) and the peer snapshots: Five Star Recomp (`34b4dfed`,
+> GPL-3.0-or-later; ThatRecompDev), VIctory (`63bcca4`, GPL-3.0-or-later; Marvis), PercyScarlett (`e44c465`,
+> GPL-2.0-only; rpatty-dev), victory-fork (`9a9091d`, GPL-3.0-or-later; fxceless) and XCL (`623d02e`,
+> GPL-2.0-only; Prime1997). No code, comment text, identifier or measurement table was copied; the local address checks,
+> refusal set, bounds and tests are independently written.

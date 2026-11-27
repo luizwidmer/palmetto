@@ -6,6 +6,7 @@
 
 #include "../src/buffer_va_index.h"
 #include "../src/console_va_map.h"
+#include "../src/title_va_alias.h"
 
 #include <chrono>
 #include <cstdint>
@@ -130,6 +131,164 @@ void console_va_map_cases() {
     check(!map.incomplete(), "the map starts complete");
     map.mark_incomplete();
     check(map.incomplete(), "mark_incomplete is reported");
+}
+
+// TitleVaAliasTable (port/src/title_va_alias.h): bounded raw title VA aliases to BDA windows outside the arena.
+// Synthetic addresses only; this checks address arithmetic and policy, not a Vulkan allocation or a title boot.
+void title_va_alias_cases() {
+    using palmetto::TitleVaAliasRefusal;
+    using palmetto::TitleVaAliasResolution;
+    using palmetto::TitleVaAliasTable;
+    using palmetto::TitleVaWindowsSwitch;
+
+    check(palmetto::title_va_windows_switch_from(nullptr) == TitleVaWindowsSwitch::off,
+          "unset title-window switch is off");
+    check(palmetto::title_va_windows_switch_from("") == TitleVaWindowsSwitch::off,
+          "empty title-window switch is off");
+    check(palmetto::title_va_windows_switch_from("0") == TitleVaWindowsSwitch::off &&
+              palmetto::title_va_windows_switch_from("off") == TitleVaWindowsSwitch::off,
+          "false title-window switch values stay off");
+    check(palmetto::title_va_windows_switch_from("1") == TitleVaWindowsSwitch::on &&
+              palmetto::title_va_windows_switch_from("yes") == TitleVaWindowsSwitch::on,
+          "only explicit true title-window values opt in");
+    check(palmetto::title_va_windows_switch_from("maybe") == TitleVaWindowsSwitch::invalid &&
+              palmetto::title_va_windows_switch_from(" 1") == TitleVaWindowsSwitch::invalid,
+          "malformed title-window switch values are named invalid");
+
+    constexpr std::uint64_t arena = 0x1000000000ull;
+    constexpr std::uint64_t arena_bytes = 0x2000000ull;
+    constexpr std::uint64_t arena_end = arena + arena_bytes;
+    constexpr std::uint64_t external = arena_end + 0x100000ull;
+    constexpr std::uint64_t external_bytes = 0x200000ull;
+    constexpr std::uint64_t title_a = 0x18000000000ull;
+    constexpr std::uint64_t title_b = 0x19000000000ull;
+
+    TitleVaAliasTable off;
+    const auto off_window = off.add_window(1, external, 0x1000);
+    TitleVaAliasResolution untouched{0x11, 0x22, 0x33, 0x44};
+    const auto before = untouched;
+    const auto off_resolve = off.resolve(title_a, 0x100, untouched);
+    check(off_window == TitleVaAliasRefusal::switch_off && off_resolve == TitleVaAliasRefusal::switch_off &&
+              std::memcmp(&untouched, &before, sizeof(before)) == 0 && off.window_count() == 0 &&
+              off.alias_count() == 0,
+          "switch-off refusal leaves output and registry state unchanged");
+    TitleVaAliasTable invalid(TitleVaWindowsSwitch::invalid, arena, arena_bytes);
+    check(invalid.add_window(1, external, 0x1000) == TitleVaAliasRefusal::invalid_switch,
+          "invalid switch refuses window registration by name");
+
+    TitleVaAliasTable table(TitleVaWindowsSwitch::on, arena, arena_bytes);
+    check(table.add_window(7, external, external_bytes) == TitleVaAliasRefusal::none &&
+              table.window_count() == 1 && table.window_bytes() == external_bytes,
+          "one external BDA window is accepted within the per-window and total bounds");
+    check(table.add_alias(101, title_a, 0x100000, 7, 0x10000) == TitleVaAliasRefusal::none &&
+              table.add_alias(102, title_b, 0x100000, 7, 0x10000) == TitleVaAliasRefusal::none,
+          "two raw title VAs may alias the same outside-arena window bytes");
+
+    TitleVaAliasResolution a{};
+    TitleVaAliasResolution b{};
+    constexpr std::uint64_t inside = 0x1234;
+    check(table.resolve(title_a + inside, 0x200, a) == TitleVaAliasRefusal::none &&
+              table.resolve(title_b + inside, 0x200, b) == TitleVaAliasRefusal::none &&
+              a.window_id == 7 && a.console_va == external - arena + 0x10000 + inside &&
+              a.device_address == external + 0x10000 + inside && a.console_va + arena == a.device_address &&
+              a.console_va == b.console_va && a.device_address == b.device_address &&
+              a.available_bytes == 0x100000 - inside,
+          "both aliases resolve to the same representable GPU address with remaining bounds");
+    check(table.resolve(title_a - 0x1000, 0x20, a) == TitleVaAliasRefusal::alias_unmapped,
+          "unregistered raw title VA is refused by name");
+    check(table.resolve(title_a + 0xfffff, 2, a) == TitleVaAliasRefusal::alias_view_out_of_bounds,
+          "a view crossing its alias end is refused");
+    check(table.resolve(title_a, 0, a) == TitleVaAliasRefusal::zero_bytes &&
+              table.resolve(UINT64_MAX - 1, 4, a) == TitleVaAliasRefusal::range_overflow,
+          "empty and overflowing view spans are named refusals");
+
+    check(table.add_alias(103, title_a + 0x80000, 0x1000, 7) == TitleVaAliasRefusal::alias_overlap,
+          "overlapping title-VA aliases are refused as ambiguous");
+    check(table.add_alias(104, title_a + 0x200000, 0x1000, 99) == TitleVaAliasRefusal::alias_window_missing,
+          "alias without a registered window is refused");
+    check(table.add_alias(105, title_a + 0x200000, external_bytes + 1, 7) ==
+              TitleVaAliasRefusal::alias_outside_window,
+          "alias larger than its backing window is refused");
+    check(table.add_alias(106, 0x10000000ull, 0x1000, 7) ==
+              TitleVaAliasRefusal::title_va_inside_arena_window,
+          "a raw VA inside the 32-bit arena window is not aliased");
+    check(table.add_alias(107, UINT64_MAX - 0x10, 0x20, 7) == TitleVaAliasRefusal::range_overflow,
+          "a raw title range that wraps is refused");
+    check(table.add_alias(0, title_a + 0x300000, 0x1000, 7) == TitleVaAliasRefusal::zero_alias_id &&
+              table.add_alias(108, 0, 0x1000, 7) == TitleVaAliasRefusal::zero_address &&
+              table.add_alias(109, title_a + 0x300000, 0, 7) == TitleVaAliasRefusal::zero_bytes &&
+              table.add_alias(101, title_a + 0x300000, 0x1000, 7) == TitleVaAliasRefusal::duplicate_alias_id,
+          "zero and duplicate alias inputs are refused by name");
+
+    check(table.add_window(7, external + 0x400000, 0x1000) == TitleVaAliasRefusal::duplicate_window_id &&
+              table.add_window(8, external + 0x1000, 0x1000) == TitleVaAliasRefusal::window_overlap,
+          "duplicate window IDs and overlapping BDA windows are refused");
+    check(table.add_window(9, arena - 0x1000, 0x1000) == TitleVaAliasRefusal::window_below_heap_base &&
+              table.add_window(10, arena + 0x1000, 0x1000) == TitleVaAliasRefusal::window_overlaps_arena,
+          "negative-bias and arena-overlapping windows are refused");
+    check(table.add_window(11, arena + TitleVaAliasTable::kConsoleVaSpace, 0x1000) ==
+              TitleVaAliasRefusal::window_v48_unrepresentable,
+          "a window outside the 48-bit V# address extent is refused");
+    check(table.add_window(12, external + 0x400000, TitleVaAliasTable::kMaxWindowBytes + 1) ==
+              TitleVaAliasRefusal::window_too_large &&
+              table.add_window(13, UINT64_MAX - 0x10, 0x20) == TitleVaAliasRefusal::range_overflow &&
+              table.add_window(0, external + 0x400000, 0x1000) == TitleVaAliasRefusal::zero_window_id &&
+              table.add_window(14, 0, 0x1000) == TitleVaAliasRefusal::zero_address &&
+              table.add_window(15, external + 0x400000, 0) == TitleVaAliasRefusal::zero_bytes,
+          "oversized, wrapping, and empty window requests are named refusals");
+    TitleVaAliasTable no_geometry(TitleVaWindowsSwitch::on);
+    check(no_geometry.add_window(1, external, 0x1000) == TitleVaAliasRefusal::no_arena_geometry,
+          "a window without the one heap_base and arena extent is refused");
+    check(std::strcmp(palmetto::title_va_alias_refusal_name(TitleVaAliasRefusal::window_v48_unrepresentable),
+                      "window_v48_unrepresentable") == 0,
+          "refusal names are stable for startup-trace reporting");
+
+    TitleVaAliasTable budget(TitleVaWindowsSwitch::on, arena, arena_bytes);
+    constexpr std::uint64_t budget_base = arena_end + 0x10000000ull;
+    bool budget_windows_added = true;
+    for (std::uint64_t i = 0; i < 8; ++i)
+        budget_windows_added = budget_windows_added &&
+                               budget.add_window(100 + i, budget_base + i * TitleVaAliasTable::kMaxWindowBytes,
+                                                 TitleVaAliasTable::kMaxWindowBytes) == TitleVaAliasRefusal::none;
+    check(budget_windows_added && budget.window_bytes() == TitleVaAliasTable::kMaxTotalWindowBytes &&
+              budget.add_window(200, budget_base + 8 * TitleVaAliasTable::kMaxWindowBytes, 1) ==
+                  TitleVaAliasRefusal::window_budget_spent,
+          "the 32 MiB aggregate window budget is enforced before the fixed table is full");
+
+    TitleVaAliasTable window_capacity(TitleVaWindowsSwitch::on, arena, arena_bytes);
+    constexpr std::uint64_t cap_base = arena_end + 0x20000000ull;
+    bool all_windows_added = true;
+    for (std::uint64_t i = 0; i < TitleVaAliasTable::kMaxWindows; ++i)
+        all_windows_added = all_windows_added &&
+                            window_capacity.add_window(300 + i, cap_base + i * 0x1000, 1) ==
+                                TitleVaAliasRefusal::none;
+    check(all_windows_added && window_capacity.window_count() == TitleVaAliasTable::kMaxWindows &&
+              window_capacity.add_window(400, cap_base + TitleVaAliasTable::kMaxWindows * 0x1000, 1) ==
+                  TitleVaAliasRefusal::window_table_full,
+          "the fixed outside-window table refuses its 33rd entry");
+
+    TitleVaAliasTable alias_capacity(TitleVaWindowsSwitch::on, arena, arena_bytes);
+    constexpr std::uint64_t alias_window_base = arena_end + 0x30000000ull;
+    check(alias_capacity.add_window(1, alias_window_base, TitleVaAliasTable::kMaxWindowBytes) ==
+              TitleVaAliasRefusal::none,
+          "alias-cap test has one bounded backing window");
+    bool all_aliases_added = true;
+    for (std::uint64_t i = 0; i < TitleVaAliasTable::kMaxAliases; ++i)
+        all_aliases_added = all_aliases_added &&
+                            alias_capacity.add_alias(500 + i, title_a + i * 0x1000, 0x1000, 1) ==
+                                TitleVaAliasRefusal::none;
+    check(all_aliases_added && alias_capacity.alias_count() == TitleVaAliasTable::kMaxAliases &&
+              alias_capacity.add_alias(600, title_a + TitleVaAliasTable::kMaxAliases * 0x1000, 0x1000, 1) ==
+                  TitleVaAliasRefusal::alias_table_full,
+          "the fixed title-VA alias table refuses its 33rd entry");
+
+    check(table.remove_window(7) == TitleVaAliasRefusal::alias_has_live_views &&
+              table.remove_alias(101) == TitleVaAliasRefusal::none &&
+              table.remove_alias(102) == TitleVaAliasRefusal::none &&
+              table.remove_window(7) == TitleVaAliasRefusal::none && table.window_count() == 0 &&
+              table.alias_count() == 0 && table.window_bytes() == 0 &&
+              table.resolve(title_a, 0x100, a) == TitleVaAliasRefusal::alias_unmapped,
+          "window lifetime cannot end before its aliases and releases all bounded bytes");
 }
 
 void fixed_cases() {
@@ -402,6 +561,7 @@ void time_miss_after_free() {
 
 int main(int argc, char** argv) {
     console_va_map_cases();
+    title_va_alias_cases();
     fixed_cases();
     allocation_failures();
     random_tables();
@@ -414,7 +574,7 @@ int main(int argc, char** argv) {
         std::printf("%d failure(s)\n", failures);
         return 1;
     }
-    std::puts("BufferVaIndex: fixed cases and 200 random tables agree with the scan");
+    std::puts("BufferVaIndex: fixed cases, title-VA windows, and 200 random tables pass");
     const bool bench = argc > 1 && std::strcmp(argv[1], "--bench") == 0;
     for (const std::size_t n : {std::size_t(1000), std::size_t(10000)}) time_lookups(n);
     if (bench)
