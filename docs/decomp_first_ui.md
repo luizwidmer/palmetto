@@ -1,13 +1,13 @@
 # The first-run, UI and movie path: the boot-media gate, the frame handshake and the calls behind the first visible frame
 
-**Status: sections 1-10 are static decompilation, no boot; section 11 is measured.** This page maps the title's
-own first-run/UI/movie path from the image alone: the boot-media gate the stage-2 boot sequence waits on, the frame loop that gate releases, the first-run,
-accessibility, text-entry, profile, settings/save and launcher code with the runtime calls each one makes, and the
-separate movie/Bink module that produces the launch-video frames. Every entry is an image RVA (image base
-`0x140000000`) and a call site, a call graph edge, a structure offset or a count; no strings, asset contents or hashes
-of game data appear here. **M** marks a fact measured statically in this slice (decompiled or scanned from the image);
-**I** marks an inference from the call shape that the page does not resolve further. Runtime pages are cited only as
-context and are never used as the evidence for a static claim.
+**Status: sections 1-10 are static decompilation; sections 11-19 add measured boot evidence.** This page maps the title's
+own first-run/UI/movie path from the image and a bounded series of boots: the boot-media gate the stage-2 boot sequence
+waits on, the frame loop that gate releases, the first-run, accessibility, text-entry, profile, settings/save and launcher
+code with the runtime calls each one makes, and the separate movie/Bink module that produces the launch-video frames.
+Every entry is an image RVA (image base `0x140000000`) and a call site, a call graph edge, a structure offset or a count;
+no strings, asset contents or hashes of game data appear here. **M** marks a fact measured statically in this slice
+(decompiled or scanned from the image); **I** marks an inference from the call shape that the page does not resolve
+further. Runtime pages are cited only as context and are never used as the evidence for a static claim.
 
 ## 1. What was measured, and with what
 
@@ -18,7 +18,7 @@ context and are never used as the evidence for a static claim.
 | functions decompiled | 88 function ranges over six headless batches; 74 with real bodies (the rest are two-instruction stage thunks or ranges without a `.pdata` start); per-function files under `D:\leonida-work\decomp\out-*` |
 | static scans | RIP-relative references and immediate stores to every watched word, direct `E8` caller graphs from 299k function starts, the whole import table, the 161 GDK-runtime thunks and their 348 direct call sites |
 | runtime answers seen statically | 17 GDK runtime classes (the thunk census from `tooling/gdk_runtime_calls.py`), the `Bink2Scarlett.dll` 23-import surface, the host kernel/PLM objects |
-| not used | no boot, no game-data strings or bytes, no shim behaviour as evidence, no repository code changed, no git write |
+| evidence boundary | static sections 1-10 use no boot or shim behaviour as evidence; later measured sections cite their own bounded runs; no game-data strings or bytes are included |
 | work notes | `D:\leonida-work\decomp\first-ui.md` (raw RVA list, scan outputs, next steps) |
 
 The decompile covers the two producers the peer ports report as their first visible content: the title's **2D/UI
@@ -1544,3 +1544,85 @@ measured, so no shim is changed.
 - **Attribution.** The arms, the probe, the field measurements, the allocations and the captures are this project's own
   measurements; the title functions and the package decoder were decompiled locally from the user's own image with the
   project's Ghidra tooling. No peer code was used and no game data is added.
+
+## 19. Measured: the UI 2D-batch route and the media/UI present body
+
+### 19.1 The arm and probe
+
+This is the one authorized light arm that fills the 2D-batch gap in section 14: it uses the class-0xa mitigation and the
+same content environment, then adds the bounded `PALMETTO_UI_PROBE=draw` counters and `PALMETTO_PRESENT_ATTEST=1`.
+There was no scripted input and no movie probe. The four measured instruction prefixes were validated before any trap;
+all four sites armed and none was refused. The stage split reads the title's game/stage word at `0x7446510`; each site
+stops counting and restores its instruction at 4,096 hits. The probe records entry counts only, not caller, arguments,
+stack or drawn content, so it cannot attribute these calls to a particular screen owner.
+
+The UI draw reporter's `t` field is absolute `steady_clock` seconds. I normalized its samples against the run's
+`timeline origin`; the `<3`/`>=3` buckets are read from the live title word and do not depend on this clock conversion.
+
+### 19.2 Timeline and site results
+
+| run-relative time | observation |
+|---:|---|
+| 0 s | `PALMETTO_UI_PROBE=draw` armed batch-build `0x517A290`, rectangle-fill `0x3A1B860`, transform-copy `0x58C8950` and batch-submit `0x2AACF0`: 4/4, 0 refused. |
+| 2 s | Present attestation: `body-entries 166`, `presents 0`; gate `0x2`, both present-pass keys `0x0`, state `body-exits-on-keys`. |
+| about 10/20 s | All four UI draw counters remain 0 in the snapshots. The game/stage word advances through stages 1 and 2. |
+| about 30 s | `batch-build=404` and `batch-submit=404`; rectangle-fill and transform-copy remain 0. |
+| 32.1 s | Present attestation: `presents 273`, `submits 547`, `frame-callbacks 274`, `body-entries 1,632`; both keys remain 0 and the body still exits on keys. |
+| 92.1 s | Present attestation: `presents 2,083`, `submits 4,168`, `frame-callbacks 2,085`, `body-entries 1,632`; state remains `body-exits-on-keys`. |
+| about 100 s | Batch-build and batch-submit each reach their 4,096-hit cap, all in the `<3` bucket; rectangle-fill and transform-copy remain at 0. |
+| 112 s | State trace has init/stage word 2, loading 2, session 1, machine current 2 / next 2. Stage 3 is not reached. |
+| about 113.0 s | One `[rt] replay: the Vulkan device was lost` event. |
+| 114.363 s | Startup trace records an access-violation exception at `game+0x4D9F6C4`, read from `0xffffffffffffffff`; the arm exits at 116.1 s, not by timeout. |
+
+| site | `<3` | `>=3` | unknown | observed result |
+|---|---:|---:|---:|---|
+| batch-build | 4,096 (capped) | 0 | 0 | reached before stage 3; the true total after the cap is unobserved |
+| rectangle-fill | 0 | 0 | 0 | no entry during this arm |
+| transform-copy | 0 | 0 | 0 | no entry during this arm |
+| batch-submit | 4,096 (capped) | 0 | 0 | reached before stage 3; the true total after the cap is unobserved |
+
+The batch-build and batch-submit counters matched at every snapshot. The title remained at machine stage 2 through the
+last state sample and crashed before stage 3, so the zero `>=3` columns are **not** evidence that these sites do not run
+after stage 3. The device-loss line preceded the exception; this single arm does not establish that the loss caused the
+exception. No second arm was run.
+
+The present-body result is a separate measurement from the 2D-batch sites. The existing attestation counts entries into
+the measured media/UI body at `0x22185A0`; it observed at least 1,632 entries by 32.1 s, with the last logged sample at
+92.1 s still at 1,632. At every emitted sample the body's two present-pass keys were 0 and its state was
+`body-exits-on-keys`. Renderer `PresentX`/queue activity was also non-zero (2,083 presents and 4,168 submits at 92.1 s),
+but the capture index contains 28 frames (1 through 2,701), all with mean RGB `0.00 0.00 0.00`. Thus code reaches the
+media/UI body and the renderer's present path, but this arm does not reach the body's present pass or a visible frame.
+
+### 19.3 Verdict, limits and next falsifier
+
+- **The measured 2D batch path is reached before stage 3.** Batch-build and batch-submit each hit 4,096 and capped;
+  rectangle-fill and transform-copy did not fire. These are function-entry counts, not proof that the calls belong to
+  the first-run screen owner or that they draw visible UI.
+- **The present body is reached but exits on its keys.** At least 1,632 body entries were sampled; the pass keys stayed
+  zero. `PresentX` activity and black captures are not contradictory: the former names renderer submission/presentation,
+  while `0x22185A0` is the distinct media/UI body.
+- **Post-stage-3 behavior remains unmeasured.** The one arm lost the Vulkan device at about 113 s and stopped on an
+  access violation at 114.363 s, before stage 3; it was not a 300 s timeout. There was one device-loss event, below the
+  two-loss ceiling, but no further boot is authorized or claimed here.
+- **Next falsifier, only if separately authorized:** run one stable-host arm through a confirmed stage-3 transition with
+  these same bounded counters and a bounded caller/return-site sample for batch-build and batch-submit. That decides
+  whether the batch path continues after stage 3 and whether the pre-stage-3 hits belong to a UI screen owner. Do not
+  infer a negative post-stage-3 result from this stopped arm.
+
+### 19.4 Tests, gates, evidence and files
+
+- The lead's pre-arm `PALMETTO_OK` and `TESTS_BUILT` gates passed. After this section was appended, the documentation
+  suite passed 38/38 tests. The GPU-free `ui_draw_probe_test` CTest ran without rebuilding: 1/1 passed; its executable
+  reported 80 checks and 0 failures. No Palmetto build or relink was done after the arm.
+- **Evidence (outside the repository; local lab):** `D:\leonida-work\fsrstable\boot-ui2d-draw-one` contains the
+  original `meta.txt`, `boot.jsonl`, `stderr.log`, `stdout.log` and `summary.txt`; captures and `index.txt` are in
+  `D:\leonida-work\fsrstable\capture-ui2d-draw-one`. Actor: `luna3-ui2d`; target: the local Palmetto process running
+  the supplied title image under the class-0xa/content environment. Capture window: 2026-11-27 09:46:30–09:48:26
+  America/Sao_Paulo. The used `palmetto.exe` SHA-256 starts `1DD3A3E84789BDB0`. Raw proof SHA-256:
+  `stderr.log` `772B5E6938624444531060EF8550936C2848226CB6ABFD1C7037E50666B99EA3`,
+  `boot.jsonl` `F6709FC60F5B3586E9981C10C80B31C9F3240F6EA1BCCE265DE1C0FC48B3DA6`,
+  capture `index.txt` `B7913D0BA28FD4B6C2520BA1BF0E27BA82FD6BB503455E2EE823627F43EFD214`.
+- **Uncommitted files from this slice:** [main.cpp](../port/src/main.cpp),
+  [ui_draw_probe.h](../port/src/ui_draw_probe.h), [ui_draw_probe_test.cpp](../port/test/ui_draw_probe_test.cpp) and this
+  page. The lead owns the CMake/CTest registration and the `docs/README.md` index row. No game data was added and no git
+  write was made.

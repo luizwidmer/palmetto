@@ -45,6 +45,7 @@
 #include "pe_loader.h"
 #include "title_class0a.h"
 #include "title_watchdog.h"
+#include "ui_draw_probe.h"
 #include "wait_trace.h"
 #include "../shims/d3d12_trace.h"
 #include "../shims/d3d12_xs_device.h"
@@ -8926,6 +8927,280 @@ void start_movie_draw_probe(std::uintptr_t image_base, std::size_t image_size) {
     std::fflush(stderr);
 }
 
+// ---- UI 2D-batch path probe (PALMETTO_UI_PROBE=draw) -------------------------------------------------------------
+// The page probe in docs/peer_port_first_ui.md section 14 reaches the RBF0 handler but no front-end page owner. This
+// separate arm checks the measured draw route: batch build, rectangle/fill, transform copy and submit. It is opt-in and
+// shape-gated at each measured RVA. Each site restores the original instruction, single-steps it, and re-arms; a site is
+// permanently disarmed after 4096 hits. The reporter prints only four counters every 10 s, for at most 300 s (no title
+// registers or memory are dumped). Hits are split at the measured stage word image+0x7446510, so the stage-3 boundary is
+// not inferred from wall-clock alone. The existing PALMETTO_PRESENT_ATTEST switch independently counts the media/UI
+// present body; no body or title state is written by this probe.
+namespace ud = palmetto::ui_draw_probe;
+constexpr unsigned kUiDrawProbeHitCap = 4096;
+constexpr unsigned kUiDrawProbeSampleSeconds = 10;
+constexpr unsigned kUiDrawProbeMaxSamples = 30;
+
+struct UiDrawProbe {
+    std::atomic<bool> ready{false};
+    std::atomic<std::uintptr_t> address[ud::kSiteCount] = {};
+    std::uint8_t original[ud::kSiteCount] = {};
+    std::atomic<unsigned> hits[ud::kSiteCount] = {};
+    std::atomic<unsigned> before_stage3[ud::kSiteCount] = {};
+    std::atomic<unsigned> after_stage3[ud::kSiteCount] = {};
+    std::atomic<unsigned> unknown_stage[ud::kSiteCount] = {};
+    std::atomic<bool> capped[ud::kSiteCount] = {};
+    std::atomic<bool> write_failed[ud::kSiteCount] = {};
+    std::uintptr_t stage_address = 0;
+    unsigned armed = 0;
+    unsigned refused = 0;
+};
+
+UiDrawProbe& ui_draw_probe() {
+    static UiDrawProbe probe;
+    return probe;
+}
+
+thread_local unsigned ui_draw_repoke_site = 0;  // 1-based site whose original first byte is single-stepped
+
+enum class UiDrawWriteResult { Failed, Written, WrittenProtectionNotRestored };
+
+UiDrawWriteResult ui_draw_probe_write_byte(std::uintptr_t address, std::uint8_t value) {
+    if (address == 0) return UiDrawWriteResult::Failed;
+    DWORD old_protect = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(address), 1, PAGE_EXECUTE_READWRITE, &old_protect))
+        return UiDrawWriteResult::Failed;
+    *reinterpret_cast<std::uint8_t*>(address) = value;
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<const void*>(address), 1);
+    DWORD ignored = 0;
+    return VirtualProtect(reinterpret_cast<void*>(address), 1, old_protect, &ignored)
+               ? UiDrawWriteResult::Written
+               : UiDrawWriteResult::WrittenProtectionNotRestored;
+}
+
+void ui_draw_probe_log_snapshot(double seconds) {
+    UiDrawProbe& probe = ui_draw_probe();
+    char line[1024];
+    int used = std::snprintf(line, sizeof line, "[rt] UI draw at %.1f s:", seconds);
+    for (unsigned site = 0; site < ud::kSiteCount && used > 0 && used < static_cast<int>(sizeof line) - 2; ++site) {
+        const auto load = [](const std::atomic<unsigned>& value) { return value.load(std::memory_order_relaxed); };
+        const int written = std::snprintf(
+            line + used, sizeof line - static_cast<std::size_t>(used),
+            " %s=%u(<3:%u,>=3:%u,?:%u%s%s)", ud::kSites[site].name, load(probe.hits[site]),
+            load(probe.before_stage3[site]), load(probe.after_stage3[site]), load(probe.unknown_stage[site]),
+            probe.capped[site].load(std::memory_order_relaxed) ? ",capped" : "",
+            probe.write_failed[site].load(std::memory_order_relaxed) ? ",write-failed" : "");
+        if (written <= 0) break;
+        used += written;
+    }
+    if (used > 0 && used < static_cast<int>(sizeof line) - 1) {
+        line[used++] = '\n';
+        line[used] = '\0';
+        std::fwrite(line, 1, static_cast<std::size_t>(used), stderr);
+        std::fflush(stderr);
+    }
+}
+
+LONG CALLBACK ui_draw_probe_exception(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT& context = *info->ContextRecord;
+    UiDrawProbe& probe = ui_draw_probe();
+    if (!probe.ready.load(std::memory_order_acquire)) return EXCEPTION_CONTINUE_SEARCH;
+    if (info->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT) {
+        const auto at = reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress);
+        unsigned site = ud::kSiteCount;
+        for (unsigned i = 0; i < ud::kSiteCount; ++i)
+            if (probe.address[i].load(std::memory_order_acquire) == at) {
+                site = i;
+                break;
+            }
+        if (site == ud::kSiteCount) return EXCEPTION_CONTINUE_SEARCH;
+
+        unsigned observed = probe.hits[site].load(std::memory_order_relaxed);
+        while (observed < kUiDrawProbeHitCap &&
+               !probe.hits[site].compare_exchange_weak(observed, observed + 1, std::memory_order_relaxed)) {
+        }
+        if (observed >= kUiDrawProbeHitCap) {
+            // Another thread already consumed the site budget. Restore the instruction for this trapped thread too.
+            const UiDrawWriteResult restored = ui_draw_probe_write_byte(at, probe.original[site]);
+            if (restored == UiDrawWriteResult::Failed) {
+                probe.write_failed[site].store(true, std::memory_order_relaxed);
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+            if (restored == UiDrawWriteResult::WrittenProtectionNotRestored)
+                probe.write_failed[site].store(true, std::memory_order_relaxed);
+            probe.address[site].store(0, std::memory_order_release);
+            probe.capped[site].store(true, std::memory_order_relaxed);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        const unsigned hit = observed + 1;
+        std::uint32_t stage = 0;
+        if (executor_watch_read_block(probe.stage_address, &stage, sizeof stage)) {
+            if (stage < 3)
+                probe.before_stage3[site].fetch_add(1, std::memory_order_relaxed);
+            else
+                probe.after_stage3[site].fetch_add(1, std::memory_order_relaxed);
+        } else {
+            probe.unknown_stage[site].fetch_add(1, std::memory_order_relaxed);
+        }
+        const UiDrawWriteResult restored = ui_draw_probe_write_byte(at, probe.original[site]);
+        if (restored == UiDrawWriteResult::Failed) {
+            probe.write_failed[site].store(true, std::memory_order_relaxed);
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        if (restored == UiDrawWriteResult::WrittenProtectionNotRestored)
+            probe.write_failed[site].store(true, std::memory_order_relaxed);
+        if (hit >= kUiDrawProbeHitCap) {
+            // Keep the reach evidence but stop paying for a hot probe. The current original instruction is restored.
+            probe.address[site].store(0, std::memory_order_release);
+            probe.capped[site].store(true, std::memory_order_relaxed);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        ui_draw_repoke_site = site + 1;
+        context.EFlags |= 0x100;  // trap after the original instruction, then put the int3 back
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (info->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP) {
+        if (!ui_draw_repoke_site) return EXCEPTION_CONTINUE_SEARCH;
+        const unsigned site = ui_draw_repoke_site - 1;
+        ui_draw_repoke_site = 0;
+        const auto address = probe.address[site].load(std::memory_order_acquire);
+        if (address != 0 && ui_draw_probe_write_byte(address, 0xCC) != UiDrawWriteResult::Written)
+            probe.write_failed[site].store(true, std::memory_order_relaxed);
+        context.EFlags &= ~static_cast<DWORD>(0x100);
+        context.Dr6 = 0;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// Validates each measured site before installing any trap, then patches only committed executable pages. The
+// independent page gate probe remains on the existing POKE_LOG path.
+void start_ui_draw_probe(std::uintptr_t image_base, std::size_t image_size) {
+    UiDrawProbe& probe = ui_draw_probe();
+    executor_watch_image_base = image_base;
+    executor_watch_image_size = image_size;
+    if (image_base == 0 || image_size == 0 || ud::kStageWordRva > image_size ||
+        sizeof(std::uint32_t) > image_size - ud::kStageWordRva) {
+        std::fprintf(stderr, "[rt] UI draw probe: NOT installed (the measured stage word is outside the mapped image)\n");
+        std::fflush(stderr);
+        return;
+    }
+    probe.stage_address = image_base + ud::kStageWordRva;
+    std::uint32_t stage = 0;
+    if (!executor_watch_read_block(probe.stage_address, &stage, sizeof stage)) {
+        std::fprintf(stderr, "[rt] UI draw probe: NOT installed (the measured stage word is unreadable)\n");
+        std::fflush(stderr);
+        return;
+    }
+
+    bool validated[ud::kSiteCount] = {};
+    unsigned refused = 0;
+    for (unsigned site = 0; site < ud::kSiteCount; ++site) {
+        const ud::SiteShape& shape = ud::kSites[site];
+        const ud::Validation bounds = ud::validate_site(site, image_size, shape.signature, shape.signature_length);
+        if (bounds != ud::Validation::Ok) {
+            std::fprintf(stderr, "[rt] UI draw probe: site %s image+0x%x refused (%s)\n", shape.name, shape.rva,
+                         ud::validation_name(bounds));
+            ++refused;
+            continue;
+        }
+        const auto address = image_base + shape.rva;
+        MEMORY_BASIC_INFORMATION info{};
+        const bool queried = VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof info) == sizeof info;
+        constexpr DWORD kExecuteProtection = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                                            PAGE_EXECUTE_WRITECOPY;
+        const bool executable = queried && info.State == MEM_COMMIT && (info.Protect & kExecuteProtection) != 0 &&
+                                (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+        if (!executable) {
+            std::fprintf(stderr, "[rt] UI draw probe: site %s image+0x%x refused (not a committed executable page)\n",
+                         shape.name, shape.rva);
+            ++refused;
+            continue;
+        }
+        std::uint8_t bytes[16] = {};
+        const bool read = executor_watch_read_block(address, bytes, shape.signature_length);
+        const ud::Validation result = read ? ud::validate_site(site, image_size, bytes, shape.signature_length)
+                                           : ud::Validation::MissingBytes;
+        if (result != ud::Validation::Ok) {
+            std::fprintf(stderr, "[rt] UI draw probe: site %s image+0x%x refused (%s)\n", shape.name, shape.rva,
+                         ud::validation_name(result));
+            ++refused;
+            continue;
+        }
+        validated[site] = true;
+    }
+
+    if (refused == ud::kSiteCount) {
+        std::fprintf(stderr, "[rt] UI draw probe: no measured site validated; no trap installed\n");
+        std::fflush(stderr);
+        return;
+    }
+    void* const handler = AddVectoredExceptionHandler(1, ui_draw_probe_exception);
+    if (!handler) {
+        std::fprintf(stderr, "[rt] UI draw probe: no trap installed (vectored handler registration failed)\n");
+        std::fflush(stderr);
+        return;
+    }
+    probe.ready.store(true, std::memory_order_release);
+    unsigned armed = 0;
+    for (unsigned site = 0; site < ud::kSiteCount; ++site) {
+        if (!validated[site]) continue;
+        const ud::SiteShape& shape = ud::kSites[site];
+        const auto address = image_base + shape.rva;
+        DWORD old_protect = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(address), 1, PAGE_EXECUTE_READWRITE, &old_protect)) {
+            std::fprintf(stderr, "[rt] UI draw probe: site %s image+0x%x refused (page is not writable)\n", shape.name,
+                         shape.rva);
+            ++refused;
+            continue;
+        }
+        auto* const patch_at = reinterpret_cast<std::uint8_t*>(address);
+        if (std::memcmp(patch_at, shape.signature, shape.signature_length) != 0) {
+            DWORD ignored = 0;
+            VirtualProtect(reinterpret_cast<void*>(address), 1, old_protect, &ignored);
+            std::fprintf(stderr,
+                         "[rt] UI draw probe: site %s image+0x%x refused (instruction shape changed after preflight)\n",
+                         shape.name, shape.rva);
+            ++refused;
+            continue;
+        }
+        probe.original[site] = *patch_at;
+        probe.address[site].store(address, std::memory_order_release);
+        *patch_at = 0xCC;
+        FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<const void*>(address), 1);
+        DWORD ignored = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(address), 1, old_protect, &ignored))
+            std::fprintf(stderr, "[rt] UI draw probe: site %s image+0x%x warning (original protection restore failed)\n",
+                         shape.name, shape.rva);
+        std::fprintf(stderr, "[rt] UI draw probe: armed %s image+0x%x (%zu-byte measured prefix)\n", shape.name,
+                     shape.rva, shape.signature_length);
+        ++armed;
+    }
+    probe.armed = armed;
+    probe.refused = refused;
+    if (armed == 0) {
+        probe.ready.store(false, std::memory_order_release);
+        RemoveVectoredExceptionHandler(handler);
+        std::fprintf(stderr, "[rt] UI draw probe: no site could be patched; no trap remains installed\n");
+        std::fflush(stderr);
+        return;
+    }
+    std::fprintf(stderr,
+                 "[rt] UI draw probe: %u/%u sites armed, %u refused; per-site cap %u; stage split at image+0x%x; "
+                 "counter snapshots every %u s for at most %u s\n",
+                 armed, ud::kSiteCount, refused, kUiDrawProbeHitCap, ud::kStageWordRva, kUiDrawProbeSampleSeconds,
+                 kUiDrawProbeSampleSeconds * kUiDrawProbeMaxSamples);
+    std::fflush(stderr);
+    std::thread([] {
+        for (unsigned sample = 1; sample <= kUiDrawProbeMaxSamples; ++sample) {
+            std::this_thread::sleep_for(std::chrono::seconds(kUiDrawProbeSampleSeconds));
+            UiDrawProbe& probe = ui_draw_probe();
+            if (!probe.ready.load(std::memory_order_acquire)) return;
+            ui_draw_probe_log_snapshot(executor_watch_seconds());
+        }
+    }).detach();
+}
+
 // ---- Bink import witness and non-looping-movie fast-advance (PALMETTO_BINK_WITNESS / PALMETTO_BINK_FASTFORWARD) ----
 // docs/peer_port_movie.md section 14. The measured state this instrument is for: the movie player reaches the
 // middleware's playing state 0x9 with a non-null Bink handle and `buffers 0`, while frame-buffer registration
@@ -10085,26 +10360,20 @@ int wmain(int argc, wchar_t** argv) {
                             "draw); no probe installed\n");
             }
         }
-        // PALMETTO_UI_PROBE=<group>: bounded opt-in int3 entry probes on the front-end UI resource/draw path (P4 of
-        // docs/peer_port_first_ui.md section 7; the measurement is section 14). The audit asks whether the title asks
-        // for its front-end UI at all: the peers' first visible pixels are the title's own 2D UI draws, and this tree's
-        // front-end manager renders while no presented UI frame appears. "draw" is the engine's 2D batch path the UI's
-        // own draws would use (the measured UI path of docs/decomp_first_ui.md section 6): batch entry builder
-        // 0x517A290, rectangle/fill 0x3A1B860, transform matrix copy 0x58C8950 and the batch submit 0x2AACF0. "pages"
-        // is the front-end page owners: profile-name text entry 0x2234A40, profile card 0x3DAF310, the first-run flow
-        // state machine 0x22364A0, and 0x135A290 - the only site in the image that tests the RBF0 stream magic ("RBF0"
-        // as a little-endian dword), i.e. the gate the UI page-data reader would pass through. Same one-shot machinery
-        // and logging as PALMETTO_POKE_LOG (the first hit prints the registers and the title stack): a hit is the reach
-        // signal that the static negatives say cannot exist, and a quiet probe is the P4 falsifier's negative.
-        constexpr std::uint32_t kUiDrawProbeSites[] = {0x517A290, 0x3A1B860, 0x58C8950, 0x2AACF0};
+        // PALMETTO_UI_PROBE=<group>: opt-in front-end UI reach probes (P4 of docs/peer_port_first_ui.md section 14).
+        // "draw" validates four measured 2D-batch instruction shapes and reports bounded counters split by the stage
+        // word; its per-site hit cap and sample window are in start_ui_draw_probe above. "pages" is the front-end page
+        // owners: profile-name text entry 0x2234A40, profile card 0x3DAF310, the first-run flow state machine
+        // 0x22364A0, and 0x135A290, the RBF0 stream-magic gate. That group keeps the existing POKE_LOG behaviour (the
+        // first hit prints registers and the title stack) and its measured RBF0 compare check.
         constexpr std::uint32_t kUiPageProbeSites[] = {0x2234A40, 0x3DAF310, 0x22364A0, 0x135A290};
         if (const DWORD size = GetEnvironmentVariableW(L"PALMETTO_UI_PROBE", nullptr, 0); size > 1) {
             std::wstring value(size, L'\0');
             const DWORD n = GetEnvironmentVariableW(L"PALMETTO_UI_PROBE", value.data(), size);
             if (n > 0 && n < size) value.resize(n);
             if (value == L"draw") {
-                std::printf("[rt] PALMETTO_UI_PROBE=draw: %u 2D batch/draw probe(s)\n",
-                            poke_log_sites(kUiDrawProbeSites, 4));
+                std::printf("[rt] PALMETTO_UI_PROBE=draw: installing the shape-validated 2D-batch counter probe\n");
+                start_ui_draw_probe(reinterpret_cast<std::uintptr_t>(main_module.base), main_module.size);
             } else if (value == L"pages") {
                 // The RBF0 magic test is only a page gate if the bytes are the measured compare: cmp ecx, "RBF0".
                 // Refuse by name rather than probe an instruction whose meaning was not measured.
