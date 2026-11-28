@@ -1825,3 +1825,35 @@ remaining walls are (1) the **frame-request/state-2 request-item producer** for 
 or plane table that only the real app-state notification sequence initializes. Next falsifier: capture the stack of the
 0x0 call with the exception-time stack sampler, then either synthesize the request item through `0x2218080` or fix the
 uninitialized callback.
+
+### 20.10 Round-3 producers: the arena exhaustion, the PLM app-state shim, and the loading-worker null
+
+Three linked results from the producer-side round:
+
+1. **The state-13 crash is arena exhaustion.** The crash in the state-13 handler (`game+0x6EB759`, read `[0]==0` + `0x10`,
+   stack `0x6EB759 <- 0x36BA2B <- 0x56B507D <- 0x275FBB5 <- 0x1D0CAB6 <- 0x21B7733 <- 0x21B7540` = the session-13 handler,
+   `<-
+1D839DE dispatcher <- 0x81AFB9 post-transition) is the title's buffer factory dereferencing a null placeable: the
+   port's GPU address arena (default 1024 MiB) was full at stage 3 (`arena buffer: no room for 0x10 bytes`, then
+   `CreatePlacedResource` `E_OUTOFMEMORY`). With `PALMETTO_ARENA_MB=3072` the same arm reached stage 3 / session 13 at
+   62-102 s and stayed **ALIVE for 200-240 s with 0 exceptions and 0 device losses** - the first stable session-13
+   windows of the campaign. Stage-3 arms must now use `PALMETTO_ARENA_MB=3072` (documented as a measured requirement,
+   not a default change).
+2. **The crash reporter can name a null call.** `stack_from` now starts the walk at `[rsp]` when `Rip == 0` (a jump to 0
+   used to report an empty stack), and `PALMETTO_CRASH_STACK=1` appends 32 raw guest stack words. The state-13 crash
+   above was named that way.
+3. **A PLM app-state notification shim and the loading-worker null.** The producer route the docs call H2 needs the OS
+   app-state notification (`RegisterAppStateChangeNotification` callback `0x2217C70` -> producer `0x2218180`). New
+   `port/shims/appnotify.cpp` answers the imports from `api-ms-win-core-psm-appnotify-*`: off, it forwards to the host
+   api set unchanged; `PALMETTO_TITLE_APPSTATE_CALLBACK=1` delivers one synthetic running-state notification 500 ms
+   after registration (synchronous delivery re-entered the module during construction and the title never reached the
+   renderer; deferred delivery renders normally). The deferred arm reached stage 3 / session 13 at 92-94 s, then
+   **stopped at `game+0x5151E29` read 0x0 on the loading/media worker** (stack `0x5151E29 <- 0x5151C64 <- 0x5151C05 <-
+   `0x12381A <- 0x4FD1B8D <- 0x4FD1AE5 <- 0x23CF247 <- 0x23CF104 <- 0x2215ECA` media tick) - a new title-side null in the
+   loading worker path, not the arena and not the buffer factory.
+
+**Also measured:** with `PALMETTO_TITLE_BOOTMEDIA_OPEN=1` the title's own tick opens the present handshake AC
+(`keys 0x0/0x1`), the boot-media gate changes `0x2 -> 0x20` after the first frame and presentation stops; adding
+`PALMETTO_TITLE_FRAME_REQUEST=1` produces exactly one `body-present-pass` with keys `1/1`, after which AC clears and the
+body stops being ticked. Both are still synthetic or one-shot producer edges; the PLM shim is the route that the real
+app-state sequence uses. No menu pixel is claimed.

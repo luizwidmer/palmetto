@@ -143,6 +143,11 @@ inline constexpr std::uint32_t kBootMediaEventByteRva = 0x75DF0D8u;
 inline constexpr std::uint8_t kBootMediaEventOpenValue = 1u;
 inline constexpr std::uint32_t kBootMediaEventPollMs = 100u;
 inline constexpr std::uint32_t kBootMediaEventMaxWaitTicks = 2400u;
+// The first producer arm opened AC once, the title consumed the frame, and the boot-media gate changed 0x2 -> 0x20 with
+// AC cleared and presentation stopped after one pass. Re-assert the event edge every 100 ms (the media module may clear it
+// on its teardown event type 0x25) so the title's own tick can reopen AC each frame; bounded like the other writers.
+inline constexpr std::uint32_t kBootMediaEventReassertMs = 100u;
+inline constexpr std::uint32_t kBootMediaEventReassertMax = 2400u;
 
 // True when the boot-media gate reads 2 and stage 3 is running. The first producer arm wrote the event byte at gate==2
 // (4 s) and the title then never left init 2 / session 0 (presents 1, body ticking but the frame loop stalled); the

@@ -139,6 +139,7 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
     src/pe_loader.cpp
     src/crash_unwind.cpp
     shims/registry.cpp
+    shims/appnotify.cpp
     shims/file_system.cpp
     shims/winhttp_offline.cpp
     shims/xmem.cpp
@@ -388,6 +389,7 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
     shims/xgameruntime_offline.cpp
     shims/library_loader.cpp
     shims/registry.cpp
+    shims/appnotify.cpp
     shims/file_system.cpp
   )
   target_include_directories(xgameruntime_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
@@ -409,6 +411,7 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
     shims/xgameruntime_offline.cpp
     shims/library_loader.cpp
     shims/registry.cpp
+    shims/appnotify.cpp
     shims/file_system.cpp
   )
   target_include_directories(task_queue_parity_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
@@ -427,6 +430,7 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
     shims/xgameruntime_offline.cpp
     shims/library_loader.cpp
     shims/registry.cpp
+    shims/appnotify.cpp
     shims/file_system.cpp
   )
   target_include_directories(xgameruntime_user_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
@@ -445,6 +449,7 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
     shims/xgameruntime_offline.cpp
     shims/library_loader.cpp
     shims/registry.cpp
+    shims/appnotify.cpp
     shims/file_system.cpp
   )
   target_include_directories(xgameruntime_gamesave_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
@@ -463,6 +468,7 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
     shims/xgameruntime_offline.cpp
     shims/library_loader.cpp
     shims/registry.cpp
+    shims/appnotify.cpp
     shims/file_system.cpp
   )
   target_include_directories(xgameruntime_store_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
@@ -481,6 +487,7 @@ if(WIN32 AND PALMETTO_BUILD_WINDOWS_RUNTIME)
     shims/xgameruntime_offline.cpp
     shims/library_loader.cpp
     shims/registry.cpp
+    shims/appnotify.cpp
     shims/file_system.cpp
   )
   target_include_directories(xgameruntime_offline_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)

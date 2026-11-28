@@ -172,6 +172,12 @@ inline std::atomic<unsigned long>& all_threads_code() noexcept {
 inline std::string stack_from(const CONTEXT& start_context) {
     CONTEXT c = start_context;
     std::string out = "[";
+    // A jump to address 0 (execute fault) leaves Rip == 0, which used to stop the walk immediately and report an empty
+    // stack. The caller's return address is the first word at Rsp; start there so a null call names its caller.
+    if (!c.Rip && c.Rsp && !IsBadReadPtr(reinterpret_cast<void*>(c.Rsp), 8)) {
+        c.Rip = *reinterpret_cast<DWORD64*>(c.Rsp);
+        c.Rsp += 8;
+    }
     for (int i = 0; i < kMaxFrames && c.Rip; ++i) {
         if (i) out += ',';
         out += quote(where(c.Rip));
@@ -247,6 +253,24 @@ inline void log_exception(const EXCEPTION_POINTERS& info) {
                 f += ",\"stack\":" + stack_from(*info.ContextRecord);                // PALMETTO_DUMP_REGS=1: the argument registers at the fault. A stop whose stack frame looks impossible
                 // (a null test that should have branched) is usually a jump into a shared tail, and the registers say
                 // which values the failing instruction actually saw.
+                // PALMETTO_CRASH_STACK=1: raw guest stack words at the fault, for stops whose frames the unwinder cannot
+                // name (a null call is the measured case: 0xc0000005 execute at 0x0).
+                static const bool dump_raw_stack = GetEnvironmentVariableW(L"PALMETTO_CRASH_STACK", nullptr, 0) != 0;
+                if (dump_raw_stack) {
+                    const CONTEXT& c = *info.ContextRecord;
+                    MEMORY_BASIC_INFORMATION raw_mbi{};
+                    if (c.Rsp &&
+                        VirtualQuery(reinterpret_cast<const void*>(c.Rsp), &raw_mbi, sizeof(raw_mbi)) == sizeof(raw_mbi) &&
+                        !(raw_mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+                        const auto* words = reinterpret_cast<const std::uint64_t*>(c.Rsp);
+                        f += ",\"raw_stack\":[";
+                        for (int i = 0; i < 32; ++i) {
+                            if (i) f += ',';
+                            f += quote(hex(words[i]));
+                        }
+                        f += "]";
+                    }
+                }
                 static const bool dump_regs = GetEnvironmentVariableW(L"PALMETTO_DUMP_REGS", nullptr, 0) != 0;
                 if (dump_regs) {
                     const CONTEXT& c = *info.ContextRecord;

@@ -398,3 +398,10 @@ falsifier: wait-trace/stack sample of the body during the present pass (semaphor
 plane resource pointer) plus a bounded target-binding probe at the UI batch submit path; the wall is the media/UI plane
 or worker event, not session completion. Evidence: `D:\leonida-work\fsrstable\boot-menus-r23-burst`,
 `D:\leonida-work\evidence\menus-r23b`, page section 20.7.
+
+### Round-3 producers (same day)
+
+- Stage-3 arms need `PALMETTO_ARENA_MB=3072`: the default 1024 MiB GPU address arena fills by stage 3 and the title null-derefs at `game+0x6EB759` in the state-13 handler; 3072 MiB leaves arms ALIVE 200-240 s with 0 exceptions.
+- The crash reporter now names null calls (walks `[rsp]` when `Rip == 0`; `PALMETTO_CRASH_STACK=1` raw words).
+- `port/shims/appnotify.cpp` (PALMETTO_TITLE_APPSTATE_CALLBACK=1) delivers the deferred PLM app-state notification; it renders normally and reaches stage 3 / session 13, then stops at a new loading-worker null `game+0x5151E29` (media tick stack). Next: attribute that worker null; the H2 producer route is now reachable.
+- Evidence: `D:\leonida-work\fsrstable\boot-menus-r24-arena`, `-r24-ad`, `-r25-appnotify`, `-r25b-appnotify`; page section 20.10.

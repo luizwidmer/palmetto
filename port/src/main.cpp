@@ -10137,12 +10137,21 @@ int wmain(int argc, wchar_t** argv) {
             std::thread([frontier_base, frontier_size] {
                 for (unsigned wait = 0; wait < palmetto::title_frontier::kBootMediaEventMaxWaitTicks; ++wait) {
                     if (palmetto::title_frontier::bootmedia_open_ready(frontier_base, frontier_size)) {
-                        const bool changed = palmetto::title_frontier::open_bootmedia_event(frontier_base, frontier_size);
+                        bool changed = palmetto::title_frontier::open_bootmedia_event(frontier_base, frontier_size);
                         std::fprintf(stderr,
                                      "[rt] frontier: boot-media event byte image+0x%x set to 1 (bit 0 %s); the title's "
                                      "own tick can open the present handshake\n",
                                      palmetto::title_frontier::kBootMediaEventByteRva,
                                      changed ? "changed" : "already set");
+                        std::fflush(stderr);
+                        unsigned reasserts = 0;
+                        for (; reasserts < palmetto::title_frontier::kBootMediaEventReassertMax; ++reasserts) {
+                            std::this_thread::sleep_for(
+                                std::chrono::milliseconds(palmetto::title_frontier::kBootMediaEventReassertMs));
+                            palmetto::title_frontier::open_bootmedia_event(frontier_base, frontier_size);
+                        }
+                        std::fprintf(stderr, "[rt] frontier: boot-media event re-assert ended after %u tick(s)\n",
+                                     reasserts);
                         std::fflush(stderr);
                         return;
                     }

@@ -1007,3 +1007,13 @@ The round-22 frontier push changed the runtime and added two pure CTests. Gates 
 - `sse4a_emulation` (25 checks): the clean-room EXTRQ/INSERTQ decoder and semantics used by the illegal-instruction handler (`port/src/sse4a_emulation.h`).
 - `code_hooks` 211 checks (the class-0xa mitigation parser is now exact-`1` only); `ui_draw_probe` 198 checks (bounded caller ring); the queue-slot-14 mapping suite (`d3d12_draw`, `d3d12_set0_compute`, `d3d12_bindless_churn[_validated]`, `device_proxy`, `device_proxy_trace`) is 7/7 with the console Signal/Wait mapping and the unchanged slot-14 refusal.
 - The full round-22 arm table, loss ledger and the window/capture analysis live outside the repo under `D:\leonida-work\fsrstable` and `D:\leonida-work\evidence\menus-r22`; `tooling/scripts/frame_analysis.py` is the bounded capture/readback analyzer (self-test `tests/test_frame_analysis.py`).
+
+### Round-24/25 producer gates (measured)
+
+- **Stage-3 arms require `PALMETTO_ARENA_MB=3072`.** The default 1024 MiB arena fills by stage 3; the title's buffer
+  factory then null-dereferences at `game+0x6EB759`. With 3072 MiB the same arms stay ALIVE 200-240 s with 0 exceptions.
+- `PALMETTO_TITLE_APPSTATE_CALLBACK=1` (new `port/shims/appnotify.cpp`) answers the `api-ms-win-core-psm-appnotify-*`
+  registrations with one deferred synthetic running-state notification; off, the shim forwards to the host api set.
+  `PALMETTO_CRASH_STACK=1` dumps 32 raw fault stack words; `stack_from` walks `[rsp]` for a `Rip == 0` null call.
+- `opt_in_switches` is 3080 checks / 301 switches; `title_frontier_patch` 60; `sse4a_emulation` 25; `code_hooks` 211;
+  docs 38 / 215.
