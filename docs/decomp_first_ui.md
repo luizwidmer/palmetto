@@ -1775,3 +1775,27 @@ completes, so the frame loop stops presenting after the first pass. The next fal
 the body during `body-present-pass` (semaphores `0x71B9078`/`0x71B9088`, worker events, plane resource pointer) plus a
 bounded target-binding probe at the UI batch submit path; if the pass is waiting on a media-ready event, the fix belongs
 in the media worker/plane producer path, not in session completion.
+
+### 20.8 Wait-trace of the present pass: the frame thread deadlocks on the media semaphore
+
+A second 260 s arm (`boot-menus-r23-wait`) repeated the bounded burst and sampled `PALMETTO_WAIT_TRACE` and
+`PALMETTO_THREAD_STACKS` at 95/120/180/240 s. The present attestation again switched to `body-present-pass` at 92 s with
+presents frozen at 946/1,892. The wait trace names the stall precisely:
+
+- the **frame thread** (tid 74760) is parked on `NtWaitForSingleObject` with timeout `INF` on **semaphore `0x718`** at
+  `game+0x56A0D`, reported by the stage-3 pump as `[session-dispatch stage3-post transition pump-loop machine-wrapper
+  tick-dispatch frame-pump frame-update]`; the same wait appears at 44.9 s / 69.9 s / 129.9 s / 189.9 s with no release
+  (one thread, one semaphore, counts 1/1/0/0 in the handle table);
+- the **media/UI body thread** (tid 34508) waits on **event `0x918`** at `game+0x221957F` (`0x221957F` is inside the
+  present-body region: the body entry is `0x22185A0`, and the body releases a semaphore at `game+0x22185D3`); its wait
+  statistics are 532 waits / 531 signalled - exactly one wait is left outstanding;
+- so forcing the body's present pass while the media/UI producer has no ready plane sets up a **mutual wait**: the body
+  waits for the event the frame thread would signal, while the frame thread waits for the semaphore the body's producer
+  would release. Presentation stops and every later capture is a pre-deadlock black frame.
+
+**Conclusion for the round:** the present-key experiment is a deadlock trigger, not a menu path. The honest next step is
+the **producer** side of the media/UI plane: why the movie player (state 3, handle 0, buffers 0) and the front-end/UI
+draw target never produce a ready plane at session 13. Useful next instruments: (a) the movie open/registration call
+chain (`0x2EF0E0` decode, `0x442F760` frame-buffer registration) with the player state machine, and (b) the UI batch
+submit's bound render target (`0x2AACF0`, `0x517A290`) correlated with the body's plane resource pointer. Forcing the
+body pass again is not productive until a producer exists.
