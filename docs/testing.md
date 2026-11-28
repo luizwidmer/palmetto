@@ -314,6 +314,40 @@ The five CI jobs that were already failing on `main` before the round-20 refresh
 `stdlib-tests-linux`, `viewer-tests`, `semantic-tests` (Ubuntu) and `macos-python` - are pre-existing and were not
 re-run here.
 
+## Round-22 queue-slot-14 Signal group (2026-11-28)
+
+The four round-21 failures (`d3d12_draw`, `d3d12_set0_compute`, `d3d12_bindless_churn`,
+`d3d12_bindless_churn_validated`) were fixtures calling a **PC-ABI** method on the **Xbox-ABI** queue proxy, not a layer
+defect. The console queue inserts two methods before `Signal`, so its `Signal` is console slot **16** and its `Wait`
+console slot **17** (measured on this title: Signal 16, GetDesc 20; see [d3d12_xs_surface.md](d3d12_xs_surface.md)).
+Proxy slots 14/15 are those two inserted methods; their shapes are not identified, so the named refusal
+`[rt] d3d12_xs: queue slot 14 is one of the console's two methods before Signal; refusing` remains the default and was
+not weakened. `port/shims/d3d12_xs_device.h` exposes `queue_proxy_console_signal` / `queue_proxy_console_wait` for a
+fixture holding a queue proxy, and the four fixtures now call `Signal`/`Wait` through them (`d3d12_bindless_churn`
+also routes its cross-queue `Wait`); no queue slot's mapping changed. `device_proxy_test` made the same wrong-ABI call
+and now asserts both sides of the mapping: console slot 16 signals the fence proxy, console slot 17 forwards `Wait`,
+and slot 14 still answers `E_NOTIMPL` to the PC `Signal` index.
+
+Measured on the round-22 tree (one `ctest -R` invocation each, `RelWithDebInfo`, serial, no build started):
+
+```powershell
+ctest --test-dir port/build -C RelWithDebInfo --output-on-failure --timeout 150 -j 1 `
+  -R '^(device_proxy|device_proxy_trace|d3d12_draw|d3d12_set0_compute|d3d12_bindless_churn|d3d12_bindless_churn_validated)$'
+```
+
+| Target | Result | Time | What it now covers |
+| --- | --- | ---: | --- |
+| `device_proxy` | PASS | 0.2 s | queue/fence proxies, GPU signal through console slot 16, slot-14 refusal, console slot 17 |
+| `device_proxy_trace` | PASS | 0.0 s | same with `--trace-d3d12` |
+| `d3d12_draw` | PASS | 1.0 s | draw/viewport/PSO cases, ten fence signals through console slot 16 |
+| `d3d12_set0_compute` | PASS | 0.8 s | set-0 compute dispatch and readback |
+| `d3d12_bindless_churn` | PASS | 3.9 s | two queues, six frames in flight, console Signal 16 and Wait 17 |
+| `d3d12_bindless_churn_validated` | PASS | 4.2 s | the same with Vulkan validation on |
+
+That is 6/6 green. The rest of the round-20 queue-slot-14 table above was not re-run this round; a target in it that
+still calls `Signal`/`Wait` through the PC interface will fail the same way and needs the same console-order
+conversion (for example `queue_proxy`, whose public-slot checks are written in PC order).
+
 ## Build, artifact, and single-test notes
 
 Windows, from a "Developer PowerShell for VS 2022" or a plain shell:
@@ -963,3 +997,13 @@ script printed. Post counts and pass/fail lines only, never shaders or logs from
 the table above gets its own issue, linked from your entry.
 
 Use your system's detected CPU, GPU, VRAM and RAM model names in the report, not benchmark scores. For a rough browser-based check against reference profiles, you can use [Can I Run Palmetto](https://assttro.github.io/can-i-run-palmetto/).
+
+## Round-22 gate (2026-11-28)
+
+The round-22 frontier push changed the runtime and added two pure CTests. Gates on the final tree:
+
+- `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT`.
+- `title_frontier_patch` (46 checks): the session-3 completion / present-key / out-record site instruments, their exact-value parsers and the gating preconditions.
+- `sse4a_emulation` (25 checks): the clean-room EXTRQ/INSERTQ decoder and semantics used by the illegal-instruction handler (`port/src/sse4a_emulation.h`).
+- `code_hooks` 211 checks (the class-0xa mitigation parser is now exact-`1` only); `ui_draw_probe` 198 checks (bounded caller ring); the queue-slot-14 mapping suite (`d3d12_draw`, `d3d12_set0_compute`, `d3d12_bindless_churn[_validated]`, `device_proxy`, `device_proxy_trace`) is 7/7 with the console Signal/Wait mapping and the unchanged slot-14 refusal.
+- The full round-22 arm table, loss ledger and the window/capture analysis live outside the repo under `D:\leonida-work\fsrstable` and `D:\leonida-work\evidence\menus-r22`; `tooling/scripts/frame_analysis.py` is the bounded capture/readback analyzer (self-test `tests/test_frame_analysis.py`).

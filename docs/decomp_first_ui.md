@@ -1079,9 +1079,9 @@ Uninstall writes those displacements back and flushes the instruction cache, so 
 trampoline's page is left mapped by default because a thread could be inside its few instructions when a shutdown-time
 uninstall runs (the test frees it explicitly once no site points at it). A title-initiated exit ends the process with the
 patch in place, which is process-local: the mapped image is this process's private copy and nothing on disk changes. The
-switch is off unless `PALMETTO_TITLE_CLASS0A_SIZE` is set to a value other than `0`/`off`/`false`/`no`, so every default
-arm runs the title's original bytes. This is a title-side workaround for the experiment, not a console-faithful
-emulation, and section 16.5 is part of the change.
+switch is off unless `PALMETTO_TITLE_CLASS0A_SIZE` is exactly `1` (the registry's `exact_one` contract); unset, empty,
+and every other value leave the title's original bytes byte-identical. This is a title-side workaround for the experiment,
+not a console-faithful emulation, and section 16.5 is part of the change.
 
 ### 16.3 The A/B
 
@@ -1157,7 +1157,7 @@ frame on screen is still not called.
 ### 16.6 Tests and gates
 
 - The extended `port/test/code_hooks_test.cpp` covers the switch parser, the class mask/decision and the stride
-  (`105 checks, 0 failures`, run as the `code_hooks` ctest target), the trampoline on a synthetic original function (class
+  (`211 checks, 0 failures`, run as the `code_hooks` ctest target), the trampoline on a synthetic original function (class
   0xa answered, every other class reaching the original unchanged, class bits masked, scaling with width), and
   install/call-through/uninstall on a synthetic executable image: both an E8 call and an E9 tail jump redirected, a
   decoy branch to another address left byte for byte, the original function's bytes untouched, byte-for-byte restore on
@@ -1664,3 +1664,89 @@ media/UI body and the renderer's present path, but this arm does not reach the b
   [ui_draw_probe.h](../port/src/ui_draw_probe.h), [ui_draw_probe_test.cpp](../port/test/ui_draw_probe_test.cpp) and this
   page. The lead owns the CMake/CTest registration and the `docs/README.md` index row. No game data was added and no git
   write was made.
+
+## 20. Round 22 (2026-11-28): the session-3 completion instrument, SSE4a emulation, and the gated presenter experiments
+
+**Status: frontier moved, menus not yet rendered.** Round 22 built the two instruments section 15.6 asked for and measured
+what happens once the session-3 loading record is forced complete. The completion wall is gone; the next wall is
+post-completion title execution on a stable host, and the media/UI present body still has no visible content.
+
+### 20.1 The forced-completion arm (binary `DA291AFB…`)
+
+`PALMETTO_TITLE_SESSION3_COMPLETE=1` writes 1 into the loading record's slot-4 completion dword `image+0x78ACB20`
+(the dword the 33 ms poll `0x21B7070` tests through `0x41E8C0`) every 100 ms. In the first arm (writer active from
+process start, 120 s timeout, class-0xa mitigation, `PALMETTO_THREAD_STACKS`/`WAIT_TRACE`) the title:
+
+- reached init 2 at 20 s, loading 2 and session 1 at 64.0 s, then init 3 at 66.5 s and **session 1 -> 13 at 68.0 s**;
+  the stage-3 pump ran and the 22 s loading pause did not reproduce (the loading tick advanced ~1000/s);
+- stopped at 89.9 s on `[rt] illegal instruction on the host: f2 0f 78 at 1402E7FF1`, which decodes as the AMD-only
+  SSE4a `INSERTQ xmm0, xmm1, length 0x10, index 0x10` inside a real half-float packing routine (12 SSE4a sites in 9
+  functions in the image).
+
+### 20.2 The fix: clean-room SSE4a emulation
+
+`port/src/sse4a_emulation.h` (ours, from the AMD64 manual fact sheet) decodes EXTRQ/INSERTQ immediates and register
+forms, applies them to the CONTEXT XMM low halves and advances RIP; `port/shims/startup_trace.h` calls it from the
+existing illegal-instruction handler next to the clzero/monitorx emulations. A synthetic test (`sse4a_emulation`, 25
+checks) covers INSERTQ imm (the measured site bytes `f2 0f 78 c1 10 10`), length-0-means-64, both register forms,
+EXTRQ, and the refusals (short buffer, wrong opcode, memory ModRM, bad /0, field crossing bit 64). The stop at
+`0x2E7FF1` is removed by construction. A full session-13 window with the emulation has not been measured yet because
+the host lost the Vulkan device in every later long arm (see 20.4).
+
+### 20.3 The gated instruments and what the arms measured
+
+- `PALMETTO_TITLE_PRESENT_KEYS=1` forces the two media/UI present-pass bytes `image+0x71B90AD`/`0x71B90AC` to 1. Forced
+  from process start, the title stalled at init 1 (window existed, client black, no presents). Gated on the boot-media
+  gate byte `0x71B9048 == 2`, it still stalled at init 1; gated on stage 2 + session != 0 it froze the loading tick at
+  session 1; the final gate is **init >= 3 and session != 0** so the pass is only forced in a real stage-3 window.
+- `PALMETTO_TITLE_OUTRECORD_STATE2=1` is the section 15.6 one-byte redirect at `image+0x402E987` (`0x74 -> 0xEB`, after
+  validating the `cmp dword [rdi+0xac],2` bytes at `0x402E980`). It applies correctly and is inert until the dispatch
+  runs, but combining it with the other instruments still disturbed early boot; it is a dedicated-arm diagnostic.
+- A window-level capture arm on the final gated binary shows the title's own window exists (`sgaWindowClass`, 3870x2190
+  outer / 2580x1460 at 150% DPI), is visible and foreground, and its client area is **pure black** in every sample
+  (83 screenshots; whole-window non-black is Windows chrome only). Presenter captures in the session arm that reached
+  session 1 were 19/19 mean RGB `0 0 0`; no readback PPM was produced before that arm's device loss.
+- The stage-2/session-1 state table in the retuned arms matches section 17's clean baseline (init 2 at 20-22 s, loading 1,
+  session 0), and session 1 arrives at 58-80 s depending on host load; reaching session 3 needs the completion dword
+  and a host that does not lose the device first.
+
+### 20.4 Host instability and the honest verdict
+
+Every long arm after the first forced-completion arm lost the Vulkan device (`[rt] d3d12: present failed (VkResult -4)`,
+followed by the known post-loss AV family at `game+0x86F97E`/`0x86F981`/`0x3DB414`). One combined arm that included the
+stage-3-gated present keys stopped at 68.3 s exactly this way, before the keys could arm. Two arms were invalidated by a
+lead debugger attach (noted in the round-22 ledger and excluded). No arm yet combines: session 3 -> 13, the SSE4a
+emulation active, the stage-3 present-pass keys forced, and a live device. Until that arm runs on a quiet host, no menu
+pixel is claimed - the round moved the wall from "session-3 never completes" to "post-completion execution on a stable
+host, then the media/UI present pass".
+
+### 20.5 Evidence
+
+Arms, ledger and analysis are outside the repository: `D:\leonida-work\fsrstable\boot-t41-pause` (DA291AFB,
+session 13), `boot-t41-pause2` (gated, front-end exception family), `boot-r22t7-p3-2d2a`, `boot-r22t7-combined-da541`
+(device loss), `boot-r22t14-windowshot{,2,3}` (window exists, client black), the loss ledger
+`D:\leonida-work\fsrstable\r22-loss-ledger.txt`, window PNGs under `D:\leonida-work\evidence\menus-r22\window*`, and the
+frame tooling under `D:\leonida-work\tools-r22\` (+ `tooling/scripts/frame_analysis.py` in the tree). Switches and the
+site validation are in `port/src/title_frontier_patch.h`; the SSE4a decoder/test are in `port/src/sse4a_emulation.h` and
+`port/test/sse4a_emulation_test.cpp`.
+### 20.6 The decisive round-22 window: session 13 reached with the present pass forced, and the frame is still black
+
+The fourth-retune binary (`DA54119D6F5AE4CFFB514B7AA5F4A7E0304CF03655569D682AEC1EBB46162DA3`) finally produced the
+clean window the earlier arms could not: one 240 s light arm with `PALMETTO_TITLE_CLASS0A_SIZE=1`,
+`PALMETTO_TITLE_SESSION3_COMPLETE=1`, `PALMETTO_TITLE_PRESENT_KEYS=1` and state tracing progressed to **stage 3 at 51.6 s
+and init 3 / loading 2 / session 13 at 52 s**, machine current 3 / next 3, heartbeat advancing, and the title alive past the earlier INSERTQ stop; the SSE4a
+emulation line itself was **not logged in this arm** (the path may not have executed that routine; the emulation is
+covered by its synthetic test), and the arm ran **with zero device losses and zero present failures** (the completion
+writer armed at init 2, the present keys at init 3 + session 13). The presenter produced 9 capture frames and 4 readbacks:
+**every captured presented frame is black** (2564x1421, mean/min/max RGB 0 0 0), and the readbacks are one black frame
+plus three exact `51 102 204` layer write-control frames - no title-content pixel. The title pane is also occluded on this
+host (Chrome owns the screen centre) so the literal window screenshot could not be taken while the title was foreground;
+the window-chrome-only screenshots from the earlier arms show the `sgaWindowClass` window at 3870x2190 with a black
+client area.
+
+**Verdict for P-75:** the session-3 wall is removed (session 13 held from 52 s to 198 s and the arm stayed ALIVE to the 240 s timeout) and a stable stage-3/session-13 window with the media/UI
+present pass forced is now reachable on a clean host, but the presented frame is still black. The remaining wall is
+therefore **the content that the media/UI present body chooses to present** (its second-plane source), not the session
+completion, not the CPU-feature gap, and not the presenter path. Next instruments: the body's begin/phase subscriber
+output and the movie/front-end draw target correlation (section 19's batch path with a target-binding probe), plus
+`PALMETTO_UI_PROBE=draw` in the same arm that now reaches session 13.

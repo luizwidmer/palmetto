@@ -327,3 +327,63 @@ handoff update is the next commit on `main`; everything is pushed.
   still holds it.
 - `d3d12_draw` remains the known-flaky shared GPU fixture; use `d3d12_viewport_array` for the viewport case.
 - reports/evidence under `D:\leonida-work` and `reports/` stay outside the repo.
+
+## Round 22 (2026-11-28): the session-3 completion instrument, SSE4a emulation, and the menu push
+
+This round targeted the first menus directly. The frontier moved: **the session-3 loading wall is no longer the wall**, but
+no menu pixel has been rendered yet.
+
+### What landed
+
+- `PALMETTO_TITLE_SESSION3_COMPLETE=1` (`port/src/title_frontier_patch.h`, wired in `port/src/main.cpp`): after the image
+  map, a bounded writer waits for init state >= 2 and writes 1 into the loading record's slot-4 completion dword
+  `image+0x78ACB20` (the dword the title's 33 ms poll `0x21B7070` tests through `0x41E8C0`) every 100 ms. In the first
+  arm this took the title **init 2 -> 3 and session 1 -> 13 at 68.0 s** with the stage-3 pump running.
+- `PALMETTO_TITLE_PRESENT_KEYS=1`: forces the two media/UI present-pass key bytes `image+0x71B90AD`/`0x71B90AC`, gated to
+  **init >= 3 and session != 0** (forcing earlier stalls the boot; every weaker gate was measured).
+- `PALMETTO_TITLE_OUTRECORD_STATE2=1`: the section-15.6 one-byte redirect at `image+0x402E987` (`0x74 -> 0xEB`), with
+  full site-byte validation. It applies correctly but disturbs early boot when combined; dedicated-arm only.
+- **Clean-room SSE4a emulation** (`port/src/sse4a_emulation.h`, called from the illegal-instruction handler in
+  `port/shims/startup_trace.h`): the forced-completion arm stopped at `image+0x2E7FF1` on the AMD-only `INSERTQ`
+  instruction (`f2 0f 78 c1 10 10`) inside a half-float packing routine. EXTRQ/INSERTQ (both immediate and register
+  forms) are now emulated; 25 synthetic checks; the stop is removed by construction.
+- Presenter-keys and out-record diagnostics are opt-in and off by default; the default path is byte-identical.
+- New CTests: `title_frontier_patch` (46 checks), `sse4a_emulation` (25 checks); `code_hooks` 211 checks after the
+  exact-`1` class-0xa parser hardening; `ui_draw_probe` 198 checks after the bounded caller ring; the queue-slot-14
+  mapping suite is green (7/7). `tooling/scripts/frame_analysis.py` + `tests/test_frame_analysis.py` are the bounded
+  capture/readback analyzer.
+
+### What the arms measured
+
+- Forced completion reached session 13/stage 3 at 68 s, then stopped at INSERTQ (fixed now).
+- The title's own window exists (`sgaWindowClass`, 3870x2190 outer, 2580x1460 client at 150% DPI) and is visible and
+  foreground; its client area is **pure black** in every window screenshot (83 samples), and presenter captures in the
+  arms that reached session 1 were 19/19 mean RGB `0 0 0`.
+- Every later long arm lost the Vulkan device (`present failed (VkResult -4)`) before a full stage-3/session-13 window
+  with the present keys armed, so no menu frame exists yet. The second arm of the round's first batch was invalidated by
+  a lead debugger attach; the loss ledger is outside the repo.
+
+### What is still open (next thread)
+
+1. **P-75 first menus rendering** (the round's open frontier): run one 300 s arm on a quiet host with
+   `PALMETTO_TITLE_CLASS0A_SIZE=1 PALMETTO_TITLE_SESSION3_COMPLETE=1 PALMETTO_TITLE_PRESENT_KEYS=1` (no OUTRECORD),
+   state trace 2 s, full readback + presenter captures + window screenshots. Success = session 13 reached, the SSE4a
+   emulation line appears, the stage-3-gated present keys arm, and a non-black title frame is captured. If the SSE4a
+   emulation is not the last CPU-feature gap, the next stop is named the same way (illegal instruction -> decode ->
+   emulation) and the same arm is repeated.
+2. The host must stay quiet for that arm (close GPU-using desktop apps; several recent losses match Chrome/desktop GPU
+   activity). The two-consecutive-loss rule is recorded in `D:\leonida-work\fsrstable\r22-loss-ledger.txt`.
+3. `PALMETTO_TITLE_OUTRECORD_STATE2` needs its own gated installation (only when the completion dispatch can run) before
+   it can be combined with the completion/present instruments.
+4. The class-0xa mitigation remains a title-side inference (not console-faithful) and the `PALMETTO_TITLE_CLASS0A_SIZE`
+   parser is now exact-`1` only; a clean-host stage-3 A/B is still open.
+5. The round-21 items remain: queue-slot-14 layer slice (now mapped in tests), F4/F7 residual coverage, V2 adapter,
+   contract-only headers, CI/branch-protection items.
+
+### Where the round-22 evidence lives
+
+`D:\leonida-work\fsrstable\boot-t41-pause` (session 13, DA291AFB), `boot-t41-pause2`, `boot-r22t7-p3-2d2a`,
+`boot-r22t7-combined-da541` (device loss), `boot-r22t14-windowshot{,2,3}` (window exists/client black), the loss ledger
+`r22-loss-ledger.txt`, window PNGs under `D:\leonida-work\evidence\menus-r22\window*`, frame analysis under
+`D:\leonida-work\evidence\menus-r22\frame-analysis`, and the marker `D:\leonida-work\.round22-patch-ready` (binary SHA
+history for each retune). Page: `docs/decomp_first_ui.md` section 20; frontier paragraph in `docs/issues.md`.

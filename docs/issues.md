@@ -22,6 +22,17 @@ the title-side UI/movie draw path, not the earlier stage-2 wait or a missing dec
 off by default and does not establish console-faithful behavior. See [decomp_first_ui.md](decomp_first_ui.md) sections
 16-18, [peer_port_first_ui.md](peer_port_first_ui.md) sections 14-15, and [first_visible.md](first_visible.md).
 
+**Round-22 update (2026-11-28):** the session-3 completion wall was forced and measured. Writing 1 into the loading
+record's slot-4 completion dword (`image+0x78ACB20`, the dword the 33 ms poll tests) took the title to **session 1 -> 13**
+at 68.0 s with the stage-3 pump running; it then stopped at the AMD-only SSE4a `INSERTQ` instruction at `image+0x2E7FF1`
+(a real half-float packing routine). A clean-room SSE4a INSERTQ/EXTRQ emulation now runs in the illegal-instruction
+handler (`port/src/sse4a_emulation.h`, 25 synthetic checks), removing that stop by construction. The media/UI present-pass
+keys, forced only in a stage-3 window, and the out-record state-2 redirect exist as opt-in diagnostics in
+`port/src/title_frontier_patch.h`. The title's own window now exists and is visible, but its client area is pure black in
+every window screenshot and every presenter capture so far; later long arms lost the Vulkan device before reaching
+session 3, so no menu pixel is claimed. The visible-content frontier is now **post-session-3 execution on a stable host**,
+followed by the media/UI present pass - not the session-3 wait. See [decomp_first_ui.md](decomp_first_ui.md) section 20.
+
 ### Historical issue-1 baseline (measured on one machine; one 150 s boot unless named)
 
 The retail target console title
@@ -171,3 +182,9 @@ runs; O8 and O9 are build/corpus hygiene. The full build is green (237/237), so 
   it must not be claimed changed until it is measured.
 - **docs and tracker.** README's progress tracker is generated from `docs/progress.json` by `tooling/readme_progress.py`;
   both are refreshed to this state (`--check` passes).
+**Round-22 final measurement (windowshot4, binary `DA54119D`):** with the class-0xa mitigation, the forced session-3
+completion and the stage-3-gated present keys, the title reached **stage 3 at 51.6 s and session 13 at 52 s** with zero
+device losses and zero present failures; the SSE4a INSERTQ emulation carried execution past the previous stop. The
+presented captures remain **9/9 black** and the readbacks are black plus the layer's own `51 102 204` write-control
+frames - so the remaining wall is the content the media/UI present body chooses to present, not session completion or the
+CPU-feature gap. No menu pixel exists yet; see [decomp_first_ui.md](decomp_first_ui.md) section 20.6.
