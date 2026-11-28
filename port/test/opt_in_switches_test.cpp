@@ -255,7 +255,7 @@ int parser_semantics_case() {
 
 int table_shape_case() {
     current_case = "table shape";
-    CHECK(kSwitchCount == 297);
+    CHECK(kSwitchCount == 299);
     CHECK(kNotSwitchCount == 1);
     CHECK(kScanRootCount == 2);
     std::set<std::string> names;
@@ -282,7 +282,7 @@ int kind_census_case() {
         counts[static_cast<std::size_t>(kSwitches[i].kind)] += 1;
         if (kSwitches[i].wired) ++wired;
     }
-    CHECK(counts[static_cast<std::size_t>(Kind::exact_one)] == 29);
+    CHECK(counts[static_cast<std::size_t>(Kind::exact_one)] == 31);
     CHECK(counts[static_cast<std::size_t>(Kind::switch_on)] == 89);
     CHECK(counts[static_cast<std::size_t>(Kind::text_switch)] == 6);
     CHECK(counts[static_cast<std::size_t>(Kind::any_set)] == 82);
@@ -290,7 +290,7 @@ int kind_census_case() {
     CHECK(counts[static_cast<std::size_t>(Kind::value_string)] == 39);
     CHECK(counts[static_cast<std::size_t>(Kind::disable_value)] == 3);
     CHECK(counts[0] + counts[1] + counts[2] + counts[3] + counts[4] + counts[5] + counts[6] == kSwitchCount);
-    CHECK(wired == 295);
+    CHECK(wired == 297);
     return 0;
 }
 

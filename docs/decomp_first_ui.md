@@ -1799,3 +1799,29 @@ draw target never produce a ready plane at session 13. Useful next instruments: 
 chain (`0x2EF0E0` decode, `0x442F760` frame-buffer registration) with the player state machine, and (b) the UI batch
 submit's bound render target (`0x2AACF0`, `0x517A290`) correlated with the body's plane resource pointer. Forcing the
 body pass again is not productive until a producer exists.
+
+### 20.9 Producer-side switch: the title's own tick opens AC, then a null call kills it
+
+Section 20.8 showed that forcing the consumer keys deadlocks. Round 24 therefore added `PALMETTO_TITLE_BOOTMEDIA_OPEN=1`
+(write bit 0 of the boot-media event byte `image+0x75DF0D8`, the edge the app-state handler `0x247B500` normally
+delivers on event type 0x24) and `PALMETTO_TITLE_FRAME_REQUEST=1` (set the frame-request flag `image+0x71B90AD` while the
+title owns AC). Three arms on the `09D07D8C` / `7753FA4A` / `08FBA618` binaries:
+
+- **event byte at gate==2 (4 s)**: the title never left init 2 / session 0 (presents 1, body-entries kept rising to
+  17,611), i.e. opening the boot-media frame loop that early stalls the main pump;
+- **event byte at stage 3 (`boot-menus-r24-producer3`, 105 s)**: the title reached init 3 / session 13 at 102.0 s and
+  **the title's own tick opened the present handshake**: `keys 0x0/0x1` (AC `image+0x71B90AC` = 1 by the title, AD still 0),
+  with the front-end manager ready/running and 58 movie players. Then, **1.45 s after stage 3, the process died at
+  `game+0x0`, access execute, address 0x0** (null function pointer) - before any state-2 request item or frame capture;
+- **event byte + frame request (`boot-menus-r24-frame`)**: this arm crashed earlier, at `game+0xF229C` read wild pointer at
+  95.3 s before stage 3, so the frame request never armed and the arm is not a producer measurement (host/title
+  instability after the earlier arms, recorded as such).
+
+**What this proves:** the boot-media producer chain (`0x75DF0D8` bit 0 -> media tick `0x24846D0` -> `0x2484A90` ->
+`0x2218900`/`0x2218910`) works in this port and is sufficient to open AC; it is not a shim answer we are missing. The two
+remaining walls are (1) the **frame-request/state-2 request-item producer** for AD (`0x71B90AD`), which the request poll
+`0x2218410` would set from a queued media item, and (2) a **null call 1-1.5 s after the boot-media frame loop opens**
+(execute 0x0), which must be fixed before the present pass can be driven; the likely cause is a media/UI phase callback
+or plane table that only the real app-state notification sequence initializes. Next falsifier: capture the stack of the
+0x0 call with the exception-time stack sampler, then either synthesize the request item through `0x2218080` or fix the
+uninitialized callback.

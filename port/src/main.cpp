@@ -10131,6 +10131,64 @@ int wmain(int argc, wchar_t** argv) {
             std::fflush(stderr);
         }
 
+        if (palmetto::title_frontier::switch_enabled(std::getenv("PALMETTO_TITLE_BOOTMEDIA_OPEN"))) {
+            auto* frontier_base = static_cast<std::uint8_t*>(main_module.base);
+            const std::size_t frontier_size = main_module.size;
+            std::thread([frontier_base, frontier_size] {
+                for (unsigned wait = 0; wait < palmetto::title_frontier::kBootMediaEventMaxWaitTicks; ++wait) {
+                    if (palmetto::title_frontier::bootmedia_open_ready(frontier_base, frontier_size)) {
+                        const bool changed = palmetto::title_frontier::open_bootmedia_event(frontier_base, frontier_size);
+                        std::fprintf(stderr,
+                                     "[rt] frontier: boot-media event byte image+0x%x set to 1 (bit 0 %s); the title's "
+                                     "own tick can open the present handshake\n",
+                                     palmetto::title_frontier::kBootMediaEventByteRva,
+                                     changed ? "changed" : "already set");
+                        std::fflush(stderr);
+                        return;
+                    }
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(palmetto::title_frontier::kBootMediaEventPollMs));
+                }
+                std::fprintf(stderr,
+                             "[rt] frontier: boot-media event byte not set: boot-media gate never reached 2\n");
+                std::fflush(stderr);
+            }).detach();
+        }
+        if (palmetto::title_frontier::switch_enabled(std::getenv("PALMETTO_TITLE_FRAME_REQUEST"))) {
+            auto* frontier_base = static_cast<std::uint8_t*>(main_module.base);
+            const std::size_t frontier_size = main_module.size;
+            std::thread([frontier_base, frontier_size] {
+                bool ready = false;
+                for (unsigned wait = 0; wait < palmetto::title_frontier::kBootMediaEventMaxWaitTicks; ++wait) {
+                    if (palmetto::title_frontier::frame_request_ready(frontier_base, frontier_size)) {
+                        ready = true;
+                        break;
+                    }
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(palmetto::title_frontier::kBootMediaEventPollMs));
+                }
+                if (!ready) {
+                    std::fprintf(stderr,
+                                 "[rt] frontier: frame-request writer not armed (needs stage 3 + session + AC open)\n");
+                    std::fflush(stderr);
+                    return;
+                }
+                std::fprintf(stderr,
+                             "[rt] frontier: frame-request writer armed: AD image+0x%x set to 1 every %u ms while the "
+                             "title's own AC stays open\n",
+                             palmetto::title_frontier::kFrameRequestRva,
+                             palmetto::title_frontier::kFrameRequestIntervalMs);
+                std::fflush(stderr);
+                unsigned writes = 0;
+                for (; writes < palmetto::title_frontier::kFrameRequestMaxWrites; ++writes) {
+                    palmetto::title_frontier::set_frame_request(frontier_base, frontier_size);
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(palmetto::title_frontier::kFrameRequestIntervalMs));
+                }
+                std::fprintf(stderr, "[rt] frontier: frame-request writer finished after %u write(s)\n", writes);
+                std::fflush(stderr);
+            }).detach();
+        }
         if (palmetto::title_frontier::switch_enabled(std::getenv("PALMETTO_TITLE_SESSION3_COMPLETE"))) {
             auto* frontier_base = static_cast<std::uint8_t*>(main_module.base);
             if (main_module.size < palmetto::title_frontier::kSession3CompletionRva + sizeof(std::uint32_t)) {

@@ -89,6 +89,31 @@ int main() {
     check(session3_ready(session_image.data(), session_image.size()), "stage2 gate ready at init 2");
     *reinterpret_cast<std::uint32_t*>(session_image.data() + kInitStateRva) = 1;
     check(!session3_ready(session_image.data(), session_image.size()), "stage2 gate not ready at init 1");
+
+    // Boot-media producer switch: the event byte writer waits for the gate and sets bit 0 only.
+    auto event_image = std::vector<std::uint8_t>(kBootMediaEventByteRva + 8, 0);
+    check(!bootmedia_open_ready(event_image.data(), event_image.size()), "boot-media open not ready at gate 0");
+    event_image[kBootMediaGateRva] = 2;
+    check(!bootmedia_open_ready(event_image.data(), event_image.size()), "gate 2 alone not enough (init 0)");
+    *reinterpret_cast<std::uint32_t*>(event_image.data() + kInitStateRva) = 3;
+    check(bootmedia_open_ready(event_image.data(), event_image.size()), "boot-media open ready at gate 2 + stage 3");
+    event_image[kBootMediaEventByteRva] = 0xFE;
+    check(open_bootmedia_event(event_image.data(), event_image.size()), "event byte bit 0 was clear");
+    check(event_image[kBootMediaEventByteRva] == 0xFF, "event byte bit 0 set, other bits kept");
+    check(!open_bootmedia_event(event_image.data(), event_image.size()), "second set reports no change");
+    check(!open_bootmedia_event(nullptr, 0), "event writer refuses null");
+    // Frame-request producer: gated on stage 3 + session + the title's own AC, writes only AD.
+    auto frame_image = std::vector<std::uint8_t>(kSessionStateRva + 8, 0);
+    check(!frame_request_ready(frame_image.data(), frame_image.size()), "frame request not ready at 0");
+    frame_image[kBootMediaGateRva] = 2;
+    *reinterpret_cast<std::uint32_t*>(frame_image.data() + kInitStateRva) = 3;
+    *reinterpret_cast<std::uint32_t*>(frame_image.data() + kSessionStateRva) = 13;
+    check(!frame_request_ready(frame_image.data(), frame_image.size()), "AC closed: not ready");
+    frame_image[kPresentKeyRvas[1]] = 1;
+    check(frame_request_ready(frame_image.data(), frame_image.size()), "stage3 + session + AC ready");
+    check(set_frame_request(frame_image.data(), frame_image.size()), "set AD");
+    check(frame_image[kPresentKeyRvas[0]] == 1, "AD written to 1");
+    check(!set_frame_request(nullptr, 0), "frame request refuses null");
     check(!write_session3_completion(nullptr, 0), "session-3 write refuses null");
     auto too_small = std::vector<std::uint8_t>(64, 0);
     check(!write_session3_completion(too_small.data(), too_small.size()), "session-3 write refuses short image");

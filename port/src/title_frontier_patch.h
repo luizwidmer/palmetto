@@ -130,4 +130,62 @@ inline bool session3_ready(const std::uint8_t* image, std::size_t image_size) no
     return *reinterpret_cast<const std::uint32_t*>(image + kInitStateRva) >= kInitStateStage2;
 }
 
+
+// PALMETTO_TITLE_BOOTMEDIA_OPEN=1: write bit 0 of the boot-media event byte image+0x75DF0D8 once the boot-media gate
+// reads 2. This is the *producer* side of the present handshake instead of the forced consumer keys: the handler
+// 0x247B500 normally sets this byte on event type 0x24 (the PLM app-state callback producer is unresolved statically;
+// measured boots never deliver it). With the bit set, the title's own media tick 0x24846D0 calls opener 0x2484A90 ->
+// 0x2218900/0x2218910, which sets the present handshake AC (image+0x71B90AC) and lets the body take its real present
+// pass, with the title's own frame-consumption side clearing it again (docs/decomp_stage.md 6 milestone 6 and
+// docs/decomp_first_ui.md sections 11/17). A diagnostic, not console-faithful behavior: it synthesizes the missing
+// app-state edge rather than delivering the event.
+inline constexpr std::uint32_t kBootMediaEventByteRva = 0x75DF0D8u;
+inline constexpr std::uint8_t kBootMediaEventOpenValue = 1u;
+inline constexpr std::uint32_t kBootMediaEventPollMs = 100u;
+inline constexpr std::uint32_t kBootMediaEventMaxWaitTicks = 2400u;
+
+// True when the boot-media gate reads 2 and stage 3 is running. The first producer arm wrote the event byte at gate==2
+// (4 s) and the title then never left init 2 / session 0 (presents 1, body ticking but the frame loop stalled); the
+// event must be synthesized in the stage-3/menu window instead.
+inline bool bootmedia_open_ready(const std::uint8_t* image, std::size_t image_size) noexcept {
+    if (!image || image_size <= kBootMediaGateRva || image[kBootMediaGateRva] != kBootMediaGateReady) return false;
+    if (image_size < kInitStateRva + sizeof(std::uint32_t)) return false;
+    return *reinterpret_cast<const std::uint32_t*>(image + kInitStateRva) >= kInitStateStage3;
+}
+
+// Set bit 0 of the event byte; returns true when the byte changed. Only bytes inside a non-null image are touched.
+inline bool open_bootmedia_event(std::uint8_t* image, std::size_t image_size) noexcept {
+    if (!image || image_size <= kBootMediaEventByteRva) return false;
+    std::uint8_t& event_byte = image[kBootMediaEventByteRva];
+    const bool changed = (event_byte & kBootMediaEventOpenValue) == 0;
+    event_byte = static_cast<std::uint8_t>(event_byte | kBootMediaEventOpenValue);
+    return changed;
+}
+
+
+// PALMETTO_TITLE_FRAME_REQUEST=1: the last missing producer edge for the media/UI present body. With
+// PALMETTO_TITLE_BOOTMEDIA_OPEN=1 the title's own tick opens the present handshake (AC image+0x71B90AC = 1, measured),
+// but the body still exits on the frame-request flag AD image+0x71B90AD == 0 because the request ring never got its
+// state-2 media item (docs/decomp_first_ui.md sections 11/17). This writer sets only AD (the title's own present side
+// clears it after each frame at 0x2218689) while AC stays title-owned, so the body runs its real present pass per tick
+// instead of having both keys forced. Requires init>=3, session!=0 and AC already 1.
+inline constexpr std::uint32_t kFrameRequestRva = kPresentKeyRvas[0];  // image+0x71B90AD
+inline constexpr std::uint32_t kFrameRequestIntervalMs = 2u;
+inline constexpr std::uint32_t kFrameRequestMaxWrites = 120000u;  // 240 s at 2 ms
+
+// True when the frame-request writer may run: stage 3, a session, and the title's own present handshake is open.
+inline bool frame_request_ready(const std::uint8_t* image, std::size_t image_size) noexcept {
+    if (!image || image_size <= kBootMediaGateRva || image[kBootMediaGateRva] != kBootMediaGateReady) return false;
+    if (image_size < kInitStateRva + sizeof(std::uint32_t) || image_size < kSessionStateRva + sizeof(std::uint32_t))
+        return false;
+    const bool stage3 = *reinterpret_cast<const std::uint32_t*>(image + kInitStateRva) >= kInitStateStage3;
+    const bool session = *reinterpret_cast<const std::uint32_t*>(image + kSessionStateRva) != 0;
+    return stage3 && session && image[kPresentKeyRvas[1]] == 1;  // AC open by the title
+}
+
+inline bool set_frame_request(std::uint8_t* image, std::size_t image_size) noexcept {
+    if (!image || image_size <= kFrameRequestRva) return false;
+    image[kFrameRequestRva] = 1;
+    return true;
+}
 }  // namespace palmetto::title_frontier
