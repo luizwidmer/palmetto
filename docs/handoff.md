@@ -387,3 +387,14 @@ no menu pixel has been rendered yet.
 `r22-loss-ledger.txt`, window PNGs under `D:\leonida-work\evidence\menus-r22\window*`, frame analysis under
 `D:\leonida-work\evidence\menus-r22\frame-analysis`, and the marker `D:\leonida-work\.round22-patch-ready` (binary SHA
 history for each retune). Page: `docs/decomp_first_ui.md` section 20; frontier paragraph in `docs/issues.md`.
+
+### Round-3 probe (same day): the media/UI present pass runs once and freezes presentation
+
+A 300 s arm on the bounded-burst binary (`FF7ECF51…`) repeated the stable window (session 13 from 92 s, ALIVE 300.2 s,
+0 losses), and the bounded present-key burst made the media/UI body take `body-present-pass` at 92 s, but
+**presentation froze** (presents/submits 1,118/2,236 held for ~200 s) and all captures stayed black. The 2D-batch probe
+recorded its first **post-stage-3** hits (2 batch-build/2 batch-submit in the `>=3` bucket) but no menu draw. Next
+falsifier: wait-trace/stack sample of the body during the present pass (semaphores `0x71B9078`/`0x71B9088`, worker events,
+plane resource pointer) plus a bounded target-binding probe at the UI batch submit path; the wall is the media/UI plane
+or worker event, not session completion. Evidence: `D:\leonida-work\fsrstable\boot-menus-r23-burst`,
+`D:\leonida-work\evidence\menus-r23b`, page section 20.7.

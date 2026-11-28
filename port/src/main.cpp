@@ -10112,11 +10112,16 @@ int wmain(int argc, wchar_t** argv) {
                 }
                 std::fprintf(stderr, "[rt] frontier: present-key writer armed at the stage-2 gate\n");
                 std::fflush(stderr);
-                for (;;) {
+                unsigned writes = 0;
+                for (; writes < palmetto::title_frontier::kPresentKeyMaxWrites; ++writes) {
                     palmetto::title_frontier::force_present_keys(frontier_base);
                     std::this_thread::sleep_for(
                         std::chrono::milliseconds(palmetto::title_frontier::kPresentKeyWriteIntervalMs));
                 }
+                std::fprintf(stderr,
+                             "[rt] frontier: present-key burst finished after %u write(s); the title's own keys now decide\n",
+                             writes);
+                std::fflush(stderr);
             }).detach();
             std::fprintf(stderr,
                          "[rt] frontier: media/UI present keys image+0x%x + image+0x%x forced to 1 every %u ms "

@@ -98,6 +98,7 @@ int main() {
 
     auto keys = std::vector<std::uint8_t>(kPresentKeyRvas[0] + 16, 0);
     force_present_keys(keys.data());
+    check(kPresentKeyMaxWrites == 300 && kPresentKeyWriteIntervalMs == 2, "bounded burst constants");
     check(keys[kPresentKeyRvas[0]] == 1 && keys[kPresentKeyRvas[1]] == 1, "both keys forced to 1");
     // The two key RVAs are adjacent (0x71B90AD and 0x71B90AC); check outside the pair that the writer touched nothing.
     check(keys[kPresentKeyRvas[0] + 1] == 0, "byte after the key pair untouched");

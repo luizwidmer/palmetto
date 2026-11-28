@@ -188,3 +188,10 @@ device losses and zero present failures; the SSE4a INSERTQ emulation carried exe
 presented captures remain **9/9 black** and the readbacks are black plus the layer's own `51 102 204` write-control
 frames - so the remaining wall is the content the media/UI present body chooses to present, not session completion or the
 CPU-feature gap. No menu pixel exists yet; see [decomp_first_ui.md](decomp_first_ui.md) section 20.6.
+**Round-3 probe (binary `FF7ECF51`, 300 s arm):** the stable stage-3/session-13 window repeated (ALIVE 300.2 s, 0 losses)
+and the bounded present-key burst made the media/UI body take its present pass at 92 s; **presentation then froze**
+(presents/submits 1,118/2,236 held for ~200 s) and all 23 captures stayed black. The 2D-batch probe recorded its first
+**post-stage-3** hits (batch-build/submit 2 in the `>=3` bucket; rectangle/transform still 0) but no menu draw. The
+remaining wall is the media/UI present pass waiting on its media/UI plane or worker event; next falsifier is a wait-trace
+of the body during `body-present-pass` plus a target-binding probe on the UI batch submit path
+([decomp_first_ui.md](decomp_first_ui.md) section 20.7).

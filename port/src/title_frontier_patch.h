@@ -43,6 +43,10 @@ inline constexpr std::size_t kOutrecordBytesCount = sizeof(kOutrecordBytes);
 // The two media/UI present-pass key bytes (image-relative RVAs).
 inline constexpr std::uint32_t kPresentKeyRvas[2] = {0x71B90ADu, 0x71B90ACu};
 inline constexpr std::uint32_t kPresentKeyWriteIntervalMs = 2u;
+// A bounded burst, not a permanent override: 300 writes at 2 ms = 0.6 s. The first arm that forced the keys every 2 ms for
+// the whole run made the body take its present pass but then froze presentation (presents/submits stopped at 1323/2646).
+// The burst only triggers the pass; the title's own state machine clears the keys afterwards.
+inline constexpr std::uint32_t kPresentKeyMaxWrites = 300u;
 
 // The session-3 loading record's slot-4 completion dword (docs/decomp_stage.md 15.4-15.5; docs/decomp_first_ui.md
 // section 17: the frame thread's 33 ms poll 0x21B7070 checks 0x41E8C0 on image+0x78ACB20, and nothing measured writes

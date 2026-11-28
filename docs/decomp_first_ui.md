@@ -1750,3 +1750,28 @@ therefore **the content that the media/UI present body chooses to present** (its
 completion, not the CPU-feature gap, and not the presenter path. Next instruments: the body's begin/phase subscriber
 output and the movie/front-end draw target correlation (section 19's batch path with a target-binding probe), plus
 `PALMETTO_UI_PROBE=draw` in the same arm that now reaches session 13.
+
+### 20.7 Round-3 probe arm: the media/UI present pass runs once and then stops presentation
+
+After 20.6, a 300 s arm on the bounded-burst binary (`FF7ECF51…`) repeated the stable window (init 3 / loading 2 /
+session 13 from 92 s, ALIVE 300.2 s, 0 exceptions, 0 device losses) and added `PALMETTO_UI_PROBE=draw`,
+`PALMETTO_MOVIE_PROBE=player2`, `PALMETTO_PRESENT_ATTEST=1` and full captures. Results:
+
+- at 62 s the body was still `body-exits-on-keys` with keys 0/0 and 1,064 presents; the bounded 300-write key burst
+  (0.6 s) fired once stage 3 + session 13 were current, and from 92 s the attestation reads `body-present-pass` with
+  keys 1/1;
+- **presentation then froze**: presents/submits/frame-callbacks stayed 1,118 / 2,236 / 1,118 for the remaining ~200 s.
+  The media/UI present pass therefore blocks the title's frame loop instead of presenting its plane; this was not the
+  repeated-write override alone (the bounded burst does the same);
+- the UI 2D-batch counters finally show **post-stage-3 entries**: batch-build and batch-submit each reached 2 hits in the
+  `>=3` bucket (all other hits pre-stage-3), rectangle-fill and transform-copy stayed 0 - the first measured post-stage-3
+  UI draw attempts, but not enough to identify a menu draw;
+- the movie player stayed state 3 / next 3, handle 0, buffers 0, `probe 1 / open 1`; decode and frame-buffer
+  registration never hit;
+- all 23 presenter captures are black (2564x1421 mean RGB 0 0 0) and no readback PPM was produced after the pass.
+
+**Wall named:** the media/UI present body's present pass waits on its media/UI plane (or a media worker event) and never
+completes, so the frame loop stops presenting after the first pass. The next falsifier is a wait-trace/stack sample of
+the body during `body-present-pass` (semaphores `0x71B9078`/`0x71B9088`, worker events, plane resource pointer) plus a
+bounded target-binding probe at the UI batch submit path; if the pass is waiting on a media-ready event, the fix belongs
+in the media worker/plane producer path, not in session completion.

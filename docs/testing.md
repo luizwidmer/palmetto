@@ -1003,7 +1003,7 @@ Use your system's detected CPU, GPU, VRAM and RAM model names in the report, not
 The round-22 frontier push changed the runtime and added two pure CTests. Gates on the final tree:
 
 - `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT`.
-- `title_frontier_patch` (46 checks): the session-3 completion / present-key / out-record site instruments, their exact-value parsers and the gating preconditions.
+- `title_frontier_patch` (47 checks): the session-3 completion / present-key / out-record site instruments, their exact-value parsers and the gating preconditions.
 - `sse4a_emulation` (25 checks): the clean-room EXTRQ/INSERTQ decoder and semantics used by the illegal-instruction handler (`port/src/sse4a_emulation.h`).
 - `code_hooks` 211 checks (the class-0xa mitigation parser is now exact-`1` only); `ui_draw_probe` 198 checks (bounded caller ring); the queue-slot-14 mapping suite (`d3d12_draw`, `d3d12_set0_compute`, `d3d12_bindless_churn[_validated]`, `device_proxy`, `device_proxy_trace`) is 7/7 with the console Signal/Wait mapping and the unchanged slot-14 refusal.
 - The full round-22 arm table, loss ledger and the window/capture analysis live outside the repo under `D:\leonida-work\fsrstable` and `D:\leonida-work\evidence\menus-r22`; `tooling/scripts/frame_analysis.py` is the bounded capture/readback analyzer (self-test `tests/test_frame_analysis.py`).
