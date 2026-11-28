@@ -1961,7 +1961,8 @@ change.
 ### 20.15 Forcing the boot-media arm bits runs the whole producer chain to the handler
 
 The producer's enqueue helper waits on the module's arm mask (`context+0x3D0`) for the item classes it posts (bits
-0x08, 0x10, 0x20), while every measured arm shows the mask stuck at `0x02`. `PALMETTO_TITLE_APPSTATE_ARM=1` forces
+0x08, 0x10, 0x20), while every measured arm shows the mask stuck at `0x02`. Delivery timing is the value switch
+`PALMETTO_TITLE_APPSTATE_DELAY_MS` (default 60000 ms, clamped to 0..600000). `PALMETTO_TITLE_APPSTATE_ARM=1` forces
 those bits (`0x02 -> 0x3A`) before invoking the handler, and the chain then runs:
 
 - poke log: `0x2217C70` selector -> `0x2218180` producer -> `0x2217B80` dispatcher -> **`0x247B500` handler** (twice);
