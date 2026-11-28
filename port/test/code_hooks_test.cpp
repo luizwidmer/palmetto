@@ -381,9 +381,10 @@ int main() {
         check(!switch_enabled(" off "), "the class-0xa switch is off for off");
         check(!switch_enabled("FALSE"), "the class-0xa switch is off for FALSE");
         check(!switch_enabled("no"), "the class-0xa switch is off for no");
-        check(switch_enabled("1"), "the class-0xa switch is on for 1");
-        check(switch_enabled(" 1 "), "the class-0xa switch ignores surrounding blanks");
-        check(switch_enabled("yes"), "the class-0xa switch is on for any other spelling");
+        check(!switch_enabled("01"), "the class-0xa switch is off unless the value is exactly 1");
+        check(!switch_enabled(" 1 "), "the class-0xa switch does not trim an inexact value");
+        check(!switch_enabled("yes"), "the class-0xa switch is off for non-exact spellings");
+        check(switch_enabled("1"), "the class-0xa switch is on for exactly 1");
         check(class_of(0xau) == 0xau, "class 0xa is read from the low 12 bits");
         check(class_of(0x1000u | 0xau) == 0xau, "flag bits above the low 12 are masked off");
         check(overrides(0xau) && overrides(0x1000u | 0xau), "0xa is the overridden class");

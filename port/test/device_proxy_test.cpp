@@ -487,10 +487,19 @@ int main(int argc, char** argv) {
         check(SUCCEEDED(hr) && rt::d3d12_xs::is_fence_proxy(fence.Get()), "slot 36 returns a fence proxy");
         if (queue && fence) {
             HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-            check(event && SUCCEEDED(queue->Signal(fence.Get(), 1)) &&
+            // The console queue's Signal is console slot 16, not the PC index 14 (the two methods the console inserts
+            // before Signal occupy 14/15). The helper makes the call the title makes; a PC-ABI Signal through this
+            // Xbox-ABI object is a different method and is refused by name (checked below).
+            check(event && SUCCEEDED(rt::d3d12_xs::queue_proxy_console_signal(queue.Get(), fence.Get(), 1)) &&
                       SUCCEEDED(fence->SetEventOnCompletion(1, event)) && WaitForSingleObject(event, 5000) == 0,
-                  "the queue proxy signals the fence proxy on the GPU");
+                  "the queue proxy signals the fence proxy on the GPU through console slot 16");
             if (event) CloseHandle(event);
+            void** const queue_vtable = *reinterpret_cast<void***>(queue.Get());
+            using SignalFn = HRESULT(WINAPI*)(void*, ID3D12Fence*, UINT64);
+            check(reinterpret_cast<SignalFn>(queue_vtable[14])(queue.Get(), fence.Get(), 2) == E_NOTIMPL,
+                  "queue slot 14 (a console inserted method) refuses the PC Signal index by name");
+            check(SUCCEEDED(rt::d3d12_xs::queue_proxy_console_wait(queue.Get(), fence.Get(), 1)),
+                  "queue console slot 17 (Wait) forwards to PC Wait");
             ComPtr<ID3D12Device> owner;
             check(SUCCEEDED(queue->GetDevice(IID_PPV_ARGS(owner.GetAddressOf()))) && owner.Get() == device.Get(),
                   "the queue proxy's GetDevice is the device the shim returned");

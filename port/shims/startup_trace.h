@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstdio>
 #include "../src/crash_unwind.h"
+#include "../src/sse4a_emulation.h"
 #include <cstdlib>
 #include <mutex>
 #include <string>
@@ -715,6 +716,43 @@ inline bool emulate_amd_instruction(EXCEPTION_POINTERS* info) {
         if (!logged_mwait.exchange(true, std::memory_order_relaxed))
             std::fprintf(stderr, "[rt] emulated the AMD-only monitorx/mwaitx pair (the host has neither)\n");
         return true;
+    }
+    // AMD SSE4a bit-field instructions (EXTRQ / INSERTQ). The title's half-float packing on the session-13 path uses
+    // INSERTQ xmm1, xmm2, length, index and an Intel host raises #UD at image+0x2E7FF1 (measured in round 22). Decode the
+    // instruction from the faulting bytes and apply it to the CONTEXT's XMM registers; a field crossing bit 64 is refused
+    // so the generic illegal-instruction report below still fires.
+    if (at[0] == 0xF2 || at[0] == 0x66) {
+        std::size_t available = 3;
+        MEMORY_BASIC_INFORMATION region{};
+        if (VirtualQuery(at, &region, sizeof(region)) == sizeof(region)) {
+            const auto region_end = reinterpret_cast<std::uintptr_t>(region.BaseAddress) + region.RegionSize;
+            const auto here = reinterpret_cast<std::uintptr_t>(at);
+            if (region_end > here)
+                available = static_cast<std::size_t>(region_end - here) < 7u
+                                ? static_cast<std::size_t>(region_end - here)
+                                : 7u;
+        }
+        palmetto::sse4a::Instruction sse4a_instruction;
+        if (palmetto::sse4a::decode(at, available, sse4a_instruction)) {
+            auto& source = c.FltSave.XmmRegisters[sse4a_instruction.source & 15u];
+            auto& destination = c.FltSave.XmmRegisters[sse4a_instruction.destination & 15u];
+            const std::uint64_t source_low = source.Low;
+            const std::uint64_t source_high = source.High;
+            const palmetto::sse4a::Field field =
+                palmetto::sse4a::resolve(sse4a_instruction, source_low, source_high);
+            std::uint64_t destination_low = destination.Low;
+            if (palmetto::sse4a::apply(sse4a_instruction, field, source_low, destination_low)) {
+                destination.Low = destination_low;
+                c.Rip += sse4a_instruction.size;
+                static std::atomic<unsigned> sse4a_emulated{0};
+                if ((sse4a_emulated.fetch_add(1, std::memory_order_relaxed) & 0xFFu) == 0)
+                    std::fprintf(stderr,
+                                 "[rt] emulated an AMD-only SSE4a %s (%u bit-field instruction(s) so far; host has no SSE4a)\n",
+                                 sse4a_instruction.op == palmetto::sse4a::Op::insert ? "INSERTQ" : "EXTRQ",
+                                 sse4a_emulated.load(std::memory_order_relaxed));
+                return true;
+            }
+        }
     }
     static std::atomic<int> reported{0};
     if (reported.fetch_add(1, std::memory_order_relaxed) < 4)

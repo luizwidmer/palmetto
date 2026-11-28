@@ -155,6 +155,17 @@ unsigned queue_proxy_slot_count(const void* queue);
 unsigned fence_proxy_slot_count(const void* fence);
 unsigned queue_proxy_table_size();
 unsigned fence_proxy_table_size();
+// ---- Console-order queue calls ---------------------------------------------------------------------------------
+//
+// The console queue inserts two methods before Signal, so its Signal is console slot 16 and its Wait slot 17; the proxy
+// maps those two (and 18/19/20 = timestamp frequency, clock calibration, GetDesc) onto the PC slots two below them
+// (docs/d3d12_xs_surface.md; measured on this title: Signal 16, GetDesc 20). Console slots 14 and 15 are the inserted
+// methods: their shapes are not identified, so the proxy refuses them by name with E_NOTIMPL. A PC-ABI caller that
+// invokes ID3D12CommandQueue::Signal through the Xbox-ABI object therefore lands on console slot 14 and is refused, not
+// signalled. These helpers make the call at the console slot the title uses, for a fixture or client holding a queue
+// proxy; they return E_INVALIDARG for anything that is not a queue proxy (the proxy's own refusal still logs the slot).
+HRESULT queue_proxy_console_signal(void* queue, ID3D12Fence* fence, std::uint64_t value);
+HRESULT queue_proxy_console_wait(void* queue, ID3D12Fence* fence, std::uint64_t value);
 // ---- Console fence slot 12 (vtable offset 0x60) ----
 //
 // A fence proxy answers console fence slot 12 with the address of a 64-bit cell that carries the fence's completed

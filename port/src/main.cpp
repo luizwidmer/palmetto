@@ -45,6 +45,7 @@
 #include "audio_submit_probe.h"
 #include "pe_loader.h"
 #include "title_class0a.h"
+#include "title_frontier_patch.h"
 #include "title_watchdog.h"
 #include "ui_draw_probe.h"
 #include "wait_trace.h"
@@ -10059,6 +10060,119 @@ int wmain(int argc, wchar_t** argv) {
                              palmetto::title_class0a::kRowStrideRva);
             std::fflush(stderr);
         }
+        // PALMETTO_TITLE_OUTRECORD_STATE2=1 / PALMETTO_TITLE_PRESENT_KEYS=1: the round-22 first-menus frontier
+        // diagnostics (docs/decomp_stage.md 15.6, docs/decomp_first_ui.md section 11). Both are off by default, write
+        // only the measured bytes after validating the image, and leave the default path unchanged.
+        if (palmetto::title_frontier::switch_enabled(std::getenv("PALMETTO_TITLE_OUTRECORD_STATE2"))) {
+            auto* frontier_base = static_cast<std::uint8_t*>(main_module.base);
+            const auto frontier_check =
+                palmetto::title_frontier::check_outrecord_site(frontier_base, main_module.size);
+            if (!frontier_check.ok) {
+                std::fprintf(stderr, "[rt] frontier: out-record state-2 redirect NOT installed: %s\n",
+                             frontier_check.reason);
+            } else {
+                auto* frontier_site = frontier_base + palmetto::title_frontier::kOutrecordBranchRva;
+                DWORD frontier_old = 0;
+                if (VirtualProtect(frontier_site, 1, PAGE_EXECUTE_READWRITE, &frontier_old)) {
+                    const std::uint8_t frontier_original = *frontier_site;
+                    *frontier_site = palmetto::title_frontier::kOutrecordBranchPatched;
+                    FlushInstructionCache(GetCurrentProcess(), frontier_site, 1);
+                    DWORD frontier_restored = 0;
+                    VirtualProtect(frontier_site, 1, frontier_old, &frontier_restored);
+                    std::fprintf(stderr,
+                                 "[rt] frontier: out-record state-2 redirect image+0x%x 0x%02x->0x%02x (state 0 out "
+                                 "records take the completion branch)\n",
+                                 palmetto::title_frontier::kOutrecordBranchRva, frontier_original,
+                                 palmetto::title_frontier::kOutrecordBranchPatched);
+                } else {
+                    std::fprintf(stderr, "[rt] frontier: out-record state-2 redirect failed: VirtualProtect %lu\n",
+                                 GetLastError());
+                }
+            }
+            std::fflush(stderr);
+        }
+        if (palmetto::title_frontier::switch_enabled(std::getenv("PALMETTO_TITLE_PRESENT_KEYS"))) {
+            auto* frontier_base = static_cast<std::uint8_t*>(main_module.base);
+            const std::size_t frontier_size = main_module.size;
+            std::thread([frontier_base, frontier_size] {
+                // Wait for the title's stage-2 gate before forcing the handshake keys: an unconditional writer measured
+                // init 1 / loading 0 / session 0 for a whole 180 s arm.
+                bool ready = false;
+                for (unsigned wait = 0; wait < 2400; ++wait) {
+                    if (palmetto::title_frontier::present_keys_ready(frontier_base, frontier_size)) {
+                        ready = true;
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                if (!ready) {
+                    std::fprintf(stderr, "[rt] frontier: present-key writer not armed: boot-media gate never reached 2\n");
+                    std::fflush(stderr);
+                    return;
+                }
+                std::fprintf(stderr, "[rt] frontier: present-key writer armed at the stage-2 gate\n");
+                std::fflush(stderr);
+                for (;;) {
+                    palmetto::title_frontier::force_present_keys(frontier_base);
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(palmetto::title_frontier::kPresentKeyWriteIntervalMs));
+                }
+            }).detach();
+            std::fprintf(stderr,
+                         "[rt] frontier: media/UI present keys image+0x%x + image+0x%x forced to 1 every %u ms "
+                         "(detached writer; present body can take its present pass)\n",
+                         palmetto::title_frontier::kPresentKeyRvas[0], palmetto::title_frontier::kPresentKeyRvas[1],
+                         palmetto::title_frontier::kPresentKeyWriteIntervalMs);
+            std::fflush(stderr);
+        }
+
+        if (palmetto::title_frontier::switch_enabled(std::getenv("PALMETTO_TITLE_SESSION3_COMPLETE"))) {
+            auto* frontier_base = static_cast<std::uint8_t*>(main_module.base);
+            if (main_module.size < palmetto::title_frontier::kSession3CompletionRva + sizeof(std::uint32_t)) {
+                std::fprintf(stderr, "[rt] frontier: session-3 completion write NOT installed: image too small\n");
+            } else {
+                const std::size_t frontier_size = main_module.size;
+                std::thread([frontier_base, frontier_size] {
+                    unsigned writes = 0;
+                    // Wait for session 3 before forcing the record completion: an unconditional writer stopped the title
+                    // at an illegal instruction at game+0x2E7FF1 in the first arm.
+                    bool ready = false;
+                    for (unsigned wait = 0; wait < 2400; ++wait) {
+                        if (palmetto::title_frontier::session3_ready(frontier_base, frontier_size)) {
+                            ready = true;
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                    if (!ready) {
+                        std::fprintf(stderr,
+                                     "[rt] frontier: session-3 completion writer not armed: session state never read 3\n");
+                        std::fflush(stderr);
+                        return;
+                    }
+                    std::fprintf(stderr, "[rt] frontier: session-3 completion writer armed at the stage-2 gate\n");
+                    std::fflush(stderr);
+                    for (; writes < palmetto::title_frontier::kSession3CompletionMaxWrites; ++writes) {
+                        if (!palmetto::title_frontier::write_session3_completion(frontier_base, frontier_size))
+                            break;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(
+                            palmetto::title_frontier::kSession3CompletionIntervalMs));
+                    }
+                    std::fprintf(stderr,
+                                 "[rt] frontier: session-3 completion writer finished after %u write(s)\n", writes);
+                    std::fflush(stderr);
+                }).detach();
+                std::fprintf(stderr,
+                             "[rt] frontier: session-3 loading record slot-4 completion image+0x%x forced to %u every "
+                             "%u ms for at most %u write(s)\n",
+                             palmetto::title_frontier::kSession3CompletionRva,
+                             palmetto::title_frontier::kSession3CompletionValue,
+                             palmetto::title_frontier::kSession3CompletionIntervalMs,
+                             palmetto::title_frontier::kSession3CompletionMaxWrites);
+            }
+            std::fflush(stderr);
+        }
+
         // PALMETTO_PRESENT_ATTEST=1 and PALMETTO_TITLE_WATCHDOG_HOLD=watch|<seconds>: the P2/P3 ports of
         // docs/peer_port_first_ui.md section 13. The attestation's counting thunk and the hold's monitor are both set up
         // here, after the image is mapped and before the title's entry point runs; with both switches unset this block

@@ -8829,6 +8829,20 @@ unsigned queue_proxy_slot_count(const void* queue) {
     return is_queue_proxy(queue) ? static_cast<const ChildProxy*>(queue)->slot_count : 0;
 }
 
+HRESULT queue_proxy_console_signal(void* queue, ID3D12Fence* fence, std::uint64_t value) {
+    if (!is_queue_proxy(queue)) return E_INVALIDARG;
+    using ConsoleSignalFn = HRESULT(WINAPI*)(void*, ID3D12Fence*, std::uint64_t);
+    void** const vtable = *reinterpret_cast<void***>(queue);
+    return reinterpret_cast<ConsoleSignalFn>(vtable[kConsoleQueueSignal])(queue, fence, value);
+}
+
+HRESULT queue_proxy_console_wait(void* queue, ID3D12Fence* fence, std::uint64_t value) {
+    if (!is_queue_proxy(queue)) return E_INVALIDARG;
+    using ConsoleWaitFn = HRESULT(WINAPI*)(void*, ID3D12Fence*, std::uint64_t);
+    void** const vtable = *reinterpret_cast<void***>(queue);
+    return reinterpret_cast<ConsoleWaitFn>(vtable[kConsoleQueueWait])(queue, fence, value);
+}
+
 unsigned fence_proxy_slot_count(const void* fence) {
     return is_fence_proxy(fence) ? static_cast<const ChildProxy*>(fence)->slot_count : 0;
 }

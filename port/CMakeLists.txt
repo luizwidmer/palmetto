@@ -1320,6 +1320,21 @@ if(BUILD_TESTING)
       PALMETTO_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
     target_compile_options(opt_in_switches_test PRIVATE /W4 /permissive- /utf-8 /EHsc)
     add_test(NAME opt_in_switches COMMAND opt_in_switches_test)
+
+    # Round-22 frontier instruments: pure synthetic tests for the out-record state-2 redirect site validation and the
+    # media/UI present-key writer (port/src/title_frontier_patch.h).
+    add_executable(title_frontier_patch_test test/title_frontier_patch_test.cpp)
+    target_include_directories(title_frontier_patch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(title_frontier_patch_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(title_frontier_patch_test PRIVATE /W4 /permissive- /utf-8 /EHsc)
+    add_test(NAME title_frontier_patch COMMAND title_frontier_patch_test)
+
+    # Round-22 clean-room SSE4a emulation used by the illegal-instruction handler (EXTRQ/INSERTQ on an Intel host).
+    add_executable(sse4a_emulation_test test/sse4a_emulation_test.cpp)
+    target_include_directories(sse4a_emulation_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(sse4a_emulation_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(sse4a_emulation_test PRIVATE /W4 /permissive- /utf-8 /EHsc)
+    add_test(NAME sse4a_emulation COMMAND sse4a_emulation_test)
   endif()
 
   if(TARGET device_proxy_test)

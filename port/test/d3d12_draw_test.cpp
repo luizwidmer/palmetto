@@ -460,7 +460,7 @@ int main() {
         ID3D12CommandList* lists[] = {list.p};
         queue->ExecuteCommandLists(1, lists);
         EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
-        EXPECT(SUCCEEDED(queue->Signal(fence.p, 1)));
+        EXPECT(SUCCEEDED(rt::d3d12_xs::queue_proxy_console_signal(queue.p, fence.p, 1)));
         EXPECT(SUCCEEDED(fence->SetEventOnCompletion(1, nullptr)));
         void* mapped = nullptr;
         EXPECT(SUCCEEDED(readback->Map(0, nullptr, &mapped)));
@@ -490,7 +490,7 @@ int main() {
         EXPECT(list->Close() == S_OK);
         queue->ExecuteCommandLists(1, lists);
         EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
-        EXPECT(SUCCEEDED(queue->Signal(fence.p, 2)) && SUCCEEDED(fence->SetEventOnCompletion(2, nullptr)));
+        EXPECT(SUCCEEDED(rt::d3d12_xs::queue_proxy_console_signal(queue.p, fence.p, 2)) && SUCCEEDED(fence->SetEventOnCompletion(2, nullptr)));
         std::memcpy(second_pixels.data(), mapped, second_pixels.size());
 
         // Logic-op pass on its own R8G8B8A8_UINT target: D3D12 applies logic ops to UINT formats only. Cleared to
@@ -533,7 +533,7 @@ int main() {
             EXPECT(list->Close() == S_OK);
             queue->ExecuteCommandLists(1, lists);
             EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
-            EXPECT(SUCCEEDED(queue->Signal(fence.p, 3)) && SUCCEEDED(fence->SetEventOnCompletion(3, nullptr)));
+            EXPECT(SUCCEEDED(rt::d3d12_xs::queue_proxy_console_signal(queue.p, fence.p, 3)) && SUCCEEDED(fence->SetEventOnCompletion(3, nullptr)));
             std::memcpy(logic_pixels.data(), mapped, logic_pixels.size());
         }
 
@@ -599,7 +599,7 @@ int main() {
                 queue->ExecuteCommandLists(1, lists);
                 EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
                 ++strip_fence;
-                EXPECT(SUCCEEDED(queue->Signal(fence.p, strip_fence)) &&
+                EXPECT(SUCCEEDED(rt::d3d12_xs::queue_proxy_console_signal(queue.p, fence.p, strip_fence)) &&
                        SUCCEEDED(fence->SetEventOnCompletion(strip_fence, nullptr)));
                 std::memcpy(sp.out->data(), mapped, sp.out->size());
             }
@@ -693,7 +693,7 @@ int main() {
                     queue->ExecuteCommandLists(1, lists);
                     EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
                     ++ms_fence;
-                    EXPECT(SUCCEEDED(queue->Signal(fence.p, ms_fence)) &&
+                    EXPECT(SUCCEEDED(rt::d3d12_xs::queue_proxy_console_signal(queue.p, fence.p, ms_fence)) &&
                            SUCCEEDED(fence->SetEventOnCompletion(ms_fence, nullptr)));
                     std::memcpy(ms_passes[pass].out->data(), mapped, ms_passes[pass].out->size());
                 }
@@ -713,7 +713,7 @@ int main() {
         EXPECT(list->Close() == S_OK);
         queue->ExecuteCommandLists(1, lists);
         EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
-        EXPECT(SUCCEEDED(queue->Signal(fence.p, 30)) && SUCCEEDED(fence->SetEventOnCompletion(30, nullptr)));
+        EXPECT(SUCCEEDED(rt::d3d12_xs::queue_proxy_console_signal(queue.p, fence.p, 30)) && SUCCEEDED(fence->SetEventOnCompletion(30, nullptr)));
 
         // Each parent draw starts with a 0.25 blend factor, then executes one of four bundles.
         // Empty and reset bundles preserve it. Explicit zero and nullptr replace it with zero and one.
@@ -767,7 +767,7 @@ int main() {
             queue->ExecuteCommandLists(1, lists);
             EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
             // Above line 580's 30: a lower value is already reached, so the wait would return at once.
-            EXPECT(SUCCEEDED(queue->Signal(fence.p, 31)) && SUCCEEDED(fence->SetEventOnCompletion(31, nullptr)));
+            EXPECT(SUCCEEDED(rt::d3d12_xs::queue_proxy_console_signal(queue.p, fence.p, 31)) && SUCCEEDED(fence->SetEventOnCompletion(31, nullptr)));
             const auto* result = static_cast<const std::uint8_t*>(mapped);
             for (UINT row = 0; row < size; ++row) {
                 for (UINT col = 0; col < size; ++col) {
@@ -854,7 +854,7 @@ int main() {
                     queue->ExecuteCommandLists(1, lists);
                     EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
                     ++x8_fence;
-                    EXPECT(SUCCEEDED(queue->Signal(fence.p, x8_fence)) &&
+                    EXPECT(SUCCEEDED(rt::d3d12_xs::queue_proxy_console_signal(queue.p, fence.p, x8_fence)) &&
                            SUCCEEDED(fence->SetEventOnCompletion(x8_fence, nullptr)));
                     // Source (0.8, 0.6, 0) with alpha 1, destination the cleared bytes; SRC_ALPHA_SAT is
                     // min(1, 1 - dest alpha).
@@ -934,7 +934,7 @@ int main() {
                 queue->ExecuteCommandLists(1, lists);
                 EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
                 ++step_fence;
-                EXPECT(SUCCEEDED(queue->Signal(fence.p, step_fence)) &&
+                EXPECT(SUCCEEDED(rt::d3d12_xs::queue_proxy_console_signal(queue.p, fence.p, step_fence)) &&
                        SUCCEEDED(fence->SetEventOnCompletion(step_fence, nullptr)));
                 auto& dst_buf = pass == 0 ? step2_pixels : step1_pixels;
                 std::memcpy(dst_buf.data(), mapped, dst_buf.size());
@@ -1016,7 +1016,7 @@ int main() {
                 queue->ExecuteCommandLists(1, lists);
                 EXPECT(rt::d3d12::last_execute_result(queue.p) == palmetto::ReplayResult::success);
                 ++cast_fence;
-                EXPECT(SUCCEEDED(queue->Signal(fence.p, cast_fence)) &&
+                EXPECT(SUCCEEDED(rt::d3d12_xs::queue_proxy_console_signal(queue.p, fence.p, cast_fence)) &&
                        SUCCEEDED(fence->SetEventOnCompletion(cast_fence, nullptr)));
                 const auto* got = static_cast<const std::uint8_t*>(mapped);
                 const unsigned compared = c.view == DXGI_FORMAT_B8G8R8X8_UNORM ? 3 : 4;

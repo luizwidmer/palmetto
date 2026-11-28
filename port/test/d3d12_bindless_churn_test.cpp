@@ -341,11 +341,14 @@ bool run(vktest::Device& d, const std::filesystem::path& library, bool legacy_id
             list[q]->CopyBufferRegion(readback[q][k].p, 0, output[q][k].p, 0, probes * run_bytes);
             EXPECT(list[q]->Close() == S_OK);
             // The compute queue samples what the direct queue uploads: that is a wait on the GPU, not on the CPU.
-            if (q == 1 && !async_compute(async, q, f)) EXPECT(SUCCEEDED(queue[1]->Wait(fence[0].p, f + 1)));
+            // Console order: the queue's Wait is console slot 17 and its Signal slot 16; the PC indices 14/15 are the
+            // console's two inserted methods and are refused (docs/testing.md, the queue-slot-14 group).
+            if (q == 1 && !async_compute(async, q, f))
+                EXPECT(SUCCEEDED(rt::d3d12_xs::queue_proxy_console_wait(queue[1].p, fence[0].p, f + 1)));
             ID3D12CommandList* lists[] = {list[q].p};
             queue[q]->ExecuteCommandLists(1, lists);
             EXPECT(rt::d3d12::last_execute_result(queue[q].p) == palmetto::ReplayResult::success);
-            EXPECT(SUCCEEDED(queue[q]->Signal(fence[q].p, f + 1)));
+            EXPECT(SUCCEEDED(rt::d3d12_xs::queue_proxy_console_signal(queue[q].p, fence[q].p, f + 1)));
             // A generation the flush retired stays until the submissions that may have used it are done.
             result.max_retired_pending = std::max(result.max_retired_pending,
                                                   rt::d3d12::bindless_stats(device.p).retired_pending);

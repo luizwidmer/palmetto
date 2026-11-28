@@ -59,29 +59,9 @@ inline bool overrides(std::uint32_t class_and_flags) { return class_of(class_and
 // The row stride the mitigation answers for class 0xa: bytes per element times the row width.
 inline std::uint32_t row_stride(std::uint32_t width) { return width * kClass0aElementBytes; }
 
-// PALMETTO_TITLE_CLASS0A_SIZE's value: set and not 0/off/false/no (case-insensitive, surrounding blanks ignored)
-// enables the mitigation; unset or any of those spellings leaves the default path, which is every current arm's path.
-inline bool switch_enabled(const char* value) {
-    if (value == nullptr) return false;
-    while (*value == ' ' || *value == '\t') ++value;
-    const char* end = value;
-    while (*end != '\0') ++end;
-    while (end != value && (end[-1] == ' ' || end[-1] == '\t')) --end;
-    const std::size_t size = static_cast<std::size_t>(end - value);
-    if (size == 0) return false;
-    if (size == 1 && value[0] == '0') return false;
-    const auto is = [&](const char* word) {
-        const std::size_t length = std::strlen(word);
-        if (length != size) return false;
-        for (std::size_t i = 0; i < size; ++i) {
-            char c = value[i];
-            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-            if (c != word[i]) return false;
-        }
-        return true;
-    };
-    return !(is("off") || is("false") || is("no"));
-}
+// PALMETTO_TITLE_CLASS0A_SIZE uses the opt-in registry's exact_one contract: only the literal value "1" enables
+// the mitigation. Unset, empty, or any other value leaves the default path byte-identical.
+inline bool switch_enabled(const char* value) { return value != nullptr && std::strcmp(value, "1") == 0; }
 
 // The executable trampoline. Entry: ecx = class_and_flags, edx = width, as the original's callers leave them.
 //
