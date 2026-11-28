@@ -107,7 +107,30 @@ HRESULT __stdcall register_app_state_change(Handler callback, void* context, voi
                          change->reason, change->state, static_cast<void*>(change), context,
                          static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(change) & 0xffu));
             std::fflush(stderr);
+            // Diagnostic: the producer 0x2218180 enters FUN_142217DE0 (the item enqueue helper) before it dispatches.
+            // In the measured arm the dispatcher 0x2217B80 is never reached, so the helper may be waiting for ring
+            // space. The ring fields (the helper's own offsets) are sampled once a second while the callback runs.
+            std::thread monitor([context] {
+                for (int i = 0; i < 60; ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                    const auto* base = static_cast<const unsigned char*>(context);
+                    std::uint32_t ring0 = 0, armed = 0, pending = 0;
+                    std::uint64_t ring1 = 0;
+                    std::memcpy(&ring0, base + 0x3b8, sizeof(ring0));
+                    std::memcpy(&ring1, base + 0x3c0, sizeof(ring1));
+                    std::memcpy(&armed, base + 0x3d0, 1);
+                    std::memcpy(&pending, base + 0x3d4, sizeof(pending));
+                    std::fprintf(stderr,
+                                 "[rt] appnotify monitor +%ds: ring0 0x%08x ring1 0x%016llx armed 0x%02x pending 0x%08x\n",
+                                 i + 1, ring0, static_cast<unsigned long long>(ring1),
+                                 static_cast<unsigned>(armed & 0xffu), pending);
+                    std::fflush(stderr);
+                }
+            });
+            monitor.detach();
             callback(change, context);
+            std::fprintf(stderr, "[rt] appnotify: callback returned\n");
+            std::fflush(stderr);
         }).detach();
     }
     return S_OK;

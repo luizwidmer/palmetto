@@ -1936,3 +1936,24 @@ subscriber exists in the process; the item dispatch from `0x2218180` (`FUN_14221
 and handler `0x247B500` (or split into two arms) to separate "producer did not dispatch" from "dispatch found no
 subscriber". One arm with this notification device-lost at 86 s; the 60 s arm was ALIVE 300 s with 904,354 D3D12
 calls, UI batches 2,072 in the >=3 bucket, and black captures.
+
+### 20.14 The producer blocks in the item-enqueue helper: the boot-media request ring has no free slot
+
+With the corrected callback order the selector `0x2217C70` and producer `0x2218180` are both reached (poke log), but
+neither the dispatcher `0x2217B80` nor the handler `0x247B500` is; the producer never returns. A diagnostic monitor in
+the shim samples the producer's ring fields (`context+0x3B8` state, `+0x3C0` count, `+0x3D0` armed, `+0x3D4` pending)
+once a second after delivery:
+
+- every sample for 60 s reads `ring0 0x00000000  ring1 0x000000000000007f  armed 0x02  pending 0x00000001`;
+- `callback returned` never prints, so the producer is inside the enqueue helper `FUN_142217DE0` waiting for ring space
+  (its state mask `0x1ff0000` selects between claiming and releasing a slot; with no free slot it spins);
+- the title keeps presenting and ticking the body throughout (presents 5,826 / body entries 3,259 at 122 s), but the
+  ring's consumer side never frees a slot for this producer.
+
+**Interpretation:** the app-state notification's producer is meant to run on a thread whose pump also drains the
+boot-media request ring; our shim delivers it on its own worker thread, so the enqueue blocks. The next engineering step
+is to deliver the registered callback from the title's own per-frame thread/pump (the title-side route the console uses),
+not from a shim worker thread: either enqueue the callback into the title's task queue, or hook a known per-frame entry
+(the media tick `0x24846D0` / frame loop) so it calls the registered handler once. The ring fields above are the
+check: after a title-thread delivery the dispatcher `0x2217B80` and handler `0x247B500` should be hit and `ring0` should
+change.
