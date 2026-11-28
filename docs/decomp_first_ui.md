@@ -1957,3 +1957,21 @@ not from a shim worker thread: either enqueue the callback into the title's task
 (the media tick `0x24846D0` / frame loop) so it calls the registered handler once. The ring fields above are the
 check: after a title-thread delivery the dispatcher `0x2217B80` and handler `0x247B500` should be hit and `ring0` should
 change.
+
+### 20.15 Forcing the boot-media arm bits runs the whole producer chain to the handler
+
+The producer's enqueue helper waits on the module's arm mask (`context+0x3D0`) for the item classes it posts (bits
+0x08, 0x10, 0x20), while every measured arm shows the mask stuck at `0x02`. `PALMETTO_TITLE_APPSTATE_ARM=1` forces
+those bits (`0x02 -> 0x3A`) before invoking the handler, and the chain then runs:
+
+- poke log: `0x2217C70` selector -> `0x2218180` producer -> `0x2217B80` dispatcher -> **`0x247B500` handler** (twice);
+- the state-2 item is queued and the frame-request flag **AD `0x71B90AD` becomes 1** (`keys 0x1/0x0`);
+- the boot-media gate moves `0x2 -> 0x10` at 62 s and `0x10 -> 0x20` at 90 s;
+- presentation runs to 1,022 presents and then stops at the `0x20` gate; the body keeps ticking to 2,267 entries and
+  stops; **AC `0x71B90AC` never becomes 1**, so the present body still exits on keys and every capture stays black.
+
+The arm-bit force is a diagnostic, not a fix: it lets the producer enqueue and dispatch, but the module then enters the
+0x10/0x20 gate states where the media tick no longer runs the opener (`0x24846D0` -> `0x2484A90` -> `0x2218900`/
+`0x2218910`), so AC is never set. Next probe: the media tick and opener (`0x24846D0`, `0x2484A90`, `0x2218910`) plus
+the gate/arm sequence, to find what normally sets the arm bits and arms AC in the 0x10/0x20 states. Delivery timing,
+callback order and the subscriber registration are now all verified; no menu pixel is claimed.

@@ -46,6 +46,20 @@ bool switch_on() {
     return on;
 }
 
+// PALMETTO_TITLE_APPSTATE_DELAY_MS: when the synthetic notification is delivered (default 60 s). Value switch: a
+// negative or absent value keeps the default, and it is clamped to 10 minutes.
+std::uint32_t delivery_delay_ms() {
+    static const std::uint32_t value = [] {
+        const char* text = std::getenv("PALMETTO_TITLE_APPSTATE_DELAY_MS");
+        if (!text || !*text) return 60000u;
+        const long parsed = std::strtol(text, nullptr, 10);
+        if (parsed < 0) return 60000u;
+        if (parsed > 600000) return 600000u;
+        return static_cast<std::uint32_t>(parsed);
+    }();
+    return value;
+}
+
 // The host api set as the default path: forward the call exactly as before this shim existed.
 template <class Fn>
 Fn host_function(const char* dll, const char* name) {
@@ -94,7 +108,7 @@ HRESULT __stdcall register_app_state_change(Handler callback, void* context, voi
             // 60 s: the selector/producer are reached at 20 s, but the type-0x24 subscriber (handler 0x247B500) is not
             // registered yet (no poke hit), so nothing downstream changes. By 60 s the title is in session 3 and the
             // boot-media module has its subscriber list and frame loop running.
-            std::this_thread::sleep_for(std::chrono::milliseconds(60000));
+            std::this_thread::sleep_for(std::chrono::milliseconds(delivery_delay_ms()));
             // The title's selector tests CL (the low byte of the change pointer) and takes the alternate path when it
             // is zero. A heap/stack buffer can sit at a page-aligned address, so hand it an odd byte offset: the selector
             // then enters the producer 0x2218180 with the registration context.
@@ -128,6 +142,22 @@ HRESULT __stdcall register_app_state_change(Handler callback, void* context, voi
                 }
             });
             monitor.detach();
+            // PALMETTO_TITLE_APPSTATE_ARM=1: the enqueue helper FUN_142217DE0 waits until the boot-media module's arm
+            // mask (+0x3D0) has the item-class bits for the producer's calls (0x08, 0x10, 0x20). The monitor shows the
+            // mask stuck at 0x02 in every measured arm, so the producer spins forever. Force those bits for the
+            // diagnostic and see whether the dispatcher 0x2217B80 and handler 0x247B500 are then reached.
+            static const bool force_arm = [] {
+                const char* value = std::getenv("PALMETTO_TITLE_APPSTATE_ARM");
+                return value && std::strcmp(value, "1") == 0;
+            }();
+            if (force_arm) {
+                auto* armed_byte = static_cast<unsigned char*>(context) + 0x3d0;
+                const unsigned before = *armed_byte;
+                *armed_byte = static_cast<unsigned char>(before | 0x38);
+                std::fprintf(stderr, "[rt] appnotify: arm mask forced 0x%02x -> 0x%02x\n", before,
+                             static_cast<unsigned>(*armed_byte));
+                std::fflush(stderr);
+            }
             callback(change, context);
             std::fprintf(stderr, "[rt] appnotify: callback returned\n");
             std::fflush(stderr);
