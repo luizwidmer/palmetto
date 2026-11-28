@@ -256,6 +256,64 @@ The loader subset was `loader`, `pe_loader`, `pe_loader_bounds`, `loader_tls`, `
 re-run the other 300 targets after the rebuild, so their rows stay attributed to the pre-gate binaries. The round-20
 tree has 330 registered tests: 29/29 in the lead's round-20 subset and 26/26 in this new-target and loader pass.
 
+## Round-21 final gate (2026-11-28)
+
+The round-21 gate ran on `main` at `2785e429e` with the round-21 slices in the working tree (the lead commits them after
+this gate). The final Windows `port/build` registered **333** tests (CTest 4.4.5, `RelWithDebInfo`): the 330 of the
+round-20 tree plus three new targets, `d3d12_title_va_production`, `indirect_graphics_replay_readiness` and
+`opt_in_switches`. The build gates were green (`PALMETTO_OK`, `TESTS_BUILT`) and the lead's round-21 subset of 35
+targets passed 35/35.
+
+This is the affected-target inventory, not a full-suite sweep. It ran 33 targets - the three new ones, the round-21
+fixed targets, the named known-failure groups and the 17-name loader subset - one bounded CTest invocation each,
+serially, under the shared build lock, with no build started and the inherited `GIT_CONFIG_*` and `PALMETTO_*`
+variables cleared:
+
+```powershell
+ctest --test-dir port/build -C RelWithDebInfo -R '^<one-test-name>$' --output-on-failure --timeout 150 -j 1
+```
+
+| Inventory measure | Count |
+| --- | ---: |
+| Registered in the final `port/build` | 333 |
+| Affected targets selected | 33 |
+| Executed | 33 |
+| Passed | 29 |
+| Skipped | 0 |
+| Failed | 4 |
+
+The four failures are one group. `d3d12_draw`, `d3d12_set0_compute`, `d3d12_bindless_churn` and
+`d3d12_bindless_churn_validated` all reach console queue slot 14 and stop at the same named refusal,
+`[rt] d3d12_xs: queue slot 14 is one of the console's two methods before Signal; refusing`, before the test can
+signal its fence. The two test-side defects that used to mask this are fixed this round - `d3d12_draw`'s stale
+oversized-heap case and the bindless `< 2^32` handle precondition - so those four targets now fail one step later, on
+the shared layer/fixture item owned elsewhere, not on their own assertions. The other 14 targets of the round-20
+queue-slot-14 group and `d3d12_depth_resolve` were not re-run here and stay attributed to the round-20 tree.
+
+The round-21 fixes verified green in this inventory: `root_sig` passes both zero-checksum blob assertions; `xmem`
+passes in the serial sweep, so its working-set check is deterministic now; `d3d12_close_parity` passes all 116 cases;
+and the loader family is green under the strict gates - `loader_tls_race` is registered without `--expect-faults`
+(the F4/F7 fixes landed) and passes, `loader_census` passes with its census assertions, and `loader`, `pe_loader`,
+`pe_loader_bounds`, `loader_tls`, `loader_tls_audit`, `loader_core_audit`, `loader_selfcheck`,
+`pe_loader_shadow_wiring`, `pe_loader_shadow`, `pe_image`, `pe_image_fuzz`, `pe_mapper`, `pe_resolver`,
+`module_names`, `unimplemented_policy`, `startup_trace` and `loader_bind_audit` are all green. `d3d12_title_va`
+passes with the new `PALMETTO_VK_VALIDATION=1` CTest environment (validation-on), and `d3d12_viewport_array`
+remains the validation-clean viewport target.
+
+| Round-21 target | Result | Time | What it covers |
+| --- | --- | ---: | --- |
+| `d3d12_title_va_production` | PASS | 0.3 s | P-45 production-BDA raw VA -> window -> pull -> sampled pixel through the real queue/fence. |
+| `indirect_graphics_replay_readiness` | PASS | 0.0 s | Pure strict multi-count indirect graphics replay readiness contract. |
+| `opt_in_switches` | PASS | 0.9 s | Compiled `PALMETTO_*` switch-registry audit against the source scan. |
+| `d3d12_title_va` | PASS | 0.3 s | Round-20 title-VA GPU regression, now validation-on and green. |
+| `loader_tls_race` | PASS | 0.4 s | Strict F4/F7 loader TLS contracts; no `--expect-faults`. |
+
+The six exclusions documented in the round-20 section (`d3d12_fence_timing`, `vk_queue`, `d3d12_xdxr_rt`,
+`d3d12_xdxr_rt_check`, `xbox_present`, `d3d12_vulkan_device`) are unchanged and were not part of this inventory.
+The five CI jobs that were already failing on `main` before the round-20 refresh - `translator-tests`,
+`stdlib-tests-linux`, `viewer-tests`, `semantic-tests` (Ubuntu) and `macos-python` - are pre-existing and were not
+re-run here.
+
 ## Build, artifact, and single-test notes
 
 Windows, from a "Developer PowerShell for VS 2022" or a plain shell:

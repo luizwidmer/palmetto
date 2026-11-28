@@ -336,3 +336,30 @@ The synthetic [fixture](../tests/semantic/fixtures/disasm/ps_smov_exec_lo_gap.s)
 The same union scan after this rule translated and validated **491 / 668** programs and refused the same 177 classes. The 23 measured EXEC-low moves are restored, but every request-union status remains unchanged: these words do not close a full program, so net module closure is **0 programs**. All **491** previously translating modules are byte-identical afterward (491 common; 0 changed, none missing, none added), verified by SHA-256 comparison. The exact status transitions, scan outputs, and per-program refusal manifests stayed outside the repository and were discarded after comparison; only aggregate counts remain in this page.
 
 This rule uses this tree's own decoder and established EXEC semantics. Peer notes were read-only evidence; no peer code or fixture was copied, so no `NOTICE.md` entry is needed.
+
+## 17. One exact clause hint in a decode gap
+
+### Measured sub-class
+
+A fresh GPU-free Python scan of the current 668-program request union translated and `spirv-val` checked **491 / 668** programs and refused 177: fall-through 165, cannot re-anchor 8, `v_cmp` destination 2, mask destination 1, and normalized encoding 1. An aggregate-only pass over those 165 fall-through refusals inspected 138 reachable four-byte gap candidates; exactly **3** decode as one complete, unmodified SOPP `s_clause 3`. No program identifiers or native instruction words are recorded.
+
+| refusal before this rule | programs |
+|---|---:|
+| fall-through into undecodable words | 165 |
+| undecodable words (cannot re-anchor) | 8 |
+| `v_cmp` destination | 2 |
+| mask destination | 1 |
+| reachable instruction with normalized encoding | 1 |
+| **total refused** | **177** |
+
+### Narrow rule and semantic fixture
+
+At a reachable fall-through only, the callback may inspect a four-byte gap when the next listed instruction starts exactly four bytes later. `scalar_s_clause_gap_word()` accepts only one complete RDNA2 decode whose bytes exactly match the raw word, with no modifiers and the exact opcode/operand `s_clause 3`. This is already in the translator's `NOOPS` set and emits no SPIR-V instruction, so recovery adds no new runtime semantics. Other `s_clause` immediates (including 1), other opcodes, wider gaps, and branch targets remain refused. The one-word recovery budget is shared with the plain-SGPR move, exact-LGKM-wait, and EXEC-low move rules.
+
+The synthetic [fixture](../tests/semantic/fixtures/disasm/ps_s_clause_gap.s) and [CPU semantic test](../tests/semantic/test_s_clause_gap.py) recover a hidden `s_clause 3` between a listed `s_nop` and export path, then check the expected four lane outputs. `s_clause 1` remains a negative refusal control. Existing scalar-no-op semantic coverage also checks the clause's no-op contract. No GPU, game program, or game bytes are used.
+
+### Closure and byte-identity check
+
+The after-rule union scan again translated and validated **491 / 668** programs and refused the same 177 classes. The rule recovered the three measured clause words, but none closed a full program: net module closure is **0 programs**, with 0 refusal-status transitions. All **491** previously translating modules are byte-identical afterward (491 common; 0 changed, none missing, none added), verified by SHA-256 comparison. The scan outputs, per-program statuses, and hashes remain outside the repository; only aggregate counts are recorded here.
+
+This rule uses the current tree's decoder and existing no-op semantics. No peer implementation or fixture was used, so no `NOTICE.md` entry is needed.

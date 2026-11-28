@@ -1,6 +1,6 @@
 {
-  "updated": "2026-11-27",
-  "commit": "db10358b1",
+  "updated": "2026-11-28",
+  "commit": "a4d75c126",
   "intro": "Measured on one machine (Windows 11, Intel 13900K, RTX 4090) against the author's own retail console package. Every row below is an outcome the project produces, not a plan. The boot and frame-row numbers are the last full measurement (the 2026-11-24 snapshot preserved in docs/boot_frontier.md); later round-20 light arms and the current content frontier are stated where they change the picture.",
   "stages": [
     {
@@ -75,11 +75,11 @@
     },
     {
       "what": "Loader and rewrite CTests",
-      "value": "16/16 CPU loader-subset tests pass in the shared build on 2026-11-27 (loader, pe_image, pe_image_fuzz, pe_mapper, pe_resolver, pe_loader_shadow, loader_core_audit, loader_bind_audit, loader_tls_audit, loader_selfcheck, pe_loader, pe_loader_bounds, loader_tls, module_names, unimplemented_policy, startup_trace); the round-20 additions are listed in the next row (docs/pe_loader_rewrite.md)"
+      "value": "19 loader-family CPU targets pass on the 2026-11-28 round-21 gate (loader, pe_image, pe_image_fuzz, pe_mapper, pe_mapper_parity, pe_resolver, pe_loader_shadow, pe_loader_shadow_wiring, loader_core_audit, loader_bind_audit, loader_tls_audit, loader_selfcheck, loader_census, loader_tls_race strict, pe_loader, pe_loader_bounds, loader_tls, module_names, unimplemented_policy, startup_trace) (docs/pe_loader_rewrite.md)"
     },
     {
-      "what": "Round-20 contract CTests",
-      "value": "9/9 new CPU targets pass: pe_mapper_parity (285 checks), pe_loader_shadow_wiring (6), loader_tls_race (9 checks, 2 expected F4/F7 faults), loader_census (47), ds_publication (85), query_heap_readiness (7 synthetic cases), ui_input_script (5 cases), d3d12_residency_budget (60); the d3d12_title_va GPU CTest passed 1/1 (P-48) (docs/pe_loader_rewrite.md)"
+      "what": "Round-20/21 contract CTests",
+      "value": "pass: pe_mapper_parity (309 checks), pe_loader_shadow_wiring (6), loader_tls_race (9 checks, 0 faults after the F4/F7 fixes), loader_census (47, switch wired), ds_publication (85), query_heap_readiness (8 cases, wired at CreateQueryHeap), ui_input_script (5), d3d12_residency_budget (60), indirect_graphics_replay_readiness (16), opt_in_switches (3,010 checks over 294 switches); d3d12_title_va GPU passes 3/3 with PALMETTO_VK_VALIDATION=1 and d3d12_title_va_production passes 1/1 (P-45) (docs/pe_loader_rewrite.md, docs/vertex_buffer_va.md)"
     },
     {
       "what": "Graphics pipelines built",
@@ -107,20 +107,20 @@
     },
     {
       "what": "Full build",
-      "value": "237 of 237 targets green at the 2026-11-24 measurement; last recorded gates PALMETTO_OK / TESTS_BUILT (docs/testing.md)"
+      "value": "the 2026-11-24 237-target figure is historical; the 2026-11-28 round-21 gate has PALMETTO_OK / TESTS_BUILT green and 333 registered CTests, with the known queue-slot-14 Signal group (4 affected targets) as the only known failure in the affected set (docs/testing.md)"
     }
   ],
   "frontier": {
-    "stop": "no stop on the measured light arms - the title boots past 300 s, executes its draws and presents into its own window, and the presented frame reads back black; the loader is ruled out as the cause and the frontier is content/presentation (frame-frontier F-01/F-02 are blocked, F-03..F-07 are open)",
-    "summary": "The loader hypothesis is falsified for the black frame: 103/103 light arms across 37 builds map the title at its preferred base, bind all 587 imports with 0 unimplemented, install TLS and show no loader-failure string, and the P-55 PALMETTO_TRACE_TLS=1 + PALMETTO_TEB_CHECK=1 arm runs 90.3 s ALIVE with the per-thread GA view installed in every listed thread (docs/pe_loader_rewrite.md). The 2026-11-24 full measurement reached the frame loop, executed its draws and presented a black frame; that snapshot is historical context now (docs/boot_frontier.md, docs/frame_capture.md). Later arms show the presented resource is the frame's own writable target while the compose pass's source target is zero and the constant pass's colour input is a title-owned 96-byte block with a zero colour window and no writer in the stationary loop (docs/frame_first_light.md, docs/colour_path.md). The first-run/UI path produces no content yet: the page owners stay at 0 hits and the movie player reaches state 9 with buffers 0 (docs/decomp_first_ui.md sections 16-18). On the default unmitigated path a clean stage-3 arm faults at the title-side class-0xa upload; the opt-in PALMETTO_TITLE_CLASS0A_SIZE=1 workaround holds stage 3 but stays black, and it is not a console-faithful fix (docs/issues.md).",
+    "stop": "no stop on the measured light arms - the title boots past 300 s, executes its draws and presents into its own window; the presented frame reads back black. Round-21 light arms on the final loader-fix binary: a1 and a3 ALIVE at 88 s (a3 reaches stage 3 with the opt-in class-0xa mitigation exercised), a2 records one device loss then a post-loss title stop at game+0x86F97E (single arm, not attributable); the loader stays ruled out and the frontier is content/presentation (F-01/F-02 blocked, F-03..F-07 open) (docs/boot_smoke.md).",
+    "summary": "The loader hypothesis is falsified for the black frame: 103/103 light arms across 37 builds map the title at its preferred base, bind all 587 imports with 0 unimplemented, install TLS and show no loader-failure string, and the P-55 PALMETTO_TRACE_TLS=1 + PALMETTO_TEB_CHECK=1 arm runs 90.3 s ALIVE with the per-thread GA view installed in every listed thread (docs/pe_loader_rewrite.md). The 2026-11-24 full measurement reached the frame loop, executed its draws and presented a black frame; that snapshot is historical context now (docs/boot_frontier.md, docs/frame_capture.md). Later arms show the presented resource is the frame's own writable target while the compose pass's source target is zero and the constant pass's colour input is a title-owned 96-byte block with a zero colour window and no writer in the stationary loop (docs/frame_first_light.md, docs/colour_path.md). The first-run/UI path produces no content yet: the page owners stay at 0 hits and the movie player reaches state 9 with buffers 0 (docs/decomp_first_ui.md sections 16-18). On the default unmitigated path a clean stage-3 arm faults at the title-side class-0xa upload; the opt-in PALMETTO_TITLE_CLASS0A_SIZE=1 workaround holds stage 3 but stays black, and it is not a console-faithful fix (docs/issues.md). Round-21 arms on the final binary (SHA-256 5C30DE03...) show the loader surface unchanged, 0 shadow-parse divergences, 15 census lines, one device loss in the census+shadow arm followed by the known post-loss AV family, and a class-0xa-mitigated stage-3 arm that survives to the timeout; the title-side pixel frontier is unchanged (docs/boot_smoke.md).",
     "detail_doc": "docs/decomp_first_ui.md"
   },
   "next": [
-    "route the frame-frontier rows: name the session-3 out-record state (F-01) and then get the movie draw to issue (F-02), so content can run (docs/decomp_stage.md sections 14-15, docs/decomp_first_ui.md sections 14-17)",
-    "carry the content window's colour source once content runs; the constant pass's colour block is a title-owned 96-byte record with a zero colour window and no writer in the stationary loop (docs/frame_first_light.md, docs/colour_path.md)",
-    "land the PE-loader rewrite gates: old-loader-vs-mapper parity, the opt-in PALMETTO_PE_LOADER_V2 adapter and the TLS F4/F7 contract tests (docs/pe_loader_rewrite.md)",
-    "keep the class-0xa mitigation off by default and add the clean-host stage-3 pair and image-variant detection (F-05; docs/decomp_first_ui.md section 16)",
-    "find a title path that creates a 64 KiB-tiled resource, so the XG slot-10 tile list can be filled honestly (docs/boot_frontier.md)"
+    "land the d3d12_xs queue-proxy slice for the console queue slot-14 Signal refusal, the only known failing group left in the affected set (d3d12_draw, d3d12_set0_compute, d3d12_bindless_churn, d3d12_bindless_churn_validated; docs/testing.md)",
+    "carry the frame-frontier rows: name the session-3 out-record state (F-01) and then get the movie draw to issue (F-02), so content can run; F-03 has a four-site next-arm recipe with PALMETTO_STATE_TRACE=5 + PALMETTO_POKE_LOG (docs/decomp_first_ui.md section 11)",
+    "carry the content window colour source once content runs; the constant pass colour block is a title-owned 96-byte record with a zero colour window and no writer in the stationary loop (docs/frame_first_light.md, docs/colour_path.md)",
+    "close the remaining loader limits: no deterministic Loader-destruction-reentry arm, static-TLS-DLL thread events uncovered, the 16-slot mapped-TLS cap, and the still-unwired PALMETTO_PE_LOADER_V2 adapter (docs/pe_loader_rewrite.md)",
+    "measure real plane-role evidence before wiring the movie second-plane identity contract, and keep the class-0xa mitigation off by default with a clean-host stage-3 pair (docs/peer_port_movie.md, docs/decomp_first_ui.md section 16)"
   ],
   "links": [
     {

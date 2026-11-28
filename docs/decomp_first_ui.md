@@ -287,14 +287,15 @@ exact functions and gates to probe next, not a new measurement of them.
 
 ## 11. Measured: the AC chain in a boot (bounded probes, negative)
 
-**Status: measured, diagnostic only, negative.** Sections 1-10 are the static slice. This section reports what two
+**Status: measured diagnostic negative for the sampled boots; static callback path found.** Sections 1-10 are the static slice. This section reports what two
 130 s probe boots and one clean 300 s boot showed about the chain in section 2. The media module is armed - its kernel
 objects and both present semaphores exist early, the event handler is registered once, the per-frame media tick runs
 and the frame body is ticked 4556 times in 130 s - but the handler `0x247B500`, the AC opener `0x2484A90` and the AC
-setter `0x2218910` never execute, and both present-pass keys (`0x71B90AD`, `0x71B90AC`) read 0 in every sample of all
-three boots. The only in-image producer of the type-`0x24` set event, `0x2218180`, has no reference in the image and
-never executes (11.2). So **no shim answer is the missing side**: the AC handshake cannot be opened by title code in
-this build, and this slice changes no shim behaviour beyond the two diagnostic fields in 11.1.
+setter `0x2218910` record 0 hits in boot A, and both present-pass keys (`0x71B90AD`, `0x71B90AC`) read 0 in every sample of all
+three boots. Boot B's producer-side probe also records 0 hits at the callback selector `0x2217C70` and its target
+`0x2218180`. Static cross-checking finds a conditional registered app-state callback path to that producer (11.2), so the
+runtime negative is bounded to these arms: it does not prove the producer unreachable or that a shim answer is missing.
+This documentation correction changes no runtime or shim behavior; no title event or ring item is synthesized.
 
 ### 11.1 The probe and the two 130 s boots
 
@@ -315,7 +316,8 @@ the low one.
 | `0x2218910` | the only instruction that sets `0x71B90AC = 1` | **0** |
 | `0x22185A0` | the boot-media/UI present body | **4556** |
 
-The 4556 body entries name the pumps that drive the tick, and the body exits at its first two compares every time:
+The 4556 body entries name the pumps that drive the tick, not successful passes past the guards. The disassembly exits
+at the first compare if `0x71B90AD != 1`, and at the second if `0x71B90AC != 1`:
 
 | body caller (return address after the tick call) | hits | what it is |
 |---|---|---|
@@ -337,13 +339,15 @@ module is open and ticking while the one producer of the set event does not run:
 | `0x2218180` | the only in-image producer of the type-`0x24` set event (11.2) | **0** |
 | `0x2217C70` | the selector thunk that tail-jumps to `0x2218180` | **0** |
 
-Boot B's chain words are the same negative (gate 2 at 20 s, the two keys 0, semaphores 0x714/0x71c, machine 2/2,
-session 0), with 0 exceptions and 249,337 D3D12 calls recorded.
+Boot B's sampled chain words are also negative (gate 2 at 20 s, both keys read 0 in every sample, semaphores
+0x714/0x71c, machine 2/2, session 0), with 0 exceptions and 249,337 D3D12 calls recorded.
 
-### 11.2 The static cross-check that names the missing side
+### 11.2 Static cross-check: registered callback route and both gates
 
-The probe is the measurement; the image's own reference graph explains why it reads 0, and it corrects one claim in
-sections 2-3:
+The runtime probes are the measured negative; the code graph is a conditional route, not proof that the callback fired.
+It corrects the earlier "unreferenced producer" conclusion: the decisive edge is a code pointer passed to an imported
+notification API, not an in-image direct `call` to `0x2218180`. The separate correction about the flag's writer and
+clear remains part of the model, as recorded in the first bullet below.
 
 - **The flag has one writer and one reader.** `0x75DF0D8` is stored only at `0x247B527` (inside `0x247B500`) and
   loaded only at `0x2484823` (inside the media tick `0x24846D0`). A RIP-relative scan of the whole image finds no
@@ -359,14 +363,33 @@ sections 2-3:
   queues the state-2 item `0x200000000` the poll turns into `0x71B90AD = 1`), `0x25` (only from the body at
   `0x2218673`), `0x26` (`0x2217CC0`), `0x27` (`0x2217D50`) and `0x10` (`0x59DCBD0`). So the two present-pass keys have
   exactly one common producer, `0x2218180`.
-- **That producer is unreferenced code in this image.** `0x2218180` has no reference anywhere in the image except
-  its own selector thunk `0x2217C70`; the two selector thunks `0x2217C70`/`0x2217C90` themselves have no call, jump,
-  conditional jump or address-taken pointer (8-byte VA or 32-bit RVA) anywhere, and `0x2217CC0`/`0x2217D50` are each
-  referenced only by their selector thunk. The constant `0x2400000000` that builds the type-`0x24` item appears twice
-  in `.text`: at `0x22181C3` inside `0x2218180`, and at `0x526D3EA` in the GDK task-queue port-message builder
-  `0x526D3E0`, which posts into its own queue (`0x5220050`) and never dispatches into the boot-media list. A linear
-  scan also finds one other `[reg+0xC] = 0x24` builder at `0x3C2DC60`; it builds a different 16-byte event object for
-  its own consumer (`0x3C0C970`) and never reaches either dispatcher of the boot-media list.
+- **The producer is reached through a registered app-state callback.** `0x2218180` has no direct `E8` caller; its
+  code edge is the `jmp 0x2218180` at `0x2217C7C`. Selector `0x2217C70` requires non-null `RDX`; if `CL != 0`, it
+  copies `RDX` to `RCX` and jumps to that producer, while `CL == 0` takes the alternate path to `0x22181F0`.
+  Registration function `0x1D10A30` forms the callback address with `lea` at `0x1D10A34` (target `0x2217C70`) and
+  calls `RegisterAppStateChangeNotification` via IAT slot `0x6793B38` at `0x1D10A49`, passing context `0x71B8C78`
+  and output handle `0x71B9060`. It also passes selector `0x2217C90` (LEA at `0x1D10A53`) to
+  `RegisterAppConstrainedChangeNotification` via IAT slot `0x6793B50` at `0x1D10A68` (output `0x71B9068`); that
+  constrained-change selector does not branch to `0x2218180`.
+- **The in-image registration path is concrete.** `0x56A1E55` calls `0x5A91BD0`; on its non-negative status path,
+  `0x5A91BD0` calls thunk `0x5A91C30` at `0x5A91BE1`, `0x5A91C30` jumps to `0x5A91C40`, and `0x5A91C40`
+  tail-jumps to `0x1D10A30` at `0x5A91CB4`. This establishes a static path to the registration calls. These arms did
+  not record the import return values or prove that the OS delivered a notification; a callback address reference is not
+  callback execution.
+- **The two key effects follow from that one conditional producer.** `0x2218180` enqueues the high-dword state-2 item
+  (`0x200000000`) through `0x2218080` at `0x22181B7`; the request poll `0x2218410` sets `0x71B90AD = 1` at
+  `0x22184AB`. It also builds the high-dword type-`0x24` item (`0x2400000000`) and directly dispatches it through
+  `0x2217B80` at `0x22181D2`; the registered handler `0x247B500` sets `0x75DF0D8`, then media tick `0x24846D0`
+  reads its bit at `0x2484823` and calls opener `0x2484A90` -> `0x2218900`/setter `0x2218910`, which writes
+  `0x71B90AC = 1`. Frame body `0x22185A0` checks `0x71B90AD` first at `0x22185A5`, then `0x71B90AC` at
+  `0x22185B2`; either non-1 value branches to the common exit at `0x221869A`.
+- **Other type-`0x24` builders are not this dispatch.** `0x526D3E0` writes the same qword type code at `0x526D3EA`
+  but posts a port message to its own queue (`0x5220050`), not the boot-media subscriber list. A full `.text` scalar-store
+  scan found two separate `mov [reg+0xC], 0x24` sites: `0x33DE67A` and `0x3C2DC92`. The first initializes a 0x68-byte
+  notification record in `0x33DE660`; callback adapter `0x33DE650` is passed to the object constructor `0x3AA8F0` at
+  `0x5D55D4F`, not to the boot-media dispatcher. The second belongs to builder `0x3C2DC60` and its different consumer
+  `0x3C0C970`. These known alternate record/queue paths do not call `0x2217B80` or `0x2218080`; the boot-media
+  dispatch-list producer remains unique in the identified paths, but it is not unreferenced.
 
 ### 11.3 The clean 300 s boot
 
@@ -388,30 +411,39 @@ One boot with no int3 probe: standard environment, `PALMETTO_STATE_TRACE=10`, pr
 | platform / loading-active | platform gate `0xA210D81` 0x1000001 at 20 s then 0x101; loading-active 0x7453EE0 = 1 from 30 s |
 
 Before/after in one sentence: at 0 s every chain word is zero; from 20 s to the kill the gate, the state machine and
-the semaphores are set exactly as in section 2's static model, and the two keys that would let the body run stay 0,
-which is why the 16 captures are black.
+the semaphores are set exactly as in section 2's static model, and every periodic sample reads both keys as 0, consistent
+with the black captures. The sampler is not a watch on every byte write and does not exclude a brief key pulse between samples.
 
-### 11.4 Verdict, limits and the next falsifier
+### 11.4 Verdict, limits and concrete next-arm recipe
 
-The verdict is a negative, and it is not a shim gap. The media module is fully armed in the measured boots - the
-kernel objects and both semaphores exist by 10-20 s, the event handler is registered once, the per-frame media tick
-runs 5214 times in 130 s and the frame body is ticked 4556 times - but the request/set side of the handshake never
-executes, and the image's own reference graph shows why: the only producer of the type-`0x24` event (and of the state-2
-item that sets the other key) is unreferenced code in this build. A runtime that synthesized that event or those ring
-items would be inventing title state, not answering a runtime call, so this slice implements no producer fix. The
-picture-roadmap consequence is that the boot-media/UI present pass is not the missing first visible producer on this
-build; the stage-2 -> 3 gate (roadmap row 1) and the first-run/UI and movie producers (rows 4/5) remain the candidates.
+**Measured verdict:** negative for the sampled boots, not a proof of static unreachability. The media module is armed -
+its kernel objects and both semaphores exist by 10-20 s; the event handler is registered once in boot B, whose media
+tick runs 5214 times, while boot A ticks the frame body 4556 times in 130 s. The probed handler/opener/setter in boot A
+and callback selector/producer in boot B have 0 hits; periodic state-trace samples read both keys as 0 in the two probe boots plus the clean 300 s arm.
+The code does contain a route from the successful registration path to the state-2 and type-`0x24` producer, guarded by
+an OS callback and its `CL` value (11.2). These runs did not record registration return values or a callback delivery, so
+they do not distinguish registration failure, no notification, or a notification taking the alternate `CL == 0` path.
+No shim gap is established. Synthesizing a callback, event, or ring item would still invent title state, so no producer fix
+is made. The boot-media/UI pass is not yet a measured first-visible producer; the stage-2 -> 3 gate (roadmap row 1) and
+the first-run/UI and movie producers (rows 4/5) remain candidates.
 
-- **Next falsifier:** one boot in which `0x247B500` is entered, `0x71B90AD` reads 1, or `0x2218180`/`0x2217C70`
-  executes. Any of them means the producer is reachable after all (through a pointer form these scans do not see) and
-  the chain trace restarts from that site with the same four probes.
-- **Static limit.** The "unreferenced" result comes from RIP-relative, direct `E8`/`E9`/`jcc` and 8-byte-VA/32-bit-RVA
-  data scans of the image as it sits in the package. A pointer computed at run time from a table outside those forms
-  would not be seen; the probe boot is what makes the negative a measurement (the function did not execute).
-- **Probe limit.** Function entries only. `0x2218180` is a `.pdata` function start and the selector thunks tail-jump to
-  it, so the entry is the site a caller would hit; an interior entry is not plausible for the measured call shapes.
+- **Next arm (one light boot, no binary change):** under the boot lock, use the existing standard environment with
+  `PALMETTO_STATE_TRACE=5` and `PALMETTO_POKE_LOG=5A91BD0,1D10A30,2217C70,2218180`. After the title reaches its
+  normal window, record one ordinary focus loss/restore (do not inject an event). Keep the trace outside the repo. The
+  expected static sequence is `0x5A91BD0` success path -> `0x1D10A30` registration -> callback `0x2217C70`; at that
+  callback record `CL`/`RDX`. If `CL != 0`, the disassembly predicts the tail jump to `0x2218180`; a callback hit
+  followed by that producer-entry hit is the reachability falsifier. If registration entry is seen but the callback is not
+  delivered during that real transition, keep the result bounded; it does not refute the static route. `STATE_TRACE` is
+  periodic and may miss brief key pulses. If the producer hits but its downstream effects are unclear, a follow-up should
+  probe `0x247B500`, `0x24846D0`, `0x2484A90`, and `0x2218910`, with a write watch on the two key bytes.
+- **Static limit.** The helper sweeps this mapped image's `.text` for direct-branch and RIP-displacement candidates, then
+  decodes the relevant instruction/function ranges; `ptr_scan.py` searches literal VA/RVA forms. This confirms the callback-
+  address path in this image, not a successful API return, OS notification, or callback execution. Pointer construction outside
+  those forms and cross-image callback wiring remain outside this bounded static contract.
+- **Probe limit.** `PALMETTO_POKE_LOG` observes the named entry sites only. Boot B covered both `0x2217C70` and
+  `0x2218180`, but not the registration return codes; its zero hits mean those entries were not reached in that window.
 - **Host-side noise.** Boot A recorded 8 exceptions, all host-side C++ exceptions (`0xe06d7363`) raised and caught
-  inside the host's UI Automation DLL during the boot; they are host-only and did not stop the boot. Boot B and the
+  inside the host's UI Automation DLL during the boot; they were host-only and did not stop the boot. Boot B and the
   300 s boot recorded none.
 
 ### 11.5 Files and gates
@@ -424,8 +456,14 @@ build; the stage-2 -> 3 gate (roadmap row 1) and the first-run/UI and movie prod
   `boot-mediaac-300` (stderr, trace, summary) and `D:\leonida-work\capture-mediaac-300` (captures + `index.txt`);
   driver scripts `D:\leonida-work\boot_mediaac_probe.ps1`, `boot_mediaac_producer.ps1`, `boot_mediaac_final.ps1`;
   static scan helpers under `D:\leonida-work\mediaac`.
+- **Static method (read-only)**: `scan.py` `fn`/`dis`/`callers`/`refs` cross-checks the producer, selector, registration
+  routine and upstream branch; `jmp_scan.py` checks direct branch sites; `ptr_scan.py imm64 2400000000` finds the two
+  `.text` qword builders (`0x22181C3`, `0x526D3EA`). `type_scan.py` decodes `.text` for scalar `[reg+0xC] = 0x24`
+  stores and found `0x33DE67A`/`0x3C2DC92`; `iat.py` resolves slots `0x6793B38`/`0x6793B50`, and `pdata_list.py`
+  checks function ranges. The decisive edge is the decoded RIP-relative callback LEA plus imported API call, not an
+  absolute data-pointer hit. No instruction bytes or executable data are copied here.
 - **No game data**: RVAs, counts, handles and outcomes only; no string, asset, package path or hash is quoted here.
-- **No git write**: the lead commits the two uncommitted files (`port/src/main.cpp`, `docs/decomp_first_ui.md`).
+- **Round-21 delta**: this section's static correction only; no runtime code, test target or CMake stanza changed.
 
 ## 12. Measured: the first-run service answers, their defaults, and the first save-provider start
 

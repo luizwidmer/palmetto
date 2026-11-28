@@ -32,14 +32,14 @@ that landed our implementation, and whether the port was measured on a boot or i
 | BVH route plan wired into RT slots | `bvh_route.md` | `a19ce9aab` | measured GPU: route arm on update/postbuild/copy, 0/1000 ray diffs; helper rehydration unwired |
 | Kind-7 upscaler consumer plan | `fsr_route.md` section 9 | `0148cbfeb` | readiness: shapes measured, no FFX dispatch/consumer observation yet |
 | Viewport/scissor array capture and named refusals | `d3d12_vulkan.md` | `dfe2337ef` | historical readiness: bounded capture and count>1 refusal before dynamic-state replay; superseded by row 39 |
-| Title-VA windows on the device | `vertex_buffer_va.md` section 24 | `75e9991a2` | historical unit/readiness baseline; superseded by row 41's synthetic GPU pull test and P-45 production alias admission; earlier qualitative `window_below_heap_base` report had no numeric trace; current pixel acceptance is blocked by the slot-14 Signal proxy refusal |
+| Title-VA windows on the device | `vertex_buffer_va.md` section 24 | `75e9991a2` | historical unit/readiness baseline; superseded by row 41's synthetic GPU pull test and P-45 production alias admission; earlier qualitative `window_below_heap_base` report had no numeric trace; the dedicated synthetic `d3d12_title_va` CTest (P-48) is registered and passes 1/1 with pulled pixel `35 ff c1 ff`, while production pixel acceptance is still blocked by the slot-14 Signal proxy refusal |
 | Bindless degradation override and telemetry | `bindless_degradation.md` sections 9 and 11 | `33f20f0c2` | default unchanged and legacy mode pinned; current sizing baseline 32 images / 279.1 MiB, with real exhaustion unmeasured; Task-228 P-44 did not run after the two-loss stop; Task-236 P-44 ran 62.3 s then logged a Vulkan loss/title AV; `degraded_flushes`/`spares_reused`/`keys_refused` snapshot absent (unavailable, not zero) |
 | Native write-fault watch and shadow invalidation | `title_memory_model.md` sections 12-13 | `805b42ed4` | 545 xmem checks and synthetic fault stress; no title consumer; P-43 was the second device-loss event in the series, counters unavailable (not zero) |
 | Synthetic audio decoder contract | `audio_decode.md` | `cd47ec306` | 18 Rust FFI contract tests; codec-header validation unproven |
 | 120 Hz and kind-7 arms | `window.md` / `fsr_route.md` | `5746b8123` | measured negatives: no enumeration trace; no post-map FSPX consumer |
 | Multi-count viewport/scissor replay | `d3d12_vulkan.md` C-06 | `6351f6846` | P-32/P-41 direct counted draw GPU PASS: multiViewport=1, maxViewports=16, readback (8,8)=0,255,0,255, 0 validation errors; 10 readiness cases pass. Multi-count `ExecuteIndirect` plus array state is refused as `indirect_multi_count_viewport_state_not_captured` (no replay graphics snapshot; five measured title sites cap `MaxCommandCount` at 1). P-47's dedicated `d3d12_viewport_array_test` is CMake-registered and the `d3d12_viewport_array` CTest passes 1/1 (1.6 s, validation layer and the strict-viewport switch set by the test properties); the earlier source-only status is retired |
 | Strict direct-heap admission | `root_packing.md` section 10 | `6351f6846` | fail-closed opt-in; 96 CPU assertions and `root_signature` / `root_signature_oracle` pass; final `d3d12_compute` CTest passes 1/1 after shim-safe queue/fence fix, strict and legacy cases 64/64; missing-base controls refuse `E_INVALIDARG`; no title direct-index commands (synthetic proof only) |
-| Title-VA window test seam | `vertex_buffer_va.md` section 24 | `6351f6846` | synthetic GPU readbacks `21 43 65 87` then `9a bc de f0`; corrected P-45 256 MiB run placed candidate 0x90000 above arena end, registered production alias, pulled 5 times / 5.6 MiB and submitted `ExecuteCommandLists`. The test then failed at Xbox Signal slot 14 before CPU pixel/readback acceptance; earlier `window_below_heap_base` was a separate qualitative case. P-48 Title-VA CTest deferred |
+| Title-VA window test seam | `vertex_buffer_va.md` section 24 | `6351f6846` | synthetic GPU readbacks `21 43 65 87` then `9a bc de f0`; corrected P-45 256 MiB run placed candidate 0x90000 above arena end, registered production alias, pulled 5 times / 5.6 MiB and submitted `ExecuteCommandLists`. The test then failed at Xbox Signal slot 14 before CPU pixel/readback acceptance; earlier `window_below_heap_base` was a separate qualitative case. The dedicated `d3d12_title_va` CTest (P-48) is registered and passes 1/1 with pulled pixel `35 ff c1 ff`; its validation-on error counter is an open item tracked this round |
 | Native-library MS publication | `mesh_stage.md` sections 8-10 | `3eebb1bae` | synthetic native-key publication and all-refused prune pass; 0 selected/resolver MS keys against 7,498 library programs, no real module or boot |
 | Audio submit pointer roles | `audio_decode.md` sections 11-12 | `9d00b09d7` | static disassembly resolves RCX=context, RDX=0x20 descriptor, R8=command-id out; 136 synthetic checks pass; Task-236 P-34 ran 90.3 s ALIVE/no loss but had no submit hit (350 contexts, five 5,600-dword scans all zero; decoder DLL missing) |
 | Translator decode-gap rules | `translator_fixes.md` sections 14-15 | `13f423532` (smov) | narrow `s_mov_b32` and exact `s_waitcnt lgkmcnt(0)` recover 12 + 30 words; 0 full-program closures, 491 prior modules byte-identical |
@@ -531,3 +531,32 @@ measured calls do not cover. The host endpoint already works, so the output can 
 - The first audit read peer source only where a mechanism had to be understood (module headers and docs). This refresh
   inspected only peer READMEs and documentation/status pages; no source code or comment text was copied. Each slice that
   lands adds its attribution to `NOTICE.md` and its own page, with the peer project, licence and commit named here.
+
+# Round-21 update (2026-11-28)
+
+This refresh ran no boot and changed no code. It records the round-21 programme items whose own pages define the
+evidence. **No peer mechanism slice is added by this round and the five peer snapshot pins below are unchanged**; the
+parity-matrix rows keep their recorded pins.
+
+- **The loader is still not the black-frame cause, and its audit surface is now closed.** Round 21 fixes the two
+  remaining TLS-audit findings (F4 duplicate-install window, F7 thread-event callback self-deadlock by releasing the
+  TLS lock before mapped callbacks and draining them at destruction), wires the loader census behind
+  `PALMETTO_LOADER_CENSUS=1` and turns `loader_tls_race` into a strict gate: the strict run passes 9 checks / 0
+  reproduced faults, the emitted census lines are asserted by `loader_core_audit` (52 checks with the switch on) and
+  the loader regressions pass 6/6. Default mapping, binding and TLS behaviour is unchanged when the switch is off. On
+  the round-21 binary a light boot arm emitted the 15 real-title census lines (five images) with 0 shadow divergences,
+  the identical loader surface and no census lines in the baseline arm ([boot_smoke.md](boot_smoke.md)). The P-55
+  verdict stands: the frontier is content/presentation, not loader state ([pe_loader_rewrite.md](pe_loader_rewrite.md)).
+- **The title-VA validation-on item is diagnosed and fixed; it was not a title-VA defect.** The GPU CTest's
+  captured validation messages are now replayed on failure; pre-fix, validation-on named
+  `VkBufferCreateInfo-size-00912` and `VkMemoryAllocateInfo-allocationSize-07897`/`-07899` (0 known NVIDIA sRGB
+  exceptions) from a zero-sampled pre-readback diagnostic capture in the runtime, not from the window/pull/replay
+  path; a runtime empty-capture guard fixes them and two test-side layout/sync errors were removed by restoring the
+  target's `COLOR_ATTACHMENT` layout before the automatic readback. `d3d12_title_va` now passes 3/3 with validation on
+  and 1/1 with it off, and `d3d12_viewport_array` stays 1/1 validation-on ([vertex_buffer_va.md](vertex_buffer_va.md),
+  §24).
+- **The opt-in surface is accounted for.** The round-21 audit enumerates all 294 `PALMETTO_*` switches from the source,
+  classifies their parser idiom, measures include reachability (292 reachable, 2 test-only pure slices) and registers a
+  test that re-derives the set; no default behaviour changed ([opt_in_switches.md](opt_in_switches.md)).
+- **The ranked slices are unchanged.** The round-21 items are loader/validation hygiene and switch accounting, not new
+  peer mechanisms; the eight-slice order in the amendment above still holds.

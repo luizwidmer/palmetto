@@ -1,6 +1,6 @@
 # PE-loader rewrite
 
-The runtime's existing `rt::Loader` maps console images in `port/src/pe_loader.cpp`, a 110 KiB translation unit that parses PE headers, maps sections, relocates, binds imports, installs static TLS, registers unwind data and drives module lifecycle. This page tracks a clean-room split of that work into a parser, mapper and resolver. The old loader remains the runtime path and parity oracle. Round 20 adds two strict opt-ins that do not change a mapped image by default: a shadow comparison of the parser against the old loader's validated header facts (`PALMETTO_PE_LOADER_SHADOW_PARSE`, `PALMETTO_PE_LOADER_SHADOW_STRICT`) and a named refusal for the TLS F1 fallback. `PALMETTO_PE_LOADER_V2` still selects no new path, and no parser, mapper or resolver component replaces `Loader`.
+The runtime's existing `rt::Loader` maps console images in `port/src/pe_loader.cpp`, a 110 KiB translation unit that parses PE headers, maps sections, relocates, binds imports, installs static TLS, registers unwind data and drives module lifecycle. This page tracks a clean-room split of that work into a parser, mapper and resolver. The old loader remains the runtime path and parity oracle. Round 20 adds two strict opt-ins that do not change a mapped image by default: a shadow comparison of the parser against the old loader's validated header facts (`PALMETTO_PE_LOADER_SHADOW_PARSE`, `PALMETTO_PE_LOADER_SHADOW_STRICT`) and a named refusal for the TLS F1 fallback. `PALMETTO_PE_LOADER_V2` still selects no new path, and no parser, mapper or resolver component replaces `Loader`. Round 21 fixes the two open TLS-audit findings (F4 duplicate install, F7 thread-event callback self-deadlock), wires the loader census behind the exact `PALMETTO_LOADER_CENSUS=1` switch with assertions on the emitted lines, and makes `loader_tls_race` a strict gate; it still does not route a title image through the new components.
 
 **Rules.** Each slice is independently written, uses synthetic fixtures rather than game bytes, and keeps the old loader as the reference until field-by-field parity is demonstrated. Peer ports are behavior evidence only; they are not an implementation source. The standard docs/build gates remain required before integration.
 
@@ -9,10 +9,10 @@ The runtime's existing `rt::Loader` maps console images in `port/src/pe_loader.c
 | layer | responsibility | state |
 |---|---|---|
 | Phase 0 — `port/src/pe_image.{h,cpp}` | Decode a PE32+ file span into validated headers, sections, directories, exports, imports, relocation records, TLS metadata and exception-directory metadata. No mapping, code execution, IAT writes or host calls. | **Landed and CTest-registered.** CTest `pe_image` (29 refusal shapes, 6 positive edge shapes) and CTest `pe_image_fuzz` (48,659 deterministic mutation cases, 3,220 named PE errors) both pass from `port/CMakeLists.txt`. |
-| Phase 1 — `pe_mapper.{h,cpp}` | Allocate at the preferred base (or permit a fallback when relocations exist), copy headers/section bytes, zero the rest, apply relocations and protect headers/sections through injectable interfaces. | **Mapper landed, CTest-registered and parity-measured.** CTest `pe_mapper` passes its six synthetic scenarios, and the round-20 `pe_mapper_parity` falsifier passes **285 checks, 0 failures** on byte-identical synthetic DLL/EXE fixtures (board task 253: mapped base/size, header/section bytes, relocations, protection flags and named refusals compared with the old loader). |
+| Phase 1 — `pe_mapper.{h,cpp}` | Allocate at the preferred base (or permit a fallback when relocations exist), copy headers/section bytes, zero the rest, apply relocations and protect headers/sections through injectable interfaces. | **Mapper landed, CTest-registered and parity-measured.** CTest `pe_mapper` passes its six synthetic scenarios, and the round-20 `pe_mapper_parity` falsifier passes **309 checks, 0 failures** on byte-identical synthetic DLL/EXE fixtures (board task 253: mapped base/size, header/section bytes, relocations, protection flags and named refusals compared with the old loader). |
 | Phase 2 — `pe_resolver.{h,cpp}` | Pure import/export binding planner behind `SymbolSource`; plan IAT writes and named refusals without loading modules or writing memory. | **Pure planner landed and CTest-registered; the Loader adapter remains open.** CTest `pe_resolver` passes 37 checks from `port/CMakeLists.txt`; no runtime module-load path uses the planner. |
-| Loader adapter | Feed parsed/mapped descriptions into the existing module registry, shim/host/bundled-module binding, TLS, unwind, thread-event and lifecycle paths. | Not started as a switch. The round-20 shadow pass and TLS F1 refusal are the only `Loader` changes; both keep default mapping, binding, TLS and lifecycle behavior byte-identical. |
-| Switch | Route through the new components only after mapping, binding, TLS/lifecycle and malformed-input parity gates pass. Keep the old path available for a measured transition. | Not wired; old path remains default. `PALMETTO_PE_LOADER_V2` selects no new path; the shadow switches only compare or refuse a mismatch. |
+| Loader adapter | Feed parsed/mapped descriptions into the existing module registry, shim/host/bundled-module binding, TLS, unwind, thread-event and lifecycle paths. | Not started as a switch. The round-20 shadow pass and TLS F1 refusal, and the round-21 F4/F7 TLS fixes and census wiring, are the only `Loader` changes; each keeps default mapping, binding, TLS and lifecycle behavior byte-identical when its switch is off. |
+| Switch | Route through the new components only after mapping, binding, TLS/lifecycle and malformed-input parity gates pass. Keep the old path available for a measured transition. | Not wired; old path remains default. `PALMETTO_PE_LOADER_V2` selects no new path; the shadow switches only compare or refuse a mismatch, and the census only prints diagnostic lines behind its exact switch. |
 
 The parser, mapper and resolver are separate components, not a completed replacement loader. The mapper currently returns a non-owning `MappedImage`; the caller owns and must release its allocation even when mapping fails. The resolver only returns a plan; it does not apply IAT writes, load a module, execute a forwarder target or invoke Windows APIs.
 
@@ -48,7 +48,7 @@ The standalone mapper uses an injected `Allocator` and `Protector` (with `Virtua
 
 Protection follows section R/X/W bits: headers are read-only; X+R is `PAGE_EXECUTE_READ`; X-only is `PAGE_EXECUTE`; R-only is `PAGE_READONLY`; R+W is `PAGE_READWRITE`; no bits is `PAGE_NOACCESS`; X+W remains `PAGE_EXECUTE_READWRITE`. This is **not** strict W^X. The inherited loader now derives the same protections: the audit fixed its former `MEM_READ`-ignoring derivation, so a non-readable executable section is `PAGE_EXECUTE` (measured as `0x10` by `VirtualQuery` on a Windows image view) and an inaccessible section is `PAGE_NOACCESS`. The earlier X-only mapper-vs-legacy difference is therefore retired. The mapped image is private `VirtualAlloc` memory, so a writable section is `PAGE_READWRITE` where Windows would use copy-on-write `PAGE_WRITECOPY`; both are guest-writable, which is all the section asks for. CTest `pe_mapper_parity` now measures the agreement, protection flags included.
 
-`pe_mapper_test` covers injected copy/zero-fill, `DIR64`/`HIGHLOW` relocation, protection planning, HIGHLOW overflow, unsupported relocation type, relocation into headers and allocation failure. CTest `pe_mapper` is registered in `port/CMakeLists.txt` and passed 1/1 in the shared `port/build` on 2026-11-27. The phase-1 falsifier is now the registered CTest `pe_mapper_parity` (**285 checks, 0 failures**): field-by-field comparison of the mapper and old `Loader` on the same synthetic DLL/EXE fixtures — chosen base/relocated state, header and section bytes, virtual zero-fill/gaps, relocation values/refusals, protected ranges/flags — plus the malformed corpus's named refusals. The old loader's protection derivation was fixed to the measured rule, so both paths agree; no unexplained byte, relocation, protection or acceptance mismatch remains in the synthetic matrix. A mismatch is still the rejection condition. Limits: the harness is synthetic-only (no title image and no executed image code), and no runtime path routes a title image through the mapper yet.
+`pe_mapper_test` covers injected copy/zero-fill, `DIR64`/`HIGHLOW` relocation, protection planning, HIGHLOW overflow, unsupported relocation type, relocation into headers and allocation failure. CTest `pe_mapper` is registered in `port/CMakeLists.txt` and passed 1/1 in the shared `port/build` on 2026-11-27. The phase-1 falsifier is now the registered CTest `pe_mapper_parity` (**309 checks, 0 failures**): field-by-field comparison of the mapper and old `Loader` on the same synthetic DLL/EXE fixtures — chosen base/relocated state, header and section bytes, virtual zero-fill/gaps, relocation values/refusals, protected ranges/flags — plus the malformed corpus's named refusals. The old loader's protection derivation was fixed to the measured rule, so both paths agree; no unexplained byte, relocation, protection or acceptance mismatch remains in the synthetic matrix. A mismatch is still the rejection condition. Limits: the harness is synthetic-only (no title image and no executed image code), and no runtime path routes a title image through the mapper yet.
 
 ## Phase 2: resolver plan and falsifier
 
@@ -103,7 +103,7 @@ mapper now derives the measured copy rule from the section headers instead of us
   copy rule, DIR64/HIGHLOW/ABSOLUTE relocations and named refusals; `pe_mapper` CTest passes (copy/zero tail, page-tail
   bytes, relocations, protections, HIGHLOW overflow, unsupported type, header target, allocation failure).
 - The `pe_mapper_parity` source (CTest `pe_mapper_parity`) compares the old loader's mapping with the new mapper
-  on byte-identical synthetic DLL/EXE fixtures, including protections and the malformed-shape named refusals: 285 checks,
+  on byte-identical synthetic DLL/EXE fixtures, including protections and the malformed-shape named refusals: 309 checks,
   0 failures on 2026-11-27.
 - `port/src/pe_resolver.{h,cpp}` is the pure `SymbolSource`/forwarder/ordinal/alias planner for imports and exports
   (`pe_resolver`, 37 checks); it performs no Windows calls or IAT writes.
@@ -117,7 +117,8 @@ mapper now derives the measured copy rule from the section headers instead of us
   truncate/mutation cases with no crash and 3,220 named refusals.
 
 The remaining falsifiers are: the opt-in loader adapter behind `PALMETTO_PE_LOADER_V2`, TLS audit F4/F7 (duplicate-install
-window and thread-event-callback deadlock, now contract-tested with an explicit expected-fault gate in board task 264), and
+window and thread-event-callback deadlock, contract-tested in board task 264 and fixed in round 21, where the gate is now
+strict), and
 the forced-rebase `--dry-run` for the 598,282 title DIR64 relocations (the title is relocatable but every measured Windows
 boot maps it at its preferred base). The mapper mapping/protection parity falsifier has landed and passes (board task 253),
 and the shadow wiring and the TLS F1 fallback are wired: round 20 makes F1 a named refusal and adds the parser comparison,
@@ -139,12 +140,12 @@ both described below.
   Default mapping/import/TLS behaviour is byte-identical, and the registered CTest `pe_loader_shadow_wiring` covers the
   semantics end to end: unset switches, strict-only as a no-op, a truthy non-`1` value, parse-only diagnostics, a strict
   mismatch refused by name and a strict match accepted (6 checks, 0 failures, measured 2026-11-27).
-- **Loader census instrumentation is registered but not wired.** Board task 263 adds the pure `loader_census.h`
-  formatter and `loader_census_test` (47 checks, CTest `loader_census` registered in `port/CMakeLists.txt`; exact switch
-  `PALMETTO_LOADER_CENSUS`, only value `1` enables it). It emits bounded named mapped/bound/TLS/protection lines and does
-  not touch loader behaviour; the `pe_loader.cpp` insertion hunks are held for the file's owner and the lead, so the
-  switch is not wired into the loader in this tree yet, and the documented mapper/bind/TLS lines are a formatter contract
-  rather than observed loader output.
+- **Loader census instrumentation is registered and now wired.** Board task 263 added the pure `loader_census.h`
+  formatter and `loader_census_test` (47 checks, CTest `loader_census`; exact switch `PALMETTO_LOADER_CENSUS`, only value
+  `1` enables it). Round 21 applies the `pe_loader.cpp` insertion hunks: the loader emits the bounded mapped/bound/TLS
+  lines per module, the `tls-counters` line on destruction and `protect-failed`/`protect-omitted` lines for failed
+  `VirtualProtect` calls, and `loader_core_audit` now captures the loader's real stderr and asserts four emitted line
+  shapes. With the switch off every emission is guarded, so no line is formatted (round-21 section below).
 - **The V2 switch still selects nothing.** `PALMETTO_PE_LOADER_V2` remains unwired; the adapter and the switch are the next
   integration slice, gated on the F4/F7 contract tests.
 
@@ -152,10 +153,10 @@ both described below.
 
 | target | scope | measured result |
 |---|---|---|
-| `pe_mapper_parity` | phase-1 falsifier (old loader vs mapper) | passed, 285 checks / 0 failures |
+| `pe_mapper_parity` | phase-1 falsifier (old loader vs mapper) | passed, 309 checks / 0 failures |
 | `pe_loader_shadow_wiring` | P-56 shadow wiring, end to end | passed, 6 checks / 0 failures |
-| `loader_tls_race` | F4/F7 gate (board task 264) | passed under its `--expect-faults` gate: 9 checks, 2 reproduced faults (F4 duplicate-install window, F7 thread-event callback self-deadlock); the gate expects them so a future fix flips them to FIXED |
-| `loader_census` | P-57 formatter layer only | passed, 47 checks; the `pe_loader.cpp` hunks are not applied, so the switch is inert |
+| `loader_tls_race` | F4/F7 gate (board task 264) | round 20 measured 9 checks, 2 reproduced faults under `--expect-faults`; round 21 fixes both, and the strict form (no flag) passes 9 checks, 0 reproduced faults (below) |
+| `loader_census` | P-57 formatter layer | passed, 47 checks in round 20; round 21 wires the switch into `pe_loader.cpp` and the emitted lines are asserted by `loader_core_audit` (below) |
 
 Adjacent pure contracts registered in the same round, none of them in the loader path: `ds_publication` (85 checks),
 `query_heap_readiness` (7 synthetic cases), `ui_input_script` (5 cases) and `d3d12_residency_budget` (60 checks), all
@@ -169,5 +170,111 @@ loader's thread snapshot after the helper's `DLL_THREAD_ATTACH` already gave it 
 twice; a marker-entry fix on a scratch copy of the loader flips it to exactly one detach. F7 (a thread-attach TLS
 callback that runtime-loads a TLS module) self-deadlocks between the shared TLS lock and the exclusive lock taken by
 `initialize_tls`; the fault child is killed after 4 s while the two controls complete. The target runs with
-`--expect-faults` while both findings are open (a reproduced fault is REPRO and exit 0); the strict form becomes the
-gate after the fixes. Evidence: `D:\leonida-work\tlsrace\report.md`.
+`--expect-faults` in round 20 while both findings were open (a reproduced fault was REPRO and exit 0). Round 21 fixes
+both (below); the strict form is now the gate. Evidence: `D:\leonida-work\tlsrace\report.md` and the round-21 section.
+
+## Round-21 loader state (2026-11-28)
+
+Round 21 closes the loader's open TLS-audit findings and its observability gap. Default mapping, binding, TLS,
+unwind and lifecycle behaviour is unchanged; `PALMETTO_PE_LOADER_V2` still selects no path.
+
+- **AUDIT-F4 (duplicate install) is fixed.** `install_on_existing_threads` now records an `event_owned` marker for
+  every TLS block the helper's `DLL_THREAD_ATTACH` installed, and its thread-snapshot scan skips a thread already
+  served by such a marker. The marker owns no allocation: the thread-local slot still releases the real block and
+  receives its callbacks exactly once, and the detach-removal loop skips markers. Measured on the synthetic seam:
+  the seam thread and the post-load control each receive exactly one `DLL_THREAD_DETACH`, and the hard precondition
+  still proves the helper-event block was installed before the snapshot.
+- **AUDIT-F7 (lock-order self-deadlock) is fixed by not holding the TLS lock across mapped callbacks.**
+  `on_host_thread_event` and `release_existing_blocks_of_this_thread` collect the initialised modules under the
+  shared TLS lock, register a callback flight, release the lock and only then run the `DLL_THREAD_ATTACH`/`DETACH`
+  callbacks and `DllMain` notifications; `Loader::~Loader` retires modules under the exclusive lock and drains an
+  in-flight callback before process detach and unmapping, so a captured `Module` stays alive. A thread-attach
+  callback that runtime-loads a static-TLS module therefore reaches `initialize_tls` without deadlocking. The two
+  F7 controls (process-attach load, already-mapped dependency) still exit 0. Ordering is preserved: attach still
+  installs and calls in ascending slot order, detach still calls the existing-thread copies first and then the per-slot
+  callbacks in reverse, and a callback-free final sweep releases a TLS block loaded into an already-visited slot during
+  a detach callback.
+- **The census is wired behind `PALMETTO_LOADER_CENSUS=1`.** The exact switch (only `1`; unset, empty and `0` stay
+  off) now drives `pe_loader.cpp` itself: one `[rt] loader: census v1 mapped ...`, `... bound ...` and `... tls ...`
+  line per mapped module, a `tls-counters attach=.. detach=.. failures=..` line when a `Loader` is destroyed, and
+  `protect-failed`/`protect-omitted` lines for failed `VirtualProtect` calls (bounded and named). Asserted, not just
+  formatted: `loader_core_audit` redirects its own stderr, sets the switch and checks the mapped, binding, no-TLS and
+  TLS-counter line shapes - **52 checks, 0 failures** with the switch on. With the switch off every emission is
+  guarded by `loader_census::enabled()`, so nothing is formatted and no counter moves beyond the cached switch check:
+  the recorded switch-off comparison on the 46-check synthetic audit measured identical stdout
+  (`D99A70C1...D52FD`) and stderr (`E577520F...F230`) for the baseline and the census-patched loader
+  (`D:\leonida-work\census\run-baseline.{out,err}` vs `run-off.{out,err}`).
+- **`loader_tls_race` is the strict gate.** The test's no-argument strict form now passes: **9 checks, 0 reproduced
+  faults**, with `FIXED AUDIT-F4` and `FIXED AUDIT-F7`; a reintroduced fault fails it. The lead-owned registration
+  change drops the old `--expect-faults` flag (applied; stanza below).
+- **Measured gate set (2026-11-28, shared `port/build`, no GPU and no game files):** `loader_tls_race_test.exe`
+  (strict) 9 checks / 0 faults; the registered `loader_core_audit`, `loader_tls_audit`, `loader_selfcheck`,
+  `pe_loader`, `loader_tls` and `loader_census` targets **6/6 passed** in 3.75 s; `loader_core_audit` with the census
+  switch on **52 checks / 0 failures**. Evidence: `D:\leonida-work\scratch\r21\loader\validation_verified.log` and
+  `core_audit_switch_on.log`; the two final-binary runs above are also re-measured in
+  `D:\leonida-work\scratch\r21\docs-r21d3\` (`loader_tls_race_strict_final.log`,
+  `loader_core_audit_census_final.log`).
+- **Boot falsifier (`boot_smoke.md`, 2026-11-28).** On the round-21 binary `5C30DE03...` the census+shadow light arm
+  emitted **15 census lines** for the five mapped images (title `base=0x140000000`,
+  `total=587 shim=95 host=420 module=72 unimplemented=0`, `tls index=6 slot=0 ga_slot=2 ga_sites=53246`; the four helper
+  DLLs each mapped/bound/tls) with **0 shadow divergences**; the baseline arm had the identical loader surface and no
+  census lines, and the third arm reached stage 3 and stayed ALIVE 88.2 s with the class-0xa mitigation installed. One
+  arm per condition: the census arm's single device loss preceded a title-side stop at `game+0x86F97E`, which is not
+  attributed to the loader or to either diagnostic switch. This is the first valid-arm real-title observation of the census line
+  shapes; the synthetic assertions above remain the gate, and the shadow comparator's positive control stays the
+  synthetic `pe_loader_shadow_wiring` test.
+- **Limits carried.** Mapped DLLs without static TLS still get no thread-event delivery, the manual static-TLS slots
+  stay capped at 16 and the ended-thread-id history at 1,024; and no real `VirtualProtect` failure was forced, so the
+  `protect-failed`/`protect-omitted` output is formatter- and wiring-covered rather than observed end to end. The F7
+  flight/drain path is exercised by the thread-event child, but no deterministic arm holds a callback open while
+  another thread destroys its `Loader`, and destruction re-entered from that same thread-event callback is not
+  supported (the flight would self-wait); that case is not claimed as covered.
+
+### Registration change (lead-owned file, applied)
+
+```cmake
+    add_test(NAME loader_tls_race COMMAND loader_tls_race_test)
+    set_tests_properties(loader_tls_race PROPERTIES TIMEOUT 180)
+```
+
+The round-21 change drops the round-20 `--expect-faults` flag from the registered command, so a reintroduced F4/F7
+fault fails CTest. `loader_census`, `loader_core_audit` and the other targets need no stanza change (the census
+formatter is header-only and the assertions live in the already-registered audit target).
+
+## Remaining V2 adapter plan (round 21)
+
+The round-20/21 loader work is hardening and observability, not the adapter: `PALMETTO_PE_LOADER_V2` still
+selects no path. With F4/F7 fixed and the census wired, the adapter is the next loader slice and its gates are
+now all measurable. The plan below is the slice to claim, in order; it is a plan, not a measured result.
+
+1. **Switch and plumbing.** Parse `PALMETTO_PE_LOADER_V2` once (exact `1`, cached like the shadow switches) and
+   keep the old `Loader` mapping path as the default and as the fallback for one measured round. No call site
+   changes until steps 2-5 pass on the synthetic corpus.
+2. **Map through the new components.** In `map_image`, route a `PALMETTO_PE_LOADER_V2=1` image through
+   `rt::pe::Image::parse` + `rt::pe::mapper::map` with the production `Allocator`/`Protector` equivalents
+   (`VirtualAlloc`/`VirtualProtect` behaviour measured by `pe_mapper_parity`), then feed the file-backed section
+   bytes, relocations and protection plan back into the `Module` record the rest of the loader consumes. The
+   mapper's non-owning `MappedImage` stays owned by the loader for the module's lifetime.
+3. **Binding through the resolver.** Replace the hand-rolled import loop with `rt::pe::resolver::plan_imports`
+   behind a `SymbolSource` adapter that answers from the existing shim/host/bundled-module registry, then apply
+   the planned IAT writes. The parity gate is the existing synthetic corpus: every accepted name/ordinal/forwarder
+   must produce the same final pointer, `Binding` and owning module, and every missing import must keep the current
+   `PALMETTO_UNIMPLEMENTED` policy rather than a new refusal.
+4. **TLS, unwind and lifecycle keep their measured order.** Install TLS from the parsed directory through the
+   existing per-thread block/GA path, keep the F1 named refusal, keep the round-21 F4 marker fix and F7 callback
+   drain, register the exception directory through the existing path, and preserve the current order of mapping,
+   TLS setup, binding, unwind registration, thread events, callbacks and `DllMain` (`load()` still does not execute
+   image code; `initialise()` still does).
+5. **Gates before any boot.** Under V2, the loader/TLS/audit/fuzz CTests must pass unmodified, the strict shadow
+   comparison should be required (a parser/mapper mismatch is a failure, not a diagnostic), and the census lines
+   should match the old path's for the same images. The falsifier is any changed pointer, binding, TLS view,
+   protection or refusal on the synthetic corpus.
+6. **One measured boot, then retire the old path.** A boot with `PALMETTO_PE_LOADER_V2=1` +
+   `PALMETTO_LOADER_CENSUS=1` against the baseline arm must show the same loader surface (preferred base,
+   relocated state, bind counts, five modules, TLS view) and no new stop; only then remove the legacy mapping path
+   after one measured round.
+
+Known limits to carry into the adapter: the mapper may fall back from the preferred base while every measured
+title boot maps at `0x140000000`; the forced-rebase `--dry-run` over the 598,282 title DIR64 relocations is still
+unmeasured; and the parity evidence is synthetic, so a title image is the adapter's real acceptance test, not a
+substitute for the synthetic gates.

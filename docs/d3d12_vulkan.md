@@ -3953,7 +3953,7 @@ nothing is copied from their trees.
 | 12 | Does the game rely on async compute or copy queues for correctness? | Trace queue creation and cross-queue fences. If only performance, serialize on one queue for boot. |
 | 13 | Is 144 bytes of push constants available on all target GPUs? | **Resolved / Measured** (D3D-14). Checked at device creation in `port/shims/d3d12_vulkan_device.cpp`. Measured across the test fleet (#166): NVIDIA (256 B), desktop AMD (256 B), and Apple M1/MoltenVK (4096 B) satisfy 144 B natively. A Radeon 680M on the Windows driver 22.40.84.06 and the earlier Intel Arc entries expose only the core minimum 128 B (`maxPushConstantsSize == 128`), but an Arc B580 on Windows 11 (driver 32.0.101.9175) reports 256 B (#166), so the 128 B figure for Arc depends on the OS or driver; an Arc result on Linux (Mesa ANV) would settle which side it is. `d3d12_vulkan_device_test` accepts either answer and checks that the fallback flag matches it. Below 144 B, the device logs a warning and marks `push_constants_need_fallback`, routing the 16-byte tail (dwords 32..35: heap base and code base) to a uniform-buffer fallback. |
 | 14 | Are there PSOs with two code-base stages? | Count from the PSO/shader hash table and the index metadata. If yes, implement per-stage code-base slots (section 5.2). **Per stage, measured** (`tooling/feature_scan.py`, `s_getpc_b64` kept for data rather than a far branch): 54 VS, 93 PS, 266 MS, 263 CS, 0 GS; the translator's `uses_code_base` gives the same counts (with LLVM 23 that needs #223, without which these 1,471 shaders are rejected). So VS+PS and MS+PS pipelines with two code-base stages are possible; whether any exists depends on which shaders a PSO pairs, which is in the executable, not in `shaders.arc`. |
-| 15 | Is `ExecuteIndirect` used with signatures Vulkan cannot express directly? | **Partly resolved** by [command_signature.md](command_signature.md): five signatures are created and their static execution sites pass `MaxCommandCount=1`; no `ExecuteIndirect` reached the device proxy in the measured boot. The layer has fixed/count-buffer indirect draw and dispatch paths with GPU tests, but strict multi-count indirect graphics draws combined with viewport/scissor arrays are bounded-refused as `indirect_multi_count_viewport_state_not_captured` (C-06 note below), because the IR does not snapshot the graphics state. **Open:** whether a live title call actually uses `MaxCommandCount>1` or count-buffer contents; capture the method at the proxy. A title trace with `MaxCommandCount>1` and multi-array state is the trigger to implement full state capture and run a matching GPU/reference test before lifting the refusal. |
+| 15 | Is `ExecuteIndirect` used with signatures Vulkan cannot express directly? | **Partly resolved** by [command_signature.md](command_signature.md): five signatures are created and their static execution sites pass `MaxCommandCount=1`; no `ExecuteIndirect` reached the device proxy in the measured boot. The layer has fixed/count-buffer indirect draw and dispatch paths with GPU tests; strict multi-count indirect graphics with multi-element arrays are refused at recording as `indirect_multi_count_viewport_state_not_captured`, and every strict multi-count graphics indirect is refused again at shared replay preflight as `indirect_multi_count_graphics_state_not_captured`; the IR still lacks a complete call-site graphics-state snapshot. The GPU count-buffer value is not read by the CPU: `MaxCommandCount` is the conservative bound. **Open:** whether a live title call actually uses `MaxCommandCount>1` or count-buffer contents; capture the method at the proxy. The first title proxy trace with `MaxCommandCount>1`—fixed or GPU-count-buffer, regardless of array lengths—is the relevance trigger; before lifting the replay refusal, capture complete state and pass fixed-count and count-buffer Vulkan parity/readback with validation. |
 | 16 | Does the game use append/consume UAV counters or typed buffer formats the translator does not model? | **Shaders: answered** by `tooling/feature_scan.py` over all 26,503 (1.0.2.1, disassembled with LLVM 21.1.8 for gfx1013; SHADER-65). **No append/consume counters:** none of the 445,394 PSV0 binding records is a structured UAV with a counter, and there is no `ds_append`/`ds_consume`/GDS instruction. Typed buffers are declared in 5,359 shaders as SRVs (17,328 records) and in 2,177 as UAVs (4,005). **MTBUF** (format in the instruction): 52,890 loads in 10,278 shaders, all in five formats the translator decodes (`16_16_SNORM` 24,881, `8_8_8_8_UNORM` 19,835, `8_8_8_8_UINT` 5,099, `2_10_10_10_UNORM` 2,648, `16_16_16_16_UINT` 427), and no MTBUF store. **MUBUF** `buffer_*_format_*` (format from V# word 3): 90,316 accesses (84,908 loads, 5,408 stores) in 11,591 shaders; word 3 comes from a scalar load in 88,924 of them, is computed in 1,390, and is a literal in 2 (FORMAT 0, INVALID, which reads 0 on the hardware and in the translator). So the shaders fix no MUBUF format: the descriptors the executable writes decide it. Still open: which formats those descriptors carry; the runtime can log a V# format outside `Gen.FORMATS` (those read 0 today) when the descriptor is created or copied. Trace UAV descs and shader `buffer_*` ops; extend the translator/runtime together. **Runtime side done, console side open:** the layer writes typed buffer V#s and a counter V# (a hypothesis for where the shader finds it, section 3.4 "Buffer UAVs"); whether the game uses either is for the trace. |
 | 17 | Do upload/readback resources ever reach shaders (as vertex/index buffers or descriptors), and does the `-heap_base` bias work for them? | Trace `CreateCommittedResource` heap types and every VB/IB/descriptor that points at an upload resource; test the bias with a synthetic draw. |
 | 18 | Does the game alias buffers/images in a heap, or use reserved/tiled resources? | Trace `CreatePlacedResource` ranges, aliasing barriers, `CreateReservedResource` and tile mappings. If yes, implement shared memory per heap range or fall back to linear allocations with a clear log. Shaders: 30 declare `TILED_RESOURCES` in SFI0 (`tooling/feature_scan.py`), so reserved/tiled resources are likely used. Placed resources are D3D-16 and reserved resources D3D-20 (#313). |
@@ -4320,8 +4320,9 @@ measured boot; those facts do not establish whether the title ever uses a larger
 more than one element while `viewport_arrays_may_affect_draw` is true. It reports
 `indirect_multi_count_viewport_state_not_captured`; it does not inspect argument or GPU count-buffer contents, and the
 bound is the already-captured D3D12 array count (maximum 16). Zero-command calls remain no-ops, scalar viewport/scissor
-state is outside this particular refusal, and the existing single-command multi-array refusal still applies. With the
-switch off, this new gate is not reached and the pre-existing recorded command payload remains unchanged.
+state is outside this recording-time array-specific refusal, and the existing single-command multi-array refusal still
+applies. The replay-side catch-all below separately refuses any multi-count graphics indirect lacking a state snapshot. With
+the switch off, this record-side gate is not reached and the pre-existing command payload remains unchanged.
 
 **Test.** `port/test/replay_clear_gate_test.cpp` adds a GPU-free readiness/record case to the existing registered
 `replay_clear_gate` target: it checks the strict-off disposition, the exact named refusal for multiple viewport or scissor
@@ -4337,3 +4338,43 @@ snapshot (pipeline/root data, targets, vertex/index bindings, topology, blend/st
 then a Vulkan GPU test compares both fixed-count and GPU-`CountBuffer` draws with equivalent direct draws and passes
 validation/readback. A title proxy trace that reaches a multi-count indirect draw with multi-element arrays is the first
 observation that makes this path relevant to the title; no such call has been measured yet.
+
+## C-06 replay follow-up: strict multi-count graphics-indirect preflight
+
+**Local gap and boundary.** `ExecuteIndirect` records its signature kind, stride, maximum count, argument/count resource ids and
+offsets, but not a per-call graphics snapshot. `frame_capture.md` describes the captured state for direct `Draw` commands; it
+does not make an indirect command's implicit PSO, root data, attachments, vertex/index bindings, topology, blend/stencil state,
+or viewport/scissor arrays available. `graphics_record.md` decodes the pipeline-library record, not the command-list state at
+an indirect call. The record-side C-06 gate only catches the multi-array case. A strict scalar-state multi-count indirect can
+still reach replay, and replay also serves any producer of a closed `CommandList`, so the array-only recording guard is not a
+complete replay boundary.
+
+**Replay-side contract.** `port/src/vulkan_replay.h::prepare` is shared by single-list replay and `VulkanQueue` batch preparation.
+With the exact opt-in `PALMETTO_D3D12X_STRICT_VIEWPORTS=1`, it scans the closed immutable IR before resolving resources,
+preparing helper scratch, or emitting any Vulkan command. A `DRAW` or `DRAW_INDEXED` `ExecuteIndirect` with
+`MaxCommandCount>1` returns `ReplayResult::unsupported` and emits the named diagnostic
+`indirect_multi_count_graphics_state_not_captured`. This conservatively covers both fixed-count and GPU-`CountBuffer` forms
+even if the buffer currently contains 0 or 1; the CPU does not inspect GPU-written count contents. Counts 0/1, indirect
+dispatch, other command variants and the entire strict-switch-off path keep their previous semantics. The narrower recording-time
+`indirect_multi_count_viewport_state_not_captured` remains in force for multi-element arrays. This guard claims readiness/refusal
+only; it does not claim to replay or compare a multi-count graphics draw.
+
+**Synthetic evidence.** The `indirect_graphics_replay_readiness` CMake target compiles a CPU-only test against Vulkan headers
+and uses only callbacks. In the isolated VS18 harness (`D:\leonida-work\scratch\r21\c06_indirect_replay`), all 16 checks passed: the exact
+refusal name; fixed and indexed GPU-count-buffer multi-count refusal before even calling the resource resolver; unchanged
+strict-off fixed and count-buffer Vulkan-call arguments; strict count-1 success; strict three-record dispatch success; and a
+non-exact switch spelling staying off. No Vulkan loader, GPU, game data or boot was used. The lead-owned `port/CMakeLists.txt` registration is now present in the
+shared tree; this slice did not edit CMake or rebuild the shared `port/build` directory.
+
+**Quantified negative and falsifier.** `command_signature.md` §2.3 records five created signatures whose known static execution
+sites all pass `MaxCommandCount=1` and states that no `ExecuteIndirect` reached the device proxy in the measured boot (with the
+runtime probe detailed in §2.4).
+That does not exclude a runtime multi-count call or prove count-buffer contents. The new test falsifies the refusal boundary if
+a strict fixed/count-buffer graphics `MaxCommandCount>1` call reaches the resolver or Vulkan callback, if a non-graphics/0/1
+command is refused, or if the off-path argument tuple/callback changes. The replay refusal is lifted only after the complete
+call-site graphics state is captured in the IR and fixed-count plus GPU-count-buffer Vulkan draws match equivalent direct
+draws in validation and readback. A proxy trace showing `MaxCommandCount>1` is the first title-relevance trigger.
+
+**Peer handling.** The guard follows this repository's `CommandList` and shared replay preflight; no peer code, behavior, identifier
+or data table was used or copied for this slice. Existing C-06 peer credits above remain unchanged; no new `NOTICE.md` entry is
+required.

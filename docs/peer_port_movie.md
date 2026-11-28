@@ -1,12 +1,9 @@
 # The peer ports' movie path: Bink 2 decode, the plane textures and the present
 
-**Status: peer audit (sections 1-7, written as a read-only audit: documentation only, no boot, every page quoted) plus
-four implemented ports (sections 8-9, 11 and 12, with their own tests and their light boots), one implemented
-measurement (section 13, the movie draw-path probe, with its test and its one clean 300 s arm), one implemented
-instrument (sections 14-15, the Bink import-level witness, non-looping-movie fast-advance and the measured audio-surface
-negative, with their tests and the section-14 clean 300 s arm), their attribution (sections 8.7, 9.6, 11.7, 12.7, 13.8,
-14.8 and 15.6), plus a conservative opt-in movie-readiness guard (section 16, synthetic contract tests, no boot) and its
-peer attribution/file note.** The five peer ports
+**Status: peer audit (sections 1-7, read-only, no boot) plus four implemented ports (sections 8-9, 11-12), one implemented
+measurement (section 13), one implemented instrument (sections 14-15), and their attribution; a conservative opt-in
+movie-readiness guard (section 16, synthetic tests, no boot); and an additive plane identity/order contract (section 17,
+isolated synthetic tests, no wiring or boot).** The five peer ports
 were re-cloned and read
 at the commits in section 1 to answer one question: how does a port get a movie from the title's
 `BinkOpenWithOptions` to a pixel on screen, and
@@ -1767,7 +1764,43 @@ ABI, pixels, blend, layout, or GPU output.
 
 **Suggested NOTICE row for the lead (not applied here):** “The opt-in movie-overlay readiness guard described in [movie_overlay_readiness.md](movie_overlay_readiness.md) and this page's section 16 was informed as behavior evidence only by XCL (`623d02e465a17497a757a4ce867f482b0a6c8f3b`, GPL-2.0-only; Bink registration forwarding and multi-plane PresentX). The local gate, opaque evidence model, refusal behavior, and tests are independently implemented from Palmetto's measured frontier; no XCL source or data was copied.”
 
-Changed by this slice: [movie_overlay_readiness.h](../port/src/movie_overlay_readiness.h), [movie_overlay_readiness_test.cpp](../port/test/movie_overlay_readiness_test.cpp), `port/shims/xbox_present.cpp`, and this section; readiness details are in [movie_overlay_readiness.md](movie_overlay_readiness.md). `port/src/main.cpp`, PE-loader files, CMake, `NOTICE.md`, and peer clones are unchanged. The docs index already lists this page. No game/package data was added.
+Changed by the previous wiring slice: [movie_overlay_readiness.h](../port/src/movie_overlay_readiness.h), [movie_overlay_readiness_test.cpp](../port/test/movie_overlay_readiness_test.cpp), `port/shims/xbox_present.cpp`, and section 16. The additive identity/order contract in this round is recorded below and in [movie_overlay_readiness.md](movie_overlay_readiness.md); it does not alter the existing consumer hunk.
+
+## 17. Movie-plane identity and order contract (pure, no wiring or boot)
+
+**Status: identity-aware policy is now independently specified and synthetic-tested; no live plane is classified.** This is a follow-up to the section-4 rank-6 composition work and section 16's readiness-only guard. It does not change `xbox_present.cpp`, infer a plane role from index 1, create a Bink call, or claim a movie frame was presented.
+
+### 17.1 Evidence: a plane index is not a movie identity
+
+Our measured PresentX frontier is still one plane: section 9.1/9.4 records 11 sampled calls, all with plane count 1 and 0 two-plane calls in that window. The draw-path/Bink evidence in sections 13-14 records 0 title frame-buffer registration and 0 per-frame decode hits in its measured clean arm. [The readiness page](movie_overlay_readiness.md) records why that is a negative frontier, not proof about unmeasured runs. [The first-UI page, section 13](peer_port_first_ui.md) attests body/present state but does not identify the resource role of a presented plane.
+
+The read-only peer source supports a generic plane list, not an implicit movie tag: XCL at `623d02e465a17497a757a4ce867f482b0a6c8f3b` leaves Bink registration with the real DLL and consumes a plane-count-based `PresentX` list; Five Star Recomp at `34b4dfed3524178efeed044514499ef1b5f0cb36` describes each PresentX position/resource and reads its resource, without a movie-versus-UI role; VIctory at `63bcca43c6a00a758510398fa43096ce7e4f7df0` carries generic planes and composites later planes as overlays, explicitly giving a scene-plus-UI example. These behaviors show that plane 1 may be an overlay/UI and do not establish that Palmetto's plane 1 is movie.
+
+### 17.2 Contract and exact opt-in
+
+[`movie_overlay_readiness.h`](../port/src/movie_overlay_readiness.h) now gives each of the two supported positions a `PlaneIdentityEvidence`: observed/confirmed state, an opaque order token, index, role, and opaque resource token. A strict identity decision accepts only a successful two-plane snapshot in which plane 0 is independently confirmed as `primary` at index 0, and plane 1 is independently confirmed at index 1 with one of three roles: `movie`, `ui_overlay`, or `other_overlay`. Both identities must carry the same nonzero PresentX order, their resource tokens must be nonzero, and unknown/invalid roles, unconfirmed identity, wrong indices/order, and plane counts other than two refuse by name. Plane number alone never establishes role.
+
+For a confirmed `movie` second plane, `gate_identified_second_plane` requires the existing ordered registration -> decode -> upload -> present chain and requires the plane-1 resource token to equal the upload resource token (with the existing decoder/frame/present correlation intact). A confirmed UI or other overlay is passed through by this identity-aware helper without a movie decode chain; that is explicitly different from an unknown role, which fails closed. This role-aware helper is entered only when its `RuntimeGate` is `require_ready` (the exact existing `PALMETTO_PRESENT_MOVIE_OVERLAY_READY_ONLY=1` parse) and `Evidence.opt_in` is true. Unset/empty/`0` and invalid switch spellings retain passthrough behavior.
+
+Compatibility boundary: the old `evaluate` and `gate_second_plane` behavior is retained, including its legacy passthrough and its strict chain-only result for any selected overlay candidate. The live `xbox_present.cpp` caller still invokes that old helper with an empty evidence chain, so `=1` continues to refuse every otherwise-selected plane-1 candidate at `frame-registration-not-observed` until a separate producer and wiring change exist. This round adds no runtime role inference and does not relax that guard.
+
+### 17.3 Synthetic tests and exact wiring point
+
+The existing [movie readiness test](../port/test/movie_overlay_readiness_test.cpp) now has 11 synthetic cases, 0 failures in an isolated VS18 C++20 harness. New cases cover same-present order, primary/secondary positions, movie/UI/other roles, unknown-role refusal, movie resource correlation, UI/other pass-through only under the identity-aware helper, and unchanged old-gate behavior. The test uses opaque constants only; it needs no GPU, boot, package, or game data. The previously registered `movie_overlay_readiness_test` / `movie_overlay_readiness` CMake stanza is not changed; no `xbox_present_test` or shared `port/build` target was run for this pure slice.
+
+**Unchanged wiring hunk to replace only after measurement:** `port/shims/xbox_present.cpp` lines 831-835 currently create `Evidence{}`, set `opt_in`, and call `gate_second_plane(gate_mode, overlay, evidence)` after the existing plane rule and before `PresentPlanes` is assembled. A future reviewed integration can replace that producer/call with a record whose role and event tokens were independently observed, then call `gate_identified_second_plane`; do not synthesize a movie role from plane index, placement, resource address, or the peer's behavior. No file in the shim is edited by this slice.
+
+### 17.4 Falsifier and limits
+
+The new contract has no runtime population: it proves only the policy on synthetic evidence. A positive live movie decision requires one correlated sequence: post-call confirmation of title buffer registration, decode for that same opaque decoder key/frame, a matching upload resource, then a successful two-plane PresentX where plane 0/primary and plane 1/movie are confirmed at the same present order and plane-1's resource is the upload resource. A clean two-plane capture with plane 1 independently classified as UI/other falsifies any assumption that every secondary plane is movie; a missing identity or mismatched order/resource must continue to refuse. More than two planes remain unsupported. The existing one-plane samples and 0 registration/decode hits do not prove what an unmeasured movie window will present.
+
+### 17.5 Attribution and files
+
+Evidence-only peer references for this addition: XCL's [`bink.rs`](https://github.com/xcl-dev/xcl/blob/623d02e465a17497a757a4ce867f482b0a6c8f3b/crates/xcl/src/hle/bink.rs) and [`present.rs`](https://github.com/xcl-dev/xcl/blob/623d02e465a17497a757a4ce867f482b0a6c8f3b/crates/xcl/src/hle/d3d12x/present.rs) (GPL-2.0-only); Five Star Recomp's [`PresentPlane.cs`](https://github.com/ThatRecompDev/five-star-recomp/blob/34b4dfed3524178efeed044514499ef1b5f0cb36/src/FiveStar.Loader/Shims/D3D12X/Present/PresentPlane.cs) and [`PlaneReader.cs`](https://github.com/ThatRecompDev/five-star-recomp/blob/34b4dfed3524178efeed044514499ef1b5f0cb36/src/FiveStar.Loader/Shims/D3D12X/Present/PlaneReader.cs) (GPL-3.0-or-later); VIctory's [`queue.rs`](https://github.com/Marvisak/VIctory/blob/63bcca43c6a00a758510398fa43096ce7e4f7df0/crates/victory-gpu/src/queue.rs) and [`host.rs`](https://github.com/Marvisak/VIctory/blob/63bcca43c6a00a758510398fa43096ce7e4f7df0/crates/victory-gpu/src/host.rs) (GPL-3.0-or-later). Their source is evidence only: no peer code, comments, role names, data, or ABI structure was copied; this contract uses Palmetto's measured gap, local opaque tokens, and synthetic tests.
+
+**Suggested NOTICE.md row for the lead (not applied):** “The pure movie-plane identity/order policy described in [movie_overlay_readiness.md](movie_overlay_readiness.md) and section 17 of this page was informed as behavior evidence only by XCL (`623d02e465a17497a757a4ce867f482b0a6c8f3b`, GPL-2.0-only; forwarding Bink registration and generic PresentX composition), Five Star Recomp (`34b4dfed3524178efeed044514499ef1b5f0cb36`, GPL-3.0-or-later; indexed PresentPlane/resource reading), and VIctory (`63bcca43c6a00a758510398fa43096ce7e4f7df0`, GPL-3.0-or-later; generic ordered planes and overlay/UI composition). The local identity contract, readiness correlation, refusal policy, and tests are independently implemented; no peer source or data was copied.”
+
+This round changes only [movie_overlay_readiness.h](../port/src/movie_overlay_readiness.h), [movie_overlay_readiness_test.cpp](../port/test/movie_overlay_readiness_test.cpp), this page, and [movie_overlay_readiness.md](movie_overlay_readiness.md). `xbox_present.cpp`, `main.cpp`, `port/CMakeLists.txt`, `NOTICE.md`, and peer clones are unchanged; no boot, GPU work, or game/package data was used.
 
 
 

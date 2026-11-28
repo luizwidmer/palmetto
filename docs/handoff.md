@@ -4,17 +4,134 @@ This page is the starting point after an indefinite pause. The working tree is c
 expected to be running, and the boot lock should be free. Everything below is measured from this checkout, not from
 memory: re-check `git status`, `git log -1`, the boot lock and running processes first.
 
-## Current state (round-20 landing)
+## Current state (round-21 landing)
 
 | item | value |
 |---|---|
 | repository | `D:\leonida` on `main`, no PRs for our own fork |
-| round-20 landing | code `d95a159ce`, docs `58091833d`; this handoff update is the next commit (the tree is clean and pushed) |
-| last green gate | `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT` |
-| latest test evidence | round-20 CTest subset **29/29 passed** (10.8 s), including the new `pe_mapper_parity`, `pe_loader_shadow_wiring`, `loader_census`, `loader_tls_race`, `ds_publication`, `query_heap_readiness`, `d3d12_residency_budget`, `ui_input_script`, `d3d12_title_va`; `d3d12_viewport_array` still 1/1; loader subset 29/29 |
-| docs | all `tests/test_docs_*.py` green, 22 tests (clear inherited `GIT_CONFIG_*` first, below) |
-| agents | none running; the 8 GPT-6 Luna (max effort) + 6 DeepSeek round-20 teammates finished, and the lead committed their slices |
+| round-21 landing | code + docs followed by one final docs commit (baseline round-20 `d95a159ce`/`58091833d`); tree clean and pushed at this page's commit |
+| last green gate | `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT` on the final binary (SHA-256 `5C30DE03...200451A`) |
+| latest test evidence | round-21 CTest suite **35/35 passed** (9.4 s): strict `loader_tls_race` (F4/F7 fixed), `title_va` with the validation layer on, `d3d12_title_va_production` (P-45 production pixel), `opt_in_switches`, `indirect_graphics_replay_readiness`, `root_sig`, `xmem`, plus all round-20 targets; known group `d3d12_draw`/`d3d12_set0_compute`/`d3d12_bindless_churn[_validated]` still fails at the documented queue-slot-14 Signal refusal (layer owner) |
+| docs | all `tests/test_docs_*.py` green, 22 tests; the docs owners' extended suites report 38 passed / 215 subtests (clear inherited `GIT_CONFIG_*` first, below) |
+| agents | none running; the 8 GPT-6 Luna (max effort) + 6 DeepSeek round-21 teammates finished, and the lead committed their slices |
 | boot lock | free; no `palmetto`/`cl`/`ninja`/`ctest` process should remain |
+
+## Round 21 landed (2026-11-28)
+
+Fourteen teammates (8 GPT-6 Luna at max effort + 6 DeepSeek) over round plan tasks 253-266 equivalents plus follow-ups; the
+lead integrated, gated, committed and updated the board. The round fixes the open loader bugs, makes the Title-VA validation
+gate honest, reduces the suite's known failures, ports/validates the next peer and frontier slices, and audits every opt-in
+switch.
+
+### What landed
+
+- **Loader F4/F7 fixed + census wired** (the round-20 open items). F4 now records the helper-installed thread block so
+  `load()`'s snapshot skips a served thread; F7 stops running mapped TLS callbacks under the shared TLS lock, registers a
+  callback flight under the lock so an image cannot be unmapped mid-callback, preserves per-slot attach ascending / detach
+  reverse-slot callback+cleanup order, and adds a callback-free sweep for blocks loaded during detach. `loader_tls_race`
+  runs as a strict CTest (no `--expect-faults`): 9 checks, 0 faults, F4 seam/control each one detach, F7 child exit 0.
+  `PALMETTO_LOADER_CENSUS=1` is now wired into `pe_loader.cpp` with the 47-check formatter test and switch-off
+  byte-identical stdout/stderr proofs (SHA-256 recorded), so P-57 is complete.
+- **Title-VA validation gate is honest and green**. The failing validation count was three real empty pre-draw capture
+  errors (`VkBufferCreateInfo-size-00912`, `VkMemoryAllocateInfo-allocationSize-07897/-07899`): the title-import pre-capture
+  created a buffer/allocation with no sampled textures. The runtime now skips that capture when `pre_count`/`total` are
+  zero (non-zero path unchanged); the test replays its captured stderr on failure and returns its render target to
+  `RENDER_TARGET` before the automatic capture (removing two layout/sync artifacts). `d3d12_title_va` now runs with
+  `PALMETTO_VK_VALIDATION=1` and passes 3/3 on the RTX 4090 with the known sRGB counter at 0.
+- **P-45 production pixel acceptance**: new `d3d12_title_va_production` GPU CTest registers the production outside-arena
+  BDA window (candidate `0x17490000`, `0x90000` above arena end `0x17400000`), pulls the raw synthetic span twice
+  (2.2 MiB), samples the pixel through the real PC queue/fence (no Xbox slot-14 proxy) and verifies `35 ff c1 ff`, then
+  `00 00 00 ff` after moving the source offscreen; named CPU refusals for below-heap, overlap and out-of-bounds windows.
+  This closes the P-45 pixel falsifier for the synthetic production path - the title-boot pixel acceptance stays the
+  frontier item.
+- **C-06 multi-count indirect readiness**: with exact `PALMETTO_D3D12X_STRICT_VIEWPORTS=1`, shared replay preflight
+  refuses multi-count graphics `ExecuteIndirect` before resource resolution/emission with the named reason
+  `indirect_multi_count_graphics_state_not_captured`; dispatch, counts 0/1 and the switch-off path are unchanged.
+  Honest limit: full call-site graphics state is not captured, so this is a strict refusal/readiness contract, not replay
+  parity.
+- **Movie second-plane identity/order contract**: a pure helper requires confirmed same-PresentX identities for plane 0 and
+  plane 1, classifies plane 1 as movie/UI/other overlay, and fails closed on unknown identity; the existing
+  `PALMETTO_PRESENT_MOVIE_OVERLAY_READY_ONLY` gate and switch semantics are unchanged. The measured sample has only
+  one-plane PresentX calls, so this is contract-only pending measured plane evidence.
+- **Query-heap readiness wired + opt-in switch audit**: `PALMETTO_D3D12X_QUERY_HEAP_READINESS=1` now runs at the layer's
+  real `CreateQueryHeap` (named `E_INVALIDARG`/`E_NOTIMPL` refusals before allocation, byte-identical when unset). The
+  audit registry (`port/src/opt_in_switches.h`, 294 switches, 3,010-check test, `docs/opt_in_switches.md`) re-derives the
+  switch set and call-site reachability from source and records four named findings (dead wiring now down to two
+  contract-only headers, `any_set` empty-value semantics, spelling, default-on switches); `loader_census` and the
+  query-heap switch are now wired.
+- **Suite failures fixed down to the documented queue-slot-14 group**: `root_sig`'s two checks were a real shim defect
+  (the all-zero-checksum branch ran after the unconditional hash verify; fixed in `d3d12_xs_rootsig.cpp` and validated
+  against the host d3d12.dll); `xmem`'s working-set check is now per-page deterministic (545/545, 3/3 runs); the bindless
+  precondition failures were a test-side stack-description ABI bug fixed with a zero-tailed `PcHeapDesc`; `d3d12_draw`'s
+  stale 512 MiB heap expectation now uses the measured 1024 MiB arena. All four now reach the same known
+  `queue-slot-14 Signal` refusal (4 targets, layer owner), which is the only remaining known group in this set.
+- **Translator next refusal class**: one exact reachable `s_clause 3` gap rule with a synthetic fixture; 491/668
+  translated and 177 refused unchanged, 3 words recovered, 0 modules closed, all 491 previous SPIR-V modules
+  byte-identical. The two pre-existing semantic-suite failures (`test_exec_computed`, `test_image_atomics_guard`) are
+  unchanged and documented.
+- **Frontier F-03 recheck**: the type-0x24 producer is not unreferenced - `0x2218180` is reached through registered
+  app-state-change callbacks (`0x1D10A30` -> LEAs `0x2217C70/0x2217C90` -> tail jump), with a four-site next-arm recipe
+  and the measured boot still showing 0 callback/producer hits and 0 key hits. `decomp_first_ui.md` section 11 is
+  corrected (no reachability overclaim).
+- **Docs**: `pe_loader_rewrite` (F4/F7/census/validation), `testing` (round-21 final gate), `boot_smoke` (round-21 arms),
+  `opt_in_switches` (new page), `vertex_buffer_va` (P-45 + P-48 validation), `d3d12_vulkan` (C-06/query heap),
+  `peer_port_movie`/`movie_overlay_readiness`, `peer_port_first_ui` (C-08 verification), `decomp_first_ui` (F-03),
+  `translator_fixes`/`design`, `cleanroom_peers`/`remaining_mechanisms`/`README` all refreshed; the docs checks stay green.
+
+### Boot arms on the final binary (`5C30DE03...200451A`)
+
+Three valid light arms under the boot lock, 88 s timeout, captures/readbacks empty:
+
+| arm | switches | wall | result | device loss |
+|---|---|---|---|---|
+| a1 | `PALMETTO_TRACE_TLS=1 PALMETTO_TEB_CHECK=1` + state trace | 88.4 s (killed) | ALIVE, stage 2 at 86 s | 0 |
+| a2 | +`PALMETTO_LOADER_CENSUS=1 PALMETTO_PE_LOADER_SHADOW_PARSE=1` | 82.1 s | 15 census lines, **0 shadow divergence lines**, stage 2 at 78 s; then two refused `ExecuteCommandLists` -> `present failed (VkResult -4)` -> post-loss AV at `game+0x86F97E` (single arm, not attributable) | 1 |
+| a3 | +`PALMETTO_DS_REAP_ORDER=1 PALMETTO_TITLE_CLASS0A_SIZE=1` | 88.2 s (killed) | ALIVE, reached stage 3 at 86 s, class-0xa mitigation line plus a `0x1000`-sized block with no overlap, one `reap-order-on` line (2 lanes, buffer 64) with no refusal | 0 |
+
+Loader surface identical in all arms: preferred `0x140000000` (not relocated), size 184,995,840, entry `+0x56a1ec8`,
+binds 95/420/72/0, five modules, `/GA` TLS 53,246 reads at index 6, TEB slot-8 marker matching. Losses 0/1/0, so the
+two-consecutive-loss stop rule never fired. Arms `a1`/`a2` of an earlier pass on the intermediate binary were invalidated
+by the lead attaching a debugger (NTSTATUS 0xC0000354) and are recorded as INVALID, not as runtime findings.
+
+### Gates measured at the landing
+
+- `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT`.
+- round-21 CTest suite: **35/35 passed** (9.4 s), including the strict loader race gate, validation-on title-VA, the P-45
+  production GPU test, the switch audit, the indirect readiness contract, `root_sig` and `xmem`.
+- known group still failing as documented: `d3d12_draw`, `d3d12_set0_compute`, `d3d12_bindless_churn`,
+  `d3d12_bindless_churn_validated` - all at the queue-slot-14 `Signal` refusal, not a test defect.
+- docs checks: 22 passed (plus the docs owners' 38-test/215-subtest extended suite).
+- full-suite inventory: recorded in `docs/testing.md` by the inventory owner.
+
+### What is still open (next thread)
+
+1. **Queue-slot-14 `Signal` group** is the only known failing group left in this set (`d3d12_draw`, `d3d12_set0_compute`,
+   `d3d12_bindless_churn[_validated]`); it is the d3d12_xs queue-proxy owner's slice. The bindless slice also recorded a
+   report-only robustness finding for the descriptor-tail heuristic (validate the follower size word instead of trusting
+   it).
+2. **F4/F7 residual coverage**: no deterministic arm proves Loader destruction re-entered from its own thread-event
+   callback (self-wait, unsupported), static-TLS DLL thread-events are not covered, and the 16-slot mapped-TLS cap
+   remains. The V2 adapter is still unwired.
+3. **Title-boot pixel acceptance** remains the content/presentation frontier: a3's stage-3 run exercised the class-0xa
+   mitigation with a correctly sized block but is a single arm, not a controlled A/B; the a2 loss chain is post-loss AV
+   family, not attributable to the loader switches.
+4. **F-03** next-arm recipe is published (four sites); F-01/F-02 stay blocked.
+5. **Contract-only files**: `d3d12_residency_budget.h` and `ui_input_script.h` have no runtime caller by design; the movie
+   plane identity helper needs measured plane evidence before wiring.
+6. **CI**: the five failing jobs on `main` predate both rounds (`translator-tests`, `stdlib-tests-linux`,
+   `viewer-tests`, `semantic-tests (ubuntu-latest)`, `macos-python`); P-26 branch protection remains open.
+
+### Constraints to carry over
+
+- no game data or package bytes in the repo, logs, tests or task text; no keys/decryption; peer clones are read-only
+  evidence and every mechanism gets a NOTICE/docs credit.
+- opt-in until measured: default path byte-identical, named refusals, synthetic tests and a boot/GPU falsifier where
+  applicable.
+- one build at a time against `port\build`; never relink `palmetto` while an arm holds the exe; `LNK1168` means an arm
+  still holds it.
+- `d3d12_draw` remains a known-failing shared GPU fixture in the queue-slot-14 group; use `d3d12_viewport_array` for the
+  viewport case.
+- reports/evidence under `D:\leonida-work` and `reports/` stay outside the repo.
 
 ## What landed in round 19 (kept for history)
 
@@ -31,7 +148,9 @@ memory: re-check `git status`, `git log -1`, the boot lock and running processes
   and `movie_overlay_readiness` (opt-in movie-overlay evidence contract), both pure and unwired, with tests/docs.
 - **Workspace cleanup**: ~93.7 GB of stale scratch/installers removed; evidence directories referenced by docs kept.
 
-## Open work, in rough priority order
+## Open work after round 20 (kept for history)
+
+The list below was superseded by the Round 21 section above; kept for the record.
 
 1. **P-50 / mapper parity** (task-253 stopped before start): old `Loader` vs new `pe_mapper` mapping/protection parity on
    the synthetic fixtures; fix any real mapper difference, not the old loader.
@@ -110,7 +229,7 @@ Boot arm (take the lock, stop after two consecutive device losses; the host is p
 - CMakeLists is lead-owned: agents report stanzas, the lead applies them.
 - `d3d12_draw` remains the known-flaky shared GPU fixture; use `d3d12_viewport_array` for the viewport case.
 
-## Round 20 landed (2026-11-27)
+## Round 20 landing (kept for history)
 
 The huge round-20 push executed: 14 teammates (8 GPT-6 Luna at max effort + 6 DeepSeek) over round plan tasks 253-266,
 with the lead integrating, gating, committing and updating the board. Code is `d95a159ce`, docs `58091833d`, and this
