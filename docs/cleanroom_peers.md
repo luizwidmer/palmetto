@@ -37,7 +37,7 @@ that landed our implementation, and whether the port was measured on a boot or i
 | Native write-fault watch and shadow invalidation | `title_memory_model.md` sections 12-13 | `805b42ed4` | 545 xmem checks and synthetic fault stress; no title consumer; P-43 was the second device-loss event in the series, counters unavailable (not zero) |
 | Synthetic audio decoder contract | `audio_decode.md` | `cd47ec306` | 18 Rust FFI contract tests; codec-header validation unproven |
 | 120 Hz and kind-7 arms | `window.md` / `fsr_route.md` | `5746b8123` | measured negatives: no enumeration trace; no post-map FSPX consumer |
-| Multi-count viewport/scissor replay | `d3d12_vulkan.md` C-06 | `6351f6846` | P-32/P-41 direct counted draw GPU PASS: multiViewport=1, maxViewports=16, readback (8,8)=0,255,0,255, 0 validation errors; 10 readiness cases pass. Multi-count `ExecuteIndirect` plus array state is refused as `indirect_multi_count_viewport_state_not_captured` (no replay graphics snapshot; five measured title sites cap `MaxCommandCount` at 1). P-47 is source-only: `d3d12_viewport_array_test.cpp` is not CMake-registered or built, so no CTest result exists |
+| Multi-count viewport/scissor replay | `d3d12_vulkan.md` C-06 | `6351f6846` | P-32/P-41 direct counted draw GPU PASS: multiViewport=1, maxViewports=16, readback (8,8)=0,255,0,255, 0 validation errors; 10 readiness cases pass. Multi-count `ExecuteIndirect` plus array state is refused as `indirect_multi_count_viewport_state_not_captured` (no replay graphics snapshot; five measured title sites cap `MaxCommandCount` at 1). P-47's dedicated `d3d12_viewport_array_test` is CMake-registered and the `d3d12_viewport_array` CTest passes 1/1 (1.6 s, validation layer and the strict-viewport switch set by the test properties); the earlier source-only status is retired |
 | Strict direct-heap admission | `root_packing.md` section 10 | `6351f6846` | fail-closed opt-in; 96 CPU assertions and `root_signature` / `root_signature_oracle` pass; final `d3d12_compute` CTest passes 1/1 after shim-safe queue/fence fix, strict and legacy cases 64/64; missing-base controls refuse `E_INVALIDARG`; no title direct-index commands (synthetic proof only) |
 | Title-VA window test seam | `vertex_buffer_va.md` section 24 | `6351f6846` | synthetic GPU readbacks `21 43 65 87` then `9a bc de f0`; corrected P-45 256 MiB run placed candidate 0x90000 above arena end, registered production alias, pulled 5 times / 5.6 MiB and submitted `ExecuteCommandLists`. The test then failed at Xbox Signal slot 14 before CPU pixel/readback acceptance; earlier `window_below_heap_base` was a separate qualitative case. P-48 Title-VA CTest deferred |
 | Native-library MS publication | `mesh_stage.md` sections 8-10 | `3eebb1bae` | synthetic native-key publication and all-refused prune pass; 0 selected/resolver MS keys against 7,498 library programs, no real module or boot |
@@ -336,6 +336,12 @@ separate projects, so that dated stage is the tracker's reading, not the current
   second task-queue slice should be opened ([runtime_imports.md](runtime_imports.md)).
 - The stage-2 stall itself is title-side and no runtime answer is visibly missing; the peer mechanisms are candidates
   for the *pending-record / cell* half of it, not a known fix ([stage2_blocker.md](stage2_blocker.md)).
+- The inherited PE loader is not the black-frame cause: 103/103 light arms across 37 builds map the title at its
+  preferred base, bind all 587 imports with 0 unimplemented, install TLS and report no loader failure, and the P-55
+  `PALMETTO_TRACE_TLS=1` + `PALMETTO_TEB_CHECK=1` arm installs the per-thread GA view in every listed thread through
+  90.3 s with no new stop. The audit's real defects are fixed and CTest-registered (`loader_core_audit`,
+  `loader_bind_audit`, `loader_tls_audit`, `loader_selfcheck`, extended `pe_loader_test`), so the frontier is
+  content/presentation rather than loader state ([pe_loader_rewrite.md](pe_loader_rewrite.md)).
 
 ## The next eight clean-room slices, ranked
 

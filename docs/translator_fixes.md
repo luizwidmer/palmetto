@@ -309,3 +309,30 @@ The synthetic [fixture](../tests/semantic/fixtures/disasm/ps_s_waitcnt_lgkm0_gap
 The same union scan after the rule translated and validated **491 / 668** programs and refused the same 177 classes. The exact wait was recovered in 30 programs, but each still reaches a later unsupported gap, so full-module closure is **0 programs** and the refusal manifest has 0 status changes. All **491** previously translating modules are byte-identical afterward (491/491; 0 changed, missing or added), verified by SHA-256 comparison. Scan outputs were temporary and outside the repository; after the identity check only these aggregate counts remain.
 
 This rule follows the current tree's decoder and existing no-op contract; peer materials were evidence-only and no peer implementation or fixture was used.
+
+## 16. One exact EXEC-low SGPR move in a decode gap
+
+### Measured sub-class
+
+A fresh GPU-free Python scan of the current 668-program request union, before this rule, translated and `spirv-val` checked **491 / 668** programs and refused 177: fall-through 165, cannot re-anchor 8, `v_cmp` destination 2, mask destination 1, and normalized encoding 1. An aggregate-only pass over those 165 fall-through refusals inspected 138 reachable four-byte gap candidates; exactly **23** decode as one complete, unmodified SOP1 `s_mov_b32 exec_lo, sN` with a one-dword SGPR source. No program identifiers or native instruction words are recorded.
+
+| refusal before this rule | programs |
+|---|---:|
+| fall-through into undecodable words | 165 |
+| undecodable words (cannot re-anchor) | 8 |
+| `v_cmp` destination | 2 |
+| mask destination | 1 |
+| reachable instruction with normalized encoding | 1 |
+| **total refused** | **177** |
+
+### Narrow rule and semantic fixture
+
+At a reachable fall-through only, the callback may restore a four-byte gap word when the next listed instruction starts exactly four bytes later. `scalar_smov_exec_lo_gap_word()` accepts only one complete RDNA2 decode whose raw bytes match and whose exact shape is `s_mov_b32 exec_lo, sN`: no modifiers, one ordinary single-dword SGPR source. It hands the recovered instruction to the existing EXEC-low semantics; this adds no new register, wave-mask, or control-flow lowering. The one-word recovery budget is shared with the plain-SGPR and exact-LGKM-wait gap rules. `exec_hi`, special or immediate sources (including VCC), wider/invalid/normalized words, and branch targets into data remain refused.
+
+The synthetic [fixture](../tests/semantic/fixtures/disasm/ps_smov_exec_lo_gap.s) and [CPU semantic test](../tests/semantic/test_smov_exec_lo_gap.py) verify the generated hidden SOP1 instruction through the existing interpreter: with the low EXEC source bit set, lane 0 exports; with it clear, no export occurs. `exec_hi`, VCC-source, and inline-immediate controls remain refused. This is wave32 synthetic coverage; no GPU, game program, or game bytes are used.
+
+### Closure and byte-identity check
+
+The same union scan after this rule translated and validated **491 / 668** programs and refused the same 177 classes. The 23 measured EXEC-low moves are restored, but every request-union status remains unchanged: these words do not close a full program, so net module closure is **0 programs**. All **491** previously translating modules are byte-identical afterward (491 common; 0 changed, none missing, none added), verified by SHA-256 comparison. The exact status transitions, scan outputs, and per-program refusal manifests stayed outside the repository and were discarded after comparison; only aggregate counts remain in this page.
+
+This rule uses this tree's own decoder and established EXEC semantics. Peer notes were read-only evidence; no peer code or fixture was copied, so no `NOTICE.md` entry is needed.

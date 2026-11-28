@@ -1443,13 +1443,15 @@ changed bound from other host/device conditions. No source or test code was adde
 P-30's alias/watch arm was not run after the two consecutive losses. Its status is recorded in
 [title_memory_model.md](title_memory_model.md); it is **not** a controlled negative about aliases or page-list activity.
 
-## 17. Pure policy slice: bounded ordered retirement for async completions
+## 17. Bounded ordered retirement, and the opt-in ordered-publication path
 
-**Status: helper and synthetic test only; not wired into `Queue::run` in this round.** This is a no-boot, rank-3-adjacent
-slice: if a future opt-in worker pool lets DirectStorage request work finish out of order, a bounded retirement gate must
-keep its observable completion entries in submission order. This code does not add workers, change the current queue,
-claim a streaming-speed improvement, or explain the title's current loading state. The current one-worker queue already
-executes `process(e)` and publishes the entry's result serially, so the gate is not needed by the measured default path.
+**Status: helper, synthetic test and the runtime integration behind `PALMETTO_DS_REAP_ORDER=1` (sections 17.2, 17.3 and
+17.5). The default serial path is unchanged and still the only behaviour a boot without the switch can show; no title
+boot or A/B was run by this slice.** This is a no-boot, rank-3-adjacent slice: if an opt-in worker pool lets DirectStorage
+request work finish out of order, a bounded retirement gate must keep its observable completion entries in submission
+order. This code does not claim a streaming-speed improvement or explain the title's current loading state. The current
+one-worker queue already executes `process(e)` and publishes the entry's result serially, so the gate is not needed by
+the measured default path; the integration adds two request-work lanes only when the switch is on.
 
 ### 17.1 Evidence and gap
 
@@ -1501,8 +1503,8 @@ caller-owned completion values.
 The standalone `stream_reap_test.cpp` source is host-only. It exercises switch parsing/default-off, a deliberately
 reversed completion sequence (`request 1`, status, signal, then `request 0`), the no-early-status invariant, first-failure
 folding in retirement order, capacity and slot reuse, duplicate/future/retired tickets, stable refusal names and the
-no-wrap boundary. No boot or game file is needed. This new test is not added to CMake in this slice; it is compiled
-standalone with the VS18 x64 environment so the main target/configuration files remain untouched:
+no-wrap boundary. No boot or game file is needed. The test is registered as the CTest `stream_reap` target; the standalone command
+below still works for a quick iteration without configuring the build:
 
 ```powershell
 cmd /d /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat`" && cl /nologo /EHsc /std:c++20 /W4 /permissive- /utf-8 /Fo:port\build\stream_reap_test.obj port\test\stream_reap_test.cpp /Fe:port\build\stream_reap_test.exe && port\build\stream_reap_test.exe"
@@ -1572,3 +1574,67 @@ Peer attribution for the evidence read here: VIctory (GPL-3.0-or-later, snapshot
 `crates/victory-hle/src/modules/dstorage.rs`, linked above). No peer code, comment text, identifiers or tables were copied.
 No `NOTICE.md` edit was made; the lead can add the reference note if the later runtime integration is adopted.
 
+## 17.5 Integrated slice (2026-11-27): the work/publication split behind the exact switch
+
+**What landed.** The pure policy is [the new ds_publication.h](../port/src/ds_publication.h) plus its synthetic test
+[ds_publication_test.cpp](../port/test/ds_publication_test.cpp); the runtime change is in
+[dstorage.cpp](../port/shims/dstorage.cpp) only. No other runtime file, `main.cpp`, `CMakeLists.txt` or `pe_loader.cpp`
+was touched, and no peer code was copied.
+
+- The policy header is host-only and carries the exact switch parser seam, the option gate, the first-failure fold and the
+  bounded ticketed publisher. It has no Windows header, no queue, no file and no worker; the runtime owns every side
+  effect and every lock.
+- `Queue` now has an execution half and a publication half. `execute_entry_work` reads the file range, inflates or
+  copies, updates the pending-request statistic, reports a completed streamed destination and drops the file's pending
+  count; `publish_one` applies the first-failure fold, the status array value, the fence signal, the event set, the
+  progress trace, the failure record and the reference release. The default worker calls `process` (work then
+  publication), the progress trace and the reference release exactly as before, so a boot without the switch keeps the
+  serial path.
+
+**The opt-in path.** With `PALMETTO_DS_REAP_ORDER=1` the queue's worker becomes two request-work lanes plus one publisher:
+
+- A lane takes the next submitted entry under the queue lock, admits it into the publisher's bounded retirement buffer
+  (fixed capacity 64, compile-time) *before* dispatch, and only then runs its work outside every lock. Tickets are issued
+  in the queue's own order, so a later entry can never be dispatched past an earlier one.
+- A full buffer is backpressure before dispatch: the lane waits for a retirement instead of running the entry. An
+  enqueue is never blocked by the switch; only the lanes are.
+- The publisher completes the payload (any finish order), drains the contiguous completed prefix and runs every entry's
+  publication, progress trace and reference release inside one publication mutex, in retirement order. The status array,
+  fence and event therefore observe enqueue order, and the status array reports the first failed request in enqueue
+  order, not the first failure in finish order.
+- A named refusal never drops or reorders a completion: `capacity_full` is ordinary backpressure,
+  `duplicate_completion`, `unknown_ticket`, `internal_slot_conflict` and `sequence_exhausted` are unreachable while
+  tickets are issued once under the queue lock, and are printed by name and failed closed if they ever appear.
+
+**Named refusals that keep the serial path.** `invalid_switch_value` (any spelling other than the accepted
+`1`/`on`/`yes`/`true`, including an over-long value), `staging_scratch_shared` (`PALMETTO_DS_STAGING` enables the
+queue's per-queue single-worker scratch, so two lanes must not share it), `allocation_failed` and `lane_unavailable`.
+Each prints at most one bounded line; an unset or explicitly negative switch prints nothing and allocates nothing.
+
+**Verification (no boot, no GPU, no game data).**
+
+- `ds_publication_test`: **85 checks, 0 failures**, including the section 17.4 falsifier (request 1 fails and the later
+  status/signal complete before request 0; nothing publishes early and the status reports request 0's failure), capacity
+  backpressure, both bad-completion refusals, the option gate and a two-thread lane test whose publication order must be
+  enqueue order.
+- The registered `stream_reap` and `dstorage` CTests still pass: `ctest -R "^(dstorage|stream_reap)$"` -> 2/2.
+- The changed translation unit is compile-verified with the VS18 x64 environment (the runtime target itself is the
+  lead's build gate): `cl /c /std:c++20 /EHsc /W4 /permissive- /utf-8` on `dstorage.cpp`, exit 0, no new warning.
+
+**CMake stanza for the lead** (new host-only test, no Windows imports):
+
+```cmake
+    add_executable(ds_publication_test test/ds_publication_test.cpp)
+    target_include_directories(ds_publication_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_options(ds_publication_test PRIVATE /W4 /permissive- /utf-8)
+    target_link_options(ds_publication_test PRIVATE /OPT:NOREF)
+    add_test(NAME ds_publication COMMAND ds_publication_test)
+```
+
+**Limits and the next falsifier.** The runtime integration is compile-verified, not measured: no title boot, no A/B and no
+performance claim. The section 17.4 title falsifier is unchanged and still the next step: a bounded trace with the switch
+on must show whether concurrent request work and buffered completions ever occur; if the peak buffered-completion count is
+zero the mechanism is unobservable for this title, it stays off, and no speedup may be claimed. Two further limits: with
+the switch on, two live requests from one queue that write overlapping destination bytes can interleave differently than
+the serial path (the one-time runtime line names this), and the buffer only backpressures the lanes, so a title that never
+lets an earlier entry finish would park the lanes after 64 pending completions rather than reorder them.

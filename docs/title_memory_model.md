@@ -498,3 +498,25 @@ range through a caller and report the arm result, active pages, trips/retries an
 advance the epoch and yield `changed`, while a second post-poll store should be detected again. An `unchanged` verdict
 with a stale shadow, a lost retried store, or a mapping change that still permits a skip would falsify the mechanism.
 The bindless arm omitted by the stop rule is recorded in [bindless_degradation.md](bindless_degradation.md#10-task-228-bindless-arm-not-run-after-the-stop-rule).
+
+## 14. Synthetic pageable-residency budget contract (2026-11-27)
+
+### Measured gap and scope
+
+The desktop D3D12 residency calls already have an intentional Vulkan answer. `D3D12Device::MakeResident` and `Evict` validate only the array shape and return `S_OK`; `SetResidencyPriority` accepts only heaps and committed resources; `EnqueueMakeResident` validates its flags/array and CPU-signals the supplied fence. Vulkan allocations remain usable until freed, with paging under pressure left to the Windows driver. The existing `d3d12_residency_test` covers 58 host-vs-layer steps across the pageable kinds it creates ([d3d12_vulkan.md](d3d12_vulkan.md#41-device-and-feature-queries)). The sparse-tile data model in `vulkan_backend.h` has `TileHeapAllocation` and `TileMapping` owners for individual mapped ranges, but that is not an aggregate pageable-residency budget. No live title budget counter, pageable lifetime census, or current resident-set byte total is established by the parity test. This slice therefore does not change or dispute the established API answer; it isolates the missing *accounting decision* that a future budget-aware caller would need before interpreting `DENY_OVERBUDGET`.
+
+### Opt-in logical set
+
+The CPU-only `rt::d3d12_residency::BudgetSet` contract is an opt-in logical model. Construction requires an explicit enabled value; the exact opt-in token is `PALMETTO_D3D12_RESIDENCY_BUDGET=1` (`switch_enabled_from_environment` accepts only the literal `1`). The helper is not wired into a runtime call site, so setting that variable in the current executable has no effect. With the helper disabled every operation returns `bypassed` without validating or mutating state; the current runtime remains byte-identical.
+
+A registered pageable has a stable synthetic ID and either no GPU backing (`allocation=0, bytes=0`) or a backing-allocation ID/size. Multiple pageable views can name the same backing (for example, a heap and a placed view); requests charge those bytes once while any view is resident. `make_resident` deduplicates objects and backing allocations, validates the full request before mutation, and refuses an over-budget request atomically only when the caller asks to deny over-budget. Calls that do not request denial may be reported as `accepted_over_budget`; the helper does not invent a GPU eviction. `evict` decrements the logical set, and `unregister_pageable` models object destruction. A zero budget means *unavailable*, not unlimited.
+
+Named refusals include `invalid_pageable_id`, `invalid_array`, `allocation_identity_missing`, `zero_allocation_bytes`, `pageable_identity_conflict`, `allocation_size_conflict`, `unknown_pageable`, `budget_unavailable`, `over_budget`, `accounting_overflow`, and `corrupt_accounting_state`.
+
+### Synthetic validation, limits, and falsifier
+
+The synthetic CPU test exercises switch-off no-op behavior, shared-backing deduplication, idempotent requests, atomic over-budget/unknown-object refusals, alias-preserving eviction, zero-byte pageables, object removal, missing-budget behavior, and overflow. It is synthetic CPU-only: no game data, Vulkan instance, GPU work, or boot. The ledger is not thread-safe and does not allocate, unmap, free, or physically evict `VkDeviceMemory`; callers must supply true backing-allocation sizes and serialize updates. A future runtime connection is falsified unless it has a measured budget source and reliable creation/destruction callbacks, and a low-budget synthetic comparison shows that the tracked resident set agrees with the actual pageable ownership transitions. A boot with no residency calls or no budget-sensitive state change would be a negative for title impact, not evidence that the peer's memory strategy was ported.
+
+### Peer evidence and attribution
+
+Read-only comparison used Five Star Recomp's published physical-memory and D3D12.X notes at `34b4dfed` (documented system-memory budget/headroom and an opt-in window-eviction prototype), VIctory's pinned memory/D3D12X material at `63bcca4`, and XCL's pinned D3D12X allocation/layout tests at `623d02e`. These are evidence only; no peer source, identifier, or data table was copied. The snapshots are pinned in [cleanroom_peers.md](cleanroom_peers.md), and peer license/attribution policy is recorded in [NOTICE.md](../NOTICE.md).

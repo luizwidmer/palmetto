@@ -3349,7 +3349,28 @@ Not implemented yet:
   "Fences, queues and frames in flight".)
 - Stream-output and mesh-shader statistics. (`GetClockCalibration` is implemented: see section 4.4, "Fences,
   queues and frames in flight".)
-- Xbox-specific query heap types (if any) are **Open**; unknown types are logged.
+- Xbox-specific query-heap types, if any, remain **Open**: no title proxy trace cited here identifies the heap types
+  actually created. Read-only peer pins checked for this slice: fivestar@34b4dfed is an NVIDIA shader-table guard,
+  victory@63bcca4 is a README status update that says its real queries are missing, and xcl@623d02e is an UMA memory
+  path; none proves Xbox query-type semantics. No peer code was copied.
+
+**Bounded readiness contract (task-255).** port/src/query_heap_readiness.h and the synthetic CPU test classify the
+known D3D12 heap values 0–7 without changing runtime code. The helper names value 6 `query_heap_type_6_unidentified`,
+keeps video decode (4) and `PIPELINE_STATISTICS1` (7) refused, requires `occlusionQueryPrecise` for occlusion heaps, timestamp
+period + valid queue timestamp bits for timestamp heaps and `pipelineStatisticsQuery` for pipeline statistics, and reports stream-output statistics as zero
+only while real stream output remains unavailable. It models the host's existing invalid descriptor bounds (zero count,
+node mask > 1, or type > 7). `PALMETTO_D3D12X_QUERY_HEAP_READINESS=1` is the exact opt-in for a future caller; the helper
+is **not wired** to `QueryHeap::create` or any COM path, so setting it currently changes nothing. Switch-off returns the
+legacy disposition and all default behavior remains byte-identical. The CPU test was compiled directly with VS18
+(`cl /nologo /std:c++20 /EHsc /W4 /permissive- /utf-8`) in `D:\leonida-work\scratch\query_heap_readiness` and passed
+`query_heap_readiness_test: OK (7 synthetic cases)`. The lead then registered `query_heap_readiness_test` as CTest
+`query_heap_readiness`, which passed 1/1 (0.07 s). No runtime call path changed; no GPU/title query was run.
+
+**Falsifier / next step.** A title-proxy trace reaching query-heap creation with value 6 (or a value beyond the current 0–7
+host envelope), followed by a controlled Begin/End/Resolve comparison against the Xbox behavior, falsifies the current
+unknown-type boundary. Lifting any named refusal requires that query type's result width/order and replay path to match a
+Windows D3D12 reference and pass a Vulkan GPU validation/readback test; absence of a trace is not evidence the title never
+uses the type.
 
 ### 4.7 Indirect commands and command signatures
 

@@ -5,8 +5,8 @@ four implemented ports (sections 8-9, 11 and 12, with their own tests and their 
 measurement (section 13, the movie draw-path probe, with its test and its one clean 300 s arm), one implemented
 instrument (sections 14-15, the Bink import-level witness, non-looping-movie fast-advance and the measured audio-surface
 negative, with their tests and the section-14 clean 300 s arm), their attribution (sections 8.7, 9.6, 11.7, 12.7, 13.8,
-14.8 and 15.6) and the uncommitted file lists (sections 10, 11.8, 12.8, 13.9, 14.9 and 15.7).** The five
-peer ports
+14.8 and 15.6), plus a conservative opt-in movie-readiness guard (section 16, synthetic contract tests, no boot) and its
+peer attribution/file note.** The five peer ports
 were re-cloned and read
 at the commits in section 1 to answer one question: how does a port get a movie from the title's
 `BinkOpenWithOptions` to a pixel on screen, and
@@ -1721,6 +1721,53 @@ Implementation: [bink_witness.h](../port/src/bink_witness.h) (audio-import metad
 [bink_witness_test.cpp](../port/test/bink_witness_test.cpp). Docs: this page. `port/src/main.cpp`, the CMake files,
 `NOTICE.md`, and `docs/README.md` are unchanged by this extension; no boot binary was relinked. No git write, game data,
 or audio bytes were added.
+
+## 16. Opt-in movie-readiness guard at the second-plane decision
+
+**Status: conservative runtime guard wired; no movie path is proven.** This small extension consumes the evidence contract of
+[docs/movie_overlay_readiness.md](movie_overlay_readiness.md) at the existing second-plane decision in
+[`xbox_present.cpp`](../port/shims/xbox_present.cpp). It does not add a Bink wrapper, decode call, upload, compositor, or new
+plane. The prior plane rule still decides whether plane 1 is a candidate; only the new exact opt-in can further suppress it.
+
+### 16.1 Switch and decision
+
+`PALMETTO_PRESENT_MOVIE_OVERLAY_READY_ONLY=1` requires a confirmed, ordered, identity-correlated registration -> decode -> upload
+-> successful two-plane-present chain before the already-selected plane 1 is included in the compose list. The switch is read
+once on the first candidate plane. Unset/empty/`0` is a passthrough; an unknown, too-long, or unreadable value is named and
+keeps the old decision. With `1`, the caller currently passes an empty event chain except for the explicit opt-in bit: no Bink
+registration, decode, or source-to-resource upload evidence producer is wired. Thus an eligible plane 1 is refused at
+`frame-registration-not-observed`; plane 0 remains presentable. That is deliberately conservative and is not a movie playback
+feature. The current `PresentX` plane descriptor does not identify movie versus another overlay, so the strict switch applies to every otherwise-selected plane-1 candidate; do not enable it when a separately verified non-movie overlay must remain visible.
+
+The pure helper also supports a complete correlated record. Synthetic tests exercise the strict positive case, each existing
+named refusal, parser strictness, the default passthrough, and the current runtime's first refusal. The runtime does not mark
+a stage `confirmed` from the mere presence of a return value or a second plane.
+
+### 16.2 Peer evidence and what differs
+
+The read-only XCL clone was verified at `623d02e465a17497a757a4ce867f482b0a6c8f3b` (GPL-2.0-only). In [`bink.rs` at that
+pin](https://github.com/xcl-dev/xcl/blob/623d02e465a17497a757a4ce867f482b0a6c8f3b/crates/xcl/src/hle/bink.rs), XCL leaves the
+shipped DLL's frame-buffer sizing/registration path intact. Separately, [`present.rs` at the same revision](https://github.com/xcl-dev/xcl/blob/623d02e465a17497a757a4ce867f482b0a6c8f3b/crates/xcl/src/hle/d3d12x/present.rs)
+consumes the title plane list and composes it. Those mechanisms establish a relevant boundary, not that this title has a movie
+overlay. Unlike the peer's presented-plane behavior, this local addition is a **readiness guard**, not a general plane compositor:
+it correlates our bounded opaque observation tokens and refuses unless each stage is independently confirmed. It does not copy
+peer code, comments, identifiers, signatures, table rows, or measurement values; it follows the local evidence gap and uses
+this repository's own switch, classifier, refusal set, and tests.
+
+### 16.3 Falsifier and limits
+
+No boot or GPU run was performed for this wiring. Existing evidence still records no movie buffer registration/decode, no movie
+plane upload, and one-plane `PresentX` samples. A future live falsifier for the current refusal is a measured registration
+confirmed from post-call buffer state, a decode on that same opaque decoder identity, a correlated upload/resource, and a
+successful two-plane present naming that same frame/resource as plane 1. Until then, the switch-on first refusal is expected
+and does not show that movie playback works. The synthetic full-chain test validates only the decision logic, not the source
+ABI, pixels, blend, layout, or GPU output.
+
+### 16.4 Attribution and files
+
+**Suggested NOTICE row for the lead (not applied here):** “The opt-in movie-overlay readiness guard described in [movie_overlay_readiness.md](movie_overlay_readiness.md) and this page's section 16 was informed as behavior evidence only by XCL (`623d02e465a17497a757a4ce867f482b0a6c8f3b`, GPL-2.0-only; Bink registration forwarding and multi-plane PresentX). The local gate, opaque evidence model, refusal behavior, and tests are independently implemented from Palmetto's measured frontier; no XCL source or data was copied.”
+
+Changed by this slice: [movie_overlay_readiness.h](../port/src/movie_overlay_readiness.h), [movie_overlay_readiness_test.cpp](../port/test/movie_overlay_readiness_test.cpp), `port/shims/xbox_present.cpp`, and this section; readiness details are in [movie_overlay_readiness.md](movie_overlay_readiness.md). `port/src/main.cpp`, PE-loader files, CMake, `NOTICE.md`, and peer clones are unchanged. The docs index already lists this page. No game/package data was added.
 
 
 

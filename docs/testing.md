@@ -124,45 +124,50 @@ Four repairs in the same pass are worth knowing while reading a red full build:
   `int3_skip_test` and `startup_trace_test` open a startup trace and compile `src/crash_unwind.cpp`. Both groups failed
   to link (`LNK2019`) before that, so their tests had never run.
 
-## Full local CTest inventory (2026-11-27, after recent slices)
+## Full local CTest inventory (2026-11-27, round-20 refresh)
 
-The configured Windows `port/build` tree listed 309 registered tests (CTest 4.4.5, `RelWithDebInfo`). Existing
-binaries were run serially; there was no build or relink. No `PALMETTO_*` game/package variables were set, no real
-game was booted, and the `run_tiny_game*` family uses only its synthetic fixture. The inherited malformed
-`GIT_CONFIG_*` environment was cleared for the test processes only.
+The configured Windows `port/build` tree listed 321 registered tests at 21:15 local (CTest 4.4.5, `RelWithDebInfo`,
+HEAD `db10358b1`). That is 12 more than the 12:17 table this section replaces: the loader-audit and rewrite targets
+(`pe_image`, `pe_image_fuzz`, `pe_mapper`, `pe_resolver`, `pe_loader_shadow`, `loader_core_audit`, `loader_bind_audit`,
+`loader_tls_audit`, `loader_selfcheck`), the peer slices (`stream_reap`, `movie_overlay_readiness`) and the P-48
+viewport target (`d3d12_viewport_array`). Existing binaries were run serially in seven batches of at most 45 tests; the
+shared build lock was held for each batch and released between them. The inventory started no build, set no
+`PALMETTO_*` game/package variable, and booted no game; the `run_tiny_game*` family used only its synthetic fixture. The
+inherited malformed `GIT_CONFIG_*` environment was cleared for the test processes only.
 
-The initial sweep used the five previously documented exclusions:
+Round-20 integration reconfigured `port/build` between batches (the CTest file hash changed before batches 6 and 7) and
+relinked a few loader and peer targets after their batch had run; the rows below are the binaries present at the start
+of the sweep and HEAD stayed `db10358b1`. The round-20 targets `pe_mapper_parity`, `pe_loader_shadow_wiring`,
+`loader_tls_race`, `loader_census`, `ds_publication`, `query_heap_readiness`, `d3d12_residency_budget`,
+`ui_input_script` and `d3d12_title_va` are registered in this round; their results are in the final-gate section below,
+not in this table.
 
-```powershell
-ctest --test-dir port/build -C RelWithDebInfo --output-on-failure --timeout 300 -j 1 `
-  -E '^(d3d12_fence_timing|vk_queue|d3d12_xdxr_rt|d3d12_xdxr_rt_check|xbox_present)$'
-```
-
-It stopped at test #176, `d3d12_vulkan_device`: the child remained running without progress, so the lead terminated
-both the child and CTest before a result or final summary was written. That target was not counted as a failure and was
-excluded from the remainder. The previous inventory had a similar stall after queue slots 15 and 14 were refused while
-waiting on a fence event; this attempt produced no fresh `VK_ERROR_DEVICE_LOST` evidence. The remaining tests used a
-120-second per-test limit and six exclusions; after a 17-test range stopped on its first ordinary failure, the final
-111 targets were run one at a time. All 111 completed without timeout or device-loss output.
-
-For each of those final 111 names, the serial bounded invocation was:
+`d3d12_vulkan_device` stalled at #176 in the 12:17 sweep and was externally terminated there; it was not retried in
+this refresh and stays excluded. The other five exclusions are unchanged from the 12:17 table:
 
 ```powershell
 ctest --test-dir port/build -C RelWithDebInfo --output-on-failure --timeout 120 -j 1 `
-  -R '^<one-remaining-test-name>$' `
+  -E '^(d3d12_fence_timing|vk_queue|d3d12_xdxr_rt|d3d12_xdxr_rt_check|xbox_present|d3d12_vulkan_device)$'
+```
+
+Every one of the 315 selected tests was then run serially in its own bounded invocation:
+
+```powershell
+ctest --test-dir port/build -C RelWithDebInfo --output-on-failure --timeout 120 -j 1 `
+  -R '^<one-test-name>$' `
   -E '^(d3d12_fence_timing|vk_queue|d3d12_xdxr_rt|d3d12_xdxr_rt_check|xbox_present|d3d12_vulkan_device)$'
 ```
 
 | Inventory measure | Count |
 | --- | ---: |
-| Registered in `port/build` | 309 |
+| Registered in `port/build` at the start | 321 |
 | Excluded from this inventory | 6 |
-| Selected after exclusions | 303 |
+| Selected after exclusions | 315 |
 | Disabled (`gameinput`) | 1 |
-| Executed | 302 |
-| Passed | 270 |
+| Executed | 314 |
+| Passed | 281 |
 | Skipped | 11 |
-| Failed | 21 |
+| Failed | 22 |
 
 The exact exclusions are intentional and are not counted as failures:
 
@@ -173,10 +178,11 @@ The exact exclusions are intentional and are not counted as failures:
 | `d3d12_xdxr_rt` | GPU-heavy ray-tracing target; withheld under the same device-loss policy. |
 | `d3d12_xdxr_rt_check` | GPU verifier paired with the excluded ray-tracing target. |
 | `xbox_present` | Previously hung in the per-origin present gate; not retried in this inventory. |
-| `d3d12_vulkan_device` | Stalled at #176 in this run and was externally terminated before CTest emitted a result. |
+| `d3d12_vulkan_device` | Stalled at #176 in the 12:17 sweep and was externally terminated there; not retried here. |
 
 `gameinput` is disabled in this build because it was configured without SDL3; `gameinput_nosdl` exercises the
-always-built backend. Eleven selected targets returned CTest's configured skip code:
+always-built backend. Eleven selected targets returned CTest's configured skip code, all for the same causes as the
+12:17 table:
 
 | Targets | Observed skip cause |
 | --- | --- |
@@ -189,31 +195,37 @@ always-built backend. Eleven selected targets returned CTest's configured skip c
 | `d3d12_rgb9e5_rtv` | RTX 4090 reported RGB9E5 render targets unavailable. |
 | `d3d12_first_light` | `PALMETTO_FIRST_LIGHT_DIR` is unset. |
 
-The 21 failures split into these groups:
+The 22 failures split into these groups; one of them, `xmem`, passed 3/3 when re-run alone:
 
 | Failure group | Failing targets | Current observed cause |
 | --- | --- | --- |
-| Queue slot 14 before `Signal` (15) | `device_proxy`, `device_proxy_trace`, `d3d12_debug_markers`, `queue_proxy`, `allocator_proxy`, `d3d12_present`, `d3d12_f16_halves`, `d3d12_compute`, `d3d12_fspx_compute`, `d3d12_msaa_draw`, `d3d12_geometry`, `d3d12_depth24_draw`, `d3d12_mesh`, `run_tiny_frame`, `run_tiny_frame_queue_test_settings` | Each test reaches console queue slot 14, which refuses the PC `Signal` call as a console-only method before `Signal`; the proxy cannot signal its fence. |
-| `d3d12_draw` known-flaky fixture | `d3d12_draw` | The oversized resource/heap refusals were followed by a non-shader-visible console descriptor heap reported as unbacked; the process segfaulted before the viewport draw. |
+| Queue slot 14 before `Signal` (14) | `device_proxy`, `device_proxy_trace`, `d3d12_debug_markers`, `queue_proxy`, `allocator_proxy`, `d3d12_present`, `d3d12_f16_halves`, `d3d12_fspx_compute`, `d3d12_msaa_draw`, `d3d12_geometry`, `d3d12_depth24_draw`, `d3d12_mesh`, `run_tiny_frame`, `run_tiny_frame_queue_test_settings` | Each test reaches console queue slot 14, which refuses the PC `Signal` call as a console-only method before `Signal`; the proxy cannot signal its fence. `d3d12_compute` now passes, so this group is 14 targets instead of 15. |
+| `d3d12_draw` stale oversized-heap case | `d3d12_draw` | Deterministic 3/3 (it used to crash): `CreateDescriptorHeap` with 2^24 shader-visible descriptors (512 MiB) is expected to answer `E_OUTOFMEMORY`, but the 1024 MiB arena default (`10b2a0ee5`, 2026-11-25) now holds it. A 2 GiB request instead reaches the console-heap path and fails `VirtualQuery` with error 87, so the case needs the layer owner; the test was left unchanged. |
 | Root-signature zero checksum | `root_sig` | The same two assertions failed: rewriting an all-zero-checksum Xbox blob and deserializing it after clearing the high flag byte. |
 | Depth-resolve refusal | `d3d12_depth_resolve` | Eight refused resolves returned `E_INVALIDARG` from `Close()` but still changed the destination; first error was `D24S8 depth AVERAGE rect 1`. The NVIDIA host quirks were informational. |
 | Bindless handle precondition (3) | `d3d12_set0_compute`, `d3d12_bindless_churn`, `d3d12_bindless_churn_validated` | The tests' `< 2^32` GPU-handle assertion fails for unbacked console descriptor heaps above the 32-bit handle window; this is the shared console-heap-addressing gate in [bindless_degradation.md](bindless_degradation.md#7-tests), not a bindless-table failure. |
+| Console scissor count (new) | `d3d12_close_parity` | One of 116 cases: recording `RSSetScissorRects(17)` and closing the list returns `0x80070057` from the layer while WARP succeeds. The bounded viewport/scissor slice (`dfe2337efe`) now refuses more than 16 rectangles, as it already did for viewports; the test still expected a match, so its expectation was corrected to the known layer-stricter class and the case passes after a relink (verified 2026-11-27 21:29). |
+| Flaky working-set check (new) | `xmem` | One of 545 checks, `writing to 512 of them charges about those 512 pages`, failed in the serial sweep and passed 3/3 in isolation; the measurement is working-set-sensitive and host load from concurrent builds can move it. |
 
-The recently repaired tests are now passing against the existing binaries: `shader_library`, `d3d12_com`,
-`d3d12_descriptor`, `d3d12_execute_indirect_validation` (49 cases, with its five known layer/reference divergences
-reported separately), `crt_timed_wait`, `file_system`, `xmem`, `buffer_va_index` and `d3d12_xmem_placed`. Also passing
-are `root_signature`, `root_signature_oracle`, `d3d12_console_descriptor_heap`, `d3d12_set_descriptor_heaps`,
-`viewport_replay_readiness`, and all ten `run_tiny_game*` tests, including the abort-exit-code and directory-path checks.
-`run_tiny_game_dir` confirms the `check_game_dir` path probe; the synthetic file round-trip fixture's 8-byte write/read
-count correction is effective. No stale path or test expectation was changed during this inventory.
+The recently repaired tests are still passing: `shader_library`, `d3d12_descriptor`,
+`d3d12_execute_indirect_validation` (49 cases, with its five known layer/reference divergences reported separately),
+`crt_timed_wait`, `file_system`, `buffer_va_index` and `d3d12_xmem_placed`. Also passing are `root_signature`,
+`root_signature_oracle`, `d3d12_console_descriptor_heap`, `d3d12_set_descriptor_heaps`, `viewport_replay_readiness`,
+and all ten `run_tiny_game*` tests, including the abort-exit-code and directory-path checks. All loader and rewrite
+targets passed: `loader`, `pe_loader`, `pe_loader_bounds`, `pe_loader_fuzz`, `loader_tls`, `pe_image`, `pe_image_fuzz`,
+`pe_mapper`, `pe_resolver`, `pe_loader_shadow`, `loader_core_audit`, `loader_bind_audit`, `loader_tls_audit` and
+`loader_selfcheck`; `d3d12_viewport_array` passed in 1.2 s, and the pure `viewport_replay_readiness` target passed too.
 
-The pure `viewport_replay_readiness` target passed. The separate focused GPU run had already read back the expected green
-pixel for the two-viewport case with zero Vulkan validation errors; this CTest's `d3d12_draw` process crashed earlier in
-its allocation/descriptor-heap path and did not reach that viewport draw. The standalone result is recorded separately
-in [d3d12_vulkan.md](d3d12_vulkan.md); the earlier post-draw title-VA crash remains a separate known limit.
+The separate focused GPU run had already read back the expected green pixel for the two-viewport case with zero Vulkan
+validation errors; this sweep's `d3d12_draw` failed before that viewport draw, at the oversized-heap case above. The
+standalone result is recorded separately in [d3d12_vulkan.md](d3d12_vulkan.md); the earlier post-draw title-VA crash
+remains a separate known limit.
 
-No source or runtime code was changed for this inventory, and no build was run. The failures above are recorded for
-follow-up rather than hidden by disabling tests or changing runtime behavior.
+Two test-side expectations were found stale and one of them was corrected: `d3d12_close_parity`'s scissor case now
+records the layer's intended stricter result, while `d3d12_draw`'s arena-sized case is recorded for its owner instead of
+being weakened. No runtime code was changed for this inventory and the inventory itself started no build. The CI jobs
+`translator-tests`, `stdlib-tests-linux`, `viewer-tests`, `semantic-tests` (Ubuntu) and `macos-python` were already
+failing on `main` before this refresh; they are pre-existing and were not re-run here.
 
 ## Build, artifact, and single-test notes
 

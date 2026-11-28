@@ -2,7 +2,8 @@
 
 Status: implementation measured on one boot (numbers in section 5). Frame **content** is a separate frontier and is not
 claimed here: the window is still black for the reasons docs/page_content.md and docs/texture_layout.md measure. This
-page is about window identity and count only.
+page records window identity/count; section 8 separately records the P-02 frame-signature/input
+boundary, not a frame-content claim.
 
 The presentation core (docs/present_wiring.md) presents PresentX without a DXGI swapchain. The window it presents into
 is therefore the runtime's own choice, and that choice used to produce a second window. This page records the measured
@@ -291,3 +292,44 @@ armed marker, then the `GetDisplayModeList1`/actual callsite count and fill resu
 `{current_width,current_height,120,1}` record, followed by state flag `1` and refresh `120/1`. An armed marker with no mode
 API sample attributes the path as not reached in that window; a fill that returns 120/1 followed by `0`/`60/1` falsifies
 the measured consumer path. No game data is needed.
+
+## 8. P-02 screen-state input boundary
+
+The adopted HWND is a presentation destination, not an input-sample source. Choosing the
+title's visible window and creating/recreating a swapchain on its client area do not provide
+a CPU-readable frame signature to GameInput. The existing timed first-run script therefore
+continues to refuse a live `screen:` trigger until a presenter-to-input sample path is measured
+([peer_port_first_ui.md](peer_port_first_ui.md), section 18.3).
+
+[The pure helper](../port/src/ui_input_script.h) adds a single-block state machine over the
+existing 32x18 luma matcher: two consecutive matches start a one-button press (default 300 ms);
+it emits an explicit neutral/release edge, waits 1.2 s and retries while the same screen
+remains, then completes after two consecutive mismatches. The default whole-block timeout is
+30 s. Missing/unconfigured signatures, missing/wrong-size frame samples, backwards clocks,
+caller aborts, malformed switch values, and timeouts are named; an abort/timeout while holding
+emits release. Its switch parser
+recognizes only exact `PALMETTO_UI_INPUT_SCRIPT=1` as enabled (`unset`, empty, `0`, and exact
+`off` are disabled); malformed values and a caller-reported conflict with `PALMETTO_FAKE_INPUT`
+or `PALMETTO_FIRST_RUN_SCRIPT` are refusals. The helper does not read the process environment,
+capture the window, contain a screen template, or inject input, and no runtime caller uses it
+yet. Setting this variable in the current executable has no effect; default window and
+GameInput behavior remain unchanged.
+
+The state machine is synthetic-only in this slice. The registered `ui_input_script_test`
+target ([port/CMakeLists.txt](../port/CMakeLists.txt)) checks exact opt-in, hold/release/retry
+edges, stable screen changes, timeout/abort paths, and named bad-input refusals with hand-built
+luma arrays. The registered CTest passes 1/1 and the executable reports 5/5 cases. These are
+not a title-input or frame-content proof; they exercise no live screen feed or input injection.
+A future live adapter needs a measured presented-frame-to-GameInput feed; its falsifier is a
+stable sample stream
+showing that the target screen cannot be distinguished under the bounded matcher tolerance,
+in which case screen-triggered input is not safe to enable.
+
+Behavior comparisons only: Five Star Recomp's [first-run input blocks]
+(https://github.com/ThatRecompDev/five-star-recomp/blob/34b4dfed/docs/first-run.input) and
+[screen watcher](https://github.com/ThatRecompDev/five-star-recomp/blob/34b4dfed/src/FiveStar.Loader/Shims/Input/InputScriptWatcher.cs)
+hold a mapped button and retry until the screen changes; XCL's [GameInput test schedule]
+(https://github.com/xcl-dev/xcl/blob/623d02e/crates/xcl/src/hle/gameinput.rs) and VIctory's
+[GameInput path](https://github.com/Marvisak/VIctory/blob/63bcca4/crates/victory-hle/src/modules/gameinput.rs)
+evidence shorter timed holds. No peer code, screen signature, comment, or game data was copied;
+the implementation uses this tree's separate 32x18 matcher and its own synthetic cases.

@@ -2896,7 +2896,7 @@ the measured title-buffer window model, not a claim that the peers share one imp
 
 ## 24. Outside-arena title-VA window device adapter
 
-**Status: implemented behind `PALMETTO_TITLE_VA_WINDOWS`; portable/replay-lookup units pass; manual production BDA probe on RTX 4090/256 MiB arena accepted the window, but the test's final CPU pixel assertion was blocked by queue-slot-14 `Signal`; dedicated Title-VA CTest is deferred as P-48.**
+**Status: implemented behind `PALMETTO_TITLE_VA_WINDOWS`; portable/replay-lookup units pass; the P-48 synthetic GPU CTest is registered and builds. Its earlier validation-off run passed, but the current validation-on run reaches the final `vk.validation_errors() == 0` assertion with a nonzero count, so it is not a clean pass. The separate production-BDA probe accepted a window but its final CPU pixel assertion remains blocked by the Xbox queue-slot-14 `Signal` proxy; the test-hook run does not close that production-path limit.**
 This extends section 23's tested policy into the Vulkan device path. The public runtime switch is strict: unset/false keeps the prior
 external-host import path; an explicit true value selects the window adapter; malformed text logs `invalid_switch` and refuses
 new raw spans. The off branch installs no window allocator/resolver, creates no window Vulkan objects, and keeps the existing
@@ -2977,13 +2977,25 @@ source-page pull callback. The hook seam bypasses only production `create_title_
 copy; `VulkanContext` submission registration, `buffer_at` replay lookup, D3D12 draw and GPU readback were exercised. The
 reported manual result was `raw ... registered and resolved; pulled readback 21 43 65 87 -> 9a bc de f0`; assertions
 covered one backing, two pulls, an out-of-window view refusal (`alias_view_out_of_bounds`), and an overlapping immediate
-write refusal (`write_buffer_immediate_unsupported`). The validation-off console log was not retained; the overall draw
-CTest invocation later failed at an unrelated stale 512 MiB heap-OOM expectation (line 730), so that full target result is
-not green evidence for this slice. This manual arm covers direct vertex-view resolution only: it does not test production
-BDA placement/`TitleVaAliasTable`, `ConsoleVaMap` root/table/V# rebasing, or arbitrary shader UAV writeback. The test hooks
-remain a test-only seam; the shared `d3d12_draw_test` source is byte-identical to baseline in the final tree. The P-45
-production measurement below used a temporary env-gated branch and restored it after the one run. A dedicated GPU CTest
-target is deferred as P-48.
+write refusal (`write_buffer_immediate_unsupported`). The validation-off console log was not retained. That historical `d3d12_draw`
+invocation did not reach its CPU pixel assertion because it used the Xbox queue `Signal` proxy; its full CTest run also hit a stale
+512 MiB heap-OOM expectation (line 730), so it remains incomplete. The P-48 synthetic GPU CTest is registered as `d3d12_title_va`.
+Its earlier validation-off run passed 1/1; the updated CTest honors `PALMETTO_VK_VALIDATION=1` and ran on the RTX 4090 (not skipped),
+but failed at the final `vk.validation_errors() == 0` assertion because the validation-error count was nonzero. It reached and passed all
+42 preceding `EXPECT` call sites plus the direct policy/pixel checks; the final assertion is the 43rd call site. Functional coverage includes
+the test-hook registration log, one coherent `VkBuffer`, raw-VA `buffer_at` resolution, page-pull/data equality, and pixel readback
+`35 ff c1 ff`; the CPU `TitleVaAliasTable` case and GPU submissions observed named `alias_view_out_of_bounds` and
+`write_buffer_immediate_unsupported` refusals with `unresolved_resource`, and WBI leaves the synthetic source bytes unchanged. CTest output
+The CTest log has no emitted `validation:` line: validation mode installs a debug messenger, but the test's `StderrCapture`
+redirects stderr during each `ExecuteCommandLists` and retains the captured text without replaying it on the final failure. The
+counter is global to the test process; `known_validation_errors()` only counts NVIDIA sRGB-swapchain VUID `0xc036022f`. This test
+calls `vk.initialize()` with its default `presentation=false` and leaves `VulkanDeviceInfo::presentation` false, so it does not
+exercise a swapchain/presenter and there is no evidence to accept the count as that known exception. Exact origin/count is unknown;
+validation-on reports a nonzero counter with no emitted message and is tracked for the next round. The test uses a caller-supplied Vulkan device and a PC-ABI D3D12 device/list;
+the real queue `Signal` plus fence/event waits replace the Xbox proxy.
+The hook target still bypasses production `create_title_va_window` BDA allocation/resolution and its copy. It does not verify production
+BDA placement or `ConsoleVaMap` root/table/V# rebasing, nor arbitrary shader UAV writeback. The shared `d3d12_draw_test` source
+remains unchanged. The P-45 production measurement below used a temporary env-gated branch and restored it after the one run.
 
 **Production BDA ordering measurement (validation off, no game data):** with `PALMETTO_TITLE_VA_WINDOWS=1`,
 `PALMETTO_ARENA_MB=256`, empty test hooks, and Vulkan buffer-device-address enabled, a synthetic committed host span
@@ -3006,11 +3018,12 @@ above the arena. No relaxed check was added: below-base candidates still must re
 the shader requires `heap_base + console_va` and cannot represent a negative delta. No game bytes, game shaders, package
 paths, extracted tables, or title boot were used.
 
-**Synthetic-arm falsifier:** the first draw must log window registration, the hook must allocate one backing and resolve
-both valid draws, both readbacks must match their respective source bytes, and the second draw must invoke the pull hook;
-the two negative controls must return `unresolved_resource` with their exact names and submit no bad address. Missing
-registration/resolution/pull, stale or mismatched GPU bytes, a successful bad-view/write submission, or device loss falsifies
-this measured replay arm. Absence of host-coherent memory for the test buffer is an explicit skip, not a pass.
+**Synthetic-arm falsifier:** the P-48 test must execute (not return skip 77), log window registration, allocate one coherent backing,
+resolve the raw vertex VA, invoke the page-pull hook, and read the expected `35 ff c1 ff` pixel from GPU-produced output. Its out-of-window
+and `WriteBufferImmediate` submissions must each return `unresolved_resource` with `alias_view_out_of_bounds` and
+`write_buffer_immediate_unsupported`, respectively; the rejected WBI must leave the original synthetic bytes unchanged. Missing
+registration/resolution/pull, stale or mismatched GPU bytes, a successful bad-view/write submission, any nonzero Vulkan validation-error
+count, or device loss falsifies a clean replay run. Absence of a usable Vulkan BDA device or host-coherent hook buffer is an explicit skip, not a pass.
 
 **Production-adapter falsifier / remaining limit:** the measured 256 MiB RTX 4090 run had hooks empty and a candidate
 `BDA >= arena_end`; it registered, pulled the raw page five times, and returned a successful draw submission. The expected

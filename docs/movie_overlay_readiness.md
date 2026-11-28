@@ -1,8 +1,6 @@
 # Movie overlay readiness contract
 
-**Status: pure, opt-in readiness contract only.** No runtime caller is wired, no Bink call is synthesized, and no plane or
-frame is changed. The current measurements do not reach frame-buffer registration, per-frame decode, or a movie overlay;
-this slice makes those prerequisites explicit and testable without claiming that the movie path works.
+**Status: pure readiness contract plus a conservative opt-in consumer at the second-plane decision.** The runtime does not synthesize a Bink call, decode, upload, or plane. The current measurements do not reach frame-buffer registration, per-frame decode, or a movie overlay. `PALMETTO_PRESENT_MOVIE_OVERLAY_READY_ONLY=1` makes a would-be plane-1 candidate conditional on the complete evidence chain; because no registration/decode/upload producer is wired, an eligible candidate is refused at `frame-registration-not-observed`. Unset/empty/`0` preserves the previous plane decision.
 
 ## Evidence and scope
 
@@ -43,31 +41,18 @@ it must not be inferred from an unmeasured return value. The helper does not val
 XG layout, plane flags, color space, blend mode, or GPU correctness. More than two planes are explicitly unsupported by
 this contract.
 
-`Evidence{}` defaults to `opt_in == false`; `evaluate` immediately returns `opt-in-off`, even if synthetic event fields
-are populated. Opting in only evaluates a supplied evidence record: it performs no I/O, logging, allocation, memory write,
-Bink call, or presentation. Since there is no runtime caller, the default executable path and its bytes are unchanged.
-This is not a new environment switch and does not enable movie playback.
+`Evidence{}` defaults to `opt_in == false`; `evaluate` immediately returns `opt-in-off`, even if synthetic event fields are populated. The helper itself is pure and performs no I/O, logging, allocation, memory write, Bink call, or presentation. The caller opts in only when `PALMETTO_PRESENT_MOVIE_OVERLAY_READY_ONLY=1`, and currently passes an otherwise-empty record because no measured producer supplies registration/decode/upload evidence. At the second-plane decision, an opted-in non-ready chain refuses plane 1 by its first named reason; it does not alter plane 0. With the switch unset/empty/`0`, or with an invalid/too-long/unreadable value, the old gate is retained (invalid configuration is named once). The option is a conservative visibility gate, not movie playback or a decoder.
+
+The switch is read once on the first candidate second plane. The current `PresentX` path does not classify plane 1 as movie versus another overlay, so enabling this strict option requires every otherwise-selected plane-1 candidate to satisfy the movie evidence chain; do not enable it where an independently verified non-movie overlay must remain visible. It never changes the title's Bink exports, buffers, or upload path.
 
 ## Tests
 
-[`movie_overlay_readiness_test.cpp`](../port/test/movie_overlay_readiness_test.cpp) uses only synthetic IDs. It checks the
-byte-identical-off contract, each stage's named refusal, ordering and identity mismatches, unsupported plane counts, and a
-fully correlated synthetic two-plane chain. It needs no GPU, boot, package, or game data. The standalone test is not
-registered in CMake because this slice intentionally does not modify CMake; compile and run it with the VS18 environment
-as described in the task report.
+[`movie_overlay_readiness_test.cpp`](../port/test/movie_overlay_readiness_test.cpp) uses only synthetic IDs. It checks the default-off contract, exact switch parsing, the legacy passthrough, each stage's named refusal, ordering and identity mismatches, unsupported plane counts, an opted-in incomplete-chain refusal, and a fully correlated synthetic two-plane chain that the gate permits. It needs no GPU, boot, package, or game data. The existing `movie_overlay_readiness_test` target and `movie_overlay_readiness` CTest are already registered in `port/CMakeLists.txt`; this slice does not modify that lead-owned file. VS18 build succeeded and `movie_overlay_readiness` passed 1/1. `xbox_present_test.exe` was built only to compile/link the changed shim, not run because the test needs a Vulkan GPU/window; no GPU or boot was run.
 
-## Falsifier and later integration point
+## Runtime gate falsifier and evidence limit
 
-The current first refusal with opt-in requested is `frame-registration-not-observed`. A future clean arm falsifies that
-readiness result only when it yields a correlated chain: a title-owned registration confirmed by the player's post-call
-buffer state, a completed frame on the same handle, the matching plane upload/resource, and a successful two-plane
-`PresentX` containing that resource as plane 1. A registration without decode, a decode without a matching upload, or a
-one-plane present is not evidence for the overlay route. If the title remains in its measured playing state while
-registration stays at zero, this overlay contract is not the current boot blocker; return to the title-side draw/load
-falsifiers already recorded in [peer_port_movie.md](peer_port_movie.md#3-comparison-with-our-chain).
+The current first refusal with opt-in requested is `frame-registration-not-observed`. If the existing plane rule selects a plane-1 candidate, the runtime consumer in `port/shims/xbox_present.cpp` currently supplies no Bink or texture events, so the strict gate is expected to refuse that candidate at this name; that is an explicit negative/guard result, not proof that the movie path works or that the title registered no buffers in an unmeasured run.
 
-If that evidence is ever measured, the exact consumption point is the existing second-plane decision in
-`port/shims/xbox_present.cpp`: after the `PresentX` plane list is validated and before its second-plane composition rule
-is applied. A later, separately coordinated change would populate the evidence record from the Bink witness's measured
-registration/decode observations and the texture-upload path's source-to-resource association. This task does not edit
-that shared shim, `main.cpp`, CMake, or any peer clone.
+A future clean arm falsifies that readiness result only when it yields a correlated chain: a title-owned registration confirmed by the player's post-call buffer state, a completed frame on the same handle, the matching plane upload/resource, and a successful two-plane `PresentX` containing that resource as plane 1. A registration without decode, a decode without a matching upload, or a one-plane present is not evidence for the overlay route. If the title remains in its measured playing state while registration stays at zero, this overlay contract is not the current boot blocker; return to the title-side draw/load falsifiers already recorded in [peer_port_movie.md](peer_port_movie.md#3-comparison-with-our-chain).
+
+The consumption point is the second-plane decision in `port/shims/xbox_present.cpp`, after plane-list validation and the existing rule/flag decision but before `PresentPlanes` is assembled. `PALMETTO_PRESENT_MOVIE_OVERLAY_READY_ONLY=1` refuses an otherwise-composed plane unless its supplied evidence record is ready. This task intentionally does not populate registration/decode/upload from the Bink witness or infer source-to-resource association; a future measurement plus a separately reviewed evidence producer is required before this guard can allow a movie plane. No Bink ABI, content, or upload behavior is changed.
