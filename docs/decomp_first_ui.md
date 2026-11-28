@@ -1857,3 +1857,28 @@ Three linked results from the producer-side round:
 `PALMETTO_TITLE_FRAME_REQUEST=1` produces exactly one `body-present-pass` with keys `1/1`, after which AC clears and the
 body stops being ticked. Both are still synthetic or one-shot producer edges; the PLM shim is the route that the real
 app-state sequence uses. No menu pixel is claimed.
+
+### 20.11 The natural + app-state-notification window: continuous presentation and UI draws, still black
+
+With `PALMETTO_TITLE_APPSTATE_CALLBACK=1` (deferred PLM notification) and the class-0xa mitigation, **no forced session-3
+completion**: the title takes init 3 at 52 s and **session 1 -> 3 at 52 s**, then holds session 3 while it keeps
+presenting. A 300 s arm recorded 703,326 D3D12 calls, 6,535 presents, UI batch-build/submit 4,096 (cap) with **2,332
+entries in the >=3 bucket**; a 480 s arm recorded 1,738,130 D3D12 calls, **18,642 presents**, 15,604 `DrawInstanced` +
+69,023 `DrawIndexedInstanced`, 43,299 `SetPipelineState`, UI batches 2,060 in the >=3 bucket, **ALIVE 480.2 s, 0
+exceptions**. This is the first route where the title renders continuously for minutes instead of freezing or crashing.
+
+Measured present: `PresentX` carries **1 plane** (3840x2160, source rect full, placement full, rule fill ->
+2564x1421 swapchain; `plane 0 token ... resources 1`), and every capture (3,541 presented frames, 60 sampled) is mean
+RGB 0/0/0. The loading record still does not complete: session 3 is the state-3 poll and it holds for the whole 480 s
+(loading tick advances ~1000/s, so the loading worker is busy). The earlier forced-completion arms advanced session to 13
+but then null-dereferenced in the loading/upload workers (`game+0x6EB759` while the arena was full; `game+0x5151E29` in
+the texture-upload job when `param_1+0x38` is null) - i.e. the loaded-record completion without the streamed content
+produces jobs whose resources do not exist.
+
+**Verdict for P-75:** the correct producer route (PLM app-state notification) now runs and keeps the title presenting and
+drawing for 480 s, but the loaded-content wall remains: the state-3 loading record does not complete on its own, and
+completing it artificially reaches session 13 only to have the upload workers dereference resources that the real
+stream never delivered. Next: instrument the loading record entry 4 (the 0x50-byte entry the 0x41E8C0 poll reads) with
+its progress fields and the slot gates, to separate "still streaming" from "stuck on a missing job/answer"; if it is
+streaming, extend the window; if stuck, the completion writer's condition (DirectStorage chunk job / stream gate) is the
+next fix. No menu pixel is claimed.

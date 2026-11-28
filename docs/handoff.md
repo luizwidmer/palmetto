@@ -405,3 +405,10 @@ or worker event, not session completion. Evidence: `D:\leonida-work\fsrstable\bo
 - The crash reporter now names null calls (walks `[rsp]` when `Rip == 0`; `PALMETTO_CRASH_STACK=1` raw words).
 - `port/shims/appnotify.cpp` (PALMETTO_TITLE_APPSTATE_CALLBACK=1) delivers the deferred PLM app-state notification; it renders normally and reaches stage 3 / session 13, then stops at a new loading-worker null `game+0x5151E29` (media tick stack). Next: attribute that worker null; the H2 producer route is now reachable.
 - Evidence: `D:\leonida-work\fsrstable\boot-menus-r24-arena`, `-r24-ad`, `-r25-appnotify`, `-r25b-appnotify`; page section 20.10.
+
+### Natural app-state window (round 4)
+
+- With `PALMETTO_TITLE_APPSTATE_CALLBACK=1` and NO forced session-3 completion, the title takes init 3 / session 3 at 52 s and keeps presenting: 480 s arm ALIVE with 1.74M D3D12 calls, 18,642 presents, 84k draws, UI batches 2,060 post-stage-3, 0 exceptions.
+- PresentX carries 1 plane (3840x2160 full-rect -> 2564x1421), and every capture is still mean RGB 0/0/0. Session 3 (the loading-record poll) holds for the whole run while the loading tick advances ~1000/s.
+- Forced completion reaches session 13 but the upload workers then null-deref (game+0x6EB759 under arena pressure; game+0x5151E29 in the texture-upload job, param_1+0x38 null), i.e. completion without streamed content creates jobs with missing resources.
+- Next: instrument loading record entry 4 progress fields + slot gates to separate "still streaming" from "stuck"; then fix the completion writer condition (DirectStorage chunk job / stream gate). Page section 20.11.
