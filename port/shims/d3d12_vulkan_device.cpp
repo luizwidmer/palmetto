@@ -42,6 +42,7 @@
 #include "../src/device_health.h"  // opt-in, bounded loss attribution; no driver fault-info query
 #include "../src/console_texture.h"  // the console's depth-stencil + unordered-access translation (docs/3d_textures.md)
 #include "../src/title_va_alias.h"  // opt-in outside-arena title-VA BDA windows (docs/vertex_buffer_va.md)
+#include "../src/query_heap_readiness.h"  // opt-in query-heap preflight at CreateQueryHeap (docs/d3d12_vulkan.md 4.6)
 
 #include <chrono>
 #include <vulkan/vulkan_win32.h>
@@ -11007,6 +11008,30 @@ public:
             UINT(desc->Type) > UINT(D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS1))
             return E_INVALIDARG;
         if (!out) return E_UNEXPECTED;
+        // Opt-in readiness preflight (round-21 T15, docs/opt_in_switches.md): only the exact
+        // PALMETTO_D3D12X_QUERY_HEAP_READINESS=1 enables it, and with it unset no environment read happens here and the
+        // path below is byte-identical. When set, the measured contract in src/query_heap_readiness.h decides whether
+        // this type/count/node can produce a result: a refusal is returned before any allocation with the contract's
+        // named reason, and a ready/ready_zero type continues through the existing creation path unchanged.
+        if (palmetto::query_heap_readiness::enabled()) {
+            namespace readiness = palmetto::query_heap_readiness;
+            const readiness::Capabilities caps{state_.context->timestamp_period() > 0.0,
+                                               state_.clock.timestamp_valid_bits > 0,
+                                               state_.info.pipeline_statistics_query,
+                                               false,  // no stream output path yet: SO queries resolve zero
+                                               state_.info.occlusion_query_precise};
+            const readiness::Assessment assessment = readiness::assess(
+                readiness::Descriptor{UINT(desc->Type), desc->Count, desc->NodeMask}, true, caps);
+            const readiness::Action action = readiness::action_of(assessment);
+            if (readiness::is_refusal(action)) {
+                std::fprintf(stderr,
+                             "[rt] d3d12: query heap readiness refused type %s count %u node %u: %s "
+                             "(PALMETTO_D3D12X_QUERY_HEAP_READINESS)\n",
+                             readiness::type_name(assessment.type), desc->Count, desc->NodeMask,
+                             readiness::reason_name(assessment.reason));
+                return action == readiness::Action::refuse_invalid_argument ? E_INVALIDARG : E_NOTIMPL;
+            }
+        }
         auto* heap = new QueryHeap(state_);
         heap->attach_device(identity());
         if (const HRESULT hr = heap->create(*desc); FAILED(hr)) {

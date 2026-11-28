@@ -19,6 +19,7 @@
 #include "test_temp_dir.h"
 #include "vk_test_device.h"
 #include "d3d12_test_shaders.h"
+#include "pc_heap_desc.h"
 #include "../shims/d3d12_com.h"
 #include "../shims/d3d12_xs_device.h"
 #include "../src/shader_library.h"
@@ -194,15 +195,17 @@ int main() {
             }
 
         // The two heaps; their start handles come back in RAX (heap slots 9 and 10). Shader-visible heaps live in
-        // the GPU address arena, so the GPU handles are console VAs and the bytes the views and the samplers wrote
-        // are what the shader loads.
-        const D3D12_DESCRIPTOR_HEAP_DESC view_heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 4,
-                                                        D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
-        const D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 2,
-                                                           D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
+        // the GPU address arena, so the GPU handles are low arena VAs (asserted below) and the bytes the views and
+        // the samplers wrote are what the shader loads. The descriptions are zero-tailed (pc_heap_desc.h): a PC heap
+        // description is 16 bytes, and the two follower words are the console-extended slot-14 form, so leaving
+        // them to the stack would let a saved value take the console-heap path.
+        const PcHeapDesc view_heap_spec{{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 4,
+                                         D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0}};
+        const PcHeapDesc sampler_heap_spec{{D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 2,
+                                            D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0}};
         Ref<ID3D12DescriptorHeap> view_heap, sampler_heap;
-        EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&view_heap_desc, IID_PPV_ARGS(&view_heap.p))));
-        EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&sampler_heap_desc, IID_PPV_ARGS(&sampler_heap.p))));
+        EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&view_heap_spec.desc, IID_PPV_ARGS(&view_heap.p))));
+        EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&sampler_heap_spec.desc, IID_PPV_ARGS(&sampler_heap.p))));
         const std::uint64_t view_cpu = reinterpret_cast<XboxHeapHandleFn>(slot(view_heap.p, 9))(view_heap.p);
         const std::uint64_t view_gpu = reinterpret_cast<XboxHeapHandleFn>(slot(view_heap.p, 10))(view_heap.p);
         const std::uint64_t sampler_cpu = reinterpret_cast<XboxHeapHandleFn>(slot(sampler_heap.p, 9))(sampler_heap.p);

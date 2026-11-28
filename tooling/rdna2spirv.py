@@ -17457,6 +17457,29 @@ def scalar_waitcnt_lgkm0_gap_word(blob, pc):
     return ins
 
 
+def scalar_s_clause_gap_word(blob, pc):
+    """Decode only the measured four-byte SOPP `s_clause 3` gap.
+
+    `s_clause` is already in NOOPS, so recovering this exact word adds no execution effect. Other immediates,
+    instructions, widths, and raw/decoded encoding disagreements stay refused.
+    """
+    raw = blob[pc:pc + 4]
+    if len(raw) != 4:
+        return None
+    import rdna2_decode     # on demand: only a listing with a skipped word reaches this path
+    decoded = rdna2_decode.decode_bytes(raw, mcpu="gfx1030", code_start=pc)
+    if decoded["invalid"] or len(decoded["insns"]) != 1:
+        return None
+    ins = decoded["insns"][0]
+    if (ins.get("op") != "s_clause" or len(ins.get("enc", "")) != 8 or
+            bytes.fromhex(ins["enc"]) != raw or ins.get("mods") or len(ins.get("args", ())) != 1):
+        return None
+    operand = ins["args"][0]
+    if operand.get("k") != "imm" or operand.get("v") != 3:
+        return None
+    return ins
+
+
 def check_printed_encodings(path, info):
     """A listing without undecodable words is translated from LLVM's text, which shows the instruction LLVM decoded,
     not the bytes it read. Where those bytes sit next to the listing (fssm/ or fspx/), each instruction's printed
@@ -17615,8 +17638,8 @@ def translate(path):
         # The console's v_dot4_i32_i8 words llvm-mc could not decode are in the listing as the instruction it
         # decoded instead: re-anchoring put the line for the word's second half at +4 from the skipped word.
         # Rebuild the whole word from the blob and drop that line (docs/fspx.md measured the shape). Reachable gaps
-        # may restore one exact plain-SGPR move, one exact EXEC-low SGPR move, or one exact
-        # `s_waitcnt lgkmcnt(0)`; all other gaps remain refused.
+        # may restore one exact plain-SGPR move, one exact EXEC-low SGPR move, one exact
+        # `s_waitcnt lgkmcnt(0)`, or one exact `s_clause 3`; all other gaps remain refused.
         kept, prev_end = [], info["code_start"]
         for ins in insns:
             if ins["pc"] - prev_end == 4:
@@ -17640,6 +17663,8 @@ def translate(path):
                 word = scalar_smov_exec_lo_gap_word(blob, pc)
             if word is None:
                 word = scalar_waitcnt_lgkm0_gap_word(blob, pc)
+            if word is None:
+                word = scalar_s_clause_gap_word(blob, pc)
             if word is not None:
                 recovered_gap[0] = True
             return word

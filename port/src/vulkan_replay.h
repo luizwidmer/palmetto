@@ -32,6 +32,7 @@
 
 #include "command_list.h"
 #include "viewport_replay_readiness.h"
+#include "indirect_graphics_replay_readiness.h"
 #include "depth24.h"
 #include "gfx10_descriptors.h"
 #include "uav_clear.h"
@@ -3467,6 +3468,19 @@ inline void note_viewport_count_refusal(viewport_replay_readiness::Refusal refus
     std::fprintf(stderr, "[rt] replay: PALMETTO_D3D12X_STRICT_VIEWPORTS=1 refused draw: %s\n", name);
 }
 
+inline void note_indirect_graphics_refusal(
+    indirect_graphics_replay_readiness::Refusal refusal, std::size_t command_index, std::uint32_t max_count) {
+    static std::mutex mutex;
+    static std::set<std::string> printed;
+    const char* name = indirect_graphics_replay_readiness::refusal_name(refusal);
+    const std::lock_guard lock(mutex);
+    if (printed.size() >= 8 || !printed.insert(name).second) return;
+    std::fprintf(stderr,
+                 "[rt] replay: PALMETTO_D3D12X_STRICT_VIEWPORTS=1 refused ExecuteIndirect command %zu "
+                 "(max_count %u): %s\n",
+                 command_index, max_count, name);
+}
+
 
 // Resolves a draw's pipeline, attachments and buffers. Attachment views take the pipeline's formats, so a
 // typeless texture is viewed as the format the pipeline renders.
@@ -4836,6 +4850,20 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
     if (!list.closed()) return ReplayResult::list_open;
     if (list.queries_open()) return ReplayResult::invalid_query;  // a Vulkan query must end in its command buffer
     const auto commands = list.commands();
+    // Even when the recording shim is bypassed, strict multi-count graphics indirects need a complete state snapshot.
+    // Check the immutable IR before resolving resources, allocating helper scratch, or writing a Vulkan command.
+    if (viewport_replay_readiness::strict_enabled()) {
+        for (std::size_t i = 0; i < commands.size(); ++i) {
+            const auto* indirect = std::get_if<ExecuteIndirect>(&commands[i]);
+            if (!indirect) continue;
+            const auto assessment = indirect_graphics_replay_readiness::assess(
+                true, indirect->kind, indirect->max_count);
+            if (assessment.disposition == indirect_graphics_replay_readiness::Disposition::refuse) {
+                detail::note_indirect_graphics_refusal(assessment.refusal, i, indirect->max_count);
+                return ReplayResult::unsupported;
+            }
+        }
+    }
     out.list = &list;
     out.commands.assign(commands.size(), {});
     out.draw_count = 0;

@@ -20,6 +20,7 @@
 // required).
 #include "vk_test_device.h"
 #include "d3d12_test_shaders.h"
+#include "pc_heap_desc.h"
 #include "../shims/d3d12_com.h"
 #include "../shims/d3d12_xs_device.h"
 #include "../src/shader_library.h"
@@ -180,14 +181,17 @@ bool run(vktest::Device& d, const std::filesystem::path& library, bool legacy_id
         }
     }
 
-    // The view heap holds `ring` frames of `per_frame` SRVs; the sampler heap one wrapping POINT sampler.
-    const D3D12_DESCRIPTOR_HEAP_DESC view_heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, ring * per_frame,
-                                                    D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
-    const D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 1,
-                                                       D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
+    // The view heap holds `ring` frames of `per_frame` SRVs; the sampler heap one wrapping POINT sampler. A PC
+    // heap description is 16 bytes and the proxy reads two follower words as the console-extended slot-14
+    // address/size, so the descriptions are zero-tailed (pc_heap_desc.h): the heaps take the arena path and their
+    // GPU handles are the low arena VAs this test's precondition asserts.
+    const PcHeapDesc view_heap_spec{{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, ring * per_frame,
+                                     D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0}};
+    const PcHeapDesc sampler_heap_spec{{D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 1,
+                                        D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0}};
     Ref<ID3D12DescriptorHeap> view_heap, sampler_heap;
-    EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&view_heap_desc, IID_PPV_ARGS(&view_heap.p))));
-    EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&sampler_heap_desc, IID_PPV_ARGS(&sampler_heap.p))));
+    EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&view_heap_spec.desc, IID_PPV_ARGS(&view_heap.p))));
+    EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&sampler_heap_spec.desc, IID_PPV_ARGS(&sampler_heap.p))));
     const std::uint64_t view_cpu = reinterpret_cast<XboxHeapHandleFn>(slot(view_heap.p, 9))(view_heap.p);
     const std::uint64_t view_gpu = reinterpret_cast<XboxHeapHandleFn>(slot(view_heap.p, 10))(view_heap.p);
     const std::uint64_t sampler_cpu = reinterpret_cast<XboxHeapHandleFn>(slot(sampler_heap.p, 9))(sampler_heap.p);

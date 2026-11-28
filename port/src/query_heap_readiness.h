@@ -5,9 +5,12 @@
 #include <cstdlib>
 
 // CPU-only contract for the query-heap types and capability gates measured in
-// docs/d3d12_vulkan.md section 4.6. This is intentionally not wired to the COM
-// shim: a future diagnostic/call-site may opt into the preflight without changing
-// the default query-heap behavior in this slice.
+// docs/d3d12_vulkan.md section 4.6. Round 21 wires it at the layer's real query-heap
+// creation path (port/shims/d3d12_vulkan_device.cpp CreateQueryHeap) behind the exact
+// switch below: with the switch unset nothing is consulted and the default behaviour is
+// byte-identical; with it set the preflight either proceeds or answers the host's
+// E_INVALIDARG / E_NOTIMPL with a named reason. action_of() is the pure mapping the
+// shim uses, so port/test/query_heap_readiness_test.cpp covers it without a GPU.
 namespace palmetto::query_heap_readiness {
 
 inline constexpr char kSwitch[] = "PALMETTO_D3D12X_QUERY_HEAP_READINESS";
@@ -131,6 +134,40 @@ constexpr Assessment assess(Descriptor desc, bool opt_in, Capabilities caps) noe
         return {Disposition::invalid_argument, Reason::type_outside_host_range, type};
     }
     return {Disposition::refuse, Reason::type_outside_host_range, Type::outside_host_range};
+}
+
+// What a caller does with one assessment. The shim maps these to COM results; the mapping is
+// pure so the synthetic test can assert it, and the reason names above are the diagnostics.
+enum class Action : std::uint8_t {
+    legacy,                 // switch off: do not gate, allocate exactly as before
+    proceed,                // ready or ready_zero: create the heap through the existing path
+    refuse_invalid_argument,  // E_INVALIDARG: matches the host's own description checks
+    refuse_not_implemented,   // E_NOTIMPL: a known type whose result path this layer does not have
+};
+
+constexpr Action action_of(const Assessment& assessment) noexcept {
+    switch (assessment.disposition) {
+    case Disposition::legacy_unchanged: return Action::legacy;
+    case Disposition::ready:
+    case Disposition::ready_zero: return Action::proceed;
+    case Disposition::invalid_argument: return Action::refuse_invalid_argument;
+    case Disposition::refuse: return Action::refuse_not_implemented;
+    }
+    return Action::refuse_not_implemented;
+}
+
+constexpr bool is_refusal(Action action) noexcept {
+    return action == Action::refuse_invalid_argument || action == Action::refuse_not_implemented;
+}
+
+constexpr const char* action_name(Action action) noexcept {
+    switch (action) {
+    case Action::legacy: return "legacy";
+    case Action::proceed: return "proceed";
+    case Action::refuse_invalid_argument: return "refuse_invalid_argument";
+    case Action::refuse_not_implemented: return "refuse_not_implemented";
+    }
+    return "unknown_query_heap_readiness_action";
 }
 
 constexpr const char* type_name(Type type) noexcept {

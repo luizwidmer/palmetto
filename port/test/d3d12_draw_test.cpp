@@ -14,6 +14,7 @@
 //     or across B8G8R8X8 and B8G8R8A8: the bytes land in the view's order and encoding.
 // The shaders are GLSL written to the translator's contract (test/glsl/vs_draw.vert, ps_draw.frag). No game data.
 // Set PALMETTO_VK_VALIDATION=1 to run under VK_LAYER_KHRONOS_validation.
+#include "pc_heap_desc.h"
 #include "shader_fixture_path.h"
 #include "test_temp_dir.h"
 #include "vk_test_device.h"
@@ -308,7 +309,16 @@ int main() {
                                                          IID_PPV_ARGS(&readback.p))));
 
         // Buffers D3D12 refuses: no bytes, or a size that wraps when aligned. One the arena cannot hold, and a
-        // shader-visible heap it cannot hold (512 MiB of descriptors in the 256 MiB default), run out of memory.
+        // shader-visible heap it cannot hold, run out of memory. The heap's request is taken from the device's own
+        // GPU address arena and goes one 64 KiB page past it, so the case keeps its intent under any arena size
+        // (PALMETTO_ARENA_MB, the device's caps, or a future default) instead of assuming the default.
+        //
+        // It used to hard-code 2^24 descriptors (512 MiB, 32 bytes each) against the 256 MiB default arena. Commit
+        // 10b2a0ee5 (2026-11-25) raised that default to 1024 MiB - the deferred-compile boot's measured 501.8 MiB
+        // peak plus margin (port/src/arena_size.h) - so 512 MiB now fits in the arena and the layer creates it, which
+        // is why this case failed instead of the layer. A request larger than the whole arena is still refused
+        // E_OUTOFMEMORY with a null output: the layer will not keep a shader-visible heap in host memory, where its
+        // GPU handle would be 0 and every table would read VA 0.
         {
             Ref<ID3D12Resource> bad;
             for (const UINT64 width : {UINT64(0), ~UINT64(0) - 65535}) {
@@ -321,10 +331,22 @@ int main() {
             EXPECT(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &huge,
                                                    D3D12_RESOURCE_STATE_COMMON, nullptr,
                                                    IID_PPV_ARGS(&bad.p)) == E_OUTOFMEMORY && !bad.p);
-            const D3D12_DESCRIPTOR_HEAP_DESC too_many{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1u << 24,
-                                                      D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
-            Ref<ID3D12DescriptorHeap> big_heap;
-            EXPECT(device->CreateDescriptorHeap(&too_many, IID_PPV_ARGS(&big_heap.p)) == E_OUTOFMEMORY && !big_heap.p);
+            const std::uint64_t arena = rt::d3d12::device_arena_size(device.p);
+            if (!arena) {
+                std::fprintf(stderr, "SKIP a shader-visible heap larger than the GPU address arena: the device has "
+                                     "no arena\n");
+            } else {
+                // One page past the arena (the arena is a whole number of MiB), in descriptors of the layer's
+                // measured 32-byte size (rt::d3d12::descriptor_size), plus a small margin above any alignment.
+                const UINT too_many_descriptors = static_cast<UINT>(
+                    arena / std::uint64_t(rt::d3d12::descriptor_size) + 2048);
+                // Zero-tailed (pc_heap_desc.h): the Xbox slot-14 ABI must read address 0, not a stray stack word.
+                const PcHeapDesc too_many{{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, too_many_descriptors,
+                                           D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0}};
+                Ref<ID3D12DescriptorHeap> big_heap;
+                EXPECT(device->CreateDescriptorHeap(&too_many.desc, IID_PPV_ARGS(&big_heap.p)) == E_OUTOFMEMORY &&
+                       !big_heap.p);
+            }
         }
         D3D12_RESOURCE_DESC rt_desc{};
         rt_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -348,9 +370,9 @@ int main() {
         std::memcpy(up + 1024, instance_colors, sizeof(instance_colors));
         const D3D12_GPU_VIRTUAL_ADDRESS upload_va = upload->GetGPUVirtualAddress();
 
-        const D3D12_DESCRIPTOR_HEAP_DESC heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+        const PcHeapDesc heap_desc{{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0}};
         Ref<ID3D12DescriptorHeap> rtv_heap;
-        EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&rtv_heap.p))));
+        EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&heap_desc.desc, IID_PPV_ARGS(&rtv_heap.p))));
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv{
             SIZE_T(reinterpret_cast<XboxHeapHandleFn>(slot(rtv_heap.p, 9))(rtv_heap.p))};
         device->CreateRenderTargetView(target.p, nullptr, rtv);
@@ -480,7 +502,7 @@ int main() {
                                                              D3D12_RESOURCE_STATE_COMMON, nullptr,
                                                              IID_PPV_ARGS(&uint_target.p))));
             Ref<ID3D12DescriptorHeap> uint_rtv_heap;
-            EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&uint_rtv_heap.p))));
+            EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&heap_desc.desc, IID_PPV_ARGS(&uint_rtv_heap.p))));
             const D3D12_CPU_DESCRIPTOR_HANDLE uint_rtv{
                 SIZE_T(reinterpret_cast<XboxHeapHandleFn>(slot(uint_rtv_heap.p, 9))(uint_rtv_heap.p))};
             device->CreateRenderTargetView(uint_target.p, nullptr, uint_rtv);
@@ -617,10 +639,10 @@ int main() {
                 EXPECT(SUCCEEDED(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &ms_rt_desc,
                                                                  D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
                                                                  IID_PPV_ARGS(&ms_target.p))));
-                D3D12_DESCRIPTOR_HEAP_DESC ms_heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1,
-                                                        D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+                const PcHeapDesc ms_heap_desc{{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1,
+                                               D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0}};
                 Ref<ID3D12DescriptorHeap> ms_rtv_heap;
-                EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&ms_heap_desc, IID_PPV_ARGS(&ms_rtv_heap.p))));
+                EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&ms_heap_desc.desc, IID_PPV_ARGS(&ms_rtv_heap.p))));
                 const D3D12_CPU_DESCRIPTOR_HANDLE ms_rtv{
                     SIZE_T(reinterpret_cast<XboxHeapHandleFn>(slot(ms_rtv_heap.p, 9))(ms_rtv_heap.p))};
                 device->CreateRenderTargetView(ms_target.p, nullptr, ms_rtv);
@@ -781,10 +803,10 @@ int main() {
                 {"dst*DEST_ALPHA", D3D12_BLEND_ZERO, D3D12_BLEND_DEST_ALPHA},
                 {"dst*INV_DEST_ALPHA", D3D12_BLEND_ZERO, D3D12_BLEND_INV_DEST_ALPHA},
             };
-            const D3D12_DESCRIPTOR_HEAP_DESC x8_heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1,
-                                                          D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+            const PcHeapDesc x8_heap_desc{{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1,
+                                           D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0}};
             Ref<ID3D12DescriptorHeap> x8_heap;
-            EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&x8_heap_desc, IID_PPV_ARGS(&x8_heap.p))));
+            EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&x8_heap_desc.desc, IID_PPV_ARGS(&x8_heap.p))));
             const D3D12_CPU_DESCRIPTOR_HANDLE x8_rtv{
                 SIZE_T(reinterpret_cast<XboxHeapHandleFn>(slot(x8_heap.p, 9))(x8_heap.p))};
             const D3D12_VIEWPORT x8_viewport{0, 0, 4, 4, 0, 1};
@@ -946,10 +968,10 @@ int main() {
                 {DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8X8_UNORM, "B8G8R8A8{B8G8R8X8}", {0, 153, 204, 0}},
                 {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_B8G8R8X8_UNORM, "R8G8B8A8{B8G8R8X8}", {0, 153, 204, 0}},
             };
-            const D3D12_DESCRIPTOR_HEAP_DESC cast_heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1,
-                                                            D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+            const PcHeapDesc cast_heap_desc{{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1,
+                                             D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0}};
             Ref<ID3D12DescriptorHeap> cast_heap;
-            EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&cast_heap_desc, IID_PPV_ARGS(&cast_heap.p))));
+            EXPECT(SUCCEEDED(device->CreateDescriptorHeap(&cast_heap_desc.desc, IID_PPV_ARGS(&cast_heap.p))));
             const D3D12_CPU_DESCRIPTOR_HANDLE cast_rtv{
                 SIZE_T(reinterpret_cast<XboxHeapHandleFn>(slot(cast_heap.p, 9))(cast_heap.p))};
             const D3D12_VIEWPORT cast_viewport{0, 0, 4, 4, 0, 1};

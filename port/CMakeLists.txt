@@ -828,9 +828,9 @@ if(BUILD_TESTING)
     target_link_options(loader_tls_race_test PRIVATE /OPT:NOREF ${PALMETTO_HOST_BASE})
     target_link_libraries(loader_tls_race_test PRIVATE psapi)
     add_dependencies(loader_tls_race_test palmetto_tls_host)
-    # The F4/F7 fixes are still open in pe_loader.cpp, so the standing gate runs the documented --expect-faults form:
-    # a reproduced finding is REPRO (exit 0) and the controls still fail loudly. Drop the flag when the fixes land.
-    add_test(NAME loader_tls_race COMMAND loader_tls_race_test --expect-faults)
+    # Round-21 F4/F7 fixes landed: the strict gate now expects the fixed behaviour (the deterministic F4 seam gets one
+    # DLL_THREAD_DETACH and the F7 thread-event load completes instead of deadlocking).
+    add_test(NAME loader_tls_race COMMAND loader_tls_race_test)
     set_tests_properties(loader_tls_race PROPERTIES TIMEOUT 180)
     # PE loader tests use two locally built fixtures: a DLL with exports, imports and relocations, and an EXE that
     # imports it so Loader::load exercises recursive module loading. They contain no game data.
@@ -1303,6 +1303,23 @@ if(BUILD_TESTING)
     target_compile_definitions(d3d12_residency_budget_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(d3d12_residency_budget_test PRIVATE /W4 /permissive- /utf-8 /EHsc)
     add_test(NAME d3d12_residency_budget COMMAND d3d12_residency_budget_test)
+
+    # Round-21 pure contracts: strict multi-count indirect graphics replay readiness, and the opt-in switch registry
+    # audit (which re-derives the PALMETTO_* set from the source tree under PALMETTO_REPO_ROOT).
+    add_executable(indirect_graphics_replay_readiness_test test/indirect_graphics_replay_readiness_test.cpp)
+    target_include_directories(indirect_graphics_replay_readiness_test PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/shims)
+    target_link_libraries(indirect_graphics_replay_readiness_test PRIVATE Vulkan::Headers)
+    target_compile_definitions(indirect_graphics_replay_readiness_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(indirect_graphics_replay_readiness_test PRIVATE /W4 /permissive- /utf-8 /EHsc)
+    add_test(NAME indirect_graphics_replay_readiness COMMAND indirect_graphics_replay_readiness_test)
+
+    add_executable(opt_in_switches_test test/opt_in_switches_test.cpp)
+    target_include_directories(opt_in_switches_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(opt_in_switches_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+      PALMETTO_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+    target_compile_options(opt_in_switches_test PRIVATE /W4 /permissive- /utf-8 /EHsc)
+    add_test(NAME opt_in_switches COMMAND opt_in_switches_test)
   endif()
 
   if(TARGET device_proxy_test)
@@ -3139,11 +3156,25 @@ if(TARGET Vulkan::Headers)
                                  PALMETTO_TEST_PS_SPV="${PALMETTO_TEST_PS}")
       target_compile_options(d3d12_title_va_test PRIVATE /W4 /permissive- /utf-8)
       add_test(NAME d3d12_title_va COMMAND d3d12_title_va_test)
-      # The functional gate runs without the validation layer: with PALMETTO_VK_VALIDATION=1 the test's final
-      # counter assertion currently fails on a nonzero count whose messages are swallowed by the ExecuteCommandLists
-      # stderr capture (dedicated open item in docs/vertex_buffer_va.md; d3d12_viewport_array covers validation-clean
-      # replay). A validation-on manual run remains possible once that item is resolved.
+      # Round-21: the test now replays the captured stderr so a failing stage is visible, the empty pre-capture buffer
+      # VUIDs are fixed in vulkan_backend.h (skip the capture when there are no sampled textures), and the test-order
+      # layout/sync artifacts are corrected. Validation-on passes 3/3 on the RTX 4090 with the known sRGB counter at 0,
+      # so the registered gate runs with the validation layer.
+
       set_tests_properties(d3d12_title_va PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120
+                           LABELS "gpu;vulkan;d3d12"
+                           ENVIRONMENT "PALMETTO_VK_VALIDATION=1")
+      # Round-21 P-45 production-adapter acceptance: the same raw-VA -> window -> pull -> readback chain through the
+      # production BDA allocation/resolver path, independent of the synthetic hook test above.
+      add_executable(d3d12_title_va_production_test test/d3d12_title_va_production_test.cpp ${PALMETTO_TEST_VS} ${PALMETTO_TEST_PS})
+      target_include_directories(d3d12_title_va_production_test PRIVATE test shims src)
+      target_link_libraries(d3d12_title_va_production_test PRIVATE palmetto_d3d12_com Vulkan::Headers user32)
+      target_compile_definitions(d3d12_title_va_production_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+                                 PALMETTO_TEST_VS_SPV="${PALMETTO_TEST_VS}"
+                                 PALMETTO_TEST_PS_SPV="${PALMETTO_TEST_PS}")
+      target_compile_options(d3d12_title_va_production_test PRIVATE /W4 /permissive- /utf-8)
+      add_test(NAME d3d12_title_va_production COMMAND d3d12_title_va_production_test)
+      set_tests_properties(d3d12_title_va_production PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120
                            LABELS "gpu;vulkan;d3d12")
       # Graphics & compute PSO descriptor validation parity against live Windows D3D12 (WARP and HW).
       add_executable(d3d12_pso_validation_test test/d3d12_pso_validation_test.cpp ${PALMETTO_TEST_VS}

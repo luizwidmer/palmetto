@@ -509,16 +509,36 @@ void test_physical_pages_commit_on_touch(const PhysicalApi& api) {
     check(commit_growth(allocated, mapped) < static_cast<int64_t>(kMapped * kPage64k / 2),
           "mapping them does not charge them");
 
+    // Commit-on-touch: the 1,024 mapped pages are reserve-only members of the pagefile-backed physical-page section,
+    // and a first write commits the page it lands in. The old check compared the machine's commit total before and
+    // after the 512 writes and wanted about 32 MiB (measured +31.8 MiB on 2026-11-28). That total is shared with every
+    // other process, so a concurrent build or CTest sweep moved it between the two samples - the serial-sweep failure
+    // was that host term, not the shim. The durable assertion is the per-page state the shim's page-fault handler
+    // sets: exactly the 512 written pages become MEM_COMMIT and the 512 unwritten ones stay MEM_RESERVE.
     for (uint64_t i = 0; i < kTouched; ++i) {
         static_cast<volatile uint32_t*>(static_cast<void*>(window + i * kPage64k))[0] =
             0xc0de0000u | static_cast<uint32_t>(i);
     }
-    PERFORMANCE_INFORMATION touched{};
-    GetPerformanceInfo(&touched, sizeof(touched));
-    const int64_t touched_growth = commit_growth(mapped, touched);
-    check(touched_growth >= static_cast<int64_t>(kTouched * kPage64k / 2) &&
-              touched_growth < static_cast<int64_t>(kMapped * kPage64k),
-          "writing to 512 of them charges about those 512 pages");
+    uint64_t committed_touched = 0;
+    uint64_t committed_untouched = 0;
+    uint64_t reserved_untouched = 0;
+    bool pages_queried = true;
+    for (uint64_t i = 0; i < kMapped; ++i) {
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(window + i * kPage64k, &info, sizeof(info)) != sizeof(info)) {
+            pages_queried = false;
+            break;
+        }
+        if (i < kTouched) {
+            committed_touched += info.State == MEM_COMMIT ? 1 : 0;
+        } else {
+            committed_untouched += info.State == MEM_COMMIT ? 1 : 0;
+            reserved_untouched += info.State == MEM_RESERVE ? 1 : 0;
+        }
+    }
+    check(pages_queried && committed_touched == kTouched && committed_untouched == 0 &&
+              reserved_untouched == kMapped - kTouched,
+          "writing to 512 of them charges about those 512 pages (512 of the 1,024 committed, 512 still reserved)");
     bool written = true;
     for (uint64_t i = 0; i < kTouched; ++i) written &= read_u32(window + i * kPage64k, 0) == (0xc0de0000u | i);
     check(written, "each touched page keeps what was written to it");

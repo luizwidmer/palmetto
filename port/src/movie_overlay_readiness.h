@@ -1,8 +1,8 @@
 #pragma once
 
-// Pure, bounded readiness contract for a title-owned movie frame -> overlay observation.
-// This deliberately does not allocate, inspect title memory, or call Bink/PresentX. The opt-in present gate has no Bink or
-// upload evidence producer yet; it supplies an empty chain and conservatively refuses plane 1 rather than synthesizing one.
+// Pure, bounded readiness and plane-identity contracts for a title-owned movie frame -> PresentX observation.
+// This deliberately does not allocate, inspect title memory, or call Bink/PresentX. The existing opt-in present gate has no
+// Bink, upload, or plane-role evidence producer yet; it supplies an empty chain and conservatively refuses plane 1.
 
 #include <cstdint>
 
@@ -57,6 +57,16 @@ enum class Refusal : std::uint8_t {
     unexpected_movie_plane_index,
     present_frame_mismatch,
     present_resource_mismatch,
+    plane_identity_not_observed,
+    plane_identity_unconfirmed,
+    plane_identity_order_mismatch,
+    primary_plane_index_mismatch,
+    primary_plane_role_mismatch,
+    secondary_plane_index_mismatch,
+    secondary_plane_role_unknown,
+    secondary_plane_role_invalid,
+    second_plane_not_movie,
+    movie_plane_resource_mismatch,
 };
 
 inline constexpr const char* refusal_name(Refusal refusal) noexcept {
@@ -86,6 +96,16 @@ inline constexpr const char* refusal_name(Refusal refusal) noexcept {
     case Refusal::unexpected_movie_plane_index: return "unexpected-movie-plane-index";
     case Refusal::present_frame_mismatch: return "present-frame-mismatch";
     case Refusal::present_resource_mismatch: return "present-resource-mismatch";
+    case Refusal::plane_identity_not_observed: return "plane-identity-not-observed";
+    case Refusal::plane_identity_unconfirmed: return "plane-identity-unconfirmed";
+    case Refusal::plane_identity_order_mismatch: return "plane-identity-order-mismatch";
+    case Refusal::primary_plane_index_mismatch: return "primary-plane-index-mismatch";
+    case Refusal::primary_plane_role_mismatch: return "primary-plane-role-mismatch";
+    case Refusal::secondary_plane_index_mismatch: return "second-plane-index-mismatch";
+    case Refusal::secondary_plane_role_unknown: return "second-plane-role-unknown";
+    case Refusal::secondary_plane_role_invalid: return "second-plane-role-invalid";
+    case Refusal::second_plane_not_movie: return "second-plane-not-movie";
+    case Refusal::movie_plane_resource_mismatch: return "movie-plane-resource-mismatch";
     }
     return "unknown-refusal";
 }
@@ -117,6 +137,25 @@ struct UploadEvidence {
     std::uint64_t resource_key = 0;
 };
 
+// Plane roles are observation labels, not PresentX ABI fields. A role is confirmed only when independent evidence
+// distinguishes the title's primary plane, its movie upload, and UI/other overlays; index 1 alone never means movie.
+enum class PlaneRole : std::uint8_t {
+    unknown,
+    primary,
+    movie,
+    ui_overlay,
+    other_overlay,
+};
+
+struct PlaneIdentityEvidence {
+    bool observed = false;
+    bool confirmed = false;
+    std::uint64_t order = 0;  // order of the PresentX snapshot that supplied this plane identity
+    std::uint32_t index = 0;
+    PlaneRole role = PlaneRole::unknown;
+    std::uint64_t resource_key = 0;
+};
+
 struct PresentEvidence {
     bool observed = false;
     bool confirmed = false;
@@ -125,6 +164,9 @@ struct PresentEvidence {
     std::uint64_t resource_key = 0;
     std::uint32_t plane_count = 0;
     std::uint32_t movie_plane_index = 0;
+    // Identity is captured for both positions from the same successful PresentX, not inferred from plane count/order.
+    PlaneIdentityEvidence primary_plane{};
+    PlaneIdentityEvidence second_plane{};
 };
 
 struct Evidence {
@@ -149,8 +191,53 @@ inline constexpr Decision refuse(Stage stage, Refusal reason) noexcept {
     return {stage, reason};
 }
 
-// This gate answers only whether a complete, correlated two-plane movie observation exists. It does not validate the
-// undocumented Bink buffer ABI, transform/upload contents, plane flags, blend mode, or presentation correctness.
+struct PlaneIdentityDecision {
+    PlaneRole second_role = PlaneRole::unknown;
+    Refusal refusal = Refusal::plane_identity_not_observed;
+
+    constexpr bool classified() const noexcept { return refusal == Refusal::none; }
+    constexpr const char* reason() const noexcept { return refusal_name(refusal); }
+};
+
+// Classify the two supported PresentX positions without guessing that every secondary plane is a movie. Both descriptors
+// must be observed and independently confirmed against this same presentation order; identity tokens are opaque.
+inline constexpr PlaneIdentityDecision classify_second_plane(const PresentEvidence& p) noexcept {
+    if (!p.observed) return {PlaneRole::unknown, Refusal::present_not_observed};
+    if (!p.confirmed) return {PlaneRole::unknown, Refusal::present_unconfirmed};
+    if (p.order == 0) return {PlaneRole::unknown, Refusal::event_order_missing};
+    if (p.plane_count < 2) return {PlaneRole::unknown, Refusal::overlay_plane_not_observed};
+    if (p.plane_count != 2) return {PlaneRole::unknown, Refusal::unsupported_plane_count};
+
+    const auto& primary = p.primary_plane;
+    const auto& second = p.second_plane;
+    if (!primary.observed || !second.observed)
+        return {PlaneRole::unknown, Refusal::plane_identity_not_observed};
+    if (!primary.confirmed || !second.confirmed)
+        return {PlaneRole::unknown, Refusal::plane_identity_unconfirmed};
+    if (primary.order == 0 || second.order == 0)
+        return {PlaneRole::unknown, Refusal::event_order_missing};
+    if (primary.order != p.order || second.order != p.order)
+        return {PlaneRole::unknown, Refusal::plane_identity_order_mismatch};
+    if (primary.index != 0) return {PlaneRole::unknown, Refusal::primary_plane_index_mismatch};
+    if (second.index != 1) return {PlaneRole::unknown, Refusal::secondary_plane_index_mismatch};
+    if (primary.role != PlaneRole::primary)
+        return {PlaneRole::unknown, Refusal::primary_plane_role_mismatch};
+    if (second.role == PlaneRole::unknown)
+        return {PlaneRole::unknown, Refusal::secondary_plane_role_unknown};
+    if (second.role == PlaneRole::primary)
+        return {PlaneRole::unknown, Refusal::secondary_plane_role_invalid};
+    if (second.role != PlaneRole::movie && second.role != PlaneRole::ui_overlay &&
+        second.role != PlaneRole::other_overlay)
+        return {PlaneRole::unknown, Refusal::secondary_plane_role_invalid};
+    if (primary.resource_key == 0 || second.resource_key == 0)
+        return {PlaneRole::unknown, Refusal::resource_identity_missing};
+
+    return {second.role, Refusal::none};
+}
+
+// Chain-only readiness predicate retained for the existing consumer; it does not establish semantic plane roles. Use the
+// identity-aware gate when a producer can independently classify the positions. It validates no Bink ABI, pixel contents,
+// transform/upload contents, plane flags, blend mode, or presentation correctness.
 inline constexpr Decision evaluate(const Evidence& e) noexcept {
     if (!e.opt_in) return refuse(Stage::off, Refusal::opt_in_off);
 
@@ -209,6 +296,47 @@ inline constexpr GateDecision gate_second_plane(RuntimeGate mode, bool overlay_r
     if (mode != RuntimeGate::require_ready) return {true, refuse(Stage::off, Refusal::opt_in_off)};
     const Decision readiness = evaluate(evidence);
     return {readiness.ready(), readiness};
+}
+
+enum class PlaneGateAction : std::uint8_t {
+    not_requested,
+    legacy_passthrough,
+    non_movie_passthrough,
+    movie_ready,
+    refused,
+};
+
+struct IdentityGateDecision {
+    bool allow_overlay = false;
+    PlaneGateAction action = PlaneGateAction::refused;
+    // Meaningful as movie readiness only for movie_ready/refused; non-movie passthrough is identified by `action`.
+    Decision readiness{};
+};
+
+// Identity-aware policy for a future evidence producer. The current runtime still calls gate_second_plane with an empty chain,
+// so its strict mode presently refuses every selected candidate at registration without classifying any plane role.
+inline constexpr IdentityGateDecision gate_identified_second_plane(RuntimeGate mode, bool overlay_requested,
+                                                                    const Evidence& evidence) noexcept {
+    if (!overlay_requested)
+        return {false, PlaneGateAction::not_requested, refuse(Stage::off, Refusal::opt_in_off)};
+    if (mode != RuntimeGate::require_ready)
+        return {true, PlaneGateAction::legacy_passthrough, refuse(Stage::off, Refusal::opt_in_off)};
+    if (!evidence.opt_in)
+        return {false, PlaneGateAction::refused, refuse(Stage::off, Refusal::opt_in_off)};
+
+    const PlaneIdentityDecision plane = classify_second_plane(evidence.present);
+    if (!plane.classified())
+        return {false, PlaneGateAction::refused, refuse(Stage::overlay_present, plane.refusal)};
+    if (plane.second_role == PlaneRole::ui_overlay || plane.second_role == PlaneRole::other_overlay)
+        return {true, PlaneGateAction::non_movie_passthrough,
+                refuse(Stage::overlay_present, Refusal::second_plane_not_movie)};
+
+    const Decision readiness = evaluate(evidence);
+    if (!readiness.ready()) return {false, PlaneGateAction::refused, readiness};
+    if (evidence.present.second_plane.resource_key != evidence.upload.resource_key)
+        return {false, PlaneGateAction::refused,
+                refuse(Stage::overlay_present, Refusal::movie_plane_resource_mismatch)};
+    return {true, PlaneGateAction::movie_ready, readiness};
 }
 
 }  // namespace palmetto::movie_overlay_readiness

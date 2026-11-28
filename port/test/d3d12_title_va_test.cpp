@@ -102,6 +102,16 @@ private:
     bool active_ = false;
 };
 
+void report_captured_validation_messages(const char* stage, const std::string& log) {
+    std::fprintf(stderr, "--- captured stderr during %s ---\n", stage);
+    if (log.empty()) {
+        std::fprintf(stderr, "(no stderr captured)\n");
+        return;
+    }
+    std::fwrite(log.data(), 1, log.size(), stderr);
+    if (log.back() != '\n') std::fputc('\n', stderr);
+}
+
 struct SyntheticPage {
     void* address = VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     ~SyntheticPage() { if (address) VirtualFree(address, 0, MEM_RELEASE); }
@@ -510,10 +520,15 @@ int main() {
     src.pResource = target.p;
     src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     draw_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    // The automatic title-import readback runs after this list; return the target to its expected attachment layout.
+    const auto target_from_copy = transition(target.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    draw_list->ResourceBarrier(1, &target_from_copy);
     EXPECT(SUCCEEDED(draw_list->Close()));
     palmetto::ReplayResult draw_result = palmetto::ReplayResult::success;
     std::string draw_log;
+    const unsigned validation_errors_before_draw = vk.validation_errors();
     EXPECT(execute_and_wait(queue.p, fence.p, event.handle, draw_list.p, 1, draw_result, draw_log));
+    const unsigned draw_validation_errors = vk.validation_errors() - validation_errors_before_draw;
     if (hook.buffer_unavailable.load(std::memory_order_relaxed)) {
         std::fprintf(stderr, "SKIP: host-coherent Vulkan test hook buffer unavailable\n");
         return 77;
@@ -545,14 +560,14 @@ int main() {
     Ref<ID3D12CommandAllocator> oob_allocator;
     Ref<ID3D12GraphicsCommandList> oob_list;
     EXPECT(make_list(device.p, oob_allocator, oob_list, pso.p));
-    const auto target_to_rt_again = transition(target.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    oob_list->ResourceBarrier(1, &target_to_rt_again);
     const D3D12_VERTEX_BUFFER_VIEW oob_vbv{raw_va + sizeof(vertices) - 8, 16, sizeof(Vertex)};
     bind_draw_state(oob_list.p, root.p, pso.p, rtv, tint_buffer.p, oob_vbv, width, height);
     EXPECT(SUCCEEDED(oob_list->Close()));
     palmetto::ReplayResult oob_result = palmetto::ReplayResult::success;
     std::string oob_log;
+    const unsigned validation_errors_before_oob = vk.validation_errors();
     EXPECT(execute_and_wait(queue.p, fence.p, event.handle, oob_list.p, 2, oob_result, oob_log));
+    const unsigned oob_validation_errors = vk.validation_errors() - validation_errors_before_oob;
     EXPECT(oob_result == palmetto::ReplayResult::unresolved_resource);
     EXPECT(oob_log.find("alias_view_out_of_bounds") != std::string::npos);
     EXPECT(hook.out_of_window_calls.load(std::memory_order_relaxed) == 1);
@@ -568,11 +583,32 @@ int main() {
     EXPECT(SUCCEEDED(write_list->Close()));
     palmetto::ReplayResult write_result = palmetto::ReplayResult::success;
     std::string write_log;
+    const unsigned validation_errors_before_write = vk.validation_errors();
     EXPECT(execute_and_wait(queue.p, fence.p, event.handle, write_list.p, 3, write_result, write_log));
+    const unsigned write_validation_errors = vk.validation_errors() - validation_errors_before_write;
     EXPECT(write_result == palmetto::ReplayResult::unresolved_resource);
     EXPECT(write_log.find("write_buffer_immediate_unsupported") != std::string::npos);
     EXPECT(std::memcmp(page.address, vertices.data(), sizeof(vertices)) == 0);
-    EXPECT(vk.validation_errors() == 0);
+
+    const unsigned validation_errors = vk.validation_errors();
+    if (validation_errors != 0) {
+        const unsigned known = vk.known_validation_errors();
+        std::fprintf(stderr,
+                     "FAIL: %u Vulkan validation error(s) (%u known NVIDIA sRGB swapchain error(s)); "
+                     "before first submit %u, draw %u, out-of-bounds %u, WriteBufferImmediate %u\n",
+                     validation_errors, known, validation_errors_before_draw, draw_validation_errors,
+                     oob_validation_errors, write_validation_errors);
+        if (draw_validation_errors) report_captured_validation_messages("draw submission", draw_log);
+        if (oob_validation_errors) report_captured_validation_messages("out-of-bounds refusal submission", oob_log);
+        if (write_validation_errors)
+            report_captured_validation_messages("WriteBufferImmediate refusal submission", write_log);
+        const unsigned accounted = validation_errors_before_draw + draw_validation_errors +
+                                   oob_validation_errors + write_validation_errors;
+        if (validation_errors > accounted)
+            std::fprintf(stderr, "%u validation error(s) arrived outside the captured submissions; callback output is above\n",
+                         validation_errors - accounted);
+        return 1;
+    }
 
     std::printf("Title-VA GPU test: raw VA registered/resolved, %u pull(s), sampled pixel %02x %02x %02x %02x; named OOB/WBI refusals\n",
                 hook.pull_calls.load(std::memory_order_relaxed), actual[0], actual[1], actual[2], actual[3]);

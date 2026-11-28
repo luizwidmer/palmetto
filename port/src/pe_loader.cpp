@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -22,6 +23,7 @@
 #include "../shims/shims.h"
 #include "../shims/startup_trace.h"
 #include "base_reservation.h"
+#include "loader_census.h"
 #include "pe_loader_shadow.h"
 
 #if defined(PALMETTO_VULKAN_DEVICE)
@@ -414,9 +416,9 @@ struct ThreadTlsSlot {
 // Per-thread installation state for each reserved TLS slot.
 thread_local std::array<ThreadTlsSlot, kMaxMappedTlsModules> g_thread_tls_slots{};
 
-// Orders the TLS owners' publication, their `initialised` flags and their retirement against the thread events. Shared
-// in on_host_thread_event, exclusive only for those short writes (no allocation and no call that takes the Windows
-// loader lock, which the events run under).
+// Orders TLS-owner publication/retirement and the thread events' slot bookkeeping. Thread events hold this lock only
+// while collecting/installing/removing state; mapped TLS callbacks and DllMain run after it is released because they may
+// runtime-load another TLS module and need the lock exclusively.
 SRWLOCK g_tls_lock = SRWLOCK_INIT;
 struct SharedTlsLock {
     SharedTlsLock() { AcquireSRWLockShared(&g_tls_lock); }
@@ -430,6 +432,39 @@ struct ExclusiveTlsLock {
     ExclusiveTlsLock(const ExclusiveTlsLock&) = delete;
     ExclusiveTlsLock& operator=(const ExclusiveTlsLock&) = delete;
 };
+
+// Thread-event callbacks may load another mapped TLS module, so never hold g_tls_lock while invoking them. A callback
+// flight is registered while that shared lock still protects its Module pointers; Loader destruction retires modules
+// under the exclusive lock, then drains these flights before running process detach or unmapping an image.
+std::mutex g_tls_callbacks_mutex;
+std::condition_variable g_tls_callbacks_drained;
+uint32_t g_tls_callbacks_in_flight = 0;
+
+class TlsCallbackFlight {
+public:
+    TlsCallbackFlight() = default;
+    TlsCallbackFlight(const TlsCallbackFlight&) = delete;
+    TlsCallbackFlight& operator=(const TlsCallbackFlight&) = delete;
+    ~TlsCallbackFlight() {
+        if (!active_) return;
+        std::lock_guard lock(g_tls_callbacks_mutex);
+        if (--g_tls_callbacks_in_flight == 0) g_tls_callbacks_drained.notify_all();
+    }
+    // Call with SharedTlsLock held, before any captured Module pointer escapes that lock.
+    void begin() {
+        std::lock_guard lock(g_tls_callbacks_mutex);
+        ++g_tls_callbacks_in_flight;
+        active_ = true;
+    }
+
+private:
+    bool active_ = false;
+};
+
+void wait_tls_callbacks_drained() {
+    std::unique_lock lock(g_tls_callbacks_mutex);
+    g_tls_callbacks_drained.wait(lock, [] { return g_tls_callbacks_in_flight == 0; });
+}
 
 // Puts the helper DLL's own block back in this thread's slot and frees the copy that replaced it. Uses only this
 // thread's record, so it also works after the module that installed the copy is gone.
@@ -464,6 +499,9 @@ struct ExistingThreadBlock {
     void* block = nullptr;
     void** ga_cell = nullptr;  // that thread's TEB->TlsSlots[tls_ga_slot]: inline in the TEB, so it never moves
     void* ga_view = nullptr;   // the /GA view that cell points at (Module::tls_ga_slot)
+    // The helper's DLL_THREAD_ATTACH installed this thread's actual block; the load() snapshot must skip it.
+    // This marker owns no allocation: the thread-local slot releases the block and receives its callbacks.
+    bool event_owned = false;
 };
 
 // Immortal, like the thread events that use them. `ended` holds the ids of threads whose DLL_THREAD_DETACH has run:
@@ -471,6 +509,7 @@ struct ExistingThreadBlock {
 struct ExistingThreads {
     SRWLOCK lock = SRWLOCK_INIT;  // a leaf: nothing is called while it is held but VirtualFree and thread queries
     std::vector<ExistingThreadBlock> blocks;
+    std::vector<DWORD> ending;  // transient detach callbacks: never cull an id while its callback is still running
     std::vector<DWORD> ended;
 };
 ExistingThreads& existing_threads() {
@@ -489,6 +528,27 @@ bool has_existing_thread_block(DWORD thread, const Module& m) {
     for (const auto& b : existing_threads().blocks)
         if (b.thread == thread && b.module == &m && b.generation == m.tls_generation) return true;
     return false;
+}
+
+// Record that the helper event installed this thread's TLS block, so load()'s later snapshot skips this served thread.
+// Must follow install_thread_block() and is called outside ExistingThreadsLock.
+void record_event_owned_block(Module& m, DWORD thread) {
+    ExistingThreadsLock lock;
+    ExistingThreadBlock marker;
+    marker.thread = thread;
+    marker.slot = m.tls_slot;
+    marker.module = &m;
+    marker.generation = m.tls_generation;
+    marker.event_owned = true;
+    existing_threads().blocks.push_back(marker);
+}
+
+void install_thread_block(Module& m);
+
+void install_thread_event_block(Module& m, DWORD thread) {
+    const bool already_recorded = has_existing_thread_block(thread, m);
+    install_thread_block(m);
+    if (!already_recorded && (m.tls_raw_size || m.tls_zero_fill)) record_event_owned_block(m, thread);
 }
 
 // The /GA view a thread's TlsSlots[Module::tls_ga_slot] points at: [0] and [tls_index] are this thread's block.
@@ -641,8 +701,8 @@ void run_callbacks(Module& m, uint32_t reason, bool trace = false) {
 // without static TLS that called it is skipped. Only the slot owners and existing-thread records reach this today:
 // a mapped DLL without static TLS still gets no thread events (a Loader-wide initialised-module list would be the
 // complete fix).
-void notify_dllmain_thread(Module& m, uint32_t reason) {
-    if (!m.initialised) return;
+void notify_dllmain_thread(Module& m, uint32_t reason, bool initialised_for_event) {
+    if (!initialised_for_event) return;
     const bool static_tls = m.tls_index != kNoTlsIndex && (m.tls_raw_size || m.tls_zero_fill);
     if (m.thread_calls_disabled && !static_tls) return;
     auto* nt = at<IMAGE_NT_HEADERS64>(m.base, reinterpret_cast<IMAGE_DOS_HEADER*>(m.base)->e_lfanew);
@@ -824,11 +884,23 @@ void install_on_existing_threads(Module& m) {
         ExistingThreads& state = existing_threads();
         for (const Candidate& c : candidates) {
             if (!c.handle) continue;
-            if (std::find(state.ended.begin(), state.ended.end(), c.id) != state.ended.end()) continue;
+            if (std::find(state.ended.begin(), state.ended.end(), c.id) != state.ended.end() ||
+                std::find(state.ending.begin(), state.ending.end(), c.id) != state.ending.end())
+                continue;
             void*** vector = running_thread_tls_vector(c.handle);
             void** slots = nullptr;
             void* saved = nullptr;
             if (!vector || !read_thread_slot(vector, m.tls_index, slots, saved) || !slots || !saved) continue;
+            // The helper event already installed this thread's block after owner publication. Do not overwrite it with a
+            // second block or duplicate its DLL_THREAD_DETACH callbacks.
+            bool event_served = false;
+            for (const auto& b : state.blocks)
+                if (b.thread == c.id && b.event_owned && b.slot == m.tls_slot && b.module == &m &&
+                    b.generation == m.tls_generation) {
+                    event_served = true;
+                    break;
+                }
+            if (event_served) continue;
             // A copy an earlier module left in this slot of this thread goes first; what it replaced is kept.
             bool present = false;
             for (auto it = state.blocks.begin(); it != state.blocks.end();) {
@@ -906,6 +978,7 @@ void remove_from_existing_threads(Module& m) {
         }
         ExistingThreadBlock b = *it;
         it = state.blocks.erase(it);
+        if (b.event_owned) continue;  // the thread-local slot owns the real block and its callback
         const HANDLE h = OpenThread(THREAD_QUERY_INFORMATION, FALSE, b.thread);
         if (!h || running_thread_tls_vector(h) != b.vector) b.vector = nullptr;
         if (h) CloseHandle(h);
@@ -920,6 +993,7 @@ void forget_ended_thread_id() {
     ExistingThreadsLock lock;
     ExistingThreads& state = existing_threads();
     state.ended.erase(std::remove(state.ended.begin(), state.ended.end(), self), state.ended.end());
+    state.ending.erase(std::remove(state.ending.begin(), state.ending.end(), self), state.ending.end());
     for (auto it = state.blocks.begin(); it != state.blocks.end();) {
         if (it->thread != self) {
             ++it;
@@ -931,95 +1005,227 @@ void forget_ended_thread_id() {
     }
 }
 
-// DLL_THREAD_DETACH, before this thread's own records are released: the blocks load() gave it come out, newest first,
-// after the module's TLS callbacks have seen the event (Windows sends DLL_THREAD_DETACH to a DLL for a thread that
-// was running before it was loaded, too).
-void release_existing_blocks_of_this_thread() {
-    const DWORD self = GetCurrentThreadId();
-    std::vector<ExistingThreadBlock> mine;
-    {
-        ExistingThreadsLock lock;
-        for (const auto& b : existing_threads().blocks)
-            if (b.thread == self) mine.push_back(b);
+struct ThreadSlotSnapshot {
+    Module* module = nullptr;
+    uint64_t generation = 0;
+    bool initialised = false;
+};
+
+struct ThreadCallbackBatch {
+    std::array<Module*, kMaxMappedTlsModules> modules{};
+    size_t count = 0;
+
+    bool append(Module* module) noexcept {
+        for (size_t i = 0; i < count; ++i)
+            if (modules[i] == module) return true;
+        if (count == modules.size()) return false;
+        modules[count++] = module;
+        return true;
     }
-    for (auto it = mine.rbegin(); it != mine.rend(); ++it) {
-        Module* m = it->module;
-        if (g_tls_slot_owners[it->slot].load() != m || g_tls_slot_generations[it->slot].load() != it->generation ||
-            !m->initialised)
+};
+
+// Collect callbacks while SharedTlsLock protects owners and initialization state. The marker-only records installed by
+// helper thread events own no block and are dispatched by the thread-local slot loop instead.
+void collect_existing_thread_callbacks(ThreadCallbackBatch& callbacks, DWORD self) {
+    ExistingThreadsLock lock;
+    const ExistingThreads& state = existing_threads();
+    for (auto it = state.blocks.rbegin(); it != state.blocks.rend(); ++it) {
+        const ExistingThreadBlock& block = *it;
+        if (block.thread != self || block.event_owned || !block.module || block.slot >= kMaxMappedTlsModules) continue;
+        Module* m = block.module;
+        if (g_tls_slot_owners[block.slot].load() != m ||
+            g_tls_slot_generations[block.slot].load() != block.generation || !m->initialised)
             continue;
-        try {
-            run_callbacks(*m, DLL_THREAD_DETACH);
-            notify_dllmain_thread(*m, DLL_THREAD_DETACH);
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "[rt] loader: thread detach: %s\n", e.what());
-        }
+        if (!callbacks.append(m))
+            std::fprintf(stderr, "[rt] loader: TLS_EVENT_CALLBACK_LIMIT: more than %zu modules in one thread event\n",
+                         callbacks.modules.size());
     }
+}
+
+// Mark before leaving SharedTlsLock: a concurrent load() snapshot must not install into a thread that is already running
+// its DLL_THREAD_DETACH callback. Reused ids are removed by forget_ended_thread_id() on the new thread's attach event.
+void mark_thread_ending(DWORD self) {
+    ExistingThreadsLock lock;
+    ExistingThreads& state = existing_threads();
+    if (std::find(state.ending.begin(), state.ending.end(), self) == state.ending.end()) state.ending.push_back(self);
+}
+
+// After detach callbacks, take out load()-installed blocks (newest first) and their event-owned markers.
+void finish_existing_thread_detach(DWORD self) {
     ExistingThreadsLock lock;
     ExistingThreads& state = existing_threads();
     for (auto it = state.blocks.end(); it != state.blocks.begin();) {
         --it;
         if (it->thread != self) continue;
-        remove_existing_block(*it);
+        if (!it->event_owned) remove_existing_block(*it);
         it = state.blocks.erase(it);
     }
-    // Bounded: an id matters only until its thread has left the process, moments after this event, so the oldest
-    // can go. (An id also leaves the list when a new thread gets it.)
-    if (state.ended.size() >= kMaxEndedThreads) state.ended.erase(state.ended.begin(), state.ended.begin() + kMaxEndedThreads / 2);
-    state.ended.push_back(self);
+    state.ending.erase(std::remove(state.ending.begin(), state.ending.end(), self), state.ending.end());
+    if (std::find(state.ended.begin(), state.ended.end(), self) == state.ended.end()) {
+        // Bounded: an id matters only until its thread has left the process, so the oldest completed id can go.
+        if (state.ended.size() >= kMaxEndedThreads)
+            state.ended.erase(state.ended.begin(), state.ended.begin() + kMaxEndedThreads / 2);
+        state.ended.push_back(self);
+    }
 }
 
-// Runs in palmetto_tls_host.dll's DllMain for each thread the process starts or ends once the helper is loaded, under
-// the Windows loader lock, on that thread. A new thread gets its own copy of each active TLS owner's template; an
-// ending one gives each helper's block back before the Windows loader frees it. TLS callbacks get the thread events
-// only after the module's DLL_PROCESS_ATTACH (initialise()), as the Windows loader orders them.
+// Runs in palmetto_tls_host.dll's DllMain for each thread the process starts or ends, under the Windows loader lock, on
+// that thread. Thread-event slot installs retain their original per-slot order; mapped callbacks and DllMain are
+// dispatched between short SharedTlsLock scopes because a callback may runtime-load another TLS module.
 void __cdecl on_host_thread_event(DWORD reason) {
-    SharedTlsLock lock;
-    // The try/catch is per slot: a throw from one module's install or callbacks must not take the thread events
-    // away from the other slots. Nothing may leave DllMain.
+    if (reason != DLL_THREAD_ATTACH && reason != DLL_THREAD_DETACH) return;
+
+    TlsCallbackFlight flight;
+    const DWORD self = GetCurrentThreadId();
     if (reason == DLL_THREAD_ATTACH) {
-        try {
-            forget_ended_thread_id();
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "[rt] loader: thread attach: %s\n", e.what());
-        }
-        for (size_t slot = 0; slot < kMaxMappedTlsModules; ++slot) {
-            Module* m = g_tls_slot_owners[slot].load();
-            if (!m) continue;
+        std::array<ThreadSlotSnapshot, kMaxMappedTlsModules> snapshot{};
+        bool has_callbacks = false;
+        {
+            SharedTlsLock lock;
+            loader_census::process_counters().note_attach();
             try {
-                install_thread_block(*m);
-                if (m->initialised) run_callbacks(*m, DLL_THREAD_ATTACH);
-                notify_dllmain_thread(*m, DLL_THREAD_ATTACH);
+                forget_ended_thread_id();
             } catch (const std::exception& e) {
-                // The thread runs on without this module's TLS; later slots still get theirs.
+                loader_census::process_counters().note_failure();
+                std::fprintf(stderr, "[rt] loader: thread attach: %s\n", e.what());
+            }
+            for (size_t slot = 0; slot < kMaxMappedTlsModules; ++slot) {
+                Module* m = g_tls_slot_owners[slot].load();
+                if (m && m->initialised) {
+                    snapshot[slot] = {m, m->tls_generation, true};
+                    has_callbacks = true;
+                }
+            }
+            if (has_callbacks) flight.begin();
+        }
+
+        for (size_t slot = 0; slot < kMaxMappedTlsModules; ++slot) {
+            Module* m = snapshot[slot].module;
+            if (!m) {
+                // No active owner was in the event snapshot; install any later-published owner under the lock but do
+                // not synthesize a DLL_THREAD_ATTACH for a module loaded from an earlier callback in this event.
+                SharedTlsLock lock;
+                m = g_tls_slot_owners[slot].load();
+                if (!m) continue;
+                try {
+                    install_thread_event_block(*m, self);
+                } catch (const std::exception& e) {
+                    loader_census::process_counters().note_failure();
+                    std::fprintf(stderr, "[rt] loader: thread attach, slot %zu (%s): %s\n", slot, m->name.c_str(),
+                                 e.what());
+                }
+                continue;
+            }
+
+            bool installed = false;
+            {
+                SharedTlsLock lock;
+                try {
+                    install_thread_event_block(*m, self);
+                    installed = true;
+                } catch (const std::exception& e) {
+                    loader_census::process_counters().note_failure();
+                    // The thread runs on without this module's TLS; later slots still get theirs.
+                    std::fprintf(stderr, "[rt] loader: thread attach, slot %zu (%s): %s\n", slot, m->name.c_str(),
+                                 e.what());
+                }
+            }
+            if (!installed) continue;
+            try {
+                run_callbacks(*m, DLL_THREAD_ATTACH);
+                notify_dllmain_thread(*m, DLL_THREAD_ATTACH, true);
+            } catch (const std::exception& e) {
+                loader_census::process_counters().note_failure();
                 std::fprintf(stderr, "[rt] loader: thread attach, slot %zu (%s): %s\n", slot, m->name.c_str(),
                              e.what());
             }
         }
-    } else if (reason == DLL_THREAD_DETACH) {
-        // The blocks load() gave this thread while it was already running come out first (they can sit on top of
-        // an older module's block in the same slot).
+        return;
+    }
+
+    ThreadCallbackBatch existing_callbacks;
+    std::array<ThreadSlotSnapshot, kMaxMappedTlsModules> slot_callbacks{};
+    bool have_slot_callbacks = false;
+    {
+        SharedTlsLock lock;
+        loader_census::process_counters().note_detach();
         try {
-            release_existing_blocks_of_this_thread();
+            collect_existing_thread_callbacks(existing_callbacks, self);
         } catch (const std::exception& e) {
+            loader_census::process_counters().note_failure();
+            std::fprintf(stderr, "[rt] loader: thread detach: %s\n", e.what());
+        }
+        try {
+            mark_thread_ending(self);
+        } catch (const std::exception& e) {
+            loader_census::process_counters().note_failure();
             std::fprintf(stderr, "[rt] loader: thread detach: %s\n", e.what());
         }
         for (size_t i = kMaxMappedTlsModules; i-- > 0;) {
             Module* m = g_tls_slot_owners[i].load();
-            if (m && g_thread_tls_slots[i].module == m &&
-                g_thread_tls_slots[i].generation == m->tls_generation) {
-                try {
-                    if (m->initialised) run_callbacks(*m, DLL_THREAD_DETACH);
-                    notify_dllmain_thread(*m, DLL_THREAD_DETACH);
-                } catch (const std::exception& e) {
-                    std::fprintf(stderr, "[rt] loader: thread detach, slot %zu (%s): %s\n", i, m->name.c_str(),
-                                 e.what());
-                }
-                // Released even when the callbacks threw: a leaked block would be handed to the OS loader as the
-                // helper's own TLS block and freed with it at thread exit.
-                uninstall_thread_block(*m);
-            } else {
-                release_thread_slot(i);  // installed by a module whose Loader is gone (or nothing to do)
+            const ThreadTlsSlot& entry = g_thread_tls_slots[i];
+            if (m && entry.module == m && entry.generation == m->tls_generation && m->initialised) {
+                slot_callbacks[i] = {m, m->tls_generation, true};
+                have_slot_callbacks = true;
             }
+        }
+        if (existing_callbacks.count || have_slot_callbacks) flight.begin();
+    }
+
+    // Match the old ordering: pre-existing-thread copies receive callbacks first, newest first, then are removed.
+    for (size_t i = 0; i < existing_callbacks.count; ++i) {
+        Module* m = existing_callbacks.modules[i];
+        try {
+            run_callbacks(*m, DLL_THREAD_DETACH);
+            notify_dllmain_thread(*m, DLL_THREAD_DETACH, true);
+        } catch (const std::exception& e) {
+            loader_census::process_counters().note_failure();
+            std::fprintf(stderr, "[rt] loader: thread detach, slot %u (%s): %s\n", m->tls_slot,
+                         m->name.c_str(), e.what());
+        }
+    }
+    {
+        SharedTlsLock lock;
+        finish_existing_thread_detach(self);
+    }
+
+    // Keep the original reverse slot order and release each block after its callbacks. A callback may load a new TLS
+    // module into a slot already visited, so a final callback-free sweep below releases any such late block as well.
+    for (size_t i = kMaxMappedTlsModules; i-- > 0;) {
+        const ThreadSlotSnapshot& work = slot_callbacks[i];
+        if (work.module && work.initialised) {
+            try {
+                run_callbacks(*work.module, DLL_THREAD_DETACH);
+                notify_dllmain_thread(*work.module, DLL_THREAD_DETACH, true);
+            } catch (const std::exception& e) {
+                loader_census::process_counters().note_failure();
+                std::fprintf(stderr, "[rt] loader: thread detach, slot %zu (%s): %s\n", i,
+                             work.module->name.c_str(), e.what());
+            }
+        }
+        {
+            SharedTlsLock lock;
+            ThreadTlsSlot& entry = g_thread_tls_slots[i];
+            Module* owner = g_tls_slot_owners[i].load();
+            if (work.module && entry.module == work.module && entry.generation == work.generation) {
+                uninstall_thread_block(*work.module);  // the event flight keeps the captured module alive
+            } else if (owner && entry.module == owner && entry.generation == owner->tls_generation) {
+                uninstall_thread_block(*owner);
+            } else {
+                release_thread_slot(i);
+            }
+        }
+    }
+    {
+        SharedTlsLock lock;
+        for (size_t i = kMaxMappedTlsModules; i-- > 0;) {
+            ThreadTlsSlot& entry = g_thread_tls_slots[i];
+            Module* owner = g_tls_slot_owners[i].load();
+            if (!entry.module && !entry.block) continue;
+            if (owner && entry.module == owner && entry.generation == owner->tls_generation)
+                uninstall_thread_block(*owner);
+            else
+                release_thread_slot(i);
         }
     }
 }
@@ -1176,7 +1382,10 @@ Loader::~Loader() {
     for (auto it = init_order_.rbegin(); it != init_order_.rend(); ++it) {
         Module& m = **it;
         if (!m.initialised) continue;  // a map-only load never opts in to running image code
-        set_initialised(m, false);  // under the TLS lock: thread events stop running its callbacks
+        set_initialised(m, false);  // under the TLS lock: thread events stop collecting new callbacks for this module
+        // Events that collected this module before retirement hold a callback flight without the TLS lock. Drain them
+        // before process detach can run or this mapping can be freed.
+        wait_tls_callbacks_drained();
         try {
             run_tls_callbacks(m, DLL_PROCESS_DETACH);
         } catch (const std::exception& e) {
@@ -1216,6 +1425,15 @@ Loader::~Loader() {
         if (m->base) VirtualFree(m->base, 0, MEM_RELEASE);
         delete m;
     }
+    if (loader_census::enabled()) {
+        char line[loader_census::kMaxLineBytes];
+        const loader_census::TlsCounters counters = loader_census::process_counters().snapshot();
+        if (const size_t n = loader_census::format_tls_counters(counters, line, sizeof line)) {
+            std::fwrite(line, 1, n, stderr);
+            std::fputc('\n', stderr);
+            std::fflush(stderr);
+        }
+    }
 }
 
 Module& Loader::load(const std::filesystem::path& image) {
@@ -1244,6 +1462,34 @@ Module& Loader::load(const std::filesystem::path& image) {
                                         ",\"base\":" + startup_trace::quote(startup_trace::hex(reinterpret_cast<uint64_t>(m.base))) +
                                         ",\"size\":" + startup_trace::quote(startup_trace::hex(m.size)) +
                                         ",\"relocated\":" + (m.relocated ? "true" : "false"));
+    if (loader_census::enabled()) {
+        char line[loader_census::kMaxLineBytes];
+        const loader_census::ModuleFacts module_facts{m.name, reinterpret_cast<uint64_t>(m.base), m.preferred_base,
+                                                      m.size, m.entry_rva, m.relocated};
+        if (const size_t n = loader_census::format_mapped(module_facts, line, sizeof line)) {
+            std::fwrite(line, 1, n, stderr);
+            std::fputc('\n', stderr);
+        }
+        loader_census::BindFacts bound{m.name, {}};
+        for (const ImportRecord& record : m.imports) {
+            switch (record.binding) {
+                case Binding::Shim: ++bound.counts.shim; break;
+                case Binding::Host: ++bound.counts.host; break;
+                case Binding::Module: ++bound.counts.module; break;
+                case Binding::Unimplemented: ++bound.counts.unimplemented; break;
+            }
+        }
+        if (const size_t n = loader_census::format_binds(bound, line, sizeof line)) {
+            std::fwrite(line, 1, n, stderr);
+            std::fputc('\n', stderr);
+        }
+        const loader_census::TlsFacts tls{m.name, m.tls_index, m.tls_slot, m.tls_ga_slot, m.tls_ga_sites};
+        if (const size_t n = loader_census::format_tls(tls, line, sizeof line)) {
+            std::fwrite(line, 1, n, stderr);
+            std::fputc('\n', stderr);
+        }
+        std::fflush(stderr);
+    }
     return m;
 }
 
@@ -1808,7 +2054,7 @@ void Loader::initialize_tls(Module& m) {
                                      " manually mapped static TLS slots are in use");
 
         // Load/clone palmetto_tls_host.dll OUTSIDE ExclusiveTlsLock so LoadLibraryExW cannot deadlock with
-        // on_host_thread_event (which runs under the Windows loader lock and takes SharedTlsLock).
+        // on_host_thread_event collects owners under SharedTlsLock but dispatches mapped callbacks after releasing it.
         index = ensure_tls_host(slot).index;
         if (index == TLS_OUT_OF_INDEXES)
             throw std::runtime_error(m.name + ": palmetto_tls_host.dll is missing or has no module TLS index");
@@ -2425,15 +2671,45 @@ void Loader::bind_imports(Module& m) {
 void Loader::protect_sections(Module& m) {
     auto* nt = at<IMAGE_NT_HEADERS64>(m.base, reinterpret_cast<IMAGE_DOS_HEADER*>(m.base)->e_lfanew);
     DWORD old;
-    VirtualProtect(m.base, nt->OptionalHeader.SizeOfHeaders, PAGE_READONLY, &old);
+    // Census names failed VirtualProtect calls. The same calls, ordering and result handling are retained when disabled.
+    uint32_t census_failures = 0;
+    auto protect = [&](uint64_t rva, uint64_t size, DWORD prot, loader_census::ProtectTarget target, uint32_t index,
+                       std::string_view section_name) {
+        if (VirtualProtect(m.base + rva, static_cast<SIZE_T>(size), prot, &old)) return;
+        const DWORD error = GetLastError();
+        if (!loader_census::enabled()) return;
+        ++census_failures;
+        if (census_failures > loader_census::kMaxProtectFailures) return;
+        char line[loader_census::kMaxLineBytes];
+        const loader_census::ProtectFailure failure{m.name, target, index, section_name, rva, size, prot, error};
+        if (const size_t n = loader_census::format_protect_failure(failure, line, sizeof line)) {
+            std::fwrite(line, 1, n, stderr);
+            std::fputc('\n', stderr);
+        }
+    };
+    protect(0, nt->OptionalHeader.SizeOfHeaders, PAGE_READONLY, loader_census::ProtectTarget::headers, 0, {});
     auto* sec = IMAGE_FIRST_SECTION(nt);
     for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
         const DWORD prot = section_protection(*sec);
         uint64_t size = section_virtual_size(*sec);
         if (sec->VirtualAddress >= m.size) continue;
         size = std::min<uint64_t>(size, m.size - sec->VirtualAddress);
-        if (size) VirtualProtect(m.base + sec->VirtualAddress, static_cast<SIZE_T>(size), prot, &old);
+        if (size) {
+            size_t name_length = 0;
+            while (name_length < IMAGE_SIZEOF_SHORT_NAME && sec->Name[name_length]) ++name_length;
+            protect(sec->VirtualAddress, size, prot, loader_census::ProtectTarget::section, i,
+                    std::string_view(reinterpret_cast<const char*>(sec->Name), name_length));
+        }
     }
+    if (loader_census::enabled() && census_failures > loader_census::kMaxProtectFailures) {
+        char line[loader_census::kMaxLineBytes];
+        if (const size_t n = loader_census::format_protect_omitted(census_failures - loader_census::kMaxProtectFailures,
+                                                                  line, sizeof line)) {
+            std::fwrite(line, 1, n, stderr);
+            std::fputc('\n', stderr);
+        }
+    }
+    if (loader_census::enabled()) std::fflush(stderr);
     FlushInstructionCache(GetCurrentProcess(), m.base, m.size);
 }
 

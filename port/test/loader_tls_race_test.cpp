@@ -1,12 +1,11 @@
-// Loader TLS race and lock-order contracts for the audit findings F4 and F7, on this tree still open:
+// Loader TLS regression contracts for audited findings F4 and F7 (synthetic images only):
 //
-//   AUDIT-F4  install_on_existing_threads() treats "the helper DLL already gave this thread a TLS block" as
-//             "this thread has no block yet": a thread created after the TLS owner is published but before the
-//             thread snapshot is taken gets a second block installed over the first, so its DLL_THREAD_DETACH
-//             callbacks run twice (once from the existing-thread record, once from the slot loop).
-//   AUDIT-F7  on_host_thread_event() holds g_tls_lock shared while it runs mapped TLS callbacks. A callback that
-//             runtime-loads a bundled module with static TLS reaches initialize_tls(), which asks for the same lock
-//             exclusively on the same thread. SRW locks are not recursive or upgradable, so the thread deadlocks.
+//   AUDIT-F4  install_on_existing_threads() skips a thread whose helper DLL_THREAD_ATTACH already installed its TLS
+//             block; otherwise DLL_THREAD_DETACH is delivered twice. A marker records the event-owned install while
+//             the actual block remains in the thread-local slot.
+//   AUDIT-F7  mapped TLS callbacks run after releasing g_tls_lock, because a callback can runtime-load a bundled
+//             static-TLS module whose initialize_tls() needs that lock exclusively. In-flight callbacks are drained
+//             before destruction so the captured mapping stays alive.
 //
 // Both cases are synthetic and need no game data: every PE image is built byte by byte in a temporary directory,
 // and the only module loaded from a file is the locally built palmetto_tls_host.dll the loader needs for a module
@@ -16,25 +15,14 @@
 // CreateToolhelp32Snapshot (the call that snapshots the threads inside install_on_existing_threads) and, on that
 // one call, creates a thread and waits for its DLL_THREAD_ATTACH to finish before forwarding to the real API. The
 // thread is therefore certainly created after the owner was published and certainly listed by the snapshot, which is
-// exactly the racing window. From the test's point of view:
-//   - today the seam thread gets the helper-event block, then the existing-threads block over it, and receives two
-//     DLL_THREAD_DETACH callbacks (AUDIT-F4 reproduced);
-//   - with a fix that records each helper-event install so the scan skips a served thread, the same seam thread
-//     receives one DLL_THREAD_DETACH (AUDIT-F4 fixed).
-// The seam is a test-only IAT patch: pe_loader.cpp is not edited. A hard precondition checks that the seam really
-// observed the helper-event install, so a tree that changes the publication order cannot silently pass.
+// exactly the racing window. The seam thread must receive one detach; a post-load control thread must also receive one.
+// The test-only IAT seam has a hard precondition that the helper-event block was installed.
 //
-// F7 runs in child processes: the fault arm hangs by design, so a parent watchdog kills it after a timeout. Three
-// arms isolate the lock order:
-//   --child-f7-attach        a mapped TLS callback runtime-loads a TLS module on DLL_PROCESS_ATTACH (no TLS lock
-//                            is held there): must complete, so the callback -> runtime load path itself works;
-//   --child-f7-preloaded     the same callback runs on DLL_THREAD_ATTACH but the dependency is already loaded, so
-//                            no initialize_tls()/exclusive lock happens: must complete;
-//   --child-f7-thread-event  the same callback runs on DLL_THREAD_ATTACH and the dependency is not loaded: today
-//                            the child deadlocks inside the helper's DllMain under the shared TLS lock.
+// F7 runs in child processes with a watchdog. The process-attach and already-mapped cases remain controls; the
+// thread-event arm must finish its nested static-TLS load within the 4 s child deadline and exit 0.
 //
-// Run with --expect-faults to count a reproduced finding as REPRO (exit 0) while the named fixes are pending; the
-// strict form (no flag) is the gate once a fix lands: a reproduced finding is a failure there.
+// The no-argument strict form is the CTest gate: any reproduced F4/F7 fault fails the run. --expect-faults remains
+// a diagnostic mode only for a tree where an audited finding is still open.
 //
 // Process shape: a normal x64 Windows process linked with /BASE:0x10000000000 so the synthetic images at
 // 0x180000000+ have their preferred bases free. Ordinary test code, not game content.

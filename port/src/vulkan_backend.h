@@ -4657,7 +4657,8 @@ private:
                     VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
                     buffer_info.size = total;
                     buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-                    if (context_.vk.vkCreateBuffer(context_.device(), &buffer_info, nullptr, &pre_buffer) == VK_SUCCESS) {
+                    if (pre_count != 0 && total != 0 &&
+                        context_.vk.vkCreateBuffer(context_.device(), &buffer_info, nullptr, &pre_buffer) == VK_SUCCESS) {
                         VkMemoryRequirements requirements{};
                         context_.vk.vkGetBufferMemoryRequirements(context_.device(), pre_buffer, &requirements);
                         const auto& memory = context_.occlusion_resolve_memory_;

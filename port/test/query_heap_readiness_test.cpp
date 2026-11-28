@@ -150,6 +150,50 @@ int known_unsupported_and_unidentified_case() {
     return 0;
 }
 
+
+int shim_action_mapping_case() {
+    current_case = "shim action mapping";
+    const Capabilities full{true, true, true, false, true};
+    const auto legacy = assess({4, 1, 0}, false, {});
+    CHECK(action_of(legacy) == Action::legacy);
+    CHECK(!is_refusal(action_of(legacy)));
+    const auto ready = assess({0, 1, 0}, true, full);
+    CHECK(action_of(ready) == Action::proceed);
+    CHECK(!is_refusal(action_of(ready)));
+    const auto so_zero = assess({3, 1, 0}, true, full);
+    CHECK(action_of(so_zero) == Action::proceed);  // accepted heap, queries resolve zero
+    const auto zero_count = assess({0, 0, 0}, true, full);
+    CHECK(action_of(zero_count) == Action::refuse_invalid_argument);
+    CHECK(is_refusal(action_of(zero_count)));
+    const auto bad_node = assess({0, 1, 2}, true, full);
+    CHECK(action_of(bad_node) == Action::refuse_invalid_argument);
+    const auto bad_type = assess({9, 1, 0}, true, full);
+    CHECK(action_of(bad_type) == Action::refuse_invalid_argument);
+    const auto video = assess({4, 1, 0}, true, full);
+    CHECK(action_of(video) == Action::refuse_not_implemented);
+    CHECK(is_refusal(action_of(video)));
+    const auto unnamed = assess({6, 1, 0}, true, full);
+    const auto stats1 = assess({7, 1, 0}, true, full);
+    CHECK(action_of(unnamed) == Action::refuse_not_implemented);
+    CHECK(action_of(stats1) == Action::refuse_not_implemented);
+    // Every refusal the shim can take carries a named reason: the stderr diagnostic is never "none".
+    const Descriptor refusals[] = {{0, 1, 0}, {1, 1, 0}, {2, 1, 0}, {3, 1, 0}, {4, 1, 0}, {6, 1, 0}, {7, 1, 0}, {8, 1, 0}};
+    for (const Descriptor& d : refusals) {
+        const auto result = assess(d, true, {});
+        const Action action = action_of(result);
+        if (is_refusal(action)) {
+            CHECK(result.reason != Reason::none);
+            CHECK(std::string(reason_name(result.reason)) != "none");
+            CHECK(std::string(reason_name(result.reason)) != "unknown_query_heap_readiness_reason");
+        }
+    }
+    CHECK(std::string(action_name(Action::legacy)) == "legacy");
+    CHECK(std::string(action_name(Action::proceed)) == "proceed");
+    CHECK(std::string(action_name(Action::refuse_invalid_argument)) == "refuse_invalid_argument");
+    CHECK(std::string(action_name(Action::refuse_not_implemented)) == "refuse_not_implemented");
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -160,6 +204,7 @@ int main() {
     if (supported_types_case()) return 1;
     if (capability_refusals_case()) return 1;
     if (known_unsupported_and_unidentified_case()) return 1;
-    std::puts("query_heap_readiness_test: OK (7 synthetic cases)");
+    if (shim_action_mapping_case()) return 1;
+    std::puts("query_heap_readiness_test: OK (8 synthetic cases)");
     return 0;
 }

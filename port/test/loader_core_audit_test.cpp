@@ -16,7 +16,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <io.h>
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
@@ -26,6 +28,7 @@
 #include <vector>
 
 #include "free_image_base.h"
+#include "loader_census.h"
 #include "pe_loader.h"
 
 namespace {
@@ -43,6 +46,66 @@ void check(bool condition, const std::string& what) {
     std::printf("%s %s\n", condition ? "PASS" : "FAIL", what.c_str());
     if (!condition) ++g_failures;
 }
+
+// Redirect only this synthetic audit's CRT stderr so the loader's real census lines can be asserted, not just formatted.
+bool has_line_with(const std::string& output, const std::string& prefix, const std::string& fragment) {
+    size_t start = 0;
+    while (start < output.size()) {
+        size_t end = output.find('\n', start);
+        if (end == std::string::npos) end = output.size();
+        const std::string line = output.substr(start, end - start);
+        if (line.find(prefix) != std::string::npos && line.find(fragment) != std::string::npos) return true;
+        start = end + (end < output.size() ? 1 : 0);
+    }
+    return false;
+}
+
+class StderrCapture {
+public:
+    StderrCapture() {
+        std::fflush(stderr);
+        file_ = std::tmpfile();
+        if (!file_) return;
+        saved_ = _dup(_fileno(stderr));
+        if (saved_ < 0) return;
+        if (_dup2(_fileno(file_), _fileno(stderr)) != 0) {
+            _close(saved_);
+            saved_ = -1;
+            return;
+        }
+        active_ = true;
+    }
+    StderrCapture(const StderrCapture&) = delete;
+    StderrCapture& operator=(const StderrCapture&) = delete;
+    ~StderrCapture() {
+        restore();
+        if (file_) std::fclose(file_);
+    }
+    bool active() const noexcept { return active_; }
+    std::string finish() {
+        restore();
+        if (!file_) return {};
+        std::rewind(file_);
+        std::string contents;
+        char buffer[4096];
+        for (size_t count = 0; (count = std::fread(buffer, 1, sizeof buffer, file_)) != 0;)
+            contents.append(buffer, count);
+        return contents;
+    }
+
+private:
+    void restore() noexcept {
+        if (!active_) return;
+        std::fflush(stderr);
+        _dup2(saved_, _fileno(stderr));
+        _close(saved_);
+        saved_ = -1;
+        active_ = false;
+    }
+    FILE* file_ = nullptr;
+    int saved_ = -1;
+    bool active_ = false;
+};
 
 // A distinct, free 64 KiB-aligned preferred base for one synthetic image. Preferred bases are probed so a test maps
 // where it asks instead of being relocated for an unrelated reason.
@@ -637,6 +700,10 @@ void test_normal_image() {
 
 int main() {
     std::printf("loader_core_audit_test: inherited PE loader core-map audit (synthetic images only)\n");
+    check(_putenv_s(rt::loader_census::kSwitchName, "1") == 0,
+          "PALMETTO_LOADER_CENSUS exact opt-in is set for the integration assertions");
+    StderrCapture census_capture;
+    check(census_capture.active(), "loader stderr is captured for census integration assertions");
     g_temp_dir = std::filesystem::temp_directory_path() /
                  ("palmetto_loader_core_audit_" + std::to_string(GetCurrentProcessId()));
     std::error_code ec;
@@ -655,6 +722,18 @@ int main() {
         std::printf("FATAL: unhandled exception: %s\n", e.what());
         ++g_failures;
     }
+
+    const std::string census_lines = census_capture.finish();
+    check(has_line_with(census_lines, "[rt] loader: census v1 mapped core_audit_", " size=0x"),
+          "loader emits a bounded mapped census line for a synthetic image");
+    check(has_line_with(census_lines, "[rt] loader: census v1 bound core_audit_",
+                        "total=0 shim=0 host=0 module=0 unimplemented=0"),
+          "loader emits the synthetic image's import-binding census line");
+    check(has_line_with(census_lines, "[rt] loader: census v1 tls core_audit_",
+                        "index=none slot=none ga_slot=none ga_sites=0"),
+          "loader emits the no-TLS census line for a synthetic image");
+    check(has_line_with(census_lines, "[rt] loader: census v1 tls-counters attach=", " failures="),
+          "loader emits a process TLS-counter census line on destruction");
 
     std::filesystem::remove_all(g_temp_dir, ec);
     std::printf("\nloader_core_audit_test: %d check(s), %d failure(s)\n", g_checks, g_failures);

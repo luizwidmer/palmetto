@@ -147,10 +147,16 @@ bool copy_rts0_blob_clear_xbox_flags(const void* data, size_t size, std::vector<
     if (chunk_count == 0 || chunk_count > 16 || static_cast<size_t>(chunk_count) * 4 > size - 32) return false;
 
     // Verify the incoming container hash before rewriting: a corrupted blob must reach the host deserializer
-    // unchanged so it is rejected, rather than getting a freshly forged valid hash.
-    uint32_t expected_hash[4];
-    dxbc_checksum(bytes, size, expected_hash);
-    if (std::memcmp(expected_hash, bytes + 4, sizeof(expected_hash)) != 0) return false;
+    // unchanged so it is rejected, rather than getting a freshly forged valid hash. Host d3d12.dll accepts an
+    // all-zero checksum as-is (d3d12_xs_rootsig.h), so that is the one case the first verification lets through and
+    // the rewrite keeps zeroed; any other checksum must match.
+    constexpr uint8_t kZeroHash[16] = {};
+    const bool zero_hash = std::memcmp(bytes + 4, kZeroHash, sizeof(kZeroHash)) == 0;
+    if (!zero_hash) {
+        uint32_t expected_hash[4];
+        dxbc_checksum(bytes, size, expected_hash);
+        if (std::memcmp(expected_hash, bytes + 4, sizeof(expected_hash)) != 0) return false;
+    }
 
     const size_t min_chunk_off = 32 + static_cast<size_t>(chunk_count) * 4;
     for (uint32_t i = 0; i < chunk_count; ++i) {
@@ -172,14 +178,8 @@ bool copy_rts0_blob_clear_xbox_flags(const void* data, size_t size, std::vector<
         if (total_size != size) return false;
 
         // Do not forge a valid hash for a corrupted container: host d3d12.dll accepts a matching
-        // DXBC checksum or an all-zero checksum, and rejects any other checksum with E_INVALIDARG.
-        constexpr uint8_t kZeroHash[16] = {};
-        const bool zero_hash = std::memcmp(bytes + 4, kZeroHash, sizeof(kZeroHash)) == 0;
-        if (!zero_hash) {
-            uint32_t expected[4];
-            dxbc_checksum(bytes, size, expected);
-            if (std::memcmp(bytes + 4, expected, sizeof(expected)) != 0) return false;
-        }
+        // DXBC checksum or an all-zero checksum, and rejects any other checksum with E_INVALIDARG. The
+        // all-zero case was verified above and is kept zeroed; every other hash was verified there too.
 
         out.assign(bytes, bytes + size);
         std::memcpy(out.data() + off + 8 + 20, &cleared, sizeof(cleared));
