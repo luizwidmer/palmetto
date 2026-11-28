@@ -412,3 +412,9 @@ or worker event, not session completion. Evidence: `D:\leonida-work\fsrstable\bo
 - PresentX carries 1 plane (3840x2160 full-rect -> 2564x1421), and every capture is still mean RGB 0/0/0. Session 3 (the loading-record poll) holds for the whole run while the loading tick advances ~1000/s.
 - Forced completion reaches session 13 but the upload workers then null-deref (game+0x6EB759 under arena pressure; game+0x5151E29 in the texture-upload job, param_1+0x38 null), i.e. completion without streamed content creates jobs with missing resources.
 - Next: instrument loading record entry 4 progress fields + slot gates to separate "still streaming" from "stuck"; then fix the completion writer condition (DirectStorage chunk job / stream gate). Page section 20.11.
+
+### Round-5 loading-record probe
+
+- Under the natural app-state window the DirectStorage burst ends at +20 s (8,685 requests / 306 submits) and no further batch is posted for 400 s; slots 0 and 4 tick ~1000/s but slot 4 completion (image+0x78ACB20) is never written, so session 3 holds. This is the streamed-consumer 6b-6d stall, not a shim gap.
+- App-state notification delivery timing: 500 ms/3 s can race boot-media construction (crash at game+0x2217DF0); 20 s is stable. `PALMETTO_PIPELINE_DEFER_COMPILE=0` stalls earlier (init 2/loading 1/session 0), so deferred compile is needed.
+- Next: PALMETTO_DS_STACK=1 / PALMETTO_DS_ARRAYS=1 at the stall to name the wait, and the stage trigger after the pipeline precompile. Page section 20.12.

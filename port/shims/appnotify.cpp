@@ -86,7 +86,9 @@ HRESULT __stdcall register_app_state_change(Handler callback, void* context, voi
     static std::atomic<bool> delivered{false};
     if (!delivered.exchange(true)) {
         std::thread([callback, context] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            // 20 s: 500 ms and 3 s both raced the boot-media construction in some arms (crash at game+0x2217DF0, wild read
+            // within ~1.5 s of the callback); by 20 s the module, its dispatch list and the stage-2 handshake are built.
+            std::this_thread::sleep_for(std::chrono::milliseconds(20000));
             const AppStateChange change{0, 1};  // reason unknown, state running
             std::fprintf(stderr,
                          "[rt] appnotify: synthetic app-state change delivered (reason %u state %u context %p) to the "

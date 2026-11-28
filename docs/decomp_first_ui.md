@@ -1882,3 +1882,27 @@ stream never delivered. Next: instrument the loading record entry 4 (the 0x50-by
 its progress fields and the slot gates, to separate "still streaming" from "stuck on a missing job/answer"; if it is
 streaming, extend the window; if stuck, the completion writer's condition (DirectStorage chunk job / stream gate) is the
 next fix. No menu pixel is claimed.
+
+### 20.12 Loading-record instrumentation under the natural window: DS burst ends at 20 s, completion never written
+
+Under the natural app-state window (`PALMETTO_TITLE_APPSTATE_CALLBACK=1`, class0a, `PALMETTO_ARENA_MB=3072`, no forced
+completion), `PALMETTO_DS_RECORD=1000,400` + `PALMETTO_DS_LOAD_TRACE=1` measured the loading record for 400 s:
+
+- **the DirectStorage burst is healthy and then stops**: 8,685 requests enqueued and done, 306 submits by +20 s (the
+  second burst the docs name), and **no further request/submit for the remaining 380 s**;
+- **the record is not idle**: slots 0 and 4 tick advances (~1,000/s) for the whole run (slot 4 tick is the session-3 poll's
+  own tick store), while slots 1-3 stay zero; **slot 4's completion dword `image+0x78ACB20` is never written** - the
+  `0x41E8C0` predicate never reads true, so session 3 holds from 62 s to 400 s;
+- the record header words (`+0x1A8`, `+0x1C0`, `+0x1C8`, `+0x1D0`, `+0x1D4`) are constant for the whole run;
+- `PALMETTO_PIPELINE_DEFER_COMPILE=0` stalls the title earlier (init 2 / loading 1 / session 0 to 360 s), so deferred
+  compile is part of the working path, not the cause.
+
+**Delivery timing of the synthetic notification matters:** delivering at 500 ms or 3 s can race the boot-media
+construction and crash at `game+0x2217DF0` (wild read within ~1.5 s of the callback, 2.4-4.4 s boot); a **20 s delay**
+(after init 2, before session 3) is stable across the arm - the shim now waits 20 s.
+
+**Wall:** this is the streamed-content stall the streamed-consumer page named in sections 6b-6d - the DirectStorage job
+mechanism answered every call, and the title-side stage logic stops arming batches after the pipeline-library burst, so
+the session-3 record never completes and the menu content is never requested. The natural app-state window does not
+change that; it just keeps the title presenting and drawing while it waits. Next: `PALMETTO_DS_STACK=1`/`PALMETTO_DS_ARRAYS=1`
+at the stall to name which array/job the stage waits for, and the stage trigger after the pipeline precompile.
