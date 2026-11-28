@@ -4,19 +4,19 @@ This page is the starting point after an indefinite pause. The working tree is c
 expected to be running, and the boot lock should be free. Everything below is measured from this checkout, not from
 memory: re-check `git status`, `git log -1`, the boot lock and running processes first.
 
-## Current state at the pause
+## Current state (round-20 landing)
 
 | item | value |
 |---|---|
 | repository | `D:\leonida` on `main`, no PRs for our own fork |
-| paused HEAD | `51dd01de8` (this page's newest commit; `git log -1` is authoritative) |
+| round-20 landing | code `d95a159ce`, docs `58091833d`; this handoff update is the next commit (the tree is clean and pushed) |
 | last green gate | `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT` |
-| latest test evidence | `d3d12_viewport_array` CTest registered and passing (1/1, 1.6 s, validation layer on); loader subset 18/18; new loader-audit and rewrite targets pass |
-| docs | all `tests/test_docs_*.py` green (clear inherited `GIT_CONFIG_*` first, below) |
-| agents | none running at pause; the 8 GPT-6 Luna + 6 DeepSeek round-18 teammates are inactive |
+| latest test evidence | round-20 CTest subset **29/29 passed** (10.8 s), including the new `pe_mapper_parity`, `pe_loader_shadow_wiring`, `loader_census`, `loader_tls_race`, `ds_publication`, `query_heap_readiness`, `d3d12_residency_budget`, `ui_input_script`, `d3d12_title_va`; `d3d12_viewport_array` still 1/1; loader subset 29/29 |
+| docs | all `tests/test_docs_*.py` green, 22 tests (clear inherited `GIT_CONFIG_*` first, below) |
+| agents | none running; the 8 GPT-6 Luna (max effort) + 6 DeepSeek round-20 teammates finished, and the lead committed their slices |
 | boot lock | free; no `palmetto`/`cl`/`ninja`/`ctest` process should remain |
 
-## What was just landed
+## What landed in round 19 (kept for history)
 
 - **PE-loader audit** (`5b0233a48`): core mapping, binding, TLS/thread/unwind and base-reservation faults fixed with named
   errors and five synthetic audit suites (`loader_core_audit`, `loader_bind_audit`, `loader_tls_audit`,
@@ -110,58 +110,93 @@ Boot arm (take the lock, stop after two consecutive device losses; the host is p
 - CMakeLists is lead-owned: agents report stanzas, the lead applies them.
 - `d3d12_draw` remains the known-flaky shared GPU fixture; use `d3d12_viewport_array` for the viewport case.
 
-## Handoff to the next thread (round 20, huge push)
+## Round 20 landed (2026-11-27)
 
-The previous thread reached its context limit while preparing a multi-agent push. **No round-20 subagents were launched.**
-The working tree is clean and pushed at the commit that adds this section; the plan below is ready to execute as-is.
+The huge round-20 push executed: 14 teammates (8 GPT-6 Luna at max effort + 6 DeepSeek) over round plan tasks 253-266,
+with the lead integrating, gating, committing and updating the board. Code is `d95a159ce`, docs `58091833d`, and this
+handoff update is the next commit on `main`; everything is pushed.
+
+### What landed
+
+- **P-50 mapper parity**: `pe_mapper` mirrors the legacy ImageBase/FileAlignment/SectionAlignment and shared-page
+  differing-protection refusals before allocation; `pe_mapper_parity` (309 checks, 0 failures) maps the same synthetic
+  fixtures through the old `Loader` and the new mapper and compares base/size/entry, page-tail and raw-pointer-zero
+  bytes, relocation results, protection plan vs VirtualQuery and the named malformed refusals.
+- **P-56 loader V2 shadow wiring + TLS F1**: `map_image` caches only exact `PALMETTO_PE_LOADER_SHADOW_PARSE=1` /
+  `PALMETTO_PE_LOADER_SHADOW_STRICT=1`, reuses the file buffer, emits bounded `[rt] loader shadow parse` diagnostics,
+  throws only in strict mode and is byte-identical when off; TLS F1 now frees a >=64 `TlsAlloc` index and refuses the
+  load with `GA_TLS_SLOT_UNAVAILABLE`. `pe_loader_shadow_wiring` 6/6, `loader_tls`/`loader_tls_audit` green (45 checks,
+  `FIXED AUDIT-F1/F5/F6`).
+- **P-57 census layer**: `port/src/loader_census.h` (header-only, `PALMETTO_LOADER_CENSUS=1`) formats bounded
+  mapped/bound/tls/tls-counters/protect-failed lines; `loader_census` 47 checks; the `pe_loader.cpp` wiring hunks are
+  recorded outside the repo (`D:\leonida-work\census\hunks.md`) and are **not applied**.
+- **F4/F7 TLS contracts**: `loader_tls_race` deterministically reproduces the duplicate-install window (2 vs 1
+  `DLL_THREAD_DETACH`) and the thread-event load self-deadlock (child watchdog) with three child arms; CTest runs
+  `--expect-faults` while the fixes are open. A validated F4 patch proposal (scratch copy: seam count 1) and an F7
+  analysis proposal are in `D:\leonida-work\tlsrace\report.md`; no loader fix was applied this round.
+- **P-48 title-VA GPU CTest**: `d3d12_title_va` registers and passes 1/1 on the RTX 4090: raw title VA -> window
+  registration -> `buffer_at` resolve -> pulled bytes sampled/read back through the real queue/fence, with named
+  out-of-window and `WriteBufferImmediate` refusals. The functional gate runs without the validation layer; with
+  `PALMETTO_VK_VALIDATION=1` its final counter assertion fails on a nonzero count whose messages are swallowed by the
+  ExecuteCommandLists stderr capture (open item in `vertex_buffer_va.md`; `d3d12_viewport_array` stays the
+  validation-clean GPU test).
+- **Pure peer/contract slices**: D3D12X query-heap readiness and CPU residency budget contracts (opt-in, unwired); the
+  movie-overlay readiness gate at the second-plane decision behind `PALMETTO_PRESENT_MOVIE_OVERLAY_READY_ONLY=1`
+  (guard only, no playback claim); DirectStorage ordered publication behind `PALMETTO_DS_REAP_ORDER=1` with the serial
+  default unchanged; the first-run screen-state input contract (`PALMETTO_UI_INPUT_SCRIPT=1`, pure/unwired); the
+  translator's one exact `s_mov_b32 exec_lo` gap rule (491/668 translated, all 491 previous modules byte-identical,
+  no program closure - an honest negative).
+- **P-61 inventory + P-62 docs**: `docs/testing.md` refreshed against the round-20 tree; `docs/progress.json` and the
+  generated README block retire the 2026-11-24 frontier as historical and point at the content/presentation frontier,
+  fixing the D-04 leftover XccQ114 reported.
+- **Boot arms (P-55/P-56 follow-up)**: three light arms on one fixed binary (`BFA39770...`): baseline and class-0xa
+  content arms ALIVE at 88.4 s (stage 2 at 86 s); the shadow-parse arm reached stage 3 at 62 s, emitted **0**
+  shadow-parse divergence lines, then hit the known class-0xa AV at `game+0x13360a3` (single arm, not attributable).
+  Loader surface identical in all arms: preferred `0x140000000`, not relocated; bindings 95/420/72/0; 5 modules; the
+  `/GA` TLS rewrite; TEB checks. 0 device losses in 3/3. Evidence: `D:\leonida-work\fsrstable\boot-round20-266-{a1,a2,a3}`;
+  page `docs/boot_smoke.md`.
+- **Test-gate fix**: `loader_test` now calls `SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX)`. A malformed
+  compat image made Windows raise a hard-error dialog that blocked CTest with no one to answer it, while standalone
+  runs returned 0; `loader` CTest is green in 1.0 s again.
+- **P-60 translator rule**, **P-02 input contract**, **P-58 query/residency contracts** and **P-59 overlay/DS slices** are
+  each behind an exact opt-in switch or pure/unwired, with synthetic tests and page updates; default behaviour is
+  unchanged in every case.
+
+### Gates measured at the landing
+
+- `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT`.
+- round-20 CTest subset (loader/rewrite + peers + GPU): **29/29 passed** in 10.8 s, including `loader`,
+  `pe_mapper_parity`, `pe_loader_shadow_wiring`, `loader_census`, `loader_tls_race` (2 expected F4/F7 faults),
+  `ds_publication`, `query_heap_readiness`, `d3d12_residency_budget`, `ui_input_script`, `movie_overlay_readiness`,
+  `d3d12_viewport_array` and `d3d12_title_va`.
+- docs checks: **22 passed** (env_vars, repo_paths, links, table_rows, repeated_lines, cli_flags).
+- full-suite refresh: 321 registered, 6 exclusions, 314 executed -> 281 pass / 11 skip / 22 fail with the grouped causes
+  in `docs/testing.md`; `d3d12_draw` remains the known-flaky shared GPU fixture (use `d3d12_viewport_array`).
+
+### What is still open (next thread)
+
+1. **P-57 wiring**: apply the census hunks to `pe_loader.cpp` behind `PALMETTO_LOADER_CENSUS=1` (owner-only file) and
+   assert the lines in the parser/mapper tests; hunks and the switch-off byte-identical proof are outside the repo.
+2. **F4/F7 fixes**: the F4 proposal is validated on a scratch copy; F7 (release the TLS lock before running callbacks,
+   drain in-flight callbacks on destruction) is analysis-only. Land one at a time, then drop `--expect-faults` from the
+   `loader_tls_race` CTest.
+3. **P-48 validation-on item**: identify the validation error whose message the ExecuteCommandLists stderr capture
+   swallows, then re-enable `PALMETTO_VK_VALIDATION=1` on `d3d12_title_va`.
+4. **Frame frontier** F-03..F-07 is unchanged and claimable one at a time; F-01/F-02 stay blocked. The content/presentation
+   wall is the same measured wall (class-0xa stage-3 AV; no content producer/colour input).
+5. **CI**: the five failing jobs on `main` predate round 20 (`translator-tests`, `stdlib-tests-linux`, `viewer-tests`,
+   `semantic-tests (ubuntu-latest)`, `macos-python`); P-26 branch protection and the P-39 triage remain open.
+6. The title-VA production BDA ordering pixel acceptance (P-45) and the multi-count replay gap (C-06) are the next
+   renderer/memory items.
 
 ### Start the next thread with this state
 
-- repo `D:\leonida`, branch `main`, no open PRs of ours; tree clean; boot lock free; no `palmetto`/`cl`/`ninja`/`ctest`
-  process.
-- last green gates: `PALMETTO_OK`, `TESTS_BUILT`; loader subset 18/18; `d3d12_viewport_array` CTest passing (1/1);
-  docs checks 22 + subtests green.
-- the live board (GitHub issue #4) and `docs/taskboard.md` already carry the planned rows **P-56..P-62**, P-48/P-50 and the
-  opened frame frontier (F-03..F-07 claimable one at a time; F-01/F-02 blocked). Do not re-publish them.
-- the team task board is at its **256-task limit**. Delete stale completed tasks with
-  `team_task_update action=delete` before creating more. `task-243` and `task-250` were deleted as superseded by the
-  landed shadow/base-reservation work.
-
-### Pending tasks created but never spawned
-
-| task | run as | subject | notes |
-|---|---|---|---|
-| `task-253` | Luna | PE mapper parity, old loader vs `pe_mapper` on synthetic fixtures | phase-1 falsifier; new target `pe_mapper_parity_test` |
-| `task-254` | Luna | PE loader V2 shadow wiring + TLS F1 named refusal | **sole owner of `port/src/pe_loader.cpp` this round** |
-| `task-255` | Luna | next measured D3D12X replay/memory gap | must not edit `d3d12_com.cpp`/`pe_loader.cpp` |
-| `task-256` | Luna | next peer movie/overlay or first-run/UI slice | pure or narrow opt-in wiring, no boot |
-| `task-257` | Luna | translator next measured refusal class | GPU-free Python |
-| `task-258` | Luna | P-48 dedicated Title-VA GPU CTest (`d3d12_title_va_test`) | report CMake stanza; lead registers |
-| `task-259` | DeepSeek | full-suite inventory refresh after loader fixes/new targets | edit `docs/testing.md` only |
-| `task-260` | DeepSeek | docs parity/loader refresh for the round | docs only |
-| `task-261` | Luna | P-02 first-run screen-state input script | pure/opt-in |
-| `task-262` | Luna | D3D12X GPU memory residency/budget slice | pure/opt-in |
-| `task-263` | DeepSeek | loader observability census (pure formatter + exact hunk) | does **not** edit `pe_loader.cpp` |
-| `task-264` | DeepSeek | TLS audit F4/F7 contract tests + fix proposals | does **not** edit `pe_loader.cpp` |
-| `task-265` | DeepSeek | DirectStorage ordered-publication integration behind `PALMETTO_DS_REAP_ORDER=1` | may edit `port/shims/dstorage.cpp` |
-| `task-266` | DeepSeek | boot arm series after loader fixes (baseline TLS trace, shadow arm if wired, class-0xa content arm) | owns the boot lock; at most 3 arms, stop after 2 losses |
-
-Suggested split for the push: **8 GPT-6 Luna max + 7 DeepSeek** (the 8-Luna cap keeps under the token-rate limit). Spawn
-all tasks in one message with `subagent` (provider `openai`, model `gpt-6-luna`, reasoning `max` for Luna; default model for
-DeepSeek), then do the lead work below while they run. A CI/contributor triage task was not created because of the task
-limit; create it after deleting a completed task, or ask the maintainer directly.
-
-### Lead work while agents run (definition of done for the push)
-
-1. Enforce the shared-file owners: only `task-254` touches `pe_loader.cpp`; `task-265` owns `dshims/dstorage.cpp`;
-   CMakeLists is lead-only (agents report stanzas).
-2. Register new targets in `port/CMakeLists.txt` as their sources land (`pe_mapper_parity`, `d3d12_title_va`,
-   `pe_loader_shadow_wiring`, `loader_census`, `loader_tls_race`, and any peer slice target), then reconfigure/build.
-3. Run `build_gta6rt.cmd` -> `PALMETTO_OK` and `build_tests.cmd` -> `TESTS_BUILT`; run the loader subset plus the new
-   CTest targets; run all docs checks with `GIT_CONFIG_*` cleared.
-4. Commit directly on `main` in coherent slices (loader fixes/rewrite, peer slices, docs), push, update issue #4 rows and
-   post one summary comment; finally refresh this handoff page and the board mirror.
-5. Only run a boot arm after the binary is fixed and the boot lock is free; stop after two consecutive device losses.
+- repo `D:\leonida`, branch `main`, tree clean and pushed; boot/build locks free; no `palmetto`/`cl`/`ninja`/`ctest`
+  process expected.
+- last green gates above; the round-20 team task board rows (task-1..task-15) are closed. The board started empty in that
+  session, so the 256-task limit did not apply; the CI/contributor triage row was lead-owned as task-13.
+- the live board (issue #4) and `docs/taskboard.md` carry the round-20 statuses; do not re-publish them.
+- boot-arm evidence and the `D:\leonida-work\scratch\round20\issue4.md` snapshot are outside the repo.
 
 ### Constraints to carry over
 

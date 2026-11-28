@@ -227,6 +227,35 @@ being weakened. No runtime code was changed for this inventory and the inventory
 `translator-tests`, `stdlib-tests-linux`, `viewer-tests`, `semantic-tests` (Ubuntu) and `macos-python` were already
 failing on `main` before this refresh; they are pre-existing and were not re-run here.
 
+## Round-20 final gate (2026-11-27, after the rebuild)
+
+The lead's final round-20 build is HEAD `d95a159ce`; `ctest` registered 330 tests, the 321-test baseline above plus the
+nine round-20 targets. Its round-20 CTest subset was 29/29 passed with `PALMETTO_OK` and `TESTS_BUILT`. This refresh ran
+the nine new targets and the 17-name loader subset from the resume command against those final binaries, serially, one
+bounded CTest invocation each (the per-test form above with `--timeout 150`): 26/26 passed.
+
+| Round-20 target | Result | Time | What it covers |
+| --- | --- | ---: | --- |
+| `pe_mapper_parity` | PASS | 0.1 s | Old loader vs `rt::pe::Mapper` on synthetic DLL/EXE fixtures. |
+| `pe_loader_shadow_wiring` | PASS | 0.2 s | Optional shadow parse/comparison through `Loader::load`/`map_image`; synthetic, no mapped code run. |
+| `loader_tls_race` | PASS | 4.3 s | Loader TLS race/lock-order contracts for audit findings F4/F7; registered with `--expect-faults`. |
+| `loader_census` | PASS | 0.0 s | Pure bounded PE-loader census formatter; synthetic facts only. |
+| `ds_publication` | PASS | 0.0 s | Pure ordered-publication policy for the DirectStorage completion stream. |
+| `query_heap_readiness` | PASS | 0.0 s | Pure D3D12X query-heap readiness policy. |
+| `d3d12_residency_budget` | PASS | 0.1 s | CPU-only D3D12X residency/budget policy. |
+| `ui_input_script` | PASS | 0.0 s | Pure opt-in screen-state input block; no presenter, GameInput, GPU or title image. |
+| `d3d12_title_va` | PASS | 0.3 s | P-48 Title-VA GPU regression readback; its functional gate runs with Vulkan validation off. |
+
+The loader subset was `loader`, `pe_loader`, `pe_loader_bounds`, `loader_tls`, `module_names`, `unimplemented_policy`,
+`startup_trace`, `pe_image`, `pe_image_fuzz`, `pe_mapper`, `pe_resolver`, `pe_loader_shadow`, `loader_core_audit`,
+`loader_bind_audit`, `loader_tls_audit`, `loader_selfcheck` and `d3d12_viewport_array`; all 17 passed in the same run
+(0.1 to 2.4 s each), so the nine new targets plus this subset are 26/26.
+
+`d3d12_title_va` passes now that its functional gate runs with Vulkan validation off, and `loader` passes after the
+`SetErrorMode` test fix. The failure groups in the table above are the pre-gate sweep; this final-gate pass did not
+re-run the other 300 targets after the rebuild, so their rows stay attributed to the pre-gate binaries. The round-20
+tree has 330 registered tests: 29/29 in the lead's round-20 subset and 26/26 in this new-target and loader pass.
+
 ## Build, artifact, and single-test notes
 
 Windows, from a "Developer PowerShell for VS 2022" or a plain shell:
