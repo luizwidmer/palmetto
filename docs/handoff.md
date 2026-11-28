@@ -9,7 +9,7 @@ memory: re-check `git status`, `git log -1`, the boot lock and running processes
 | item | value |
 |---|---|
 | repository | `D:\leonida` on `main`, no PRs for our own fork |
-| paused HEAD | the commit that added this page (see `git log -1 --format=%h`) |
+| paused HEAD | `51dd01de8` (this page's newest commit; `git log -1` is authoritative) |
 | last green gate | `_setup\build_gta6rt.cmd` -> `PALMETTO_OK`; `_setup\build_tests.cmd` -> `TESTS_BUILT` |
 | latest test evidence | `d3d12_viewport_array` CTest registered and passing (1/1, 1.6 s, validation layer on); loader subset 18/18; new loader-audit and rewrite targets pass |
 | docs | all `tests/test_docs_*.py` green (clear inherited `GIT_CONFIG_*` first, below) |
@@ -109,3 +109,67 @@ Boot arm (take the lock, stop after two consecutive device losses; the host is p
 - `reports/` is gitignored: the TLS/loader audit reports referenced above are evidence only and are not in the repo.
 - CMakeLists is lead-owned: agents report stanzas, the lead applies them.
 - `d3d12_draw` remains the known-flaky shared GPU fixture; use `d3d12_viewport_array` for the viewport case.
+
+## Handoff to the next thread (round 20, huge push)
+
+The previous thread reached its context limit while preparing a multi-agent push. **No round-20 subagents were launched.**
+The working tree is clean and pushed at the commit that adds this section; the plan below is ready to execute as-is.
+
+### Start the next thread with this state
+
+- repo `D:\leonida`, branch `main`, no open PRs of ours; tree clean; boot lock free; no `palmetto`/`cl`/`ninja`/`ctest`
+  process.
+- last green gates: `PALMETTO_OK`, `TESTS_BUILT`; loader subset 18/18; `d3d12_viewport_array` CTest passing (1/1);
+  docs checks 22 + subtests green.
+- the live board (GitHub issue #4) and `docs/taskboard.md` already carry the planned rows **P-56..P-62**, P-48/P-50 and the
+  opened frame frontier (F-03..F-07 claimable one at a time; F-01/F-02 blocked). Do not re-publish them.
+- the team task board is at its **256-task limit**. Delete stale completed tasks with
+  `team_task_update action=delete` before creating more. `task-243` and `task-250` were deleted as superseded by the
+  landed shadow/base-reservation work.
+
+### Pending tasks created but never spawned
+
+| task | run as | subject | notes |
+|---|---|---|---|
+| `task-253` | Luna | PE mapper parity, old loader vs `pe_mapper` on synthetic fixtures | phase-1 falsifier; new target `pe_mapper_parity_test` |
+| `task-254` | Luna | PE loader V2 shadow wiring + TLS F1 named refusal | **sole owner of `port/src/pe_loader.cpp` this round** |
+| `task-255` | Luna | next measured D3D12X replay/memory gap | must not edit `d3d12_com.cpp`/`pe_loader.cpp` |
+| `task-256` | Luna | next peer movie/overlay or first-run/UI slice | pure or narrow opt-in wiring, no boot |
+| `task-257` | Luna | translator next measured refusal class | GPU-free Python |
+| `task-258` | Luna | P-48 dedicated Title-VA GPU CTest (`d3d12_title_va_test`) | report CMake stanza; lead registers |
+| `task-259` | DeepSeek | full-suite inventory refresh after loader fixes/new targets | edit `docs/testing.md` only |
+| `task-260` | DeepSeek | docs parity/loader refresh for the round | docs only |
+| `task-261` | Luna | P-02 first-run screen-state input script | pure/opt-in |
+| `task-262` | Luna | D3D12X GPU memory residency/budget slice | pure/opt-in |
+| `task-263` | DeepSeek | loader observability census (pure formatter + exact hunk) | does **not** edit `pe_loader.cpp` |
+| `task-264` | DeepSeek | TLS audit F4/F7 contract tests + fix proposals | does **not** edit `pe_loader.cpp` |
+| `task-265` | DeepSeek | DirectStorage ordered-publication integration behind `PALMETTO_DS_REAP_ORDER=1` | may edit `port/shims/dstorage.cpp` |
+| `task-266` | DeepSeek | boot arm series after loader fixes (baseline TLS trace, shadow arm if wired, class-0xa content arm) | owns the boot lock; at most 3 arms, stop after 2 losses |
+
+Suggested split for the push: **8 GPT-6 Luna max + 7 DeepSeek** (the 8-Luna cap keeps under the token-rate limit). Spawn
+all tasks in one message with `subagent` (provider `openai`, model `gpt-6-luna`, reasoning `max` for Luna; default model for
+DeepSeek), then do the lead work below while they run. A CI/contributor triage task was not created because of the task
+limit; create it after deleting a completed task, or ask the maintainer directly.
+
+### Lead work while agents run (definition of done for the push)
+
+1. Enforce the shared-file owners: only `task-254` touches `pe_loader.cpp`; `task-265` owns `dshims/dstorage.cpp`;
+   CMakeLists is lead-only (agents report stanzas).
+2. Register new targets in `port/CMakeLists.txt` as their sources land (`pe_mapper_parity`, `d3d12_title_va`,
+   `pe_loader_shadow_wiring`, `loader_census`, `loader_tls_race`, and any peer slice target), then reconfigure/build.
+3. Run `build_gta6rt.cmd` -> `PALMETTO_OK` and `build_tests.cmd` -> `TESTS_BUILT`; run the loader subset plus the new
+   CTest targets; run all docs checks with `GIT_CONFIG_*` cleared.
+4. Commit directly on `main` in coherent slices (loader fixes/rewrite, peer slices, docs), push, update issue #4 rows and
+   post one summary comment; finally refresh this handoff page and the board mirror.
+5. Only run a boot arm after the binary is fixed and the boot lock is free; stop after two consecutive device losses.
+
+### Constraints to carry over
+
+- no game data or package bytes in the repo, logs, tests or task text; no keys/decryption; peer clones are read-only
+  evidence and every mechanism gets a NOTICE/docs credit.
+- opt-in until measured: default path byte-identical, named refusals, synthetic tests and a boot/GPU falsifier where
+  applicable.
+- one build at a time against `port\build`; never relink `palmetto` while an arm holds the exe; `LNK1168` means an arm
+  still holds it.
+- `d3d12_draw` remains the known-flaky shared GPU fixture; use `d3d12_viewport_array` for the viewport case.
+- reports/evidence under `D:\leonida-work` and `reports/` stay outside the repo.
