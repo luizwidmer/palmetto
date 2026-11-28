@@ -1906,3 +1906,33 @@ mechanism answered every call, and the title-side stage logic stops arming batch
 the session-3 record never completes and the menu content is never requested. The natural app-state window does not
 change that; it just keeps the title presenting and drawing while it waits. Next: `PALMETTO_DS_STACK=1`/`PALMETTO_DS_ARRAYS=1`
 at the stall to name which array/job the stage waits for, and the stage trigger after the pipeline precompile.
+
+### 20.13 The app-state callback's argument order: the producer is reachable, the item dispatch is not
+
+Disassembling the selector `0x2217C70` (it has no `.pdata` entry, so the range disassembler is needed) gives exactly:
+
+```
+0x2217C70: TEST RDX,RDX
+0x2217C73: JZ  0x2217C81      ; null change -> return
+0x2217C75: TEST CL,CL
+0x2217C77: JZ  0x2217C82      ; CL == 0 -> alternate path 0x22181F0
+0x2217C79: MOV RCX,RDX
+0x2217C7C: JMP 0x2218180      ; the producer
+```
+
+So the OS handler passes the **change first and the registration context second** (`Handler(change, context)`), and the
+producer receives the context (the boot-media object `image+0x71B8C78`), not the notification. The shim was calling
+`callback(context, &change)`, which passed the notification struct as the module object and made `FUN_142217DE0` read
+`[param+0x3B8]` from it - the wild-read crash at `game+0x2217DF0` in earlier arms. With the order corrected and the
+change pointer forced to an odd address (so the selector's `CL` is non-zero), the measured poke log now shows
+`0x2217C70` -> `0x2218180`: **the real app-state producer runs**. Delivery timing: 20 s and 60 s are both stable (no
+wild read); 60 s is after session 3, which is the useful window.
+
+What still does not happen: the handler `0x247B500` (the type-0x24 subscriber that sets `0x75DF0D8`) is never reached by
+the producer's item dispatch, and the present-pass keys stay `0x0/0x0` (body-exits-on-keys) for the whole arm. The
+boot-media module open `0x2478440` and the registration thunk `0x5CABBB0` do execute (poke logs 0 and 1), so the
+subscriber exists in the process; the item dispatch from `0x2218180` (`FUN_142217B80`) is what does not reach it.
+`PALMETTO_POKE_LOG` installs at most four sites, so the next arm must probe selector, producer, dispatcher `0x2217B80`
+and handler `0x247B500` (or split into two arms) to separate "producer did not dispatch" from "dispatch found no
+subscriber". One arm with this notification device-lost at 86 s; the 60 s arm was ALIVE 300 s with 904,354 D3D12
+calls, UI batches 2,072 in the >=3 bucket, and black captures.

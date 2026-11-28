@@ -31,7 +31,12 @@ struct AppStateChange {
     std::uint32_t state;   // APPLICATION_STATE (1 = running)
 };
 
-using Handler = void (*)(void* context, const AppStateChange* change);
+// Windows' PAPPSTATE_CHANGE_HANDLER passes the change FIRST and the registration context SECOND. The title's
+// selector at 0x2217C70 tests RDX (the context) for non-null, tests CL (a byte of the change pointer) and then moves
+// RDX into RCX before jumping to producer 0x2218180 - so the producer receives the boot-media object from the
+// registration context, not the notification. Calling it as (context, change) passed the notification struct as the
+// module object and crashed at 0x2217DF0 (wild read of +0x3B8).
+using Handler = void (*)(const AppStateChange* change, void* context);
 
 bool switch_on() {
     static const bool on = [] {
@@ -86,16 +91,23 @@ HRESULT __stdcall register_app_state_change(Handler callback, void* context, voi
     static std::atomic<bool> delivered{false};
     if (!delivered.exchange(true)) {
         std::thread([callback, context] {
-            // 20 s: 500 ms and 3 s both raced the boot-media construction in some arms (crash at game+0x2217DF0, wild read
-            // within ~1.5 s of the callback); by 20 s the module, its dispatch list and the stage-2 handshake are built.
-            std::this_thread::sleep_for(std::chrono::milliseconds(20000));
-            const AppStateChange change{0, 1};  // reason unknown, state running
+            // 60 s: the selector/producer are reached at 20 s, but the type-0x24 subscriber (handler 0x247B500) is not
+            // registered yet (no poke hit), so nothing downstream changes. By 60 s the title is in session 3 and the
+            // boot-media module has its subscriber list and frame loop running.
+            std::this_thread::sleep_for(std::chrono::milliseconds(60000));
+            // The title's selector tests CL (the low byte of the change pointer) and takes the alternate path when it
+            // is zero. A heap/stack buffer can sit at a page-aligned address, so hand it an odd byte offset: the selector
+            // then enters the producer 0x2218180 with the registration context.
+            alignas(16) static thread_local unsigned char storage[64];
+            auto* change = reinterpret_cast<AppStateChange*>(storage + 1);
+            *change = AppStateChange{0, 1};  // reason unknown, state running
             std::fprintf(stderr,
-                         "[rt] appnotify: synthetic app-state change delivered (reason %u state %u context %p) to the "
-                         "boot-media handler\n",
-                         change.reason, change.state, context);
+                         "[rt] appnotify: synthetic app-state change delivered (reason %u state %u change %p context %p, "
+                         "CL 0x%02x) to the boot-media handler\n",
+                         change->reason, change->state, static_cast<void*>(change), context,
+                         static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(change) & 0xffu));
             std::fflush(stderr);
-            callback(context, &change);
+            callback(change, context);
         }).detach();
     }
     return S_OK;

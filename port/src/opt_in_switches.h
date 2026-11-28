@@ -321,7 +321,7 @@ inline constexpr Switch kSwitches[] = {
     {"PALMETTO_TEXTURE_PAGE_WATCH", Kind::switch_on, "port/shims/d3d12_vulkan_device.cpp:2848", true},
     {"PALMETTO_THREAD_STACKS", Kind::any_set, "port/src/main.cpp:10426", true},
     {"PALMETTO_TIMELINE", Kind::switch_on, "port/src/main.cpp:10496", true},
-    {"PALMETTO_TITLE_APPSTATE_CALLBACK", Kind::exact_one, "port/shims/appnotify.cpp:38", true},
+    {"PALMETTO_TITLE_APPSTATE_CALLBACK", Kind::exact_one, "port/shims/appnotify.cpp:43", true},
     {"PALMETTO_TITLE_BOOTMEDIA_OPEN", Kind::exact_one, "port/src/main.cpp:10134", true},
     {"PALMETTO_TITLE_CLASS0A_SIZE", Kind::exact_one, "port/src/main.cpp:10047", true},
     {"PALMETTO_TITLE_FRAME_REQUEST", Kind::exact_one, "port/src/main.cpp:10157", true},
