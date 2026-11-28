@@ -5,9 +5,11 @@
 
 #include "../src/vulkan_present.h"
 #include "../src/plane_compose_rule.h"  // docs/peer_port_movie.md: the measured second-plane rule
+#include "../src/movie_overlay_readiness.h"  // docs/movie_overlay_readiness.md: opt-in correlated movie-plane guard
 #include "../src/present_fit.h"         // docs/peer_port_first_ui.md section 15: the fit/scale rule and its attestation
 #include "../src/window_fit.h"          // docs/peer_port_first_ui.md section 16: the opt-in outer-window clamp
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -357,6 +359,41 @@ bool plane_rule_measured() {
                palmetto::present_plane_rule_measured_from(value);
     }();
     return on;
+}
+
+// PALMETTO_PRESENT_MOVIE_OVERLAY_READY_ONLY=1 requires an independently correlated registration -> decode -> upload ->
+// PresentX chain before plane 1 is composed. This runtime has no registration/decode/upload evidence producer yet, so the
+// switch currently refuses plane 1 by the helper's first named refusal. Unset/0 preserve the existing plane decision.
+palmetto::movie_overlay_readiness::RuntimeGate movie_overlay_readiness_gate_mode() {
+    using palmetto::movie_overlay_readiness::RuntimeGate;
+    static const RuntimeGate mode = [] {
+        char value[24] = {};
+        std::size_t length = 0;
+        const errno_t env = getenv_s(&length, value, "PALMETTO_PRESENT_MOVIE_OVERLAY_READY_ONLY");
+        if (env == ERANGE) {
+            std::fprintf(stderr, "[rt] present: PALMETTO_PRESENT_MOVIE_OVERLAY_READY_ONLY is too long; switch refused, existing plane rule retained\n");
+            return RuntimeGate::invalid;
+        }
+        if (env != 0) {
+            std::fprintf(stderr, "[rt] present: PALMETTO_PRESENT_MOVIE_OVERLAY_READY_ONLY could not be read (errno %d); switch refused, existing plane rule retained\n", int(env));
+            return RuntimeGate::invalid;
+        }
+        if (length <= 1) return RuntimeGate::legacy;
+        const RuntimeGate parsed = palmetto::movie_overlay_readiness::parse_runtime_gate_switch(value);
+        if (parsed == RuntimeGate::invalid)
+            std::fprintf(stderr, "[rt] present: PALMETTO_PRESENT_MOVIE_OVERLAY_READY_ONLY has an unsupported value; switch refused, existing plane rule retained\n");
+        return parsed;
+    }();
+    return mode;
+}
+
+void log_movie_overlay_gate_once(const palmetto::movie_overlay_readiness::GateDecision& decision) {
+    static std::atomic_flag logged = ATOMIC_FLAG_INIT;
+    if (logged.test_and_set(std::memory_order_relaxed)) return;
+    if (decision.allow_overlay)
+        std::fprintf(stderr, "[rt] present: movie overlay readiness chain confirmed; plane 1 allowed\n");
+    else
+        std::fprintf(stderr, "[rt] present: movie overlay readiness refused plane 1: %s\n", decision.readiness.reason());
 }
 
 // PALMETTO_PRESENT_PLANE_DUMP=1: the sampled plane-word dump the second-plane rule was measured from
@@ -783,6 +820,20 @@ HRESULT XboxPresentation::present_x(UINT plane_count, const XboxPresentPlanePara
             if (!overlay)
                 log_once(logged_planes_, "PresentX with 2 planes and no overlay flag on plane 1: only plane 0 is shown (plane 1 is taken "
                                          "as the GameDVR copy of the frame)");
+        }
+    }
+    // PresentX does not identify plane 1 as movie versus another overlay; the strict opt-in therefore applies to every
+    // otherwise-selected plane 1. Nothing here guesses a movie frame from PresentX alone. Until Bink/upload evidence exists,
+    // an opted-in candidate remains refused at frame-registration-not-observed.
+    if (overlay) {
+        const palmetto::movie_overlay_readiness::RuntimeGate gate_mode = movie_overlay_readiness_gate_mode();
+        if (gate_mode == palmetto::movie_overlay_readiness::RuntimeGate::require_ready) {
+            palmetto::movie_overlay_readiness::Evidence evidence{};
+            evidence.opt_in = true;
+            const palmetto::movie_overlay_readiness::GateDecision gate =
+                palmetto::movie_overlay_readiness::gate_second_plane(gate_mode, overlay, evidence);
+            overlay = gate.allow_overlay;
+            log_movie_overlay_gate_once(gate);
         }
     }
     const bool compose = hdr0 || placement(planes[0]) || filter_of(planes[0]) != xbox_scale_filter_default || overlay;

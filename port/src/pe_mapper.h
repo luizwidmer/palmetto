@@ -50,6 +50,9 @@ struct MappedImage {
 class Allocator {
 public:
     virtual ~Allocator() = default;
+    // Fake storage allocators may intentionally accept arbitrary preferred addresses; Windows-like allocators opt in
+    // so map_image also enforces the loader's 64 KiB ImageBase granularity.
+    virtual bool enforces_windows_image_base_alignment() const noexcept { return false; }
     virtual std::uint8_t* allocate(std::uint64_t preferred_base, std::size_t size, bool allow_rebase) = 0;
 };
 

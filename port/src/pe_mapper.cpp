@@ -1,8 +1,10 @@
 #include "pe_mapper.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <span>
 #include <string>
 
 #if defined(_WIN32)
@@ -123,8 +125,79 @@ std::string section_label(const Section& section, std::size_t index) {
     return section.name.empty() ? "section #" + std::to_string(index) : section.name;
 }
 
+std::uint16_t file_u16(const Image& image, std::span<const std::uint8_t> file, std::size_t offset, const char* what) {
+    if (offset > file.size() || sizeof(std::uint16_t) > file.size() - offset)
+        fail(image, std::string(what) + " runs past the end of the file");
+    return static_cast<std::uint16_t>(static_cast<std::uint16_t>(file[offset]) |
+                                     (static_cast<std::uint16_t>(file[offset + 1]) << 8));
+}
+
+std::uint32_t file_u32(const Image& image, std::span<const std::uint8_t> file, std::size_t offset, const char* what) {
+    if (offset > file.size() || sizeof(std::uint32_t) > file.size() - offset)
+        fail(image, std::string(what) + " runs past the end of the file");
+    return static_cast<std::uint32_t>(file[offset]) | (static_cast<std::uint32_t>(file[offset + 1]) << 8) |
+           (static_cast<std::uint32_t>(file[offset + 2]) << 16) | (static_cast<std::uint32_t>(file[offset + 3]) << 24);
+}
+
+// The rewrite mapper receives Image, not the legacy Loader's optional-header view. Preserve the measured placement
+// refusals that depend on alignment metadata, and refuse conflicting sub-page protections before allocating memory.
+void validate_placement(const Image& image, bool enforce_image_base_alignment) {
+    const auto file = image.file_bytes();
+    const std::uint32_t nt_offset = file_u32(image, file, 0x3C, "the DOS header");
+    const std::uint64_t optional_offset64 = static_cast<std::uint64_t>(nt_offset) + 4 + 20;
+    if (optional_offset64 > file.size() || 2 > file.size() - static_cast<std::size_t>(optional_offset64))
+        fail(image, "the optional header runs past the end of the file");
+    const std::size_t file_header = static_cast<std::size_t>(nt_offset) + 4;
+    const std::uint16_t section_count = file_u16(image, file, file_header + 2, "the file header");
+    const std::uint16_t optional_size = file_u16(image, file, file_header + 16, "the file header");
+    const std::uint64_t optional_end = optional_offset64 + optional_size;
+    if (optional_end > file.size()) fail(image, "the optional header runs past the end of the file");
+    if (optional_size < 0xF0) fail(image, "not a PE32+ image");
+    if (enforce_image_base_alignment && image.image_base() && (image.image_base() & 0xFFFFull))
+        fail(image, "ImageBase is not a multiple of 64 KiB");
+    const auto optional_offset = static_cast<std::size_t>(optional_offset64);
+    const std::uint32_t section_alignment = file_u32(image, file, optional_offset + 32, "SectionAlignment");
+    const std::uint32_t file_alignment = file_u32(image, file, optional_offset + 36, "FileAlignment");
+    const auto is_power_of_two = [](std::uint32_t value) { return value && !(value & (value - 1)); };
+    if (file_alignment &&
+        (!is_power_of_two(file_alignment) || file_alignment < 0x200 || file_alignment > 0x10000))
+        fail(image, "FileAlignment is not a power of two between 0x200 and 0x10000");
+    if (section_alignment &&
+        (!is_power_of_two(section_alignment) || (file_alignment && section_alignment < file_alignment)))
+        fail(image, "SectionAlignment is not a power of two at least FileAlignment");
+
+    const std::uint64_t section_table = optional_end;
+    if (section_table + static_cast<std::uint64_t>(section_count) * 40 > file.size())
+        fail(image, "the section table runs past the end of the file");
+    const auto& sections = image.sections();
+    for (std::size_t i = 0; i < sections.size(); ++i) {
+        const Section& section = sections[i];
+        if (section_alignment && section.virtual_address % section_alignment)
+            fail(image, "section " + std::to_string(i) + " is not aligned to SectionAlignment");
+        const std::uint64_t section_size = section.virtual_size ? section.virtual_size : section.raw_size;
+        if (!section_size) continue;
+        const std::uint64_t first_page = section.virtual_address & ~(kImagePageSize - 1);
+        const std::uint64_t last_page = align_up(static_cast<std::uint64_t>(section.virtual_address) + section_size,
+                                                 kImagePageSize);
+        for (std::size_t j = 0; j < i; ++j) {
+            const Section& other = sections[j];
+            const std::uint64_t other_size = other.virtual_size ? other.virtual_size : other.raw_size;
+            if (!other_size) continue;
+            const std::uint64_t other_first_page = other.virtual_address & ~(kImagePageSize - 1);
+            const std::uint64_t other_last_page =
+                align_up(static_cast<std::uint64_t>(other.virtual_address) + other_size, kImagePageSize);
+            if (first_page < other_last_page && other_first_page < last_page &&
+                protection_for(section) != protection_for(other))
+                fail(image, "sections " + section_label(other, j) + " and " + section_label(section, i) +
+                                 " share a page with different protections");
+        }
+    }
+}
+
 class WindowsAllocator final : public Allocator {
 public:
+    bool enforces_windows_image_base_alignment() const noexcept override { return true; }
+
     std::uint8_t* allocate(std::uint64_t preferred_base, std::size_t size, bool allow_rebase) override {
 #if defined(_WIN32)
         void* preferred = nullptr;
@@ -163,6 +236,7 @@ public:
 }  // namespace
 
 MappedImage map_image(const Image& image, Allocator& allocator, Protector& protector) {
+    validate_placement(image, allocator.enforces_windows_image_base_alignment());
     const Directory& relocation_directory = image.directory(Image::kDirectoryBaseReloc);
     const bool can_rebase = relocation_directory.present();
     std::uint8_t* base = allocator.allocate(image.image_base(), image.size_of_image(), can_rebase);

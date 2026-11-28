@@ -11,8 +11,8 @@
 //   AUDIT-F0  initialise() re-entry: a mapped DllMain that runtime-loads a bundled module re-enters its own
 //             DLL_PROCESS_ATTACH without limit (stack overflow), and the state it appends invalidates the range-for
 //             over init_order_ that is being iterated.
-//   AUDIT-F1  A /GA image's index-0 TLS view cell comes from one process-wide static TlsAlloc slot: a second mapped
-//             /GA image overwrites the first one's view, so the first reads the second's TLS block.
+//   AUDIT-F1  /GA index-0 reads must use a distinct TlsAlloc slot per image; if no slot below 64 is available, the
+//             loader must refuse the image instead of continuing with those reads pointed at the host TLS view.
 //   AUDIT-F2  kMaxModuleTlsSlots (64) is the TlsAlloc slot count, not the module TLS index space: a reserved module
 //             index >= 64 is rejected even though the OS assigned and supports it (measured past 1101 here).
 //   AUDIT-F3  Thread events run the mapped TLS callbacks only: a mapped DLL's DllMain never receives
@@ -547,7 +547,7 @@ void test_dllmain_thread_events() {
     check(m.initialised, "the module stays initialised while its thread events run");
 }
 
-// ---- AUDIT-F1: /GA index-0 view cell is process-wide ---------------------------------------------------------------
+// ---- AUDIT-F1: /GA index-0 view and low-slot refusal -------------------------------------------------------------
 
 void test_ga_index0_slot_isolation() {
     std::printf("\n-- /GA index-0 TLS: two mapped images --\n");
@@ -576,6 +576,54 @@ void test_ga_index0_slot_isolation() {
     fault_check(read_a() != 7, "AUDIT-F1",
                 "the first /GA image still reads its own TLS block after a second /GA image is mapped");
     check(read_b() == 9, "the second /GA image reads its own TLS block");
+}
+
+// AUDIT-F1 fallback: consume every TlsAlloc slot below the fixed TEB TlsSlots limit, then require a named refusal.
+struct HeldTlsAllocSlots {
+    std::vector<DWORD> values;
+    ~HeldTlsAllocSlots() {
+        for (DWORD value : values) TlsFree(value);
+    }
+};
+
+void test_ga_index0_slot_exhaustion() {
+    std::printf("\n-- /GA index-0 TLS: no TlsAlloc slot below 64 --\n");
+    HeldTlsAllocSlots held;
+    held.values.reserve(64);
+    bool no_low_slot = false;
+    for (unsigned attempt = 0; attempt <= 64; ++attempt) {
+        const DWORD slot = TlsAlloc();
+        if (slot == TLS_OUT_OF_INDEXES) {
+            no_low_slot = true;
+            break;
+        }
+        if (slot >= 64) {
+            TlsFree(slot);
+            no_low_slot = true;
+            break;
+        }
+        held.values.push_back(slot);
+    }
+    check(no_low_slot, "TlsAlloc has no free slot below 64 after exhaustion");
+    if (!no_low_slot) return;
+
+    TempDir temp("ga_no_slot");
+    const fs::path path = write_image(temp.path, "ga_no_low_slot.exe", make_ga_exe(0x1A0000000, 7));
+    bool rejected = false;
+    std::string message;
+    {
+        rt::Loader loader(temp.path);
+        try {
+            loader.load(path);
+        } catch (const std::exception& e) {
+            rejected = true;
+            message = e.what();
+        }
+    }  // Release the mapped module before restoring the TlsAlloc pool.
+    std::printf("     load %s%s\n", rejected ? "threw: " : "accepted", rejected ? message.c_str() : "");
+    const bool fault_reproduced = !rejected || message.find("GA_TLS_SLOT_UNAVAILABLE") == std::string::npos;
+    fault_check(fault_reproduced, "AUDIT-F1",
+                "a /GA EXE is refused by GA_TLS_SLOT_UNAVAILABLE when no TlsAlloc slot below 64 remains");
 }
 
 // ---- AUDIT-F2: module TLS index >= 64 (child process) ----------------------------------------------------------------
@@ -889,6 +937,7 @@ int main(int argc, char** argv) {
         test_tls_rejections();
         test_dllmain_thread_events();
         test_ga_index0_slot_isolation();
+        test_ga_index0_slot_exhaustion();
         test_unwind_registration();
         test_nested_load_from_dllmain();
         test_module_tls_index_beyond_64(tiny_tls);

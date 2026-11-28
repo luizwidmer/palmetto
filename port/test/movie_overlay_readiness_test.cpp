@@ -34,6 +34,43 @@ int expect_refusal(const Evidence& e, Stage stage, Refusal refusal) {
     return 0;
 }
 
+int test_runtime_gate_parser_and_legacy_passthrough() {
+    EXPECT(parse_runtime_gate_switch(nullptr) == RuntimeGate::legacy);
+    EXPECT(parse_runtime_gate_switch("") == RuntimeGate::legacy);
+    EXPECT(parse_runtime_gate_switch("0") == RuntimeGate::legacy);
+    EXPECT(parse_runtime_gate_switch("1") == RuntimeGate::require_ready);
+    EXPECT(parse_runtime_gate_switch("true") == RuntimeGate::invalid);
+    EXPECT(parse_runtime_gate_switch("01") == RuntimeGate::invalid);
+
+    Evidence empty{};
+    empty.opt_in = true;
+    const GateDecision legacy = gate_second_plane(RuntimeGate::legacy, true, empty);
+    EXPECT(legacy.allow_overlay);
+    EXPECT(legacy.readiness.refusal == Refusal::opt_in_off);
+    const GateDecision invalid = gate_second_plane(RuntimeGate::invalid, true, empty);
+    EXPECT(invalid.allow_overlay);
+    EXPECT(invalid.readiness.refusal == Refusal::opt_in_off);
+    const GateDecision no_overlay = gate_second_plane(RuntimeGate::require_ready, false, empty);
+    EXPECT(!no_overlay.allow_overlay);
+    return 0;
+}
+
+int test_runtime_gate_requires_correlated_evidence() {
+    Evidence incomplete{};
+    incomplete.opt_in = true;
+    const GateDecision refused = gate_second_plane(RuntimeGate::require_ready, true, incomplete);
+    EXPECT(!refused.allow_overlay);
+    EXPECT(refused.readiness.stage == Stage::registration);
+    EXPECT(refused.readiness.refusal == Refusal::registration_not_observed);
+    EXPECT(std::strcmp(refused.readiness.reason(), "frame-registration-not-observed") == 0);
+
+    const GateDecision ready = gate_second_plane(RuntimeGate::require_ready, true, complete_evidence());
+    EXPECT(ready.allow_overlay);
+    EXPECT(ready.readiness.ready());
+    EXPECT(ready.readiness.stage == Stage::ready);
+    return 0;
+}
+
 int test_default_is_off() {
     const Evidence empty{};
     EXPECT(expect_refusal(empty, Stage::off, Refusal::opt_in_off) == 0);
@@ -187,6 +224,8 @@ int main() {
     };
     const TestCase tests[] = {
         {"default opt-in off", test_default_is_off},
+        {"runtime gate parsing and legacy passthrough", test_runtime_gate_parser_and_legacy_passthrough},
+        {"runtime gate needs correlated evidence", test_runtime_gate_requires_correlated_evidence},
         {"registration evidence and named refusals", test_registration_gate},
         {"decode ordering and identity", test_decode_gate},
         {"upload correlation", test_upload_gate},

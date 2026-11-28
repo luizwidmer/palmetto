@@ -1427,6 +1427,10 @@ void test_compat_modules() {
 }  // namespace
 
 int main() {
+    // An invalid image handed to compat resolution makes Windows raise a hard-error dialog ("bad image") from
+    // ntdll, which blocks a CTest run with no one to answer it; the test expects a catchable exception instead.
+    // The same suppression is used by the other tests that load deliberately malformed images.
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     g_dir = work_dir();
     std::error_code ec;
     std::filesystem::remove_all(g_dir, ec);

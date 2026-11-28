@@ -35,10 +35,12 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include "../src/ds_publication.h"  // the opt-in ordered-publication policy (PALMETTO_DS_REAP_ORDER)
 #include "../src/shader_library.h"  // palmetto::zlib_inflate: the runtime's own RFC 1950/1951 inflate
 #include "dstorage_advanced.h"     // staging, destination pinning, page-list plan, predictor file, unshuffle
 #include "dstorage_xs_abi.h"
@@ -1789,9 +1791,81 @@ struct Entry {
     std::uint64_t order_not_before_us = 0;  // PALMETTO_DS_ORDER: earliest time a status entry may complete
 };
 
+// ---- Ordered publication (opt-in; docs/peer_port_streaming.md section 17) -------------------------------------------
+//
+// The default queue has one worker: it executes an entry and publishes its result inline, so completion is in enqueue
+// order by construction and needs no gate. PALMETTO_DS_REAP_ORDER=1 splits that worker into two request-work lanes plus
+// one publication step. A lane admits the next entry into a bounded, ticketed retirement buffer (in queue order, before
+// dispatch), runs only the work, and hands the payload to the publisher; the publisher drains the contiguous completed
+// prefix and performs every entry's status/fence/event/failure side effect while holding one mutex. A later entry can
+// therefore finish first but can never publish first, and the status array still reports the first failed request in
+// enqueue order.
+//
+// The switch parses exactly as port/src/stream_reap.h documents, and every other outcome is a named refusal that keeps
+// the serial path: an unknown spelling (invalid_switch_value), a bounded-buffer allocation failure, or an option
+// combination the lanes cannot honour - the PALMETTO_DS_STAGING scratch is per-queue single-worker state, so two lanes
+// must not share it. With the switch unset the only added work is one cached environment read.
+
+struct CompletedEntry {
+    Entry entry;
+    HRESULT hr = S_OK;
+};
+static_assert(std::is_nothrow_move_constructible_v<CompletedEntry>,
+              "the retirement buffer needs a nothrow-movable payload");
+
+using PublicationPublisher = palmetto::ds_publication::OrderedPublisher<CompletedEntry>;
+
+struct OrderedPublication {
+    palmetto::ds_publication::Config config;
+    PublicationPublisher publisher{true};
+    std::mutex mutex;  // serializes admit/complete/drain and the published side effects
+};
+
+// The process-wide switch decision, taken once. A value too long for the bounded buffer is handed to the strict parser
+// as an unrecognised spelling, so it is a named refusal instead of a silent off.
+const palmetto::ds_publication::Config& ds_publication_config() {
+    static const palmetto::ds_publication::Config config = [] {
+        char value[64] = {};
+        const DWORD length = GetEnvironmentVariableA("PALMETTO_DS_REAP_ORDER", value, sizeof value);
+        const char* spelling = nullptr;
+        if (length > 0 && length < sizeof value) spelling = value;
+        if (length >= sizeof value) spelling = "overlong";
+        const bool staging = palmetto::dstorage::env_size("PALMETTO_DS_STAGING") != 0;
+        const palmetto::ds_publication::Config resolved = palmetto::ds_publication::resolve(spelling, staging);
+        switch (resolved.refusal) {
+            case palmetto::ds_publication::ConfigRefusal::none:
+                log_once("reap-order-on",
+                         "PALMETTO_DS_REAP_ORDER=1: request work runs on " + std::to_string(resolved.lanes) +
+                             " lanes and status/fence/event publication retires in enqueue order (bounded buffer " +
+                             std::to_string(resolved.capacity) +
+                             "; docs/peer_port_streaming.md section 17). A queue whose live requests write overlapping "
+                             "destination bytes can observe a different interleaving with this switch on");
+                break;
+            case palmetto::ds_publication::ConfigRefusal::switch_invalid:
+                log_once("reap-order-invalid",
+                         std::string("PALMETTO_DS_REAP_ORDER=") + (spelling ? spelling : "") +
+                             " is not a recognised opt-in spelling; ordered publication stays off (named refusal "
+                             "invalid_switch_value; the accepted spellings are 1/on/yes/true)");
+                break;
+            case palmetto::ds_publication::ConfigRefusal::staging_scratch_shared:
+                log_once("reap-order-staging",
+                         "PALMETTO_DS_REAP_ORDER=1 with PALMETTO_DS_STAGING set: the work lanes would share the queue's "
+                         "single-worker staging scratch; ordered publication stays serial (named refusal "
+                         "staging_scratch_shared)");
+                break;
+            case palmetto::ds_publication::ConfigRefusal::switch_off:
+            case palmetto::ds_publication::ConfigRefusal::allocation_failed:
+                break;  // the default path prints nothing
+        }
+        return resolved;
+    }();
+    return config;
+}
+
 class Queue final : public IDStorageQueueX2 {
 public:
     explicit Queue(const DSTORAGE_QUEUE_DESC1& desc) : desc_(desc) {
+        prepare_publication();
         error_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         clear_record_locked();
         std::lock_guard lock(stats().mutex);
@@ -1806,7 +1880,7 @@ public:
         if (!error_event_) return false;
         ds_load_heartbeat_start();  // no thread without PALMETTO_DS_LOAD_TRACE
         try {
-            worker_ = std::thread([this] { run(); });
+            worker_ = publication_ ? std::thread([this] { run_ordered(); }) : std::thread([this] { run(); });
         } catch (...) {
             return false;
         }
@@ -2016,7 +2090,7 @@ public:
             closing_ = true;
             submit_locked();
             space_.notify_all();  // an enqueue waiting for space gives up (the queue is closing)
-            idle_.wait(lock, [&] { return entries_.empty() && !in_flight_; });
+            idle_.wait(lock, [&] { return entries_.empty() && in_flight_ == 0; });
             closed_ = true;
             work_.notify_all();
         }
@@ -2084,7 +2158,7 @@ private:
     size_t usable() const { return desc_.Capacity - 1u; }
     size_t half() const { return desc_.Capacity / 2u; }
     bool auto_submit() const { return !desc_.Options.AutoSubmitDisabled; }
-    size_t used_locked() const { return entries_.size() + (in_flight_ ? 1 : 0); }
+    size_t used_locked() const { return entries_.size() + in_flight_; }
 
     void enqueue(Entry&& e) {
         {
@@ -2148,18 +2222,151 @@ private:
                 e = std::move(entries_.front());
                 entries_.pop_front();
                 --submitted_;
-                in_flight_ = true;
+                ++in_flight_;
             }
             process(e);
             trace_progress(e);
             release_references(e);
             {
                 std::lock_guard lock(mutex_);
-                in_flight_ = false;
+                --in_flight_;
                 space_.notify_all();
                 if (entries_.empty()) idle_.notify_all();
             }
         }
+    }
+
+    // ---- The opt-in ordered path (PALMETTO_DS_REAP_ORDER=1; docs/peer_port_streaming.md section 17) ---------------
+    //
+    // Started instead of run() only when the switch resolved on. The queue's own worker thread is one of the lanes, so
+    // Close()'s join covers the whole set: run_ordered() joins the helpers it started before it returns.
+
+    // Allocates the opt-in state only when the switch resolved on, so a default queue carries nothing but a null
+    // pointer. A failed allocation is a named refusal that keeps the serial path.
+    void prepare_publication() {
+        const palmetto::ds_publication::Config& config = ds_publication_config();
+        if (!config.ordered) return;
+        publication_.reset(new (std::nothrow) OrderedPublication);
+        if (!publication_) {
+            log_once("reap-order-alloc",
+                     "the ordered publication buffer could not be allocated; the queue keeps the serial path (named "
+                     "refusal allocation_failed)");
+            return;
+        }
+        publication_->config = config;
+    }
+
+    void run_ordered() {
+        std::vector<std::thread> helpers;
+        const unsigned lanes = publication_->config.lanes > 0 ? publication_->config.lanes : 1;
+        helpers.reserve(lanes - 1);
+        for (unsigned lane = 1; lane < lanes; ++lane) {
+            try {
+                helpers.emplace_back([this] { lane_loop(); });
+            } catch (...) {
+                log_once("reap-order-lane",
+                         "not every PALMETTO_DS_REAP_ORDER work lane could start; the lanes that started still "
+                         "publish in enqueue order (named refusal lane_unavailable)");
+                break;
+            }
+        }
+        lane_loop();
+        for (std::thread& helper : helpers) helper.join();
+    }
+
+    // One lane: admit the next submitted entry in queue order (before dispatch, so a later entry can never run past
+    // an earlier one), run only its work, then hand the completed payload to the single publisher.
+    void lane_loop() {
+        for (;;) {
+            Entry entry;
+            std::uint64_t ticket = 0;
+            if (!take_next_ordered(entry, ticket)) return;
+            const HRESULT hr = execute_entry_work(entry);
+            publish_completed(palmetto::stream_reap::Ticket{ticket}, CompletedEntry{std::move(entry), hr});
+        }
+    }
+
+    // Pops the next submitted entry and issues its retirement ticket under the queue lock, in the exact order the
+    // entries were queued. A full retirement buffer is backpressure *before* dispatch: the lane waits for a
+    // publication to free a slot instead of running this entry past earlier work. False means closed and drained.
+    bool take_next_ordered(Entry& entry, std::uint64_t& ticket) {
+        std::unique_lock lock(mutex_);
+        for (;;) {
+            work_.wait(lock, [&] {
+                return (submitted_ > 0 && retirement_used_.load(std::memory_order_relaxed) <
+                                               publication_->config.capacity) ||
+                       (closed_ && submitted_ == 0);
+            });
+            if (submitted_ == 0) return false;  // closed and drained
+            {
+                std::lock_guard publication_lock(publication_->mutex);
+                const auto admission = publication_->publisher.admit();
+                if (admission.refusal == palmetto::stream_reap::Refusal::none) {
+                    ticket = admission.ticket.value;
+                    entry = std::move(entries_.front());
+                    entries_.pop_front();
+                    --submitted_;
+                    ++in_flight_;
+                    retirement_used_.fetch_add(1, std::memory_order_relaxed);
+                    if (submitted_ > 0) work_.notify_one();  // keep the other lane busy
+                    return true;
+                }
+                // Unreachable while the wait predicate holds; a named refusal is printed rather than dropping or
+                // reordering the entry. A capacity refusal retries, any other refusal fails the lane closed.
+                refuse_ordered(admission.refusal);
+                if (admission.refusal != palmetto::stream_reap::Refusal::capacity_full) return false;
+            }
+            work_.wait(lock, [&] {
+                return closed_ || retirement_used_.load(std::memory_order_relaxed) < publication_->config.capacity;
+            });
+        }
+    }
+
+    // The single publisher: complete the payload (any finish order), drain the contiguous completed prefix and run
+    // each entry's publication plus its progress trace and reference release in retirement order, inside
+    // publication_->mutex. No other lane can interleave a side effect, which is what keeps the status array, fence
+    // and event order equal to the enqueue order.
+    void publish_completed(palmetto::stream_reap::Ticket ticket, CompletedEntry&& completed) {
+        std::size_t published = 0;
+        {
+            std::lock_guard lock(publication_->mutex);
+            const auto accepted = publication_->publisher.complete(ticket, std::move(completed));
+            if (accepted != palmetto::stream_reap::Refusal::none) {
+                // Fail closed: an unaccepted completion is an integration fault and publishing it out of order
+                // would be worse than the named refusal. Unreachable while tickets are issued once, under mutex_.
+                refuse_ordered(accepted);
+            }
+            const auto drained = publication_->publisher.drain(
+                [this](CompletedEntry&& value, palmetto::stream_reap::Ticket) {
+                    publish_in_order(value.entry, value.hr);
+                },
+                published);
+            if (drained != palmetto::stream_reap::Refusal::none) refuse_ordered(drained);
+        }
+        if (published == 0) return;
+        retirement_used_.fetch_sub(published, std::memory_order_relaxed);
+        std::lock_guard lock(mutex_);
+        in_flight_ -= published;
+        space_.notify_all();  // a queue blocked on a full slot count may fit again
+        work_.notify_all();   // a lane waiting for a retirement slot may dispatch
+        if (entries_.empty() && in_flight_ == 0) idle_.notify_all();
+    }
+
+    // One entry's publication plus the per-entry progress trace and reference release that the serial run() performs
+    // right after process().
+    void publish_in_order(Entry& entry, HRESULT hr) {
+        publish_one(entry, hr);
+        trace_progress(entry);
+        release_references(entry);
+    }
+
+    // One bounded, named line per refusal kind. capacity_full is ordinary backpressure; every other refusal is an
+    // unreachable integration fault that must stay visible instead of being papered over.
+    void refuse_ordered(palmetto::stream_reap::Refusal refusal) {
+        log_once(std::string("reap-order-refused-") + palmetto::stream_reap::refusal_name(refusal),
+                 std::string("PALMETTO_DS_REAP_ORDER ordered publication refused a queue operation: ") +
+                     palmetto::stream_reap::refusal_name(refusal) +
+                     " (named refusal; the serial path is unaffected - docs/peer_port_streaming.md section 17)");
     }
 
     // Trace-level progress counters, so a long streaming run says how much it moved (requests, bytes, rate) instead of
@@ -2224,9 +2431,11 @@ private:
         storage_trace(advanced);
     }
 
-    // Runs on the worker. since_notify_ is the first failure since the last status entry or fence signal: the
-    // HRESULT a status entry reports.
-    void process(Entry& e) {
+    // The execution half of one entry: the file read / memory copy / inflate and the timing-only waits of a status
+    // entry. It consumes no first-failure state and publishes nothing that a later entry's publication could reorder.
+    // On the default path the single worker calls this immediately before publish_one(); with
+    // PALMETTO_DS_REAP_ORDER=1 it runs on one of two lanes (docs/peer_port_streaming.md section 17).
+    HRESULT execute_entry_work(Entry& e) {
         HRESULT hr = e.enqueue_error;
         switch (e.type) {
             case Entry::Type::Request:
@@ -2246,9 +2455,10 @@ private:
                     if (SUCCEEDED(hr) && !page_list_destination && e.request.Destination && e.request.DestinationSize)
                         stream_note_completed(e.request.Destination, e.request.DestinationSize, e.caller);
                 }
+                // The file's pending count pairs with add_pending() at submit, so it drops when the work is done
+                // rather than when the ordered publisher reaches the entry; File::Close would otherwise wait for the
+                // bounded retirement buffer too.
                 if (e.file && e.file_counted) e.file->finish_pending();
-                if (ds_load_visible()) g_ds_load.requests_done.fetch_add(1, std::memory_order_relaxed);
-                if (FAILED(hr) && SUCCEEDED(since_notify_)) since_notify_ = hr;
                 break;
             case Entry::Type::Status:
                 if (SUCCEEDED(hr)) {
@@ -2282,13 +2492,38 @@ private:
                                          loader[0] ? loader : "(loader not set)");
                         }
                     }
-                    e.status->complete(e.index, since_notify_);
-                    since_notify_ = S_OK;
                 }
                 break;
             case Entry::Type::Signal:
+            case Entry::Type::Event:
+                break;
+        }
+        return hr;
+    }
+
+    // The publication half of one entry, in the order the queue has always published: the first-failure fold, the
+    // status array value, the fence signal, the event set, the progress trace, the failure record and the reference
+    // release. On the default path this runs on the worker right after the work; on the opt-in ordered path it runs
+    // on the single publisher, inside one critical section, in retirement order.
+    void publish_one(Entry& e, HRESULT hr) {
+        using palmetto::ds_publication::EntryKind;
+        const EntryKind kind = e.type == Entry::Type::Request  ? EntryKind::request
+                               : e.type == Entry::Type::Status ? EntryKind::status
+                               : e.type == Entry::Type::Signal ? EntryKind::signal
+                                                               : EntryKind::event;
+        // The fold answers a status entry: the first failed request since the previous status/signal entry, in
+        // enqueue order, not the first failure in finish order.
+        const HRESULT reported =
+            static_cast<HRESULT>(palmetto::ds_publication::note_entry(fold_, kind, static_cast<std::int32_t>(hr)));
+        switch (e.type) {
+            case Entry::Type::Request:
+                if (ds_load_visible()) g_ds_load.requests_done.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case Entry::Type::Status:
+                if (SUCCEEDED(hr)) e.status->complete(e.index, reported);
+                break;
+            case Entry::Type::Signal:
                 if (SUCCEEDED(hr)) hr = e.fence->Signal(e.value);
-                since_notify_ = S_OK;
                 break;
             case Entry::Type::Event:
                 if (SUCCEEDED(hr) && !SetEvent(e.event)) hr = HRESULT_FROM_WIN32(GetLastError());
@@ -2322,6 +2557,13 @@ private:
             describe(e, f);
             record_failure(f);
         }
+    }
+
+    // The default serial path: one entry's work, then its publication, exactly the order the queue had before the
+    // opt-in split, then the caller's progress trace and reference release (see run()).
+    void process(Entry& e) {
+        const HRESULT hr = execute_entry_work(e);
+        publish_one(e, hr);
     }
 
     // PALMETTO_DS_PIN: run one destination write with its range pinned for the duration of the write (the console's
@@ -3006,16 +3248,22 @@ private:
     std::mutex mutex_;        // entries_, submitted_, in_flight_, closing_, closed_
     std::condition_variable work_, space_, idle_;
     std::deque<Entry> entries_;
-    size_t submitted_ = 0;  // the first submitted_ entries are submitted
-    bool in_flight_ = false;
+    size_t submitted_ = 0;    // the first submitted_ entries are submitted
+    size_t in_flight_ = 0;    // entries popped and not yet published (the serial path holds at most one)
     bool closing_ = false;
     bool closed_ = false;
     // PALMETTO_DS_STAGING: one reusable buffer per transform stage, per queue (its worker is single-threaded). Both
-    // hold no allocation until the first request borrows from them.
+    // hold no allocation until the first request borrows from them. PALMETTO_DS_REAP_ORDER refuses the two-lane path
+    // when this is enabled (named refusal staging_scratch_shared), so the buffers never have two writers.
     palmetto::dstorage::BoundedScratch source_scratch_{advanced_config().staging_cap};
     palmetto::dstorage::BoundedScratch output_scratch_{advanced_config().staging_cap};
     std::thread worker_;
-    HRESULT since_notify_ = S_OK;  // worker only
+    // PALMETTO_DS_REAP_ORDER: null on the default path (nothing is allocated or locked), else the lanes' retirement
+    // buffer and the publisher mutex (docs/peer_port_streaming.md section 17).
+    std::unique_ptr<OrderedPublication> publication_;
+    std::atomic<std::size_t> retirement_used_{0};  // issued and not yet retired; the lanes' backpressure counter
+    // The publisher's first-failure state: one writer at a time, either the default worker or the publication mutex.
+    palmetto::ds_publication::FailureFold fold_;
     std::mutex error_mutex_;
     DSTORAGE_ERROR_RECORD record_{};
     HANDLE error_event_ = nullptr;

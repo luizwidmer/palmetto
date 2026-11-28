@@ -13,13 +13,16 @@
 #include <cwchar>
 #include <fstream>
 #include <mutex>
+#include <span>
 #include <stdexcept>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
 #include "../shims/shims.h"
 #include "../shims/startup_trace.h"
 #include "base_reservation.h"
+#include "pe_loader_shadow.h"
 
 #if defined(PALMETTO_VULKAN_DEVICE)
 extern "C" void* palmetto_bvh_helper_export(const char* module, const char* symbol, void* package_export);
@@ -1500,6 +1503,75 @@ void Loader::set_initialised(Module& m, bool value) {
     m.initialised = value;
 }
 
+namespace {
+
+// The opt-in shadow pass reads the environment once. Once disabled, the only per-image overhead is this static guard;
+// it does not copy the file, allocate comparison facts, parse, or log. Only the exact value "1" enables either switch.
+const pe_loader_shadow::Switches& loader_shadow_switches() {
+    static const pe_loader_shadow::Switches switches = [] {
+        const auto value = [](const char* name) -> std::string_view {
+            char buffer[2]{};
+            const DWORD length = GetEnvironmentVariableA(name, buffer, static_cast<DWORD>(sizeof(buffer)));
+            return length == 1 && buffer[0] == '1' ? std::string_view{"1"} : std::string_view{};
+        };
+        return pe_loader_shadow::switches_from_values(
+            value("PALMETTO_PE_LOADER_SHADOW_PARSE"), value("PALMETTO_PE_LOADER_SHADOW_STRICT"));
+    }();
+    return switches;
+}
+
+void compare_shadow_parse(const std::vector<uint8_t>& file, const IMAGE_NT_HEADERS64* nt, const std::string& image_name,
+                         const pe_loader_shadow::Switches& switches) {
+    using namespace pe_loader_shadow;
+    OldLoaderFacts expected;
+    expected.image_base = nt->OptionalHeader.ImageBase;
+    expected.size_of_image = nt->OptionalHeader.SizeOfImage;
+    expected.entry_point = nt->OptionalHeader.AddressOfEntryPoint;
+
+    constexpr unsigned kMaxParsedSections = 96;
+    const unsigned section_count = nt->FileHeader.NumberOfSections;
+    if (section_count <= kMaxParsedSections) {
+        expected.sections.reserve(section_count);
+        const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+        for (unsigned i = 0; i < section_count; ++i, ++section) {
+            std::size_t name_size = 0;
+            while (name_size < sizeof(section->Name) && section->Name[name_size]) ++name_size;
+            expected.sections.push_back({
+                std::string(reinterpret_cast<const char*>(section->Name), name_size), section->VirtualAddress,
+                section->Misc.VirtualSize, section->PointerToRawData, section->SizeOfRawData, section->Characteristics});
+        }
+    }
+    for (std::size_t i = 0; i < expected.directories.size(); ++i) {
+        const IMAGE_DATA_DIRECTORY old = directory(nt, static_cast<unsigned>(i));
+        expected.directories[i] = {old.VirtualAddress, old.Size};
+    }
+
+    const Result result = compare(std::span<const std::uint8_t>(file.data(), file.size()), expected, image_name);
+    if (result.matches) return;
+
+    for (const Diagnostic& diagnostic : result.diagnostics) {
+        const std::string_view code = diagnostic_name(diagnostic.code);
+        std::fprintf(stderr, "[rt] loader shadow parse: %s: %.*s: %s\n", image_name.c_str(),
+                     static_cast<int>(code.size()), code.data(), diagnostic.message.c_str());
+    }
+    if (switches.strict) {
+        std::string message = image_name + ": PALMETTO_PE_LOADER_SHADOW_STRICT";
+        if (!result.diagnostics.empty()) {
+            const Diagnostic& diagnostic = result.diagnostics.front();
+            const std::string_view code = diagnostic_name(diagnostic.code);
+            message += ": ";
+            message.append(code.data(), code.size());
+            message += ": ";
+            message += diagnostic.message;
+        } else {
+            message += ": comparison_failed_without_diagnostic";
+        }
+        throw std::runtime_error(std::move(message));
+    }
+}
+
+}  // namespace
+
 Module& Loader::map_image(const std::filesystem::path& path, const std::string& narrow_key) {
     auto file = read_file(path);
     const std::string name = path_utf8(path.filename());
@@ -1577,6 +1649,9 @@ Module& Loader::map_image(const std::filesystem::path& path, const std::string& 
     // block. The measured tiny_game_fixed fixture has exactly {0, 0xd}.
     const auto relocation_directory = directory(nt, IMAGE_DIRECTORY_ENTRY_BASERELOC);
     const bool relocatable = relocation_directory.VirtualAddress != 0 && relocation_directory.Size != 0;
+
+    const auto& shadow_switches = loader_shadow_switches();
+    if (shadow_switches.enabled) compare_shadow_parse(file, nt, name, shadow_switches);
 
     auto* m = new Module;
     m->name = name;
@@ -1768,8 +1843,9 @@ void Loader::initialize_tls(Module& m) {
             // first module then reads the second one's TLS block; measured as a title AV before).
             const DWORD ga_slot = TlsAlloc();
             if (ga_slot == TLS_OUT_OF_INDEXES || ga_slot >= kMaxTlsAllocSlots) {
-                std::fprintf(stderr, "[rt] loader: %s: no TlsAlloc slot below 64 for its index-0 TLS reads\n",
-                             m.name.c_str());
+                if (ga_slot != TLS_OUT_OF_INDEXES) TlsFree(ga_slot);
+                throw std::runtime_error(m.name +
+                                         ": GA_TLS_SLOT_UNAVAILABLE: no TlsAlloc slot below 64 for its index-0 TLS reads");
             } else {
                 m.tls_ga_sites = patch_ga_tls_reads(m, ga_slot);
                 if (m.tls_ga_sites) m.tls_ga_slot = ga_slot;

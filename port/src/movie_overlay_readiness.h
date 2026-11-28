@@ -1,8 +1,8 @@
 #pragma once
 
-// Pure, bounded readiness contract for a future title-owned movie frame -> overlay observation.
-// This deliberately does not allocate, inspect title memory, or call Bink/PresentX. The live path has not yet produced a
-// registered or decoded movie frame, so callers must not use it to synthesize one.
+// Pure, bounded readiness contract for a title-owned movie frame -> overlay observation.
+// This deliberately does not allocate, inspect title memory, or call Bink/PresentX. The opt-in present gate has no Bink or
+// upload evidence producer yet; it supplies an empty chain and conservatively refuses plane 1 rather than synthesizing one.
 
 #include <cstdint>
 
@@ -16,6 +16,20 @@ enum class Stage : std::uint8_t {
     overlay_present,
     ready,
 };
+
+// The runtime switch is deliberately exact: unset/empty/0 preserve the old plane gate, 1 requires
+// a complete evidence chain, and any other nonempty spelling is invalid and also preserves the old gate.
+enum class RuntimeGate : std::uint8_t {
+    legacy,
+    require_ready,
+    invalid,
+};
+
+inline constexpr RuntimeGate parse_runtime_gate_switch(const char* value) noexcept {
+    if (!value || value[0] == '\0' || (value[0] == '0' && value[1] == '\0')) return RuntimeGate::legacy;
+    if (value[0] == '1' && value[1] == '\0') return RuntimeGate::require_ready;
+    return RuntimeGate::invalid;
+}
 
 enum class Refusal : std::uint8_t {
     none,
@@ -114,7 +128,8 @@ struct PresentEvidence {
 };
 
 struct Evidence {
-    // Explicitly false by default. No runtime caller is wired to this readiness-only helper.
+    // Explicitly false by default. Runtime sets this only behind PALMETTO_PRESENT_MOVIE_OVERLAY_READY_ONLY=1;
+    // no Bink-registration, decode, or upload evidence producer is wired yet.
     bool opt_in = false;
     RegistrationEvidence registration{};
     DecodeEvidence decode{};
@@ -179,6 +194,21 @@ inline constexpr Decision evaluate(const Evidence& e) noexcept {
     if (p.resource_key != u.resource_key) return refuse(Stage::overlay_present, Refusal::present_resource_mismatch);
 
     return {Stage::ready, Refusal::none};
+}
+
+struct GateDecision {
+    bool allow_overlay = false;
+    Decision readiness{};
+};
+
+// The legacy mode is an exact passthrough. The evidence gate is intentionally conservative: it permits plane 1 only when the
+// full registration -> decode -> upload -> two-plane-present chain is correlated. Invalid switch spellings are handled by the
+// runtime parser as a named diagnostic and are also a passthrough.
+inline constexpr GateDecision gate_second_plane(RuntimeGate mode, bool overlay_requested, const Evidence& evidence) noexcept {
+    if (!overlay_requested) return {false, refuse(Stage::off, Refusal::opt_in_off)};
+    if (mode != RuntimeGate::require_ready) return {true, refuse(Stage::off, Refusal::opt_in_off)};
+    const Decision readiness = evaluate(evidence);
+    return {readiness.ready(), readiness};
 }
 
 }  // namespace palmetto::movie_overlay_readiness
